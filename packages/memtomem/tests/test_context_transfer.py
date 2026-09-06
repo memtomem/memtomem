@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import hashlib
+import os
 import shlex
 import shutil
 from pathlib import Path
@@ -1086,6 +1087,254 @@ def test_destination_appeared_during_promote(two_projects, monkeypatch, mode):
     assert src_manifest.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
     assert "racer" in (dst_dir / "agent.md").read_text(encoding="utf-8")
     assert not list(dst_dir.parent.glob(".migrate-*"))
+
+
+# ── #2312: promote and rollback refuse an occupant, never replace it ─
+#
+# The race above plants its occupant during ``scan_artifact_tree``, which
+# runs BEFORE the promote's own guard. That timing cannot tell a no-replace
+# rename from a check-then-replace: the old ``dst.exists()`` refused those
+# cells too. The seams below plant the occupant INSIDE a wrapper around the
+# rename primitive, i.e. after every check has already run and passed —
+# the only window where the two implementations differ.
+
+
+def _plant(path: Path, shape: str) -> None:
+    """Create *shape* at *path* — the three shapes ``exists()`` mishandles."""
+    if shape == "file":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("occupant bytes\n", encoding="utf-8")
+    elif shape == "empty_dir":
+        # POSIX ``rename`` REPLACES an empty directory; only a no-replace
+        # rename refuses one.
+        path.mkdir(parents=True)
+    elif shape == "dangling_symlink":
+        # ``Path.exists()`` follows the link and answers False, so a check
+        # never saw this one at all.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(path.parent / "no-such-target")
+    else:  # pragma: no cover - guards the parametrization itself
+        raise ValueError(shape)
+
+
+def _assert_intact(path: Path, shape: str) -> None:
+    """The planted entry is still exactly what was planted."""
+    if shape == "file":
+        assert path.is_file() and not path.is_symlink()
+        assert path.read_text(encoding="utf-8") == "occupant bytes\n"
+    elif shape == "empty_dir":
+        assert path.is_dir() and not path.is_symlink()
+        assert list(path.iterdir()) == []
+    elif shape == "dangling_symlink":
+        assert path.is_symlink(), f"{path} is no longer a symlink"
+        assert not path.exists(), "the link should still be dangling"
+        assert Path(os.readlink(path)).name == "no-such-target"
+
+
+def _plant_at_rename(module, target: Path, shape: str, calls: list[Path]):
+    """Wrap *module*'s rename primitive to plant *shape* at *target*.
+
+    The occupant appears immediately before the real primitive runs, so it
+    is created strictly AFTER any pre-check the caller performed — the
+    check-to-act window itself. Only the call whose destination is
+    *target* is intercepted; the staging claim shares the primitive.
+    """
+    real = module.rename_no_replace
+
+    def wrapper(src, dst, **kwargs):
+        if Path(dst) == target:
+            calls.append(Path(dst))
+            if not os.path.lexists(target):
+                _plant(target, shape)
+        return real(src, dst, **kwargs)
+
+    return wrapper
+
+
+_OCCUPANT_SHAPES = [
+    "file",
+    "empty_dir",
+    pytest.param("dangling_symlink", marks=pytest.mark.requires_symlinks),
+]
+
+
+@pytest.mark.parametrize("mode", ["copy", "move"])
+@pytest.mark.parametrize("shape", _OCCUPANT_SHAPES)
+def test_promote_refuses_an_occupant_created_after_the_check(
+    two_projects, monkeypatch, shape, mode
+):
+    """An entry appearing between the promote's check and its act is refused.
+
+    Pre-#2312 the promote read ``dst.exists()`` and then called
+    ``os.replace``, so an occupant created in between was silently
+    replaced: a regular file overwritten, an empty directory replaced
+    (POSIX ``rename`` does that), a dangling symlink unlinked. Now the
+    kernel refuses, and the refusal is the typed collision the surfaces
+    already declare rather than a bare ``OSError``.
+
+    The pin bites on the primitive too: revert the promote to
+    ``exists()`` + ``os.replace`` and the wrapper never fires, so nothing
+    is planted, the promote succeeds and ``pytest.raises`` fails.
+    """
+    import memtomem.context.migrate as migrate_mod
+    from memtomem.context.transfer import TransferCollisionError
+
+    src_manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    dst_dir = _canonical_root(two_projects, "agents", "project_shared", "b") / "foo"
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        migrate_mod,
+        "rename_no_replace",
+        _plant_at_rename(migrate_mod, dst_dir, shape, calls),
+    )
+
+    with pytest.raises(TransferCollisionError, match="appeared during promote"):
+        transfer_artifact(
+            "agents",
+            "foo",
+            src_project_root=two_projects["a"],
+            from_scope="project_shared",
+            dst_project_root=two_projects["b"],
+            to_scope="project_shared",
+            mode=mode,
+            apply_=True,
+        )
+
+    assert calls, "the promote must go through the no-replace rename primitive"
+    # The occupant is untouched — this is the whole point.
+    _assert_intact(dst_dir, shape)
+    # Source recovered by the rollback; no staging residue at the destination.
+    assert src_manifest.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    assert not list(dst_dir.parent.glob(".migrate-*"))
+
+
+@pytest.mark.parametrize("shape", _OCCUPANT_SHAPES)
+def test_rollback_refuses_an_occupied_src_and_keeps_staging(
+    two_projects, monkeypatch, caplog, shape
+):
+    """An occupant at ``src_path`` refuses the rename-back; staging survives.
+
+    The ladder's ``src_path.exists()`` branch already covers an occupant
+    that is there when the check runs. This is the window AFTER it: the
+    entry appears just before the rename-back. Pre-#2312 ``os.replace``
+    replaced an empty directory there outright, destroying an entry we
+    did not create while consuming the only copy of the source bytes.
+
+    Staging is preserved on every refusal, and the ERROR says the source
+    is occupied rather than advising ``mv`` onto somebody else's entry.
+    """
+    import logging as _logging
+
+    import memtomem.context.transfer as transfer_mod
+
+    src_manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    src_dir = src_manifest.parent
+    secret_body = f"---\nname: foo\n---\n\napi_key={_SECRET_LITERAL}\n"
+    _write_versions(src_dir, secret_body)
+
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        transfer_mod,
+        "rename_no_replace",
+        _plant_at_rename(transfer_mod, src_dir, shape, calls),
+    )
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
+
+    # Gate A blocks the shared landing, which is what sends us to rollback.
+    with pytest.raises(PrivacyBlockedError):
+        transfer_artifact(
+            "agents",
+            "foo",
+            src_project_root=two_projects["a"],
+            from_scope="project_shared",
+            dst_project_root=two_projects["b"],
+            to_scope="project_shared",
+            mode="move",
+            apply_=True,
+        )
+
+    assert calls, "the rollback must go through the no-replace rename primitive"
+    # The occupant survives, and so do the source bytes — in staging.
+    _assert_intact(src_dir, shape)
+    dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+    surviving = list(dst_root.glob(".migrate-foo-*.tmp"))
+    assert len(surviving) == 1, surviving
+    assert (surviving[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    assert not (dst_root / "foo").exists()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "rename-back refused" in m and str(src_dir) in m and ".migrate-foo-" in m for m in messages
+    ), messages
+    # It must NOT tell the operator to mv onto an occupied path.
+    assert not any("mv it back" in m for m in messages), messages
+
+
+@pytest.mark.requires_symlinks
+def test_rollback_restores_a_flat_canonical_whose_link_went_dangling(
+    two_projects, monkeypatch, caplog
+):
+    """Staging that is a dangling symlink is still renamed back, not stranded.
+
+    A flat canonical may be a symlink, and staging preserves it as one
+    (``_stage_copy_into`` does not dereference). If its target disappears
+    mid-transfer the staged entry is a dangling link, which
+    ``staging.exists()`` reports as absent — the ladder then fell through
+    to "nothing to do", leaving the link in the destination store with
+    the source name empty. ``lexists`` sees it.
+
+    Revert that one word to ``exists()`` and the final assertion fails:
+    src stays gone and staging is stranded.
+    """
+    import logging as _logging
+
+    import memtomem.context.transfer as transfer_mod
+
+    target = two_projects["a"] / "outside" / "real-agent.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(_AGENT_BODY_CLEAN, encoding="utf-8")
+
+    src_root = _canonical_root(two_projects, "agents", "project_shared", "a")
+    src_root.mkdir(parents=True, exist_ok=True)
+    flat = src_root / "foo.md"
+    flat.symlink_to(target)
+
+    real_scan = transfer_mod.scan_artifact_tree
+
+    def scan_then_break_the_link(*args, **kwargs):
+        # After staging has consumed the source link, delete its target so
+        # the staged entry becomes dangling, then fail the landing so the
+        # rollback has to put that dangling link back. Any exception does —
+        # the ladder lives in an ``except BaseException``.
+        real_scan(*args, **kwargs)
+        if target.exists():
+            target.unlink()
+        raise RuntimeError("forced failure after the link went dangling")
+
+    monkeypatch.setattr(transfer_mod, "scan_artifact_tree", scan_then_break_the_link)
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
+
+    with pytest.raises(RuntimeError, match="forced failure"):
+        transfer_artifact(
+            "agents",
+            "foo",
+            src_project_root=two_projects["a"],
+            from_scope="project_shared",
+            dst_project_root=two_projects["b"],
+            to_scope="project_shared",
+            mode="move",
+            apply_=True,
+        )
+
+    # The link is back where it came from, still a link, still dangling.
+    assert flat.is_symlink(), "the dangling staged link was not renamed back"
+    assert not flat.exists()
+    dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+    assert not list(dst_root.glob(".migrate-*")), "staging was stranded at the destination"
 
 
 def test_exdev_fallback_cross_project_move(two_projects, monkeypatch):

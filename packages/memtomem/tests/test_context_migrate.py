@@ -734,6 +734,229 @@ class TestStagingCollisionNeverClearsTheCollider:
         assert src.is_symlink()
 
 
+class TestPromoteMoveRefusesAnOccupiedDestination:
+    """#2312 — the promote refuses through the syscall, not a check.
+
+    ``_promote_move`` used to read ``dst.exists()`` and then call
+    ``os.replace``. Both halves leaked: the check cannot see a dangling
+    symlink, and ``os.replace`` silently replaces a regular file or an
+    EMPTY directory. Only a non-empty directory happened to fail, which is
+    what made the old destination-race coverage indistinguishable from a
+    real guard.
+
+    These call the helper directly, with the destination already occupied.
+    The pre-occupied file / empty-dir cells passed before the fix too (the
+    old check caught them); they are here so the refusal TYPE and message
+    survive the primitive swap. The dangling-link cells are the ones the
+    old shape got wrong, and the race window itself is pinned in
+    ``test_context_transfer.py``.
+    """
+
+    @staticmethod
+    def _staging(tmp_path: Path, shape: str) -> Path:
+        """A ready-to-promote staging entry beside the destination."""
+        staging = tmp_path / "dest" / ".migrate-foo-1-aaaaaaaa.tmp"
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        if shape == "dir":
+            staging.mkdir()
+            (staging / "agent.md").write_text("staged", encoding="utf-8")
+        else:
+            staging.write_text("staged", encoding="utf-8")
+        return staging
+
+    @pytest.mark.parametrize("staging_shape", ["dir", "flat"])
+    @pytest.mark.parametrize(
+        "collider",
+        [
+            "file",
+            "empty_dir",
+            "full_dir",
+            pytest.param("dangling_link", marks=pytest.mark.requires_symlinks),
+        ],
+    )
+    def test_refuses_and_keeps_both_sides(self, tmp_path, staging_shape, collider):
+        from memtomem.context.migrate import _promote_move
+
+        staging = self._staging(tmp_path, staging_shape)
+        staged_before = _collider_state(staging)
+        dst = _plant(tmp_path / "dest" / "foo", collider)
+        before = _collider_state(dst)
+
+        with pytest.raises(FileExistsError, match="destination already exists"):
+            _promote_move(staging, dst)
+
+        # Neither side moved: the occupant is untouched and staging still
+        # holds the bytes, so the caller's rollback still has something to
+        # roll back.
+        assert _collider_state(dst) == before
+        assert _collider_state(staging) == staged_before
+
+    @pytest.mark.parametrize("staging_shape", ["dir", "flat"])
+    def test_promotes_onto_a_free_name(self, tmp_path, staging_shape):
+        from memtomem.context.migrate import _promote_move
+
+        staging = self._staging(tmp_path, staging_shape)
+        dst = tmp_path / "dest" / "foo"
+
+        _promote_move(staging, dst)
+
+        assert not staging.exists()
+        assert _collider_state(dst) == ("dir", repr((["agent.md"], ["staged"]))) or dst.is_file()
+
+    def test_a_missing_staging_is_not_reported_as_a_collision(self, tmp_path):
+        """``ENOENT`` must stay ``ENOENT``.
+
+        For a move, staging is the ONLY copy of the artifact — "it is not
+        there" and "something else is in the way" are different
+        emergencies, and only the second one is a collision.
+        """
+        from memtomem.context.migrate import _promote_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+
+        with pytest.raises(OSError) as exc_info:
+            _promote_move(dst_parent / ".migrate-gone.tmp", dst_parent / "foo")
+
+        assert not isinstance(exc_info.value, FileExistsError)
+        assert exc_info.value.errno == errno.ENOENT
+
+    @pytest.mark.parametrize("collider", ["file", "full_dir"])
+    def test_an_unrelated_failure_propagates_even_when_dst_exists(
+        self, tmp_path, monkeypatch, collider
+    ):
+        """Classification is by errno, never by "is something at dst".
+
+        A rule of "collision, OR the destination exists" would report an
+        ``EIO`` — or the ``ENOENT`` above — as an ordinary collision
+        whenever the name happened to be taken, sending the caller down a
+        remediation path for a problem it does not have.
+        """
+        import memtomem.context.migrate as migrate_mod
+        from memtomem.context.migrate import _promote_move
+
+        staging = self._staging(tmp_path, "dir")
+        dst = _plant(tmp_path / "dest" / "foo", collider)
+
+        def raise_eio(*_args, **_kwargs):
+            raise OSError(errno.EIO, "I/O error", str(dst))
+
+        monkeypatch.setattr(migrate_mod, "rename_no_replace", raise_eio)
+
+        with pytest.raises(OSError) as exc_info:
+            _promote_move(staging, dst)
+
+        assert not isinstance(exc_info.value, FileExistsError)
+        assert exc_info.value.errno == errno.EIO
+
+    def test_enotdir_with_nothing_at_dst_is_not_a_collision(self, tmp_path):
+        """``ENOTDIR`` is ambiguous, so it is settled by looking (#2312).
+
+        The kernel reports it both for an occupied destination and for a
+        broken path component. Ensuring ``dst.parent`` does not PIN it: a
+        writer outside our lock can replace the store directory with a
+        file in that window, and nothing at ``dst`` exists at all. Calling
+        that "destination already exists" sends the operator hunting for a
+        collision that is not there, while the real event — the parent,
+        and the staged artifact inside it, are gone — goes unnamed.
+
+        Real syscall, no monkeypatch, and the step that actually fails
+        first is the ``mkdir``: ``exist_ok=True`` still raises when the
+        path is a file, and that raise is a ``FileExistsError`` — this
+        function's own signal for a taken destination. Hence the explicit
+        translation.
+        """
+        from memtomem.context.migrate import _promote_move
+
+        store = tmp_path / "store"
+        store.mkdir()
+        staging = store / ".migrate-foo-1-aaaaaaaa.tmp"
+        staging.mkdir()
+        dst = store / "foo"
+        # An outside writer replaces the whole store directory with a file.
+        shutil.rmtree(store)
+        store.write_text("not a directory any more\n", encoding="utf-8")
+
+        with pytest.raises(OSError) as exc_info:
+            _promote_move(staging, dst)
+
+        assert exc_info.value.errno == errno.ENOTDIR
+        assert not isinstance(exc_info.value, FileExistsError)
+        assert not os.path.lexists(dst)
+
+    def test_an_ambiguous_errno_without_an_occupant_propagates(self, tmp_path, monkeypatch):
+        """``ENOTDIR`` from the rename itself, with ``dst`` free, is not ours.
+
+        The reachable shape of this — the store directory replaced by a
+        file — is caught one step earlier by the ``mkdir`` translation, so
+        this forces the errno to witness the conjunction directly. Without
+        it the ``lexists`` half is unpinned and a later edit could drop it
+        back to a bare errno test.
+        """
+        import memtomem.context.migrate as migrate_mod
+        from memtomem.context.migrate import _promote_move
+
+        staging = self._staging(tmp_path, "dir")
+        dst = tmp_path / "dest" / "foo"
+
+        def raise_enotdir(*_args, **_kwargs):
+            raise OSError(errno.ENOTDIR, "Not a directory", str(dst))
+
+        monkeypatch.setattr(migrate_mod, "rename_no_replace", raise_enotdir)
+
+        with pytest.raises(OSError) as exc_info:
+            _promote_move(staging, dst)
+
+        assert not isinstance(exc_info.value, FileExistsError)
+        assert exc_info.value.errno == errno.ENOTDIR
+        assert not os.path.lexists(dst)
+
+    def test_an_ambiguous_errno_with_an_occupant_is_a_collision(self, tmp_path, monkeypatch):
+        """The other half of the conjunction: ``ENOTDIR`` + something there.
+
+        Kept as a pinned pair with the test above so a future edit cannot
+        satisfy one by dropping ``ENOTDIR`` from the classification
+        entirely. Forced, because the platforms measured answer ``EEXIST``
+        for a shape mismatch — but a filesystem or platform that spells it
+        ``ENOTDIR`` must still be reported as the collision it is.
+        """
+        import memtomem.context.migrate as migrate_mod
+        from memtomem.context.migrate import _promote_move
+
+        staging = self._staging(tmp_path, "dir")
+        dst = _plant(tmp_path / "dest" / "foo", "file")
+
+        def raise_enotdir(*_args, **_kwargs):
+            raise OSError(errno.ENOTDIR, "Not a directory", str(dst))
+
+        monkeypatch.setattr(migrate_mod, "rename_no_replace", raise_enotdir)
+
+        with pytest.raises(FileExistsError, match="destination already exists"):
+            _promote_move(staging, dst)
+
+    def test_the_cross_parent_invariant_survives_an_occupied_destination(self, tmp_path):
+        """A promote from another directory is a caller bug, not a collision.
+
+        The primitive refuses a cross-parent promote with ``EXDEV`` on
+        purpose (#2309 kept that default for exactly this call site). If an
+        occupied destination could turn that into ``FileExistsError`` the
+        early refusal would be silently downgraded to a routine collision.
+        """
+        from memtomem.context.migrate import _promote_move
+
+        staging = tmp_path / "elsewhere" / ".migrate-foo-1-aaaaaaaa.tmp"
+        staging.parent.mkdir(parents=True)
+        staging.mkdir()
+        (tmp_path / "dest").mkdir(parents=True)
+        dst = _plant(tmp_path / "dest" / "foo", "full_dir")
+
+        with pytest.raises(OSError) as exc_info:
+            _promote_move(staging, dst)
+
+        assert not isinstance(exc_info.value, FileExistsError)
+        assert exc_info.value.errno == errno.EXDEV
+
+
 def _write_flat(project: Path, asset_type: str, name: str, body: bytes) -> Path:
     target = project / ".memtomem" / asset_type / f"{name}.md"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -2223,33 +2446,35 @@ def test_e4_rollback_rename_back_failure_preserves_staging(scope_layout, monkeyp
     the only surviving copy of the user's bytes; do NOT delete it.
 
     Setup: clean canonical at user-tier, Gate A would block (secret),
-    and ``os.replace`` is monkeypatched so the rollback's staging→src
-    rename-back call raises ``OSError``. The first ``os.replace`` in
-    the apply path is the rollback (Gate A blocks before
-    ``_promote_move`` runs).
+    and the rollback's rename-back primitive is monkeypatched to raise
+    ``OSError``. Gate A blocks before ``_promote_move`` runs, so the only
+    ``rename_no_replace`` call the transfer module makes along this path
+    is the rollback's staging→src rename-back (#2312 moved it off
+    ``os.replace``; the forward promote calls the migrate module's own
+    reference, which this patch deliberately does not touch).
 
     Pin: error logged with the staging path, staging dir is NOT
     deleted, exit non-zero. Pre-fix the cleanup branch unconditionally
     deleted staging → user data lost.
     """
     import logging as _logging
-    import os as os_mod
+
+    from memtomem.context import transfer as transfer_mod
 
     src = _write_canonical_dir(scope_layout, "agents", "user", "leak", _AGENT_BODY_SECRET)
-    real_replace = os_mod.replace
+    real_rename = transfer_mod.rename_no_replace
     rename_back_calls: list[tuple[Path, Path]] = []
 
-    def fake_replace(a, b):
-        # The first os.replace in this path is the rollback's
-        # staging→src rename-back. Trip it once so the rollback hits the
-        # OSError branch; subsequent os.replace calls (none expected
-        # along this code path) go through.
+    def fake_rename(a, b, **kwargs):
+        # Trip the first rename-back so the rollback hits the OSError
+        # branch; any later call (none expected along this path) goes
+        # through to the real primitive.
         if not rename_back_calls:
             rename_back_calls.append((Path(a), Path(b)))
             raise OSError(13, "Permission denied", str(a))
-        return real_replace(a, b)
+        return real_rename(a, b, **kwargs)
 
-    monkeypatch.setattr("memtomem.context.migrate.os.replace", fake_replace)
+    monkeypatch.setattr(transfer_mod, "rename_no_replace", fake_rename)
     caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
 
     result = _invoke_migrate(

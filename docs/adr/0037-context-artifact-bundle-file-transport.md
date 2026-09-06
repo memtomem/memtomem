@@ -514,9 +514,12 @@ tier cannot be protected, rather than assuming a previous command created it.
 **Promotion is no-replace, enforced by the syscall.** Receipt promotes with the
 native no-replace rename primitive (`renameat2` / `renamex_np`, with the Windows
 rename that already refuses an existing target) rather than an `exists()` check
-followed by `os.replace`. The check-then-replace pair the transfer engine uses
-cannot see a dangling symlink at the destination and can still replace an entry
-created between the two calls; a no-replace rename refuses atomically. Every
+followed by `os.replace`. The check-then-replace pair the transfer engine used
+when this ADR was written could not see a dangling symlink at the destination
+and could still replace an entry created between the two calls; a no-replace
+rename refuses atomically. That engine has since adopted the same primitive for
+its promote and its rollback rename-back (#2312), so this is now a shared rule
+rather than a difference between the two transports. Every
 refusal it can raise — the existing-target error, a non-empty-directory error,
 and a source/target type mismatch — maps to the same typed collision, so a
 platform difference cannot turn a refusal into a traceback. `--as <new-name>`

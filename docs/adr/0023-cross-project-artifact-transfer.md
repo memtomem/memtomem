@@ -219,6 +219,47 @@ file-or-directory kind Windows tracks separately and cannot infer for a
 dangling target, and a directory junction — not a symlink, and recursed into
 by `copytree` — is refused rather than followed into the destination store.
 
+**Amendment (2026-09, #2312): the promote and the rollback rename-back are
+no-replace too.** #2309 closed the check-then-act window on the way IN to
+staging and left the two renames on the way out of it deciding with
+`Path.exists()` and acting with `os.replace()`. Both now go through
+`rename_no_replace`, so a destination created after the check is refused by
+the kernel instead of being replaced — the three shapes that leaked were a
+regular file, an empty directory (plain `rename` replaces one), and a dangling
+symlink (`exists()` reports it absent). ADR-0037 §6 raised this engine's
+check-then-replace pair as the contrast case for receipt's no-replace promote;
+that contrast is now gone. Two check-then-replace promotes remain elsewhere and
+neither is this shape: the hard-link fallback in the mcp-servers adapter (§12),
+and the skills swap's *replacing* branch (`_promote_staging` with
+`replace_existing=True`), which is meant to land on top of an existing
+canonical via move-aside rather than to refuse one — its `replace_existing=False`
+branch already uses the no-replace rename.
+
+Classification differs by direction, deliberately. The **promote** decides by
+**errno** for the unambiguous refusals — `EEXIST`, `ENOTEMPTY`, `EISDIR`; a
+no-replace rename answers `EEXIST` for an occupied destination whatever shape
+it is, including the shape mismatch a plain `rename` would spell `ENOTDIR`.
+`ENOTDIR` therefore needs a presence probe **as a conjunction**, because the
+kernel also reports it for a broken path component on either side, and
+"ensuring the parent first" does not remove that reading: ensuring a directory
+does not pin it, and a writer outside the lock that replaces the store
+directory with a file produces exactly this with nothing at the destination.
+The conjunction is safe in the direction the inverse is not — it can only turn
+a wrong "collision" back into the true error, whereas a rule of "collision, OR
+something is at the destination" would report an `ENOENT` (staging gone, and
+for a move staging is the only copy) or the deliberate cross-parent `EXDEV` as
+an ordinary collision. The same window has one more edge the promote handles
+explicitly: `mkdir(exist_ok=True)` on a parent that is now a *file* raises
+`FileExistsError`, which is the promote's own signal for a taken destination,
+so it is translated to `ENOTDIR` before it can be mistaken for one.
+The **rollback** rename-back is cross-parent by construction (staging sits in
+the destination store, the source path in another), so it passes
+`allow_cross_parent=True`; it preserves staging on every refusal and chooses its
+message by looking at the source path, because "something is there" is a claim
+about the world and telling an operator to move the tree back on top of it would
+be wrong. The rollback's staging probe is `lexists`, since a flat canonical may
+itself be a symlink and stages as one.
+
 ### 7. Copy mode and `--as` rename
 
 Copy stages by **byte copy** (`_stage_copy`, which since #2309 delegates
@@ -464,12 +505,13 @@ Mechanism-specific decisions:
   source edit racing the pre-flight cannot smuggle invalid bytes in.
 - **No-clobber promote.** The mcp web CRUD routes serialize on the
   in-process gateway lock only — they do not take sidecar locks — so
-  the engine's `exists() → os.replace()` promote could overwrite a
-  canonical that a racing web create landed between the two calls.
-  `os.link` refuses an existing target atomically (EEXIST → the §6
+  the engine's promote of the day (`exists() → os.replace()`) could
+  overwrite a canonical that a racing web create landed between the two
+  calls. `os.link` refuses an existing target atomically (EEXIST → the §6
   collision error, destination bytes untouched); filesystems without
-  hard links fall back to the engine's re-check + replace semantics,
-  no worse than every artifact transfer today.
+  hard links fall back to a re-check + replace. Since #2312 the transfer
+  engine no longer shares that shape, having moved to the no-replace
+  rename (§6), so this fallback's residual window is its own.
 - **Symlinked canonicals are refused** (pre-flight on the source, plus
   an in-lock regular-file check on staging for a source that turned
   into a link mid-copy). The engine preserves links by contract (§7);
