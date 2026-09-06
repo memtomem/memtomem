@@ -145,6 +145,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   set-aside original has also gone missing, because then the incomplete copy is
   the last thing holding any of those bytes, and the error names where it is.
 
+- **A failed move now names the copies that are really on disk** (#2327) —
+  when `mm context move` has to undo itself it keeps every copy of the artifact
+  it finds and tells you where they are, because that message is all a recovery
+  by hand has to go on. It used to say where it *expected* them to be: if
+  something had removed the set-aside original while the move was failing, the
+  error named a recovery copy that was no longer there, and a cross-filesystem
+  move — which keeps a second copy at the destination on purpose — called one
+  of its two copies "the only surviving copy" and sent you to half the
+  recovery. The rollback now looks at each path before naming it and reports
+  the copies it found, and how many, so every path in the error is one you can
+  actually `mv` back.
+
 - **A cross-store transfer no longer replaces something that appears at the
   destination while it is landing** (#2312) — `mm context move` and `mm context
   copy` finish by renaming the staged artifact onto its final name, and they

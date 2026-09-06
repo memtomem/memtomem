@@ -544,6 +544,48 @@ def _remove_entry(entry: StagingClaim) -> None:
             raise
 
 
+def _log_rollback_survivors(src_path: Path, *candidates: Path) -> None:
+    """Name the pre-move copies that are ON DISK, and only those.
+
+    The rollback ladder preserves whatever it finds and never deletes what it
+    has not seen land back at the source, so these ERRORs are the whole of
+    what a hand recovery has to go on. That makes them a claim about the
+    filesystem, and it must be written from a probe rather than from what the
+    ladder expected to be there: every candidate is an entry we created and
+    then stopped touching, and an out-of-band writer can remove any of them —
+    the same race #2313 answered one layer up, where the holding entry
+    disappeared mid-copy. A recovery copy that is named but absent sends the
+    operator looking for bytes that are not there, which is worse than saying
+    nothing.
+
+    ``lexists``, not ``exists``: a flat artifact that is itself a symlink is
+    parked AS a link, and if its target went away the dangling link is still
+    the only name the parked artifact has.
+
+    Counting here is the point of the helper. ``_restore_source`` sees one
+    entry and so says nothing about how many exist; the caller knows whether
+    the EXDEV path is deliberately holding a second copy at the destination,
+    and one message listing what was observed beats two that each name a path
+    and imply it is alone.
+    """
+    survivors = [path for path in dict.fromkeys(candidates) if os.path.lexists(path)]
+    if not survivors:
+        logger.error(
+            "transfer rollback: the pre-move bytes of %s were not restored and "
+            "no copy of them survives — nothing left to recover.",
+            src_path,
+        )
+        return
+    logger.error(
+        "transfer rollback: the pre-move bytes of %s were not restored; "
+        "%d surviving %s: %s — manual recovery required.",
+        src_path,
+        len(survivors),
+        "copy" if len(survivors) == 1 else "copies",
+        ", ".join(str(path) for path in survivors),
+    )
+
+
 def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> StagingClaim:
     """Copy *src* into a same-dir staging entry under *dst_parent*.
 
@@ -1281,13 +1323,17 @@ def transfer_artifact(
                     # src has reappeared — not by us. Don't overwrite the new
                     # src bytes; don't delete our copies either. The user
                     # reconciles by hand.
+                    #
+                    # This arm says only what it looked at: src is occupied.
+                    # It used to name ``restore_from`` as the recovery copy in
+                    # the same breath, a path it had not probed since before
+                    # the apply — the survivor line below is written from a
+                    # probe instead (#2327).
                     logger.error(
                         "transfer rollback: src %s reappeared during apply "
-                        "(another writer outside our lock); preserving the "
-                        "pre-move bytes at %s as a recovery copy — manual "
-                        "reconciliation required.",
+                        "(another writer outside our lock); the pre-move bytes "
+                        "were not put back — manual reconciliation required.",
                         src_path,
-                        restore_from.path,
                     )
                 elif os.path.lexists(restore_from.path):
                     # src is gone as expected; try the rename-back. Success
@@ -1336,29 +1382,28 @@ def transfer_artifact(
                             src_path=src_path,
                             dst_path=dst_path,
                         ) from exc
-                elif holding is None:
-                    # Same-FS: the source and the staging entry it became are
-                    # both gone. Nothing to put back and nothing to name.
+                else:
+                    # The entry that held the pre-move bytes is gone too, so
+                    # there is no rename to attempt. Same-FS ends here with
+                    # nothing anywhere; EXDEV still has the destination-side
+                    # copy, which the survivor line names if it is really
+                    # there.
                     logger.error(
-                        "transfer rollback: neither src %s nor the staging "
-                        "entry that consumed it survives — nothing to restore.",
+                        "transfer rollback: src %s is gone and so is the entry "
+                        "that held the pre-move bytes (%s) — nothing to rename "
+                        "back.",
                         src_path,
+                        restore_from,
                     )
 
-                if not cleanup_staging and holding is not None:
-                    # EXDEV, and the pre-move bytes did not make it home. The
-                    # destination-side copy is preserved below, so say where it
-                    # is: ``_restore_source`` names the HOLDING entry, which on
-                    # this path may itself be what went missing, and a recovery
-                    # copy nobody can name is a copy nobody recovers.
-                    logger.error(
-                        "transfer rollback: the source at %s was not restored; "
-                        "the copy staged at %s is preserved and may be the only "
-                        "surviving copy of the pre-move bytes — manual recovery "
-                        "required.",
-                        src_path,
-                        staging,
-                    )
+                if not cleanup_staging:
+                    # The bytes did not make it home on any of the three arms.
+                    # Both copies we could still be holding are preserved, so
+                    # name the ones a probe actually finds — and let the count
+                    # come from that probe: the EXDEV path keeps a second copy
+                    # at the destination on purpose (#2313), and the holding
+                    # entry it names may itself be what went missing (#2327).
+                    _log_rollback_survivors(src_path, restore_from.path, staging)
 
                 if cleanup_staging and holding is not None:
                     # Same-FS restored staging itself, so there is nothing

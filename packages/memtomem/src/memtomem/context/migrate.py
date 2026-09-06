@@ -1500,23 +1500,44 @@ def _restore_source(entry: StagingClaim, src: Path, *, allow_cross_parent: bool)
 
     The one rename-back, shared by :func:`_stage_move`'s own unwind and by
     ``transfer.transfer_artifact``'s rollback ladder, because both are asking
-    the identical question: the entry named here holds the ONLY copy of the
-    source bytes, and it may be put back only onto a name nobody else has
-    taken.
+    the identical question: the entry named here holds the pre-move bytes, and
+    it may be put back only onto a name nobody else has taken.
+
+    **The messages are cardinality-neutral, deliberately.** This function sees
+    one entry; how many copies of the source bytes exist is not a question it
+    can answer. The predecessor called *entry* "the ONLY surviving copy",
+    which is exact on the same-filesystem path — staging IS the pre-move tree
+    — and wrong on the EXDEV one, where the destination-side copy survives on
+    purpose (#2313) and the operator was sent to one path while two held the
+    bytes. The caller knows whether it is holding a second copy, so the caller
+    counts (:func:`~memtomem.context.transfer._log_rollback_survivors`).
 
     **Nothing here removes anything, on any path.** A refusal returns False
-    with *entry* intact; the caller decides what to preserve, and every caller
-    preserves it. That is the same rule the staging claim follows
+    having touched nothing; the caller decides what to preserve, and every
+    caller preserves it. That is the same rule the staging claim follows
     (:func:`_claim_transfer_staging`): a leaked directory is cheap, a deleted
-    canonical is not.
+    canonical is not. It is a promise about what THIS function does, not about
+    what is left: a concurrent actor can remove *entry* inside the rename
+    window, which is why the failure probes it rather than describing it from
+    the fact that we created it.
 
     No-replace, never :func:`os.replace`: an external writer can recreate the
     source path while we are staging, and a replacing rename would delete
-    bytes that are not ours to delete. Which of the two messages to log is
-    decided by LOOKING at *src* rather than by the errno — "something is at
-    src" is a claim about the world, and the errno spellings for an occupied
-    rename target differ per platform. ``lexists``, so a dangling symlink
-    counts as occupying the name.
+    bytes that are not ours to delete. Which message to log is decided by
+    LOOKING rather than by the errno — "something is at src" is a claim about
+    the world, and the errno spellings for an occupied rename target differ
+    per platform. ``lexists`` on both probes, so a dangling symlink counts:
+    at *src* it occupies the name, at *entry* it is still the parked
+    artifact's only name.
+
+    **Both halves of the message are probed.** The failure says why the
+    rename was refused AND where the bytes are, and the second half used to
+    be assumed — *entry* is ours, so it must still be there. That is the
+    assumption #2327 removed from the rest of this ladder, and the same
+    writer that can occupy *src* can remove *entry* inside the same window.
+    A path named as a recovery copy has to be a path that exists; when it
+    does not, the message says the bytes are gone rather than sending a hand
+    recovery after them.
 
     *allow_cross_parent* is the caller's assertion that the two paths are on
     one filesystem while living in different directories: true for the
@@ -1552,21 +1573,41 @@ def _restore_source(entry: StagingClaim, src: Path, *, allow_cross_parent: bool)
     try:
         rename_no_replace(entry.path, src, allow_cross_parent=allow_cross_parent)
     except OSError as exc:
+        preserved = os.path.lexists(entry.path)
         if os.path.lexists(src):
+            if preserved:
+                logger.error(
+                    "transfer rollback: rename-back refused (%s) — an entry we "
+                    "did not create occupies src %s; preserving the pre-move "
+                    "bytes at %s — manual reconciliation required.",
+                    exc,
+                    src,
+                    entry.path,
+                )
+            else:
+                logger.error(
+                    "transfer rollback: rename-back refused (%s) — an entry we "
+                    "did not create occupies src %s, and %s, which held the "
+                    "pre-move bytes, is gone too — manual reconciliation "
+                    "required.",
+                    exc,
+                    src,
+                    entry.path,
+                )
+        elif preserved:
             logger.error(
-                "transfer rollback: rename-back refused (%s) — an entry we did "
-                "not create occupies src %s; preserving %s as the ONLY "
-                "surviving copy of the source bytes — manual reconciliation "
-                "required.",
+                "transfer rollback: rename-back failed (%s); the pre-move bytes "
+                "are preserved at %s — manual recovery required (mv it back to "
+                "%s).",
                 exc,
-                src,
                 entry.path,
+                src,
             )
         else:
             logger.error(
-                "transfer rollback: rename-back failed (%s); %s is the ONLY "
-                "surviving copy of the source bytes — manual recovery required "
-                "(mv it back to %s).",
+                "transfer rollback: rename-back failed (%s) and %s, which held "
+                "the pre-move bytes, is gone too — nothing left to put back at "
+                "%s.",
                 exc,
                 entry.path,
                 src,

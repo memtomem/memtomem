@@ -1398,8 +1398,13 @@ class TestReplacedStagingIsNeitherRemovedNorPromoted:
         # wording; what this cell pins is that the state is REPORTED at all —
         # a silent "nothing to do" here reads as a clean rollback while the
         # artifact is gone from both ends.
+        # The ladder says so out loud. #2313 and #2327 both restated this arm
+        # and its wording; what this cell pins is that the state is REPORTED —
+        # a silent "nothing to do" reads as a clean rollback while the artifact
+        # is gone from both ends. Since #2327 the report is a probe of what
+        # actually survives, and here that set is empty.
         assert any(
-            "nothing to restore" in r.getMessage() and str(src_dir) in r.getMessage()
+            "nothing left to recover" in r.getMessage() and str(src_dir) in r.getMessage()
             for r in caplog.records
         ), [r.getMessage() for r in caplog.records]
 
