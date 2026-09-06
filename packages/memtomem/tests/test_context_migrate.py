@@ -68,14 +68,15 @@ def test_stage_move_produces_an_internal_artifact_name(tmp_path: Path) -> None:
     src.mkdir()
     (src / "agent.md").write_text("---\nname: reviewer\n---\nbody\n", encoding="utf-8")
 
-    staging, src_consumed = _stage_move(src, tmp_path / "dest", name_hint="reviewer")
+    staging, holding = _stage_move(src, tmp_path / "dest", name_hint="reviewer")
 
     assert staging.is_dir()
     assert is_internal_artifact_dir(staging.name), staging.name
     assert internal_artifact_owner(staging.name) == "reviewer"
     # Pins the premise of the never-reap rule: on a same-fs move the source is
-    # gone, so this staging tree is the only copy in existence.
-    assert src_consumed is True
+    # gone, so this staging tree is the only copy in existence. Nothing was
+    # parked on the source side — the staging entry IS the source (#2313).
+    assert holding is None
     assert not src.exists()
 
 
@@ -83,7 +84,13 @@ def test_stage_move_produces_an_internal_artifact_name(tmp_path: Path) -> None:
 
 
 _FORCED_PID = "424242"
-_FORCED_HEX = ("aaaaaaaa", "bbbbbbbb")
+#: Staging suffixes handed out in order by :func:`_force_staging_suffix`.
+#:
+#: Four, not two, since #2313: an EXDEV move allocates a name for the staging
+#: attempt that fails with EXDEV, then one for the holding entry, before the
+#: copy-mode claim ever asks — so a cell that wants the COPY claim to collide
+#: has to schedule what the two earlier calls consume.
+_FORCED_HEX = ("aaaaaaaa", "bbbbbbbb", "cccccccc", "dddddddd")
 
 
 def _force_staging_suffix(monkeypatch, *hexes: str) -> None:
@@ -105,12 +112,35 @@ def _force_staging_suffix(monkeypatch, *hexes: str) -> None:
     monkeypatch.setattr(migrate_mod.secrets, "token_hex", fake_token_hex)
 
 
+def _crosses_stores(src, dst) -> bool:
+    """Whether a rename leaves the directory its source sits in.
+
+    The one shape a real ``EXDEV`` can take in this engine: staging into the
+    DESTINATION store is the only rename the stager makes across parents.
+    Parking the source in a holding entry beside itself and renaming that
+    entry back are same-parent, same-filesystem by construction (#2313), so a
+    fake that answered EXDEV to every call would make the copy fallback
+    unreachable and quietly turn these cells into assertions about an error
+    path instead of the one they name.
+    """
+    return Path(src).parent != Path(dst).parent
+
+
 def _exdev_always(monkeypatch) -> None:
-    """Force every staging rename to report EXDEV, selecting the copy path."""
+    """Force every CROSS-STORE staging rename to report EXDEV.
+
+    Same-parent renames — the holding claim and its restore — delegate to the
+    real primitive, so a cell using this fixture exercises the whole EXDEV
+    path rather than stopping at the first rename (#2313).
+    """
     import errno as _errno
 
+    real_rename = _real_stage_rename()
+
     def always_exdev(src, dst, **kwargs):
-        raise OSError(_errno.EXDEV, "Cross-device link", str(src))
+        if _crosses_stores(src, dst):
+            raise OSError(_errno.EXDEV, "Cross-device link", str(src))
+        return real_rename(src, dst, **kwargs)
 
     monkeypatch.setattr("memtomem.context.migrate.rename_no_replace", always_exdev)
 
@@ -303,11 +333,11 @@ class TestStagingCollisionNeverClearsTheCollider:
         before = _collider_state(planted)
         src = _src_tree(tmp_path)
 
-        staging, src_consumed = _stage_move(src, dst_parent, name_hint="reviewer")
+        staging, holding = _stage_move(src, dst_parent, name_hint="reviewer")
 
         assert staging == _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[1])
         assert (staging / "agent.md").read_text(encoding="utf-8") == "source"
-        assert src_consumed is True
+        assert holding is None
         assert not src.exists()
         assert _collider_state(planted) == before
 
@@ -418,23 +448,42 @@ class TestStagingCollisionNeverClearsTheCollider:
         assert (src / "agent.md").read_text(encoding="utf-8") == "source"
 
     def test_exdev_fallback_retries_onto_a_fresh_suffix(self, tmp_path, monkeypatch):
+        """The COPY-mode claim retries, and the collider it steps over lives.
+
+        The suffix schedule is what makes this cell witness anything. An EXDEV
+        move spends one name on the staging attempt that reports EXDEV and a
+        second on the holding entry, so a collider planted under the FIRST
+        scheduled suffix would be met by that first attempt — the copy claim
+        would then take a free name and the retry under test would never run
+        while the cell stayed green (#2313 design gate).
+        """
         from memtomem.context.migrate import _stage_move
 
         dst_parent = tmp_path / "dest"
         dst_parent.mkdir()
-        _force_staging_suffix(monkeypatch, *_FORCED_HEX)
+        # Order: failed EXDEV staging claim, holding claim, then the copy
+        # claim's first attempt (the collider) and its retry.
+        _force_staging_suffix(
+            monkeypatch,
+            _FORCED_HEX[2],
+            _FORCED_HEX[3],
+            _FORCED_HEX[0],
+            _FORCED_HEX[1],
+        )
         _exdev_always(monkeypatch)
         planted = _plant(_forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0]), "full_dir")
         before = _collider_state(planted)
         src = _src_tree(tmp_path)
 
-        staging, src_consumed = _stage_move(src, dst_parent, name_hint="reviewer")
+        staging, holding = _stage_move(src, dst_parent, name_hint="reviewer")
 
         assert staging == _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[1])
         assert (staging / "agent.md").read_text(encoding="utf-8") == "source"
-        # The copy fallback never consumes the source.
-        assert src_consumed is False
-        assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+        # The copy fallback reads the holding entry, so the source is gone
+        # from its canonical path and its bytes are parked beside it.
+        assert holding == _forced_staging_path(src.parent, "reviewer", _FORCED_HEX[3])
+        assert not src.exists()
+        assert (holding / "agent.md").read_text(encoding="utf-8") == "source"
         assert _collider_state(planted) == before
 
     @pytest.mark.requires_symlinks
@@ -472,12 +521,16 @@ class TestStagingCollisionNeverClearsTheCollider:
         src.parent.mkdir(parents=True)
         src.symlink_to(outside)
 
-        staging, src_consumed = _stage_move(src, dst_parent, name_hint="reviewer")
+        staging, holding = _stage_move(src, dst_parent, name_hint="reviewer")
 
         assert staging.is_symlink()
-        assert _same_link_target(staging, src)
-        assert src_consumed is False
-        assert src.is_symlink()
+        # The source link itself was parked, so the comparison is against the
+        # holding entry — a link renamed to a sibling name keeps its target,
+        # relative ones included, because the directory it resolves from has
+        # not changed (#2313).
+        assert holding is not None and holding.is_symlink()
+        assert _same_link_target(staging, holding)
+        assert not os.path.lexists(src)
 
         # A link and a copy both answer is_symlink()-adjacent questions the
         # same way through the link, so distinguish them by taking the target
@@ -589,10 +642,18 @@ class TestStagingCollisionNeverClearsTheCollider:
         src.parent.mkdir(parents=True)
         src.symlink_to(outside, target_is_directory=(target == "dir"))
 
-        staging, _ = _stage_move(src, dst_parent, name_hint="reviewer")
+        # Read the kind while the source is still there: staging parks it
+        # under the holding name, and on Windows a missing path answers False
+        # to this question while a directory-link staging entry answers True,
+        # so asking afterwards would compare a real answer with an absence.
+        expected_kind = _link_target_is_directory(src)
+
+        staging, holding = _stage_move(src, dst_parent, name_hint="reviewer")
 
         assert staging.is_symlink()
-        assert _link_target_is_directory(staging) == _link_target_is_directory(src)
+        assert _link_target_is_directory(staging) == expected_kind
+        assert holding is not None
+        assert _link_target_is_directory(holding) == expected_kind
 
     @pytest.mark.requires_symlinks
     @pytest.mark.parametrize("target", ["dir", "dangling"])
@@ -629,10 +690,14 @@ class TestStagingCollisionNeverClearsTheCollider:
             return real_symlink(target_, path, *args, **kwargs)
 
         monkeypatch.setattr(migrate_mod.os, "symlink", recording_symlink)
+        # Read before staging: the source is parked under the holding name by
+        # the time the call returns, and on Windows a missing path answers
+        # False to this question whatever the link was.
+        expected_kind = _link_target_is_directory(src)
 
         _stage_move(src, dst_parent, name_hint="reviewer")
 
-        assert seen == [_link_target_is_directory(src)], seen
+        assert seen == [expected_kind], seen
 
     def test_a_junction_shaped_source_is_refused_rather_than_followed(self, tmp_path, monkeypatch):
         """The everywhere-witness for the junction refusal.
@@ -2053,17 +2118,23 @@ def test_e4_row10_skills_project_shared_to_project_local_clean(scope_layout):
 def test_e4_row11_exdev_fallback_copytree(scope_layout, monkeypatch):
     """Row 11: EXDEV — the staging rename raises EXDEV; staging falls back to copytree.
 
-    Monkeypatches ``rename_no_replace`` once so the ``src → staging`` step
-    (the only call to it inside ``migrate_scope``) hits EXDEV. The
-    promote-side ``os.replace`` is a different function and therefore
-    unaffected.
+    Monkeypatches ``rename_no_replace`` so the CROSS-STORE ``src → staging``
+    step hits EXDEV. Since #2313 the fallback then parks the source in a
+    holding entry beside itself — a same-parent rename the fake lets through —
+    and copies from there, so the source is gone from its canonical path by
+    the time the promote runs and the holding entry is what gets removed
+    afterwards. The promote is a different function and is unaffected either
+    way.
     """
     src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
     real_rename = _real_stage_rename()
     raised: dict[str, bool] = {"once": False}
 
     def fake_rename(a, b, **kwargs):
-        if not raised["once"]:
+        # Only the cross-store staging rename can be EXDEV; the holding
+        # rename and its restore are same-parent (#2313), so they pass
+        # through or the copy fallback would never be reached.
+        if not raised["once"] and _crosses_stores(a, b):
             raised["once"] = True
             import errno as _errno
 
@@ -2382,21 +2453,23 @@ def test_e4_unreadable_canonical_blocks_project_shared_promotion(scope_layout, m
 # ── PR-E4 Codex review fold #2: EXDEV + Gate A combined path ─────────
 
 
-def test_e4_exdev_then_gate_a_blocks_src_untouched(scope_layout, monkeypatch):
+def test_e4_exdev_then_gate_a_blocks_src_restored(scope_layout, monkeypatch):
     """Codex review #2 — EXDEV-fallback path must roll back cleanly when
     Gate A then blocks. Combines two branches that Row 11 (clean EXDEV)
     and Row 2 (same-FS Gate A block) cover separately:
 
-    1. ``os.rename`` raises EXDEV → ``_stage_move`` falls back to
-       ``copytree``, leaving src on disk and staging as a copy
-       (``src_consumed=False``).
+    1. The cross-store staging rename raises EXDEV → ``_stage_move`` parks
+       the source in a holding entry beside itself and copies THAT into
+       staging (#2313).
     2. Gate A scans staging, finds the secret, raises ClickException.
-    3. ``except BaseException`` rollback: src already exists (was never
-       renamed away), so the rename-back branch is a no-op; staging
-       (the copy) gets dropped via rmtree.
+    3. ``except BaseException`` rollback: the source path is free, so the
+       holding entry is renamed back onto it and the destination-side copy,
+       now provably redundant, is dropped.
 
     Pin: src is byte-identical to the pre-migrate state, dst absent,
-    no staging leftover, exit non-zero.
+    no leftover in EITHER store, exit non-zero. The byte-identity is what it
+    was before — the difference is that it is now reached by renaming the
+    original back rather than by never having moved it.
     """
     import errno as _errno
 
@@ -2429,7 +2502,9 @@ def test_e4_exdev_then_gate_a_blocks_src_untouched(scope_layout, monkeypatch):
     assert "Gate A" in result.output
     assert raised["once"], "EXDEV branch should have triggered"
 
-    # POSITIVE: src untouched (EXDEV path never consumed it).
+    # POSITIVE: src is back, byte for byte. Since #2313 the EXDEV path DOES
+    # consume it — into a holding entry — so this is the rollback's rename-back
+    # having succeeded, not the source having stayed put.
     assert src.is_file()
     assert src.read_text(encoding="utf-8") == _AGENT_BODY_SECRET
     # NEGATIVE: dst absent + no staging tmp leftover (rollback dropped it).
@@ -2446,12 +2521,13 @@ def test_e4_rollback_rename_back_failure_preserves_staging(scope_layout, monkeyp
     the only surviving copy of the user's bytes; do NOT delete it.
 
     Setup: clean canonical at user-tier, Gate A would block (secret),
-    and the rollback's rename-back primitive is monkeypatched to raise
-    ``OSError``. Gate A blocks before ``_promote_move`` runs, so the only
-    ``rename_no_replace`` call the transfer module makes along this path
-    is the rollback's staging→src rename-back (#2312 moved it off
-    ``os.replace``; the forward promote calls the migrate module's own
-    reference, which this patch deliberately does not touch).
+    and the rename-back is monkeypatched to raise ``OSError``. Gate A
+    blocks before ``_promote_move`` runs, so the rename-back is the only
+    call this fake has to let through or trip (#2312 moved it off
+    ``os.replace``; #2313 moved it into ``migrate._restore_source``, so
+    the seam is migrate's binding — shared with the FORWARD staging
+    rename, which is why the fake is keyed on the destination being the
+    source path rather than on being the first call).
 
     Pin: error logged with the staging path, staging dir is NOT
     deleted, exit non-zero. Pre-fix the cleanup branch unconditionally
@@ -2459,22 +2535,23 @@ def test_e4_rollback_rename_back_failure_preserves_staging(scope_layout, monkeyp
     """
     import logging as _logging
 
-    from memtomem.context import transfer as transfer_mod
+    from memtomem.context import migrate as migrate_mod
 
     src = _write_canonical_dir(scope_layout, "agents", "user", "leak", _AGENT_BODY_SECRET)
-    real_rename = transfer_mod.rename_no_replace
+    real_rename = migrate_mod.rename_no_replace
     rename_back_calls: list[tuple[Path, Path]] = []
 
     def fake_rename(a, b, **kwargs):
-        # Trip the first rename-back so the rollback hits the OSError
-        # branch; any later call (none expected along this path) goes
-        # through to the real primitive.
-        if not rename_back_calls:
+        # Trip the rename-back — the call whose DESTINATION is the canonical
+        # artifact — and let the forward staging rename through untouched.
+        # ``src`` is the manifest inside the dir-layout canonical, so the
+        # artifact itself is its parent.
+        if Path(b) == src.parent:
             rename_back_calls.append((Path(a), Path(b)))
             raise OSError(13, "Permission denied", str(a))
         return real_rename(a, b, **kwargs)
 
-    monkeypatch.setattr(transfer_mod, "rename_no_replace", fake_rename)
+    monkeypatch.setattr(migrate_mod, "rename_no_replace", fake_rename)
     caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
 
     result = _invoke_migrate(
@@ -2801,6 +2878,10 @@ def test_e4_exdev_src_cleanup_failure_raises_partial_error(scope_layout, monkeyp
     so the next ``mm context sync --scope <src_scope>`` recreates fan-out
     at the OLD tier from the stale src. The autodetect sees two
     canonicals and the user has no remediation hint.
+
+    Since #2313 the leftover is the HOLDING entry rather than the canonical
+    source: the copy reads a parked entry, so the failure this cell forces is
+    the removal of that entry, and the canonical path stays free.
     """
     import errno as _errno
     import shutil as shutil_mod
@@ -2820,14 +2901,16 @@ def test_e4_exdev_src_cleanup_failure_raises_partial_error(scope_layout, monkeyp
     real_rmtree = shutil_mod.rmtree
 
     def fake_rmtree(path, *args, **kwargs):
-        # Refuse to remove the EXDEV-leftover src dir. Everything else
-        # (staging cleanup paths, runtime fan-out cleanup) still works.
-        if str(path) == str(src.parent):
+        # Refuse to remove the HOLDING entry the source was parked in — the
+        # post-promote removal's target since #2313. Everything else (staging
+        # cleanup paths, runtime fan-out cleanup) still works.
+        target = Path(path)
+        if target.parent == src.parent.parent and target.name.startswith(".migrate-foo-"):
             raise PermissionError(13, "Permission denied", str(path))
         return real_rmtree(path, *args, **kwargs)
 
     monkeypatch.setattr("memtomem.context.migrate.rename_no_replace", fake_rename)
-    monkeypatch.setattr("memtomem.context.migrate.shutil.rmtree", fake_rmtree)
+    monkeypatch.setattr("memtomem.context.transfer.shutil.rmtree", fake_rmtree)
 
     result = _invoke_migrate(
         _migrate_args(
@@ -2848,9 +2931,16 @@ def test_e4_exdev_src_cleanup_failure_raises_partial_error(scope_layout, monkeyp
     # ``mm context sync --scope <src_scope>`` re-run.
     assert "do NOT run" in result.output
 
-    # POSITIVE: both src and dst exist (the documented bad state).
-    # The error is the loud signal — the user must clean src manually.
-    assert src.is_file()
+    # POSITIVE: the destination canonical and a source-side HOLDING copy
+    # both exist — the documented bad state, restated for #2313: what
+    # survives on the source side carries an internal name, so the canonical
+    # path is free and this is not "two canonicals".
+    assert not src.exists()
+    assert not src.parent.exists()
+    leftovers = list(src.parent.parent.glob(".migrate-foo-*.tmp"))
+    assert len(leftovers) == 1, leftovers
+    assert (leftovers[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    assert "Both canonicals" not in result.output
     dst = _canonical_root_for(scope_layout, "agents", "project_shared") / "foo" / "agent.md"
     assert dst.is_file()
 
@@ -2933,7 +3023,10 @@ def _exdev_once(monkeypatch) -> dict[str, bool]:
     raised: dict[str, bool] = {"once": False}
 
     def fake_rename(a, b, **kwargs):
-        if not raised["once"]:
+        # Only the cross-store staging rename can be EXDEV; the holding
+        # rename and its restore are same-parent (#2313), so they pass
+        # through or the copy fallback would never be reached.
+        if not raised["once"] and _crosses_stores(a, b):
             raised["once"] = True
             import errno as _errno
 
@@ -3393,3 +3486,684 @@ def test_classify_lockfile_entry_unparseable_installed_at(tmp_path: Path) -> Non
     assert row.state == "skip_manual"
     assert row.has_lock_entry is False
     assert row.flat_dirty is None
+
+
+# ── #2313: the EXDEV copy reads a source only we can name ────────────
+
+
+def _writer_racing_the_copy(monkeypatch, src_path: Path, body: str, *, when: str, layout: str):
+    """Have an out-of-band writer recreate *src_path* around the EXDEV copy.
+
+    The writer stands for anything that does not take our sidecar lock — an
+    editor saving, a shell redirect, a ``git checkout`` restoring a file. It
+    writes at the canonical path by NAME, which is the only way an out-of-band
+    writer can find an artifact, and it is what the pre-#2313 cleanup then
+    deleted.
+
+    ``when="after"`` is the window the issue describes: the bytes are copied,
+    the writer lands, the promote succeeds, and the cleanup removes whatever
+    is sitting at the source path. ``when="before"`` is the control: it proves
+    the copy is reading the parked entry rather than the canonical path, since
+    a copy that read the path would carry the writer's bytes to the
+    destination.
+
+    Returns a dict the caller asserts on, so a cell cannot pass because the
+    seam never fired.
+    """
+    import shutil as shutil_mod
+
+    fired = {"count": 0}
+    real_copytree = shutil_mod.copytree
+    real_copy2 = shutil_mod.copy2
+
+    def _write() -> None:
+        # The shape is passed in rather than probed: by the time the writer
+        # runs, the canonical path is EMPTY (that is the whole point), so
+        # asking the path what it is would answer about nothing.
+        fired["count"] += 1
+        if layout == "dir":
+            src_path.mkdir(parents=True, exist_ok=True)
+            (src_path / _MANIFEST_NAME["agents"]).write_text(body, encoding="utf-8")
+            return
+        src_path.parent.mkdir(parents=True, exist_ok=True)
+        src_path.write_text(body, encoding="utf-8")
+
+    def _wrap(real):
+        def wrapper(*args, **kwargs):
+            if when == "before":
+                _write()
+                return real(*args, **kwargs)
+            result = real(*args, **kwargs)
+            _write()
+            return result
+
+        return wrapper
+
+    monkeypatch.setattr(shutil_mod, "copytree", _wrap(real_copytree))
+    monkeypatch.setattr(shutil_mod, "copy2", _wrap(real_copy2))
+    return fired
+
+
+_WRITER_BODY = "---\nname: foo\ndescription: written by the racer\n---\n\nracer bytes\n"
+
+
+@pytest.mark.parametrize("when", ["before", "after"])
+@pytest.mark.parametrize("layout", ["dir", "flat"])
+def test_e4_exdev_writer_at_the_source_path_survives(scope_layout, monkeypatch, when, layout):
+    """A writer that recreates the source path during the copy keeps its bytes.
+
+    The defect this pins (#2313): the EXDEV fallback copied from the canonical
+    source path and the caller then removed THAT PATH by name after the
+    promote. A writer landing in the copy→promote window therefore lost
+    everything it wrote, while the destination kept the older snapshot — the
+    newer version existed nowhere.
+
+    Mutation: restore the old ``shutil.rmtree(src_path)`` cleanup and every
+    parametrization fails on the source-side assertion.
+    """
+    root = _canonical_root_for(scope_layout, "agents", "user")
+    if layout == "dir":
+        src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN).parent
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+        src = root / "foo.md"
+        src.write_text(_AGENT_BODY_CLEAN, encoding="utf-8")
+
+    raised = _exdev_once(monkeypatch)
+    fired = _writer_racing_the_copy(monkeypatch, src, _WRITER_BODY, when=when, layout=layout)
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+
+    assert result.exit_code == 0, result.output
+    assert raised["once"], "the cell must have taken the EXDEV copy fallback"
+    assert fired["count"] == 1, fired
+
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    dst = dst_root / "foo" / "agent.md" if layout == "dir" else dst_root / "foo.md"
+    # The move published the snapshot it actually copied — never the racer's
+    # bytes, not even when the racer wrote before the copy ran, because the
+    # copy reads the parked entry rather than the canonical path.
+    assert dst.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+
+    # ...and the racer's bytes are still where the racer put them.
+    written = src / _MANIFEST_NAME["agents"] if layout == "dir" else src
+    assert written.read_text(encoding="utf-8") == _WRITER_BODY
+
+    # Neither store keeps a leftover: the holding entry is removed once the
+    # destination is in place, and staging was promoted.
+    assert not list(root.glob(".migrate-foo-*.tmp"))
+    assert not list(dst_root.glob(".migrate-foo-*.tmp"))
+
+
+class TestTheHoldingClaimIsExclusiveAndUnwinds:
+    """Unit cells for the source-side holding entry an EXDEV move parks in.
+
+    The staging entry has had these since #2309; the holding entry is the same
+    claim on the other side of the transfer, so it gets the same matrix. The
+    shapes are not decoration: a claim written with a plain ``os.rename``
+    replaces an EMPTY DIRECTORY silently and follows a DANGLING LINK, so a
+    cell list without those two would stay green while the collider died.
+    """
+
+    @pytest.mark.parametrize(
+        "collider",
+        [
+            "file",
+            "empty_dir",
+            "full_dir",
+            pytest.param("dangling_link", marks=pytest.mark.requires_symlinks),
+        ],
+    )
+    @pytest.mark.parametrize("shape", ["dir", "flat"])
+    def test_an_occupied_holding_name_fails_closed(self, tmp_path, monkeypatch, collider, shape):
+        from memtomem.context.migrate import TransferStagingBusyError, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path) if shape == "dir" else _src_file(tmp_path)
+        # One suffix for the staging attempt that reports EXDEV, then the
+        # holding attempt and its retry — both land on the planted name.
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[2], _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+        planted = _plant(_forced_staging_path(src.parent, "reviewer", _FORCED_HEX[0]), collider)
+        before = _collider_state(planted)
+
+        with pytest.raises(TransferStagingBusyError):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        # Nothing was removed to make room, the source never moved, and the
+        # destination store was not touched at all.
+        assert _collider_state(planted) == before
+        body = (src / "agent.md") if shape == "dir" else src
+        assert body.read_text(encoding="utf-8") == "source"
+        assert list(dst_parent.iterdir()) == []
+
+    @pytest.mark.parametrize("shape", ["dir", "flat"])
+    def test_a_failed_copy_puts_the_source_back(self, tmp_path, monkeypatch, shape):
+        """The stager owns its unwind: the caller never sees a moved source.
+
+        ``transfer_artifact`` calls ``_stage_move`` OUTSIDE the try block its
+        rollback ladder hangs off, which was safe only while a failed stage
+        created nothing. The holding rename is a mutation, so a failure after
+        it has to be undone here.
+
+        Mutation: drop the ``except BaseException`` in ``_stage_move`` and the
+        source stays parked under an internal name — every assertion below
+        fails.
+        """
+        import shutil as shutil_mod
+
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path) if shape == "dir" else _src_file(tmp_path)
+        _exdev_always(monkeypatch)
+
+        def boom(*args, **kwargs):
+            # Witnessed HERE, mid-failure: the source is already parked, which
+            # is what the unwind then has to put back. Asserting only the end
+            # state would pass under a full revert, since the predecessor
+            # never moved the source in the first place.
+            assert not os.path.lexists(src), "the source must be parked before the copy"
+            raise OSError(errno.EIO, "I/O error")
+
+        monkeypatch.setattr(shutil_mod, "copytree" if shape == "dir" else "copy2", boom)
+
+        with pytest.raises(OSError) as exc_info:
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        # The original failure surfaces — not a rollback error dressed up as
+        # the cause.
+        assert exc_info.value.errno == errno.EIO
+        body = (src / "agent.md") if shape == "dir" else src
+        assert body.read_text(encoding="utf-8") == "source"
+        assert not list(src.parent.glob(".migrate-*"))
+        assert list(dst_parent.iterdir()) == []
+
+    def test_a_busy_destination_after_the_holding_rename_puts_the_source_back(
+        self, tmp_path, monkeypatch
+    ):
+        """The same unwind, reached through the staging claim rather than the copy."""
+        from memtomem.context.migrate import TransferStagingBusyError, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path)
+        # Staging attempt (EXDEV), holding, then both copy-claim attempts on
+        # the planted destination name.
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[2], _FORCED_HEX[3], _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+        planted = _plant(_forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0]), "full_dir")
+        before = _collider_state(planted)
+
+        with pytest.raises(TransferStagingBusyError):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+        assert not list(src.parent.glob(".migrate-*"))
+        assert _collider_state(planted) == before
+
+    def test_a_crashed_holding_entry_is_hidden_in_the_source_store(self, tmp_path, monkeypatch):
+        """A leftover on the SOURCE side is as invisible as one on the other.
+
+        The ADR now claims this about the source store, so it is pinned there
+        rather than inferred from the destination-store cells: the predicate
+        reads the name, and the name is the same on both sides.
+        """
+        from memtomem.context._names import internal_artifact_owner, is_internal_artifact_dir
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path)
+        _exdev_always(monkeypatch)
+
+        staging, holding = _stage_move(src, dst_parent, name_hint="reviewer")
+
+        # Simulating the crash: the caller never gets to promote or clean up.
+        assert holding is not None
+        assert holding.parent == src.parent
+        assert is_internal_artifact_dir(holding.name), holding.name
+        assert internal_artifact_owner(holding.name) == "reviewer"
+        assert (holding / "agent.md").read_text(encoding="utf-8") == "source"
+        assert is_internal_artifact_dir(staging.name), staging.name
+
+
+def _fail_promote(monkeypatch, src_path: Path, *, then=None):
+    """Make the promote fail, optionally after running *then* first."""
+
+    def boom(staging, dst):
+        # Same witness as the copy-failure cells: at promote time the source
+        # path is free, because the bytes were parked before the copy.
+        assert not os.path.lexists(src_path), "the source must be parked before the promote"
+        if then is not None:
+            then()
+        raise OSError(errno.EIO, "I/O error", str(dst))
+
+    monkeypatch.setattr("memtomem.context.transfer._promote_move", boom)
+
+
+@pytest.mark.parametrize("layout", ["dir", "flat"])
+def test_e4_exdev_promote_failure_puts_the_source_back(scope_layout, monkeypatch, layout):
+    """A failed promote on the EXDEV path restores the canonical source.
+
+    The rollback ladder's "entry holding the source bytes" is the holding
+    entry here, not staging, and it goes back to the canonical name with the
+    no-replace rename.
+
+    Mutation: leave the ladder restoring ``staging`` on this path and the
+    source comes back as a byte COPY while the holding entry leaks — the
+    residue assertions fail.
+    """
+    root = _canonical_root_for(scope_layout, "agents", "user")
+    if layout == "dir":
+        src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN).parent
+        body = src / "agent.md"
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+        src = root / "foo.md"
+        src.write_text(_AGENT_BODY_CLEAN, encoding="utf-8")
+        body = src
+    before_ino = src.stat().st_ino
+
+    raised = _exdev_once(monkeypatch)
+    _fail_promote(monkeypatch, src)
+
+    # ``catch_exceptions=False``, so an engine-level OSError surfaces here
+    # rather than as an exit code — the rollback still ran on its way out.
+    with pytest.raises(OSError):
+        _invoke_migrate(
+            _migrate_args(
+                "agents",
+                "foo",
+                from_scope="user",
+                to_scope="project_shared",
+                confirm_project_shared=True,
+            )
+        )
+
+    assert raised["once"]
+    # Same bytes AND the same inode: renamed back, not rebuilt from the copy.
+    assert body.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    assert src.stat().st_ino == before_ino
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    assert not (dst_root / "foo").exists() and not (dst_root / "foo.md").exists()
+    assert not list(root.glob(".migrate-foo-*.tmp"))
+    assert not list(dst_root.glob(".migrate-foo-*.tmp"))
+
+
+def test_e4_exdev_promote_failure_with_an_occupied_source_keeps_every_copy(
+    scope_layout, monkeypatch, caplog
+):
+    """When the rename-back is refused, nothing is deleted to tidy up.
+
+    Two writers' bytes are in play — the racer's at the canonical path and the
+    user's in the holding entry — and the engine owns neither decision, so it
+    keeps both and says so.
+
+    Mutation: drop staging unconditionally on the EXDEV path (the shape the
+    design gate rejected) and the destination-side copy vanishes while the
+    holding entry is the only thing left; assert on both and either mutation
+    fails.
+    """
+    import logging as _logging
+
+    root = _canonical_root_for(scope_layout, "agents", "user")
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN).parent
+
+    def racer() -> None:
+        src.mkdir(parents=True, exist_ok=True)
+        (src / "agent.md").write_text(_WRITER_BODY, encoding="utf-8")
+
+    raised = _exdev_once(monkeypatch)
+    _fail_promote(monkeypatch, src, then=racer)
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
+
+    with pytest.raises(OSError):
+        _invoke_migrate(
+            _migrate_args(
+                "agents",
+                "foo",
+                from_scope="user",
+                to_scope="project_shared",
+                confirm_project_shared=True,
+            )
+        )
+
+    assert raised["once"]
+    # The racer keeps what it wrote.
+    assert (src / "agent.md").read_text(encoding="utf-8") == _WRITER_BODY
+    # The pre-move bytes survive in the holding entry, which is preserved.
+    leftovers = list(root.glob(".migrate-foo-*.tmp"))
+    assert len(leftovers) == 1, leftovers
+    assert (leftovers[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    # ...and so does the destination-side copy. This is the assertion the
+    # "drop staging unconditionally on EXDEV" mutation fails: without it, that
+    # mutation leaves the same source-side state and the cell stays green.
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    staged = list(dst_root.glob(".migrate-foo-*.tmp"))
+    assert len(staged) == 1, staged
+    assert (staged[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    # The racer lands before the rollback looks, so the ladder takes its
+    # "src reappeared" arm — which must name the holding entry, since that is
+    # where the pre-move bytes are and the operator has to find them. (The
+    # narrower race, an occupant appearing INSIDE the rename-back, is pinned
+    # in the transfer suite through the rename primitive itself.)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "reappeared during apply" in m and str(src) in m and ".migrate-foo-" in m for m in messages
+    ), messages
+
+
+@pytest.mark.parametrize("layout", ["dir", "flat"])
+def test_e4_exdev_holding_removal_failure_is_reported_per_shape(scope_layout, monkeypatch, layout):
+    """Both removal branches report a partial move, not a silent success.
+
+    A flat canonical is unlinked and a dir tree is ``rmtree``-d, so a cell
+    list covering only the tree branch would let an ``unlink`` failure be
+    swallowed while the pre-move bytes sat on disk under a name nothing lists.
+    """
+    import shutil as shutil_mod
+
+    root = _canonical_root_for(scope_layout, "agents", "user")
+    if layout == "dir":
+        _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "foo.md").write_text(_AGENT_BODY_CLEAN, encoding="utf-8")
+
+    _exdev_once(monkeypatch)
+
+    def _is_holding(path) -> bool:
+        target = Path(path)
+        return target.parent == root and target.name.startswith(".migrate-foo-")
+
+    real_rmtree = shutil_mod.rmtree
+    real_unlink = Path.unlink
+
+    def fake_rmtree(path, *args, **kwargs):
+        if _is_holding(path):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_rmtree(path, *args, **kwargs)
+
+    def fake_unlink(self, *args, **kwargs):
+        if _is_holding(self):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr("memtomem.context.transfer.shutil.rmtree", fake_rmtree)
+    monkeypatch.setattr(Path, "unlink", fake_unlink)
+
+    # The CLI translates the engine's MigratePartialError into its own
+    # one-line error, so the assertion is on what the operator reads.
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+
+    assert result.exit_code != 0, result.output
+    assert "failed to remove stale source" in result.output
+    assert "Both canonicals" not in result.output
+    leftovers = list(root.glob(".migrate-foo-*.tmp"))
+    assert len(leftovers) == 1, leftovers
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    dst = dst_root / "foo" / "agent.md" if layout == "dir" else dst_root / "foo.md"
+    assert dst.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+
+
+def test_copy_mode_still_refuses_a_junction_shaped_source(tmp_path, monkeypatch):
+    """The copy-mode junction guard needs a witness of its own.
+
+    ``_stage_move`` asks the junction question early now, about the source,
+    so the move-path cell no longer reaches the guard inside
+    ``_stage_copy_into`` — and ``transfer._stage_copy`` calls that stager
+    directly, with no early question in front of it. Without this cell,
+    deleting the guard there is invisible: a junction would reach ``copytree``,
+    which recurses INTO one, materializing out-of-tree bytes into a possibly
+    git-tracked destination tier.
+    """
+    from memtomem.context.migrate import _stage_copy_into
+
+    dst_parent = tmp_path / "dest"
+    dst_parent.mkdir()
+    src = _src_tree(tmp_path)
+    real_is_junction = Path.is_junction
+    monkeypatch.setattr(Path, "is_junction", lambda self: self == src or real_is_junction(self))
+
+    with pytest.raises(OSError) as exc_info:
+        _stage_copy_into(src, dst_parent, name_hint="reviewer")
+
+    assert exc_info.value.errno == errno.EINVAL
+    assert list(dst_parent.iterdir()) == []
+
+
+def test_a_refused_junction_source_is_never_moved(tmp_path, monkeypatch):
+    """Asking early is not only about which path gets probed.
+
+    The refusal happens before the holding rename, so a source the engine
+    will not copy is never taken off its own name. Move the question after
+    the claim and this cell fails: the artifact ends up parked under an
+    internal name by an operation that then refused to do anything.
+    """
+    from memtomem.context.migrate import _stage_move
+
+    dst_parent = tmp_path / "dest"
+    dst_parent.mkdir()
+    src = _src_tree(tmp_path)
+    _exdev_always(monkeypatch)
+    real_is_junction = Path.is_junction
+    monkeypatch.setattr(Path, "is_junction", lambda self: self == src or real_is_junction(self))
+
+    with pytest.raises(OSError) as exc_info:
+        _stage_move(src, dst_parent, name_hint="reviewer")
+
+    assert exc_info.value.errno == errno.EINVAL
+    assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+    assert not list(src.parent.glob(".migrate-*"))
+    assert list(dst_parent.iterdir()) == []
+
+
+def test_e4_exdev_a_vanished_holding_entry_names_the_staged_copy(scope_layout, monkeypatch, caplog):
+    """When the parked source disappears, the rollback says what is left.
+
+    The design gate's counter-example: something removes the holding entry
+    during the copy, then the promote fails. Staging is now the only copy of
+    the pre-move bytes, so it must be kept — and, just as importantly, named.
+    A recovery copy nobody can name is a copy nobody recovers.
+
+    Mutation: drop the destination-side copy on this path (the shape the gate
+    rejected) and the surviving-copy assertion fails; delete the ERROR arm and
+    the log assertion fails while the bytes sit somewhere nothing mentions.
+    """
+    import logging as _logging
+    import shutil as shutil_mod
+
+    root = _canonical_root_for(scope_layout, "agents", "user")
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN).parent
+
+    def vanish() -> None:
+        for leftover in root.glob(".migrate-foo-*.tmp"):
+            shutil_mod.rmtree(leftover)
+
+    raised = _exdev_once(monkeypatch)
+    _fail_promote(monkeypatch, src, then=vanish)
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
+
+    with pytest.raises(OSError):
+        _invoke_migrate(
+            _migrate_args(
+                "agents",
+                "foo",
+                from_scope="user",
+                to_scope="project_shared",
+                confirm_project_shared=True,
+            )
+        )
+
+    assert raised["once"]
+    assert not list(root.glob(".migrate-foo-*.tmp"))
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    staged = list(dst_root.glob(".migrate-foo-*.tmp"))
+    assert len(staged) == 1, staged
+    assert (staged[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("may be the only surviving copy" in m and str(staged[0]) in m for m in messages), (
+        messages
+    )
+
+
+def test_e4_exdev_a_holding_entry_removed_by_someone_else_is_not_a_partial_move(
+    scope_layout, monkeypatch
+):
+    """A removal that already happened is a removal, not a failure.
+
+    If the holding entry is gone by the time the move cleans up, the goal —
+    that name is absent — already holds. Reporting a partial move there would
+    announce a source-side copy that does not exist AND skip the bookkeeping
+    and fan-out cleanup a completed move owes.
+
+    Mutation: let the ``ENOENT`` propagate and the move reports a partial
+    failure over a destination that is perfectly complete.
+    """
+    import shutil as shutil_mod
+
+    root = _canonical_root_for(scope_layout, "agents", "user")
+    _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+    raised = _exdev_once(monkeypatch)
+
+    real_rmtree = shutil_mod.rmtree
+
+    def vanishing_rmtree(path, *args, **kwargs):
+        target = Path(path)
+        if target.parent == root and target.name.startswith(".migrate-foo-"):
+            # Someone else got there first, between the shape test and the
+            # removal — the race the ENOENT acceptance exists for. The second
+            # call is OURS, and it fails with ENOENT over a name that is
+            # already absent.
+            real_rmtree(path, *args, **kwargs)
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr("memtomem.context.transfer.shutil.rmtree", vanishing_rmtree)
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "agents",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+
+    assert result.exit_code == 0, result.output
+    assert raised["once"]
+    assert "failed to remove stale source" not in result.output
+    dst_root = _canonical_root_for(scope_layout, "agents", "project_shared")
+    assert (dst_root / "foo" / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    assert not list(root.glob(".migrate-foo-*.tmp"))
+
+
+@pytest.mark.parametrize("shape", ["dir", "flat"])
+def test_a_failed_copy_keeps_the_partial_when_the_holding_entry_is_gone(
+    tmp_path, monkeypatch, caplog, shape
+):
+    """A half-filled staging entry is not swept when it is all that is left.
+
+    The fill's cleanup rests on "the source is still there to rebuild from".
+    Copy mode owns that claim; an EXDEV move does not, because the source it
+    reads IS the holding entry and the canonical path is already empty. If
+    that entry disappears while the fill is failing, deleting the partial copy
+    would complete a loss the failure only started — and the rollback then has
+    nothing to put back, so the bytes exist nowhere.
+
+    Mutation: drop the ``src_is_recoverable`` argument (or let the cleanup run
+    unconditionally) and the surviving-copy assertion fails with the bytes
+    gone from disk entirely.
+    """
+    import logging as _logging
+    import shutil as shutil_mod
+
+    from memtomem.context.migrate import _stage_move
+
+    dst_parent = tmp_path / "dest"
+    dst_parent.mkdir()
+    src = _src_tree(tmp_path) if shape == "dir" else _src_file(tmp_path)
+    _exdev_always(monkeypatch)
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
+
+    def fill_then_vanish(source, target, *args, **kwargs):
+        # A partial fill lands, then an outside actor removes the holding
+        # entry we were reading, and only then does the copy fail.
+        if shape == "dir":
+            Path(target).mkdir(parents=True, exist_ok=True)
+            (Path(target) / "agent.md").write_text("source", encoding="utf-8")
+            shutil_mod.rmtree(source)
+        else:
+            Path(target).write_text("source", encoding="utf-8")
+            Path(source).unlink()
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(shutil_mod, "copytree" if shape == "dir" else "copy2", fill_then_vanish)
+
+    with pytest.raises(OSError) as exc_info:
+        _stage_move(src, dst_parent, name_hint="reviewer")
+
+    assert exc_info.value.errno == errno.EIO
+    # Nothing survives on the source side — that is the premise of the cell.
+    assert not os.path.lexists(src)
+    assert not list(src.parent.glob(".migrate-*"))
+    # ...so the partial copy is kept, and named.
+    survivors = list(dst_parent.glob(".migrate-reviewer-*"))
+    assert len(survivors) == 1, survivors
+    body = survivors[0] / "agent.md" if shape == "dir" else survivors[0]
+    assert body.read_text(encoding="utf-8") == "source"
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("preserving the partial copy" in m and str(survivors[0]) in m for m in messages), (
+        messages
+    )
+
+
+@pytest.mark.parametrize("shape", ["dir", "flat"])
+def test_copy_mode_still_sweeps_its_own_partial_fill(tmp_path, monkeypatch, shape):
+    """The preservation rule must not leak into copy mode.
+
+    Copy mode reads the canonical artifact and never consumes it, so a
+    half-filled staging entry there is always rebuildable and always goes —
+    otherwise every ordinary copy failure would leak a tree nothing reaps.
+
+    Mutation: preserve unconditionally and this cell fails with a leftover in
+    the destination store.
+    """
+    import shutil as shutil_mod
+
+    from memtomem.context.migrate import _stage_copy_into
+
+    dst_parent = tmp_path / "dest"
+    dst_parent.mkdir()
+    src = _src_tree(tmp_path) if shape == "dir" else _src_file(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(shutil_mod, "copytree" if shape == "dir" else "copy2", boom)
+
+    with pytest.raises(OSError):
+        _stage_copy_into(src, dst_parent, name_hint="reviewer")
+
+    assert list(dst_parent.iterdir()) == []
+    body = (src / "agent.md") if shape == "dir" else src
+    assert body.read_text(encoding="utf-8") == "source"
