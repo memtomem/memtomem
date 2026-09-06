@@ -567,11 +567,14 @@ def _rewrite_staged_manifest_name(
     (ADR-0022) and override bytes are verbatim-by-contract. The caller
     surfaces a :attr:`TransferResult.notes` entry when overrides exist.
     """
-    # Before reading, not only before writing: for a flat artifact the
-    # manifest IS the staging entry, so a replaced entry would otherwise have
-    # ITS bytes read, rewritten and written back — publishing a stranger's
-    # artifact under our name (#2314).
-    staging.assert_still_ours("rewrite the staged manifest")
+    # Before reading, not only before writing (the write has its own check
+    # below): for a flat artifact the manifest IS the staging entry, so
+    # without this a replaced entry has ITS bytes read and its frontmatter
+    # parsed — and ``rewrite_manifest_name_bytes`` refuses some manifests
+    # loudly, so a stranger's file would decide which error this transfer
+    # reports. The two guards name different actions so a failure says which
+    # one caught it (#2314).
+    staging.assert_still_ours("read the staged manifest for a rename")
     manifest = staging.path if layout == "flat" else staging.path / _DIR_MANIFEST[kind]
     original = manifest.read_bytes()
     rewritten = rewrite_manifest_name_bytes(original, new_name, manifest_label=manifest.name)

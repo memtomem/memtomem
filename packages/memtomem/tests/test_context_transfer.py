@@ -1156,7 +1156,14 @@ def _plant_at_rename(module, target: Path, shape: str, calls: list[Path]):
     return wrapper
 
 
-def _usurp_staging(dst_root: Path) -> tuple[Path, Path]:
+#: What a usurper leaves at a FLAT staging pathname: a manifest of its own,
+#: with a name that is not the one this transfer is landing. Opaque bytes would
+#: not do — the rewrite skips a file with no frontmatter, which would hide
+#: whether the pre-read check ran.
+_THEIR_FLAT_BYTES = "---\nname: theirs\ndescription: not ours\n---\n\ntheirs\n"
+
+
+def _usurp_staging(dst_root: Path, shape: str = "dir") -> tuple[Path, Path]:
     """Replace the in-flight ``.migrate-*`` entry under *dst_root* out of band.
 
     Renames the entry the transfer claimed aside and creates a foreign one at
@@ -1164,21 +1171,43 @@ def _usurp_staging(dst_root: Path) -> tuple[Path, Path]:
     actor: it must know a name carrying our pid and 32 bits of randomness
     generated moments earlier, so it is external and targeted — the cells
     below simulate it rather than claiming an in-tree writer does this.
+
+    *shape* follows the staging entry being replaced: a DIR-layout artifact
+    stages as a directory, a flat one stages as a single file. Matching it
+    keeps the simulation faithful, and it keeps the assertions off directory
+    permissions — inspecting a planted directory needs its owner-exec bit,
+    which depends on the ambient umask and therefore on what else ran in the
+    same worker.
     """
     staged = [p for p in dst_root.glob(".migrate-*") if not p.name.endswith(".aside")]
     assert len(staged) == 1, staged
     path = staged[0]
     aside = path.with_name(path.name + ".aside")
     path.rename(aside)
-    path.mkdir()
-    # Explicit chmod: ``mkdir`` masks its mode with the ambient umask, and this
-    # suite sets a pathological one in places (0o177 clears the owner-exec
-    # bit). Depending on what ran before this cell in the same worker the
-    # replacement would otherwise be an unsearchable directory, and these
-    # assertions would fail with EACCES on one platform's shard order only.
-    path.chmod(0o700)
-    (path / "theirs.md").write_text("theirs", encoding="utf-8")
+    if shape == "dir":
+        path.mkdir()
+        path.chmod(0o700)  # umask-independent; see the docstring
+        (path / "theirs.md").write_text("theirs", encoding="utf-8")
+    else:
+        path.write_text(_THEIR_FLAT_BYTES, encoding="utf-8")
     return path, aside
+
+
+def _assert_replacement_survived(staged: Path) -> None:
+    """The foreign entry is still exactly what the usurper left there.
+
+    Byte-for-byte, not merely present. For the flat shape that is what makes
+    the pre-read identity check observable: drop it and the rewrite reads the
+    usurper's frontmatter, renames it to OUR destination name and writes the
+    result back over their file — the transfer still fails afterwards, on a
+    later guard and with the same exception type, so an assertion that only
+    checked the exception would stay green while a stranger's artifact was
+    being edited.
+    """
+    if staged.is_dir():
+        assert (staged / "theirs.md").read_text(encoding="utf-8") == "theirs"
+    else:
+        assert staged.read_text(encoding="utf-8") == _THEIR_FLAT_BYTES
 
 
 class TestReplacedStagingIsNeitherRemovedNorPromoted:
@@ -1226,7 +1255,7 @@ class TestReplacedStagingIsNeitherRemovedNorPromoted:
             )
 
         staged, aside = seen[0]
-        assert (staged / "theirs.md").read_text(encoding="utf-8") == "theirs"
+        _assert_replacement_survived(staged)
         assert (aside / "agent.md").exists(), "our own staging survived under its new name"
         assert not (dst_root / "foo").exists()
         # The source was never consumed by a copy, replacement or not.
@@ -1392,12 +1421,13 @@ class TestReplacedStagingIsNeitherRemovedNorPromoted:
 
         def stage_then_usurp(*args, **kwargs):
             claimed = original_stage(*args, **kwargs)
-            seen.append(_usurp_staging(dst_root))
+            # A flat artifact stages as a FILE, so the usurper leaves a file.
+            seen.append(_usurp_staging(dst_root, shape="file"))
             return claimed
 
         monkeypatch.setattr(transfer_mod, "_stage_copy", stage_then_usurp)
 
-        with pytest.raises(StagingIdentityLostError, match="was replaced out of band"):
+        with pytest.raises(StagingIdentityLostError) as exc_info:
             transfer_artifact(
                 "agents",
                 "foo",
@@ -1410,9 +1440,14 @@ class TestReplacedStagingIsNeitherRemovedNorPromoted:
                 new_name="bar",
             )
 
+        # WHICH guard caught it is the point. The write-time guard would also
+        # keep the bytes intact, so an outcome-only assertion here stays green
+        # with this check deleted; naming the action pins that we refused
+        # before reading a stranger's frontmatter at all.
+        assert "Refused: read the staged manifest for a rename" in str(exc_info.value)
         staged, aside = seen[0]
         assert not (dst_root / "bar.md").exists()
-        assert staged.is_dir() and (staged / "theirs.md").exists()
+        _assert_replacement_survived(staged)
         assert aside.exists(), "our own staging survived under its new name"
 
     def test_a_flat_rename_refuses_a_replacement_that_lands_mid_write(
@@ -1435,18 +1470,20 @@ class TestReplacedStagingIsNeitherRemovedNorPromoted:
         src_root.mkdir(parents=True)
         (src_root / "foo.md").write_text(_AGENT_BODY_CLEAN, encoding="utf-8")
         dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
-        real_fstat = atomic_mod.os.fstat
+        real_fsync = atomic_mod._fsync_fd
         seen: list[tuple[Path, Path]] = []
 
-        def fstat_then_usurp(fd):
-            # The last hook inside the writer before its guard runs: the
-            # tempfile is written and the destination is about to be replaced.
-            info = real_fstat(fd)
+        def flush_then_usurp(fd, *args, **kwargs):
+            # Our own flush seam, one statement before the writer's guard runs:
+            # the tempfile is written and the destination is about to be
+            # replaced. Hooking a stdlib primitive here instead would re-enter
+            # whenever the helper below does its own I/O.
+            result = real_fsync(fd, *args, **kwargs)
             if not seen and list(dst_root.glob(".migrate-*")):
-                seen.append(_usurp_staging(dst_root))
-            return info
+                seen.append(_usurp_staging(dst_root, shape="file"))
+            return result
 
-        monkeypatch.setattr(atomic_mod.os, "fstat", fstat_then_usurp)
+        monkeypatch.setattr(atomic_mod, "_fsync_fd", flush_then_usurp)
 
         with pytest.raises(StagingIdentityLostError, match="was replaced out of band"):
             transfer_artifact(
@@ -1463,7 +1500,7 @@ class TestReplacedStagingIsNeitherRemovedNorPromoted:
 
         staged, aside = seen[0]
         assert not (dst_root / "bar.md").exists()
-        assert staged.is_dir() and (staged / "theirs.md").exists(), "the replacement was consumed"
+        _assert_replacement_survived(staged)
         # Our own entry is untouched too: the write aborted before the replace.
         assert aside.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
 
