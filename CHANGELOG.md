@@ -113,6 +113,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   now says which path refused, and is never mistaken for a conflict at the
   destination.
 
+- **Moving an artifact to another filesystem no longer discards an edit made
+  while the move was running** (#2313) — when the two stores sit on different
+  volumes, `mm context move` cannot rename the artifact across and has to copy
+  it instead, and it used to copy from the artifact's own path and then delete
+  that path once the destination was in place. A large skill takes a while to
+  copy, and anything that wrote to the source in the meantime — an editor
+  saving, a `git checkout`, a shell redirect — had its work deleted along with
+  the copy the move had already taken, so the newer version existed nowhere
+  while the destination held the older snapshot. The move now sets the source
+  aside first, in one atomic step, and copies from there; a writer that
+  recreates the source path finds it free and keeps what it wrote, because the
+  move never removes that path again. What is set aside is removed only once
+  the destination is complete, and put back if anything goes wrong on the way —
+  and never deleted to tidy up a failure, so the bytes always exist somewhere
+  the error message names.
+
+  This covers writers that go through the source's path, which is how anything
+  outside this tool finds an artifact. A program that opened a file inside the
+  artifact before the move began and writes to that open file afterwards is
+  still writing to what the move already copied; a copy to another filesystem
+  is a snapshot, and only a same-filesystem move can carry such a write along.
+
+  Interrupting a cross-filesystem move now leaves its work-in-progress beside
+  the source rather than at the destination, under the same hidden name a
+  same-filesystem move already used, and nothing removes it automatically:
+  rename it back onto the artifact's name to recover it, or delete it once you
+  have checked that the destination is complete. Until you do, the artifact
+  reads as missing at the source rather than as a half-moved copy. If a copy
+  fails outright, a half-written one is normally cleaned up — but not when the
+  set-aside original has also gone missing, because then the incomplete copy is
+  the last thing holding any of those bytes, and the error names where it is.
+
 - **A cross-store transfer no longer replaces something that appears at the
   destination while it is landing** (#2312) — `mm context move` and `mm context
   copy` finish by renaming the staged artifact onto its final name, and they

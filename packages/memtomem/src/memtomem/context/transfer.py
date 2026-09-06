@@ -10,7 +10,8 @@ entry point.
 The staged-move / pair-lock / fan-out primitives stay in
 :mod:`memtomem.context.migrate` and are reused here verbatim
 (``_acquire_pair_lock``, ``_stage_move``, ``_promote_move``,
-``_existing_fanout_targets``, ``_remove_runtime_fanout_for``).
+``_restore_source``, ``_existing_fanout_targets``,
+``_remove_runtime_fanout_for``).
 ``migrate_scope`` is now a thin same-root wrapper over this engine
 with byte-compatible results and error messages; the lazy import in
 its body (not here) breaks the module cycle.
@@ -67,7 +68,6 @@ from memtomem.context._atomic import (
     atomic_write_bytes,
     installed_at_from_dest,
     iter_installed_files,
-    rename_no_replace,
 )
 from memtomem.context._names import validate_name
 from memtomem.context._skip_reasons import (
@@ -106,6 +106,7 @@ from memtomem.context.migrate import (
     _existing_fanout_targets,
     _promote_move,
     _remove_runtime_fanout_for,
+    _restore_source,
     _stage_copy_into,
     _stage_move,
 )
@@ -499,6 +500,48 @@ def _provenance_fields(
     return "not_carried", plan.reason, plan.reason_code
 
 
+def _remove_entry(entry: StagingClaim) -> None:
+    """Remove one internal entry we created, STRICTLY — errors propagate.
+
+    Takes the CLAIM: this removal consumes whatever answers to the pathname,
+    and an entry replaced out of band is not ours to delete (#2314). A lost
+    identity raises :class:`StagingIdentityLostError`, which is an ``OSError``
+    and therefore reaches the caller's existing arm — reported as the partial
+    move it is, rather than silently leaving a stale duplicate or destroying
+    somebody else's entry.
+
+    The strict sibling of :func:`~memtomem.context.migrate._remove_staging_entry`
+    for the one removal whose failure
+    the caller must hear about: the EXDEV holding entry, dropped once the
+    destination canonical is in place (#2313). Swallowing an error there would
+    report a completed move while the pre-move bytes are still on disk under a
+    name nothing reaps and nothing lists.
+
+    Link-first, for the reason ``_remove_staging_entry`` spells out: both
+    ``exists()`` and ``is_dir()`` follow links, so a directory symlink would
+    otherwise reach ``shutil.rmtree``, which refuses a link. A flat canonical
+    can itself be a symlink, and it is parked as a link.
+
+    An entry that is ALREADY GONE is a completed removal, not a failure. The
+    caller's goal is that the name is absent, and it is; reporting the move as
+    partial there would announce a source-side copy that does not exist and
+    skip the bookkeeping and fan-out cleanup a finished move owes. The
+    ``ENOENT`` is accepted only after LOOKING, so a removal that failed for
+    some other reason and left the entry behind is still reported.
+    """
+    path = entry.path
+    if os.path.lexists(path):
+        entry.assert_still_ours("remove the pre-move copy")
+    try:
+        if path.is_symlink() or not path.is_dir():
+            path.unlink()
+            return
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        if os.path.lexists(path):
+            raise
+
+
 def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> StagingClaim:
     """Copy *src* into a same-dir staging entry under *dst_parent*.
 
@@ -715,7 +758,7 @@ def _rename_overrides_note(probe_dir: Path, dst_path: Path, name: str) -> tuple[
 def _partial_move_message(
     kind: ArtifactKind,
     name: str,
-    src_path: Path,
+    stale_path: Path,
     dst_path: Path,
     src_scope: TargetScope,
     to_scope: TargetScope,
@@ -728,41 +771,54 @@ def _partial_move_message(
     A ``project_local`` destination gets no "then run sync" instruction:
     that tier has no runtime fan-out (ADR-0011 §3), so ``mm context sync
     --scope project_local`` is a NO_FANOUT no-op and telling the user to
-    run it undermines the (real) warning that follows. The stale-source
+    run it undermines the (real) warning that follows. The stale-copy
     warning stays — the SOURCE tier's fan-out hazard is what matters.
+
+    *stale_path* is the holding entry the source was parked in before the
+    copy, not the canonical source path, which is empty (or belongs to
+    whoever wrote it since) by the time this can be reached (#2313). So the
+    state is one canonical at the destination plus one internally-named copy
+    on the source side — NOT "both canonicals on disk", which is what the
+    predecessor said when the leftover really did sit at the canonical name.
+    The prohibition on syncing the source scope survives that correction with
+    a different reason: this move stopped before clearing the source tier's
+    runtime fan-out, so that tier still advertises an artifact the canonical
+    store no longer has.
     """
     if not cross_root:
         if to_scope == "project_local":
-            remove_clause = f"Remove {src_path} manually. "
+            remove_clause = f"Remove {stale_path} manually. "
         else:
             remove_clause = (
-                f"Remove {src_path} manually, "
+                f"Remove {stale_path} manually, "
                 f"then run `mm context sync --scope {to_scope}` to refresh "
                 f"runtime fan-out at the new tier. "
             )
         return (
             f"Migrate {kind}/{name}: canonical copied to {dst_path} but "
-            f"failed to remove stale source at {src_path} (errno={errno_}). "
-            f"Both canonicals now exist on disk. {remove_clause}"
+            f"failed to remove stale source at {stale_path} (errno={errno_}). "
+            f"The destination canonical and a source-side copy of the "
+            f"pre-move bytes now both exist on disk. {remove_clause}"
             f"Until then, do NOT run "
-            f"`mm context sync --scope {src_scope}` — it would recreate "
-            f"runtime fan-out from the stale source."
+            f"`mm context sync --scope {src_scope}` — this move stopped "
+            f"before clearing the source tier's runtime fan-out."
         )
     if to_scope == "project_local":
-        remove_clause = f"Remove {src_path} manually. "
+        remove_clause = f"Remove {stale_path} manually. "
     else:
         followup = sync_command or f"mm context sync --scope {to_scope}"
         remove_clause = (
-            f"Remove {src_path} manually, "
+            f"Remove {stale_path} manually, "
             f"then run `{followup}` to refresh runtime fan-out at the destination. "
         )
     return (
         f"Transfer {kind}/{name}: canonical copied to {dst_path} but "
-        f"failed to remove stale source at {src_path} (errno={errno_}). "
-        f"Both canonicals now exist on disk. {remove_clause}"
+        f"failed to remove stale source at {stale_path} (errno={errno_}). "
+        f"The destination canonical and a source-side copy of the "
+        f"pre-move bytes now both exist on disk. {remove_clause}"
         f"Until then, do NOT run `mm context sync --scope "
-        f"{src_scope}` in the source project — it would recreate runtime "
-        f"fan-out from the stale source."
+        f"{src_scope}` in the source project — this move stopped before "
+        f"clearing the source tier's runtime fan-out."
     )
 
 
@@ -829,12 +885,17 @@ def transfer_artifact(
        (``acquire_canonical_locks`` on ``(src_store, name)`` +
        ``(dst_store, dst_name)`` — ``str(lock_path)`` sort is a total
        order across two project roots; ADR-0030 §6).
-    5. Stage via rename (EXDEV → copy fallback), Gate A scan on staging
+    5. Stage via rename (EXDEV → the source is first parked in a holding
+       entry beside itself, then byte-copied into staging, so the copy
+       reads a name only we can reach; #2313), Gate A scan on staging
        iff ``to_scope == "project_shared"``, promote via a no-replace
        rename — an occupied destination is refused by the kernel and
        surfaces as the typed collision, never replaced (#2312). Rollback
-       renames back with the same primitive and preserves "staging
-       deleted only when the bytes are verified safe elsewhere".
+       renames the entry holding the pre-move bytes back with the same
+       primitive and preserves "a copy is deleted only once the bytes are
+       seen home". After the promote the holding entry is removed; the
+       canonical source path is never removed by name, so a writer that
+       recreated it keeps what it wrote.
     6. Still INSIDE the canonical-lock span (ADR-0030 §6 — so a wiki
        reinstall can't interleave; bookkeeping stays best-effort via
        try/except, not by releasing the lock, and shares the canonical
@@ -1142,7 +1203,7 @@ def transfer_artifact(
                 _discard_claimed_staging(claimed)
                 raise
         else:
-            claimed, src_consumed = _stage_move(src_path, dst_path.parent, name_hint=name)
+            claimed, holding = _stage_move(src_path, dst_path.parent, name_hint=name)
             staging = claimed.path
 
             try:
@@ -1186,175 +1247,167 @@ def transfer_artifact(
                 # Roll back: put bytes back at src so the caller can retry
                 # without manual cleanup.
                 #
-                # The cleanup rule is: staging is deleted only when we KNOW
-                # the bytes are safe elsewhere. There are exactly three safe
-                # cases; everything else preserves staging as a recovery copy
-                # and logs a loud ERROR pointing the user at it.
+                # The cleanup rule is: a copy is deleted only once we have
+                # SEEN the bytes land back at src. Everything else preserves
+                # what is on disk and logs a loud ERROR pointing at it.
+                #
+                # ``restore_from`` is the entry holding the pre-move bytes,
+                # and there is always exactly one: the holding entry beside
+                # the source on the EXDEV path, the staging entry itself on
+                # the same-filesystem one, where the rename that consumed src
+                # IS what produced staging.
                 #
                 # Codex review #1 fold caught the "rename-back fails →
                 # staging gets deleted" path. Re-review then caught a
                 # subtler one: ``not src_path.exists()`` was a TOCTOU — an
-                # external writer (``mm context install``, a manual file op,
-                # any tool that does not take our sidecar lock) can recreate
-                # ``src_path`` between our ``os.rename`` and rollback. The
-                # old guard would skip rename-back (src "already there") and
-                # the cleanup branch would delete staging anyway, even
-                # though the bytes at src now belong to someone else.
+                # external writer (a manual file op, an editor, any tool that
+                # does not take our sidecar lock) can recreate ``src_path``
+                # between our rename and rollback. The old guard would skip
+                # rename-back (src "already there") and the cleanup branch
+                # would delete staging anyway, even though the bytes at src
+                # now belong to someone else.
+                #
+                # The #2313 gate caught the EXDEV twin of that: dropping
+                # staging because "the holding entry still has the bytes" is
+                # a claim about a path we last saw before the copy. If
+                # something removed the holding entry meanwhile, staging is
+                # the only copy left, so it may only be dropped once the
+                # restore has actually succeeded.
+                restore_from = claimed if holding is None else holding
                 cleanup_staging = False
-                if not src_consumed:
-                    # EXDEV fallback: src was never consumed, staging is
-                    # just a copy. Safe to drop.
-                    cleanup_staging = True
-                elif src_path.exists():
-                    # Same-FS path consumed src, but src has reappeared —
-                    # not by us. Don't overwrite the new src bytes; don't
-                    # delete staging either. User reconciles manually.
+                if os.path.lexists(src_path):
+                    # src has reappeared — not by us. Don't overwrite the new
+                    # src bytes; don't delete our copies either. The user
+                    # reconciles by hand.
                     logger.error(
                         "transfer rollback: src %s reappeared during apply "
-                        "(another writer outside our lock); preserving staging "
-                        "at %s as a recovery copy — manual reconciliation "
-                        "required.",
+                        "(another writer outside our lock); preserving the "
+                        "pre-move bytes at %s as a recovery copy — manual "
+                        "reconciliation required.",
                         src_path,
-                        staging,
+                        restore_from.path,
                     )
-                elif not claimed.still_ours() and os.path.lexists(staging):
-                    # Something replaced our staging entry out of band. The
-                    # rename-back is a CONSUMER, so doing it by name would
-                    # move a stranger's object onto the canonical source path
-                    # while the artifact we renamed aside stays lost under
-                    # whatever name they gave it (#2314). Move nothing, delete
-                    # nothing — and do NOT let the caller see this as the
-                    # ordinary "nothing happened, retry" refusal
-                    # ``StagingIdentityLostError`` describes. The same-fs stage
-                    # already consumed the source: the artifact is not where
-                    # the user left it, so this is a PARTIAL transfer, which is
-                    # the state ``MigratePartialError`` exists for and which
-                    # every surface already renders with its recovery text
-                    # intact rather than as a retryable conflict (#2314
-                    # round 2). Raised from inside the rollback, so it replaces
-                    # the original failure as the reported one — accurately:
-                    # whatever sent us here matters less than an artifact that
-                    # is now missing from both ends.
+                elif not restore_from.still_ours() and os.path.lexists(restore_from.path):
+                    # The entry holding the pre-move bytes was replaced out of
+                    # band. Renaming it back would put a stranger's object on
+                    # the canonical source path while the artifact we parked
+                    # stays lost under whatever name they gave it, and removing
+                    # it would destroy something we did not create (#2314).
+                    #
+                    # This is not the ordinary "nothing happened, retry"
+                    # refusal: the stage consumed the source by an atomic
+                    # rename on BOTH paths, so the artifact is missing from
+                    # where the user left it. That is a PARTIAL transfer, the
+                    # state ``MigratePartialError`` exists for and the one
+                    # every surface renders with its recovery text intact
+                    # rather than as a retryable conflict. Raised from inside
+                    # the rollback so it replaces the original failure as the
+                    # reported one — accurately: whatever sent us here matters
+                    # less than an artifact that is now missing from both ends.
                     logger.error(
-                        "transfer rollback: staging %s no longer names the "
-                        "entry this transfer created (replaced out of band); "
-                        "neither renaming it back to %s nor removing it — the "
-                        "source bytes may survive under another name in that "
-                        "store. Manual reconciliation required.",
-                        staging,
+                        "transfer rollback: %s no longer names the entry this "
+                        "transfer created (replaced out of band); neither "
+                        "renaming it back to %s nor removing it — the source "
+                        "bytes may survive under another name in that store. "
+                        "Manual reconciliation required.",
+                        restore_from.path,
                         src_path,
                     )
                     raise MigratePartialError(
                         f"transfer left {kind}/{name} unaccounted for: the move "
-                        f"consumed the source and the staging entry it created "
+                        f"consumed the source and the entry holding its bytes "
                         f"was replaced out of band, so it was neither promoted "
                         f"nor rolled back. Do NOT retry — look for the artifact "
-                        f"in {dst_path.parent} under a name it was renamed to, "
-                        f"and restore it to {src_path} by hand. The entry now "
-                        f"holding {staging} belongs to whoever put it there.",
+                        f"in {restore_from.path.parent} under a name it was "
+                        f"renamed to, and restore it to {src_path} by hand. The "
+                        f"entry now at {restore_from.path} belongs to whoever "
+                        f"put it there.",
                         src_path=src_path,
                         dst_path=dst_path,
                     ) from exc
-                elif os.path.lexists(staging):
-                    # Same-FS path consumed src; src is gone as expected;
-                    # try the rename-back. Success consumes staging (cleanup
-                    # is a no-op then); failure preserves staging.
+                elif os.path.lexists(restore_from.path):
+                    # src is gone as expected; try the rename-back. Success
+                    # means the bytes are home and any remaining copy is
+                    # redundant; a refusal preserves everything and logs.
                     #
                     # ``lexists``, not ``exists``: a flat artifact that is
-                    # itself a symlink stages AS a link (``_stage_copy_into``
-                    # preserves one rather than dereferencing it), and if its
-                    # target went away mid-transfer the link is dangling —
-                    # invisible to ``exists()``. That fell through to "nothing
-                    # to do" and stranded the link in staging with src empty.
+                    # itself a symlink is parked AS a link, and if its target
+                    # went away mid-transfer the link is dangling — invisible
+                    # to ``exists()``. That fell through to "nothing to do"
+                    # and stranded the link with src empty.
                     #
-                    # The rename-back is cross-parent by construction (staging
-                    # lives in the DESTINATION store, src_path in the source
-                    # one), so it opts out of the promote-shape guard. It is
-                    # still same-filesystem: ``src_consumed`` is only True
-                    # because the staging rename succeeded (#2309/#2312).
-                    try:
-                        rename_no_replace(staging, src_path, allow_cross_parent=True)
-                        cleanup_staging = True
-                    except OSError as exc:
-                        # Preserve staging on EVERY failure — it is the only
-                        # copy of the source bytes. Which message to print is
-                        # decided by LOOKING at src_path rather than by the
-                        # errno: "something is at src" is a claim about the
-                        # world, and the errno spellings for an occupied
-                        # rename target differ per platform. Both branches
-                        # keep staging; only the remediation differs, because
-                        # "mv it back" is wrong advice when moving it back
-                        # would land on top of somebody else's entry.
-                        if os.path.lexists(src_path):
-                            logger.error(
-                                "transfer rollback: rename-back refused (%s) — "
-                                "an entry we did not create occupies src %s; "
-                                "preserving staging at %s as the ONLY surviving "
-                                "copy of the source bytes — manual "
-                                "reconciliation required.",
-                                exc,
-                                src_path,
-                                staging,
-                            )
-                        else:
-                            logger.error(
-                                "transfer rollback: rename-back failed (%s); "
-                                "staging at %s is the ONLY surviving copy of the "
-                                "source bytes — manual recovery required (mv it "
-                                "back to %s).",
-                                exc,
-                                staging,
-                                src_path,
-                            )
-                else:
-                    # src_consumed and the staging entry is gone too. There is
-                    # nothing to move and nothing to delete, but this is not
-                    # "nothing happened": the same-fs stage consumed the
-                    # source, so the only copy of the artifact left this
-                    # process's sight. Silence here reads as a clean rollback
-                    # to whoever is looking at the log (#2314 review).
-                    logger.error(
-                        "transfer rollback: the source at %s was consumed by the "
-                        "staging rename and the staging entry %s is gone — this "
-                        "process cannot account for the artifact's bytes. Manual "
-                        "recovery required; look for it under another name in %s.",
+                    # The same-FS rename-back is cross-parent by construction
+                    # (staging lives in the DESTINATION store, src_path in the
+                    # source one), so it opts out of the promote-shape guard;
+                    # it is still same-filesystem, since staging only exists
+                    # because that rename succeeded (#2309/#2312). The EXDEV
+                    # holding entry is a sibling of src and keeps the guard.
+                    cleanup_staging = _restore_source(
+                        restore_from,
                         src_path,
-                        staging,
-                        dst_path.parent,
+                        allow_cross_parent=holding is None,
+                    )
+                elif holding is None:
+                    # Same-FS: the source and the staging entry it became are
+                    # both gone. Nothing to put back and nothing to name.
+                    logger.error(
+                        "transfer rollback: neither src %s nor the staging "
+                        "entry that consumed it survives — nothing to restore.",
+                        src_path,
                     )
 
-                if cleanup_staging:
+                if not cleanup_staging and holding is not None:
+                    # EXDEV, and the pre-move bytes did not make it home. The
+                    # destination-side copy is preserved below, so say where it
+                    # is: ``_restore_source`` names the HOLDING entry, which on
+                    # this path may itself be what went missing, and a recovery
+                    # copy nobody can name is a copy nobody recovers.
+                    logger.error(
+                        "transfer rollback: the source at %s was not restored; "
+                        "the copy staged at %s is preserved and may be the only "
+                        "surviving copy of the pre-move bytes — manual recovery "
+                        "required.",
+                        src_path,
+                        staging,
+                    )
+
+                if cleanup_staging and holding is not None:
+                    # Same-FS restored staging itself, so there is nothing
+                    # left to drop; only the EXDEV path still has a copy at
+                    # the destination, now provably redundant — and "drop"
+                    # means the object this claim created, never the pathname
+                    # (#2314).
                     _discard_claimed_staging(claimed)
                 raise
 
-            # EXDEV cleanup — promoted dst now holds the bytes; src copy is
-            # stale and must be removed for the move to be complete.
-            if not src_consumed and src_path.exists():
+            # EXDEV cleanup — the promoted destination now holds the bytes, so
+            # the holding entry beside the source is a stale duplicate and must
+            # go for the move to be complete. It is removed BY IDENTITY in the
+            # only sense that matters here: we created it under a name we
+            # generated, nothing else writes it, and the canonical path it came
+            # from is not touched — whatever a racing writer put back there is
+            # theirs to keep (#2313).
+            if holding is not None:
                 try:
-                    if src_path.is_dir():
-                        shutil.rmtree(src_path)
-                    else:
-                        src_path.unlink()
+                    _remove_entry(holding)
                 except OSError as exc:
-                    # Canonical is at dst but src cleanup failed — both
-                    # canonicals are on disk. Rolling back dst would just
-                    # restore the duplicate state we just resolved (and the
-                    # bytes at src are presumably the same — copy succeeded).
-                    # Instead, surface as a hard error so the caller does
-                    # NOT report "moved" and does NOT proceed to fan-out
-                    # cleanup. Without this fail-loud, the next
-                    # ``mm context sync`` at src_scope would recreate runtime
-                    # fan-out from the stale src (#895 P2 review #5).
+                    # Canonical is at dst but the pre-move copy survives.
+                    # Rolling back dst would just restore the duplicate state
+                    # we just resolved (and the bytes are the same — the copy
+                    # succeeded). Instead, surface as a hard error so the
+                    # caller does NOT report "moved" and does NOT proceed to
+                    # fan-out cleanup, which is the step the message tells the
+                    # operator has not run (#895 P2 review #5).
                     logger.error(
-                        "EXDEV cleanup: failed to remove stale src %s: %s",
-                        src_path,
+                        "EXDEV cleanup: failed to remove the pre-move source copy %s: %s",
+                        holding.path,
                         exc,
                     )
                     raise MigratePartialError(
                         _partial_move_message(
                             kind,
                             name,
-                            src_path,
+                            holding.path,
                             dst_path,
                             src_scope,
                             to_scope,
@@ -1362,7 +1415,7 @@ def transfer_artifact(
                             cross_root,
                             sync_command,
                         ),
-                        src_path=src_path,
+                        src_path=holding.path,
                         dst_path=dst_path,
                     ) from exc
 

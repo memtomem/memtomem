@@ -164,7 +164,11 @@ class InvalidNameError(ValueError):
 # (``migrate._stage_move`` / ``transfer._stage_copy``, both through
 # ``migrate.transfer_staging_path``). ``mm context move`` / ``copy`` crashing
 # between stage and promote leaves one of those in the DESTINATION store, and
-# until #2304 no consumer of this predicate matched it (#2304).
+# until #2304 no consumer of this predicate matched it (#2304). Since #2313 a
+# cross-filesystem move also parks its source under this shape in the SOURCE
+# store for the length of the copy, so a crash can leave one on either side:
+# before the promote it is the only copy of the artifact, after it a stale
+# duplicate of the canonical now at the destination.
 #
 # The kinds are a named constant and the pattern is built from it, because the
 # reaper scans by kind (``skills._iter_own_internal_dirs`` globs
