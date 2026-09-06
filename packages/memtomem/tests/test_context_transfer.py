@@ -1235,8 +1235,9 @@ class TestReplacedStagingIsNeitherRemovedNorPromoted:
         rollback that renames the pathname back would put a stranger's entry on
         the canonical source path and leave the real artifact lost under the
         name the usurper gave it. Nothing is moved and nothing is deleted; the
-        state is the "manual reconciliation" one the ladder already reports for
-        a reappeared source.
+        state is a PARTIAL transfer, not the retryable refusal the identity
+        error describes: the artifact is missing from both ends, so the caller
+        is told to look for it rather than to try again (#2314 round 2).
         """
         import logging as _logging
 
@@ -1250,7 +1251,7 @@ class TestReplacedStagingIsNeitherRemovedNorPromoted:
         self._usurp_at_gate_a(monkeypatch, dst_root, seen)
         caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
 
-        with pytest.raises(PrivacyBlockedError):
+        with pytest.raises(MigratePartialError) as exc_info:
             transfer_artifact(
                 "agents",
                 "foo",
@@ -1262,6 +1263,11 @@ class TestReplacedStagingIsNeitherRemovedNorPromoted:
                 apply_=True,
             )
 
+        # The reported failure is the unaccounted-for artifact, not the Gate A
+        # block that sent us into the rollback: an artifact missing from both
+        # ends outranks whatever triggered the attempt.
+        assert "Do NOT retry" in exc_info.value.message
+        assert isinstance(exc_info.value.__cause__, PrivacyBlockedError)
         staged, aside = seen[0]
         assert (staged / "theirs.md").read_text(encoding="utf-8") == "theirs"
         assert not src_dir.exists(), "the same-fs stage consumed the source"
@@ -1403,14 +1409,67 @@ class TestReplacedStagingIsNeitherRemovedNorPromoted:
         assert staged.is_dir() and (staged / "theirs.md").exists()
         assert aside.exists(), "our own staging survived under its new name"
 
+    def test_a_flat_rename_refuses_a_replacement_that_lands_mid_write(
+        self, two_projects, monkeypatch
+    ):
+        """The check before the READ is a whole rewrite older than the replace.
+
+        ``atomic_write_bytes`` writes a tempfile and then ``os.replace``s it
+        onto the pathname — and that replace CONSUMES whatever is there. A
+        usurper landing after the pre-read check would have its entry replaced
+        by our bytes and its inode adopted as ours, so the write takes a fresh
+        answer in the last instant before the rename (#2314 round 2). One
+        syscall still separates that answer from the act; nothing portable
+        closes it, and the docstring says so rather than implying otherwise.
+        """
+        from memtomem.context import _atomic as atomic_mod
+        from memtomem.context.migrate import StagingIdentityLostError
+
+        src_root = _canonical_root(two_projects, "agents", "project_shared", "a")
+        src_root.mkdir(parents=True)
+        (src_root / "foo.md").write_text(_AGENT_BODY_CLEAN, encoding="utf-8")
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+        real_fstat = atomic_mod.os.fstat
+        seen: list[tuple[Path, Path]] = []
+
+        def fstat_then_usurp(fd):
+            # The last hook inside the writer before its guard runs: the
+            # tempfile is written and the destination is about to be replaced.
+            info = real_fstat(fd)
+            if not seen and list(dst_root.glob(".migrate-*")):
+                seen.append(_usurp_staging(dst_root))
+            return info
+
+        monkeypatch.setattr(atomic_mod.os, "fstat", fstat_then_usurp)
+
+        with pytest.raises(StagingIdentityLostError, match="was replaced out of band"):
+            transfer_artifact(
+                "agents",
+                "foo",
+                src_project_root=two_projects["a"],
+                from_scope="project_shared",
+                dst_project_root=two_projects["b"],
+                to_scope="project_shared",
+                mode="copy",
+                apply_=True,
+                new_name="bar",
+            )
+
+        staged, aside = seen[0]
+        assert not (dst_root / "bar.md").exists()
+        assert staged.is_dir() and (staged / "theirs.md").exists(), "the replacement was consumed"
+        # Our own entry is untouched too: the write aborted before the replace.
+        assert aside.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+
     def test_a_flat_rename_still_cleans_up_its_own_staging(self, two_projects):
         """The anti-leak pin for the identity refresh (#2314).
 
         For a FLAT artifact the manifest IS the staging entry, and the ``--as``
         rewrite goes through ``atomic_write_bytes`` — ``mkstemp`` + ``os.replace``
         — so it legitimately swaps the inode the claim recorded. Without
-        ``claim.refresh_identity()`` the rollback would read our own rewrite as
-        a stranger's entry and preserve it, leaking a full staging entry into
+        ``claim.adopt()`` taking the identity that write reports, the rollback
+        would read our own rewrite as a stranger's entry and preserve it,
+        leaking a full staging entry into
         the destination store on EVERY ordinary failure. ``.migrate-*`` is not
         reapable, so that leak is permanent and invisible to discovery.
         """

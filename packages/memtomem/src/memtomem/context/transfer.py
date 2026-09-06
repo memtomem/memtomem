@@ -581,7 +581,19 @@ def _rewrite_staged_manifest_name(
     # surface-wide (test_context_atomic_write_guard): no bare writes on
     # gateway modules. Mode is preserved from the copied manifest —
     # copy semantics, not the helper's 0600 default.
-    placed = atomic_write_bytes(manifest, rewritten, mode=stat.S_IMODE(manifest.stat().st_mode))
+    placed = atomic_write_bytes(
+        manifest,
+        rewritten,
+        mode=stat.S_IMODE(manifest.stat().st_mode),
+        # Re-asked in the last instant before the replace: for a flat artifact
+        # the replace consumes the staging entry itself, and the check above
+        # this call is a whole read-and-rewrite older (#2314 round 2).
+        before_replace=(
+            (lambda: staging.assert_still_ours("rewrite the staged manifest"))
+            if layout == "flat"
+            else None
+        ),
+    )
     if layout == "flat":
         # ``atomic_write_bytes`` is mkstemp + ``os.replace``, so for a flat
         # artifact — where the manifest IS the staging entry — that write just
@@ -1167,7 +1179,7 @@ def transfer_artifact(
                     raise TransferCollisionError(
                         f"destination appeared during promote: {dst_path}."
                     ) from exc
-            except BaseException:
+            except BaseException as exc:
                 # Roll back: put bytes back at src so the caller can retry
                 # without manual cleanup.
                 #
@@ -1208,10 +1220,18 @@ def transfer_artifact(
                     # move a stranger's object onto the canonical source path
                     # while the artifact we renamed aside stays lost under
                     # whatever name they gave it (#2314). Move nothing, delete
-                    # nothing, and say so — this lands in the same
-                    # "manual reconciliation" state the branch above uses when
-                    # src reappears, which is the worst outcome we already
-                    # know how to report.
+                    # nothing — and do NOT let the caller see this as the
+                    # ordinary "nothing happened, retry" refusal
+                    # ``StagingIdentityLostError`` describes. The same-fs stage
+                    # already consumed the source: the artifact is not where
+                    # the user left it, so this is a PARTIAL transfer, which is
+                    # the state ``MigratePartialError`` exists for and which
+                    # every surface already renders with its recovery text
+                    # intact rather than as a retryable conflict (#2314
+                    # round 2). Raised from inside the rollback, so it replaces
+                    # the original failure as the reported one — accurately:
+                    # whatever sent us here matters less than an artifact that
+                    # is now missing from both ends.
                     logger.error(
                         "transfer rollback: staging %s no longer names the "
                         "entry this transfer created (replaced out of band); "
@@ -1221,6 +1241,17 @@ def transfer_artifact(
                         staging,
                         src_path,
                     )
+                    raise MigratePartialError(
+                        f"transfer left {kind}/{name} unaccounted for: the move "
+                        f"consumed the source and the staging entry it created "
+                        f"was replaced out of band, so it was neither promoted "
+                        f"nor rolled back. Do NOT retry — look for the artifact "
+                        f"in {dst_path.parent} under a name it was renamed to, "
+                        f"and restore it to {src_path} by hand. The entry now "
+                        f"holding {staging} belongs to whoever put it there.",
+                        src_path=src_path,
+                        dst_path=dst_path,
+                    ) from exc
                 elif os.path.lexists(staging):
                     # Same-FS path consumed src; src is gone as expected;
                     # try the rename-back. Success consumes staging (cleanup

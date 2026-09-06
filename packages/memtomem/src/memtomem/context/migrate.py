@@ -1039,7 +1039,13 @@ def _staging_identity(path: Path) -> StagingIdentity | None:
     """
     try:
         info = path.lstat()
-    except OSError:
+    except OSError as exc:
+        # Distinct from the zero-inode case below, and logged as such: this is
+        # a probe that FAILED (a permission problem, a vanished parent), not a
+        # platform that cannot answer. Telling an operator their filesystem
+        # lacks file identity when the real event was an EACCES sends them to
+        # fix the wrong thing.
+        logger.warning("could not read the identity of staging %s: %s", path, exc)
         return None
     if info.st_ino == 0:
         logger.warning(
