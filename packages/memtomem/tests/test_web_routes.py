@@ -3090,6 +3090,32 @@ class TestEditChunkProjectSharedGateB:
         assert "rewritten body" in source.read_text(encoding="utf-8")
         assert consent_lines(caplog) == []
 
+    @pytest.mark.parametrize("private_scope", ["user", "project_local"])
+    async def test_a_private_tier_refusal_names_that_tier(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch, private_scope
+    ):
+        """Both tiers the SPA will offer a ``force_unsafe`` bypass on (#2332).
+
+        The client decides that from an allow-list, not from
+        ``!= "project_shared"``, so each accepted value needs a server-side
+        counterpart: a route that stopped reporting one of them would leave
+        the refusal *unknown*, and the bypass would silently stop being
+        offered on that tier with every JS fixture still green — they build
+        this payload themselves.
+        """
+        source, _calls = self._stage(app, monkeypatch, tmp_path, scope=private_scope)
+
+        resp = await client.patch(
+            f"/api/chunks/{CHUNK_ID}",
+            json={"new_content": "secret token=sk-" + "a" * 30},
+        )
+        assert resp.status_code == 403, resp.text
+        detail = resp.json()["detail"]
+        assert detail["detail"] == "redaction_blocked"
+        assert detail["scope"] == private_scope
+        # Refused before the mutation: the bypass is on offer, not applied.
+        assert "original body" in source.read_text(encoding="utf-8")
+
     async def test_gate_b_reads_the_chunk_re_fetched_under_the_lock(
         self, app, client: AsyncClient, tmp_path: Path, monkeypatch, caplog
     ):
