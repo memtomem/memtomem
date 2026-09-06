@@ -728,6 +728,80 @@ def emit_exemption_audit(
     )
 
 
+#: How a caller established the ``project_shared`` consent that
+#: :func:`emit_project_shared_confirmation` records.
+#:
+#: ``flag``     — a CLI ``--confirm-project-shared`` was passed.
+#: ``prompt``   — a CLI interactive confirm was answered yes.
+#: ``param``    — an MCP tool kwarg / library kwarg ``confirm_project_shared=True``.
+#: ``request``  — a web request body/query field said true.
+CONSENT_MECHANISMS: frozenset[str] = frozenset({"flag", "prompt", "param", "request"})
+
+
+def emit_project_shared_confirmation(
+    *,
+    surface: str,
+    mechanism: str,
+    action: str = "write",
+    audit_context: dict[str, object] | None = None,
+) -> None:
+    """Emit the ADR-0011 §5 Gate B consent audit line.
+
+    ADR-0011 §5 pairs two gates on every ``project_shared`` mutation: Gate A
+    refuses a bypass at the content chokepoint (counted as
+    ``blocked_project_shared``, audited by :func:`emit_bypass_audit`), and
+    Gate B requires an explicit confirmation at the surface. Only the refusal
+    half was observable until #2306 — a reviewer could see attempted bypasses
+    into git history but never a consented write, so a bug in flag handling
+    left no trace. This is the success half: every surface that gates on
+    ``confirm_project_shared`` calls it once the consent is established.
+
+    **Records the consent, not the write.** Gate A, a host-write gate, a lock
+    timeout, or a collision can still refuse *after* this line is emitted. It
+    says a human (or an agent acting for one) authorised a git-tracked write
+    at ``surface``, which is the thing that has no other record. A dry run
+    writes nothing and so emits nothing — which is a statement about what
+    is *recorded*, not about what is *asked*: ``mem_context_memory_migrate``
+    still requires the confirmation argument on a preview call, its own
+    pre-existing contract and not something this line reports on.
+
+    **Log line only, no counter.** :data:`_VALID_OUTCOMES` labels the outcome
+    of a *content scan*; a consent is not a scan, and folding it into those
+    counters would break the "one outcome per scanned write" reading that
+    ``mem_add_redaction_stats`` and Settings → Redaction present. Like
+    ``blocked_project_shared``, this is LTM-only and does not sync to STM
+    (STM has no scope axis) — see the module docstring's "Sync rule".
+
+    ``mechanism`` must be one of :data:`CONSENT_MECHANISMS`; an unknown value
+    raises rather than logging, because every caller is first-party and a
+    typo would otherwise ship a line no operator query matches.
+
+    Every context value goes through :func:`sanitize_audit_value` first:
+    matched bytes never reach error messages, audit lines, or responses.
+    Callers pass identifying scalars (artifact kind/name, namespace, chunk
+    id, counts) and deliberately not absolute paths — this line fires on a
+    routine, successful action, so its context stays narrower than a
+    bypass's.
+    """
+    if mechanism not in CONSENT_MECHANISMS:
+        raise ValueError(
+            f"unknown consent mechanism {mechanism!r}; expected one of {sorted(CONSENT_MECHANISMS)}"
+        )
+    if audit_context:
+        sanitized = {k: sanitize_audit_value(v) for k, v in audit_context.items()}
+        ctx_pairs = ", " + ", ".join(f"{k}={v!r}" for k, v in sanitized.items())
+    else:
+        ctx_pairs = ""
+    logger.warning(
+        "project_shared consent recorded (project_shared.confirmed_via=%s, "
+        "mechanism=%s, action=%s%s)",
+        sanitize_audit_value(surface),
+        mechanism,
+        sanitize_audit_value(action),
+        ctx_pairs,
+    )
+
+
 def enforce_write_guard(
     content: str,
     *,

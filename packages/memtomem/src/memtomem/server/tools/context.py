@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 import click
 from pydantic import StrictBool
 
+from memtomem import privacy
 from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import remediation, versioning
@@ -296,6 +297,17 @@ async def mem_context_init(
         return (
             "needs confirmation: scope='project_shared' writes to git-tracked "
             f"{root / '.memtomem'}. Re-call with confirm_project_shared=True to proceed."
+        )
+
+    # ADR-0011 §5 Gate B consent (#2306). Mirrors the gate, ``scope_explicit``
+    # included: an implicit project_shared default asks for no consent, so
+    # there is none to record.
+    if scope_explicit and artifact_scope == "project_shared":
+        privacy.emit_project_shared_confirmation(
+            surface="mcp_context_init",
+            mechanism="param",
+            action="init",
+            audit_context={"include": include},
         )
 
     results: list[str] = []
@@ -1337,6 +1349,11 @@ async def mem_context_memory_migrate(
             # MCP, which has no TTY.
             yes=True,
             confirm_project_shared=confirm_project_shared,
+            # The helper carries Gate B for both surfaces, so it emits the
+            # ADR-0011 §5 consent line on our behalf (#2306) — it must name
+            # this tool, not the CLI verb it shares an implementation with.
+            surface="mcp_context_memory_migrate",
+            consent_mechanism="param",
             stdout_buf=stdout_lines,
             stderr_buf=stderr_lines,
         )
@@ -1594,6 +1611,14 @@ async def mem_context_artifact_migrate(
                 "needs confirmation: to_scope='project_shared' moves the canonical "
                 "into the git-tracked tier. Re-call with confirm_project_shared=True "
                 "to proceed."
+            )
+        # ADR-0011 §5 Gate B consent (#2306) — apply-only, like the gate.
+        if to == "project_shared" and apply:
+            privacy.emit_project_shared_confirmation(
+                surface="mcp_context_artifact_migrate",
+                mechanism="param",
+                action="move",
+                audit_context={"kind": asset, "name": nm, "from_scope": frm},
             )
         try:
             result = await asyncio.to_thread(
@@ -2131,6 +2156,15 @@ async def mem_context_artifact_transfer(
             f"canonical into the git-tracked tier. Re-call with "
             f"confirm_project_shared=True to proceed."
         )
+    # ADR-0011 §5 Gate B consent (#2306). The host-write gate below and the
+    # engine can still refuse: this records the consent, not the transfer.
+    if to == "project_shared" and apply:
+        privacy.emit_project_shared_confirmation(
+            surface="mcp_context_artifact_transfer",
+            mechanism="param",
+            action=mode,
+            audit_context={"kind": asset, "name": nm, "from_scope": frm},
+        )
     if to == "user" and apply and not allow_host_writes:
         return (
             "needs confirmation: to_scope='user' writes the canonical to a "
@@ -2481,6 +2515,16 @@ async def mem_context_version(
                 "git-tracked tree (flat file → directory layout). Re-call with "
                 "confirm_project_shared=True to proceed."
             )
+        # ADR-0011 §5 Gate B consent (#2306). The idempotent already-dir
+        # no-op and the orphan refusal both come later: this records the
+        # consent, not the restructure.
+        if scope_explicit and artifact_scope == "project_shared":
+            privacy.emit_project_shared_confirmation(
+                surface="mcp_context_version_enable",
+                mechanism="param",
+                action="enable",
+                audit_context={"kind": artifact_type, "name": name},
+            )
         # ``artifact_dir`` is <root>/<name> on dir layout, <root> on flat — so the
         # canonical <type> root is its parent only when already dir (mirror of the
         # web router's ``working_file.parent.parent if dir else parent``).
@@ -2540,6 +2584,14 @@ async def mem_context_version(
         return (
             "needs confirmation: scope='project_shared' freezes a snapshot into the "
             "git-tracked tree. Re-call with confirm_project_shared=True to proceed."
+        )
+    # ADR-0011 §5 Gate B consent (#2306). The flat-layout refusal below and
+    # Gate A inside the locked create can still stop the write.
+    if scope_explicit and artifact_scope == "project_shared":
+        privacy.emit_project_shared_confirmation(
+            surface="mcp_context_version_create",
+            mechanism="param",
+            audit_context={"kind": artifact_type, "name": name},
         )
     if layout != "dir":
         return f"error: {_flat_layout_hint(artifact_type, name)}"
@@ -2684,6 +2736,17 @@ async def mem_context_promote(
         return (
             "needs confirmation: scope='project_shared' moves a pointer in the "
             "git-tracked label map. Re-call with confirm_project_shared=True to proceed."
+        )
+    # ADR-0011 §5 Gate B consent (#2306).
+    if scope_explicit and artifact_scope == "project_shared":
+        privacy.emit_project_shared_confirmation(
+            surface="mcp_context_promote",
+            mechanism="param",
+            action="delete" if delete else "promote",
+            # ``label`` is only stripped, never validated into a constrained
+            # identifier, so it stays out of a routine WARNING; ``kind`` and
+            # ``name`` are validated artifact identifiers.
+            audit_context={"kind": artifact_type, "name": name},
         )
 
     if layout != "dir":
@@ -3114,6 +3177,15 @@ async def mem_context_pull(
             f"needs confirmation: Pull {k}/{nm} from {plan.selected_runtime} writes to "
             "the git-tracked project_shared canonical (history is forever). Re-call "
             "with confirm_project_shared=True to proceed."
+        )
+    # ADR-0011 §5 Gate B consent (#2306). ``commit_pull`` can still fail on a
+    # lock or a conflict: this records the consent, not the landed pull.
+    if plan.scope == "project_shared":
+        privacy.emit_project_shared_confirmation(
+            surface="mcp_context_pull",
+            mechanism="param",
+            action="pull",
+            audit_context={"kind": k, "name": nm, "runtime": plan.selected_runtime},
         )
     if plan.scope == "user" and not allow_host_writes:
         target = canonical_artifact_dir(plan.kind, "user", plan.project_root) / plan.name

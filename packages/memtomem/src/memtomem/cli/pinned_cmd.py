@@ -146,6 +146,10 @@ async def _set_block(
                 priority=priority,
                 confirm_project_shared=confirm_project_shared,
                 force_unsafe=force_unsafe,
+                # The store carries Gate B for every caller, so the ADR-0011 §5
+                # consent line has to be told which one this is (#2306).
+                consent_surface="cli_pinned_set",
+                consent_mechanism="flag",
             )
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
@@ -185,6 +189,8 @@ async def _delete_block(
                 scope=scope,
                 agent_id=agent_id,
                 confirm_project_shared=confirm_project_shared,
+                consent_surface="cli_pinned_delete",
+                consent_mechanism="flag",
             )
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc

@@ -188,6 +188,70 @@ async def test_memory_migrate_apply_user_to_project_shared_chunk_ids_preserved(
     assert refreshed.metadata.source_file == target
 
 
+@pytest.mark.asyncio
+async def test_mcp_memory_migrate_consent_names_the_mcp_tool(
+    bm25_only_components, monkeypatch, tmp_path, caplog
+):
+    """ADR-0011 §5 consent attribution across a delegate (#2306).
+
+    ``mem_context_memory_migrate`` gates, then hands the work to the CLI
+    helper, which is what emits. The helper defaults to the CLI's own
+    surface, so the tool has to pass its name down — and nothing else
+    would notice if that argument were dropped: the recorded surface
+    would quietly become ``cli_context_memory_migrate`` for a call that
+    never touched the CLI. This is the only test that would fail.
+    """
+    import logging
+
+    from helpers import StubCtx, consent_lines
+    from memtomem.server.context import AppContext
+    from memtomem.server.tools.context import mem_context_memory_migrate
+
+    comp, mem_dir = bm25_only_components
+    project_root = tmp_path / "proj_mcp_attr"
+    proj_shared = project_root / ".memtomem" / "memories"
+    proj_shared.mkdir(parents=True)
+    (project_root / ".git").mkdir()
+    comp.config.indexing.project_memory_dirs = [proj_shared]
+
+    src = mem_dir / "rule.md"
+    src.write_text("## Rule\n\nharmless body.\n", encoding="utf-8")
+    await comp.storage.upsert_chunks(
+        [
+            Chunk(
+                content="harmless body.",
+                metadata=ChunkMetadata(
+                    source_file=src,
+                    scope="user",
+                    project_root=None,
+                    start_line=3,
+                    end_line=3,
+                ),
+                embedding=[0.1] * 1024,
+            )
+        ]
+    )
+
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(project_root)
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await mem_context_memory_migrate(
+            source=str(src.resolve()),
+            from_scope="user",
+            to_scope="project_shared",
+            apply=True,
+            confirm_project_shared=True,
+            ctx=StubCtx(AppContext.from_components(comp)),
+        )
+    assert "error" not in out.lower(), out
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "project_shared.confirmed_via=mcp_context_memory_migrate" in lines[0]
+    assert "mechanism=param" in lines[0]
+    assert "cli_context_memory_migrate" not in lines[0]
+
+
 @pytest.mark.parametrize("caller_inside_project", [True, False], ids=["same-boundary", "moved-out"])
 @pytest.mark.asyncio
 async def test_replace_chunk_tags_is_atomic_against_memory_migrate(

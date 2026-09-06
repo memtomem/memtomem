@@ -455,6 +455,23 @@ async def transfer_context_artifact(
     gate = None if dry_run else _required_confirm(body)
     apply_ = not dry_run and gate is None
 
+    # ADR-0011 §5 Gate B consent (#2306). The gate itself lives in
+    # ``_required_confirm``, which is a pure predicate; the consent is
+    # recorded here, where the applying request is known. ``apply_`` already
+    # encodes "not a dry run and nothing left to confirm" — the only other
+    # gate in that helper is the user-tier host-write one, so a
+    # project_shared request reaching here has cleared Gate B. The engine can
+    # still refuse: this records the consent, not the transfer.
+    if apply_ and body.to_target_scope == "project_shared":
+        from memtomem import privacy
+
+        privacy.emit_project_shared_confirmation(
+            surface="web_context_transfer",
+            mechanism="request",
+            action=body.mode,
+            audit_context={"kind": kind, "name": name, "from_scope": body.from_scope},
+        )
+
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:

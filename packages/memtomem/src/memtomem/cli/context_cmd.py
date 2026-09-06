@@ -12,6 +12,7 @@ from pathlib import Path
 
 import click
 
+from memtomem import privacy
 from memtomem.context import versioning
 from memtomem.context._canonical_txn import versioning_op_locked
 from memtomem.context._atomic import atomic_write_text
@@ -1146,6 +1147,16 @@ def init_cmd(
         if not click.confirm(prompt, default=False):
             raise click.Abort()
 
+    # ADR-0011 §5 Gate B consent (#2306). After the block, not inside it —
+    # the block runs only when the flag is absent. ``scope_explicit`` is
+    # kept: an implicit project_shared default asks for no consent.
+    if scope_explicit and scope == "project_shared":
+        privacy.emit_project_shared_confirmation(
+            surface="cli_context_init",
+            mechanism="flag" if confirm_project_shared else "prompt",
+            action="init",
+        )
+
     # context.md is a **project_shared** artifact in nature: it lives at
     # ``<proj>/.memtomem/context.md``, gets git-tracked when the project
     # has a ``.git`` (just like the project_shared canonical tree), and
@@ -1623,6 +1634,25 @@ def pull_cmd(
                 f"\nPull {kind}/{name} from {plan.selected_runtime} into {scope}?",
                 abort=True,
             )
+    # ADR-0011 §5 Gate B consent (#2306). This surface satisfies Gate B
+    # differently from its MCP and web twins, which take an explicit
+    # ``confirm_project_shared``: ADR-0030 §11 accepts ``--yes`` *or* the
+    # prompt here. The consent is recorded either way — the audit line is
+    # about what was authorised, not about which spelling authorised it —
+    # and ``audit_context`` names the flag so the two are told apart. The
+    # divergence itself is a sibling-parity question, not this line's.
+    if scope == "project_shared":
+        privacy.emit_project_shared_confirmation(
+            surface="cli_context_pull",
+            mechanism="flag" if yes else "prompt",
+            action="pull",
+            audit_context={
+                "kind": kind,
+                "name": name,
+                "runtime": plan.selected_runtime,
+                **({"flag": "--yes"} if yes else {}),
+            },
+        )
     result = commit_pull(plan)
     if result.status != "applied":
         raise _pull_refusal(result)
@@ -3754,6 +3784,16 @@ def _migrate_scope_dispatch(
         ):
             raise click.Abort()
 
+    # ADR-0011 §5 Gate B consent (#2306). After the block, not inside it —
+    # the block runs only when the flag is absent. Apply-only, like the gate.
+    if to_scope == "project_shared" and apply_:
+        privacy.emit_project_shared_confirmation(
+            surface="cli_context_migrate",
+            mechanism="flag" if confirm_project_shared else "prompt",
+            action="move",
+            audit_context={"kind": asset_type, "name": name, "from_scope": from_scope},
+        )
+
     # On MigratePartialError the fan-out cleanup never ran (raise
     # short-circuited), and the "Next: run sync ..." hint at the bottom
     # of _print_migrate_scope_result is skipped because we exit before
@@ -4432,6 +4472,16 @@ def _transfer_dispatch(
         ):
             raise click.Abort()
 
+    # ADR-0011 §5 Gate B consent (#2306). After the block, not inside it —
+    # the block runs only when the flag is absent. Apply-only, like the gate.
+    if to_scope_t == "project_shared" and apply_:
+        privacy.emit_project_shared_confirmation(
+            surface=f"cli_context_{mode}",
+            mechanism="flag" if confirm_project_shared else "prompt",
+            action=mode,
+            audit_context={"kind": asset_type, "name": name, "from_scope": from_scope},
+        )
+
     result: TransferResult | McpServerCopyResult
     # Same translation set as _migrate_scope_dispatch — the engine's
     # validate_name raises InvalidNameError (not ClickException), and
@@ -4876,6 +4926,17 @@ def import_cmd(
             default=False,
         ):
             raise click.Abort()
+
+    # ADR-0011 §5 Gate B consent (#2306) — the gap ADR-0037 recorded and
+    # deferred. After the block, not inside it; apply-only, like the gate.
+    # The bundle is not parsed yet, so the artifact it carries has no name
+    # to record here.
+    if to_scope_t == "project_shared" and apply_:
+        privacy.emit_project_shared_confirmation(
+            surface="cli_context_import",
+            mechanism="flag" if confirm_project_shared else "prompt",
+            action="import",
+        )
 
     # The project_local tier is protected BEFORE anything can land in it — the
     # marker is what keeps a received artifact out of a `git add -A`, so
@@ -5565,6 +5626,19 @@ def settings_copy_cmd(
         ):
             raise click.Abort()
 
+    # ADR-0011 §5 Gate B consent (#2306). Mirrors the gate's predicate
+    # exactly — ``git_tracked_write`` fires for a user/project_local
+    # destination too, because the canonical settings file is git-tracked
+    # in every tier. After the block, not inside it; dry runs and no-ops
+    # returned above, and the host-write prompt below can still abort.
+    if git_tracked_write:
+        privacy.emit_project_shared_confirmation(
+            surface="cli_context_settings_copy",
+            mechanism="flag" if confirm_project_shared else "prompt",
+            action="copy",
+            audit_context={"event": event, "dst_scope": dst_scope},
+        )
+
     # Host-write prompt — the user tier file lives outside any project
     # root (mirrors settings-migrate; satisfied by --yes).
     if host_write and not yes:
@@ -5740,10 +5814,18 @@ async def _memory_migrate_run(
     yes: bool,
     confirm_project_shared: bool,
     *,
+    surface: str = "cli_context_memory_migrate",
+    consent_mechanism: str = "flag",
     stdout_buf: list[str] | None = None,
     stderr_buf: list[str] | None = None,
 ) -> None:
     """Apply or dry-run a memory-migrate plan over the resolved sources.
+
+    ``surface`` / ``consent_mechanism``: this helper carries Gate B for
+    both the CLI verb and the MCP tool that delegates to it, so the
+    ADR-0011 §5 consent line must name the caller rather than the impl.
+    The MCP wrapper passes its own surface and ``param``; an accepted
+    interactive prompt overrides the mechanism to ``prompt``.
 
     ``stdout_buf`` / ``stderr_buf``: when provided, every plan/summary/
     error message that the CLI would emit via ``click.echo`` /
@@ -5979,6 +6061,19 @@ async def _memory_migrate_run(
                 default=False,
             ):
                 raise click.Abort()
+
+        # ADR-0011 §5 Gate B: record the consent that just cleared the gate
+        # (#2306). One line per batch, mirroring the one prompt above —
+        # every file in the plan lands in the same tier. ``to_dir`` is an
+        # absolute path and stays out of the line; the count is the part
+        # that says how much was opted into git.
+        if to_scope == "project_shared":
+            privacy.emit_project_shared_confirmation(
+                surface=surface,
+                mechanism=consent_mechanism if confirm_project_shared else "prompt",
+                action="move",
+                audit_context={"files": len(plan), "from_scope": from_scope},
+            )
 
         to_dir.mkdir(parents=True, exist_ok=True)
         # ADR-0011 PR-D review round 10 (B2): hold an exclusive sidecar

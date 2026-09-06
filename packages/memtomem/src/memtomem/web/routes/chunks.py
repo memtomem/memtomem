@@ -257,6 +257,7 @@ async def delete_chunk(
 
     import asyncio
 
+    from memtomem import privacy
     from memtomem.tools.memory_mutation import locked_source_chunk
 
     # #1587: hold the source file's cross-process sidecar (L2) across the
@@ -330,6 +331,16 @@ async def delete_chunk(
                         "git-tracked memory tier; pass the query parameter to proceed."
                     ),
                 },
+            )
+
+        # ADR-0011 §5 Gate B consent (#2306). The stat policy below and the
+        # mutation can still refuse: this records the consent, not the delete.
+        if inferred_scope == "project_shared":
+            privacy.emit_project_shared_confirmation(
+                surface="web_api_chunk_delete",
+                mechanism="request",
+                action="delete",
+                audit_context={"chunk_id": str(chunk_id)},
             )
 
         # Only a source that is genuinely absent permits an index-only delete.

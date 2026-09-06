@@ -165,11 +165,26 @@ class PinnedContextStore:
         priority: int = 0,
         confirm_project_shared: bool = False,
         force_unsafe: bool = False,
+        consent_surface: str = "pinned_context_set",
+        consent_mechanism: str = "param",
     ) -> PinnedBlock:
         if len(content) > PINNED_BLOCK_MAX_CHARS:
             raise ValueError(f"Pinned Context block exceeds {PINNED_BLOCK_MAX_CHARS} characters")
         if scope == "project_shared" and not confirm_project_shared:
             raise ValueError("project_shared Pinned Context requires explicit confirmation")
+        # ADR-0011 §5 Gate B consent (#2306). This library method is the only
+        # gate on the path — the CLI and MCP surfaces forward the kwarg
+        # without gating — so the consent is recorded here. The caller names
+        # itself, because the point of the line is which surface took the
+        # consent: recording a `mm pinned set --confirm-project-shared` as a
+        # library parameter would lose both the surface and the mechanism.
+        # Gate A below can still refuse: this records the consent, not the write.
+        if scope == "project_shared":
+            privacy.emit_project_shared_confirmation(
+                surface=consent_surface,
+                mechanism=consent_mechanism,
+                audit_context={"block_id": block_id},
+            )
         guard = privacy.enforce_write_guard(
             content,
             surface="pinned_context_set",
@@ -229,9 +244,20 @@ class PinnedContextStore:
         scope: TargetScope = "user",
         agent_id: str | None = None,
         confirm_project_shared: bool = False,
+        consent_surface: str = "pinned_context_delete",
+        consent_mechanism: str = "param",
     ) -> bool:
         if scope == "project_shared" and not confirm_project_shared:
             raise ValueError("project_shared Pinned Context requires explicit confirmation")
+        # ADR-0011 §5 Gate B consent (#2306) — see ``set``. The block may
+        # already be gone (``missing_ok``); the consent still happened.
+        if scope == "project_shared":
+            privacy.emit_project_shared_confirmation(
+                surface=consent_surface,
+                mechanism=consent_mechanism,
+                action="delete",
+                audit_context={"block_id": block_id},
+            )
         path = self._path(scope, block_id, agent_id)
         existed = path.exists()
         path.unlink(missing_ok=True)

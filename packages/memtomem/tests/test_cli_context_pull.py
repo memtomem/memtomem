@@ -10,6 +10,7 @@ refusals.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ from click.testing import CliRunner
 from memtomem.cli.context_cmd import context
 from memtomem.context.scope_resolver import canonical_artifact_dir
 
-from .helpers import seed_multi_runtime
+from .helpers import consent_lines, seed_multi_runtime
 
 _SECRET = "AKIA" + "IOSFODNN7EXAMPLE"
 
@@ -227,6 +228,64 @@ def test_project_shared_prompt_accept_writes(proj: Path) -> None:
     res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared"], input="y\n")
     assert res.exit_code == 0, res.output
     assert "c" in _canonical_agent_text(proj, "a")
+
+
+# ── ADR-0011 §5 consent audit (#2306) ─────────────────────────────────────────
+#
+# This command satisfies Gate B differently from its MCP and web twins:
+# ADR-0030 §11 accepts ``--yes`` or the prompt, and there is no
+# ``--confirm-project-shared`` to pass. The AST guard in
+# ``test_project_shared_confirmation_audit_guard.py`` finds gates by that
+# argument's name, so it is blind to this one — these tests are the only
+# thing holding the line here.
+
+
+def test_prompt_accepted_records_the_consent(proj: Path, caplog) -> None:
+    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")})
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared"], input="y\n")
+    assert res.exit_code == 0, res.output
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "project_shared.confirmed_via=cli_context_pull" in lines[0]
+    assert "mechanism=prompt" in lines[0]
+    assert "action=pull" in lines[0]
+
+
+def test_yes_flag_records_the_consent_and_names_the_flag(proj: Path, caplog) -> None:
+    """``--yes`` is this command's documented Gate B satisfaction, so it is
+    recorded — and the line names which flag carried it, since ``--yes`` is
+    not the ``--confirm-project-shared`` the other surfaces require."""
+    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")})
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
+    assert res.exit_code == 0, res.output
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "mechanism=flag" in lines[0]
+    assert "flag='--yes'" in lines[0]
+
+
+def test_declined_prompt_records_no_consent(proj: Path, caplog) -> None:
+    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")})
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared"], input="n\n")
+    assert res.exit_code != 0
+    assert consent_lines(caplog) == []
+
+
+def test_preview_records_no_consent(proj: Path, caplog) -> None:
+    """A preview writes nothing, so it consents to nothing.
+
+    This is the only tier negative available on this command: ``--scope
+    user`` needs a user-level runtime the project fixture does not seed,
+    and ``project_local`` is rejected outright (ADR-0011 §3).
+    """
+    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")})
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        res = _invoke(["pull", "agents", "a", "--scope", "project_shared"])
+    assert res.exit_code == 0, res.output
+    assert consent_lines(caplog) == []
 
 
 # ── Gate A ────────────────────────────────────────────────────────────────────

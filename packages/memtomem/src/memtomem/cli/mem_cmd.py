@@ -142,6 +142,16 @@ def init_cmd(scope: str, confirm_project_shared: bool) -> None:
         if not click.confirm(prompt, default=False):
             raise click.Abort()
 
+    # ADR-0011 §5 Gate B consent (#2306). After the block, not inside it:
+    # the block runs only when the flag is absent, so an emit within it
+    # would miss every ``--confirm-project-shared`` run.
+    if scope == "project_shared":
+        privacy.emit_project_shared_confirmation(
+            surface="cli_mm_init",
+            mechanism="flag" if confirm_project_shared else "prompt",
+            action="init",
+        )
+
     tier_dir = resolve_memory_scope_dir(cast(TargetScope, scope), root)
 
     # project_local: git protection FIRST, registration last. A

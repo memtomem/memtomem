@@ -363,6 +363,18 @@ async def delete_source(
             scopes=sorted(scopes),
         )
 
+    # ADR-0011 §5 Gate B consent (#2306). Mirrors the gate's predicate: the
+    # probe, not the caller's scope hint, decides whether consent was needed.
+    if "project_shared" in scopes:
+        from memtomem import privacy
+
+        privacy.emit_project_shared_confirmation(
+            surface="web_api_source_delete",
+            mechanism="request",
+            action="delete",
+            audit_context={"scopes": len(scopes)},
+        )
+
     deleted = await storage.delete_by_source(request_path)
     search_pipeline.invalidate_cache()
     return DeleteResponse(deleted=deleted).model_dump()

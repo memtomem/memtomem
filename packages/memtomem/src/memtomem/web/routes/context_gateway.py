@@ -1133,6 +1133,17 @@ async def context_pull_apply(
             confirm="confirm_project_shared",
             host_targets=[],
         )
+    # ADR-0011 §5 Gate B consent (#2306). ``commit_pull`` below can still
+    # fail on a lock or conflict: this records the consent, not the pull.
+    if plan.scope == "project_shared":
+        from memtomem import privacy
+
+        privacy.emit_project_shared_confirmation(
+            surface=_PULL_SURFACE,
+            mechanism="request",
+            action="pull",
+            audit_context={"kind": kind, "name": name, "runtime": plan.selected_runtime},
+        )
     if plan.scope == "user":
         target = canonical_artifact_dir(plan.kind, "user", plan.project_root) / plan.name
         gate = host_write_gate(

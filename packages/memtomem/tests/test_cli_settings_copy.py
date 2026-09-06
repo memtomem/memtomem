@@ -8,11 +8,13 @@ the surface: option gates, Gate B / host-write confirmation flows, the
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
+from helpers import consent_lines
 from memtomem.cli.context_cmd import context
 from memtomem.context.projects import KnownProjectsStore, compute_scope_id
 from memtomem.context.settings import CANONICAL_SETTINGS_FILE
@@ -133,6 +135,62 @@ def test_apply_happy_path_project_local(cli_projects) -> None:
         (cli_projects["b"] / ".claude" / "settings.local.json").read_text(encoding="utf-8")
     )
     assert tier["hooks"]["PostToolUse"][0]["hooks"][0]["statusMessage"].startswith("memtomem · ")
+
+
+def test_consent_line_follows_the_git_tracked_write_not_the_tier(cli_projects, caplog) -> None:
+    """ADR-0011 §5 consent line on settings-copy (#2306).
+
+    The gate here keys on ``git_tracked_write``, not on the destination
+    tier: the canonical ``.memtomem/settings.json`` is git-tracked for
+    *every* tier, which is why a ``project_local`` destination still asks
+    for ``--confirm-project-shared``. The recorded consent must follow the
+    same predicate — narrowing it to ``dst_scope == "project_shared"``
+    would silently stop recording the consents this command actually takes.
+    """
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        result = _invoke(
+            _copy_args(
+                cli_projects["b"], "--to", "project_local", "--apply", "--confirm-project-shared"
+            )
+        )
+    assert result.exit_code == 0, result.output
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "project_shared.confirmed_via=cli_context_settings_copy" in lines[0]
+    assert "mechanism=flag" in lines[0]
+    assert "dst_scope='project_local'" in lines[0]
+
+
+def test_dry_run_records_no_consent(cli_projects, caplog) -> None:
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        result = _invoke(_copy_args(cli_projects["b"], "--to", "project_local"))
+    assert result.exit_code == 0, result.output
+    assert consent_lines(caplog) == []
+
+
+def test_refused_gate_b_records_no_consent(cli_projects, caplog) -> None:
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        result = _invoke(_copy_args(cli_projects["b"], "--to", "project_local", "--apply", "--yes"))
+    assert result.exit_code != 0
+    assert consent_lines(caplog) == []
+
+
+def test_noop_rerun_records_no_consent(cli_projects, caplog) -> None:
+    """A no-op writes nothing and never prompts, so it consents to nothing."""
+    first = _invoke(
+        _copy_args(
+            cli_projects["b"], "--to", "project_local", "--apply", "--confirm-project-shared"
+        )
+    )
+    assert first.exit_code == 0, first.output
+    # The setup run above legitimately recorded its own consent; only the
+    # second run is under test.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        second = _invoke(_copy_args(cli_projects["b"], "--to", "project_local", "--apply"))
+    assert second.exit_code == 0, second.output
+    assert "nothing to do" in second.output
+    assert consent_lines(caplog) == []
 
 
 def test_idempotent_rerun_needs_no_confirmation(cli_projects) -> None:
@@ -297,7 +355,7 @@ def test_gate_a_block_surfaces_and_writes_nothing(cli_projects) -> None:
 def test_json_dry_run_schema(cli_projects) -> None:
     result = _invoke(_copy_args(cli_projects["b"], "--to", "project_local", "--json"))
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["status"] == "ok"
     assert payload["applied"] is False
     assert payload["event"] == "PostToolUse"
@@ -311,7 +369,7 @@ def test_json_dry_run_schema(cli_projects) -> None:
 def test_json_gate_b_needs_confirmation_exit_1(cli_projects) -> None:
     result = _invoke(_copy_args(cli_projects["b"], "--to", "project_local", "--apply", "--json"))
     assert result.exit_code == 1
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["status"] == "needs_confirmation"
     assert "confirm-project-shared" in payload["hint"]
 
@@ -328,7 +386,7 @@ def test_json_user_tier_host_writes_listed(cli_projects) -> None:
         )
     )
     assert result.exit_code == 1
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["status"] == "needs_confirmation"
     assert payload["host_writes"] == [str(cli_projects["home"] / ".claude" / "settings.json")]
 
@@ -345,7 +403,7 @@ def test_json_apply_reports_written_legs(cli_projects) -> None:
         )
     )
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["applied"] is True
     assert payload["canonical"]["written"] is True
     assert payload["target"]["written"] is True

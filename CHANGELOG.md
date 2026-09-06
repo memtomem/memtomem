@@ -92,6 +92,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   copied top-level link now keeps the file-or-directory kind Windows tracks
   separately. A Windows directory junction is refused outright rather than
   walked into, which would have copied out-of-tree bytes into the store.
+- **A confirmed write into the Git-tracked tier now leaves the audit record it
+  was promised.** Most ways of writing to the shared tier take two gates: the
+  privacy scanner refuses a bypass at the boundary, and the surface requires an
+  explicit confirmation. (Editing a chunk that already lives there is the
+  exception — it has the scanner but no confirmation.) The refusal has been
+  recorded since that design shipped. The confirmation was specified to leave a
+  matching
+  `project_shared.confirmed_via=<surface>` line and left none anywhere, so a
+  team reviewing how a note, an agent, a hook, or a bundle came to be in Git
+  had the blocked attempts to read and no trace of the writes that succeeded.
+  Every surface that asks for the confirmation — the CLI flag and its
+  interactive prompt, the MCP tools, the web transfer, pull, settings-copy and
+  add requests, and the LangGraph store — now records it as one warning naming
+  the surface, how the consent arrived, and what it covered. It records the
+  consent rather than the finished write, since a later refusal or failure is
+  itself already visible, and it is a log line rather than a counter: the
+  redaction statistics count scans, and a consent is not one. A dry run writes
+  nothing and so records nothing. (#2306)
 
 - **An artifact written with Windows line endings can be exported again.**
   `mm context export` refused any CRLF-authored skill, command, or agent whose

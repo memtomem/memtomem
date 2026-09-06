@@ -317,6 +317,18 @@ async def _add(
                     raise click.ClickException("cancelled at project_shared confirmation prompt")
                 raise click.Abort()
 
+        # ADR-0011 §5 Gate B consent (#2306). Placed after the whole gate,
+        # not inside it: the block above runs only when the flag is absent,
+        # so an emit within it would miss every ``--confirm-project-shared``
+        # run. Reached only on the fall-through — ``--yes`` alone raised and
+        # a declined prompt aborted.
+        if scope == "project_shared":
+            privacy.emit_project_shared_confirmation(
+                surface="cli_mm_add",
+                mechanism="flag" if confirm_project_shared else "prompt",
+                audit_context={"file": target.name, "namespace": namespace},
+            )
+
         from memtomem.context._atomic import (
             _CRUD_SIDECAR_LOCK_BUDGET_S,
             memory_lock_path,

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 
+from helpers import consent_lines
 from memtomem.config import Mem2MemConfig
 from memtomem.pinned import ContextAssembler, ContextBundle, PinnedContextStore
 from memtomem.search.pipeline import RetrievalStats
@@ -441,3 +444,180 @@ def test_empty_memory_dirs_project_tier_still_works(empty_dirs_config, tmp_path)
 async def test_compose_with_empty_memory_dirs_returns_bundle_without_pinned(empty_dirs_config):
     bundle = await ContextAssembler(PinnedContextStore(empty_dirs_config)).compose(max_chars=100)
     assert bundle.pinned == ()
+
+
+# ── ADR-0011 §5 consent audit (#2306) ────────────────────────────────────────
+#
+# The store carries Gate B for every caller, so it cannot name the surface
+# itself. Recording a ``mm pinned set --confirm-project-shared`` as a generic
+# library parameter would lose both the surface and the mechanism, which is
+# the whole content of ``confirmed_via``.
+
+
+@pytest.mark.asyncio
+async def test_mcp_pinned_set_consent_names_the_tool(
+    bm25_only_components, tmp_path, monkeypatch, caplog
+):
+    """Through the real MCP entry point, not by handing the store a surface.
+
+    The store defaults to its own library name, so passing the surface in
+    from the test would leave the forwarding in ``server/tools/pinned.py``
+    unexercised: delete it and the assertion would still hold.
+    """
+    from helpers import StubCtx
+    from memtomem.server.context import AppContext
+    from memtomem.server.tools import pinned as pinned_tools
+
+    comp, _mem_dir = bm25_only_components
+    project_root = tmp_path / "proj_pinned_mcp"
+    proj_mem = project_root / ".memtomem" / "memories"
+    proj_mem.mkdir(parents=True)
+    (project_root / ".git").mkdir()
+    comp.config.indexing.project_memory_dirs = [proj_mem]
+    monkeypatch.chdir(project_root)
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await pinned_tools.mem_pinned_set(
+            "rules",
+            "team rule",
+            scope="project_shared",
+            confirm_project_shared=True,
+            ctx=ctx,
+        )
+    assert not out.startswith("Error:"), out
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "project_shared.confirmed_via=mem_pinned_set" in lines[0]
+    assert "mechanism=param" in lines[0]
+    assert "pinned_context_set" not in lines[0]
+
+
+@pytest.mark.parametrize(
+    ("helper", "kwargs", "expected_surface"),
+    [
+        (
+            "_set_block",
+            {
+                "block_id": "rules",
+                "content": "team rule",
+                "description": "",
+                "priority": 0,
+                "scope": "project_shared",
+                "agent_id": None,
+                "confirm_project_shared": True,
+                "force_unsafe": False,
+            },
+            "cli_pinned_set",
+        ),
+        (
+            "_delete_block",
+            {
+                "block_id": "rules",
+                "scope": "project_shared",
+                "agent_id": None,
+                "confirm_project_shared": True,
+            },
+            "cli_pinned_delete",
+        ),
+    ],
+    ids=["set", "delete"],
+)
+@pytest.mark.asyncio
+async def test_cli_pinned_forwards_its_own_surface(monkeypatch, helper, kwargs, expected_surface):
+    """The CLI must name itself when it calls the shared store.
+
+    Asserted at the call boundary rather than by running the command: the
+    CLI store path needs a registered project in the real config, and what
+    is under test is the forwarding, not the store (whose behaviour the
+    library tests above cover). Without this, deleting the two kwargs in
+    ``cli/pinned_cmd.py`` would file every CLI consent under the library's
+    default surface and no test would notice.
+    """
+    from memtomem.cli import pinned_cmd
+
+    captured: dict[str, object] = {}
+
+    class _Store:
+        def set(self, *_a, **kw):
+            captured.update(kw)
+            return SimpleNamespace(source_path="/tmp/rules.md", block_id="rules")
+
+        def delete(self, *_a, **kw):
+            captured.update(kw)
+            return True
+
+    @asynccontextmanager
+    async def _fake_ctx():
+        yield (None, _Store())
+
+    monkeypatch.setattr(pinned_cmd, "_store_context", _fake_ctx)
+    await getattr(pinned_cmd, helper)(**kwargs)
+
+    assert captured.get("consent_surface") == expected_surface
+    assert captured.get("consent_mechanism") == "flag"
+
+
+def test_consent_line_defaults_to_the_library_surface(pinned_store, caplog):
+    """A direct library caller has no public surface to name."""
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        pinned_store.set("rules", "team rule", scope="project_shared", confirm_project_shared=True)
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "project_shared.confirmed_via=pinned_context_set" in lines[0]
+    assert "mechanism=param" in lines[0]
+
+
+def test_user_tier_pinned_write_records_no_consent(pinned_store, caplog):
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        block = pinned_store.set("style", "user style", scope="user")
+    assert block.scope == "user"
+    assert consent_lines(caplog) == []
+
+
+def test_refused_pinned_write_records_no_consent(pinned_store, caplog):
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        with pytest.raises(ValueError, match="explicit confirmation"):
+            pinned_store.set("rules", "team rule", scope="project_shared")
+    assert consent_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_pinned_delete_consent_names_the_tool(
+    bm25_only_components, tmp_path, monkeypatch, caplog
+):
+    from helpers import StubCtx
+    from memtomem.server.context import AppContext
+    from memtomem.server.tools import pinned as pinned_tools
+
+    comp, _mem_dir = bm25_only_components
+    project_root = tmp_path / "proj_pinned_del"
+    proj_mem = project_root / ".memtomem" / "memories"
+    proj_mem.mkdir(parents=True)
+    (project_root / ".git").mkdir()
+    comp.config.indexing.project_memory_dirs = [proj_mem]
+    monkeypatch.chdir(project_root)
+    ctx = StubCtx(AppContext.from_components(comp))
+    await pinned_tools.mem_pinned_set(
+        "rules", "team rule", scope="project_shared", confirm_project_shared=True, ctx=ctx
+    )
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        out = await pinned_tools.mem_pinned_delete(
+            "rules", scope="project_shared", confirm_project_shared=True, ctx=ctx
+        )
+    assert not out.startswith("Error:"), out
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "project_shared.confirmed_via=mem_pinned_delete" in lines[0]
+    assert "action=delete" in lines[0]
+
+
+def test_direct_library_call_keeps_the_library_surface(pinned_store, caplog):
+    """A caller with no public surface of its own gets the store's default."""
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        pinned_store.delete("absent", scope="project_shared", confirm_project_shared=True)
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "project_shared.confirmed_via=pinned_context_delete" in lines[0]
