@@ -1,11 +1,21 @@
-/* #2317: saving a chunk that lives in the project_shared tier rides the same
- * disclose-then-confirm round-trip the source delete and context gateway use.
+/* #2317 / #2332: saving a chunk is a conversation, not a request.
  *
- * Server contract: an unconfirmed PATCH answers HTTP 200
+ * Server contract. ``PATCH /api/chunks/{id}`` carries two ADR-0011 §5 gates.
+ * Gate B answers an unconfirmed ``project_shared`` write at HTTP 200 with
  * ``{status: "needs_confirmation", confirm: "confirm_project_shared", reason}``
  * and writes nothing; the confirmed re-send carries
- * ``confirm_project_shared: true`` in the JSON body. Gate B is checked before
- * the redaction scan, so a confirmed re-send can still trip Gate A.
+ * ``confirm_project_shared: true``. Gate A runs after it and refuses a
+ * redaction hit with a 403 that NAMES THE TIER it judged under — so a
+ * confirmed re-send can still trip the scanner, and the client can tell
+ * "the bypass is available here" from "it is not".
+ *
+ * Neither answer is stable for the length of the interaction: an incremental
+ * re-index re-derives scope from the path and chunk ids survive it, while
+ * every dialog holds a window open for as long as the user takes to answer.
+ * ``saveChunkBody`` therefore loops, and the loop holds one invariant:
+ *
+ *     each attempt carries exactly the flag the server's LAST answer asked
+ *     for, applied to the body disclosed before the first request.
  *
  * These pin the JS half:
  *
@@ -14,25 +24,29 @@
  *     SERVER named — the client matches that name against the one
  *     confirmation it can answer and refuses anything else (an allow-list
  *     check, not dynamic following);
- *   - the re-send carries the SAME body — the editor can change under an
+ *   - every attempt carries the SAME body — the editor can change under an
  *     open dialog, and saving the newer bytes would write content the user
  *     was never warned about;
- *   - declining sends nothing further and reports no success;
- *   - a confirmed re-send that trips the scanner is converted to a
- *     non-overridable shared-tier refusal, with NO bypass dialog: Gate A
- *     refuses force_unsafe on that tier unconditionally.
+ *   - declining at any dialog sends nothing further and reports no success;
+ *   - a refusal on the shared tier is converted to a non-overridable
+ *     shared-tier refusal, with NO bypass dialog: Gate A refuses
+ *     force_unsafe there unconditionally.
  *
- * And the two cross-request races, which exist because a re-index can
- * re-scope a chunk while a dialog is open (the window is however long the
- * user takes to answer):
+ * And the three cross-request races, which exist because a re-index can
+ * re-scope a chunk while a dialog is open:
  *
  *   - private → shared between the redaction retry and its response: the
  *     retry gets the envelope and writes nothing, so no success toast may
- *     be shown;
+ *     be shown (#2328);
  *   - shared → private between the envelope and the confirmed request: the
- *     bypass IS available now, so the refusal must not claim otherwise.
- *     Both branch on the scope the server reports with the refusal, never
- *     on the tier an earlier response implied.
+ *     bypass IS available now, so it must be offered IN THAT INTERACTION
+ *     rather than left to a second Save (#2332);
+ *   - either of those again on the next hop — answered up to a bounded
+ *     number of attempts, then stopped with an honest refusal.
+ *
+ * Which tier is bypassable is an allow-list, never ``!== 'project_shared'``:
+ * a refusal reporting no scope, or one naming a tier this build does not
+ * know, is *unknown*, and unknown is offered nothing.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -53,6 +67,9 @@ const SAVED = { id: CHUNK_ID, content: 'the reviewed text' };
 
 // The route reports the tier it decided the refusal under, so the client
 // branches on what the server just saw rather than on the earlier envelope.
+// ``scope: undefined`` models a surface that reports none at all — not this
+// route, whose field is pinned server-side for every tier in
+// ``test_web_routes.py``, but the shape the client must not guess about.
 const redaction403 = (scope) => ({
   ok: false,
   status: 403,
@@ -215,7 +232,11 @@ describe('chunk edit — project_shared confirm round-trip (#2317)', () => {
      * believing it saved.
      */
     const { window, toasts, patches } = await bootEdit({
-      responses: [redaction403(undefined), SHARED_ENVELOPE],
+      // The first refusal names ``user`` because that is what this route
+      // always sends; #2332 made the tier decide whether the bypass is
+      // offered at every hop, including the first, so an unscoped refusal
+      // here would be declined outright — which the last two cases pin.
+      responses: [redaction403('user'), SHARED_ENVELOPE],
       // 1st: bypass the scanner. 2nd: decline the shared-tier disclosure.
       confirmAnswers: [true, false],
     });
@@ -229,36 +250,279 @@ describe('chunk edit — project_shared confirm round-trip (#2317)', () => {
     expect(toasts).toHaveLength(0);
   });
 
-  it('does not claim the bypass is unavailable when a re-scope made it available', async () => {
-    /* shared → private, in the window the shared-tier modal holds open.
-     * The confirmed request is refused by the scanner, but on the tier it
-     * now lives in force_unsafe IS permitted. Converting that to a
-     * shared-tier refusal would deny a real option on a false claim, so
-     * the generic redaction error must survive instead.
+  it('apiWithRedactionRetry still refuses to call an envelope a bypassed write', async () => {
+    /* The property above belongs to the generic wrapper too, and since
+     * #2332 ``saveChunkBody`` no longer reaches it — so it needs a pin that
+     * drives it directly, or the guard would be provable only through a
+     * caller that stopped existing.
      */
-    const { window } = await bootEdit({
+    const { window, toasts, patches } = await bootEdit({
+      // Scoped, because the URL below is this route's and this route always
+      // reports one. The wrapper never reads the field — that is exactly
+      // what is being pinned — so an unscoped fixture would only add a wire
+      // shape the named route cannot produce.
+      responses: [redaction403('user'), SHARED_ENVELOPE],
+      confirmAnswers: [true],
+    });
+
+    const resp = await window.apiWithRedactionRetry(
+      'PATCH', `/api/chunks/${CHUNK_ID}`, BODY,
+    );
+
+    expect(patches).toHaveLength(2);
+    expect(patches[1].force_unsafe).toBe(true);
+    // The envelope is handed back for the caller to answer, unannounced.
+    expect(resp).toEqual(SHARED_ENVELOPE);
+    expect(toasts).toHaveLength(0);
+  });
+
+  it('offers the bypass a shared → private re-scope has made available (#2332)', async () => {
+    /* shared → private, in the window the shared-tier modal holds open.
+     * The confirmed request is refused by the scanner, but on the tier the
+     * chunk now lives in force_unsafe IS permitted. Before #2332 the error
+     * propagated to a call site that only renders a failed-save toast, so
+     * the offer was never made in that interaction — a second Save reached
+     * it, which is why this was a missing offer and not a lost capability.
+     */
+    const { window, confirms, toasts, patches } = await bootEdit({
+      responses: [SHARED_ENVELOPE, redaction403('user'), SAVED],
+      // 1st: the shared-tier disclosure. 2nd: the redaction bypass.
+      confirmAnswers: [true, true],
+    });
+
+    // Caught into a value, not awaited bare: a regression here is a throw,
+    // and an escaping rejection is formatted across the JSDOM boundary,
+    // where a source-map read aborts the whole run and leaves this case
+    // reported as pending rather than failed.
+    const resp = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+
+    expect(resp).toEqual(SAVED);
+    expect(patches).toHaveLength(3);
+    expect(confirms).toHaveLength(2);
+    // Each attempt carries exactly the flag the LAST answer asked for.
+    expect(patches[0]).toEqual(BODY);
+    expect(patches[1]).toEqual({ ...BODY, confirm_project_shared: true });
+    // The third must not re-send the consent: one human answer, one Gate B
+    // consent line. Re-sending it would record a second if the chunk had
+    // flipped back to shared before this attempt landed.
+    expect(patches[2]).toEqual({ ...BODY, force_unsafe: true });
+    // The write that landed used the bypass, so it is announced.
+    expect(toasts).toEqual([
+      { msg: window.I18N.t('toast.redaction_bypassed', { hits: 2 }), sev: 'info' },
+    ]);
+  });
+
+  it('offers it on project_local too — the bypassable tiers are a list, not "not shared"', async () => {
+    /* A ``!== "project_shared"`` test passes the case above on its own.
+     * Only a second named tier forces the check to be a real membership
+     * test, and only that keeps the unknown cases below out of it.
+     */
+    const { window, confirms, patches } = await bootEdit({
+      responses: [SHARED_ENVELOPE, redaction403('project_local'), SAVED],
+      confirmAnswers: [true, true],
+    });
+
+    // Caught into a value, not awaited bare: a regression here is a throw,
+    // and an escaping rejection is formatted across the JSDOM boundary,
+    // where a source-map read aborts the whole run and leaves this case
+    // reported as pending rather than failed.
+    const resp = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+
+    expect(resp).toEqual(SAVED);
+    expect(patches).toHaveLength(3);
+    expect(patches[2].force_unsafe).toBe(true);
+    expect(confirms).toHaveLength(2);
+  });
+
+  it('sends nothing further when the bypass it offered is declined', async () => {
+    const { window, confirms, toasts, patches } = await bootEdit({
       responses: [SHARED_ENVELOPE, redaction403('user')],
+      confirmAnswers: [true, false],
+    });
+
+    const resp = await window.saveChunkBody(CHUNK_ID, BODY);
+
+    expect(resp).toBeNull();
+    expect(patches).toHaveLength(2);
+    expect(confirms).toHaveLength(2);
+    expect(toasts).toHaveLength(0);
+  });
+
+  it('drops the bypass when the next answer is an envelope, and says so', async () => {
+    /* private → shared → (still private enough to write). The bypass was
+     * granted, then the envelope came back and the confirmed attempt cannot
+     * carry force_unsafe — Gate A refuses that combination outright. So the
+     * write that landed did NOT bypass anything, and announcing a bypass
+     * would describe a request that was never sent.
+     */
+    const { window, toasts, patches } = await bootEdit({
+      responses: [redaction403('user'), SHARED_ENVELOPE, SAVED],
+      confirmAnswers: [true, true],
+    });
+
+    // Caught into a value, not awaited bare: a regression here is a throw,
+    // and an escaping rejection is formatted across the JSDOM boundary,
+    // where a source-map read aborts the whole run and leaves this case
+    // reported as pending rather than failed.
+    const resp = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+
+    expect(resp).toEqual(SAVED);
+    expect(patches).toHaveLength(3);
+    expect(patches[1]).toEqual({ ...BODY, force_unsafe: true });
+    expect(patches[2]).toEqual({ ...BODY, confirm_project_shared: true });
+    expect(toasts).toHaveLength(0);
+  });
+
+  /* Every hop can re-scope, so the exchange is bounded at four attempts —
+   * the longest flow that ends in a write, plus one more flip. Both arms end
+   * on the fourth answer, one on each prompt site, because the rule is
+   * "stop before the question", not "stop after the answer": a dialog whose
+   * answer can only be discarded asks for an authorisation this helper
+   * cannot act on. Hence three dialogs for four requests, asserted on both
+   * arms — a cap that merely bounded the requests would leave the fourth
+   * dialog free to appear.
+   */
+  const CAP_ARMS = [
+    ['a redaction refusal', [
+      SHARED_ENVELOPE, redaction403('user'), SHARED_ENVELOPE, redaction403('user'), SAVED,
+    ]],
+    ['an envelope', [
+      redaction403('user'), SHARED_ENVELOPE, redaction403('user'), SHARED_ENVELOPE, SAVED,
+    ]],
+  ];
+
+  it.each(CAP_ARMS)(
+    'stops instead of looping when the tier keeps changing, last answer being %s',
+    async (_label, responses) => {
+      const { window, confirms, toasts, patches } = await bootEdit({
+        // One more answer than can be asked for, so an extra prompt would be
+        // answerable and therefore visible in the count below.
+        responses,
+        confirmAnswers: [true, true, true, true, true],
+      });
+
+      const err = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+
+      expect(patches).toHaveLength(4);
+      expect(confirms).toHaveLength(3);
+      expect(err.message).toBe(window.I18N.t('toast.chunk_save_tier_kept_changing'));
+      // A missing locale entry makes ``t()`` echo the key; the message the
+      // caller toasts has to be prose.
+      expect(err.message).not.toBe('toast.chunk_save_tier_kept_changing');
+      expect(toasts).toHaveLength(0);
+    },
+  );
+
+  it('applies the same rule on the first hop, before any tier is known', async () => {
+    /* The rule is uniform across hops, not stricter after the first. Before
+     * #2332 the opening request went through ``apiWithRedactionRetry``,
+     * which offers the bypass on any refusal, so an unscoped one was offered
+     * it here and refused it two hops later. This route always reports a
+     * scope (pinned server-side for all three tiers), so the case is
+     * unreachable in production — it is pinned because the comment above
+     * claims it, not because a user can reach it.
+     */
+    const { window, confirms, patches } = await bootEdit({
+      responses: [redaction403(undefined)],
       confirmAnswers: [true],
     });
 
     const err = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
 
     expect(err.name).toBe('RedactionBlockedError');
-    expect(err.scope).toBe('user');
+    expect(patches).toHaveLength(1);
+    expect(confirms).toHaveLength(0);
+  });
+
+  /* The cap bounds the exchange; it does not shorten it. Every terminal
+   * outcome is decided from the fourth response *before* the guard is
+   * consulted, so a save that lands on the fourth request still lands and a
+   * refusal on it is still reported in its own words. Without these the
+   * guard could be hoisted ahead of the classification and quietly become a
+   * cap of three — measured: that mutation leaves the two arms above green.
+   */
+  const UPTO_THREE_PROMPTS = [SHARED_ENVELOPE, redaction403('user'), SHARED_ENVELOPE];
+  const UNKNOWN_CONFIRM = {
+    status: 'needs_confirmation',
+    confirm: 'confirm_something_this_build_cannot_answer',
+    reason: 'a consent a later server knows about and this client does not',
+  };
+
+  const FOURTH_RESPONSE_OUTCOMES = [
+    ['a write, which lands', SAVED, (out) => {
+      expect(out).toEqual(SAVED);
+    }],
+    ['a shared-tier refusal, reported as one', REDACTION_403, (out) => {
+      expect(out.name).toBe('ProjectTierBlockedError');
+    }],
+    ['a refusal on a tier we do not know, rethrown raw', redaction403('project_archived'),
+      (out) => {
+        expect(out.name).toBe('RedactionBlockedError');
+        expect(out.scope).toBe('project_archived');
+      }],
+    ['an envelope we cannot answer, failing loudly', UNKNOWN_CONFIRM, (out) => {
+      expect(out.name).toBe('Error');
+      expect(out.message).toBe(`unsupported confirmation: ${UNKNOWN_CONFIRM.confirm}`);
+    }],
+  ];
+
+  it.each(FOURTH_RESPONSE_OUTCOMES)(
+    'lets the fourth response decide the outcome — %s',
+    async (_label, fourth, check) => {
+      const { window, confirms, toasts, patches } = await bootEdit({
+        responses: [...UPTO_THREE_PROMPTS, fourth],
+        confirmAnswers: [true, true, true, true],
+      });
+
+      const out = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+
+      // Three prompts got us to the fourth request, so the cap was in reach
+      // — and did not take it.
+      expect(patches).toHaveLength(4);
+      expect(confirms).toHaveLength(3);
+      expect(out && out.message).not.toBe(
+        window.I18N.t('toast.chunk_save_tier_kept_changing'),
+      );
+      check(out);
+      // Nothing here used a bypass on the write that landed.
+      expect(toasts).toHaveLength(0);
+    },
+  );
+
+  it('does not offer a bypass on a tier it does not recognise', async () => {
+    /* The companion to the unreported case below: a scope this build has
+     * no rule for is unknown, exactly as an absent one is. Treating it as
+     * "not shared, therefore private" would offer a bypass on a tier that
+     * may refuse it.
+     */
+    const { window, confirms } = await bootEdit({
+      responses: [SHARED_ENVELOPE, redaction403('project_archived')],
+      confirmAnswers: [true, true],
+    });
+
+    const err = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+
+    expect(err.name).toBe('RedactionBlockedError');
+    expect(err.scope).toBe('project_archived');
+    // Only the shared-tier disclosure; a second answer was staged so a
+    // stray bypass prompt would be answerable and therefore visible.
+    expect(confirms).toHaveLength(1);
   });
 
   it('does not assert a tier the server declined to report', async () => {
     /* A surface that sends no scope leaves the tier unknown. Unknown is
-     * not "shared": asserting it would put the false claim back for every
-     * caller that has not been taught to report one.
+     * neither "shared" — asserting that would put the false claim back —
+     * nor "private": offering a bypass there would be the mirror error.
      */
-    const { window } = await bootEdit({
+    const { window, confirms } = await bootEdit({
       responses: [SHARED_ENVELOPE, redaction403(undefined)],
-      confirmAnswers: [true],
+      confirmAnswers: [true, true],
     });
 
     const err = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
 
     expect(err.name).toBe('RedactionBlockedError');
+    expect(err.scope).toBeUndefined();
+    expect(confirms).toHaveLength(1);
   });
 });
