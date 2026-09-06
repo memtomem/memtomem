@@ -507,6 +507,21 @@ mem_edit(chunk_id="abc123-...", new_content="Updated content")
 
 Modifies the source `.md` file and re-indexes it.
 
+Editing a chunk that lives in the `project_shared` tier takes an explicit
+confirmation, because the file it rewrites is one the repository tracks:
+
+```
+mem_edit(
+    chunk_id="abc123-...",
+    new_content="Updated content",
+    confirm_project_shared=True,
+)
+```
+
+Without it the call is refused and the file is left alone. The scope is read
+from the chunk itself, not from an argument — you do not say which tier it is
+in, and passing the flag for a `user` or `project_local` chunk changes nothing.
+
 > **Note**: After editing, the chunk gets a new UUID (the old one is replaced during re-indexing). If you need to reference it again, search for the updated content.
 
 ### `mem_delete` — Delete
@@ -528,6 +543,11 @@ whether the deletion survives:
 - `chunk_id=` is the outlier: it removes the chunk's line range from the
   markdown file itself and re-indexes. The content is gone from disk, so
   re-indexing has nothing to restore.
+
+All three forms take `confirm_project_shared=True` when the deletion would
+touch `project_shared` chunks — the same gate `mem_edit` takes above. The
+`source_file=` and `namespace=` forms are all-or-nothing: one `project_shared`
+chunk in the set requires the confirmation for the whole call.
 
 > **Note**: to keep a file out of the index for good, exclude it and then
 > reclaim the rows it already has — add a matching glob to

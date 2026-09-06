@@ -950,6 +950,7 @@ async def mem_edit(
     chunk_id: str,
     new_content: str,
     force_unsafe: bool = False,
+    confirm_project_shared: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Edit an existing memory entry in its source markdown file.
@@ -965,12 +966,13 @@ async def mem_edit(
     ``force_unsafe=True``; bypass events are audit-logged. See
     ``mem_add_redaction_stats`` for the counter snapshot.
 
-    ADR-0011: the gate's scope is **inferred from the loaded chunk**,
-    not from a caller parameter. Editing a chunk whose persisted
-    ``scope == 'project_shared'`` enforces the same hard-refusal of
-    ``force_unsafe=True`` that applies to ``mem_add(scope='project_shared',
-    ...)`` — a client cannot bypass Gate A by omitting an explicit
-    scope kwarg on the edit path.
+    ADR-0011: both gates read the scope **inferred from the loaded
+    chunk**, not from a caller parameter. Editing a chunk whose
+    persisted ``scope == 'project_shared'`` requires
+    ``confirm_project_shared=True`` (Gate B) and enforces the same
+    hard-refusal of ``force_unsafe=True`` (Gate A) that applies to
+    ``mem_add(scope='project_shared', ...)`` — a client cannot bypass
+    either gate by omitting an explicit scope kwarg on the edit path.
 
     Args:
         chunk_id: The UUID of the chunk to edit (shown in mem_search results)
@@ -983,6 +985,10 @@ async def mem_edit(
             when the edited chunk's own scope is ``project_shared``: that is
             hard-refused, because git history cannot be retracted from
             clones.
+        confirm_project_shared: Required when the edited chunk lives in
+            ``scope='project_shared'``. Replacing its body is a
+            git-tracked write, so it takes the same explicit consent
+            ``mem_delete`` takes to remove the very same chunk.
     """
     if not new_content.strip():
         return "Error: new_content cannot be empty."
@@ -1010,13 +1016,45 @@ async def mem_edit(
         meta = chunk.metadata
 
         # ADR-0011: infer scope from the loaded chunk's persisted metadata.
-        # The privacy gate sees the same scope the chunk lives under, so
-        # editing a project_shared chunk gets the project_shared refusal
-        # rule even when the caller did not pass an explicit scope kwarg.
-        # Evaluated on the fresh chunk: a migrate could have re-scoped it
-        # while we waited, and validating a stale snapshot would reopen the
-        # Gate-A bypass ADR-0011 closed.
+        # Both gates below see the same scope the chunk lives under, so
+        # editing a project_shared chunk gets the project_shared rules even
+        # when the caller did not pass an explicit scope kwarg. Evaluated on
+        # the fresh chunk: a migrate could have re-scoped it while we waited,
+        # and validating a stale snapshot would reopen the Gate-A bypass
+        # ADR-0011 closed — and would now let a re-scoped chunk past Gate B
+        # on a consent the caller never gave for the tier it ended up in.
         inferred_scope = meta.scope or "user"
+
+        # ADR-0011 §5 Gate B (#2317). Editing a chunk does not move it
+        # between tiers, so this consent is not about the destination —
+        # it is about the write: replacing the body of a git-tracked note
+        # puts new bytes on a path the project commits and shares, and
+        # until now
+        # it was the one such write nobody was asked to confirm while
+        # ``mem_delete`` asked before removing the same chunk. Ordered
+        # ahead of Gate A to match ``_mem_add_core``, and evaluated on the
+        # fresh chunk for the same reason the scan below is.
+        if inferred_scope == "project_shared" and not confirm_project_shared:
+            logger.info(
+                "mem_edit rejected project_shared chunk without confirmation",
+                extra={"chunk_id": chunk_id, "scope": inferred_scope},
+            )
+            return (
+                "Error: editing scope='project_shared' chunks requires "
+                "confirm_project_shared=True. The chunk lives in the git-tracked "
+                "memory tier; the replacement is what the project commits "
+                "and everyone who pulls it reads."
+            )
+        # Mirrors the gate's predicate: an ordinary user-tier edit asked
+        # for no consent and must not be recorded as having given one.
+        if inferred_scope == "project_shared":
+            privacy.emit_project_shared_confirmation(
+                surface="mem_edit",
+                mechanism="param",
+                action="edit",
+                audit_context={"chunk_id": chunk_id},
+            )
+
         guard = privacy.enforce_write_guard(
             new_content,
             surface="mem_edit",

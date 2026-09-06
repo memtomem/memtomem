@@ -539,6 +539,54 @@ async function apiWithRedactionRetry(method, path, body, opts = {}) {
   }
 }
 
+// ADR-0011 §5 Gate B on a chunk edit (#2317). Saving a chunk that lives in
+// the project_shared tier comes back as the shared ``needs_confirmation``
+// envelope at HTTP 200 with no write performed; disclose what the second leg
+// would do, then re-issue carrying the flag the server named.
+//
+// Two properties this helper exists to hold, both of which a per-call-site
+// copy got wrong on the first attempt:
+//
+//   * The retry sends the *same body*. The editor's textarea can change
+//     while a dialog is open, and re-reading it on the retry would save
+//     bytes the user never saw the warning for.
+//   * Gate B is checked before the redaction scan server-side, so a
+//     confirmed retry can still hit Gate A. Routing the retry back through
+//     ``apiWithRedactionRetry`` keeps that second dialog working instead of
+//     surfacing a raw 403 — and Gate A's own project_shared hard-refusal,
+//     which no confirmation can satisfy, still arrives as a thrown
+//     ProjectTierBlockedError for the caller's catch-arm to report.
+//
+// Returns ``null`` when the user declines, matching the cancel contract
+// ``apiWithRedactionRetry`` already has, so call sites keep one check.
+async function saveChunkBody(chunkId, body, opts = {}) {
+  const path = `/api/chunks/${chunkId}`;
+  // Snapshot BEFORE the first request, not between the dialog and the
+  // retry. Copying at the retry copies whatever the caller's object holds
+  // by then, and an editor that writes straight into it — or a caller that
+  // reuses one object across saves — would send bytes no dialog described.
+  // The first version of this helper did exactly that and its own test
+  // caught it.
+  const disclosed = Object.assign({}, body || {});
+  const resp = await apiWithRedactionRetry('PATCH', path, disclosed, opts);
+  if (resp === null) return null;
+  if (!resp || resp.status !== 'needs_confirmation') return resp;
+  if (resp.confirm !== 'confirm_project_shared') {
+    // An envelope this build does not know how to answer. Failing loudly
+    // beats silently returning it as if the save had happened.
+    throw new Error(`unsupported confirmation: ${resp.confirm}`);
+  }
+  const agreed = await showConfirm({
+    title: t('confirm.chunk_edit_shared_title'),
+    message: t('confirm.chunk_edit_shared_msg'),
+    confirmText: t('common.save'),
+    danger: true,
+  });
+  if (!agreed) return null;
+  const confirmedBody = Object.assign({}, disclosed, { confirm_project_shared: true });
+  return await apiWithRedactionRetry('PATCH', path, confirmedBody, opts);
+}
+
 // Multipart upload variant of ``apiWithRedactionRetry``. ``/api/upload``
 // returns HTTP 200 with per-file ``error="redaction_blocked (hits=N)"``
 // strings (system.py:1161) instead of a structured 403, so the dialog is
@@ -3653,11 +3701,7 @@ qs('d-save-btn').addEventListener('click', async () => {
   const btn = qs('d-save-btn');
   btnLoading(btn, true);
   try {
-    const resp = await apiWithRedactionRetry(
-      'PATCH',
-      `/api/chunks/${STATE.selectedChunkId}`,
-      { new_content: newContent },
-    );
+    const resp = await saveChunkBody(STATE.selectedChunkId, { new_content: newContent });
     if (resp === null) return;
     // History push must follow a confirmed write — pushing before the
     // request would pollute the undo stack with a no-op entry when the
@@ -5950,11 +5994,7 @@ function _startChunkEdit(card, chunk, sourcePath) {
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
     try {
-      const resp = await apiWithRedactionRetry(
-        'PATCH',
-        `/api/chunks/${chunk.id}`,
-        { new_content: newContent },
-      );
+      const resp = await saveChunkBody(chunk.id, { new_content: newContent });
       if (resp === null) {
         saveBtn.disabled = false;
         saveBtn.textContent = 'Save';

@@ -22,6 +22,7 @@ from memtomem.web.deps import (
     get_storage,
     require_indexed_source,
 )
+from memtomem.web.routes._confirm import needs_confirmation_envelope
 from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
 from memtomem.web.schemas.core import (
     ChunkOut,
@@ -30,7 +31,11 @@ from memtomem.web.schemas.core import (
     chunk_to_out,
 )
 from memtomem.web.schemas.search import SimilarChunksResponse
-from memtomem.web.schemas.sources import ChunksListResponse, EditRequest
+from memtomem.web.schemas.sources import (
+    ChunkEditNeedsConfirmation,
+    ChunksListResponse,
+    EditRequest,
+)
 from memtomem.web.schemas.tags import TagsUpdateRequest, TagsUpdateResponse
 
 logger = logging.getLogger(__name__)
@@ -92,7 +97,7 @@ async def get_chunk(
     return chunk_to_out(chunks[0])
 
 
-@router.patch("/{chunk_id}", response_model=ChunkOut)
+@router.patch("/{chunk_id}", response_model=ChunkOut | ChunkEditNeedsConfirmation)
 async def edit_chunk(
     chunk_id: UUID,
     body: EditRequest,
@@ -100,7 +105,7 @@ async def edit_chunk(
     index_engine=Depends(get_index_engine),
     search_pipeline=Depends(get_search_pipeline),
     config=Depends(get_config),
-) -> ChunkOut:
+) -> ChunkOut | dict:
     chunk = await _screened_chunk(storage, chunk_id, config)
     if chunk.metadata.source_file.is_symlink():
         raise HTTPException(status_code=403, detail="Cannot edit chunks from symlinked files.")
@@ -139,11 +144,50 @@ async def edit_chunk(
             raise HTTPException(status_code=403, detail="Cannot edit chunks from symlinked files.")
 
         # ADR-0011 PR-D review round 7: infer scope from the loaded chunk's
-        # persisted metadata so Gate A's project_shared hard-refusal of
-        # ``force_unsafe=True`` fires on the web edit path too. Evaluated on the
-        # fresh chunk (re-fetched under the lock) so a concurrent migrate cannot
-        # leave us validating a stale scope. Mirrors MCP ``mem_edit``.
+        # persisted metadata so both gates below fire on the web edit path
+        # too. Evaluated on the fresh chunk (re-fetched under the lock) so a
+        # concurrent migrate cannot leave us validating a stale scope.
+        # Mirrors MCP ``mem_edit``.
         inferred_scope = meta.scope or "user"
+
+        # ADR-0011 §5 Gate B (#2317), the web twin of the ``mem_edit`` gate
+        # and the sibling of the DELETE route's below. An edit does not move
+        # the chunk between tiers, so the consent is about the write rather
+        # than the destination: it rewrites a file the project commits and
+        # shares. Ordered ahead of Gate A to match ``_mem_add_core`` and MCP
+        # ``mem_edit``.
+        #
+        # Answered with the disclose-then-confirm envelope at HTTP 200, not
+        # the 403 ``blocked_project_shared`` the DELETE route below uses.
+        # That route has no Gate A, so there the discriminant is unambiguous;
+        # here it is already spoken for by Gate A's ``force_unsafe`` refusal
+        # a few lines down, which no re-request can ever satisfy. Reusing it
+        # would leave a client unable to tell "ask the user and retry" from
+        # "stop" — which is exactly what the SPA has to decide.
+        if inferred_scope == "project_shared" and not body.confirm_project_shared:
+            logger.info(
+                "web edit_chunk rejected project_shared chunk without confirmation",
+                extra={"chunk_id": str(chunk_id), "scope": inferred_scope},
+            )
+            return needs_confirmation_envelope(
+                (
+                    "This chunk lives in the project_shared tier, on a path the "
+                    "repository tracks. Saving replaces its body for everyone who "
+                    "pulls the project."
+                ),
+                confirm="confirm_project_shared",
+            )
+
+        # ADR-0011 §5 Gate B consent (#2306/#2317). Gate A below and the
+        # mutation can still refuse: this records the consent, not the edit.
+        if inferred_scope == "project_shared":
+            privacy.emit_project_shared_confirmation(
+                surface="web_api_chunk_edit",
+                mechanism="request",
+                action="edit",
+                audit_context={"chunk_id": str(chunk_id)},
+            )
+
         guard = privacy.enforce_write_guard(
             body.new_content,
             surface="web_api_chunk_edit",
