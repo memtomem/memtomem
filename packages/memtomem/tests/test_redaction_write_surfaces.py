@@ -388,7 +388,10 @@ class TestLangGraphAddRedactionGuard:
         # Bypass __init__ so we don't touch real storage. ``_ensure_init``
         # is stubbed so the lazy-bootstrap path inside ``add`` resolves
         # without spinning up real components; the guard then short-
-        # circuits the actual write.
+        # circuits the actual write. ``_current_agent_id`` is set by hand
+        # because ``__new__`` skips ``__init__`` and ``add`` resolves the
+        # namespace before it scans (#2321).
+        mem._current_agent_id = None
         mem._ensure_init = AsyncMock(return_value=MagicMock())  # type: ignore[attr-defined]
 
         before = privacy.snapshot()["by_tool"].get(
@@ -410,7 +413,9 @@ class TestLangGraphAddRedactionGuard:
         # Stub bootstrap so the bypass path can attempt a write without
         # hitting real storage. The append + index step will fail on the
         # MagicMock memory_dirs, but the bypass counter must already
-        # have ticked.
+        # have ticked. ``_current_agent_id`` is set by hand for the reason
+        # given above.
+        mem._current_agent_id = None
         mem._ensure_init = AsyncMock(  # type: ignore[attr-defined]
             return_value=MagicMock(
                 config=MagicMock(indexing=MagicMock(memory_dirs=[Path("/nonexistent")])),
@@ -463,15 +468,27 @@ class TestLangGraphAddRedactionGuard:
     @pytest.mark.asyncio
     async def test_force_unsafe_under_agent_session_pins_call_order(self, tmp_path, monkeypatch):
         """Multi-agent × redaction bypass: under an active agent session,
-        ``force_unsafe=True`` must run **redaction guard → namespace
-        resolve → write → index** in that exact order, with
+        ``force_unsafe=True`` must run **namespace resolve → redaction
+        guard → write → index** in that exact order, with
         ``namespace="agent-runtime:<id>"`` reaching the index layer.
 
         A naked "final ``index_file`` got the agent namespace" assertion
-        would still pass if a refactor moved the namespace resolve
-        *before* the redaction guard — losing the trust-boundary
-        invariant that no namespace work happens on rejected content.
-        We sequence-pin via spies on each stage.
+        would still pass if a refactor moved the write ahead of the
+        redaction guard, so we sequence-pin via spies on each stage.
+
+        The first two stages traded places in #2321, deliberately. The
+        guard used to run first, and the invariant claimed was that no
+        namespace work happens on rejected content. But Gate A now has to
+        be told which tier it is scanning for, that tier is derived from
+        the resolved target, and the no-``file=`` branch of target
+        resolution picks a per-namespace day file — so the namespace has
+        to be known before the target, and the target before the scan.
+        Resolving the namespace is a pure in-memory read of
+        ``self._current_agent_id``: it touches no storage and writes
+        nothing, so running it on content that is about to be rejected
+        costs nothing. What must stay behind the guard is the **write**,
+        and ``append`` following ``guard`` here is the assertion that says
+        so.
         """
         from memtomem import privacy as _privacy
         from memtomem.integrations.langgraph import MemtomemStore
@@ -496,12 +513,17 @@ class TestLangGraphAddRedactionGuard:
 
         real_guard = _privacy.enforce_write_guard
 
-        def _spy_guard(content, *, surface, force_unsafe, audit_context):
-            events.append(("guard", {"force_unsafe": force_unsafe, "surface": surface}))
+        def _spy_guard(content, *, surface, force_unsafe, scope, audit_context):
+            # ``scope`` is named rather than swallowed by ``**kwargs`` so
+            # dropping it from the call site fails here (#2321).
+            events.append(
+                ("guard", {"force_unsafe": force_unsafe, "surface": surface, "scope": scope})
+            )
             return real_guard(
                 content,
                 surface=surface,
                 force_unsafe=force_unsafe,
+                scope=scope,
                 audit_context=audit_context,
             )
 
@@ -539,15 +561,20 @@ class TestLangGraphAddRedactionGuard:
             force_unsafe=True,
         )
 
-        # Order pin: redaction guard fires first, then namespace resolve,
-        # then write, then index. Any reorder trips the equality check.
+        # Order pin: namespace resolve, then the redaction guard, then the
+        # write, then index. Any reorder trips the equality check.
         assert [name for name, _ in events] == [
-            "guard",
             "resolve_namespace",
+            "guard",
             "append",
             "index",
         ], events
 
+        # The guard was told the tier it was scanning for. This target is
+        # an ordinary tmp_path file, so ``user`` — but a call site that
+        # stopped passing ``scope=`` would fail on the spy signature above,
+        # and one that passed the wrong tier fails here.
+        assert events[1][1]["scope"] == "user"
         # Index call carried the agent-runtime namespace.
         assert events[3][1]["namespace"] == "agent-runtime:planner"
         # Caller saw the success shape (not the redaction-block dict).

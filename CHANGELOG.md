@@ -114,6 +114,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   tiers that honour it, named individually — a refusal that does not say
   which tier it was decided under is treated as unknown and offered nothing.
 
+- **The LangGraph store asks before writing into the Git-tracked tier**
+  (#2321) — `MemtomemStore.add()` takes a caller-supplied `file=`, which makes
+  it the one path on that adapter able to choose the `project_shared` tier, and
+  it reached that tier with neither ADR-0011 §5 gate. It scanned the content
+  twelve lines before it chose the destination, so the scan was told nothing
+  about the tier and defaulted to `user`: a secret plus `force_unsafe=True`
+  plus a project-canonical `file=` landed in a repository-tracked file and was
+  recorded as an ordinary bypass rather than the hard refusal that tier
+  requires. There was no confirmation argument on the method at all, so nobody
+  was asked either. The adapter now resolves its target first and hands the
+  resulting tier to both halves: a `project_shared` destination needs
+  `confirm_project_shared=True` and records the consent under
+  `project_shared.confirmed_via=langgraph_add`, and the scan that follows
+  refuses `force_unsafe=True` outright, because git history cannot be retracted
+  from clones. **Breaking** for callers passing a `project_shared` `file=`:
+  that call now needs the confirmation. Ordinary `user` and `project_local`
+  writes are unchanged and are asked nothing.
+
+  Deciding *which* tier turned out to be the whole difficulty, because the
+  path's spelling answers it wrong in both directions. A registered project
+  directory now decides the tier for everything beneath it, so a target buried
+  at `<shared-root>/sub/.memtomem/memories.local/note.md` is treated as the
+  git-tracked write it is rather than as the private tier its innermost path
+  component imitates. In the other direction the default user memory directory
+  is literally `~/.memtomem/memories`, which matches the shared pattern
+  exactly — so a target covered by a configured memory directory is settled as
+  personal before any pattern test runs, and only a path covered by no
+  configured directory at all is refused for looking canonical without being
+  registered.
+
+  That still leaves the gates and the stored notes answering to different
+  judges: the gates protect the write, while editing or deleting a note later
+  reads the tier recorded on the note itself. Where those two would disagree,
+  the write is refused rather than left behind as a note that could not be
+  protected again — in either direction, whether the write is guarded and the
+  note is not, or the note lands in the shared tier having been guarded as
+  personal.
+
+  Both gates also apply when the destination is chosen for you. If one
+  directory is configured as both a personal and a project memory directory,
+  the automatic daily file really is in the tracked tier, and the write asks
+  and scans accordingly.
+
+  This was missed because the *other* LangGraph adapter in the same package —
+  the JSON-backed `MemtomemBaseStore` — does carry the gate, so a search for
+  the confirmation flag found a hit under `integrations/` and read as covered.
+  The architectural guard could not see it either: it finds gates by that
+  flag's name, and a surface carrying no such argument is invisible to it. The
+  sibling writers named in that guard's own boundary note (#2322) are still
+  open.
+
 - **A transfer's cleanup and promote now act on the staging entry they
   created, not on its name** (#2314) — `mm context move` / `copy`, receiving a
   shared artifact file, and `mm context copy mcp-servers` all stage under a

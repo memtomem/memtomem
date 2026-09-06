@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from uuid import UUID, uuid4
 
+from memtomem.config import classify_scope
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     SHARED_NAMESPACE,
@@ -57,6 +58,149 @@ def __getattr__(name: str) -> Any:
 
         return MemtomemBaseStore
     raise AttributeError(name)
+
+
+class _UnregisteredProjectTarget(Exception):
+    """A target names a project tree that no config entry covers.
+
+    Raised rather than returned so the refusal cannot be dropped. An optional
+    return would let a caller that ignores it fall through as ``user`` tier —
+    which is the exact failure ADR-0011 §5 exists to prevent, and the one this
+    module was fixed for (#2321).
+    """
+
+
+class _TierWouldNotRoundTrip(Exception):
+    """The tier the gates would use is not the tier the indexer would store.
+
+    The gates need to know which tier they are protecting; the indexer decides,
+    independently, which tier the resulting rows are labelled with. When those
+    two answers differ the write is unsafe in one direction or the other, and
+    which direction does not matter enough to write it anyway:
+
+    * gated ``project_shared`` / stored ``project_local`` — the write is
+      protected, but the row is not, and ``mem_edit`` / ``mem_delete`` read the
+      tier from the row. A note nobody could add without consent becomes one
+      anybody can rewrite without it.
+    * gated ``user`` / stored ``project_shared`` — the row lands in the
+      git-tracked tier having passed neither gate, which is #2321 itself,
+      reached through a different door.
+
+    Refusing is the honest answer, because making the two agree means changing
+    the classifier every read surface shares — a decision for the classifier,
+    not for this adapter.
+    """
+
+
+def _owned_tier(
+    target: Path,
+    memory_dirs: list,
+    project_memory_dirs: list,
+) -> str:
+    """Which tier *owns* ``target``, by configured directory rather than spelling.
+
+    ``classify_scope`` decides from the path's shape, and a path can be shaped
+    to defeat it in both directions — see :func:`_resolve_target_scope`, which
+    is what callers should use. This half answers only the ownership question.
+    """
+    # 1. A registered project root that covers the target decides the tier.
+    #    Most specific root wins, so a registered ``memories.local`` nested
+    #    under a registered ``memories`` is still read as its own tier. Two
+    #    roots can only both cover the target by being ancestors of it, and so
+    #    of each other, which makes the path-component count a total order
+    #    over exactly the roots in contention.
+    covering: list[tuple[int, str]] = []
+    for raw in project_memory_dirs or ():
+        try:
+            root = Path(raw).expanduser().resolve()
+        except OSError:  # pragma: no cover - unreadable configured root
+            continue
+        if target == root or target.is_relative_to(root):
+            root_tier, _ = classify_scope(root, None)
+            # A registered root whose own path is not canonical cannot say
+            # which tier it is, so it does not get to decide. It is not
+            # ignored either: the round-trip check in the caller refuses the
+            # write if the indexer reads the target differently, which is the
+            # case that would otherwise slip past both gates.
+            if root_tier != "user":
+                covering.append((len(root.parts), root_tier))
+    if covering:
+        covering.sort()
+        return covering[-1][1]
+
+    # 2. A configured user memory dir covering the target makes it user-tier
+    #    whatever the path happens to be spelled like. This runs *after* the
+    #    project roots on purpose: the default user memory directory is
+    #    ``~/.memtomem/memories``, so the two loops overlap by design and the
+    #    more specific claim has to be asked first.
+    for raw in memory_dirs or ():
+        try:
+            base = Path(raw).expanduser().resolve()
+        except OSError:  # pragma: no cover - unreadable configured dir
+            continue
+        if target == base or target.is_relative_to(base):
+            return "user"
+
+    # 3. Covered by nothing, but shaped like a project canonical path: an
+    #    unregistered project tree. Writing there would stamp user-tier rows
+    #    onto a git-tracked path with both gates bypassed.
+    pattern_scope, _ = classify_scope(target, None)
+    if pattern_scope != "user":
+        raise _UnregisteredProjectTarget(
+            f"{target} is a project-canonical path, but no "
+            "indexing.project_memory_dirs entry covers it. Register the tier "
+            "or choose a target inside a configured memory directory."
+        )
+
+    return "user"
+
+
+def _resolve_target_scope(
+    target: Path,
+    memory_dirs: list,
+    project_memory_dirs: list,
+) -> str:
+    """The ADR-0011 tier to gate ``target`` on, or a refusal.
+
+    Two questions have to give the same answer before anything is written:
+    which tier *owns* the target (:func:`_owned_tier`, by configured
+    directory), and which tier the indexer will *label its rows* with
+    (``classify_scope``, by path shape). The gates protect the first; every
+    later surface — ``mem_edit``, ``mem_delete`` — trusts the second. A write
+    whose two answers differ is one this adapter declines.
+
+    Raises :class:`_UnregisteredProjectTarget` or
+    :class:`_TierWouldNotRoundTrip`; never returns a tier it is unsure of.
+    """
+    owned = _owned_tier(target, memory_dirs, project_memory_dirs)
+    indexed, _ = classify_scope(target, project_memory_dirs)
+    if owned != indexed:
+        raise _TierWouldNotRoundTrip(
+            f"{target} would be gated as {owned!r} but stored as {indexed!r}, so "
+            "the gates and every later edit or delete would disagree about which "
+            "tier it is in. Choose a target that is not nested inside another "
+            ".memtomem directory, and register project tiers at their canonical "
+            "memories or memories.local directory."
+        )
+    return owned
+
+
+def _gate_scope_for(comp: "Components", target: Path) -> str | dict:
+    """``_resolve_target_scope`` with this adapter's error-dict contract.
+
+    Both destinations — a caller's ``file=`` and the derived day file — go
+    through it, so neither can be given a tier the other would not be.
+    """
+    try:
+        return _resolve_target_scope(
+            target,
+            comp.config.indexing.memory_dirs,
+            comp.config.indexing.project_memory_dirs,
+        )
+    except _UnregisteredProjectTarget as exc:
+        return {"error": "unregistered_project_target", "detail": str(exc)}
+    except _TierWouldNotRoundTrip as exc:
+        return {"error": "tier_would_not_round_trip", "detail": str(exc)}
 
 
 class MemtomemStore:
@@ -281,6 +425,7 @@ class MemtomemStore:
         namespace: str | None = None,
         template: str | None = None,
         force_unsafe: bool = False,
+        confirm_project_shared: bool = False,
     ) -> dict:
         """Add a memory entry. Returns dict with file path and chunk count.
 
@@ -293,6 +438,21 @@ class MemtomemStore:
         any filesystem write. On a hit the call returns ``{"error":
         "redaction_blocked", "hits": N}`` instead of writing; pass
         ``force_unsafe=True`` to bypass with audit logging.
+
+        ADR-0011 §5 (#2321): an explicit ``file=`` chooses the destination
+        tier, so the tier is derived from the resolved target *before*
+        either gate runs. A target under a registered ``project_shared``
+        directory is git-tracked and needs ``confirm_project_shared=True``
+        (Gate B); the same tier reaches the redaction guard (Gate A), where
+        ``force_unsafe=True`` is hard-refused because git history cannot be
+        retracted from clones.
+
+        Args:
+            confirm_project_shared: Required when the resolved ``file=``
+                target lives in a registered ``project_shared`` tier. That
+                write is what the project commits and everyone who pulls it
+                reads, so it takes the same explicit consent ``mem_add``
+                takes for the same destination.
         """
         comp = await self._ensure_init()
         from datetime import datetime, timezone
@@ -306,24 +466,20 @@ class MemtomemStore:
 
             content = render_template(template, content, title=title)
 
-        guard = privacy.enforce_write_guard(
-            content,
-            surface="langgraph_add",
-            force_unsafe=force_unsafe,
-            audit_context={"namespace": namespace, "file": file},
-        )
-        if guard.decision == "blocked":
-            return {
-                "error": "redaction_blocked",
-                "hits": len(guard.hits),
-                "surface": "langgraph_add",
-            }
-
         effective_namespace = self._resolve_add_namespace(namespace)
         default_ns = comp.config.namespace.default_namespace
 
+        # ADR-0011 §5 (#2321): resolve the target before scanning the content.
+        # The guard used to run twelve lines above this block, which left both
+        # gates unreachable on the one path that can reach the shared tier — a
+        # scan cannot know the destination tier while the destination is still
+        # unchosen.
         if file:
             target = Path(file).expanduser().resolve()
+            resolved = _gate_scope_for(comp, target)
+            if isinstance(resolved, dict):
+                return resolved
+            effective_scope = resolved
         else:
             from memtomem.errors import ConfigError
             from memtomem.memory_scope import day_file_name, require_user_base
@@ -337,6 +493,76 @@ class MemtomemStore:
             # its namespace before choosing the file (no session can change
             # it mid-write here), so no in-lock re-target is needed.
             target = base / day_file_name(effective_namespace, default_ns, date_str=date_str)
+            # Resolved the same way an explicit target is, not assumed.
+            # ``memory_dirs`` and ``project_memory_dirs`` may name the same
+            # directory, and when they do this day file really is in the
+            # git-tracked tier — so both gates have to see that, exactly as
+            # they would for a caller-supplied path. #2322 covers four *other*
+            # derived-target writers and says in its own text that the
+            # caller-controlled case belongs here, so there was nothing to
+            # defer this branch to.
+            resolved = _gate_scope_for(comp, target)
+            if isinstance(resolved, dict):
+                return resolved
+            effective_scope = resolved
+
+        # ADR-0011 §5 Gate B, ordered ahead of Gate A to match
+        # ``_mem_add_core``: a caller who never consented to a git-tracked
+        # write should be told that, not that their content looked like a
+        # secret. It applies to every destination this method writes to, not
+        # only a caller-supplied one — a derived day file that lands in the
+        # tracked tier is the same write with the destination chosen for you.
+        if effective_scope == "project_shared" and not confirm_project_shared:
+            return {
+                "error": "project_shared_confirmation_required",
+                "detail": (
+                    f"{target} resolves into a registered project_shared tier, "
+                    "which is git-tracked; pass confirm_project_shared=True to "
+                    "proceed."
+                ),
+            }
+        # Mirrors the gate's predicate rather than falling through it: an
+        # ``!= "user"`` widening here would file a consent for project_local,
+        # a tier nobody was asked about. The AST guard in
+        # ``test_project_shared_confirmation_audit_guard.py`` cannot check
+        # predicate equivalence — the surface tests carry that half.
+        if effective_scope == "project_shared":
+            privacy.emit_project_shared_confirmation(
+                surface="langgraph_add",
+                mechanism="param",
+                action="write",
+                audit_context={"namespace": effective_namespace},
+            )
+
+        # ADR-0011 §5 Gate A, now told which tier it is scanning for.
+        guard = privacy.enforce_write_guard(
+            content,
+            surface="langgraph_add",
+            force_unsafe=force_unsafe,
+            scope=effective_scope,
+            audit_context={
+                "namespace": namespace,
+                "file": file,
+                "scope": effective_scope,
+            },
+        )
+        if guard.decision == "blocked":
+            return {
+                "error": "redaction_blocked",
+                "hits": len(guard.hits),
+                "surface": "langgraph_add",
+            }
+        # Separate from ``blocked`` because the remedy differs: this one is
+        # never retryable with ``force_unsafe``. Handling it is also what keeps
+        # threading ``scope=`` from becoming a regression — the lone
+        # ``== "blocked"`` test this replaced would let the hard refusal fall
+        # through as a pass and write the secret into git.
+        if guard.decision == "blocked_project_shared":
+            return {
+                "error": "redaction_blocked_project_shared",
+                "hits": len(guard.hits),
+                "surface": "langgraph_add",
+            }
 
         from memtomem.context._atomic import (
             _CRUD_SIDECAR_LOCK_BUDGET_S,
