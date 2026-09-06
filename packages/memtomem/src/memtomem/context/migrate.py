@@ -1221,9 +1221,17 @@ def _restore_source(entry: Path, src: Path, *, allow_cross_parent: bool) -> bool
 
     The one rename-back, shared by :func:`_stage_move`'s own unwind and by
     ``transfer.transfer_artifact``'s rollback ladder, because both are asking
-    the identical question: the entry named here holds the ONLY copy of the
-    source bytes, and it may be put back only onto a name nobody else has
-    taken.
+    the identical question: the entry named here holds the pre-move bytes, and
+    it may be put back only onto a name nobody else has taken.
+
+    **The messages are cardinality-neutral, deliberately.** This function sees
+    one entry; how many copies of the source bytes exist is not a question it
+    can answer. The predecessor called *entry* "the ONLY surviving copy",
+    which is exact on the same-filesystem path — staging IS the pre-move tree
+    — and wrong on the EXDEV one, where the destination-side copy survives on
+    purpose (#2313) and the operator was sent to one path while two held the
+    bytes. The caller knows whether it is holding a second copy, so the caller
+    counts (:func:`~memtomem.context.transfer._log_rollback_survivors`).
 
     **Nothing here removes anything, on any path.** A refusal returns False
     with *entry* intact; the caller decides what to preserve, and every caller
@@ -1251,18 +1259,17 @@ def _restore_source(entry: Path, src: Path, *, allow_cross_parent: bool) -> bool
         if os.path.lexists(src):
             logger.error(
                 "transfer rollback: rename-back refused (%s) — an entry we did "
-                "not create occupies src %s; preserving %s as the ONLY "
-                "surviving copy of the source bytes — manual reconciliation "
-                "required.",
+                "not create occupies src %s; preserving the pre-move bytes at "
+                "%s — manual reconciliation required.",
                 exc,
                 src,
                 entry,
             )
         else:
             logger.error(
-                "transfer rollback: rename-back failed (%s); %s is the ONLY "
-                "surviving copy of the source bytes — manual recovery required "
-                "(mv it back to %s).",
+                "transfer rollback: rename-back failed (%s); the pre-move bytes "
+                "are preserved at %s — manual recovery required (mv it back to "
+                "%s).",
                 exc,
                 entry,
                 src,

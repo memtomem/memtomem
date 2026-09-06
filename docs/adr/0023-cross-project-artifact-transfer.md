@@ -346,6 +346,24 @@ a claim about a path last observed before the copy, and the design gate's
 counter-example was an actor that removes the holding entry and then fails the
 promote, leaving staging as the only copy.
 
+**Amendment (2026-09, #2327): the ERROR names what a probe finds, and counts
+it.** The ladder preserved correctly and then described the result from what it
+*expected* to be on disk. The "source reappeared" arm named the entry holding
+the pre-move bytes without looking at it, so the same actor that removes the
+holding entry mid-copy produced a message pointing at a recovery copy that was
+not there; and the rename-back called the entry it failed to move "the ONLY
+surviving copy", which is exact on the same-filesystem path — staging IS the
+pre-move tree — and wrong on the EXDEV one, where the destination-side copy
+survives on purpose and the operator was sent to one of the two places the
+bytes were. Every arm now ends in a single message written from an
+`os.path.lexists` probe of both candidates, listing the survivors observed and
+their number; `lexists`, so a parked flat artifact that is itself a dangling
+symlink still counts. The rename-back stays cardinality-neutral — it is handed
+one entry and cannot see the other — and the caller, which knows whether the
+EXDEV path is holding a second copy, does the counting. Nothing about what is
+preserved changes; these messages are the entire interface a hand recovery
+has, so a path named in one must be a path that exists.
+
 Crash states are the same **policy** as the same-filesystem path — a leftover
 under the internal grammar, hidden, never reaped, recovered by hand (`mv` it
 back onto the canonical name, or delete it once the destination is complete) —
