@@ -125,7 +125,9 @@ def test_project_local_refused_both_modes(proj: Path) -> None:
 
 def test_apply_single_candidate(proj: Path) -> None:
     seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "only")})
-    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
+    res = _invoke(
+        ["pull", "agents", "a", "--apply", "--scope", "project_shared", "--confirm-project-shared"]
+    )
     assert res.exit_code == 0, res.output
     assert "Pulled agents/a from claude" in res.output
     assert "only" in _canonical_agent_text(proj, "a")
@@ -135,7 +137,9 @@ def test_apply_source_conflict_refuses(proj: Path) -> None:
     seed_multi_runtime(
         proj, "agents", "a", {"claude": _agent("a", "c"), "gemini": _agent("a", "g")}
     )
-    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
+    res = _invoke(
+        ["pull", "agents", "a", "--apply", "--scope", "project_shared", "--confirm-project-shared"]
+    )
     assert res.exit_code != 0
     assert "Pass --from <runtime>" in res.output
     assert not (canonical_artifact_dir("agents", "project_shared", proj) / "a").exists()
@@ -146,7 +150,17 @@ def test_apply_from_lands_chosen(proj: Path) -> None:
         proj, "agents", "a", {"claude": _agent("a", "CLAUDE"), "gemini": _agent("a", "GEM")}
     )
     res = _invoke(
-        ["pull", "agents", "a", "--apply", "--from", "gemini", "--scope", "project_shared", "--yes"]
+        [
+            "pull",
+            "agents",
+            "a",
+            "--apply",
+            "--from",
+            "gemini",
+            "--scope",
+            "project_shared",
+            "--confirm-project-shared",
+        ]
     )
     assert res.exit_code == 0, res.output
     assert "GEM" in _canonical_agent_text(proj, "a")
@@ -175,7 +189,9 @@ def test_apply_overwrite_refused_without_flag(proj: Path) -> None:
     d.mkdir(parents=True)
     (d / "agent.md").write_text(_agent("a", "STORE"), encoding="utf-8")
     seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "RUNTIME")})
-    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
+    res = _invoke(
+        ["pull", "agents", "a", "--apply", "--scope", "project_shared", "--confirm-project-shared"]
+    )
     assert res.exit_code != 0
     assert "--overwrite" in res.output
 
@@ -186,7 +202,9 @@ def test_apply_identical_noop(proj: Path) -> None:
     d.mkdir(parents=True)
     (d / "agent.md").write_text(body, encoding="utf-8")
     seed_multi_runtime(proj, "agents", "a", {"claude": body})
-    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
+    res = _invoke(
+        ["pull", "agents", "a", "--apply", "--scope", "project_shared", "--confirm-project-shared"]
+    )
     assert res.exit_code == 0, res.output
     assert "already identical" in res.output
 
@@ -199,7 +217,16 @@ def test_skills_overwrite_succeeds(proj: Path) -> None:
     (d / "SKILL.md").write_text("---\nname: s\n---\nold\n", encoding="utf-8")
     seed_multi_runtime(proj, "skills", "s", {"claude": "---\nname: s\n---\nnew\n"})
     res = _invoke(
-        ["pull", "skills", "s", "--apply", "--overwrite", "--scope", "project_shared", "--yes"]
+        [
+            "pull",
+            "skills",
+            "s",
+            "--apply",
+            "--overwrite",
+            "--scope",
+            "project_shared",
+            "--confirm-project-shared",
+        ]
     )
     assert res.exit_code == 0, res.output
     assert "new" in (d / "SKILL.md").read_text(encoding="utf-8")
@@ -230,14 +257,15 @@ def test_project_shared_prompt_accept_writes(proj: Path) -> None:
     assert "c" in _canonical_agent_text(proj, "a")
 
 
-# ── ADR-0011 §5 consent audit (#2306) ─────────────────────────────────────────
+# ── ADR-0011 §5 consent audit (#2306, #2318) ──────────────────────────────────
 #
-# This command satisfies Gate B differently from its MCP and web twins:
-# ADR-0030 §11 accepts ``--yes`` or the prompt, and there is no
-# ``--confirm-project-shared`` to pass. The AST guard in
-# ``test_project_shared_confirmation_audit_guard.py`` finds gates by that
-# argument's name, so it is blind to this one — these tests are the only
-# thing holding the line here.
+# #2318 gave this command the ``--confirm-project-shared`` every other CLI
+# surface takes, so the AST guard in
+# ``test_project_shared_confirmation_audit_guard.py`` can finally see it. What
+# that guard buys is narrow — it only checks that the emit outlives the
+# conditional. Whether ``--yes`` is still accepted, which flag the line names,
+# and how many lines are emitted are all invisible to it, so the tests below
+# remain the only thing holding those.
 
 
 def test_prompt_accepted_records_the_consent(proj: Path, caplog) -> None:
@@ -253,7 +281,7 @@ def test_prompt_accepted_records_the_consent(proj: Path, caplog) -> None:
 
 
 def test_yes_flag_records_the_consent_and_names_the_flag(proj: Path, caplog) -> None:
-    """``--yes`` is this command's documented Gate B satisfaction, so it is
+    """``--yes`` still carries Gate B during the #2318 window, so it is
     recorded — and the line names which flag carried it, since ``--yes`` is
     not the ``--confirm-project-shared`` the other surfaces require."""
     seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")})
@@ -264,6 +292,175 @@ def test_yes_flag_records_the_consent_and_names_the_flag(proj: Path, caplog) -> 
     assert len(lines) == 1
     assert "mechanism=flag" in lines[0]
     assert "flag='--yes'" in lines[0]
+
+
+# ── ADR-0011 §5 parity: --confirm-project-shared and the --yes window (#2318) ──
+#
+# ``mm context pull`` was the one CLI surface where a generic ``--yes``
+# satisfied Gate B, diverging from its own ``mem_context_pull`` tool and web
+# route. It now takes the standard flag; ``--yes`` keeps working through 0.5.x
+# behind a notice and stops satisfying Gate B in 0.6.0. Each test below pins
+# exactly one cell of that contract, because the flip in 0.6.0 has to be able
+# to change one row without silently rewriting the others.
+
+_FLIP_NOTICE = "--yes alone will stop satisfying Gate B"
+
+
+def _seed_one(proj: Path, scope: str = "project_shared") -> None:
+    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")}, scope=scope)
+
+
+def test_confirm_flag_carries_gate_b_without_a_prompt(proj: Path, caplog) -> None:
+    """The parity case: the standard flag alone lands the pull."""
+    _seed_one(proj)
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        res = _invoke(
+            ["pull", "agents", "a", "--apply", "--scope", "project_shared"],
+            input="",  # no prompt may be consumed
+        )
+    assert res.exit_code != 0  # sanity: without either flag it *does* prompt
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        res = _invoke(
+            [
+                "pull",
+                "agents",
+                "a",
+                "--apply",
+                "--scope",
+                "project_shared",
+                "--confirm-project-shared",
+            ]
+        )
+    assert res.exit_code == 0, res.output
+    assert "c" in _canonical_agent_text(proj, "a")
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "mechanism=flag" in lines[0]
+    assert "flag='--yes'" not in lines[0]
+
+
+def test_confirm_flag_emits_no_deprecation_notice(proj: Path) -> None:
+    _seed_one(proj)
+    res = _invoke(
+        ["pull", "agents", "a", "--apply", "--scope", "project_shared", "--confirm-project-shared"]
+    )
+    assert res.exit_code == 0, res.output
+    assert _FLIP_NOTICE not in res.output
+
+
+def test_yes_alone_warns_on_stderr_and_still_applies(proj: Path) -> None:
+    """The window's whole point: an existing ``--yes`` script keeps working,
+    and is told once, on stderr, that it will not in 0.6.0."""
+    _seed_one(proj)
+    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "c" in _canonical_agent_text(proj, "a")
+    assert res.stderr.count(_FLIP_NOTICE) == 1
+    assert "--confirm-project-shared" in res.stderr
+    assert "0.6.0" in res.stderr
+    assert _FLIP_NOTICE not in res.stdout
+
+
+def test_both_flags_the_explicit_one_wins(proj: Path, caplog) -> None:
+    """Precedence, and the reason it is computed once: with both flags the
+    consent belongs to ``--confirm-project-shared``, so the line must not
+    name ``--yes`` and the migration notice must not fire."""
+    _seed_one(proj)
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        res = _invoke(
+            [
+                "pull",
+                "agents",
+                "a",
+                "--apply",
+                "--scope",
+                "project_shared",
+                "--yes",
+                "--confirm-project-shared",
+            ]
+        )
+    assert res.exit_code == 0, res.output
+    lines = consent_lines(caplog)
+    assert len(lines) == 1
+    assert "mechanism=flag" in lines[0]
+    assert "flag='--yes'" not in lines[0]
+    assert _FLIP_NOTICE not in res.output
+
+
+def test_prompt_path_emits_no_notice(proj: Path) -> None:
+    _seed_one(proj)
+    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared"], input="y\n")
+    assert res.exit_code == 0, res.output
+    assert _FLIP_NOTICE not in res.output
+
+
+def test_yes_without_apply_still_fails_before_the_notice(proj: Path) -> None:
+    """The flag-combination guard runs first, so a preview never warns."""
+    _seed_one(proj)
+    res = _invoke(["pull", "agents", "a", "--yes"])
+    assert res.exit_code == 2
+    assert _FLIP_NOTICE not in res.output
+
+
+def test_preview_with_the_confirm_flag_neither_warns_nor_consents(proj: Path, caplog) -> None:
+    _seed_one(proj)
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        res = _invoke(
+            ["pull", "agents", "a", "--scope", "project_shared", "--confirm-project-shared"]
+        )
+    assert res.exit_code == 0, res.output
+    assert consent_lines(caplog) == []
+    assert _FLIP_NOTICE not in res.output
+    assert not (canonical_artifact_dir("agents", "project_shared", proj) / "a").exists()
+
+
+def test_user_tier_yes_keeps_its_ordinary_meaning(proj: Path, caplog) -> None:
+    """``--yes`` was never Gate B on the user tier, so nothing changes there:
+    it still skips the prompt, warns about nothing, and records no consent."""
+    _seed_one(proj, scope="user")
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        res = _invoke(["pull", "agents", "a", "--apply", "--scope", "user", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert consent_lines(caplog) == []
+    assert _FLIP_NOTICE not in res.output
+
+
+def test_user_tier_confirm_flag_does_not_skip_the_prompt(proj: Path, caplog) -> None:
+    """The pin against widening the gate past ``project_shared``.
+    ``--confirm-project-shared`` authorises the git-tracked tier and nothing
+    else, so on the user tier the ordinary confirm still governs — and
+    declining it must write nothing and record no consent.
+
+    The nonzero exit alone would not show that: an implementation that
+    rejected the flag outright with a usage error would also exit nonzero
+    without ever prompting. So this asserts the prompt's own words."""
+    _seed_one(proj, scope="user")
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        res = _invoke(
+            ["pull", "agents", "a", "--apply", "--scope", "user", "--confirm-project-shared"],
+            input="n\n",
+        )
+    assert res.exit_code != 0
+    assert "Pull agents/a from claude into user?" in res.output
+    assert consent_lines(caplog) == []
+    assert not (canonical_artifact_dir("agents", "user", None) / "a").exists()
+
+
+def test_gate_a_block_warns_but_records_no_consent(proj: Path, caplog) -> None:
+    """Notice is not consent. ``prepare_pull`` refuses before Gate B is ever
+    reached, so the migration signal still fires — an automation owner needs
+    it on a refused run too — while the audit line, which records an
+    authorised write, must not."""
+    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", _SECRET)})
+    with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+        res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
+    assert res.exit_code != 0
+    assert "Gate A" in res.output
+    assert res.stderr.count(_FLIP_NOTICE) == 1
+    assert consent_lines(caplog) == []
+    assert not (canonical_artifact_dir("agents", "project_shared", proj) / "a").exists()
 
 
 def test_declined_prompt_records_no_consent(proj: Path, caplog) -> None:
@@ -301,7 +498,7 @@ def test_project_shared_secret_hard_refused(proj: Path) -> None:
             "--apply",
             "--scope",
             "project_shared",
-            "--yes",
+            "--confirm-project-shared",
             "--force-unsafe-import",
         ]
     )
@@ -354,6 +551,8 @@ def test_project_shared_gate_block_offers_no_force_valve(proj: Path) -> None:
     Keying the hint on the code alone would send the user to a flag that
     hard-refuses — the hint is gated on ``force_bypassable`` instead."""
     seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", f"tok {_SECRET}")})
-    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
+    res = _invoke(
+        ["pull", "agents", "a", "--apply", "--scope", "project_shared", "--confirm-project-shared"]
+    )
     assert res.exit_code != 0
     assert "--force-unsafe-import" not in res.output

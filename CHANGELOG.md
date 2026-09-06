@@ -32,6 +32,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   **Upgrading:** an agent or script that edits shared-tier notes must pass the
   new argument; the refusal names it. (#2317)
 
+### Deprecated
+
+- **`mm context pull` now asks for consent in the same words as everywhere
+  else.** Writing into the Git-tracked `project_shared` tier takes an explicit
+  `--confirm-project-shared` on every `mm` command — except `pull`, which had
+  no such flag and accepted a bare `--yes` instead. `--yes` is the flag people
+  put in scripts to mean "don't stop and ask me things"; letting it stand in
+  for "yes, publish this to everyone with repo access" made one operation
+  answer to three different contracts, since `pull`'s own MCP tool and web
+  route always required the explicit argument.
+
+  `mm context pull … --scope project_shared` now takes
+  `--confirm-project-shared`. Nothing you run today stops working: through
+  0.5.x a bare `--yes` still carries the consent and prints a one-line notice
+  on stderr naming the change; from **0.6.0** it is refused with the same
+  message the other commands give — "`--yes` alone is not sufficient". On the
+  `user` tier `--yes` is untouched: it never meant consent there, only "skip
+  the prompt".
+
+  The notice fires whenever `--yes` is carrying the consent on its own — pass
+  both flags and it stays quiet, because there is nothing left to migrate. It
+  also fires on runs that then refuse for an unrelated reason, so a scheduled
+  job finds out it needs updating without having to succeed first. The audit line keeps
+  reporting `flag='--yes'` while the old spelling is in use, which is how you
+  find the scripts still to migrate before the flip.
+
+  **Upgrading:** replace `--yes` with `--confirm-project-shared` in any
+  `mm context pull … --scope project_shared` invocation. (#2318)
+
 ### Added
 
 - **Hand one skill, command, or agent to someone else as a file.**

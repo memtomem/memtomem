@@ -731,7 +731,12 @@ def emit_exemption_audit(
 #: How a caller established the ``project_shared`` consent that
 #: :func:`emit_project_shared_confirmation` records.
 #:
-#: ``flag``     — a CLI ``--confirm-project-shared`` was passed.
+#: ``flag``     — a CLI flag was passed. Normally ``--confirm-project-shared``;
+#:                where a surface accepts another spelling, the caller names it
+#:                in ``audit_context`` as ``flag='--…'`` so the two are told
+#:                apart without a second mechanism value. The only such spelling
+#:                is ``mm context pull``'s deprecated ``--yes``, which stops
+#:                satisfying Gate B in 0.6.0 (#2318).
 #: ``prompt``   — a CLI interactive confirm was answered yes.
 #: ``param``    — an MCP tool kwarg / library kwarg ``confirm_project_shared=True``.
 #: ``request``  — a web request body/query field said true.
