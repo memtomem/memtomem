@@ -132,20 +132,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   that call now needs the confirmation. Ordinary `user` and `project_local`
   writes are unchanged and are asked nothing.
 
-  Deciding the tier turned out to be the whole difficulty, because the path
-  *spelling* answers it wrong in both directions. A registered shared root now
-  decides the tier for everything beneath it, so a target buried at
-  `<root>/sub/.memtomem/memories.local/note.md` is treated as the git-tracked
-  write it is rather than as the private tier its innermost path component
-  imitates. In the other direction the default user memory directory is
-  literally `~/.memtomem/memories`, which matches the shared pattern exactly —
-  so a target covered by a configured memory directory is settled as `user`
-  before any pattern test runs, and only a path covered by no configured
-  directory at all is refused for looking canonical without being registered.
-  Finally, when one directory is listed as both a user and a project memory
-  directory, the automatic daily file really is in the tracked tier: the scan
-  is now told so, and refuses a bypass there too. Whether that automatic write
-  should also *ask* is left to #2322, which exists to decide it.
+  Deciding *which* tier turned out to be the whole difficulty, because the
+  path's spelling answers it wrong in both directions. A registered project
+  directory now decides the tier for everything beneath it, so a target buried
+  at `<shared-root>/sub/.memtomem/memories.local/note.md` is treated as the
+  git-tracked write it is rather than as the private tier its innermost path
+  component imitates. In the other direction the default user memory directory
+  is literally `~/.memtomem/memories`, which matches the shared pattern
+  exactly — so a target covered by a configured memory directory is settled as
+  personal before any pattern test runs, and only a path covered by no
+  configured directory at all is refused for looking canonical without being
+  registered.
+
+  That still leaves the gates and the stored notes answering to different
+  judges: the gates protect the write, while editing or deleting a note later
+  reads the tier recorded on the note itself. Where those two would disagree,
+  the write is refused rather than left behind as a note that could not be
+  protected again — in either direction, whether the write is guarded and the
+  note is not, or the note lands in the shared tier having been guarded as
+  personal.
+
+  Both gates also apply when the destination is chosen for you. If one
+  directory is configured as both a personal and a project memory directory,
+  the automatic daily file really is in the tracked tier, and the write asks
+  and scans accordingly.
 
   This was missed because the *other* LangGraph adapter in the same package —
   the JSON-backed `MemtomemBaseStore` — does carry the gate, so a search for

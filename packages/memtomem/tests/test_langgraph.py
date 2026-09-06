@@ -1710,17 +1710,23 @@ class TestAddProjectSharedGateB:
         assert consent_lines(caplog) == []
 
     @pytest.mark.asyncio
-    async def test_registered_shared_root_wins_over_a_nested_canonical_path(
+    async def test_a_target_the_indexer_would_file_differently_is_refused(
         self, tmp_path, monkeypatch, caplog
     ):
-        """Ownership beats spelling.
+        """Ownership and spelling must agree, or nothing is written.
 
         ``<shared-root>/sub/.memtomem/memories.local/x.md`` lands inside the
-        tree the shared root registered, but the raw path classifier searches
-        the ``memories.local`` pattern first and answers ``project_local`` —
-        a tier that asks for no confirmation and lets ``force_unsafe`` through.
-        The registered root covering the target decides instead, so this is a
-        ``project_shared`` write and is gated as one.
+        tree the shared root registered, so ownership says ``project_shared``.
+        The indexer classifies by path shape, finds the inner pattern first,
+        and would file the row as ``project_local``. Gating the write on the
+        stricter answer protects the write and not the row: ``mem_edit`` and
+        ``mem_delete`` read the tier from the row, so a note nobody could add
+        without consent would afterwards be rewritable without it.
+
+        Both halves matter, so both are asserted. Reverting the ownership rule
+        to the raw classifier makes the two answers agree on ``project_local``
+        and the write simply lands, unasked — which is why this test would
+        rather see a refusal than a confirmation prompt.
         """
         import logging
 
@@ -1741,26 +1747,145 @@ class TestAddProjectSharedGateB:
         finally:
             await store.close()
 
-        assert refused["error"] == "project_shared_confirmation_required"
-        assert not nested.exists(), "nothing may land under the shared root unasked"
+        assert refused["error"] == "tier_would_not_round_trip"
+        assert "project_shared" in refused["detail"]
+        assert "project_local" in refused["detail"]
+        assert not nested.exists(), "nothing may land under the shared root"
         assert consent_lines(caplog) == []
 
     @pytest.mark.asyncio
-    async def test_overlapping_registries_give_gate_a_the_real_tier(
+    async def test_a_registered_root_that_cannot_name_its_own_tier_is_refused(
         self, tmp_path, monkeypatch, caplog
     ):
-        """A day file in an overlapping registry is scanned as what it is.
+        """The same rule, caught from the other side.
+
+        A ``project_memory_dirs`` entry whose own path is not canonical —
+        ``<base>/registered`` with no ``.memtomem`` in it — cannot say which
+        tier it is, so it does not get to decide one. That alone would let the
+        target fall through to the user-directory branch and be gated as
+        ``user`` while the indexer files the row as ``project_shared``: the
+        original bug, reached through a different door. The round-trip check
+        is what closes it, which is why this case belongs beside the one
+        above rather than in its own corner.
+        """
+        import logging
+
+        from helpers import consent_lines, isolate_memtomem_env
+
+        isolate_memtomem_env(monkeypatch)
+
+        base = tmp_path / "base"
+        registered = base / "registered"
+        registered.mkdir(parents=True)
+        target = registered / "nested" / ".memtomem" / "memories" / "x.md"
+
+        store = self._store(tmp_path, "m", memory_dirs=[base], project_memory_dirs=[registered])
+        try:
+            with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+                refused = await store.add(self._SECRET, file=str(target), force_unsafe=True)
+        finally:
+            await store.close()
+
+        assert refused["error"] == "tier_would_not_round_trip"
+        assert not target.exists(), "a force_unsafe secret must not reach a tracked path"
+        assert consent_lines(caplog) == []
+
+    @pytest.mark.asyncio
+    async def test_a_project_root_beats_a_user_root_that_also_covers_the_target(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Registry precedence, pinned where the two registries overlap.
+
+        Every other explicit-target case here keeps ``memory_dirs`` and
+        ``project_memory_dirs`` on disjoint branches of the tree, so the order
+        of the two lookups never shows. Here the user root is an *ancestor* of
+        the registered project root, which is the ordinary shape once the user
+        directory is ``~/.memtomem`` — and asking the user branch first would
+        quietly demote a git-tracked target to ``user``.
+        """
+        import logging
+
+        from helpers import consent_lines, isolate_memtomem_env
+
+        isolate_memtomem_env(monkeypatch)
+
+        root = tmp_path / "u"
+        shared = root / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        target = shared / "note.md"
+
+        store = self._store(tmp_path, "p", memory_dirs=[root], project_memory_dirs=[shared])
+        try:
+            with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+                refused = await store.add(self._CLEAN, file=str(target))
+                allowed = await store.add(
+                    self._CLEAN, file=str(target), confirm_project_shared=True
+                )
+        finally:
+            await store.close()
+
+        assert refused["error"] == "project_shared_confirmation_required"
+        assert allowed.get("error") is None, allowed
+        assert len(consent_lines(caplog)) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reversed_order", [False, True])
+    async def test_the_most_specific_covering_root_decides(
+        self, tmp_path, monkeypatch, caplog, reversed_order
+    ):
+        """Two registered roots both cover the target; the inner one wins.
+
+        Run in both configuration orders, because a rule that reads the first
+        covering root rather than the most specific one is right half the time
+        by luck. The inner tier is ``project_local``, which asks for nothing —
+        so getting this wrong shows up as an unnecessary confirmation demand
+        rather than a missing one, and would otherwise look harmless.
+        """
+        import logging
+
+        from helpers import consent_lines, isolate_memtomem_env
+
+        isolate_memtomem_env(monkeypatch)
+
+        user_dir = tmp_path / "user_mem"
+        outer = tmp_path / "proj" / ".memtomem" / "memories"
+        inner = outer / "s" / ".memtomem" / "memories.local"
+        user_dir.mkdir(parents=True)
+        inner.mkdir(parents=True)
+        roots = [inner, outer] if reversed_order else [outer, inner]
+        target = inner / "note.md"
+
+        store = self._store(
+            tmp_path, f"s{int(reversed_order)}", memory_dirs=[user_dir], project_memory_dirs=roots
+        )
+        try:
+            with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+                result = await store.add(self._CLEAN, file=str(target))
+        finally:
+            await store.close()
+
+        # project_local: gitignored, so no confirmation and no consent record.
+        assert result.get("error") is None, result
+        assert self._CLEAN in target.read_text(encoding="utf-8")
+        assert consent_lines(caplog) == []
+
+    @pytest.mark.asyncio
+    async def test_overlapping_registries_gate_the_derived_day_file_too(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """An automatic destination in the tracked tier is still a tracked write.
 
         Configuration permits one directory in both ``memory_dirs`` and
         ``project_memory_dirs``. The derived day file then genuinely lives in
-        the git-tracked tier, and the indexer tags it ``project_shared`` — so
-        telling Gate A it is ``user`` would leave the ``force_unsafe`` hole
-        open on exactly the kind of path this change exists to close.
+        the git-tracked tier, and both gates apply to it — the destination
+        being chosen for the caller rather than by them changes who picked the
+        path, not who reads the result.
 
-        Gate B deliberately does **not** fire here: this branch's destination
-        is derived rather than chosen by the caller, and whether an automatic
-        write should grow a confirmation argument is the open question in
-        #2322. Both halves are asserted so neither can drift alone.
+        This was briefly deferred to #2322 on the theory that an automatic
+        write should not grow a confirmation argument. #2322 turns out to
+        enumerate four *other* writers and to say in its own text that the
+        caller-controlled case belongs to this adapter, so there was nothing
+        to defer it to.
         """
         import logging
 
@@ -1774,14 +1899,20 @@ class TestAddProjectSharedGateB:
 
         try:
             with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
-                # Gate B does not fire: no confirmation passed, the write lands.
-                clean = await store.add(self._CLEAN)
-                # Gate A does: the tier is real, so the bypass valve is shut.
-                refused = await store.add(self._SECRET, force_unsafe=True)
+                refused = await store.add(self._CLEAN)
+                allowed = await store.add(self._CLEAN, confirm_project_shared=True)
+                blocked = await store.add(
+                    self._SECRET, force_unsafe=True, confirm_project_shared=True
+                )
         finally:
             await store.close()
 
-        assert clean.get("error") is None, clean
-        assert refused["error"] == "redaction_blocked_project_shared"
-        # No consent was asked for on the derived branch, so none is recorded.
-        assert consent_lines(caplog) == []
+        # Gate B: an unconfirmed automatic write into the tracked tier refuses.
+        assert refused["error"] == "project_shared_confirmation_required"
+        # Confirmed, it lands, and records exactly one consent.
+        assert allowed.get("error") is None, allowed
+        # Gate A: the tier is real, so the bypass valve stays shut.
+        assert blocked["error"] == "redaction_blocked_project_shared"
+        lines = consent_lines(caplog)
+        assert len(lines) == 2, lines
+        assert all("confirmed_via=langgraph_add" in line for line in lines)
