@@ -308,6 +308,75 @@ async def test_collision_409_destination_exists(client, cwd_root: Path, tmp_path
     assert "destination already exists" in detail["message"]
 
 
+def _usurp_staging_after_scan(monkeypatch, dst_store):
+    """Replace the in-flight staging entry once Gate A has read ours (#2314).
+
+    Faithful to the engine's own cells: the swap happens between the scan and
+    the promote, which is the window the claim's identity exists to survive.
+    Returns the list the pathname is appended to, so the cell can assert the
+    replacement was left alone.
+    """
+    from memtomem.context import transfer as transfer_mod
+
+    real_scan = transfer_mod.scan_artifact_tree
+    replaced = []
+
+    def scan_then_usurp(*args, **kwargs):
+        result = real_scan(*args, **kwargs)
+        staged = [p for p in dst_store.glob(".migrate-*") if not p.name.endswith(".aside")]
+        assert len(staged) == 1, staged
+        staged[0].rename(staged[0].with_name(staged[0].name + ".aside"))
+        staged[0].mkdir()
+        # umask-independent: a pathological umask elsewhere in this suite would
+        # otherwise leave the replacement unsearchable (0o177 clears owner-x).
+        staged[0].chmod(0o700)
+        (staged[0] / "theirs.md").write_text("theirs", encoding="utf-8")
+        replaced.append(staged[0])
+        return result
+
+    monkeypatch.setattr(transfer_mod, "scan_artifact_tree", scan_then_usurp)
+    return replaced
+
+
+@pytest.mark.asyncio
+async def test_replaced_staging_409_transfer_staging_replaced(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry replaced out of band is a conflict with its own code (#2314).
+
+    Twin of the MCP action's ``refused: transfer_staging_replaced``. Without
+    this arm the route answers 500 for a state the caller can act on, and the
+    engine's refusal — which is what kept the usurper's entry alive — reads as
+    a server fault.
+    """
+    _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    dst_store = _shared_agents(other)
+    dst_store.mkdir(parents=True, exist_ok=True)
+    replaced = _usurp_staging_after_scan(monkeypatch, dst_store)
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "to_target_scope": "project_shared",
+            "to_project_scope_id": scope_b,
+            "confirm_project_shared": True,
+        },
+    )
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "conflict"
+    assert detail["reason_code"] == "transfer_staging_replaced"
+    # The wire truncates at 200 characters, so the remediation has to arrive
+    # in front of the paths — the same shape the busy arm above pins.
+    assert "was replaced out of band" in detail["message"]
+    assert "Inspect it by hand, then retry." in detail["message"]
+    assert (replaced[0] / "theirs.md").exists()
+
+
 @pytest.mark.asyncio
 async def test_staging_collision_409_transfer_staging_busy(
     client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

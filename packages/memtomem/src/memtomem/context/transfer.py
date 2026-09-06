@@ -50,7 +50,6 @@ untracked, with the reason on the result
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import logging
 import os
@@ -101,7 +100,11 @@ from memtomem.context.migrate import (
     SCOPE_MIGRATABLE_KINDS,
     ArtifactNotFoundError,
     MigratePartialError,
+    RestoreOutcome,
+    StagingClaim,
+    StagingIdentityLostError,
     _detect_source_scope,
+    _discard_claimed_staging,
     _existing_fanout_targets,
     _promote_move,
     _remove_runtime_fanout_for,
@@ -499,16 +502,24 @@ def _provenance_fields(
     return "not_carried", plan.reason, plan.reason_code
 
 
-def _remove_entry(entry: Path) -> None:
+def _remove_entry(entry: StagingClaim) -> None:
     """Remove one internal entry we created, STRICTLY — errors propagate.
 
-    The sibling of :func:`_remove_staging` for the one removal whose failure
+    Takes the CLAIM: this removal consumes whatever answers to the pathname,
+    and an entry replaced out of band is not ours to delete (#2314). A lost
+    identity raises :class:`StagingIdentityLostError`, which is an ``OSError``
+    and therefore reaches the caller's existing arm — reported as the partial
+    move it is, rather than silently leaving a stale duplicate or destroying
+    somebody else's entry.
+
+    The strict sibling of :func:`~memtomem.context.migrate._remove_staging_entry`
+    for the one removal whose failure
     the caller must hear about: the EXDEV holding entry, dropped once the
     destination canonical is in place (#2313). Swallowing an error there would
     report a completed move while the pre-move bytes are still on disk under a
     name nothing reaps and nothing lists.
 
-    Link-first, for the reason :func:`_remove_staging` spells out: both
+    Link-first, for the reason ``_remove_staging_entry`` spells out: both
     ``exists()`` and ``is_dir()`` follow links, so a directory symlink would
     otherwise reach ``shutil.rmtree``, which refuses a link. A flat canonical
     can itself be a symlink, and it is parked as a link.
@@ -520,13 +531,16 @@ def _remove_entry(entry: Path) -> None:
     ``ENOENT`` is accepted only after LOOKING, so a removal that failed for
     some other reason and left the entry behind is still reported.
     """
+    path = entry.path
+    if os.path.lexists(path):
+        entry.assert_still_ours("remove the pre-move copy")
     try:
-        if entry.is_symlink() or not entry.is_dir():
-            entry.unlink()
+        if path.is_symlink() or not path.is_dir():
+            path.unlink()
             return
-        shutil.rmtree(entry)
+        shutil.rmtree(path)
     except FileNotFoundError:
-        if os.path.lexists(entry):
+        if os.path.lexists(path):
             raise
 
 
@@ -572,29 +586,7 @@ def _log_rollback_survivors(src_path: Path, *candidates: Path) -> None:
     )
 
 
-def _remove_staging(staging: Path) -> None:
-    """Best-effort removal of a staging entry whose bytes are safe elsewhere.
-
-    The symlink test comes first, and both other tests are reached only when
-    the entry is not a link: ``exists()`` and ``is_dir()`` follow links, so a
-    dangling staging link answers False to the first (leaked, never removed)
-    and a link to a directory answers True to the second (``rmtree`` refuses a
-    link, also a leak). Staging can be a link since ``_stage_copy_into``
-    preserves a symlink source as a link rather than dereferencing it.
-    """
-    if staging.is_symlink():
-        with contextlib.suppress(OSError):
-            staging.unlink()
-        return
-    if staging.exists():
-        if staging.is_dir():
-            shutil.rmtree(staging, ignore_errors=True)
-        else:
-            with contextlib.suppress(OSError):
-                staging.unlink()
-
-
-def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> Path:
+def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> StagingClaim:
     """Copy *src* into a same-dir staging entry under *dst_parent*.
 
     Copy-mode sibling of :func:`memtomem.context.migrate._stage_move`:
@@ -608,14 +600,17 @@ def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> Path:
 
     The name is claimed exclusively and a colliding entry is never cleared:
     a copy's staging is rebuildable but the name cannot say whose leftover it
-    found, and a move's staging can be the only copy of an artifact.
+    found, and a move's staging can be the only copy of an artifact. The
+    returned :class:`StagingClaim` carries the identity of the object the
+    claim created, so cleanup and promotion act on that object rather than on
+    the pathname again (#2314).
     """
     dst_parent.mkdir(parents=True, exist_ok=True)
     return _stage_copy_into(src, dst_parent, name_hint)
 
 
 def _rewrite_staged_manifest_name(
-    staging: Path,
+    staging: StagingClaim,
     kind: ArtifactKind,
     layout: Literal["dir", "flat"],
     new_name: str,
@@ -659,7 +654,15 @@ def _rewrite_staged_manifest_name(
     (ADR-0022) and override bytes are verbatim-by-contract. The caller
     surfaces a :attr:`TransferResult.notes` entry when overrides exist.
     """
-    manifest = staging if layout == "flat" else staging / _DIR_MANIFEST[kind]
+    # Before reading, not only before writing (the write has its own check
+    # below): for a flat artifact the manifest IS the staging entry, so
+    # without this a replaced entry has ITS bytes read and its frontmatter
+    # parsed — and ``rewrite_manifest_name_bytes`` refuses some manifests
+    # loudly, so a stranger's file would decide which error this transfer
+    # reports. The two guards name different actions so a failure says which
+    # one caught it (#2314).
+    staging.assert_still_ours("read the staged manifest for a rename")
+    manifest = staging.path if layout == "flat" else staging.path / _DIR_MANIFEST[kind]
     original = manifest.read_bytes()
     rewritten = rewrite_manifest_name_bytes(original, new_name, manifest_label=manifest.name)
     if rewritten == original:
@@ -668,7 +671,28 @@ def _rewrite_staged_manifest_name(
     # surface-wide (test_context_atomic_write_guard): no bare writes on
     # gateway modules. Mode is preserved from the copied manifest —
     # copy semantics, not the helper's 0600 default.
-    atomic_write_bytes(manifest, rewritten, mode=stat.S_IMODE(manifest.stat().st_mode))
+    placed = atomic_write_bytes(
+        manifest,
+        rewritten,
+        mode=stat.S_IMODE(manifest.stat().st_mode),
+        # Re-asked in the last instant before the replace: for a flat artifact
+        # the replace consumes the staging entry itself, and the check above
+        # this call is a whole read-and-rewrite older (#2314 round 2).
+        before_replace=(
+            (lambda: staging.assert_still_ours("rewrite the staged manifest"))
+            if layout == "flat"
+            else None
+        ),
+    )
+    if layout == "flat":
+        # ``atomic_write_bytes`` is mkstemp + ``os.replace``, so for a flat
+        # artifact — where the manifest IS the staging entry — that write just
+        # replaced the inode the claim recorded. The claim adopts the number
+        # the WRITE reports, off its own descriptor; looking the pathname up
+        # again would adopt an entry someone else may have put there. The
+        # obligation lives here, in the function that does the replacing,
+        # rather than with callers.
+        staging.adopt(placed)
 
 
 def rewrite_manifest_name_bytes(
@@ -1170,10 +1194,11 @@ def transfer_artifact(
         provenance_plan = _plan_provenance()
 
         if mode == "copy":
-            staging = _stage_copy(src_path, dst_path.parent, name_hint=dst_name)
+            claimed = _stage_copy(src_path, dst_path.parent, name_hint=dst_name)
+            staging = claimed.path
             try:
                 if new_name is not None:
-                    _rewrite_staged_manifest_name(staging, kind, layout, new_name)
+                    _rewrite_staged_manifest_name(claimed, kind, layout, new_name)
                     if layout == "dir":
                         # Shared derivation with the dry-run preview (probed
                         # off src there) — see _rename_overrides_note. Appended,
@@ -1199,7 +1224,7 @@ def transfer_artifact(
                             ),
                         )
                 try:
-                    _promote_move(staging, dst_path)
+                    _promote_move(claimed, dst_path)
                 except FileExistsError as exc:
                     # TOCTOU: an external writer (one not holding our sidecar
                     # lock) created dst between the in-lock ``dst_path.exists()``
@@ -1215,11 +1240,15 @@ def transfer_artifact(
                 # Copy staging never consumed the source — the source
                 # bytes are intact at src_path by construction, so
                 # dropping staging is always safe (zero residue at the
-                # destination, nothing to rename back).
-                _remove_staging(staging)
+                # destination, nothing to rename back). "Dropping staging"
+                # means the object this claim created, not the pathname:
+                # an entry replaced out of band belongs to whoever made it
+                # and is left alone with a warning (#2314).
+                _discard_claimed_staging(claimed)
                 raise
         else:
-            staging, holding = _stage_move(src_path, dst_path.parent, name_hint=name)
+            claimed, holding = _stage_move(src_path, dst_path.parent, name_hint=name)
+            staging = claimed.path
 
             try:
                 # Gate A on the staged content if landing in project_shared.
@@ -1250,7 +1279,7 @@ def transfer_artifact(
                         )
 
                 try:
-                    _promote_move(staging, dst_path)
+                    _promote_move(claimed, dst_path)
                 except FileExistsError as exc:
                     # Same promote-window TOCTOU as the copy branch — typed
                     # collision so the move rollback below runs and the caller
@@ -1258,7 +1287,7 @@ def transfer_artifact(
                     raise TransferCollisionError(
                         f"destination appeared during promote: {dst_path}."
                     ) from exc
-            except BaseException:
+            except BaseException as exc:
                 # Roll back: put bytes back at src so the caller can retry
                 # without manual cleanup.
                 #
@@ -1288,7 +1317,7 @@ def transfer_artifact(
                 # something removed the holding entry meanwhile, staging is
                 # the only copy left, so it may only be dropped once the
                 # restore has actually succeeded.
-                restore_from = staging if holding is None else holding
+                restore_from = claimed if holding is None else holding
                 cleanup_staging = False
                 if os.path.lexists(src_path):
                     # src has reappeared — not by us. Don't overwrite the new
@@ -1306,7 +1335,7 @@ def transfer_artifact(
                         "were not put back — manual reconciliation required.",
                         src_path,
                     )
-                elif os.path.lexists(restore_from):
+                elif os.path.lexists(restore_from.path):
                     # src is gone as expected; try the rename-back. Success
                     # means the bytes are home and any remaining copy is
                     # redundant; a refusal preserves everything and logs.
@@ -1323,11 +1352,36 @@ def transfer_artifact(
                     # it is still same-filesystem, since staging only exists
                     # because that rename succeeded (#2309/#2312). The EXDEV
                     # holding entry is a sibling of src and keeps the guard.
-                    cleanup_staging = _restore_source(
+                    outcome = _restore_source(
                         restore_from,
                         src_path,
                         allow_cross_parent=holding is None,
                     )
+                    cleanup_staging = outcome is RestoreOutcome.RESTORED
+                    if outcome is RestoreOutcome.IDENTITY_LOST:
+                        # The entry holding the pre-move bytes was replaced out
+                        # of band, and the stage consumed the source by an
+                        # atomic rename on BOTH paths — so the artifact is not
+                        # where the user left it, and it is not anywhere we can
+                        # name. That is a PARTIAL transfer, the state
+                        # ``MigratePartialError`` exists for and the one every
+                        # surface renders with its recovery text intact rather
+                        # than as a retryable conflict. Asked as an OUTCOME of
+                        # the restore rather than as a check before it, so the
+                        # answer cannot go stale between the two (#2314).
+                        raise MigratePartialError(
+                            f"transfer left {kind}/{name} unaccounted for: the "
+                            f"move consumed the source and the entry holding "
+                            f"its bytes was replaced out of band, so it was "
+                            f"neither promoted nor rolled back. Do NOT retry — "
+                            f"look for the artifact in {restore_from.path.parent} "
+                            f"under a name it was renamed to, and restore it to "
+                            f"{src_path} by hand. The entry now at "
+                            f"{restore_from.path} belongs to whoever put it "
+                            f"there.",
+                            src_path=src_path,
+                            dst_path=dst_path,
+                        ) from exc
                 else:
                     # The entry that held the pre-move bytes is gone too, so
                     # there is no rename to attempt. Same-FS ends here with
@@ -1339,7 +1393,7 @@ def transfer_artifact(
                         "that held the pre-move bytes (%s) — nothing to rename "
                         "back.",
                         src_path,
-                        restore_from,
+                        restore_from.path,
                     )
 
                 if not cleanup_staging:
@@ -1349,13 +1403,15 @@ def transfer_artifact(
                     # come from that probe: the EXDEV path keeps a second copy
                     # at the destination on purpose (#2313), and the holding
                     # entry it names may itself be what went missing (#2327).
-                    _log_rollback_survivors(src_path, restore_from, staging)
+                    _log_rollback_survivors(src_path, restore_from.path, staging)
 
                 if cleanup_staging and holding is not None:
                     # Same-FS restored staging itself, so there is nothing
                     # left to drop; only the EXDEV path still has a copy at
-                    # the destination, now provably redundant.
-                    _remove_staging(staging)
+                    # the destination, now provably redundant — and "drop"
+                    # means the object this claim created, never the pathname
+                    # (#2314).
+                    _discard_claimed_staging(claimed)
                 raise
 
             # EXDEV cleanup — the promoted destination now holds the bytes, so
@@ -1368,6 +1424,31 @@ def transfer_artifact(
             if holding is not None:
                 try:
                     _remove_entry(holding)
+                except StagingIdentityLostError as exc:
+                    # The destination canonical is in place, so the move
+                    # COMMITTED; what failed is dropping the pre-move copy —
+                    # and the reason is that the entry at that name is no
+                    # longer the one we parked. The generic partial-move
+                    # message must not be reused here: it tells the operator
+                    # to remove that path, which this error proves is somebody
+                    # else's (#2314 round 3). Point them at the object instead.
+                    logger.error(
+                        "EXDEV cleanup: %s no longer names the pre-move copy "
+                        "this transfer parked; leaving it alone.",
+                        holding.path,
+                    )
+                    raise MigratePartialError(
+                        f"{kind}/{name} was moved to {dst_path}, but the "
+                        f"pre-move copy could not be cleaned up: the entry at "
+                        f"{holding.path} is no longer the one this transfer "
+                        f"parked there, so it was left untouched — do NOT "
+                        f"remove it. Verify {dst_path} holds the artifact you "
+                        f"expect, then look for the parked copy in "
+                        f"{holding.path.parent} under a name it was renamed to "
+                        f"and remove that. Fan-out cleanup has not run.",
+                        src_path=holding.path,
+                        dst_path=dst_path,
+                    ) from exc
                 except OSError as exc:
                     # Canonical is at dst but the pre-move copy survives.
                     # Rolling back dst would just restore the duplicate state
@@ -1378,14 +1459,14 @@ def transfer_artifact(
                     # operator has not run (#895 P2 review #5).
                     logger.error(
                         "EXDEV cleanup: failed to remove the pre-move source copy %s: %s",
-                        holding,
+                        holding.path,
                         exc,
                     )
                     raise MigratePartialError(
                         _partial_move_message(
                             kind,
                             name,
-                            holding,
+                            holding.path,
                             dst_path,
                             src_scope,
                             to_scope,
@@ -1393,7 +1474,7 @@ def transfer_artifact(
                             cross_root,
                             sync_command,
                         ),
-                        src_path=holding,
+                        src_path=holding.path,
                         dst_path=dst_path,
                     ) from exc
 

@@ -553,9 +553,30 @@ def fsync_dir(path: Path) -> bool:
 
 
 def atomic_write_bytes(
-    path: Path, data: bytes, mode: int = 0o600, *, full_fsync: bool = False
-) -> None:
+    path: Path,
+    data: bytes,
+    mode: int = 0o600,
+    *,
+    full_fsync: bool = False,
+    before_replace: Callable[[], None] | None = None,
+) -> tuple[int, int]:
     """Atomically write *data* to *path* with an explicit file mode.
+
+    ``before_replace`` runs in the last instant before ``os.replace``, after
+    the tempfile is written and flushed, and may raise to abort the write —
+    nothing is replaced and the tempfile is removed. It exists because the
+    replace is a CONSUMER of whatever currently occupies *path*: a caller that
+    checked its ownership earlier in the function has a whole write's worth of
+    window behind that answer, and this is the only place a fresher check can
+    be taken (#2314). It does not close the gap between the check and the
+    ``os.replace`` one line below it; nothing portable does.
+
+    Returns ``(st_dev, st_ino)`` of the object it placed at *path*, read off
+    the tempfile's own descriptor BEFORE the rename. Callers that track a
+    staging entry by identity need that number and cannot recover it
+    afterwards: this function replaces the inode at *path*, and re-reading the
+    pathname to find out what is there now would adopt whatever else may have
+    landed on it (#2314). Every other caller ignores the value.
 
     ``mode`` is applied via ``os.fchmod`` on the tempfile before the rename
     where available, so the result is independent of the process umask.
@@ -584,10 +605,16 @@ def atomic_write_bytes(
             f.write(data)
             f.flush()
             _fsync_fd(f.fileno(), full=full_fsync)
+            # Off the descriptor we own, while we still own it — the only
+            # moment this identity is knowable without a second lookup.
+            placed = os.fstat(f.fileno())
+        if before_replace is not None:
+            before_replace()
         os.replace(tmp_path, path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+    return (placed.st_dev, placed.st_ino)
 
 
 def atomic_write_text(

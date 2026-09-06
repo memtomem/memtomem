@@ -69,6 +69,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A transfer's cleanup and promote now act on the staging entry they
+  created, not on its name** (#2314) — `mm context move` / `copy`, receiving a
+  shared artifact file, and `mm context copy mcp-servers` all stage under a
+  private `.migrate-*` name they claim exclusively. That claim proves the name
+  was theirs at that instant; every step afterwards asked for the name again.
+  If something renamed the claimed entry aside and put its own entry there, a
+  failed transfer deleted that replacement, and a successful one could rename
+  it onto the canonical name — publishing an artifact nobody scanned, while
+  the real one stayed lost under whatever name it had been given. Each step
+  now checks that the name still points at the object it made, and does
+  nothing when it does not: nothing removed, nothing promoted, and a message
+  saying which entry needs a human. Surfaces report it the way they already
+  report a busy staging name — a one-line CLI error, 409
+  `transfer_staging_replaced` on the web route, and `refused:
+  transfer_staging_replaced:` from the MCP actions — with the instruction in
+  front of the paths, so it survives the wire's truncation. This narrows the
+  race rather than closing it; the verify and the act are still two calls, and
+  a filesystem that cannot report file identity at all (some Windows network
+  shares) is now refused rather than silently trusted.
+
 - **A store path that is not a directory is reported as that, instead of as a
   collision with an artifact that is not there** (#2319) — several operations
   answer "the destination name is taken" by looking at the error a no-replace

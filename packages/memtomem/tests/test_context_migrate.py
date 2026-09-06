@@ -68,7 +68,8 @@ def test_stage_move_produces_an_internal_artifact_name(tmp_path: Path) -> None:
     src.mkdir()
     (src / "agent.md").write_text("---\nname: reviewer\n---\nbody\n", encoding="utf-8")
 
-    staging, holding = _stage_move(src, tmp_path / "dest", name_hint="reviewer")
+    claimed, holding = _stage_move(src, tmp_path / "dest", name_hint="reviewer")
+    staging = claimed.path
 
     assert staging.is_dir()
     assert is_internal_artifact_dir(staging.name), staging.name
@@ -333,7 +334,8 @@ class TestStagingCollisionNeverClearsTheCollider:
         before = _collider_state(planted)
         src = _src_tree(tmp_path)
 
-        staging, holding = _stage_move(src, dst_parent, name_hint="reviewer")
+        claimed, holding = _stage_move(src, dst_parent, name_hint="reviewer")
+        staging = claimed.path
 
         assert staging == _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[1])
         assert (staging / "agent.md").read_text(encoding="utf-8") == "source"
@@ -475,15 +477,16 @@ class TestStagingCollisionNeverClearsTheCollider:
         before = _collider_state(planted)
         src = _src_tree(tmp_path)
 
-        staging, holding = _stage_move(src, dst_parent, name_hint="reviewer")
+        claimed, holding = _stage_move(src, dst_parent, name_hint="reviewer")
+        staging = claimed.path
 
         assert staging == _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[1])
         assert (staging / "agent.md").read_text(encoding="utf-8") == "source"
         # The copy fallback reads the holding entry, so the source is gone
         # from its canonical path and its bytes are parked beside it.
-        assert holding == _forced_staging_path(src.parent, "reviewer", _FORCED_HEX[3])
+        assert holding.path == _forced_staging_path(src.parent, "reviewer", _FORCED_HEX[3])
         assert not src.exists()
-        assert (holding / "agent.md").read_text(encoding="utf-8") == "source"
+        assert (holding.path / "agent.md").read_text(encoding="utf-8") == "source"
         assert _collider_state(planted) == before
 
     @pytest.mark.requires_symlinks
@@ -521,15 +524,16 @@ class TestStagingCollisionNeverClearsTheCollider:
         src.parent.mkdir(parents=True)
         src.symlink_to(outside)
 
-        staging, holding = _stage_move(src, dst_parent, name_hint="reviewer")
+        claimed, holding = _stage_move(src, dst_parent, name_hint="reviewer")
+        staging = claimed.path
 
         assert staging.is_symlink()
         # The source link itself was parked, so the comparison is against the
         # holding entry — a link renamed to a sibling name keeps its target,
         # relative ones included, because the directory it resolves from has
         # not changed (#2313).
-        assert holding is not None and holding.is_symlink()
-        assert _same_link_target(staging, holding)
+        assert holding is not None and holding.path.is_symlink()
+        assert _same_link_target(staging, holding.path)
         assert not os.path.lexists(src)
 
         # A link and a copy both answer is_symlink()-adjacent questions the
@@ -648,12 +652,13 @@ class TestStagingCollisionNeverClearsTheCollider:
         # so asking afterwards would compare a real answer with an absence.
         expected_kind = _link_target_is_directory(src)
 
-        staging, holding = _stage_move(src, dst_parent, name_hint="reviewer")
+        claimed, holding = _stage_move(src, dst_parent, name_hint="reviewer")
+        staging = claimed.path
 
         assert staging.is_symlink()
         assert _link_target_is_directory(staging) == expected_kind
         assert holding is not None
-        assert _link_target_is_directory(holding) == expected_kind
+        assert _link_target_is_directory(holding.path) == expected_kind
 
     @pytest.mark.requires_symlinks
     @pytest.mark.parametrize("target", ["dir", "dangling"])
@@ -818,8 +823,15 @@ class TestPromoteMoveRefusesAnOccupiedDestination:
     """
 
     @staticmethod
-    def _staging(tmp_path: Path, shape: str) -> Path:
-        """A ready-to-promote staging entry beside the destination."""
+    def _staging(tmp_path: Path, shape: str):  # -> StagingClaim (imported in-body)
+        """A ready-to-promote staging CLAIM beside the destination.
+
+        ``_promote_move`` takes the claim, not the path (#2314): promotion
+        consumes the entry, so it verifies the pathname still names the object
+        the claim recorded before renaming it onto the canonical name.
+        """
+        from memtomem.context.migrate import StagingClaim
+
         staging = tmp_path / "dest" / ".migrate-foo-1-aaaaaaaa.tmp"
         staging.parent.mkdir(parents=True, exist_ok=True)
         if shape == "dir":
@@ -827,7 +839,7 @@ class TestPromoteMoveRefusesAnOccupiedDestination:
             (staging / "agent.md").write_text("staged", encoding="utf-8")
         else:
             staging.write_text("staged", encoding="utf-8")
-        return staging
+        return StagingClaim.capture(staging)
 
     @pytest.mark.parametrize("staging_shape", ["dir", "flat"])
     @pytest.mark.parametrize(
@@ -843,7 +855,7 @@ class TestPromoteMoveRefusesAnOccupiedDestination:
         from memtomem.context.migrate import _promote_move
 
         staging = self._staging(tmp_path, staging_shape)
-        staged_before = _collider_state(staging)
+        staged_before = _collider_state(staging.path)
         dst = _plant(tmp_path / "dest" / "foo", collider)
         before = _collider_state(dst)
 
@@ -854,7 +866,7 @@ class TestPromoteMoveRefusesAnOccupiedDestination:
         # holds the bytes, so the caller's rollback still has something to
         # roll back.
         assert _collider_state(dst) == before
-        assert _collider_state(staging) == staged_before
+        assert _collider_state(staging.path) == staged_before
 
     @pytest.mark.parametrize("staging_shape", ["dir", "flat"])
     def test_promotes_onto_a_free_name(self, tmp_path, staging_shape):
@@ -865,7 +877,7 @@ class TestPromoteMoveRefusesAnOccupiedDestination:
 
         _promote_move(staging, dst)
 
-        assert not staging.exists()
+        assert not staging.path.exists()
         assert _collider_state(dst) == ("dir", repr((["agent.md"], ["staged"]))) or dst.is_file()
 
     def test_a_missing_staging_is_not_reported_as_a_collision(self, tmp_path):
@@ -875,13 +887,17 @@ class TestPromoteMoveRefusesAnOccupiedDestination:
         there" and "something else is in the way" are different
         emergencies, and only the second one is a collision.
         """
-        from memtomem.context.migrate import _promote_move
+        from memtomem.context.migrate import StagingClaim, _promote_move
 
         dst_parent = tmp_path / "dest"
         dst_parent.mkdir()
 
+        # An absent entry is not an identity mismatch — the claim check lets it
+        # through so the rename's own ENOENT is what the caller sees (#2314).
+        gone = StagingClaim.capture(dst_parent / ".migrate-gone.tmp")
+
         with pytest.raises(OSError) as exc_info:
-            _promote_move(dst_parent / ".migrate-gone.tmp", dst_parent / "foo")
+            _promote_move(gone, dst_parent / "foo")
 
         assert not isinstance(exc_info.value, FileExistsError)
         assert exc_info.value.errno == errno.ENOENT
@@ -931,12 +947,13 @@ class TestPromoteMoveRefusesAnOccupiedDestination:
         function's own signal for a taken destination. Hence the explicit
         translation.
         """
-        from memtomem.context.migrate import _promote_move
+        from memtomem.context.migrate import StagingClaim, _promote_move
 
         store = tmp_path / "store"
         store.mkdir()
-        staging = store / ".migrate-foo-1-aaaaaaaa.tmp"
-        staging.mkdir()
+        staging_path = store / ".migrate-foo-1-aaaaaaaa.tmp"
+        staging_path.mkdir()
+        staging = StagingClaim.capture(staging_path)
         dst = store / "foo"
         # An outside writer replaces the whole store directory with a file.
         shutil.rmtree(store)
@@ -1007,11 +1024,12 @@ class TestPromoteMoveRefusesAnOccupiedDestination:
         occupied destination could turn that into ``FileExistsError`` the
         early refusal would be silently downgraded to a routine collision.
         """
-        from memtomem.context.migrate import _promote_move
+        from memtomem.context.migrate import StagingClaim, _promote_move
 
-        staging = tmp_path / "elsewhere" / ".migrate-foo-1-aaaaaaaa.tmp"
-        staging.parent.mkdir(parents=True)
-        staging.mkdir()
+        staging_path = tmp_path / "elsewhere" / ".migrate-foo-1-aaaaaaaa.tmp"
+        staging_path.parent.mkdir(parents=True)
+        staging_path.mkdir()
+        staging = StagingClaim.capture(staging_path)
         (tmp_path / "dest").mkdir(parents=True)
         dst = _plant(tmp_path / "dest" / "foo", "full_dir")
 
@@ -1020,6 +1038,300 @@ class TestPromoteMoveRefusesAnOccupiedDestination:
 
         assert not isinstance(exc_info.value, FileExistsError)
         assert exc_info.value.errno == errno.EXDEV
+
+
+def _usurp(path: Path) -> Path:
+    """Rename whatever is at *path* aside and put a FOREIGN entry in its place.
+
+    The two halves are both load-bearing (#2314). The rename-aside is why a
+    by-name cleanup is a bug and not merely a redundancy: the object we created
+    survives under a name we no longer know, so deleting the pathname destroys
+    something that is not ours AND fails to reclaim what is. The replacement is
+    what a by-name cleanup actually removes.
+
+    Returns the aside path so a cell can assert both sides survived.
+    """
+    aside = path.with_name(path.name + ".aside")
+    path.rename(aside)
+    if aside.is_dir() and not aside.is_symlink():
+        path.mkdir()
+        # ``mkdir`` masks its mode with the ambient umask, and this suite sets
+        # a pathological one in places (0o177 clears the owner-exec bit), so an
+        # explicit chmod is what keeps this replacement readable whatever ran
+        # before it in the same worker.
+        path.chmod(0o700)
+        (path / "theirs.md").write_text("theirs", encoding="utf-8")
+    else:
+        path.write_text("theirs", encoding="utf-8")
+    return aside
+
+
+class TestStagingCleanupActsOnTheObjectItClaimed:
+    """#2314: a claim proves ownership of a NAME, at one instant only.
+
+    #2309 made the claim exclusive, which settles who owned the pathname when
+    the claim ran. Every cleanup afterwards then reached for the pathname
+    again — so an entry renamed aside and replaced between the claim and the
+    cleanup meant the cleanup deleted a stranger's object while ours leaked on
+    under another name. These cells drive that replacement at each removal
+    site and assert BOTH sides survive.
+
+    The actor is external and targeted (it must know a pathname carrying our
+    pid and 32 bits of randomness generated moments earlier), so these are
+    simulations of a narrow race, not of an in-tree writer — the issue sizes
+    that honestly and the fix is correspondingly cheap.
+    """
+
+    def test_a_failed_tree_fill_does_not_delete_a_replacement(self, tmp_path, monkeypatch):
+        import shutil as _shutil
+
+        from memtomem.context.migrate import _stage_copy_into
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        staged = _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0])
+        src = _src_tree(tmp_path)
+        aside: list[Path] = []
+
+        def usurp_then_fail(*_args, **_kwargs):
+            aside.append(_usurp(staged))
+            raise OSError(errno.EIO, "I/O error during copy")
+
+        monkeypatch.setattr(_shutil, "copytree", usurp_then_fail)
+
+        with pytest.raises(OSError) as exc_info:
+            _stage_copy_into(src, dst_parent, name_hint="reviewer")
+
+        assert exc_info.value.errno == errno.EIO
+        assert (staged / "theirs.md").read_text(encoding="utf-8") == "theirs"
+        assert aside[0].is_dir()
+
+    def test_a_failed_file_fill_does_not_delete_a_replacement(self, tmp_path, monkeypatch):
+        import shutil as _shutil
+
+        from memtomem.context.migrate import _stage_copy_into
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        staged = _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0])
+        src = tmp_path / "reviewer.md"
+        src.write_text("source", encoding="utf-8")
+        aside: list[Path] = []
+
+        def usurp_then_fail(*_args, **_kwargs):
+            aside.append(_usurp(staged))
+            raise OSError(errno.EIO, "I/O error during copy")
+
+        monkeypatch.setattr(_shutil, "copy2", usurp_then_fail)
+
+        with pytest.raises(OSError) as exc_info:
+            _stage_copy_into(src, dst_parent, name_hint="reviewer")
+
+        assert exc_info.value.errno == errno.EIO
+        assert staged.read_text(encoding="utf-8") == "theirs"
+        assert aside[0].is_file()
+
+    def test_a_cleanup_that_removes_nothing_says_so(self, tmp_path, monkeypatch, caplog):
+        """The leftover is invisible to discovery, so declining is not silent."""
+        import logging as _logging
+        import shutil as _shutil
+
+        from memtomem.context.migrate import _stage_copy_into
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        staged = _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0])
+        src = _src_tree(tmp_path)
+
+        def usurp_then_fail(*_args, **_kwargs):
+            _usurp(staged)
+            raise OSError(errno.EIO, "I/O error during copy")
+
+        monkeypatch.setattr(_shutil, "copytree", usurp_then_fail)
+        caplog.set_level(_logging.WARNING, logger="memtomem.context.migrate")
+
+        with pytest.raises(OSError):
+            _stage_copy_into(src, dst_parent, name_hint="reviewer")
+
+        assert any(
+            str(staged) in r.getMessage() and "identity changed out of band" in r.getMessage()
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+    def test_an_unreadable_identity_refuses_to_remove(self, tmp_path, monkeypatch):
+        """Cannot prove it is ours → do not touch it (the standing asymmetry).
+
+        ``identity is None`` means the ``lstat`` right after our own successful
+        claim failed, which is anomalous — and indistinguishable from the race
+        being defended against. A leaked staging tree is cheap; a destroyed
+        canonical is not (``_names.REAPABLE_INTERNAL_ARTIFACT_KINDS`` encodes
+        the same trade), so the entry is preserved.
+        """
+        import shutil as _shutil
+
+        import memtomem.context.migrate as migrate_mod
+        from memtomem.context.migrate import _stage_copy_into
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        staged = _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0])
+        src = _src_tree(tmp_path)
+        monkeypatch.setattr(migrate_mod, "_staging_identity", lambda _path: None)
+
+        def fail(*_args, **_kwargs):
+            raise OSError(errno.EIO, "I/O error during copy")
+
+        monkeypatch.setattr(_shutil, "copytree", fail)
+
+        with pytest.raises(OSError):
+            _stage_copy_into(src, dst_parent, name_hint="reviewer")
+
+        assert staged.is_dir(), "an entry we cannot prove is ours must be preserved"
+
+    @staticmethod
+    def _zero_inode(monkeypatch, target: Path) -> None:
+        """Make *target* answer ``st_ino == 0``, as an identity-less FS does."""
+        real_lstat = Path.lstat
+
+        class _Zeroed:
+            def __init__(self, info):
+                self._info = info
+
+            def __getattr__(self, name):
+                return getattr(self._info, name)
+
+            st_ino = 0
+
+        def lstat(self, *args, **kwargs):
+            info = real_lstat(self, *args, **kwargs)
+            return _Zeroed(info) if self == target else info
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+
+    def test_a_filesystem_without_file_identity_reports_none(self, tmp_path, monkeypatch, caplog):
+        """Zero is not an identity — comparing zeros passes for anything.
+
+        A check that cannot fail is worse than no check, because the next
+        reader believes it. The probe returns ``None`` (not provably ours) and
+        says why, since the consequence — refusing to promote — would otherwise
+        look like corruption rather than a platform limit.
+        """
+        import logging as _logging
+
+        from memtomem.context.migrate import _staging_identity
+
+        entry = tmp_path / ".migrate-reviewer-424242-aaaaaaaa.tmp"
+        entry.mkdir()
+        assert _staging_identity(entry) is not None
+        self._zero_inode(monkeypatch, entry)
+        caplog.set_level(_logging.WARNING, logger="memtomem.context.migrate")
+
+        assert _staging_identity(entry) is None
+        assert any("does not report file identity" in r.getMessage() for r in caplog.records)
+
+    def test_an_unprovable_entry_is_neither_promoted_nor_removed(self, tmp_path, monkeypatch):
+        """Both verbs fail closed on an identity the platform cannot supply."""
+        from memtomem.context.migrate import (
+            StagingClaim,
+            StagingIdentityLostError,
+            _discard_claimed_staging,
+        )
+
+        entry = tmp_path / ".migrate-reviewer-424242-aaaaaaaa.tmp"
+        entry.mkdir()
+        (entry / "agent.md").write_text("staged", encoding="utf-8")
+        self._zero_inode(monkeypatch, entry)
+        claim = StagingClaim.capture(entry)
+
+        assert claim.identity is None
+        with pytest.raises(StagingIdentityLostError, match="does not report file identity"):
+            claim.assert_still_ours("promote onto the canonical name")
+        _discard_claimed_staging(claim)
+        assert (entry / "agent.md").exists(), "an unprovable entry must be preserved"
+
+    @pytest.mark.parametrize(
+        "replacement",
+        [
+            "file",
+            "empty_dir",
+            "full_dir",
+            pytest.param("dangling_link", marks=pytest.mark.requires_symlinks),
+        ],
+    )
+    def test_no_replacement_shape_is_removed(self, tmp_path, monkeypatch, replacement):
+        """The removal ladder branches on SHAPE, so every shape gets a cell.
+
+        ``_remove_staging_entry`` takes a different arm for a link, a
+        directory and a file, and a cleanup that reached the wrong arm would
+        still delete a stranger's entry — a dangling link is invisible to
+        ``exists()`` and a link to a directory answers ``is_dir()``. The
+        identity gate has to come before all of them, whatever the replacement
+        looks like and whatever our own entry was.
+        """
+        import shutil as _shutil
+
+        from memtomem.context.migrate import _stage_copy_into
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        staged = _forced_staging_path(dst_parent, "reviewer", _FORCED_HEX[0])
+        src = _src_tree(tmp_path)
+
+        planted: list[tuple[str, str]] = []
+
+        def usurp_then_fail(*_args, **_kwargs):
+            staged.rename(staged.with_name(staged.name + ".aside"))
+            if replacement == "dangling_link":
+                staged.symlink_to(tmp_path / "no-such-target")
+            else:
+                _plant(staged, replacement, body="theirs")
+            planted.append(_collider_state(staged))
+            raise OSError(errno.EIO, "I/O error during copy")
+
+        monkeypatch.setattr(_shutil, "copytree", usurp_then_fail)
+
+        with pytest.raises(OSError):
+            _stage_copy_into(src, dst_parent, name_hint="reviewer")
+
+        assert os.path.lexists(staged), f"the {replacement} replacement was removed"
+        assert _collider_state(staged) == planted[0], "the replacement was altered"
+        # The claim's own entry — an empty directory here, since the fill never
+        # ran — is still on disk under the name the usurper gave it.
+        assert staged.with_name(staged.name + ".aside").is_dir()
+
+    def test_promote_refuses_to_publish_a_replacement(self, tmp_path):
+        """Promotion is the consumer whose failure is not a leak.
+
+        Renaming the pathname onto the canonical name would publish bytes Gate
+        A scanned on a DIFFERENT object — the scan ran against the entry we
+        created, the promote would move the one that replaced it.
+        """
+        from memtomem.context.migrate import (
+            StagingClaim,
+            StagingIdentityLostError,
+            _promote_move,
+        )
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        staged = dst_parent / ".migrate-foo-1-aaaaaaaa.tmp"
+        staged.mkdir()
+        (staged / "agent.md").write_text("scanned", encoding="utf-8")
+        claim = StagingClaim.capture(staged)
+        aside = _usurp(staged)
+        dst = dst_parent / "foo"
+
+        with pytest.raises(StagingIdentityLostError, match="was replaced out of band"):
+            _promote_move(claim, dst)
+
+        assert not os.path.lexists(dst), "a stranger's entry must not reach the canonical name"
+        assert (staged / "theirs.md").read_text(encoding="utf-8") == "theirs"
+        assert (aside / "agent.md").read_text(encoding="utf-8") == "scanned"
 
 
 def _write_flat(project: Path, asset_type: str, name: str, body: bytes) -> Path:
@@ -3739,14 +4051,15 @@ class TestTheHoldingClaimIsExclusiveAndUnwinds:
         src = _src_tree(tmp_path)
         _exdev_always(monkeypatch)
 
-        staging, holding = _stage_move(src, dst_parent, name_hint="reviewer")
+        claimed, holding = _stage_move(src, dst_parent, name_hint="reviewer")
+        staging = claimed.path
 
         # Simulating the crash: the caller never gets to promote or clean up.
         assert holding is not None
-        assert holding.parent == src.parent
-        assert is_internal_artifact_dir(holding.name), holding.name
-        assert internal_artifact_owner(holding.name) == "reviewer"
-        assert (holding / "agent.md").read_text(encoding="utf-8") == "source"
+        assert holding.path.parent == src.parent
+        assert is_internal_artifact_dir(holding.path.name), holding.path.name
+        assert internal_artifact_owner(holding.path.name) == "reviewer"
+        assert (holding.path / "agent.md").read_text(encoding="utf-8") == "source"
         assert is_internal_artifact_dir(staging.name), staging.name
 
 
@@ -4626,6 +4939,182 @@ def test_a_failed_copy_keeps_the_partial_when_the_holding_entry_is_gone(
     assert any(
         "rename-back failed" in m and str(vanished[0]) + ", which held the" in m for m in messages
     ), messages
+
+
+def test_a_claim_renders_as_its_path_not_as_a_dataclass():
+    """A claim in a message must read as the path, on every platform.
+
+    Rollback ERRORs are the whole of what a hand recovery has to go on, and
+    ``logger`` takes its arguments as ``object`` — so a claim passed to a
+    ``%s`` is a mistake no type checker sees. The default repr would render
+    ``StagingClaim(path=WindowsPath('C:/…'))``: on POSIX that still contains
+    ``str(path)`` as a substring, so a caller matching on the path finds it
+    and the damage stays invisible; on Windows the repr spells separators the
+    other way and the match fails. This pins the rendering rather than the
+    absence of the mistake, because the mistake is the kind that comes back.
+    """
+    from memtomem.context.migrate import StagingClaim
+
+    claim = StagingClaim(path=Path("dest") / ".migrate-foo-1-aaaaaaaa.tmp", identity=(1, 2))
+
+    assert str(claim) == str(claim.path)
+    assert f"preserved at {claim}" == f"preserved at {claim.path}"
+    assert "StagingClaim" not in f"{claim}"
+
+
+class TestTheHoldingEntryIsCarriedAsAnObject:
+    """#2314 on the #2313 holding entry: a parked source is claimed too.
+
+    The EXDEV path renames the canonical source into a holding entry beside
+    itself and copies THAT into staging. Every later step — the copy that
+    reads it, the cleanup that decides whether the partial fill may go, the
+    rename-back, the post-promote removal — used to address it by pathname.
+    An entry replaced in any of those windows is somebody else's object, and
+    the artifact we parked is under a name we no longer know.
+    """
+
+    @staticmethod
+    def _usurp(path: Path) -> Path:
+        """Rename the parked entry aside and leave a foreign one behind."""
+        aside = path.with_name(path.name + ".aside")
+        path.rename(aside)
+        if aside.is_dir() and not aside.is_symlink():
+            path.mkdir()
+            path.chmod(0o700)
+            (path / "theirs.md").write_text("theirs", encoding="utf-8")
+        else:
+            path.write_text("theirs", encoding="utf-8")
+        return aside
+
+    def test_the_copy_refuses_to_read_a_replaced_holding_entry(self, tmp_path, monkeypatch):
+        """A read is a way to launder a stranger's bytes into a canonical name.
+
+        The copy feeds staging, staging is promoted: copying whatever answers
+        to the holding pathname would publish an artifact this transfer never
+        parked, and Gate A would have scanned it under our name.
+        """
+        import memtomem.context.migrate as migrate_mod
+        from memtomem.context.migrate import (
+            MigratePartialError,
+            StagingIdentityLostError,
+            _stage_move,
+        )
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path)
+        _exdev_always(monkeypatch)
+        aside: list[Path] = []
+        real_claim = migrate_mod._claim_transfer_staging
+
+        def claim_then_usurp(parent, name_hint, claim):
+            # The replacement lands the instant after the source is parked and
+            # BEFORE the copy reads it — the window a check inside the copy's
+            # own callee would already be too late for.
+            claimed = real_claim(parent, name_hint, claim)
+            if parent == src.parent and not aside:
+                aside.append(self._usurp(claimed.path))
+            return claimed
+
+        monkeypatch.setattr(migrate_mod, "_claim_transfer_staging", claim_then_usurp)
+
+        # The read is refused, and the unwind then reports the state that
+        # refusal leaves behind: the canonical name is empty and the parked
+        # entry is not ours, so the artifact is unaccounted for. The refusal
+        # itself is the cause, which is what names the guard that fired.
+        with pytest.raises(MigratePartialError) as exc_info:
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        cause = exc_info.value.__cause__ or exc_info.value.__context__
+        assert isinstance(cause, StagingIdentityLostError), cause
+        assert "Refused: copy the parked source into staging" in str(cause)
+        # Their entry is untouched, ours is still on disk under the aside name,
+        # and nothing was staged at the destination from either.
+        planted = [p for p in src.parent.glob(".migrate-*") if not p.name.endswith(".aside")]
+        assert len(planted) == 1 and (planted[0] / "theirs.md").exists()
+        assert (aside[0] / "agent.md").read_text(encoding="utf-8") == "source"
+
+    def test_a_replaced_holding_entry_does_not_authorize_dropping_the_partial(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Presence is not ownership, and the partial copy is what is left.
+
+        The cleanup asks "are these bytes recoverable from the source?". A
+        replacement satisfies a presence check as convincingly as our own
+        entry did, and answering yes deletes the only partial copy of the
+        artifact we parked.
+        """
+        import logging as _logging
+        import shutil as shutil_mod
+
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path)
+        _exdev_always(monkeypatch)
+        caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
+        done: list[bool] = []
+
+        def fill_then_usurp(source, target, *args, **kwargs):
+            # A partial fill lands; the parked entry is then REPLACED (not
+            # removed) and only afterwards does the copy fail.
+            Path(target).mkdir(parents=True, exist_ok=True)
+            (Path(target) / "agent.md").write_text("source", encoding="utf-8")
+            if not done:
+                self._usurp(Path(source))
+                done.append(True)
+            raise OSError(errno.EIO, "I/O error")
+
+        monkeypatch.setattr(shutil_mod, "copytree", fill_then_usurp)
+
+        with pytest.raises(Exception):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        survivors = list(dst_parent.glob(".migrate-reviewer-*"))
+        assert len(survivors) == 1, survivors
+        assert (survivors[0] / "agent.md").read_text(encoding="utf-8") == "source"
+        assert any("preserving the partial copy" in r.getMessage() for r in caplog.records)
+
+    def test_a_replaced_holding_entry_is_not_renamed_back_onto_the_source(
+        self, tmp_path, monkeypatch
+    ):
+        """The unwind's rename-back is a consumer, and reports the real state.
+
+        The canonical name is empty and the entry we parked is gone from the
+        name we parked it under, so the artifact is unaccounted for. Reporting
+        the fill's own error would send the operator to retry a move whose
+        source is no longer where they left it.
+        """
+        import shutil as shutil_mod
+
+        from memtomem.context.migrate import MigratePartialError, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path)
+        _exdev_always(monkeypatch)
+        done: list[bool] = []
+
+        def fail_after_usurp(source, target, *args, **kwargs):
+            # The replacement lands after the copy has read what it needed, so
+            # the failure below sends us into the unwind with a foreign entry
+            # sitting on the parked name.
+            Path(target).mkdir(parents=True, exist_ok=True)
+            if not done:
+                self._usurp(Path(source))
+                done.append(True)
+            raise OSError(errno.EIO, "I/O error")
+
+        monkeypatch.setattr(shutil_mod, "copytree", fail_after_usurp)
+
+        with pytest.raises(MigratePartialError) as exc_info:
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert "Do NOT retry" in exc_info.value.message
+        assert not os.path.lexists(src), "the canonical name stays empty"
+        planted = [p for p in src.parent.glob(".migrate-*") if not p.name.endswith(".aside")]
+        assert len(planted) == 1 and (planted[0] / "theirs.md").exists()
 
 
 @pytest.mark.parametrize("shape", ["dir", "flat"])

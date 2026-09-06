@@ -831,6 +831,51 @@ class TestReceipt:
         assert (landed / "empty").is_dir()
         assert Lockfile.at(dst).read_entry("skills", "demo") is None
 
+    def test_replaced_staging_is_neither_promoted_nor_deleted(
+        self, tmp_path, dst, monkeypatch
+    ) -> None:
+        """#2314: receipt claims its own staging, so it owns the same duty.
+
+        The claim is the ``mkdir(exist_ok=False)`` above; the promote and the
+        failure cleanup both used the pathname again. An entry replaced in
+        between would be renamed onto the canonical name — publishing a tree
+        this bundle never carried — and the cleanup would then delete the
+        replacement. Both now check the identity the claim recorded.
+        """
+        import memtomem.context.bundle as bundle_mod
+        from memtomem.context.migrate import StagingIdentityLostError
+
+        root = tmp_path / "src"
+        _write_skill(root)
+        out = tmp_path / "b.json"
+        _export(root, out)
+        store = dst / ".memtomem" / "skills.local"
+        real_write = bundle_mod.write_tree_payload
+        replaced: list[Path] = []
+
+        def write_then_usurp(staging, payload):
+            # After OUR tree is fully materialized: the fill window is a
+            # documented residual, the promote window is what this pins.
+            result = real_write(staging, payload)
+            aside = staging.with_name(staging.name + ".aside")
+            staging.rename(aside)
+            staging.mkdir()
+            # umask-independent, see the transfer suite's _usurp_staging.
+            staging.chmod(0o700)
+            (staging / "theirs.md").write_text("theirs", newline="\n")
+            replaced.append(staging)
+            return result
+
+        monkeypatch.setattr(bundle_mod, "write_tree_payload", write_then_usurp)
+
+        with pytest.raises(StagingIdentityLostError, match="was replaced out of band"):
+            receive_artifact_bundle(
+                out, dst_project_root=dst, to_scope="project_local", apply_=True
+            )
+
+        assert not (store / "demo").exists(), "a stranger's tree reached the canonical name"
+        assert (replaced[0] / "theirs.md").read_text(encoding="utf-8") == "theirs"
+
     @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
     def test_executable_bit_round_trips(self, tmp_path, dst) -> None:
         """mm context copy preserves it, so dropping it would strip a runnable script."""
