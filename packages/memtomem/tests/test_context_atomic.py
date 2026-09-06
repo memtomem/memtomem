@@ -510,6 +510,13 @@ class TestFileLockReleaseDoesNotMaskBody:
 
         assert stub.calls == 1  # fired once, inside _close_quietly
 
+        # State the confinement before driving the finalizer, or this test
+        # repairs the very condition it is here to detect: ``__del__`` on a
+        # still-open file closes it, so a helper that dropped the stub but
+        # never closed would slip past the call count alone.
+        assert "close" not in vars(fp)
+        assert fp.closed
+
         # The call the collector would have made downstream, made here where a
         # test can see it: a confined file is closed, so this is a no-op.
         fp.__del__()  # type: ignore[attr-defined]
