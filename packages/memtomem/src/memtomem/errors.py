@@ -167,6 +167,30 @@ class FeedbackConflictError(ValueError):
     """
 
 
+class ProjectSharedConfirmationRequiredError(ValueError):
+    """An ADR-0011 §5 Gate B refusal on a library surface that answers a value.
+
+    Subclasses :class:`ValueError` (not :class:`Mem2MemError`) for the same
+    reason :class:`FeedbackConflictError` does: existing callers catching
+    ``ValueError`` keep working, and the MCP ``tool_handler`` still renders it
+    verbatim.
+
+    The subclass earns its place on the surfaces whose success value cannot
+    carry a refusal. ``MemtomemStore.delete`` answers ``bool`` — ``False``
+    already means "no such chunk, or not in your project" (ADR-0036) — so the
+    refusal has to raise; and it parses its ``chunk_id`` first, which raises a
+    plain ``ValueError`` of its own. Without a distinct type a caller cannot
+    tell a malformed id from a withheld consent, and the two want opposite
+    remedies: one is not retryable at all, the other is retryable the moment
+    ``confirm_project_shared=True`` is passed.
+
+    The MCP tools and web routes return their refusals as values and do not
+    raise this. ``MemtomemBaseStore.__init__`` still raises a bare
+    ``ValueError`` for its own Gate B — a surface this type would suit, and a
+    one-line change on a day someone is touching that file.
+    """
+
+
 class RetryableError(Exception):
     """Error that can be resolved by retrying (e.g., network timeout, rate limit)."""
 
