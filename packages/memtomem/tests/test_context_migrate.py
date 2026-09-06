@@ -13,6 +13,7 @@ need a ``wiki_root`` fixture.
 from __future__ import annotations
 
 import errno
+import shutil
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -149,6 +150,19 @@ def _collider_state(path: Path) -> tuple[str, str]:
     return "file", path.read_text(encoding="utf-8")
 
 
+def _same_link_target(a: Path, b: Path) -> bool:
+    """Whether two symlinks point at the same place, spelling aside.
+
+    ``os.readlink`` on Windows reports an absolute link's substitution path in
+    the extended-length ``\\\\?\\`` form, and that form is what production hands
+    back to ``os.symlink`` — normalizing it there would damage UNC and
+    long-path semantics, so the comparison is what has to be semantic. Both
+    sides are dangling in one of the cells below, which rules out ``resolve``:
+    ``os.path.realpath`` answers for a missing target too.
+    """
+    return os.path.realpath(os.readlink(a)) == os.path.realpath(os.readlink(b))
+
+
 def _src_tree(tmp_path: Path, body: str = "source") -> Path:
     src = tmp_path / "src" / "reviewer"
     src.mkdir(parents=True)
@@ -247,25 +261,27 @@ class TestStagingCollisionNeverClearsTheCollider:
         assert src.exists()
 
     def test_a_broken_source_path_is_not_reported_as_a_busy_name(self, tmp_path, monkeypatch):
-        """``ENOTDIR`` is overloaded, and only one of its meanings is ours.
+        """A failure that is not about our name must not become a busy name.
 
-        ``rename`` reports it for "the destination holds a non-directory while
-        the source is a directory" (occupied) AND for "a component of a path is
-        not a directory" (a broken source — nothing to do with our name).
-        Classifying by errno alone burned the retry and then announced a busy
-        name for two paths that were never created, which is the confident
-        -but-wrong diagnosis this whole change exists to avoid (Codex review).
+        Classifying by errno burned the retry and then announced a busy name for
+        two paths that were never created — the confident-but-wrong diagnosis
+        this whole change exists to avoid (Codex review). The errno itself is
+        not portable and is deliberately NOT asserted: a regular file used as a
+        directory component reports ``ENOTDIR`` on POSIX and ``ENOENT`` on
+        Windows, and pinning either would pass on one platform while pinning
+        nothing about the behaviour. What matters is the classification, so
+        that is what this asserts.
 
-        Pin: the ORIGINAL error escapes, and neither staging name was left on
-        disk to be mistaken for a leftover later.
+        Pin: the original error escapes untyped, and neither staging name was
+        left on disk to be mistaken for a leftover later.
         """
         from memtomem.context.migrate import TransferStagingBusyError, _stage_move
 
         dst_parent = tmp_path / "dest"
         dst_parent.mkdir()
         _force_staging_suffix(monkeypatch, *_FORCED_HEX)
-        # A regular file used as a directory component: every syscall that
-        # walks through it reports ENOTDIR, and no staging name is involved.
+        # A regular file used as a directory component: nothing about this
+        # failure involves a staging name.
         blocker = tmp_path / "not-a-dir"
         blocker.write_text("regular file", encoding="utf-8")
         src = blocker / "reviewer"
@@ -274,7 +290,6 @@ class TestStagingCollisionNeverClearsTheCollider:
             _stage_move(src, dst_parent, name_hint="reviewer")
 
         assert not isinstance(exc.value, TransferStagingBusyError)
-        assert exc.value.errno == errno.ENOTDIR
         assert list(dst_parent.iterdir()) == []
         assert blocker.read_text(encoding="utf-8") == "regular file"
 
@@ -432,6 +447,13 @@ class TestStagingCollisionNeverClearsTheCollider:
         order takes the tree branch and materializes out-of-tree bytes into a
         possibly git-tracked destination tier. A dangling link is the cell that
         catches a copy which reads through the link.
+
+        The two links are compared for the same TARGET, not the same string.
+        Windows deliberately reports an absolute link's substitution path in the
+        extended-length ``\\\\?\\`` form, and that form is what must be handed
+        back to ``os.symlink`` — normalizing it in production would damage UNC
+        and long-path semantics. A literal comparison would fail there while
+        testing nothing about the behaviour.
         """
         from memtomem.context.migrate import _stage_move
 
@@ -453,9 +475,240 @@ class TestStagingCollisionNeverClearsTheCollider:
         staging, src_consumed = _stage_move(src, dst_parent, name_hint="reviewer")
 
         assert staging.is_symlink()
-        assert os.readlink(staging) == str(outside)
+        assert _same_link_target(staging, src)
         assert src_consumed is False
         assert src.is_symlink()
+
+        # A link and a copy both answer is_symlink()-adjacent questions the
+        # same way through the link, so distinguish them by taking the target
+        # away: a link goes dangling, a materialized copy would survive.
+        if target == "dir":
+            shutil.rmtree(outside)
+            assert staging.is_symlink()
+            assert not (dst_parent / staging.name / "secret.md").exists()
+
+    @pytest.mark.requires_symlinks
+    def test_a_file_claim_that_followed_a_link_is_not_a_claim(self, tmp_path, monkeypatch):
+        """The exclusivity of the file claim, pinned as a property of the result.
+
+        POSIX specifies ``O_CREAT | O_EXCL`` to fail with ``EEXIST`` when the
+        final component is a symlink. Windows does not: its ``open`` follows a
+        reparse point, so a dangling link on our staging name lets the create
+        succeed against the link's missing target while the directory entry
+        still belongs to whoever made the link. Believing we owned it would
+        write the artifact through someone else's link, promote their link into
+        the canonical destination, and let a later cleanup unlink an entry we
+        never created.
+
+        This cell states the guarantee without naming a platform: after a
+        claim, whatever we hold is a regular file we created — never a link we
+        followed. The real create runs against a planted dangling link, which
+        POSIX refuses in the kernel.
+        """
+        from memtomem.context.migrate import _create_exclusive_file
+
+        staging = tmp_path / "claimed"
+        victim = tmp_path / "victims-target"
+        staging.symlink_to(victim)
+        assert staging.is_symlink() and not victim.exists()
+
+        with pytest.raises(FileExistsError):
+            _create_exclusive_file(staging)
+
+        # The collider is intact and still a link, and nothing was left at the
+        # target the create may have reached through it.
+        assert staging.is_symlink()
+        assert not victim.exists()
+
+    @pytest.mark.requires_symlinks
+    def test_a_windows_shaped_create_that_follows_a_link_is_undone(self, tmp_path, monkeypatch):
+        """The same guarantee, with the Windows behaviour actually exercised.
+
+        The cell above passes on POSIX because the kernel refuses first, so it
+        witnesses nothing about the verification that carries the guarantee on
+        Windows — delete that verification and the cell stays green here. This
+        one supplies the missing witness by making ``os.open`` behave the way
+        Windows does: follow the link, create the missing target, and hand back
+        a descriptor as though the claim succeeded.
+
+        Pin: the helper notices it holds a link rather than a file it created,
+        removes the file it made at the link's target, and reports the name as
+        taken so the caller moves to a fresh suffix.
+        """
+        from memtomem.context import migrate as migrate_mod
+        from memtomem.context.migrate import _create_exclusive_file
+
+        staging = tmp_path / "claimed"
+        victim = tmp_path / "victims-target"
+        staging.symlink_to(victim)
+
+        real_open = os.open
+
+        def following_open(path, flags, mode=0o777, **kwargs):
+            # What Windows does: the reparse point is followed, so the create
+            # lands on the link's target and the entry stays the link.
+            if Path(path) == staging:
+                return real_open(victim, flags & ~os.O_EXCL | os.O_CREAT, mode)
+            return real_open(path, flags, mode, **kwargs)
+
+        monkeypatch.setattr(migrate_mod.os, "open", following_open)
+
+        with pytest.raises(FileExistsError):
+            _create_exclusive_file(staging)
+
+        assert staging.is_symlink()
+        # The file the create made through the link is gone: O_EXCL proved we
+        # made it, so undoing it restores what the other writer had.
+        assert not victim.exists()
+
+    @pytest.mark.requires_symlinks
+    @pytest.mark.parametrize("target", ["dir", "dangling"])
+    def test_the_recreated_link_keeps_the_sources_link_kind(self, tmp_path, monkeypatch, target):
+        """Windows has two kinds of symlink and cannot infer which to make.
+
+        ``os.symlink`` there takes ``target_is_directory`` and infers it from
+        the target — which is exactly what a DANGLING link does not have, so a
+        directory link would come back as a file link. POSIX has one kind and
+        ignores the flag, so this cell runs everywhere and only bites on
+        Windows.
+
+        Pinned through the observable property rather than the flag: the
+        recreated entry reports the same link kind as the source did.
+        """
+        from memtomem.context.migrate import _link_target_is_directory, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+
+        outside = tmp_path / "outside"
+        if target == "dir":
+            outside.mkdir()
+        src = tmp_path / "src" / "reviewer"
+        src.parent.mkdir(parents=True)
+        src.symlink_to(outside, target_is_directory=(target == "dir"))
+
+        staging, _ = _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert staging.is_symlink()
+        assert _link_target_is_directory(staging) == _link_target_is_directory(src)
+
+    @pytest.mark.requires_symlinks
+    @pytest.mark.parametrize("target", ["dir", "dangling"])
+    def test_the_link_kind_flag_is_passed_to_symlink(self, tmp_path, monkeypatch, target):
+        """The everywhere-witness for the link-kind flag.
+
+        The cell above compares the two links' kinds, which on POSIX is
+        ``False == False`` however the flag is passed — drop the argument
+        entirely and it stays green here, so it witnesses nothing off Windows.
+        This one watches the call instead: whatever ``os.symlink`` is asked to
+        make must carry the source link's own kind, which is the fact Windows
+        needs and cannot infer for a dangling target.
+        """
+        from memtomem.context import migrate as migrate_mod
+        from memtomem.context.migrate import _link_target_is_directory, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+
+        outside = tmp_path / "outside"
+        if target == "dir":
+            outside.mkdir()
+        src = tmp_path / "src" / "reviewer"
+        src.parent.mkdir(parents=True)
+        src.symlink_to(outside, target_is_directory=(target == "dir"))
+
+        seen: list[object] = []
+        real_symlink = os.symlink
+
+        def recording_symlink(target_, path, *args, **kwargs):
+            seen.append(kwargs.get("target_is_directory", "<not passed>"))
+            return real_symlink(target_, path, *args, **kwargs)
+
+        monkeypatch.setattr(migrate_mod.os, "symlink", recording_symlink)
+
+        _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert seen == [_link_target_is_directory(src)], seen
+
+    def test_a_junction_shaped_source_is_refused_rather_than_followed(self, tmp_path, monkeypatch):
+        """The everywhere-witness for the junction refusal.
+
+        Junctions exist only on Windows, so the real-junction cell below skips
+        everywhere else and the rule would ship unwitnessed on the platform
+        this runs on. Here ``is_junction`` is made to answer True for the
+        source, which is the only thing the dispatch consults, so the refusal
+        is exercised on every platform.
+        """
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.md").write_text("out-of-tree", encoding="utf-8")
+        src = tmp_path / "src" / "reviewer"
+        src.parent.mkdir(parents=True)
+        src.mkdir()
+        (src / "agent.md").write_text("source", encoding="utf-8")
+
+        real_is_junction = Path.is_junction
+        monkeypatch.setattr(Path, "is_junction", lambda self: self == src or real_is_junction(self))
+
+        with pytest.raises(OSError):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        # Nothing was staged, and the source is untouched.
+        assert list(dst_parent.iterdir()) == []
+        assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+
+    @pytest.mark.skipif(os.name != "nt", reason="directory junctions are Windows-only")
+    def test_a_directory_junction_source_is_refused_rather_than_followed(
+        self, tmp_path, monkeypatch
+    ):
+        """A junction is not a symlink, and copytree recurses INTO one.
+
+        So it slips past a linkness test and reaches the tree branch, where
+        ``copytree(symlinks=True)`` walks through it and materializes
+        out-of-tree bytes into the destination store — the no-deref contract
+        broken by a shape the check did not name. It cannot be reproduced with
+        ``os.symlink`` either, so the engine refuses instead of silently
+        turning it into something else.
+        """
+        import subprocess
+
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        _force_staging_suffix(monkeypatch, _FORCED_HEX[0])
+        _exdev_always(monkeypatch)
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.md").write_text("out-of-tree", encoding="utf-8")
+        src = tmp_path / "src" / "reviewer"
+        src.parent.mkdir(parents=True)
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(src), str(outside)],
+            check=True,
+            capture_output=True,
+        )
+        assert src.is_junction()
+
+        with pytest.raises(OSError):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        # Nothing was materialized, and the junction itself is untouched.
+        assert list(dst_parent.iterdir()) == []
+        assert src.is_junction()
+        assert (outside / "secret.md").read_text(encoding="utf-8") == "out-of-tree"
 
     @pytest.mark.requires_symlinks
     def test_exdev_fallback_refuses_a_symlink_source_onto_a_collider(self, tmp_path, monkeypatch):

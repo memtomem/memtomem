@@ -1300,6 +1300,12 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "no_recovery_callee",
         "No-replace staging rename with EXDEV copy fallback; migrate-local, no swap; " + _RO,
     ),
+    ("context/migrate.py", "_link_target_is_directory", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Windows link-kind probe: an unreadable lstat degrades to the resolved "
+        "target; read-only, migrate-local, no swap; " + _RO,
+    ),
     ("context/migrate.py", "_claim_transfer_staging", ("OSError",), 0): (
         _U,
         "no_recovery_callee",

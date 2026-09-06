@@ -197,6 +197,28 @@ or would lose (an empty directory, which plain `rename` replaces). The
 cost is that a transfer can fail on a leftover nothing reaps; the
 leftover is inert, hidden from discovery, and removable by hand.
 
+Whether a failed claim means "the name is taken" is decided by **looking**,
+never by the errno. Every candidate errno is overloaded and differs by
+platform: `ENOTDIR` covers both an occupied name and a broken source path,
+Windows reports `ENOENT` where POSIX reports `ENOTDIR` for the latter, and
+Windows reports `EACCES` both for the `O_EXCL` open of a name held by a
+directory and for a genuine permission failure. A presence probe after a
+failed claim settles all of them and costs nothing on the path that stages
+cleanly — the same shape the receipt transport's destination check already
+uses.
+
+The `O_EXCL` file claim is exclusive on POSIX by specification and **not on
+Windows**, which follows a symlink at the final component: a dangling link on
+the staged name lets the create succeed against the link's missing target
+while the directory entry still belongs to whoever made it. The claim
+therefore verifies what it got and, if it followed a link, removes the file it
+created at the target (`O_EXCL` proves it made it) and reports the name as
+taken. Two further Windows shapes are handled where a POSIX-shaped
+implementation would be silently wrong: a copied top-level link carries the
+file-or-directory kind Windows tracks separately and cannot infer for a
+dangling target, and a directory junction — not a symlink, and recursed into
+by `copytree` — is refused rather than followed into the destination store.
+
 ### 7. Copy mode and `--as` rename
 
 Copy stages by **byte copy** (`_stage_copy`, which since #2309 delegates

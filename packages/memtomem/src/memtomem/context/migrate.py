@@ -38,6 +38,7 @@ import logging
 import os
 import secrets
 import shutil
+import stat
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -859,42 +860,35 @@ class TransferStagingBusyError(OSError):
     """
 
 
-#: Errnos a claim reports when the staging name is taken. A no-replace rename
-#: reports the richer set (a directory onto a non-empty directory is
-#: ``ENOTEMPTY``, a shape mismatch ``EISDIR`` / ``ENOTDIR``); ``mkdir``,
-#: ``O_EXCL`` and ``os.symlink`` only ever report ``EEXIST``. Same tuple the
-#: receipt transport maps to its typed collision. ``EXDEV`` is deliberately
-#: absent — it means the source is on another filesystem, which selects the
-#: copy fallback rather than a retry.
-#:
-#: Necessary but NOT sufficient: see :func:`_claim_hit_an_occupied_name`.
-_CLAIM_OCCUPIED_ERRNOS: frozenset[int] = frozenset(
-    {errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR, errno.ENOTDIR}
-)
+def _claim_hit_an_occupied_name(staging: Path) -> bool:
+    """True when a failed claim failed because that staging name is taken.
 
+    **Decided by looking, never by the errno.** Every candidate errno is
+    overloaded, and differently per platform, so a set of them cannot answer
+    this question:
 
-def _claim_hit_an_occupied_name(exc: OSError, staging: Path) -> bool:
-    """True when *exc* really means "that staging name is taken".
+    - ``ENOTDIR`` means both "the destination holds a non-directory while the
+      source is a directory" (occupied) and "a component of a path is not a
+      directory" (a broken source — nothing to do with our name);
+    - Windows reports ``ENOENT`` where POSIX reports ``ENOTDIR`` for that same
+      broken component;
+    - Windows reports ``EACCES`` for the ``O_EXCL`` open of a name held by a
+      DIRECTORY, and also for a genuine permission or sharing failure.
 
-    The errno alone is not the answer, because ``ENOTDIR`` is overloaded:
-    ``rename`` reports it both for "the destination name holds a non-directory
-    while the source is a directory" (occupied) and for "a component of one of
-    the paths is not a directory" (a broken source or parent — a genuine
-    failure that has nothing to do with our name). Retrying the second kind
-    burns the retry and then reports a busy name for two paths that were never
-    there, which is exactly the confident-but-wrong diagnosis this whole change
-    exists to avoid (Codex review).
+    Presence settles all of it: if the name is there, the claim lost a race for
+    it and a fresh suffix is the right answer; if it is not, whatever went
+    wrong was not about the name and the original error must propagate. This is
+    the shape ``bundle._collides`` already uses for the destination identity.
 
-    So the ambiguous errno is settled by looking: ``lexists`` rather than
-    ``exists`` because a dangling symlink occupies the name just as firmly as a
-    directory does. Both outcomes are safe — nothing is removed either way —
-    and the probe only ever converts a wrong "busy" into the original error.
+    ``lexists``, not ``exists``: a dangling symlink occupies the name just as
+    firmly as a directory does, and answers False to the latter.
+
+    Probed only after a claim has already failed, so a transfer that stages
+    cleanly pays nothing. Both outcomes are safe — nothing is removed on either
+    branch — and the probe can only ever turn a wrong "busy" back into the
+    error that actually happened.
     """
-    if exc.errno not in _CLAIM_OCCUPIED_ERRNOS:
-        return False
-    if exc.errno == errno.ENOTDIR:
-        return os.path.lexists(staging)
-    return True
+    return os.path.lexists(staging)
 
 
 def _claim_transfer_staging(
@@ -905,10 +899,11 @@ def _claim_transfer_staging(
     """Claim a fresh transfer staging name exclusively, or fail closed (#2309).
 
     *claim* must be an exclusive-create and NOTHING else — a no-replace
-    rename, ``mkdir(exist_ok=False)``, an ``O_EXCL`` open, ``os.symlink``. Each
-    reports an occupied name through :data:`_CLAIM_OCCUPIED_ERRNOS`; any other
-    ``OSError`` is a real failure and propagates unchanged, so a missing source
-    or a permission problem is never mistaken for a busy name.
+    rename, ``mkdir(exist_ok=False)``, :func:`_create_exclusive_file`,
+    ``os.symlink``. Whether a failure means "the name was taken" is settled by
+    :func:`_claim_hit_an_occupied_name`, which looks rather than reading the
+    errno; any other failure propagates unchanged, so a missing source or a
+    permission problem is never mistaken for a busy name.
 
     Filling the claimed entry happens in the CALLER, after this returns. That
     split is the point: an ``EEXIST`` raised deeper inside a tree copy is not a
@@ -937,8 +932,8 @@ def _claim_transfer_staging(
     first = transfer_staging_path(dst_parent, name_hint)
     try:
         claim(first)
-    except OSError as exc:
-        if not _claim_hit_an_occupied_name(exc, first):
+    except OSError:
+        if not _claim_hit_an_occupied_name(first):
             raise
     else:
         return first
@@ -947,7 +942,7 @@ def _claim_transfer_staging(
     try:
         claim(second)
     except OSError as exc:
-        if not _claim_hit_an_occupied_name(exc, second):
+        if not _claim_hit_an_occupied_name(second):
             raise
         # dict.fromkeys, not a set: order matters for the reader, and the two
         # names coincide whenever a caller has pinned the suffix (the forced
@@ -970,6 +965,70 @@ def _claim_transfer_staging(
     return second
 
 
+def _link_target_is_directory(link: Path) -> bool:
+    """Whether *link* is a DIRECTORY symlink, without resolving it.
+
+    Only Windows distinguishes the two kinds, and it needs the answer up front:
+    :func:`os.symlink` there takes ``target_is_directory`` and cannot infer it
+    when the target is missing, so recreating a dangling link without this
+    makes a file link where the source had a directory link. POSIX has one kind
+    of symlink and ignores the flag entirely.
+
+    Read off the link itself (``lstat``, never a resolve) so a dangling link
+    still answers, which is the only case where the answer is not inferable.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        attrs = link.lstat().st_file_attributes
+    except (OSError, AttributeError):
+        # Unknowable — fall back to the target if it happens to resolve.
+        return link.is_dir()
+    return bool(attrs & stat.FILE_ATTRIBUTE_DIRECTORY)
+
+
+def _create_exclusive_file(path: Path) -> None:
+    """Create an empty regular file at *path*, or fail because it is taken.
+
+    ``O_CREAT | O_EXCL`` is the file-shaped claim, and on POSIX that is the
+    whole story: the pair is specified to fail with ``EEXIST`` when the final
+    component is a symlink, dangling or not.
+
+    **Windows does not honour that**, which is what makes the verification
+    below load-bearing rather than defensive. Its ``open`` follows a reparse
+    point at the final component, so a dangling symlink sitting on our staging
+    name lets the create SUCCEED — against the link's missing target. The
+    directory entry then still belongs to whoever made that link, while we
+    believe we own it: the copy would write through the link to a path someone
+    else chose, the promote would move THEIR link into the canonical
+    destination, and a cleanup on failure would unlink an entry we never
+    created. That is precisely the guarantee #2309 exists to establish, lost on
+    one platform.
+
+    So the claim is only complete once we have looked at what we claimed. If it
+    is a symlink, we followed one: the name is not ours. The file we created at
+    the link's target is ours, though — ``O_EXCL`` proves it did not exist a
+    moment ago — so removing it puts the filesystem back, and the raised
+    ``FileExistsError`` sends the caller to a fresh suffix.
+
+    ``O_BINARY`` is absent off Windows and suppresses newline translation on
+    it; the file is empty either way, but the flag keeps the idiom uniform with
+    the rest of the package.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    os.close(os.open(path, flags, 0o600))
+    if not path.is_symlink():
+        return
+    created = os.readlink(path)
+    with contextlib.suppress(OSError):
+        os.unlink(os.path.join(path.parent, created))
+    raise FileExistsError(
+        errno.EEXIST,
+        "staging name is held by a symlink the create followed",
+        str(path),
+    )
+
+
 def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
     """Build a staging entry under *dst_parent* from a byte copy of *src*.
 
@@ -977,28 +1036,49 @@ def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
     ``transfer._stage_copy``, so copy-mode staging has one implementation. The
     source is never consumed or mutated.
 
-    Symlinks are preserved as links, never dereferenced: the same-FS rename
-    path moves a link as a link, and the stdlib copy default would instead
+    Links are preserved as links, never dereferenced: the same-FS rename path
+    moves a link as a link, and the stdlib copy default would instead
     materialize out-of-tree target bytes into staging — and from there into the
     (possibly git-tracked) destination tier — violating the package's no-deref
     mirror contract (``_atomic.copy_tree_atomic``). Preserving links also makes
     dangling ones non-fatal (#1247 id 7).
 
-    The symlink test comes FIRST because :meth:`Path.is_dir` follows links: a
+    The link test comes FIRST because :meth:`Path.is_dir` follows links: a
     top-level symlink to a directory would otherwise take the tree branch and
     land here as a real directory while the rename path lands it as a link.
+
+    It also tests :meth:`Path.is_junction`, because a Windows directory
+    junction is not a symlink and would otherwise reach ``copytree``, which
+    deliberately recurses INTO a junction rather than reproducing it — the same
+    out-of-tree materialization by another name. A junction cannot be recreated
+    with ``os.symlink``, so it is refused rather than silently turned into
+    something else.
 
     Cleanup on a failed fill removes only an entry this call created — the
     claim ran first and succeeded, so the entry is provably ours. A failed
     claim creates nothing and therefore cleans nothing.
     """
+    if src.is_junction():
+        raise OSError(
+            errno.EINVAL,
+            "refusing to copy a directory junction: it cannot be reproduced as "
+            "a link, and following it would materialize out-of-tree bytes into "
+            "the destination store",
+            str(src),
+        )
+
     if src.is_symlink():
         # The link IS the payload; there is nothing to fill afterwards.
-        # ``os.symlink`` refuses an existing name natively, so it doubles as
-        # the exclusive claim.
+        # ``os.symlink`` refuses an existing name natively — it creates a
+        # directory entry rather than opening one, so it does not follow a
+        # link already sitting there the way ``open`` does on Windows — which
+        # makes it its own exclusive claim.
         target = os.readlink(src)
+        target_is_dir = _link_target_is_directory(src)
         staging = _claim_transfer_staging(
-            dst_parent, name_hint, lambda path: os.symlink(target, path)
+            dst_parent,
+            name_hint,
+            lambda path: os.symlink(target, path, target_is_directory=target_is_dir),
         )
         with contextlib.suppress(OSError, NotImplementedError):
             shutil.copystat(src, staging, follow_symlinks=False)
@@ -1018,14 +1098,7 @@ def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
             raise
         return staging
 
-    def _create_placeholder(path: Path) -> None:
-        # ``O_EXCL`` is the file-shaped claim. ``O_BINARY`` is absent off
-        # Windows and suppresses newline translation on it; the placeholder is
-        # empty either way, but the flag keeps the idiom uniform.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-        os.close(os.open(path, flags, 0o600))
-
-    staging = _claim_transfer_staging(dst_parent, name_hint, _create_placeholder)
+    staging = _claim_transfer_staging(dst_parent, name_hint, _create_exclusive_file)
     try:
         # Writes through our own placeholder. ``copy2`` onto an existing
         # DIRECTORY would instead copy INTO it, which is exactly the hazard the

@@ -83,11 +83,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   removed. The CLI prints that as a one-line error, the web transfer route
   answers 409 `transfer_staging_busy`, and both MCP actions refuse with the same
   reason; the leftover stays hidden from discovery and can be inspected or
-  removed by hand. The exclusive claim
-  also closes the gap between the old existence check and the write that
-  followed it, and refuses two destination shapes that check could not handle —
-  a dangling symlink, which it reported as absent, and an empty directory,
-  which a plain rename replaces silently.
+  removed by hand. The exclusive claim also closes the gap between the old
+  existence check and the write that followed it, and refuses two destination
+  shapes that check could not handle — a dangling symlink, which it reported as
+  absent, and an empty directory, which a plain rename replaces silently.
+  On Windows the claim additionally verifies what it got, because that platform
+  follows a symlink sitting on the staged name instead of refusing it, and a
+  copied top-level link now keeps the file-or-directory kind Windows tracks
+  separately. A Windows directory junction is refused outright rather than
+  walked into, which would have copied out-of-tree bytes into the store.
 
 - **An artifact written with Windows line endings can be exported again.**
   `mm context export` refused any CRLF-authored skill, command, or agent whose
