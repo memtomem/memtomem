@@ -295,6 +295,65 @@ about the world and telling an operator to move the tree back on top of it would
 be wrong. The rollback's staging probe is `lexists`, since a flat canonical may
 itself be a symlink and stages as one.
 
+**Amendment (2026-09, #2313): the EXDEV fallback gives the copy a source only
+the engine can name.** A move whose stores sit on different filesystems cannot
+rename, so it copies — and the predecessor copied from the canonical source
+path and then removed *that path*, by name, once the promote succeeded. A
+cross-filesystem copy takes as long as the artifact is large, and any writer
+that does not hold our sidecar lock (an editor saving, a shell redirect, a
+`git checkout`) can rewrite or recreate the source inside that window. Its
+bytes were then deleted while the destination kept the older snapshot, so the
+newer version existed nowhere. The failure path already refused to do this —
+the rollback ladder's "source reappeared" arm preserves everything and asks for
+manual reconciliation — which left the careful case preserving data and the
+happy case losing it.
+
+The fallback now parks the source first: an exclusive claim on a holding entry
+**beside the source**, reached by the same no-replace rename, under the same
+`.migrate-<name>-<pid>-<8 hex>.tmp` grammar (so it is hidden from every
+predicate-aware walk and reaped by nothing, exactly like staging). The copy
+reads that entry, the promote publishes it, and the holding entry — not the
+canonical path — is what gets removed afterwards. A writer that resolves the
+canonical name during the copy finds it free, and whatever it puts there is
+never the engine's to delete. The source is therefore consumed by an atomic
+rename on **both** paths, which is the property the cleanup rests on.
+
+Fingerprinting the source before and after the copy was weighed and rejected:
+it narrows the window to fingerprint-to-delete rather than closing it, and it
+costs a second full read of the artifact.
+
+The guarantee is about writers that **resolve the path** — create, replace,
+rename. A writer holding a descriptor opened before the rename still writes
+into the pre-move inode, which a cross-filesystem copy can only ever snapshot;
+those bytes are lost when the holding entry is removed, exactly as they were
+when the source itself was removed. Only the same-filesystem path preserves
+them, and only because the inode it promotes is the one that descriptor points
+at. That limit is inherent to copying across filesystems, not a property of
+this design.
+
+The rollback ladder is stated once for both paths, over "the entry holding the
+source bytes" — the holding entry on the EXDEV path, staging itself on the
+same-filesystem one. A copy is deleted only once the rename-back has been
+**seen to succeed**; if the source path is occupied, or that entry has gone, or
+the rename is refused, everything on disk is preserved and the ERROR names it.
+The earlier draft dropped the destination-side staging on the EXDEV path
+unconditionally, on the reasoning that the holding entry still had the bytes —
+a claim about a path last observed before the copy, and the design gate's
+counter-example was an actor that removes the holding entry and then fails the
+promote, leaving staging as the only copy.
+
+Crash states are the same **policy** as the same-filesystem path — a leftover
+under the internal grammar, hidden, never reaped, recovered by hand (`mv` it
+back onto the canonical name, or delete it once the destination is complete) —
+but not the same set of states, and the difference is worth writing down. A
+single atomic rename can only be caught before or after; the EXDEV path adds
+three: a holding entry with no staging yet, a holding entry beside a partially
+filled staging tree, and a promoted destination beside a stale holding entry.
+The visibility trade is the other half: a crash mid-copy used to leave the
+source visible and intact at its canonical name, and now leaves it hidden under
+the holding name, so a retry reports the artifact as missing rather than
+proceeding.
+
 ### 7. Copy mode and `--as` rename
 
 Copy stages by **byte copy** (`_stage_copy`, which since #2309 delegates
@@ -715,7 +774,9 @@ is not the web server's event loop.
   (A-13 MCP action); #895 P2 (stale fan-out orphans), #1123 B4-1
   (dangling lock.json entry), #1247 id 6 (byte-verified fan-out
   cleanup), #2304 (transfer staging classified but never reaped), #2309
-  (§6 amendment: staging collisions claim exclusively, never clear).
+  (§6 amendment: staging collisions claim exclusively, never clear), #2313
+  (§6 amendment: the EXDEV fallback parks the source in a holding entry
+  instead of copying from, and deleting, the canonical path).
 - ADRs: ADR-0011 (§3 no project_local fan-out; §5 no force valve;
   PR-E4 scope move + Row 15), ADR-0015 / ADR-0016 (scope vocabulary;
   §5 write-target rule this ADR carves the bounded exception into;

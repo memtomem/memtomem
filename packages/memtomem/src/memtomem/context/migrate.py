@@ -44,7 +44,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal
+from typing import Any, Callable, Iterator, Literal, NamedTuple
 
 import click
 
@@ -117,15 +117,19 @@ class MigratePartialError(Exception):
     """Raised when a scope-tier migrate cannot be cleanly completed.
 
     Specifically raised by the EXDEV-fallback path when the canonical
-    has been copied to ``dst`` but the original ``src`` cannot be
-    removed (permissions, open file handle, etc.). Both canonicals
-    are now on disk; the next ``mm context sync`` at the source
-    scope would recreate runtime fan-out at the old tier from the
-    stale ``src``, producing duplicate-scope ambiguity that
-    ``_detect_source_scope`` cannot resolve (#895 P2 review #5).
+    has been copied to ``dst`` but the pre-move source cannot be
+    removed (permissions, open file handle, etc.). Since #2313 that
+    source no longer sits at its canonical path — it was parked in a
+    holding entry beside it before the copy — so what survives is the
+    destination canonical plus a source-side holding copy under an
+    internal name, and ``src_path`` carries THAT path: the one the
+    user has to deal with by hand. The move also stopped before
+    clearing the source tier's runtime fan-out, which is why the
+    message tells the operator not to run ``mm context sync`` at the
+    source scope yet (#895 P2 review #5).
 
     The error carries both paths so the caller (CLI / web / MCP)
-    can surface a remediation hint pointing at the file the user
+    can surface a remediation hint pointing at the entry the user
     needs to remove manually. Translation to surface-native errors
     follows the same pattern as :class:`PrivacyScanError`.
     """
@@ -818,20 +822,21 @@ def _acquire_pair_lock(
         yield
 
 
-def transfer_staging_path(dst_parent: Path, name_hint: str) -> Path:
-    """Where a cross-store transfer stages one artifact under *dst_parent*.
+def transfer_staging_path(parent: Path, name_hint: str) -> Path:
+    """Name one internal transfer entry under *parent*.
 
     The one place the transfer staging grammar is spelled, shared by
     :func:`_stage_move` (move) and
     :func:`memtomem.context.transfer._stage_copy` (copy) so the two cannot
-    drift. The shape is
+    drift. Since #2313 it also names the EXDEV holding entry, which lives in
+    the SOURCE store rather than the destination one — the grammar is about
+    what the entry IS (ours, transient, never reaped), not about which side of
+    the transfer it sits on. The shape is
     ``.migrate-<name>-<decimal pid>-<8 lowercase hex>.tmp``, which is exactly
     what :func:`~memtomem.context._names.is_internal_artifact_dir` matches —
     so a leftover from a crash between stage and promote is hidden from every
     predicate-aware discovery walk instead of being enumerated as a canonical
-    artifact (#2304). "Predicate-aware" is the real scope, not a hedge: the
-    agent/command canonical lister does not consult it yet, so a leftover is
-    still enumerable there until that gap closes.
+    artifact (#2304), on whichever side of the transfer it was left.
 
     The width stays at ``token_hex(4)`` and the predicate was taught this
     kind's width instead. Narrowing it to the six hex the other kinds use would
@@ -845,7 +850,7 @@ def transfer_staging_path(dst_parent: Path, name_hint: str) -> Path:
     often a transfer fails closed on someone else's leftover rather than how
     often one gets destroyed.
     """
-    return dst_parent / f".migrate-{name_hint}-{os.getpid()}-{secrets.token_hex(4)}.tmp"
+    return parent / f".migrate-{name_hint}-{os.getpid()}-{secrets.token_hex(4)}.tmp"
 
 
 class TransferStagingBusyError(OSError):
@@ -897,11 +902,15 @@ def _claim_hit_an_occupied_name(staging: Path) -> bool:
 
 
 def _claim_transfer_staging(
-    dst_parent: Path,
+    parent: Path,
     name_hint: str,
     claim: Callable[[Path], None],
 ) -> Path:
-    """Claim a fresh transfer staging name exclusively, or fail closed (#2309).
+    """Claim a fresh transfer entry name exclusively, or fail closed (#2309).
+
+    Used for the destination-store staging entry in both modes and, since
+    #2313, for the source-store holding entry an EXDEV move parks its source
+    in — the same exclusivity question either way.
 
     *claim* must be an exclusive-create and NOTHING else — a no-replace
     rename, ``mkdir(exist_ok=False)``, :func:`_create_exclusive_file`,
@@ -934,7 +943,7 @@ def _claim_transfer_staging(
     permanent obstruction — two independent collisions on 32 bits of entropy
     means something other than chance.
     """
-    first = transfer_staging_path(dst_parent, name_hint)
+    first = transfer_staging_path(parent, name_hint)
     try:
         claim(first)
     except OSError:
@@ -943,7 +952,7 @@ def _claim_transfer_staging(
     else:
         return first
 
-    second = transfer_staging_path(dst_parent, name_hint)
+    second = transfer_staging_path(parent, name_hint)
     try:
         claim(second)
     except OSError as exc:
@@ -1034,6 +1043,31 @@ def _create_exclusive_file(path: Path) -> None:
     )
 
 
+def _refuse_junction(path: Path) -> None:
+    """Refuse a Windows directory junction rather than reproducing it wrongly.
+
+    A junction is not a symlink, so it would otherwise reach ``copytree``,
+    which deliberately recurses INTO one rather than reproducing it — the same
+    out-of-tree materialization the no-deref mirror contract exists to prevent
+    (``_atomic.copy_tree_atomic``). It cannot be recreated with
+    :func:`os.symlink`, so there is nothing to turn it into.
+
+    Lifted out of :func:`_stage_copy_into` so :func:`_stage_move` can ask the
+    question about the SOURCE, before the holding rename moves it (#2313).
+    Probing after the rename would test the holding entry instead, and a
+    refusal that has already moved the artifact is worse than one that has
+    not touched it.
+    """
+    if path.is_junction():
+        raise OSError(
+            errno.EINVAL,
+            "refusing to copy a directory junction: it cannot be reproduced as "
+            "a link, and following it would materialize out-of-tree bytes into "
+            "the destination store",
+            str(path),
+        )
+
+
 def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
     """Build a staging entry under *dst_parent* from a byte copy of *src*.
 
@@ -1063,14 +1097,7 @@ def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
     claim ran first and succeeded, so the entry is provably ours. A failed
     claim creates nothing and therefore cleans nothing.
     """
-    if src.is_junction():
-        raise OSError(
-            errno.EINVAL,
-            "refusing to copy a directory junction: it cannot be reproduced as "
-            "a link, and following it would materialize out-of-tree bytes into "
-            "the destination store",
-            str(src),
-        )
+    _refuse_junction(src)
 
     if src.is_symlink():
         # The link IS the payload; there is nothing to fill afterwards.
@@ -1117,26 +1144,128 @@ def _stage_copy_into(src: Path, dst_parent: Path, name_hint: str) -> Path:
     return staging
 
 
-def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> tuple[Path, bool]:
-    """Move *src* into a same-fs staging entry under *dst_parent*.
+class StagedMove(NamedTuple):
+    """What :func:`_stage_move` left on disk.
 
-    Returns ``(staging_path, src_consumed)``. ``src_consumed=True`` when the
-    no-replace rename succeeded (same-FS fast path) and the source is now
-    gone from disk. ``False`` when EXDEV forced a copy fallback; the
-    caller is responsible for removing the source after a successful
-    promote.
+    ``staging`` is the DESTINATION-store entry the caller promotes.
+    ``holding`` is the source, renamed aside in the SOURCE store, and is
+    ``None`` on the same-filesystem path where the staging entry IS the
+    source (#2313). Either way the source is gone from its canonical path by
+    the time this returns — the two paths differ in WHERE the pre-move bytes
+    live, never in whether the canonical name is free.
 
-    The staging name is claimed exclusively and a collider is never removed
-    (:func:`_claim_transfer_staging`). The rename carries the no-replace flag
-    rather than being guarded by an ``exists()`` check, which closes the
-    check-then-act window between the two and refuses shapes a check cannot
-    see — a dangling symlink is invisible to :meth:`Path.exists`, and plain
-    ``rename`` replaces an empty directory.
+    A tuple rather than a flag: the caller needs the holding path to remove
+    it after the promote and to rename it back on failure, and a boolean
+    would have to be paired with a path anyway.
+    """
 
-    Cleanup discipline: a no-replace rename that fails created nothing, so
-    there is nothing to clean up on that path; the copy fallback owns its own
-    post-claim cleanup. The src side is never touched on the EXDEV fallback
-    path until the caller signals promote success.
+    staging: Path
+    holding: Path | None
+
+
+def _restore_source(entry: Path, src: Path, *, allow_cross_parent: bool) -> bool:
+    """Rename *entry* back onto *src*; ``True`` iff the bytes are home.
+
+    The one rename-back, shared by :func:`_stage_move`'s own unwind and by
+    ``transfer.transfer_artifact``'s rollback ladder, because both are asking
+    the identical question: the entry named here holds the ONLY copy of the
+    source bytes, and it may be put back only onto a name nobody else has
+    taken.
+
+    **Nothing here removes anything, on any path.** A refusal returns False
+    with *entry* intact; the caller decides what to preserve, and every caller
+    preserves it. That is the same rule the staging claim follows
+    (:func:`_claim_transfer_staging`): a leaked directory is cheap, a deleted
+    canonical is not.
+
+    No-replace, never :func:`os.replace`: an external writer can recreate the
+    source path while we are staging, and a replacing rename would delete
+    bytes that are not ours to delete. Which of the two messages to log is
+    decided by LOOKING at *src* rather than by the errno — "something is at
+    src" is a claim about the world, and the errno spellings for an occupied
+    rename target differ per platform. ``lexists``, so a dangling symlink
+    counts as occupying the name.
+
+    *allow_cross_parent* is the caller's assertion that the two paths are on
+    one filesystem while living in different directories: true for the
+    rollback of a same-FS move (staging sits in the destination store, the
+    source in another), false for the EXDEV holding entry, which is a sibling
+    of the source by construction and therefore keeps the promote-shape guard.
+    """
+    try:
+        rename_no_replace(entry, src, allow_cross_parent=allow_cross_parent)
+    except OSError as exc:
+        if os.path.lexists(src):
+            logger.error(
+                "transfer rollback: rename-back refused (%s) — an entry we did "
+                "not create occupies src %s; preserving %s as the ONLY "
+                "surviving copy of the source bytes — manual reconciliation "
+                "required.",
+                exc,
+                src,
+                entry,
+            )
+        else:
+            logger.error(
+                "transfer rollback: rename-back failed (%s); %s is the ONLY "
+                "surviving copy of the source bytes — manual recovery required "
+                "(mv it back to %s).",
+                exc,
+                entry,
+                src,
+            )
+        return False
+    return True
+
+
+def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> StagedMove:
+    """Move *src* into a staging entry under *dst_parent*.
+
+    Returns :class:`StagedMove`. The source is consumed by an ATOMIC RENAME on
+    both paths, which is the property the caller's cleanup rests on: on the
+    same filesystem the rename lands directly in the destination store
+    (``holding`` is ``None``); across filesystems the rename can only reach a
+    sibling, so the source is first parked in a holding entry beside itself and
+    the bytes are copied from THAT into staging (#2313).
+
+    **Why the copy may not read the canonical path.** A cross-filesystem copy
+    takes as long as the artifact is large, and an out-of-band writer — an
+    editor, a shell, a ``git checkout``, anything that does not take our
+    sidecar lock — can rewrite or replace the source inside that window. The
+    predecessor copied from the canonical path and the caller then removed
+    that path BY NAME after the promote, so such a writer's bytes were
+    deleted and the destination held the older snapshot: the newer version
+    existed nowhere. Parking the source first means a writer that resolves
+    the canonical path finds it free, and whatever it puts there is nobody
+    else's to delete.
+
+    The guarantee is about writers that RESOLVE the path — create, replace,
+    rename. A writer holding a descriptor opened before the rename still
+    writes into the pre-move inode, which a cross-filesystem move can only
+    ever snapshot; those bytes are lost when the holding entry is removed,
+    exactly as they were when the source was removed by name. Only the
+    same-filesystem path preserves them, and only because the inode it
+    promotes is the one that descriptor points at.
+
+    The staging and holding names are both claimed EXCLUSIVELY and a collider
+    is never removed (:func:`_claim_transfer_staging`); both carry the
+    ``.migrate-`` grammar, so a leftover is hidden from every predicate-aware
+    walk and reaped by nothing.
+
+    **Crash states.** A crash between the holding rename and the caller's
+    post-promote removal leaves a ``.migrate-`` entry in the SOURCE store:
+    before the promote it is the only copy of the artifact, after it a stale
+    duplicate of the canonical now at the destination. That is the same
+    recovery policy the same-filesystem path already has — hidden, never
+    reaped, recovered by hand — but not the same set of states: the EXDEV path
+    can also be caught with a partially filled staging tree beside a complete
+    holding entry, and with both a promoted destination and a stale holding
+    entry, neither of which a single atomic rename can produce.
+
+    Cleanup discipline: a failed claim created nothing, so it cleans nothing;
+    a failure after the holding rename renames it back, and preserves it
+    loudly if that is refused, so the source bytes always exist somewhere this
+    function names.
     """
     dst_parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -1151,10 +1280,32 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> tuple[Path, bool
             # a filesystem without the primitive) — surface. Nothing was
             # created: the rename is atomic and it did not happen.
             raise
-        # EXDEV: src is on another filesystem, so fall back to copying bytes
-        # into staging without touching src.
-        return _stage_copy_into(src, dst_parent, name_hint), False
-    return staging, True
+        # EXDEV: src is on another filesystem. Park it beside itself first, so
+        # the copy reads an entry only we can name.
+        #
+        # The junction question is asked HERE, about the source, rather than
+        # inside the copy about the holding entry — a refusal that has not
+        # moved the artifact is better than one that has.
+        _refuse_junction(src)
+        holding = _claim_transfer_staging(
+            src.parent,
+            name_hint,
+            # Same parent by construction, so the promote-shape guard stays
+            # on: a holding entry that is not a sibling of the source is a
+            # bug, not a cross-device move.
+            lambda path: rename_no_replace(src, path),
+        )
+        try:
+            return StagedMove(_stage_copy_into(holding, dst_parent, name_hint), holding)
+        except BaseException:
+            # The source is renamed away at this point, so unwinding is this
+            # function's job: the caller's rollback ladder never sees a stage
+            # that failed. ``_restore_source`` preserves the holding entry and
+            # logs when it cannot put it back, so the bytes are never dropped
+            # to make a failure tidy.
+            _restore_source(holding, src, allow_cross_parent=False)
+            raise
+    return StagedMove(staging, None)
 
 
 def _promote_move(staging: Path, dst: Path) -> None:

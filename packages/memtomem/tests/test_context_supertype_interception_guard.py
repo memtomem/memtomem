@@ -1298,7 +1298,21 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
     ("context/migrate.py", "_stage_move", ("OSError",), 0): (
         _U,
         "no_recovery_callee",
-        "No-replace staging rename with EXDEV copy fallback; migrate-local, no swap; " + _RO,
+        "No-replace staging rename; EXDEV selects the holding-then-copy "
+        "fallback and every other errno re-raises; migrate-local, no swap; " + _RO,
+    ),
+    ("context/migrate.py", "_stage_move", ("BaseException",), 0): (
+        _R,
+        "bare",
+        "EXDEV unwind: rename the holding entry back onto the source (or "
+        "preserve it loudly), then re-raise the original failure.",
+    ),
+    ("context/migrate.py", "_restore_source", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Rename-back of the entry holding the source bytes: logs which of the "
+        "two remediations applies and returns False, removing nothing, so the "
+        "caller preserves every copy; " + _RO,
     ),
     ("context/migrate.py", "_promote_move", ("OSError",), 0): (
         _U,
@@ -1887,18 +1901,13 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
     ("context/transfer.py", "transfer_artifact", ("BaseException",), 1): (
         _R,
         "bare",
-        "Move-branch rollback: no-replace rename back, then re-raise.",
+        "Move-branch rollback: rename the entry holding the source bytes back "
+        "(migrate._restore_source), then re-raise.",
     ),
     ("context/transfer.py", "transfer_artifact", ("OSError",), 0): (
         _U,
         "no_recovery_callee",
-        "Nested rollback rename_no_replace(staging, src) — logs, preserves "
-        "staging on every failure, the outer handler re-raises; " + _RO,
-    ),
-    ("context/transfer.py", "transfer_artifact", ("OSError",), 1): (
-        _U,
-        "no_recovery_callee",
-        "EXDEV source cleanup → MigratePartialError translation; " + _RO,
+        "EXDEV holding-entry removal → MigratePartialError translation; " + _RO,
     ),
     ("context/transfer.py", "transfer_artifact", ("Exception",), 0): (
         _U,

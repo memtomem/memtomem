@@ -1227,7 +1227,7 @@ def test_rollback_refuses_an_occupied_src_and_keeps_staging(
     """
     import logging as _logging
 
-    import memtomem.context.transfer as transfer_mod
+    from memtomem.context import migrate as migrate_mod
 
     src_manifest = _write_canonical(
         two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
@@ -1237,12 +1237,16 @@ def test_rollback_refuses_an_occupied_src_and_keeps_staging(
     _write_versions(src_dir, secret_body)
 
     calls: list[Path] = []
+    # The rename-back lives in ``migrate._restore_source`` since #2313 — one
+    # implementation shared by the rollback ladder and the stager's own
+    # unwind — so the seam is migrate's binding, and the ERROR it logs
+    # carries migrate's logger name.
     monkeypatch.setattr(
-        transfer_mod,
+        migrate_mod,
         "rename_no_replace",
-        _plant_at_rename(transfer_mod, src_dir, shape, calls),
+        _plant_at_rename(migrate_mod, src_dir, shape, calls),
     )
-    caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
 
     # Gate A blocks the shared landing, which is what sends us to rollback.
     with pytest.raises(PrivacyBlockedError):
@@ -1347,7 +1351,12 @@ def test_exdev_fallback_cross_project_move(two_projects, monkeypatch):
     real_rename = migrate_mod.rename_no_replace
 
     def exdev_rename(src, dst, **kwargs):
-        if ".migrate-" in str(dst):
+        # Cross-STORE only. Staging into the destination store is the one
+        # rename that changes parents; parking the source in a holding entry
+        # beside itself and renaming it back are same-parent by construction
+        # (#2313), and answering EXDEV to those would make the copy fallback
+        # unreachable.
+        if Path(src).parent != Path(dst).parent:
             raise OSError(errno.EXDEV, "Invalid cross-device link", str(src))
         return real_rename(src, dst, **kwargs)
 
@@ -1387,12 +1396,20 @@ def test_exdev_src_cleanup_failure_cross_root_partial_error(two_projects, monkey
     real_rmtree = shutil.rmtree
 
     def exdev_rename(src, dst, **kwargs):
-        if ".migrate-" in str(dst):
+        # Cross-STORE only. Staging into the destination store is the one
+        # rename that changes parents; parking the source in a holding entry
+        # beside itself and renaming it back are same-parent by construction
+        # (#2313), and answering EXDEV to those would make the copy fallback
+        # unreachable.
+        if Path(src).parent != Path(dst).parent:
             raise OSError(errno.EXDEV, "Invalid cross-device link", str(src))
         return real_rename(src, dst, **kwargs)
 
     def failing_rmtree(path, *args, **kwargs):
-        if Path(path) == src_dir:
+        # The post-promote removal targets the HOLDING entry the source was
+        # parked in, not the canonical path — that path is left alone on
+        # purpose now (#2313).
+        if Path(path).parent == src_dir.parent and Path(path).name.startswith(".migrate-foo-"):
             raise OSError(13, "Permission denied", str(path))
         return real_rmtree(path, *args, **kwargs)
 
@@ -1418,8 +1435,21 @@ def test_exdev_src_cleanup_failure_cross_root_partial_error(two_projects, monkey
         f"cd {shlex.quote(str(two_projects['b']))} && mm context sync --scope project_shared"
     )
     assert expected_cmd in message
-    # Both canonicals on disk, as the error states.
-    assert src_manifest.is_file()
+    # What survives on the source side is the HOLDING entry, not a second
+    # canonical: the canonical path was renamed away before the copy and is
+    # never removed by name, so anything a racing writer put back there would
+    # be theirs (#2313).
+    assert not src_manifest.is_file()
+    assert not src_dir.exists()
+    leftovers = list(src_dir.parent.glob(".migrate-foo-*.tmp"))
+    assert len(leftovers) == 1, leftovers
+    assert (leftovers[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    # The remediation names that entry — the operator cannot act on a path
+    # the message does not print.
+    assert str(leftovers[0]) in message
+    assert exc_info.value.src_path == leftovers[0]
+    # ...and it no longer claims two canonicals, which stopped being true.
+    assert "Both canonicals" not in message
     dst_manifest = (
         _canonical_root(two_projects, "agents", "project_shared", "b") / "foo" / "agent.md"
     )
@@ -1914,3 +1944,70 @@ def test_collision_is_typed_with_pinned_literal(two_projects):
         "--force does not overwrite scope-tier targets in PR-E4 "
         "(replace verb is a follow-up)."
     )
+
+
+# ── #2313: the EXDEV copy reads a source only we can name ────────────
+
+
+def test_exdev_writer_at_the_source_path_survives_cross_project(two_projects, monkeypatch):
+    """The cross-project surface keeps a racing writer's bytes too.
+
+    The scope-migrate suite pins both layouts and both edges of the copy;
+    what this cell adds is the two-root path — a different source store, a
+    different destination store, and the fan-out cleanup that runs after the
+    locks release — because the holding entry lives in the SOURCE store and
+    only this shape has one that is not also the destination.
+
+    Mutation: restore the old ``shutil.rmtree(src_path)`` cleanup and the
+    writer's bytes are gone.
+    """
+    from memtomem.context import migrate as migrate_mod
+
+    src_manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    src_dir = src_manifest.parent
+    real_rename = migrate_mod.rename_no_replace
+
+    def exdev_rename(src, dst, **kwargs):
+        if Path(src).parent != Path(dst).parent:
+            raise OSError(errno.EXDEV, "Invalid cross-device link", str(src))
+        return real_rename(src, dst, **kwargs)
+
+    racer_body = "---\nname: foo\ndescription: racer\n---\n\nracer bytes\n"
+    real_copytree = shutil.copytree
+    fired: list[int] = []
+
+    def copytree_then_race(*args, **kwargs):
+        result = real_copytree(*args, **kwargs)
+        # The writer lands after the bytes are read and before the promote —
+        # the window the issue names. It finds the canonical path free,
+        # because the source was parked before the copy began.
+        fired.append(1)
+        assert not src_dir.exists(), "the copy must not read the canonical path"
+        src_dir.mkdir(parents=True)
+        (src_dir / "agent.md").write_text(racer_body, encoding="utf-8")
+        return result
+
+    monkeypatch.setattr("memtomem.context.migrate.rename_no_replace", exdev_rename)
+    monkeypatch.setattr(shutil, "copytree", copytree_then_race)
+
+    result = transfer_artifact(
+        "agents",
+        "foo",
+        src_project_root=two_projects["a"],
+        from_scope="project_shared",
+        dst_project_root=two_projects["b"],
+        to_scope="project_shared",
+        mode="move",
+        apply_=True,
+    )
+
+    assert result.transferred is True
+    assert fired, "the cell must have taken the EXDEV copy fallback"
+    dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+    assert (dst_root / "foo" / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    # The racer keeps what it wrote, and neither store carries a leftover.
+    assert (src_dir / "agent.md").read_text(encoding="utf-8") == racer_body
+    assert not list(src_dir.parent.glob(".migrate-foo-*.tmp"))
+    assert not list(dst_root.glob(".migrate-foo-*.tmp"))
