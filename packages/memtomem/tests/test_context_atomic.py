@@ -9,7 +9,10 @@ import os
 import stat
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import IO
 
 import portalocker
 import pytest
@@ -260,6 +263,48 @@ class _RecordingUnlock:
             raise self.exc
 
 
+@contextmanager
+def _raising_close_fdopen(exc: BaseException) -> Iterator[list[IO[bytes]]]:
+    """Patch ``_atomic.os.fdopen`` so its files raise *exc* from ``close``, and
+    end that stub's life with the test that installed it (#2330).
+
+    ``_close_quietly`` swallows the failure by contract, so the file is left
+    open with a ``close`` that still raises. Nothing in the test refers to it
+    afterwards — but ``_close_quietly`` logs with ``exc_info``, and pytest's
+    log capture holds that record, and through its traceback the lock's frames
+    and this file, for the rest of the item. The file therefore becomes
+    collectable only *after* teardown, and its finalizer calls the raising
+    ``close`` a second time inside whatever test is running by then. Whether
+    that is visible depends on the interpreter: 3.13 hands it to
+    ``sys.unraisablehook`` and pytest reports it against a healthy test, while
+    3.12 clears it without calling the hook at all.
+
+    Restoring the type's own ``close`` and closing the file here is what
+    confines that. The ``os.fdopen`` patch is undone here rather than left to
+    ``monkeypatch`` for the same reason: until it is, this closure is itself a
+    live reference to every file it handed out.
+
+    Yields the list of files handed out so a test can assert on them.
+    """
+    opened: list[IO[bytes]] = []
+    real_fdopen = os.fdopen
+
+    def _fdopen(*args: object, **kwargs: object):  # noqa: ANN202
+        fp = real_fdopen(*args, **kwargs)  # type: ignore[arg-type]
+        fp.close = _RecordingUnlock(exc)  # type: ignore[method-assign]
+        opened.append(fp)
+        return fp
+
+    _atomic_mod.os.fdopen = _fdopen  # type: ignore[assignment]
+    try:
+        yield opened
+    finally:
+        _atomic_mod.os.fdopen = real_fdopen  # type: ignore[assignment]
+        for fp in opened:
+            del fp.close  # type: ignore[attr-defined] # back to the type's own
+            fp.close()
+
+
 class TestFileLockFailureClassification:
     """A lock call can fail for two unrelated reasons and #2229 conflated them:
     every ``LockException`` was polled to the deadline and then reported as
@@ -419,25 +464,64 @@ class TestFileLockReleaseDoesNotMaskBody:
 
         assert any(str(lock) in record.getMessage() for record in caplog.records)
 
-    def test_body_exception_survives_a_failing_close(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_body_exception_survives_a_failing_close(self, tmp_path: Path) -> None:
         # Closing the descriptor is what actually drops the lock, so it always
         # runs — but on the way out of a failed body it must not become the
         # exception the caller sees any more than the unlock may.
         lock = _lock_path_for(tmp_path / "data.json")
-        real_fdopen = os.fdopen
 
-        def _fdopen(*args: object, **kwargs: object):  # noqa: ANN202
-            fp = real_fdopen(*args, **kwargs)  # type: ignore[arg-type]
-            fp.close = _RecordingUnlock(OSError(errno.EIO, "close failed"))  # type: ignore[method-assign]
-            return fp
+        with _raising_close_fdopen(OSError(errno.EIO, "close failed")) as opened:
+            with pytest.raises(_BodyFailure):
+                with _file_lock(lock, timeout=5.0):
+                    raise _BodyFailure("what the caller actually needs to see")
 
-        monkeypatch.setattr(_atomic_mod.os, "fdopen", _fdopen)
+            # The swallow is what leaves the descriptor open, so state the
+            # precondition the cleanup below exists for rather than tidying a
+            # file that some other change already closed.
+            assert len(opened) == 1
+            assert opened[0].close.calls == 1  # type: ignore[attr-defined]
+            assert not opened[0].closed
 
-        with pytest.raises(_BodyFailure):
-            with _file_lock(lock, timeout=5.0):
-                raise _BodyFailure("what the caller actually needs to see")
+        # Confined (#2330): nothing that raises from ``close`` is left for the
+        # collector to trip over inside an unrelated test.
+        assert "close" not in vars(opened[0])
+        assert opened[0].closed
+
+    def test_a_raising_close_stub_does_not_outlive_this_test(self, tmp_path: Path) -> None:
+        # #2330: the suite exited non-zero with zero failures because this
+        # stub used to outlive its own test — see ``_raising_close_fdopen`` for
+        # the reference that carried it past teardown.
+        #
+        # Pinned by running the finalizer here, on the stub's own call count.
+        # Watching ``sys.unraisablehook`` instead would pass vacuously on half
+        # the interpreters this suite runs under (3.12 clears a finalizer's
+        # ``close`` error without ever calling the hook; 3.13 reports it), and
+        # ``gc.collect()`` cannot stand in either: the captured log record
+        # keeps the file reachable until teardown, which is precisely why the
+        # second ``close`` used to land somewhere else.
+        lock = _lock_path_for(tmp_path / "data.json")
+
+        with _raising_close_fdopen(OSError(errno.EIO, "close failed")) as opened:
+            with pytest.raises(_BodyFailure):
+                with _file_lock(lock, timeout=5.0):
+                    raise _BodyFailure("boom")
+            fp = opened[0]
+            stub = fp.close
+
+        assert stub.calls == 1  # fired once, inside _close_quietly
+
+        # State the confinement before driving the finalizer, or this test
+        # repairs the very condition it is here to detect: ``__del__`` on a
+        # still-open file closes it, so a helper that dropped the stub but
+        # never closed would slip past the call count alone.
+        assert "close" not in vars(fp)
+        assert fp.closed
+
+        # The call the collector would have made downstream, made here where a
+        # test can see it: a confined file is closed, so this is a no-op.
+        fp.__del__()  # type: ignore[attr-defined]
+
+        assert stub.calls == 1
 
     def test_the_lock_is_actually_released_after_a_failing_unlock(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -560,22 +644,21 @@ class TestAsyncFileLockClassification:
             await task
 
     @pytest.mark.asyncio
-    async def test_body_exception_survives_a_failing_close(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_body_exception_survives_a_failing_close(self, tmp_path: Path) -> None:
         lock = _lock_path_for(tmp_path / "data.json")
-        real_fdopen = os.fdopen
 
-        def _fdopen(*args: object, **kwargs: object):  # noqa: ANN202
-            fp = real_fdopen(*args, **kwargs)  # type: ignore[arg-type]
-            fp.close = _RecordingUnlock(OSError(errno.EIO, "close failed"))  # type: ignore[method-assign]
-            return fp
+        with _raising_close_fdopen(OSError(errno.EIO, "close failed")) as opened:
+            with pytest.raises(_BodyFailure):
+                async with async_file_lock(lock, timeout=5.0):
+                    raise _BodyFailure("what the caller actually needs to see")
 
-        monkeypatch.setattr(_atomic_mod.os, "fdopen", _fdopen)
+            assert len(opened) == 1
+            assert opened[0].close.calls == 1  # type: ignore[attr-defined]
+            assert not opened[0].closed
 
-        with pytest.raises(_BodyFailure):
-            async with async_file_lock(lock, timeout=5.0):
-                raise _BodyFailure("what the caller actually needs to see")
+        # Same confinement as the sync twin (#2330).
+        assert "close" not in vars(opened[0])
+        assert opened[0].closed
 
     @pytest.mark.asyncio
     async def test_unlock_failure_on_the_success_path_still_propagates(
