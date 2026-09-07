@@ -628,7 +628,44 @@ const _MAX_CHUNK_SAVE_ATTEMPTS = 4;
 //
 // Returns ``null`` when the user declines at any dialog, matching the cancel
 // contract ``apiWithRedactionRetry`` has, so call sites keep one check.
+//
+// One conversation per chunk at a time (#2340). Nothing stops a second save
+// for the same chunk starting while the first is still going: the inline
+// editor's Cancel only removes the edit area and never consults the save in
+// flight, `_startChunkEdit`'s guard is per card, and the detail pane's
+// ``btnLoading`` disables its own button and nothing else. The window is the
+// stretch BEFORE a dialog opens — a PATCH in flight, nothing inert yet — where
+// Cancel → Edit → Save starts a second conversation for the same chunk. (Once
+// a dialog IS open the background is inert, so the editor's own buttons are
+// unclickable until it is answered; the reachable overlap is the latency
+// window, not the dialog's.) Two conversations each answer the tier THEIR
+// request was judged on, and their writes race — last one wins, with nothing
+// said. So refuse the second, and say so: the user pressed Save, and ``null``
+// is already spoken for as "the user declined" and draws no toast at all.
+//
+// This is per chunk, and deliberately not more. Two saves for DIFFERENT chunks
+// are a legitimate overlap; what they must not do is talk over each other in
+// one dialog, and that is the queue in ``showConfirm``'s job, not this set's.
+const _CHUNK_SAVES_IN_FLIGHT = new Set();
+
 async function saveChunkBody(chunkId, body, opts = {}) {
+  const inFlight = String(chunkId);
+  if (_CHUNK_SAVES_IN_FLIGHT.has(inFlight)) {
+    throw new Error(t('toast.chunk_save_in_flight'));
+  }
+  _CHUNK_SAVES_IN_FLIGHT.add(inFlight);
+  try {
+    // ``return await``, not ``return``: a bare return completes the try block
+    // with the promise itself, so ``finally`` would run before the
+    // conversation settles and release the key immediately — a guard that
+    // guards nothing.
+    return await _runChunkSaveConversation(chunkId, body, opts);
+  } finally {
+    _CHUNK_SAVES_IN_FLIGHT.delete(inFlight);
+  }
+}
+
+async function _runChunkSaveConversation(chunkId, body, opts) {
   const path = `/api/chunks/${chunkId}`;
   // Snapshot BEFORE the first request, not between a dialog and its retry.
   // Copying at the retry copies whatever the caller's object holds by then.
@@ -872,6 +909,31 @@ function _recomputeBackgroundInert() {
   });
 }
 
+// Every ``.modal-overlay`` shares one ``z-index`` (style.css), so when two are
+// visible at once the DOM order decides which paints on top — and
+// ``#confirm-modal`` sits earlier in index.html than every Context Gateway
+// overlay. That is why the pull and move/copy flows hide their own modal around
+// a disclosure and show it again afterwards, and three comments in those files
+// say so.
+//
+// That workaround assumed the confirm is gone by the time the modal comes back.
+// With confirms serialized (#2340) a queued one opens AFTER such a restore, so
+// it would land underneath a modal the user can see while ``_ACTIVE_MODALS``
+// still calls it topmost — and Esc, which the dispatcher hands to the confirm
+// whenever it is not ``hidden``, would answer a dialog that is not visible.
+//
+// So paint order is derived from the stack rather than from the document: the
+// modal on top of ``_ACTIVE_MODALS`` is the one on top of the screen, which is
+// the property the rest of this file already assumes. Inline styles are used
+// (not classes) because the depth is unbounded, and they are cleared on the way
+// out so a modal that is not open carries no stacking of its own.
+const _MODAL_Z_BASE = 200;  // must match .modal-overlay's z-index in style.css
+
+function _restackModals(removed = null) {
+  if (removed && !_ACTIVE_MODALS.includes(removed)) removed.style.zIndex = '';
+  _ACTIVE_MODALS.forEach((el, i) => { el.style.zIndex = String(_MODAL_Z_BASE + i); });
+}
+
 // openModalA11y(modal, { focusables })
 //   - captures the trigger (document.activeElement) for focus restoration
 //   - pushes modal onto _ACTIVE_MODALS and recomputes background inert
@@ -883,6 +945,7 @@ function openModalA11y(modal, { focusables = null } = {}) {
   const previouslyFocused = document.activeElement;
   _ACTIVE_MODALS.push(modal);
   _recomputeBackgroundInert();
+  _restackModals();
 
   let onKey = null;
   if (typeof focusables === 'function') {
@@ -904,6 +967,7 @@ function openModalA11y(modal, { focusables = null } = {}) {
     const idx = _ACTIVE_MODALS.indexOf(modal);
     if (idx !== -1) _ACTIVE_MODALS.splice(idx, 1);
     _recomputeBackgroundInert();
+    _restackModals(modal);
     if (onKey) document.removeEventListener('keydown', onKey, true);
     if (
       previouslyFocused
@@ -1658,7 +1722,55 @@ function showToast(message, type = 'success', options = {}) {
 // ``{ ok: boolean, extras: { [id]: boolean } }`` instead — callers that
 // pass extras must handle the object shape. Existing callers without
 // extras get the boolean shape unchanged.
-function showConfirm({
+//
+// One dialog at a time (#2340). ``#confirm-modal`` is a singleton element:
+// one title, one message, one pair of buttons. A second call while a dialog
+// is already on screen therefore cannot be *shown* — it can only overwrite the
+// first one's text and take its buttons over, which is what assigning
+// ``onclick`` used to do. The first caller's ``await`` was then left pending
+// forever, and with it its ``releaseA11y``: the phantom entry that leaves in
+// ``_ACTIVE_MODALS`` keeps every other ``<body>`` child ``inert`` after the
+// visible dialog is gone, so the page freezes with nothing on screen to
+// explain why. Overlapping calls are serialized instead — each waits its turn,
+// then opens its own dialog and gets its own answer.
+//
+// ``_confirmTail`` is the whole queue: the dialog currently settling, or
+// ``null`` for idle. One variable rather than a queue plus a counter, because
+// two pieces of state that must agree are one refactor away from disagreeing —
+// and the failure there is silent (every later dialog opening one microtask
+// late, which no assertion in the app would notice).
+let _confirmTail = null;
+
+function showConfirm(opts) {
+  const run = () => _runConfirmDialog(opts);
+  // Idle ⇒ open synchronously, exactly as before: callers read the dialog's
+  // DOM on the line after the call, with no await in between, and so do the
+  // specs. A throw out of ``run()`` here leaves ``_confirmTail`` null — still
+  // idle — so a broken dialog cannot wedge the ones behind it.
+  const p = _confirmTail === null ? run() : _confirmTail.then(run);
+  let tail;
+  const clear = () => { if (_confirmTail === tail) _confirmTail = null; };
+  // ``clear`` hands idleness back, and it has to get there before the caller
+  // awaiting ``p`` opens the next dialog — otherwise every back-to-back
+  // confirm takes the queued branch and opens a microtask late, which nothing
+  // in the app would notice. Registering it directly on ``p``, before
+  // returning, buys the margin for that; measured, one extra hop is still
+  // early enough, two is not something to find out in production.
+  //
+  // The two-argument form is load-bearing, not style: the tail must absorb
+  // rejections. A bare ``.then(clear)`` would leave a queued dialog waiting on
+  // a rejected promise — it would never open, and its caller would be handed
+  // the *previous* dialog's error.
+  tail = p.then(clear, clear);
+  _confirmTail = tail;
+  return p;
+}
+
+// The dialog itself. Kept separate from ``showConfirm`` so the queue above is
+// the only entry point. Signature and body are unchanged from before the
+// queue — every internal caller keeps calling ``showConfirm``, which is what
+// the specs override on ``window``.
+function _runConfirmDialog({
   title,
   message = '',
   // Optional second line styled as a warning (e.g. "N files will be
@@ -1739,6 +1851,8 @@ function showConfirm({
       warningEl.hidden = true;
       modal.removeEventListener('click', onBackdrop);
       document.removeEventListener('keydown', onKey, true);
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
       if (extraOption) {
         const extras = {};
         extras[extraOption.id] = extraChecked;
@@ -1756,10 +1870,27 @@ function showConfirm({
         focusables[(idx + (e.shiftKey ? -1 : 1) + focusables.length) % focusables.length].focus();
       }
     }
+    function onOk() { cleanup(true); }
+    function onCancel() { cleanup(false); }
     modal.addEventListener('click', onBackdrop);
     document.addEventListener('keydown', onKey, true);
-    qs('confirm-cancel-btn').onclick = () => cleanup(false);
-    qs('confirm-ok-btn').onclick = () => cleanup(true);
+    // Added and removed per invocation, like the two above — never assigned to
+    // ``onclick``. An assignment is a single slot on a single reused element,
+    // so a second dialog silently replaced this one's handlers and answered in
+    // its place, leaving the first caller's ``releaseA11y`` to never run.
+    //
+    // This is not merely belt-and-braces behind the queue above: the two fix
+    // different halves. Listeners alone mean BOTH cleanups run on one click,
+    // so the a11y stack always empties and the page cannot freeze. The queue
+    // alone is what stops the second call's title/message/extraOption from
+    // overwriting the first's on this shared element. Neither subsumes the
+    // other; ``confirm-reentrancy.test.mjs`` pins them separately.
+    //
+    // ``_ctxResolveConflict`` (context-gateway-conflict.js) is the same shape
+    // and still assigns ``onclick``. It has one caller, so an overlap is far
+    // less likely — but it is the same defect, not a different one.
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
   });
 }
 

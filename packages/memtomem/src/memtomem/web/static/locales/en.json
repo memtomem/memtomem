@@ -1579,6 +1579,7 @@
   "confirm.chunk_edit_shared_msg": "This entry lives in the project_shared tier, on a path the repository tracks. Saving replaces its body for everyone who pulls the project.",
   "toast.chunk_edit_shared_redaction_blocked": "The privacy scanner found {hits} match(es). Entries in the shared tier cannot override it — edit the text, or move the entry to a private tier first.",
   "toast.chunk_save_tier_kept_changing": "the entry kept moving between storage tiers while you answered, so nothing was saved — press Save again",
+  "toast.chunk_save_in_flight": "this entry is already being saved — wait for that save to finish, or answer its dialog",
   "confirm.merge_dupe_title": "Merge Duplicate",
   "confirm.merge_dupe_keep_a_msg": "Keep A and delete B.",
   "confirm.merge_dupe_keep_b_msg": "Keep B and delete A.",
