@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
+import stat
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
 from uuid import uuid4
 
+
+logger = logging.getLogger(__name__)
 
 _FRONT_MATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
@@ -227,3 +234,109 @@ def remove_lines(file_path: Path, start_line: int, end_line: int) -> None:
     if trailing_newline and new_lines:
         result += "\n"
     file_path.write_text(result, encoding="utf-8")
+
+
+class RestoreOutcome(StrEnum):
+    """What :func:`restore_pre_image_quietly` did with the pre-image (#2347)."""
+
+    restored = "restored"
+    """The source was still the file that was read, and holds its pre-image again."""
+
+    source_removed = "source_removed"
+    """The source (or a parent component) was gone — nothing was recreated."""
+
+    source_replaced = "source_replaced"
+    """A different file now answers to the path — it was left exactly as found."""
+
+    failed = "failed"
+    """The restore itself failed; logged, never raised. The file may hold the mutation."""
+
+
+@dataclass(frozen=True, slots=True)
+class PreImage:
+    """A source file's bytes plus the filesystem identity they were read from.
+
+    ``identity`` is ``(st_dev, st_ino)``, or ``None`` when the filesystem cannot
+    answer (``st_ino == 0`` on some FUSE/SMB mounts). Both come off one open
+    descriptor, so they describe the same file even if the path is re-pointed
+    the instant after (the ``atomic_write_bytes`` rule, ``context/_atomic.py``).
+    """
+
+    data: bytes
+    identity: tuple[int, int] | None
+
+
+def read_pre_image(file_path: Path) -> PreImage:
+    """Read *file_path*'s bytes and identity for a later rollback.
+
+    Bytes rather than text on purpose: a rollback restores what was there. Text
+    mode would translate newlines on the way back out and would raise
+    ``UnicodeDecodeError`` on a file the mutation itself is about to reject —
+    outside the caller's ``try``, where it could not be rolled back.
+    """
+    with open(file_path, "rb") as f:
+        info = os.fstat(f.fileno())
+        data = f.read()
+    identity = None if info.st_ino == 0 else (info.st_dev, info.st_ino)
+    return PreImage(data=data, identity=identity)
+
+
+def restore_pre_image_quietly(file_path: Path, pre_image: PreImage) -> RestoreOutcome:
+    """Put *pre_image* back at *file_path*, reporting rather than raising (#2347).
+
+    Only ever called while another exception is propagating — the failure this
+    is rolling back. So it never raises: a restore error replacing the body's
+    exception is exactly the masking #2229 closed on the lock's own release path
+    (``context/_atomic._release_quietly``), and it would demote the real cause to
+    ``__context__`` and skip the caller's ``RetryableError`` branch. The outcome
+    is returned instead, for the caller to report in its own terms.
+
+    It also never *creates*. The L2 sidecar the caller holds excludes cooperating
+    writers only; it never bound external mutation of the data file
+    (``indexing/engine.py``), so an outside ``rm`` / ``mv`` / save-via-rename can
+    land between the pre-image read and the failure. Writing the pre-image back
+    unconditionally would recreate a file the user deleted, restoring its content
+    by fiat.
+
+    **The open is the decision, by errno rather than a probe** (the #2346 rule):
+    ``"r+b"`` passes neither ``O_CREAT`` nor ``O_TRUNC``, so absence answers
+    ``ENOENT`` / ``ENOTDIR`` instead of being raced between a check and a write.
+    Identity is then compared on the *descriptor*, and the truncate comes after
+    that check — opening with ``"wb"`` would empty a replacement file before
+    refusing it.
+
+    Where the filesystem cannot answer identity (``PreImage.identity is None``)
+    the restore proceeds on existence alone. Refusing there would leave the
+    caller's own half-applied mutation on disk — a certain corruption traded for
+    a hypothetical one — and resurrection, the defect this closes, is already
+    ruled out by the open.
+
+    Symlinks are deliberately followed on both reads (no ``O_NOFOLLOW``): a
+    symlinked memory file works today, and the identity compared is the target's
+    at both ends.
+    """
+    try:
+        handle = open(file_path, "r+b")
+    except (FileNotFoundError, NotADirectoryError):
+        # The file, or a parent component, is gone. Pre-#2347 this branch was
+        # the masking one: ``write_text`` raised ENOENT over the body's error.
+        return RestoreOutcome.source_removed
+    except IsADirectoryError:
+        return RestoreOutcome.source_replaced
+    except Exception:  # noqa: BLE001 - reported, never raised over the body's
+        logger.warning("restoring %s failed while unwinding an error", file_path, exc_info=True)
+        return RestoreOutcome.failed
+
+    try:
+        with handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or (
+                pre_image.identity is not None and (info.st_dev, info.st_ino) != pre_image.identity
+            ):
+                return RestoreOutcome.source_replaced
+            handle.truncate(0)
+            handle.write(pre_image.data)
+    except Exception:  # noqa: BLE001 - reported, never raised over the body's
+        logger.warning("restoring %s failed while unwinding an error", file_path, exc_info=True)
+        return RestoreOutcome.failed
+    return RestoreOutcome.restored

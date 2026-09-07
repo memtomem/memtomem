@@ -169,6 +169,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A memory edit or delete that fails no longer brings back a file you
+  deleted while it ran** (#2347) — when `mem_edit`, `mem_delete` or the web
+  editor's save cannot re-index what it just wrote, it puts the file's
+  pre-image back. It did that with a plain write, and a plain write *creates*.
+  The lock held across that span binds other memtomem writers, never an
+  outside `rm`, `mv`, or editor saving via rename — so the one thing that
+  could remove the file mid-span was also the one thing the rollback would
+  undo, recreating a note you had deleted and refilling it with content you
+  had not asked to keep.
+
+  The restore now opens the file without creating it and checks, on the open
+  descriptor, that this is still the file the pre-image was read from. A
+  source that was removed is left removed, one that was replaced is left
+  exactly as found, and the tool result says which of those happened instead
+  of claiming a rollback that did not occur. Deciding by errno rather than by
+  asking "is it still there?" first is the rule #2346 arrived at: a question
+  answered before the write is already stale when the write lands.
+
+  The quieter half is what a *failing* rollback used to do to the error it was
+  rolling back. Restoring a file whose directory had gone raised its own
+  "no such file" from inside the failure handler, before the log line and
+  before the retry classification — so a transient store outage surfaced as a
+  missing file, and the branch that would have told the caller to try again
+  never ran. The restore now reports rather than raises, and the original
+  failure reaches the caller intact with the rollback's own trouble recorded
+  beside it. This is the rule #2229 set on the lock's release path, which had
+  never been applied here.
+
+  One consequence worth stating: "retryable" is now claimed only when the
+  pre-state is actually back. Where the source was removed or replaced under
+  the edit, retrying would answer something unrelated, so the result names
+  what happened to the file instead. The web route reports the same states
+  through the server log, and its 503 still invites the retry that a
+  clean rollback earns.
+
 - **Deleting a memory's index rows no longer recreates the directory you
   removed** (#2346) — every memory-CRUD span took the source file's sidecar
   lock unconditionally, and acquiring that lock creates its parent. So a chunk

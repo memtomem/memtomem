@@ -19,6 +19,7 @@ gate uses an ``asyncio.Event``.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -26,10 +27,12 @@ from uuid import uuid4
 import pytest
 
 from helpers import StubCtx
+from memtomem.errors import NamespaceResolutionError
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.context import AppContext
 from memtomem.server.tools import memory_crud
 from memtomem.tools import memory_writer
+from memtomem.tools.memory_writer import RestoreOutcome
 
 
 async def _chunks_by_start_line(comp, path):
@@ -404,3 +407,159 @@ class TestLockedChunkHelper:
             assert chunk is None
             assert err is not None
             assert "being moved concurrently" in err
+
+
+class TestRollbackAgainstExternalRemoval:
+    """#2347: the rollback must not recreate a source another process removed,
+    and a restore that fails itself must not replace the failure it is rolling
+    back. The locks bind cooperating CRUD writers; an outside ``rm`` / ``mv``
+    lands anyway, which is what these drive.
+    """
+
+    @staticmethod
+    def _failing_index(app, sabotage, exc):
+        """First ``index_file`` call runs *sabotage* then raises *exc*.
+
+        Later calls (the rollback re-index) delegate to the real engine, the
+        idiom ``test_rollback_does_not_erase_concurrent_append`` already uses.
+        """
+        real_index = app.index_engine.index_file
+        calls = 0
+
+        async def gated_index(path, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                sabotage()
+                raise exc
+            return await real_index(path, *args, **kwargs)
+
+        app.index_engine.index_file = gated_index  # type: ignore[method-assign]
+
+    @pytest.mark.asyncio
+    async def test_edit_does_not_recreate_a_source_removed_during_the_reindex(
+        self, bm25_only_components
+    ):
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        self._failing_index(app, f.unlink, RuntimeError("boom"))
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        assert not f.exists()  # the pre-image was NOT written back
+        assert "removed by another process" in out
+        assert "rolled back" not in out
+        assert await comp.storage.list_chunks_by_source(f.resolve()) == []
+
+    @pytest.mark.asyncio
+    async def test_edit_leaves_a_source_replaced_during_the_reindex_as_found(
+        self, bm25_only_components
+    ):
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+
+        def replace_the_source():
+            other = mem_dir / "other.md"
+            other.write_text("# Somebody else's file\n", encoding="utf-8")
+            os.replace(other, f)
+
+        self._failing_index(app, replace_the_source, RuntimeError("boom"))
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        assert "replaced by another process" in out
+        assert f.read_text(encoding="utf-8") == "# Somebody else's file\n"
+
+    @pytest.mark.asyncio
+    async def test_edit_reports_a_failed_restore_without_hiding_the_cause(
+        self, bm25_only_components, monkeypatch
+    ):
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        self._failing_index(app, lambda: None, RuntimeError("boom"))
+        monkeypatch.setattr(
+            memory_crud, "restore_pre_image_quietly", lambda *_: RestoreOutcome.failed
+        )
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        # The rollback's own failure is reported, and so is what it was
+        # rolling back — pre-#2347 the second half was lost.
+        assert "rollback failed too" in out
+        assert "boom" in out
+
+    @pytest.mark.asyncio
+    async def test_a_retryable_failure_with_a_clean_restore_is_still_retryable(
+        self, bm25_only_components
+    ):
+        """The pin the ``RetryableError`` re-raise never had."""
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        before = f.read_text(encoding="utf-8")
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        self._failing_index(app, lambda: None, NamespaceResolutionError("store down"))
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        assert out.startswith("Error (retryable)")
+        assert f.read_text(encoding="utf-8") == before
+
+    @pytest.mark.asyncio
+    async def test_a_retryable_failure_over_a_removed_source_reports_the_removal(
+        self, bm25_only_components
+    ):
+        """ "Retryable" is a claim that the pre-state is back. It is not, here:
+        the file is gone, and a retry would answer "not found" without ever
+        telling the caller why.
+        """
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        self._failing_index(app, f.unlink, NamespaceResolutionError("store down"))
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        assert not out.startswith("Error (retryable)")
+        assert "removed by another process" in out
+        assert not f.exists()
+
+    @pytest.mark.asyncio
+    async def test_delete_shares_the_removal_contract(self, bm25_only_components):
+        """The twin branch words it the same way — one ``_rollback_error``."""
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        self._failing_index(app, f.unlink, RuntimeError("boom"))
+
+        out = await memory_crud.mem_delete(chunk_id=str(alpha.id), ctx=ctx)
+
+        assert not f.exists()
+        assert "delete failed" in out
+        assert "removed by another process" in out
