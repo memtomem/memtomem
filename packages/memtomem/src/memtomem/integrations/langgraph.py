@@ -60,6 +60,16 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
+#: How many times :meth:`MemtomemStore.delete` re-runs ``locked_source_chunk``
+#: after it reports ``"moved"``. A ``memory-migrate`` can move a chunk between
+#: files while we wait for the old file's lock, and the tier has to be judged
+#: on the file the row actually belongs to. The web delete route answers 409
+#: and lets the client re-issue the request; an in-process library call has no
+#: request to re-issue, so the bounded re-key lives here — the same bound
+#: ``server/tools/memory_crud._CHUNK_LOCK_MOVE_RETRIES`` applies to its own.
+_CHUNK_LOCK_MOVE_RETRIES = 3
+
+
 class _UnregisteredProjectTarget(Exception):
     """A target names a project tree that no config entry covers.
 
@@ -626,6 +636,10 @@ class MemtomemStore:
         ``None`` covers both "no such chunk" and "belongs to another project"
         (ADR-0011 §6, ADR-0036) — the same rule ``search`` on this adapter
         already applies, and the same answer ``mem_read`` gives.
+
+        ``scope`` reports the chunk's persisted ADR-0011 tier, so a caller can
+        see that :meth:`delete` will require ``confirm_project_shared=True``
+        before the refusal raises rather than after (#2335).
         """
         from memtomem.runtime.project_context import _resolve_project_context_root
         from memtomem.search.visibility import resolve_visible_chunk
@@ -644,22 +658,137 @@ class MemtomemStore:
             "source": str(chunk.metadata.source_file),
             "tags": list(chunk.metadata.tags),
             "namespace": chunk.metadata.namespace,
+            "scope": chunk.metadata.scope or "user",
         }
 
-    async def delete(self, chunk_id: str) -> bool:
+    async def delete(self, chunk_id: str, *, confirm_project_shared: bool = False) -> bool:
         """Delete a chunk by UUID, inside the caller's project boundary.
 
         Returns ``False`` for an out-of-boundary id, exactly as for one that
         does not exist. A caller who cannot read a chunk cannot delete it
         either (ADR-0036).
+
+        ADR-0011 §5 Gate B (#2335): a chunk whose persisted ``scope`` is
+        ``project_shared`` needs ``confirm_project_shared=True``. This removes
+        index rows and leaves the markdown file alone, which does not excuse
+        it — ``mem_delete`` gates its own row-only ``source_file=`` branch for
+        the same reason. Dropping shared-tier content out of the index changes
+        what everyone on the project can find, on content the caller did not
+        author alone.
+
+        The tier is read from the chunk re-fetched **under the source file's
+        lock**, per ADR-0011 §5, so a ``memory-migrate`` re-scoping the chunk
+        between the caller's read and the delete cannot carry a shared-tier
+        removal on a consent given for another tier. A source whose directory
+        has been removed still deletes: that span degrades to the in-process
+        half of the lock rather than recreating the directory (#2346), and
+        this method writes no bytes, which is the condition the degraded span
+        attaches. That span is
+        ``tools.memory_mutation.locked_source_chunk`` — the same helper the web
+        ``DELETE /api/chunks/{id}`` route takes for the same job, so the two
+        cannot drift. Only the cross-process sidecar (L2) is taken: the
+        in-process per-file lock lives on the MCP server's ``AppContext``,
+        which this package may not import, and the sidecar's own in-process
+        layer covers same-process callers.
+
+        Args:
+            confirm_project_shared: Required when the chunk's persisted scope
+                is ``project_shared``.
+
+        Raises:
+            ProjectSharedConfirmationRequiredError: the chunk is
+                ``project_shared`` and the confirmation was not given. A
+                refusal raises instead of returning ``False`` because
+                ``False`` already means "no such chunk, or not yours" — a
+                caller must be able to tell a refusal from a miss. It is a
+                ``ValueError`` subclass rather than a bare ``ValueError``
+                because ``chunk_id`` is parsed here too and a malformed id
+                raises one of those: the two want opposite remedies, and only
+                this one is retryable by passing the flag.
+            TimeoutError: another writer holds the source file's lock past
+                the budget, or is moving the chunk between files faster than
+                the bounded re-key can follow. "Writer" and not "process":
+                the sidecar has an in-process layer as well, so a second
+                coroutine in this same interpreter can be the one holding it.
         """
+        from memtomem import privacy
+        from memtomem.errors import ProjectSharedConfirmationRequiredError
+        from memtomem.runtime.project_context import _resolve_project_context_root
+        from memtomem.tools.memory_mutation import locked_source_chunk
+
         comp = await self._ensure_init()
-        if await self.get(chunk_id) is None:
-            return False
-        deleted = await comp.storage.delete_chunks([UUID(chunk_id)])
-        if deleted:
-            comp.search_pipeline.invalidate_cache()
-        return deleted > 0
+        uid = UUID(chunk_id)
+        boundary = _resolve_project_context_root(comp)
+
+        for _ in range(_CHUNK_LOCK_MOVE_RETRIES):
+            # The third element says whether the cross-process half of the
+            # lock was actually taken (#2346): on a source whose directory the
+            # user removed, the span degrades to L2's in-process layer rather
+            # than mkdir the directory back just to lock a delete. A caller
+            # that gets ``False`` must not write bytes to the source — this
+            # one never does. It removes index rows and leaves the markdown
+            # alone, so it proceeds either way, exactly as ``mem_delete``'s
+            # row-only branch and the web DELETE's index-only branch do. The
+            # worst case is the same one that already applies to every delete
+            # on this surface: a later re-index re-adds the row.
+            async with locked_source_chunk(comp.storage, uid, project_context_root=boundary) as (
+                fresh,
+                reason,
+                _cross_process_held,
+            ):
+                if reason == "not_found":
+                    # ADR-0036: out of boundary reads as absent, so a caller
+                    # cannot tell another project's id from a missing one.
+                    return False
+                if reason == "locked":
+                    raise TimeoutError(
+                        f"chunk {chunk_id} source file is locked by another writer "
+                        "(migration in flight?); retry."
+                    )
+                if reason == "moved":
+                    # The file we held was not this row's any more, so nothing
+                    # it said is authoritative. Re-key onto the new one.
+                    continue
+                if fresh is None:  # pragma: no cover - defensive
+                    return False
+
+                inferred_scope = fresh.metadata.scope or "user"
+                if inferred_scope == "project_shared" and not confirm_project_shared:
+                    raise ProjectSharedConfirmationRequiredError(
+                        f"deleting chunk {chunk_id} requires "
+                        "confirm_project_shared=True: it is scope='project_shared', "
+                        "the git-tracked memory tier, so dropping it changes what "
+                        "anyone searching this store can find in content the project "
+                        "shares. The markdown file itself is left untouched."
+                    )
+                # Mirrors the gate's predicate rather than widening to
+                # ``!= "user"``: a project_local delete is gitignored and
+                # nobody was asked, so recording a consent for it would file
+                # one that was never given.
+                if inferred_scope == "project_shared":
+                    privacy.emit_project_shared_confirmation(
+                        surface="langgraph_delete",
+                        mechanism="param",
+                        action="delete",
+                        audit_context={"chunk_id": chunk_id},
+                    )
+
+                # Inside the lock: a concurrent ``index_file`` that landed
+                # after an unlocked delete would re-upsert the file and
+                # resurrect the row we just removed (#1570 / #1587, the same
+                # reason ``mem_delete``'s source branch holds its locks across
+                # the delete rather than only across the scope probe).
+                deleted = await comp.storage.delete_chunks([uid])
+
+            # #2141: this store keeps one warmed search cache for its whole
+            # lifetime, so an un-invalidated delete stays visible to
+            # ``search`` for up to ``search.cache_ttl``. Outside the lock —
+            # the cache is process-local and nobody else waits on it.
+            if deleted:
+                comp.search_pipeline.invalidate_cache()
+            return deleted > 0
+
+        raise TimeoutError(f"chunk {chunk_id} source file is being moved concurrently; retry.")
 
     # ── Sessions (Episodic Memory) ────────────────────────────────────────
 
