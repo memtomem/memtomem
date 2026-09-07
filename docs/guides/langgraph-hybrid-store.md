@@ -117,7 +117,24 @@ Candidate scoring and value hydration use the same SQLite snapshot. Operations
 within an instance serialize on a dedicated event-loop thread, including embedding
 calls. Sync methods can therefore be used from a host with an event loop, although
 async methods avoid blocking that host. Embedders must work on the store's loop;
-they must not call back into the same store. Caller-owned embedding clients are
+they must not call back into the same store. One that does raises `RuntimeError`
+rather than deadlocking, whether it calls a store operation or `close()` /
+`aclose()`, and the store stays usable. The refusal reads a contextvar, so it
+covers a callback that keeps the store's context: a plain sync embedder, which
+LangChain dispatches through the default executor, and an async one on the
+store's loop. An embedder that hands its work to an executor or process pool of
+its own without copying the context is invisible to that check, and reentering
+from there still deadlocks. A second rule outlives the callback: a synchronous
+method called on the store's own loop, as a task an embedder spawned would do,
+is refused as well, since it would wait on the loop it is running on. Ordinary
+async methods stay open to that task, because awaiting suspends rather than
+blocks. `aclose()` is the exception and is refused there too, since it hands
+`close()` to the loop's own executor. Close the store from the code that owns
+it. Handing `close()` to a worker of the store's own loop by other means, such
+as `asyncio.to_thread(store.close)` from a task on that loop, deadlocks the same
+way and is not detected: that worker joins the store thread while the store
+thread waits for the executor the worker belongs to. Caller-owned embedding
+clients are
 not automatically closed. Always close the store. Close drains accepted operations;
 cancelling an async caller does not retract an accepted write.
 
