@@ -6,6 +6,7 @@ import asyncio
 import errno
 import logging
 import os
+import shutil
 import stat
 import sys
 import time
@@ -22,9 +23,11 @@ from memtomem.context._atomic import (
     StrictTreeError,
     _file_lock,
     async_file_lock,
+    async_memory_file_lock,
     _fsync_fd,
     _lock_path_for,
     atomic_write_bytes,
+    memory_lock_path,
     atomic_write_text,
     copy_tree_strict,
     fsync_dir,
@@ -1390,6 +1393,303 @@ class TestFileLockOnANonDirectoryParent:
 
         assert entered is True
         assert store.is_dir()
+
+
+class TestAsyncMemoryFileLock:
+    """#2346 — the memory-file L2 entry point that will not recreate a
+    directory the user removed.
+
+    Every memory-CRUD span reaches this for a *delete* as well as an edit, and
+    a chunk outlives its source. Locking a delete used to ``mkdir`` the deleted
+    parent back and leave a ``.note.md.lock`` inside it, and wherever the
+    directory was simply absent — an unmounted store — it failed a delete that
+    needs no file at all. A parent that exists but is unwritable still fails,
+    and ``test_an_unwritable_parent_still_raises`` pins that it should.
+    """
+
+    async def test_a_live_parent_takes_the_real_sidecar(self, tmp_path: Path) -> None:
+        """The full branch, asserted positively.
+
+        Without this every other test here passes for a helper hard-wired to
+        degrade — which would silently drop cross-process exclusion from all
+        three CRUD spans while looking perfectly green.
+        """
+        src = tmp_path / "live" / "n.md"
+        src.parent.mkdir()
+        src.write_text("body\n", encoding="utf-8")
+
+        async with async_memory_file_lock(src, timeout=5.0):
+            # Observed inside the span: the sidecar is never unlinked, so its
+            # presence is the acquire's own footprint rather than a leftover.
+            assert memory_lock_path(src).exists()
+
+    async def test_a_vanished_parent_is_not_recreated(self, tmp_path: Path) -> None:
+        gone = tmp_path / "gone" / "orphan.md"
+        entered = False
+
+        async with async_memory_file_lock(gone, timeout=5.0):
+            entered = True
+
+        # Both halves matter: a helper that raised before acquiring would leave
+        # no directory either, and would pass on the second assertion alone.
+        assert entered is True, "the degraded span never ran"
+        assert not (tmp_path / "gone").exists()
+        assert not any(tmp_path.iterdir()), f"stray artifacts: {list(tmp_path.iterdir())}"
+
+    @pytest.mark.parametrize("parent", ["live", "gone"])
+    async def test_it_never_creates_a_directory_on_any_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parent: str
+    ) -> None:
+        """Race-freedom, stated as the property that produces it.
+
+        The rejected design probed ``parent.is_dir()`` and then handed a
+        present parent to an acquire that ``mkdir``s — leaving a window in
+        which the directory is removed after the check and recreated by the
+        acquire itself, which is the original bug at a lower rate. The
+        implemented design has no probe AND no ``mkdir``: absence is read off
+        ``os.open``'s errno, so there is no interval between the question and
+        the answer for anything to happen in.
+
+        Asserting "no directory was created *this time*" would pass for a
+        probing version whenever the race did not fire. Asserting that the
+        creation primitive is never reached at all is the same claim without
+        the timing, and it holds for both branches — the live one is included
+        because that is the branch a probe would have let through.
+        """
+        src = tmp_path / parent / "n.md"
+        if parent == "live":
+            src.parent.mkdir()
+
+        def refuse(*args: object, **kwargs: object) -> None:
+            raise AssertionError("async_memory_file_lock created a directory")
+
+        monkeypatch.setattr(Path, "mkdir", refuse)
+        monkeypatch.setattr(os, "makedirs", refuse)
+        monkeypatch.setattr(os, "mkdir", refuse)
+        entered = False
+
+        async with async_memory_file_lock(src, timeout=5.0):
+            entered = True
+
+        assert entered is True
+
+    async def test_a_parent_removed_at_the_last_instant_degrades(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The narrowest window there is: removed just before the sidecar open.
+
+        Injected inside ``os.open`` because that is the only remaining point
+        between deciding and acting — which is the design's whole claim. The
+        span must complete on the degraded path with the directory still gone.
+        """
+        src = tmp_path / "racy" / "n.md"
+        src.parent.mkdir()
+        sidecar = memory_lock_path(src)
+        real_open = os.open
+
+        def racing_open(path, flags, mode=0o777, **kwargs):  # type: ignore[no-untyped-def]
+            if Path(path) == sidecar:
+                shutil.rmtree(src.parent, ignore_errors=True)
+            return real_open(path, flags, mode, **kwargs)
+
+        monkeypatch.setattr(os, "open", racing_open)
+        entered = False
+
+        async with async_memory_file_lock(src, timeout=5.0):
+            entered = True
+
+        assert entered is True, "the span did not survive the removal"
+        assert not src.parent.exists(), "the acquire recreated the removed parent"
+
+    async def test_a_degraded_span_excludes_a_full_holder(self, tmp_path: Path) -> None:
+        """The claim the design rests on, in the direction that is hardest.
+
+        The degraded cell keeps L2's layer 1 — the *same* per-path lock object
+        the full acquire takes first — so it is not a no-op standing in for a
+        lock. Without this, "we still serialize" is an assertion about the
+        implementation rather than about behaviour.
+        """
+        src = tmp_path / "sub" / "n.md"
+        src.parent.mkdir()
+        src.write_text("body\n", encoding="utf-8")
+        shutil.rmtree(src.parent)
+
+        async with async_memory_file_lock(src, timeout=5.0):
+            with pytest.raises(TimeoutError, match="in-process contention"):
+                async with async_file_lock(memory_lock_path(src), timeout=0.2):
+                    pass  # pragma: no cover - the point is that it does not run
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX unlink-while-open: Windows cannot remove a directory holding an open fd",
+    )
+    async def test_a_full_holder_excludes_a_degraded_span(self, tmp_path: Path) -> None:
+        """And the reverse, which is the live shape.
+
+        POSIX lets the directory go while a holder still has the sidecar's fd,
+        so a real removal lands mid-span: the holder keeps an ``flock`` on the
+        now-unlinked inode and the next caller degrades. One direction alone
+        would leave the other free to regress.
+        """
+        src = tmp_path / "sub" / "n.md"
+        src.parent.mkdir()
+        src.write_text("body\n", encoding="utf-8")
+
+        async with async_file_lock(memory_lock_path(src), timeout=5.0):
+            shutil.rmtree(src.parent)
+            with pytest.raises(TimeoutError, match="in-process contention"):
+                async with async_memory_file_lock(src, timeout=0.2):
+                    pass  # pragma: no cover - the point is that it does not run
+
+    async def test_two_degraded_spans_serialize(self, tmp_path: Path) -> None:
+        """Two callers on the same vanished path do not overlap."""
+        gone = tmp_path / "gone" / "orphan.md"
+        order: list[str] = []
+
+        async def span(tag: str) -> None:
+            async with async_memory_file_lock(gone, timeout=5.0):
+                order.append(f"enter-{tag}")
+                await asyncio.sleep(0)
+                order.append(f"exit-{tag}")
+
+        await asyncio.gather(span("a"), span("b"))
+
+        # Ordering, not membership: the ``sleep(0)`` yields the loop, so an
+        # unlocked pair interleaves and a locked one cannot.
+        assert order in (
+            ["enter-a", "exit-a", "enter-b", "exit-b"],
+            ["enter-b", "exit-b", "enter-a", "exit-a"],
+        ), order
+
+    async def test_the_key_is_the_sidecar_of_the_resolved_data_path(self, tmp_path: Path) -> None:
+        """The helper builds its own key, and builds it the #2130 way.
+
+        It is handed the DATA path, so a caller cannot key an alias's sidecar
+        against its target's. Pinned at runtime as well as by the AST rule:
+        the rule only sees provenance inside one function.
+        """
+        real = tmp_path / "real"
+        real.mkdir()
+        src = real / "n.md"
+        src.write_text("body\n", encoding="utf-8")
+
+        async with async_memory_file_lock(src, timeout=5.0):
+            assert memory_lock_path(src).exists()
+            assert not (real / "..n.md.lock.lock").exists()
+            assert not (real / ".n.md.lock.lock").exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+    async def test_an_unwritable_parent_still_raises(self, tmp_path: Path) -> None:
+        """Absence is the only thing this helper answers.
+
+        A present-but-unwritable parent is a permissions failure, not a removed
+        directory, and it must keep failing loudly — widening the degrade to
+        every ``OSError`` would swallow the class of failure #2229 split out.
+        """
+        # After the platform gate, not before it: ``os.geteuid`` does not exist
+        # on Windows at all, so reading it to decide whether to skip raises
+        # ``AttributeError`` on the shard the skip was meant to spare.
+        if os.geteuid() == 0:  # pragma: no cover - CI does not run as root
+            pytest.skip("root ignores the mode bits this test relies on")
+        parent = tmp_path / "ro"
+        parent.mkdir()
+        parent.chmod(0o555)
+        try:
+            with pytest.raises(PermissionError):
+                async with async_memory_file_lock(parent / "n.md", timeout=5.0):
+                    pass  # pragma: no cover - the point is that it does not run
+        finally:
+            parent.chmod(0o755)
+
+    async def test_the_degraded_timeout_names_in_process_contention(self, tmp_path: Path) -> None:
+        """Callers string-match this shape, so it must not drift.
+
+        ``locked_source_chunk`` maps the ``TimeoutError`` to ``"locked"`` and
+        the MCP span to "locked by another process"; a degraded acquire that
+        raised something else would escape both.
+        """
+        gone = tmp_path / "gone" / "orphan.md"
+
+        async with async_memory_file_lock(gone, timeout=5.0):
+            with pytest.raises(TimeoutError) as exc_info:
+                async with async_memory_file_lock(gone, timeout=0.2):
+                    pass  # pragma: no cover - the point is that it does not run
+
+        assert str(exc_info.value) == (
+            f"could not acquire {memory_lock_path(gone)} within 0.2s (in-process contention)"
+        )
+
+    @pytest.mark.requires_symlinks
+    async def test_a_dangling_sidecar_symlink_fails_closed(self, tmp_path: Path) -> None:
+        """``ENOENT`` does not by itself prove the directory is gone.
+
+        A symlink at the sidecar's own path pointing nowhere answers ``ENOENT``
+        from ``os.open`` while the directory and the memory file are both live.
+        Degrading there would drop the flock on a file that still exists — a
+        silent loss of exclusion, and the one shape where "absence" is a lie.
+        Fail closed: raise, so the caller sees a lock failure instead of
+        running unlocked.
+        """
+        src = tmp_path / "live" / "n.md"
+        src.parent.mkdir()
+        src.write_text("real content\n", encoding="utf-8")
+        memory_lock_path(src).symlink_to(tmp_path / "no-such-dir" / "target.lock")
+        entered = False
+
+        with pytest.raises(FileNotFoundError):
+            async with async_memory_file_lock(src, timeout=5.0):
+                entered = True  # pragma: no cover - the point is that it does not run
+
+        assert entered is False
+        assert src.read_text(encoding="utf-8") == "real content\n"
+
+    async def test_a_parent_that_returns_before_the_open_completes_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The other half of the same disambiguation.
+
+        If the directory is recreated between the failed open and the check,
+        the ``ENOENT`` we are holding no longer describes the world. Raising is
+        right for the same reason: the caller retries and gets the full
+        sidecar, where degrading would give it a lock that excludes nobody in
+        the directory that just came back.
+        """
+        src = tmp_path / "returns" / "n.md"
+        real_open = os.open
+
+        def recreating_open(path, flags, mode=0o777, **kwargs):  # type: ignore[no-untyped-def]
+            if Path(path) == memory_lock_path(src):
+                try:
+                    return real_open(path, flags, mode, **kwargs)
+                finally:
+                    src.parent.mkdir(parents=True, exist_ok=True)
+            return real_open(path, flags, mode, **kwargs)
+
+        monkeypatch.setattr(os, "open", recreating_open)
+
+        with pytest.raises(FileNotFoundError):
+            async with async_memory_file_lock(src, timeout=5.0):
+                pass  # pragma: no cover - the point is that it does not run
+
+    async def test_it_reports_whether_the_cross_process_half_was_taken(
+        self, tmp_path: Path
+    ) -> None:
+        """The bit callers need, on both branches.
+
+        A degraded span cannot exclude a writer that arrives after it
+        degraded, so a caller that is about to touch the source has to know
+        which lock it is holding. Asserting both values keeps a helper that
+        hard-codes either one from passing.
+        """
+        live = tmp_path / "live" / "n.md"
+        live.parent.mkdir()
+        live.write_text("body\n", encoding="utf-8")
+        async with async_memory_file_lock(live, timeout=5.0) as cross_process_held:
+            assert cross_process_held is True
+
+        gone = tmp_path / "gone" / "orphan.md"
+        async with async_memory_file_lock(gone, timeout=5.0) as cross_process_held:
+            assert cross_process_held is False
 
 
 class TestStrictTreeWalkers:

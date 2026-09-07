@@ -439,6 +439,7 @@ class TestMutationLock:
         async with locked_source_chunk(storage, foreign.id, project_context_root=MINE) as (
             chunk,
             reason,
+            _held,
         ):
             pass
 
@@ -474,6 +475,7 @@ class TestMutationLock:
         async with locked_source_chunk(storage, in_boundary.id, project_context_root=MINE) as (
             chunk,
             reason,
+            _held,
         ):
             pass
 

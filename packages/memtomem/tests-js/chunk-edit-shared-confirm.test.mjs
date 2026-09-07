@@ -84,13 +84,19 @@ const redaction403 = (scope) => ({
 });
 const REDACTION_403 = redaction403('project_shared');
 
-async function bootEdit({ responses, confirmAnswers }) {
+async function bootEdit({ responses, confirmAnswers, deferConfirms = false }) {
   const dom = await bootApp({ scripts: ['i18n.js', 'app.js'] });
   const { window } = dom;
   const confirms = [];
   const answers = [...confirmAnswers];
+  // ``deferConfirms`` parks each dialog on a promise the test settles through
+  // ``answerConfirm`` instead of answering it inline. That is what holds one
+  // save open long enough for a second to overlap it (#2340); every other test
+  // here leaves it off and gets the immediate stub unchanged.
+  const openDialogs = [];
   window.showConfirm = async (opts) => {
     confirms.push(opts);
+    if (deferConfirms) return new Promise((r) => openDialogs.push(r));
     return answers.length ? answers.shift() : false;
   };
   const toasts = [];
@@ -112,7 +118,17 @@ async function bootEdit({ responses, confirmAnswers }) {
     return upstream(input, opts);
   };
   await window.I18N.init();
-  return { window, confirms, toasts, patches };
+  const answerConfirm = (value) => {
+    const resolve = openDialogs.shift();
+    if (!resolve) throw new Error('no dialog is open to answer');
+    resolve(value);
+  };
+  return { window, confirms, toasts, patches, answerConfirm };
+}
+
+/** Let every already-scheduled microtask/timer drain. */
+async function flush(window, ticks = 20) {
+  for (let i = 0; i < ticks; i++) await new Promise((r) => window.setTimeout(r, 0));
 }
 
 describe('chunk edit — project_shared confirm round-trip (#2317)', () => {
@@ -524,5 +540,128 @@ describe('chunk edit — project_shared confirm round-trip (#2317)', () => {
     expect(err.name).toBe('RedactionBlockedError');
     expect(err.scope).toBeUndefined();
     expect(confirms).toHaveLength(1);
+  });
+});
+
+describe('chunk edit — one save conversation per chunk (#2340)', () => {
+  /* Nothing stops a second save for the same chunk starting while the first is
+   * still going: the inline editor's Cancel only removes the edit area and
+   * never consults the save in flight, `_startChunkEdit`'s guard is per card,
+   * and the detail pane's ``btnLoading`` disables its own button and nothing
+   * else. The reachable window is the stretch BEFORE a dialog opens — a PATCH
+   * in flight, nothing inert yet — since once a dialog is up the background is
+   * inert and the editor's own buttons cannot be clicked. Two conversations
+   * each answer the tier THEIR request was judged on, and their writes race
+   * with nothing said.
+   *
+   * These drive ``saveChunkBody`` directly with a deferred dialog, which is
+   * the same overlap without needing the editor DOM. */
+
+  const OTHER_CHUNK_ID = 'a1b2c3d4-0000-4000-8000-000000000002';
+
+  it('refuses a second save for the same chunk while the first is answering', async () => {
+    const { window, confirms, patches, answerConfirm } = await bootEdit({
+      responses: [SHARED_ENVELOPE],
+      confirmAnswers: [],
+      deferConfirms: true,
+    });
+
+    const first = window.saveChunkBody(CHUNK_ID, BODY);
+    await flush(window);
+    // The first save is parked on the disclosure dialog, mid-conversation.
+    expect(patches).toHaveLength(1);
+    expect(confirms).toHaveLength(1);
+
+    const second = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+
+    expect(second.name).toBe('Error');
+    expect(second.message).toBe(window.I18N.t('toast.chunk_save_in_flight'));
+    // Not the raw key: the refusal has to be sayable to the user, since both
+    // call sites render it through toast.save_failed / toast.update_failed.
+    expect(second.message).not.toBe('toast.chunk_save_in_flight');
+    // Nothing was sent for it, and no second dialog was raised.
+    expect(patches).toHaveLength(1);
+    expect(confirms).toHaveLength(1);
+
+    // The first conversation is untouched and still completes.
+    answerConfirm(true);
+    expect(await first).toEqual(SAVED);
+    expect(patches).toHaveLength(2);
+    expect(patches[1]).toHaveProperty('confirm_project_shared', true);
+  });
+
+  it('keeps refusing while the first save is still going', async () => {
+    /* The guard and the ``add`` sit OUTSIDE the try/finally on purpose. Move
+     * them inside and the refused call's own ``finally`` deletes the key the
+     * RUNNING save owns — after which the next call sails through. A test that
+     * only refuses once cannot see that: the first refusal still throws. This
+     * one refuses twice, so the release-by-the-wrong-caller shows up. */
+    const { window, patches, answerConfirm } = await bootEdit({
+      responses: [SHARED_ENVELOPE],
+      confirmAnswers: [],
+      deferConfirms: true,
+    });
+
+    const first = window.saveChunkBody(CHUNK_ID, BODY);
+    await flush(window);
+
+    const second = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+    const third = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+
+    expect(second.message).toBe(window.I18N.t('toast.chunk_save_in_flight'));
+    expect(third.message).toBe(window.I18N.t('toast.chunk_save_in_flight'));
+    expect(patches).toHaveLength(1);
+
+    answerConfirm(true);
+    expect(await first).toEqual(SAVED);
+  });
+
+  it('does not block a save for a different chunk', async () => {
+    const { window, confirms, patches, answerConfirm } = await bootEdit({
+      responses: [SHARED_ENVELOPE, SHARED_ENVELOPE],
+      confirmAnswers: [],
+      deferConfirms: true,
+    });
+
+    const first = window.saveChunkBody(CHUNK_ID, BODY);
+    const other = window.saveChunkBody(OTHER_CHUNK_ID, BODY);
+    await flush(window);
+
+    // Both reached the server and both raised their own disclosure: the guard
+    // is per chunk, not a global "one save at a time".
+    expect(patches).toHaveLength(2);
+    expect(confirms).toHaveLength(2);
+
+    answerConfirm(true);
+    answerConfirm(true);
+    expect(await first).toEqual(SAVED);
+    expect(await other).toEqual(SAVED);
+  });
+
+  /* Every exit of the conversation has to release the chunk, not just the one
+   * that returns a write — otherwise the first decline or refusal of a session
+   * locks that chunk out of editing for the life of the page. A bare
+   * ``return`` in place of ``return await`` fails the overlap test above
+   * instead: it would release the chunk before the conversation settles. */
+  const RELEASE_CASES = [
+    ['a write that lands', { responses: [SAVED], confirmAnswers: [] }],
+    ['a declined disclosure', { responses: [SHARED_ENVELOPE], confirmAnswers: [false] }],
+    ['a shared-tier refusal', { responses: [REDACTION_403], confirmAnswers: [] }],
+    ['a tier that kept changing', {
+      responses: [SHARED_ENVELOPE, redaction403('user'), SHARED_ENVELOPE, SHARED_ENVELOPE],
+      confirmAnswers: [true, true, true, true],
+    }],
+  ];
+
+  it.each(RELEASE_CASES)('releases the chunk after %s', async (_label, args) => {
+    const { window, patches } = await bootEdit(args);
+
+    await window.saveChunkBody(CHUNK_ID, BODY).catch(() => {});
+    const sentByTheFirst = patches.length;
+
+    const out = await window.saveChunkBody(CHUNK_ID, BODY).catch((e) => e);
+
+    expect(out && out.message).not.toBe(window.I18N.t('toast.chunk_save_in_flight'));
+    expect(patches).toHaveLength(sentByTheFirst + 1);
   });
 });

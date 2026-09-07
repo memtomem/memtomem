@@ -978,10 +978,14 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "The lock primitive itself: on any failure it closes the fd and re-raises; "
         "a broad guard IS the mechanism.",
     ),
-    ("context/_atomic.py", "async_file_lock", ("BaseException",), 0): (
+    ("context/_atomic.py", "_sidecar_lock", ("BaseException",), 0): (
         _I,
         "",
-        "Async twin of the lock primitive; close-and-reraise.",
+        "Async twin of the lock primitive; close-and-reraise. Lived in "
+        "``async_file_lock`` until #2346 moved the shared body down into "
+        "``_sidecar_lock`` so the memory-file entry point could take the same "
+        "arms with a different parent policy — the arm is unchanged, only its "
+        "enclosing function is.",
     ),
     ("context/_atomic.py", "_file_lock", ("<dynamic>",), 0): (
         _I,
@@ -1000,17 +1004,18 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "SwapRecoveryError/TransferRecoveryError raised under the lock is not "
         "replaced by an unlock failure. Nothing is swallowed.",
     ),
-    ("context/_atomic.py", "async_file_lock", ("<dynamic>",), 0): (
+    ("context/_atomic.py", "_sidecar_lock", ("<dynamic>",), 0): (
         _I,
         "",
         "Async twin of the acquire poll loop's catch set; same classify-and-"
-        "reraise, body not yet run.",
+        "reraise, body not yet run. Moved from ``async_file_lock`` by #2346.",
     ),
-    ("context/_atomic.py", "async_file_lock", ("BaseException",), 1): (
+    ("context/_atomic.py", "_sidecar_lock", ("BaseException",), 1): (
         _I,
         "",
         "Async twin of the release arm; re-raises the body's exception "
-        "(CancelledError included) over any unlock failure.",
+        "(CancelledError included) over any unlock failure. Moved from "
+        "``async_file_lock`` by #2346.",
     ),
     ("context/_atomic.py", "_file_lock", ("<dynamic>",), 1): (
         _I,
@@ -1026,10 +1031,13 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "quietly and RE-RAISES (#2229), so a failing close cannot replace a "
         "recovery exception raised under the lock.",
     ),
-    ("context/_atomic.py", "async_file_lock", ("BaseException",), 2): (
+    ("context/_atomic.py", "_sidecar_lock", ("BaseException",), 2): (
         _I,
         "",
-        "Async twin of the close arm; closes quietly and re-raises.",
+        "Async twin of the close arm; closes quietly and re-raises. Moved from "
+        "``async_file_lock`` by #2346. The degraded branch #2346 added returns "
+        "BEFORE this arm — it opens no descriptor, so there is none to close "
+        "and nothing new to intercept.",
     ),
     ("context/_atomic.py", "_close_quietly", ("Exception",), 0): (
         _I,
