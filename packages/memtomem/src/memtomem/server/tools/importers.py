@@ -58,7 +58,9 @@ async def mem_import_notion(
         return f"Error: Path not found: {export_path}"
 
     try:
-        memory_dir = require_user_base(app.config.indexing.memory_dirs)
+        memory_dir = require_user_base(
+            app.config.indexing.memory_dirs, app.config.indexing.project_memory_dirs
+        )
     except ConfigError as exc:
         return f"Error: {exc}"
     output_dir = memory_dir / "_imported" / "notion"
@@ -174,7 +176,9 @@ async def mem_import_obsidian(
         return f"Error: Obsidian vault not found: {vault}"
 
     try:
-        memory_dir = require_user_base(app.config.indexing.memory_dirs)
+        memory_dir = require_user_base(
+            app.config.indexing.memory_dirs, app.config.indexing.project_memory_dirs
+        )
     except ConfigError as exc:
         return f"Error: {exc}"
     output_dir = memory_dir / "_imported" / "obsidian"

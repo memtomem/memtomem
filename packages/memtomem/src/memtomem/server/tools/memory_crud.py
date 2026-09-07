@@ -635,7 +635,7 @@ async def _mem_add_core(
             # No silent cwd fallback: an empty ``memory_dirs`` must name
             # the config field, not write under the server's cwd (#1768).
             try:
-                base = require_user_base(mdirs)
+                base = require_user_base(mdirs, pmdirs)
             except ConfigError as exc:
                 return (f"Error: {exc}", None)
         else:
@@ -1558,7 +1558,7 @@ async def mem_batch_add(
             # No silent cwd fallback: an empty ``memory_dirs`` must name
             # the config field, not write under the server's cwd (#1768).
             try:
-                base = require_user_base(mdirs)
+                base = require_user_base(mdirs, pmdirs)
             except ConfigError as exc:
                 return f"Error: {exc}"
         else:

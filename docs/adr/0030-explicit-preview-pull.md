@@ -334,7 +334,8 @@ This section is the design baseline; it has had its design-gate review
 ### 11. CLI shape
 
 `mm context pull <kind> <name> [--from RUNTIME] [--scope SCOPE]
-[--overwrite] [--diff] [--apply] [--yes] [--force-unsafe-import]` — a
+[--overwrite] [--diff] [--apply] [--yes] [--confirm-project-shared]
+[--force-unsafe-import]` — a
 new verb (not an `init --only` extension; `init` is already overloaded
 with context.md seeding and Gate B prompts). Dry-run preview is the
 default; `--apply` executes (the `migrate` precedent). `project_local`
@@ -342,10 +343,11 @@ is rejected (no runtime fan-out to pull from, ADR-0011 §3). Scope
 handling honors ADR-0011's explicit-choice rule for the git-tracked
 tier: the **preview** may run with an inferred scope, but an `--apply`
 whose destination is `project_shared` requires the **explicit**
-`--scope project_shared` (plus Gate B confirmation via `--yes` or
-prompt) — a new command does not inherit `init`'s legacy implicit
-default into a git-tracked write. `mm context sync` gains an additive
-`--runtime` filter (default: all detected runtimes, unchanged).
+`--scope project_shared` (plus Gate B confirmation — originally via `--yes`
+or the prompt; `--confirm-project-shared` is the spelling from 0.5.x and the
+only one from 0.6.0, #2318 below) — a new command does not inherit `init`'s
+legacy implicit default into a git-tracked write. `mm context sync` gains an additive `--runtime` filter (default: all
+detected runtimes, unchanged).
 
 > **2026-09 (#2306):** The `project_shared` confirmation here now emits
 > ADR-0011 §5's `project_shared.confirmed_via=cli_context_pull` audit
@@ -358,6 +360,18 @@ default into a git-tracked write. `mm context sync` gains an additive
 > `confirm_project_shared`. That divergence is recorded here rather
 > than resolved: closing it would break existing `--yes` invocations
 > and belongs in its own change.
+
+> **2026-09 (#2318):** That change, staged. `pull` now takes
+> `--confirm-project-shared`, so the CLI, the `mem_context_pull` tool and the
+> web pull route ask for the same thing — though only from 0.6.0 do they
+> *refuse* the same things. The `--yes` invocations the note
+> above worried about are not broken: through 0.5.x `--yes` still carries
+> Gate B here and prints a yellow stderr notice naming the 0.6.0 flip, after
+> which it gets the standard "`--yes` alone is not sufficient" refusal. The
+> consent line reports `flag='--yes'` while the deprecated spelling is in
+> use, so an operator can see which scripts still need migrating before the
+> flip. See ADR-0011 §5's `2026-09 (#2318)` rider for why this one gets a
+> window and #2317's `mem_edit` change did not.
 
 ### 12. Source-runtime vocabulary is a first-class table
 

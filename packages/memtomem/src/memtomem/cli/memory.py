@@ -251,13 +251,24 @@ async def _add(
         # writes between CLI and MCP. An empty list refuses instead of
         # falling back to the historical literal: the "index nothing"
         # state must not write into a directory the active config
-        # disabled (#1768). Project tiers resolve independently.
+        # disabled (#1768), and a ``memory_dirs[0]`` that is itself a
+        # registered project tier refuses rather than routing a
+        # ``--scope user`` write into the git-tracked tier (#2322).
+        # Rewrapped as ``ClickException`` so ``--json`` runs still get the
+        # ``{"ok": false}`` envelope rather than the bare-exception path.
+        # Project tiers resolve independently.
         if scope == "user":
+            from memtomem.errors import ConfigError
             from memtomem.memory_scope import require_user_base
 
-            base = _resolve_memory_scope_dir(
-                scope, project_root, require_user_base(comp.config.indexing.memory_dirs)
-            )
+            try:
+                user_base = require_user_base(
+                    comp.config.indexing.memory_dirs,
+                    comp.config.indexing.project_memory_dirs,
+                )
+            except ConfigError as exc:
+                raise click.ClickException(str(exc)) from exc
+            base = _resolve_memory_scope_dir(scope, project_root, user_base)
         else:
             base = _resolve_memory_scope_dir(scope, project_root)
         if scope != "user":

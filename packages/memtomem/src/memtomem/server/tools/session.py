@@ -832,8 +832,19 @@ def _prepare_summary_archive(
     event_counts: dict[str, int],
 ) -> _SummaryArchive | None:
     """Build the archive payload for a session summary, or ``None`` when no
-    memory dir is configured (a project-only setup writes no archive; the
-    row still receives the summary on a guard pass)."""
+    archive destination is available (the row still receives the summary on a
+    guard pass).
+
+    Two ways there is no destination. No memory dir is configured at all — a
+    project-only setup writes no archive. Or ``memory_dirs[0]`` is itself a
+    registered project tier, which ``require_user_base`` refuses (#2322): for
+    ``project_shared`` because an *automatic* write would reach the git-tracked
+    tier with no Gate B and nobody present to give one, and for
+    ``project_local`` — gitignored, no Gate B — because the archive would be
+    filed under a tier this surface never asked for. A session end cannot grow
+    a confirmation argument either way, so it declines the archive; the summary
+    still reaches the row.
+    """
     memory_dirs = app.config.indexing.memory_dirs
     if not memory_dirs:
         return None
@@ -846,8 +857,19 @@ def _prepare_summary_archive(
 
     # Primary memory dir: when multiple are configured, summaries land under
     # the first one. Keeps the location predictable across runs; users with
-    # multi-dir setups can re-home via memory_dirs ordering.
-    base = Path(memory_dirs[0]).expanduser().resolve()
+    # multi-dir setups can re-home via memory_dirs ordering. Routed through
+    # ``require_user_base`` rather than indexing ``memory_dirs[0]`` here so
+    # this surface inherits the project-tier refusal every other derived
+    # write got (#2322) — a local copy of the derivation is how this one
+    # escaped the guard in the first place.
+    from memtomem.errors import ConfigError
+    from memtomem.memory_scope import require_user_base
+
+    try:
+        base = require_user_base(memory_dirs, app.config.indexing.project_memory_dirs)
+    except ConfigError as exc:
+        logger.warning("session_summary_archive_declined session_id=%s reason=%s", session_id, exc)
+        return None
     now = datetime.now(timezone.utc)
     target = base / "sessions" / now.strftime("%Y-%m") / f"{session_id}.md"
 

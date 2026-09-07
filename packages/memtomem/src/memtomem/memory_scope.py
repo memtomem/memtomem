@@ -3,7 +3,7 @@
 Single source of truth for the user / project_shared / project_local →
 canonical memory directory mapping. Used by:
 
-- CLI ``mm mem add`` (``cli/memory.py``)
+- CLI ``mm add`` (``cli/memory.py``)
 - MCP ``mem_add`` / ``mem_batch_add`` (``server/tools/memory_crud.py``)
 - ``mem_consolidate_apply`` summary writes (``server/tools/consolidation.py``)
 - ``mm context memory-migrate`` (``cli/context_cmd.py``)
@@ -24,7 +24,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-from memtomem.config import TargetScope
+from memtomem.config import TargetScope, classify_scope
 from memtomem.errors import ConfigError
 
 
@@ -48,7 +48,54 @@ class MemoryScopeError(ValueError):
     """
 
 
-def require_user_base(memory_dirs: Sequence[Path | str]) -> Path:
+def project_tier_user_base_error(base: Path, scope: str) -> str:
+    """Standard error message for a user-tier base that is a project tier.
+
+    Writers that *derive* their destination from ``memory_dirs[0]`` — the
+    session-end summary archive, the Notion / Obsidian importers,
+    ``mem_fetch``, scratch promote, ``mm review approve``,
+    ``mm agent share``, ``mm shell``'s ``add`` — take no scope and no
+    confirmation argument, because their destination is supposed to be
+    the user tier. When the config makes it a project tier instead, the
+    write is refused here (#2322).
+
+    The rationale differs by tier and the message says which, because a
+    reader who is told the wrong reason cannot act on it:
+
+    * ``project_shared`` is git-tracked, so ADR-0011 §5 requires Gate B's
+      explicit confirmation — which these surfaces have no way to take.
+    * ``project_local`` is gitignored and has **no** Gate B. Nothing is
+      being exposed; the refusal is that the write would be filed under
+      a scope its caller never asked for, invisible to a default
+      ``user``-scope read and to anyone else's checkout of the project.
+    """
+    if scope == "project_shared":
+        why = (
+            "Writes that derive their destination from the user-tier base would land "
+            "in the git-tracked tier without the explicit confirmation ADR-0011 §5 "
+            "requires, so they are refused."
+        )
+    else:
+        why = (
+            "Writes that derive their destination from the user-tier base would be "
+            f"filed under scope='{scope}' — a tier their caller never asked for and "
+            "a default user-scope read does not see — so they are refused."
+        )
+    return (
+        f"indexing.memory_dirs[0] resolves to a registered {scope} tier: {base}. "
+        f"{why}\n"
+        "Put a user-tier directory first in indexing.memory_dirs, or remove "
+        f"{base} from indexing.project_memory_dirs. (To write to the project "
+        f"tier deliberately, use a surface that takes a scope, e.g. `mm add --scope={scope}`.)"
+    )
+
+
+def require_user_base(
+    memory_dirs: Sequence[Path | str],
+    project_memory_dirs: Sequence[Path | str],
+    *,
+    allow_project_tier: bool = False,
+) -> Path:
     """Return the user-tier base directory (``memory_dirs[0]``), expanded and resolved.
 
     An empty ``indexing.memory_dirs`` is a valid "index nothing" state
@@ -56,12 +103,44 @@ def require_user_base(memory_dirs: Sequence[Path | str]) -> Path:
     the user-tier base must refuse with an error that names the config
     field instead of crashing with ``IndexError``.
 
+    The name is also a promise: the returned base must actually be the
+    user tier. ``memory_dirs`` and ``project_memory_dirs`` can overlap —
+    nothing in config validation forbids it — and every caller here
+    writes without a Gate B confirmation, so a project-tier base is
+    refused (#2322). ``project_memory_dirs`` is **required**, not
+    defaulted: passing ``None`` to :func:`~memtomem.config.classify_scope`
+    skips the registration check, and the *default* user directory
+    ``~/.memtomem/memories`` matches the project path pattern at a
+    positive offset. Registration is the only thing that separates the
+    two, so the guard is worthless without the real list — and a
+    defaulted parameter is an opt-out a future caller would take by
+    accident.
+
+    ``allow_project_tier`` is for the one shape that argument does not
+    describe: a caller that has a Gate B of its own. The refusal exists
+    because these surfaces cannot ask; a surface that *can* ask should
+    ask, not be pre-empted. ``MemtomemStore.add`` is the case — it takes
+    ``confirm_project_shared`` and gates the derived destination on it
+    (#2321), so refusing here would remove a consented write the adapter
+    deliberately supports. The flag is keyword-only and defaults to the
+    refusal, so forgetting it errs toward *more* protection; a caller
+    passing it is asserting it gates the destination itself, and the
+    per-surface tests are what hold it to that.
+
     Raises:
-        ConfigError: When ``memory_dirs`` is empty.
+        ConfigError: When ``memory_dirs`` is empty, or — unless
+            ``allow_project_tier`` — when its first entry is a
+            registered project tier.
     """
     if not memory_dirs:
         raise ConfigError(EMPTY_MEMORY_DIRS_ERROR)
-    return Path(memory_dirs[0]).expanduser().resolve()
+    base = Path(memory_dirs[0]).expanduser().resolve()
+    if allow_project_tier:
+        return base
+    scope, _ = classify_scope(base, project_memory_dirs)
+    if scope != "user":
+        raise ConfigError(project_tier_user_base_error(base, scope))
+    return base
 
 
 def resolve_memory_scope_dir(
@@ -80,7 +159,7 @@ def resolve_memory_scope_dir(
             ``user`` scope.
         user_base: Override for the user-tier base directory. Defaults
             to ``~/.memtomem/memories`` — the historical hardcoded path
-            that ``mm mem add`` used pre-ADR-0011.
+            that ``mm add`` used pre-ADR-0011.
 
     Returns:
         The resolved, expanded canonical directory ``Path`` for the
@@ -311,7 +390,7 @@ def project_tier_registration_error(target_dir: Path, scope: TargetScope) -> str
     ``scope='project_shared'`` / ``project_local'`` but stay invisible
     to default search/recall. The hint is centralised here so every
     write surface (MCP ``mem_add`` / ``mem_batch_add``, CLI
-    ``mm mem add``, ``mm context memory-migrate``) emits the same
+    ``mm add``, ``mm context memory-migrate``) emits the same
     setup instruction.
     """
     return (

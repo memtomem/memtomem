@@ -190,7 +190,6 @@ async def _cmd_add(comp, args: list[str]) -> None:
     content = " ".join(args)
 
     from datetime import datetime, timezone
-    from pathlib import Path
 
     from memtomem import privacy
     from memtomem.tools.memory_writer import append_entry
@@ -207,12 +206,20 @@ async def _cmd_add(comp, args: list[str]) -> None:
         )
         return
 
-    if not comp.config.indexing.memory_dirs:
-        from memtomem.memory_scope import EMPTY_MEMORY_DIRS_ERROR
+    from memtomem.errors import ConfigError
+    from memtomem.memory_scope import require_user_base
 
-        click.secho(EMPTY_MEMORY_DIRS_ERROR, fg="red")
+    # The shell's ``add`` takes no ``--scope``, so its destination must be
+    # the user tier or nothing: an overlapping config would otherwise make
+    # it write into the git-tracked tier with neither ADR-0011 §5 gate
+    # (#2322). Also covers the empty-``memory_dirs`` refusal (#1768).
+    try:
+        base = require_user_base(
+            comp.config.indexing.memory_dirs, comp.config.indexing.project_memory_dirs
+        )
+    except ConfigError as exc:
+        click.secho(str(exc), fg="red")
         return
-    base = Path(comp.config.indexing.memory_dirs[0]).expanduser().resolve()
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     target = base / f"{date_str}.md"
     target.parent.mkdir(parents=True, exist_ok=True)
