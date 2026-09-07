@@ -75,23 +75,29 @@ def _rollback_error(
     the same condition differently. Each outcome states what is on disk now,
     because only ``restored`` leaves the pre-state the caller assumed.
 
-    The index side is reported from ``reconciled`` rather than asserted: the
-    rollback re-index purges a missing file's rows, but
-    ``IndexEngine._delete_missing_source`` deliberately no-ops when the whole
-    containing index root is gone (the #1566 mass-orphan brake), and a re-index
-    that raised reconciled nothing at all.
+    ``reconciled`` is what the caller *verified* about the index, never what it
+    assumed: a rollback re-index reports trouble in ``stats.errors`` rather than
+    raising, and on a removed source it can return a clean zero result while
+    purging nothing (#1566's brake). So the messages below promise a purge only
+    where one was confirmed, and otherwise name the doubt and point at
+    ``mem_index``.
     """
-    index_note = (
-        "its index rows were reconciled against the file"
-        if reconciled
-        else "its index could not be reconciled (see the server log); run mem_index"
-    )
     if outcome is RestoreOutcome.source_removed:
+        index_note = (
+            "its index rows were removed too"
+            if reconciled
+            else "its index rows may still be there (see the server log); run mem_index"
+        )
         return (
             f"Error: {op} failed, and {source_file} was removed by another process while "
             f"it ran; nothing was recreated and {index_note}: {exc}"
         )
     if outcome is RestoreOutcome.source_replaced:
+        index_note = (
+            "re-indexed in place"
+            if reconciled
+            else "left un-reindexed (see the server log); run mem_index"
+        )
         return (
             f"Error: {op} failed, and {source_file} was replaced by another process while "
             f"it ran; the replacement was left exactly as found and {index_note}: {exc}"
@@ -388,10 +394,36 @@ async def _mutate_file_and_reindex(
         outcome = await asyncio.to_thread(restore_pre_image_quietly, source_file, pre_image)
         reconciled = True
         try:
-            await app.index_engine.index_file(source_file, already_scanned=True, lock_held=True)
+            rollback_stats = await app.index_engine.index_file(
+                source_file, already_scanned=True, lock_held=True
+            )
         except Exception:
             reconciled = False
             logger.warning("Rollback re-index also failed", exc_info=True)
+        else:
+            # A re-index that returns is not a re-index that reconciled. It
+            # reports per-file trouble in ``stats.errors`` instead of raising,
+            # so reading only the exception would call an oversized or
+            # unreadable replacement a clean reconcile.
+            reconciled = not rollback_stats.errors
+        if outcome is RestoreOutcome.source_removed and reconciled:
+            # And a clean return still is not evidence for a *removed* source:
+            # ``_delete_missing_source`` deliberately no-ops when the whole
+            # containing index root is gone (#1566's mass-orphan brake) and
+            # returns a zero result that looks exactly like "nothing to do".
+            # Whether the rows are gone is answerable directly, so ask rather
+            # than infer — the alternative is a message that assures the caller
+            # of a purge that never happened.
+            try:
+                reconciled = not await app.storage.list_chunks_by_source(source_file.resolve())
+            except Exception:
+                # This check runs inside the rollback handler, so it lives under
+                # the same rule as the restore beside it (#2347): a cleanup step
+                # that fails must not become the exception the caller sees, and
+                # must not skip the cache invalidation below. An unanswerable
+                # question is reported as unreconciled rather than as a purge.
+                reconciled = False
+                logger.warning("Rollback index check failed for %s", source_file, exc_info=True)
         app.search_pipeline.invalidate_cache()
         logger.error(
             "mem_%s rollback after indexing failure (restore: %s): %s",

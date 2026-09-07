@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import threading
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -28,7 +29,7 @@ import pytest
 
 from helpers import StubCtx
 from memtomem.errors import NamespaceResolutionError
-from memtomem.models import Chunk, ChunkMetadata
+from memtomem.models import Chunk, ChunkMetadata, IndexingStats
 from memtomem.server.context import AppContext
 from memtomem.server.tools import memory_crud
 from memtomem.tools import memory_writer
@@ -545,6 +546,113 @@ class TestRollbackAgainstExternalRemoval:
         assert not out.startswith("Error (retryable)")
         assert "removed by another process" in out
         assert not f.exists()
+
+    @pytest.mark.asyncio
+    async def test_it_does_not_claim_a_purge_the_orphan_brake_prevented(self, bm25_only_components):
+        """A removed source whose whole index root went with it.
+
+        ``_delete_missing_source`` refuses to purge when the containing root is
+        gone (#1566), and says so with a zero result that raises nothing and
+        carries no errors — indistinguishable, from the stats alone, from "there
+        was nothing to delete". The rows survive, so the result must not tell
+        the caller they were removed.
+        """
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        self._failing_index(app, lambda: shutil.rmtree(mem_dir), RuntimeError("boom"))
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        assert "removed by another process" in out
+        # The rows really are still there — so say so, and point at the fix.
+        assert await comp.storage.list_chunks_by_source(f.resolve()) != []
+        assert "may still be there" in out
+        assert "mem_index" in out
+
+    @pytest.mark.asyncio
+    async def test_it_does_not_call_a_reindex_that_reported_errors_reconciled(
+        self, bm25_only_components
+    ):
+        """The re-index reports per-file trouble in ``stats.errors``, not by
+        raising, so reading only the exception would call it a clean reconcile.
+        """
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+
+        calls = 0
+
+        async def gated_index(path, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                f.unlink()
+                raise RuntimeError("boom")
+            return IndexingStats(
+                total_files=1,
+                total_chunks=0,
+                indexed_chunks=0,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=0.0,
+                errors=("could not read the file",),
+            )
+
+        app.index_engine.index_file = gated_index  # type: ignore[method-assign]
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        assert "may still be there" in out
+        assert "mem_index" in out
+
+    @pytest.mark.asyncio
+    async def test_a_failing_index_check_does_not_mask_the_original_error(
+        self, bm25_only_components
+    ):
+        """The verification query sits inside the rollback handler, so it obeys
+        the rule this whole issue is about: a cleanup step that fails must not
+        replace the failure being rolled back.
+        """
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        self._failing_index(app, f.unlink, RuntimeError("boom"))
+        app.storage.list_chunks_by_source = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("storage down")
+        )
+
+        invalidations = 0
+        real_invalidate = app.search_pipeline.invalidate_cache
+
+        def counting_invalidate(*args, **kwargs):
+            nonlocal invalidations
+            invalidations += 1
+            return real_invalidate(*args, **kwargs)
+
+        app.search_pipeline.invalidate_cache = counting_invalidate  # type: ignore[method-assign]
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        # The body's failure survives, the removal is still explained, and the
+        # unverifiable index is reported as such rather than as a purge.
+        assert "boom" in out
+        assert "removed by another process" in out
+        assert "may still be there" in out
+        # The cache invalidation after the check still ran.
+        assert invalidations >= 1
 
     @pytest.mark.asyncio
     async def test_delete_shares_the_removal_contract(self, bm25_only_components):
