@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import pytest
 
+import logging
+import os
+import shutil
 from datetime import datetime
 
 from memtomem.tools.memory_writer import (
+    RestoreOutcome,
     _validate_line_range,
     append_entry,
     format_entry_block,
+    read_pre_image,
     remove_lines,
     replace_lines,
+    restore_pre_image_quietly,
 )
 
 
@@ -240,3 +246,114 @@ class TestRemoveLines:
         result = target.read_text(encoding="utf-8")
         assert result == "a\nc"
         assert not result.endswith("\n")
+
+
+class TestRestorePreImage:
+    """The rollback primitives: never create, never raise (#2347)."""
+
+    def test_it_takes_bytes_and_identity_off_one_descriptor(self, tmp_path):
+        src = tmp_path / "n.md"
+        src.write_bytes(b"before\n")
+
+        pre = read_pre_image(src)
+
+        info = src.stat()
+        assert pre.data == b"before\n"
+        assert pre.identity == (info.st_dev, info.st_ino)
+
+    def test_it_restores_the_file_it_read(self, tmp_path):
+        src = tmp_path / "n.md"
+        src.write_bytes(b"before\n")
+        pre = read_pre_image(src)
+        src.write_bytes(b"mutated, and longer than the pre-image\n")
+
+        assert restore_pre_image_quietly(src, pre) is RestoreOutcome.restored
+        # Truncate-then-write, so no tail of the longer mutation survives.
+        assert src.read_bytes() == b"before\n"
+
+    def test_it_does_not_recreate_a_removed_source(self, tmp_path):
+        src = tmp_path / "n.md"
+        src.write_bytes(b"before\n")
+        pre = read_pre_image(src)
+        src.unlink()
+
+        assert restore_pre_image_quietly(src, pre) is RestoreOutcome.source_removed
+        assert not src.exists()
+
+    def test_it_reports_a_vanished_parent_as_removed(self, tmp_path):
+        # A subdirectory, not ``tmp_path`` itself: pytest still has to clean up.
+        holder = tmp_path / "memories"
+        holder.mkdir()
+        src = holder / "n.md"
+        src.write_bytes(b"before\n")
+        pre = read_pre_image(src)
+        shutil.rmtree(holder)
+
+        # Pre-#2347 this was the masking case: ``write_text`` raised ENOENT out
+        # of the ``except`` arm, over the failure being rolled back.
+        assert restore_pre_image_quietly(src, pre) is RestoreOutcome.source_removed
+        assert not holder.exists()
+
+    def test_it_leaves_a_replaced_source_as_found(self, tmp_path):
+        src = tmp_path / "n.md"
+        src.write_bytes(b"before\n")
+        pre = read_pre_image(src)
+        replacement = tmp_path / "other.md"
+        replacement.write_bytes(b"somebody else's file\n")
+        os.replace(replacement, src)
+
+        assert restore_pre_image_quietly(src, pre) is RestoreOutcome.source_replaced
+        assert src.read_bytes() == b"somebody else's file\n"
+
+    def test_it_reports_a_directory_at_the_path_as_replaced(self, tmp_path):
+        src = tmp_path / "n.md"
+        src.write_bytes(b"before\n")
+        pre = read_pre_image(src)
+        src.unlink()
+        src.mkdir()
+
+        assert restore_pre_image_quietly(src, pre) is RestoreOutcome.source_replaced
+        assert src.is_dir()
+
+    def test_it_restores_on_existence_alone_when_identity_is_unanswerable(self, tmp_path):
+        # st_ino == 0: the filesystem cannot answer identity. Restoring anyway
+        # beats leaving the caller's half-applied mutation on disk; resurrection
+        # is already ruled out by the open.
+        src = tmp_path / "n.md"
+        src.write_bytes(b"before\n")
+        pre = read_pre_image(src)
+        blind = type(pre)(data=pre.data, identity=None)
+        src.write_bytes(b"mutated\n")
+
+        assert restore_pre_image_quietly(src, blind) is RestoreOutcome.restored
+        assert src.read_bytes() == b"before\n"
+
+    def test_it_does_not_restore_over_a_removed_source_without_identity(self, tmp_path):
+        src = tmp_path / "n.md"
+        src.write_bytes(b"before\n")
+        pre = read_pre_image(src)
+        blind = type(pre)(data=pre.data, identity=None)
+        src.unlink()
+
+        assert restore_pre_image_quietly(src, blind) is RestoreOutcome.source_removed
+        assert not src.exists()
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root writes through a read-only mode bit",
+    )
+    def test_it_reports_its_own_failure_instead_of_raising(self, tmp_path, caplog):
+        src = tmp_path / "n.md"
+        src.write_bytes(b"before\n")
+        pre = read_pre_image(src)
+        src.write_bytes(b"mutated\n")
+        src.chmod(0o444)
+        try:
+            with caplog.at_level(logging.WARNING, logger="memtomem.tools.memory_writer"):
+                outcome = restore_pre_image_quietly(src, pre)
+        finally:
+            src.chmod(0o644)
+
+        assert outcome is RestoreOutcome.failed
+        assert any(str(src) in record.getMessage() for record in caplog.records)
+        assert any(record.exc_info for record in caplog.records)

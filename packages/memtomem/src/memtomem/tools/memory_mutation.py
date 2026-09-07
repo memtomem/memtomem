@@ -25,6 +25,11 @@ from typing import TYPE_CHECKING
 from memtomem.context import _atomic
 from memtomem.context._atomic import async_memory_file_lock
 from memtomem.search.visibility import chunk_in_scope_boundary
+from memtomem.tools.memory_writer import (
+    RestoreOutcome,
+    read_pre_image,
+    restore_pre_image_quietly,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -134,15 +139,38 @@ async def mutate_source_and_reindex(
     self-deadlock. Mirrors the MCP
     ``_mutate_file_and_reindex`` rollback contract, giving the web edit path the
     rollback it previously lacked.
+
+    The pre-image goes back only when the source is still the file it was read
+    from: that lock binds cooperating writers, never an external ``rm`` / ``mv``
+    / save-via-rename, so an unconditional write would recreate a file somebody
+    deleted while this ran (#2347). The restore reports instead of raising, and
+    this function always re-raises the *body's* exception — the route
+    (``web/routes/chunks.py``) classifies on its type, and a restore's own
+    ``ENOENT`` arriving in its place would answer 500 to a transient failure the
+    caller should have been told to retry. What the restore did is said in the
+    log, where the route's handler already points.
     """
-    original = await asyncio.to_thread(source_file.read_text, encoding="utf-8")
+    pre_image = await asyncio.to_thread(read_pre_image, source_file)
     try:
         await asyncio.to_thread(mutate)
         return await index_engine.index_file(source_file, already_scanned=True, lock_held=True)
-    except Exception:
-        await asyncio.to_thread(source_file.write_text, original, encoding="utf-8")
+    except Exception as exc:
+        outcome = await asyncio.to_thread(restore_pre_image_quietly, source_file, pre_image)
         try:
             await index_engine.index_file(source_file, already_scanned=True, lock_held=True)
         except Exception:
             logger.warning("Rollback re-index also failed", exc_info=True)
+        if outcome is RestoreOutcome.failed:
+            logger.error(
+                "%s: the rollback failed after %s; the file may still hold the partial edit",
+                source_file,
+                exc,
+            )
+        elif outcome is not RestoreOutcome.restored:
+            logger.warning(
+                "%s: not rolled back (%s) — the source was changed by another process while "
+                "the edit ran, so nothing was written back over it",
+                source_file,
+                outcome,
+            )
         raise

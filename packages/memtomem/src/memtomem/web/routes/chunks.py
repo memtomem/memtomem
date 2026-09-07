@@ -277,6 +277,12 @@ async def edit_chunk(
             # is itself a write (#2141). Invalidate here for the same reason
             # the generic branch below does, and the same reason the MCP twin
             # invalidates on its rollback path.
+            #
+            # It is also conditional on the source still being there (#2347):
+            # where an external ``rm``/``mv`` took it mid-edit, the restore
+            # deliberately recreates nothing and says so in the server log, and
+            # the retry this 503 invites answers 404 — the right terminal
+            # answer for a chunk whose file is gone.
             search_pipeline.invalidate_cache()
             logger.warning("Namespace lookup failed during chunk edit %s: %s", chunk_id, exc)
             raise HTTPException(

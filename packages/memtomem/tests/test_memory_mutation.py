@@ -8,6 +8,8 @@ directly plus the CLI add timeout surface.
 
 from __future__ import annotations
 
+import logging
+import shutil
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -22,7 +24,9 @@ from memtomem.context._atomic import (
     async_memory_file_lock,
 )
 from memtomem.models import IndexingStats
+from memtomem.tools import memory_mutation
 from memtomem.tools.memory_mutation import locked_source_chunk, mutate_source_and_reindex
+from memtomem.tools.memory_writer import RestoreOutcome
 
 
 def _stats() -> IndexingStats:
@@ -278,6 +282,80 @@ async def test_mutate_source_and_reindex_rolls_back_on_failure(tmp_path):
     assert src.read_text(encoding="utf-8") == "orig\n"
     assert engine.index_file.await_count == 2
     assert all(not call.kwargs.get("force", False) for call in engine.index_file.await_args_list)
+
+
+# The #2347 half: the rollback must not recreate a source another process
+# removed, and its own failure must not replace the error it is rolling back.
+
+
+@pytest.mark.asyncio
+async def test_mutate_source_and_reindex_does_not_recreate_a_source_removed_mid_span(tmp_path):
+    src = tmp_path / "n.md"
+    src.write_text("orig\n", encoding="utf-8")
+    engine = AsyncMock()
+
+    async def index_file(path, **kwargs):
+        if engine.index_file.await_count == 1:
+            # An outside ``rm`` lands between the pre-image read and the
+            # failure; the sidecar never bound it.
+            path.unlink()
+            raise RuntimeError("boom")
+        return _stats()
+
+    engine.index_file = AsyncMock(side_effect=index_file)
+
+    def mutate():
+        src.write_text("mutated\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await mutate_source_and_reindex(engine, src, mutate)
+    assert not src.exists()
+    assert engine.index_file.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_mutate_source_and_reindex_reports_the_body_error_when_the_parent_is_gone(
+    tmp_path, caplog
+):
+    holder = tmp_path / "memories"
+    holder.mkdir()
+    src = holder / "n.md"
+    src.write_text("orig\n", encoding="utf-8")
+    engine = AsyncMock()
+    engine.index_file = AsyncMock(side_effect=[RuntimeError("boom"), _stats()])
+
+    def mutate():
+        src.write_text("mutated\n", encoding="utf-8")
+        shutil.rmtree(holder)
+
+    # Pre-#2347 the restore's own FileNotFoundError arrived here instead, with
+    # the real cause demoted to ``__context__``.
+    with caplog.at_level(logging.WARNING, logger="memtomem.tools.memory_mutation"):
+        with pytest.raises(RuntimeError, match="boom"):
+            await mutate_source_and_reindex(engine, src, mutate)
+    assert not holder.exists()
+    assert any(str(src) in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_mutate_source_and_reindex_still_raises_the_body_error_when_the_restore_fails(
+    tmp_path, monkeypatch, caplog
+):
+    src = tmp_path / "n.md"
+    src.write_text("orig\n", encoding="utf-8")
+    engine = AsyncMock()
+    engine.index_file = AsyncMock(side_effect=[RuntimeError("boom"), _stats()])
+    monkeypatch.setattr(
+        memory_mutation, "restore_pre_image_quietly", lambda *_: RestoreOutcome.failed
+    )
+
+    def mutate():
+        src.write_text("mutated\n", encoding="utf-8")
+
+    with caplog.at_level(logging.ERROR, logger="memtomem.tools.memory_mutation"):
+        with pytest.raises(RuntimeError, match="boom"):
+            await mutate_source_and_reindex(engine, src, mutate)
+    assert any(str(src) in record.getMessage() for record in caplog.records)
 
 
 # ------------------------------------------------------------- CLI mm mem add
