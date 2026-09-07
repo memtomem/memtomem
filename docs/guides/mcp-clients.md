@@ -830,28 +830,40 @@ The `Host` and `Origin` allow-lists are seeded **asymmetrically**:
 > <reachable-host>:<port>` (the SDK only treats `:*`-suffixed values as
 > port wildcards) and Origin-bearing clients are blocked separately.
 
-### Episodic sessions are per server process
+### Episodic sessions are shared by everyone on one server
 
 `mem_session_start` / `mem_session_end` (`mem_do(action="session_start")` in
-the default tool mode) bind **one active session per server process**, not per
-connected client. Over stdio that distinction never shows: your editor spawns
-its own `memtomem-server`, so the slot is yours alone. On a shared network
-server it does — every connected client writes to the same slot, so a second
-client's `session_start` auto-ends the first client's session and repoints its
-agent-scoped writes to the new `agent_id`.
+the default tool mode) bind **one active session per server process** over
+stdio and `--transport http`. Over stdio that never shows: your editor spawns
+its own `memtomem-server`, so the slot is yours alone. On a shared
+`--transport http` server it shows in two ways:
 
-So on a network transport, **use the session tools from one client at a time**.
-Everything else — search, add, index — is unaffected and safe to share; and
-callers that name the agent on each call (`mem_do(action="agent_search")`,
-`mem_do(action="context_compose")`, both of which take `agent_id`) never touch
-the slot at all.
+- A second client's `session_start` **auto-ends** the first client's session
+  and takes the slot — agents do not stack.
+- While any session is active, it is ambient for **every** client on that
+  server. `mem_add` files its chunks under the session's namespace, `mem_index`
+  binds sources the store has never seen to it, both record its session id as
+  provenance, and a `mem_search` with no explicit `namespace=` falls back to it
+  as the search scope — including for a client that never touched a session
+  tool.
 
-This is not a gap waiting on a per-connection fix. MCP's 2026-07-28 protocol
-revision is single-exchange: the server builds a fresh connection per request
-and issues no `Mcp-Session-Id`, so there is no connection identity to hang an
-episodic session on. Scoping sessions to something other than the process would
-mean passing an explicit session handle on every call, which memtomem does not
-do today.
+So an open session makes the server single-tenant in practice. Either keep
+`--transport http` to one client while sessions are in use, or name the scope
+explicitly on each call (`namespace=` on `mem_add` / `mem_search`, `agent_id=`
+on `mem_do(action="agent_search")` and `mem_do(action="context_compose")`) —
+an explicit value always wins over the ambient one.
+
+`--transport sse` is the exception: the SDK enters the server lifespan once per
+SSE connection, so each client gets its own session slot. That falls out of how
+the transport is served, not from a guarantee memtomem makes — do not carry the
+assumption over to `http`.
+
+This is not a per-connection fix waiting to happen. MCP's 2026-07-28 revision
+is single-exchange: the server builds a fresh connection per request and issues
+no `Mcp-Session-Id`, so there is no connection identity left to scope an
+episodic session to. Isolating sessions on that transport would need an
+explicit application-level identity — a session handle passed on every call, or
+equivalent — which memtomem does not have today.
 
 ### One server at a time
 
