@@ -227,6 +227,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   tiers that honour it, named individually — a refusal that does not say
   which tier it was decided under is treated as unknown and offered nothing.
 
+- **The LangGraph store asks before dropping a Git-tracked note out of the
+  index** (#2335) — `MemtomemStore.delete()` removed a chunk whose recorded
+  scope is `project_shared` with no confirmation and no consent record, while
+  `mem_delete` refused the same chunk and the web `DELETE /api/chunks/{id}`
+  refused it too. Deleting through the adapter removes index rows and leaves
+  the markdown file untouched, and that is not what made it different:
+  `mem_delete`'s whole-source delete removes no bytes either and still asks.
+  What the consent covers here is the disappearance — a note the project
+  shares stops being findable for everyone who searches this store, decided by
+  a caller who did not write it alone. **Breaking** for a caller deleting a
+  `project_shared` chunk through the adapter: that call now needs
+  `confirm_project_shared=True`, and a refusal *raises*
+  `ProjectSharedConfirmationRequiredError` rather than returning `False`,
+  because `False` already means "no such chunk, or not yours" and a caller has
+  to be able to tell a refusal from a miss. The new error is a `ValueError`
+  subclass, so existing handlers keep working; it exists because the method
+  also parses its `chunk_id` and a malformed one raises a plain `ValueError`
+  too — one of those is retryable by passing the flag and the other is not
+  retryable at all. `user` and `project_local` deletes are unchanged and are
+  asked nothing. `get()` now reports the chunk's `scope`, so the requirement
+  can be seen before it is tripped.
+
+  The tier is read from the chunk re-fetched under the source file's lock, not
+  from the first look at it: a re-scope landing in between would otherwise
+  carry a shared-tier removal on a consent given for a different tier — or on
+  none. This adapter previously took no lock here at all, so the delete no
+  longer races an in-flight re-index of the same file. It does not make the
+  removal permanent, and is not meant to: the markdown is left untouched, so a
+  later re-index of that file legitimately puts the row back. What the lock
+  buys is that the tier the gate judged is the tier the delete acts on. A row
+  whose source directory you have since deleted still goes, and deleting it
+  does not put that directory back.
+
+  The issue that reported this also reported `index(path=...)` as an
+  uncontained caller path. Measured, it is not: the adapter indexes through
+  the engine's default `path_scope="configured"`, which refuses anything
+  outside the configured memory directories before it reads a file. No change
+  was needed there, and the behaviour now has a test on this surface so it
+  stays a contract rather than an inherited default.
+
 - **The LangGraph store asks before writing into the Git-tracked tier**
   (#2321) — `MemtomemStore.add()` takes a caller-supplied `file=`, which makes
   it the one path on that adapter able to choose the `project_shared` tier, and
