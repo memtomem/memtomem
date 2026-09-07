@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import threading
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -564,7 +563,11 @@ class TestRollbackAgainstExternalRemoval:
         await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
         f = mem_dir / "d.md"
         (alpha,) = await _chunks_by_start_line(comp, f)
-        self._failing_index(app, lambda: shutil.rmtree(mem_dir), RuntimeError("boom"))
+        self._failing_index(app, f.unlink, RuntimeError("boom"))
+        # Drive the brake by its own condition rather than by deleting the
+        # directory: Windows refuses to remove a tree that still holds the open
+        # sidecar lock, which would stage a different failure entirely.
+        app.index_engine._containing_index_root = lambda _p: None  # type: ignore[method-assign]
 
         out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
 

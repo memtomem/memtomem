@@ -323,6 +323,17 @@ def restore_pre_image_quietly(file_path: Path, pre_image: PreImage) -> RestoreOu
         return RestoreOutcome.source_removed
     except IsADirectoryError:
         return RestoreOutcome.source_replaced
+    except PermissionError:
+        # Windows answers a directory at the path with EACCES where POSIX
+        # answers EISDIR, and a directory standing where the source was is a
+        # replacement, not a failure to report. Asking what is actually there
+        # is safe in a way a pre-open probe would not be: both branches write
+        # nothing, so a stale answer costs a message rather than a file. A
+        # genuine permission error on a regular file still lands in ``failed``.
+        if os.path.isdir(file_path):
+            return RestoreOutcome.source_replaced
+        logger.warning("restoring %s failed while unwinding an error", file_path, exc_info=True)
+        return RestoreOutcome.failed
     except Exception:  # noqa: BLE001 - reported, never raised over the body's
         logger.warning("restoring %s failed while unwinding an error", file_path, exc_info=True)
         return RestoreOutcome.failed
