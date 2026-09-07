@@ -32,7 +32,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   **Upgrading:** an agent or script that edits shared-tier notes must pass the
   new argument; the refusal names it. (#2317)
 
-<<<<<<< HEAD
+- **The LangGraph JSON store now reads the directory you hand it.**
+  `MemtomemBaseStore` asked about the `scope=` you declared and never looked
+  at `root=`, so pointing a store at a project's shared tier while calling it
+  `user` put every later `put` into a repository-tracked directory with no
+  confirmation — and scanned each one as if it were on your own machine, which
+  left `force_unsafe=True` open on a tier where it is supposed to be
+  impossible. The store now classifies the root. Declaring a stricter scope
+  than the path suggests still works: it never talks you down to a weaker one,
+  since inferring `user` from an unregistered directory would reopen the very
+  bypass this closes.
+
+  **Upgrading:** pass `confirm_project_shared=True` when `root=` is in a
+  project's shared tier; the refusal names it. Nothing changes for the default
+  destination or for any path outside a registered project tier. (#2336)
+
 ### Deprecated
 
 - **`mm context pull` now asks for consent in the same words as everywhere
@@ -61,22 +75,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
   **Upgrading:** replace `--yes` with `--confirm-project-shared` in any
   `mm context pull … --scope project_shared` invocation. (#2318)
-=======
-- **The LangGraph JSON store now reads the directory you hand it.**
-  `MemtomemBaseStore` asked about the `scope=` you declared and never looked
-  at `root=`, so pointing a store at a project's shared tier while calling it
-  `user` put every later `put` into a repository-tracked directory with no
-  confirmation — and scanned each one as if it were on your own machine, which
-  left `force_unsafe=True` open on a tier where it is supposed to be
-  impossible. The store now classifies the root. Declaring a stricter scope
-  than the path suggests still works: it never talks you down to a weaker one,
-  since inferring `user` from an unregistered directory would reopen the very
-  bypass this closes.
-
-  **Upgrading:** pass `confirm_project_shared=True` when `root=` is in a
-  project's shared tier; the refusal names it. Nothing changes for the default
-  destination or for any path outside a registered project tier. (#2336)
->>>>>>> c44a3bbb (fix(privacy): settle the destination tier before writing to it (#2322, #2336))
 
 ### Added
 
