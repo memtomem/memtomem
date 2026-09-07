@@ -9,7 +9,7 @@ import struct
 import threading
 import warnings
 from collections.abc import Iterable
-from concurrent.futures import Future
+from concurrent.futures import Future, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -507,11 +507,9 @@ class MemtomemHybridStore(BaseStore):
             self._close_done.wait()
             return
         try:
-            for future in pending:
-                try:
-                    future.result()
-                except Exception:
-                    pass
+            # Drain accepted operations. Each outcome already reached its own
+            # caller; close only waits for completion, so nothing is re-raised.
+            wait(pending)
             asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop).result()
         finally:
             self._loop.call_soon_threadsafe(self._loop.stop)

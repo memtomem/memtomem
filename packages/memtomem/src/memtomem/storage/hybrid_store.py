@@ -254,10 +254,10 @@ class HybridDatabase:
         if limit < 0 or offset < 0:
             raise ValueError("limit and offset must be nonnegative")
         db = self.connection
-        where = (
-            "namespace_prefix(i.namespace,?) AND value_matches(i.value_json,?) "
-            "AND (i.expires_at IS NULL OR i.expires_at>?)"
-        )
+        # The three statements below repeat the same eligibility predicate
+        # (namespace prefix, JSON filter, expiry) as literal SQL rather than
+        # interpolating one shared fragment: every query stays a constant
+        # string, which is the property the security lint (B608) checks for.
         counts = {"bm25": 0, "dense": 0}
         with db:
             db.execute("BEGIN IMMEDIATE" if refresh else "BEGIN")
@@ -265,7 +265,9 @@ class HybridDatabase:
             args = (encode(namespace), encode(filters or {}), now)
             if query is None:
                 rows = db.execute(
-                    f"""SELECT i.*,NULL AS score FROM items i WHERE {where}
+                    """SELECT i.*,NULL AS score FROM items i
+                    WHERE namespace_prefix(i.namespace,?) AND value_matches(i.value_json,?)
+                    AND (i.expires_at IS NULL OR i.expires_at>?)
                     ORDER BY updated_at DESC,namespace COLLATE namespace_order,key
                     LIMIT ? OFFSET ?""",
                     (*args, limit, offset),
@@ -281,9 +283,11 @@ class HybridDatabase:
                     and fts.strip()
                 ):
                     lexical = db.execute(
-                        f"""SELECT i.id,-bm25(item_fts) AS score FROM item_fts
+                        """SELECT i.id,-bm25(item_fts) AS score FROM item_fts
                         JOIN items i ON i.id=item_fts.rowid
-                        WHERE item_fts MATCH ? AND {where}
+                        WHERE item_fts MATCH ? AND namespace_prefix(i.namespace,?)
+                        AND value_matches(i.value_json,?)
+                        AND (i.expires_at IS NULL OR i.expires_at>?)
                         ORDER BY score DESC,i.namespace COLLATE namespace_order,i.key LIMIT ?""",
                         (fts, *args, count),
                     ).fetchall()
@@ -293,9 +297,10 @@ class HybridDatabase:
                     and vector is not None
                 ):
                     dense = db.execute(
-                        f"""SELECT i.id,MAX(1-vec_distance_cosine(v.vector,?)) AS score
+                        """SELECT i.id,MAX(1-vec_distance_cosine(v.vector,?)) AS score
                         FROM items i JOIN vectors v ON v.item_id=i.id
-                        WHERE {where} GROUP BY i.id
+                        WHERE namespace_prefix(i.namespace,?) AND value_matches(i.value_json,?)
+                        AND (i.expires_at IS NULL OR i.expires_at>?) GROUP BY i.id
                         ORDER BY score DESC,i.namespace COLLATE namespace_order,i.key LIMIT ?""",
                         (sqlite_vec.serialize_float32(vector), *args, count),
                     ).fetchall()
