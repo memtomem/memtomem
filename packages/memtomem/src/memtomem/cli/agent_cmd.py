@@ -388,7 +388,10 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         from memtomem.memory_scope import day_file_name, namespace_mix_refusal, require_user_base
 
         try:
-            base = require_user_base(comp.config.indexing.memory_dirs)
+            base = require_user_base(
+                comp.config.indexing.memory_dirs,
+                comp.config.indexing.project_memory_dirs,
+            )
         except ConfigError as exc:
             raise_cli_error(exc)
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")

@@ -259,7 +259,7 @@ project_shared, the sync write is blocked regardless of `--force-unsafe`.
 > `allow_host_writes`, and still subject to the sync-time valve.
 
 **Gate B (surface).** Explicit `--scope project_shared` flag plus
-confirm prompt at the CLI/MCP write surface (`mm mem add`,
+confirm prompt at the CLI/MCP write surface (`mm add`,
 `mm context init`, `mm context migrate --to project_shared`). The flag must be passed
 explicitly — no env var or config-field default. There is
 deliberately **no** `memory.default_write_scope` config field: the
@@ -283,11 +283,12 @@ Continue? [y/N]:
 requests, neither of which has a terminal to prompt at. On every surface
 that takes `--confirm-project-shared`, `--yes` alone does **not** satisfy
 Gate B — it is a generic "skip prompts" flag users alias for unrelated
-reasons. The exception is `mm context pull`, which has no
-`--confirm-project-shared` of its own and whose Gate B is satisfied by
-`--yes` or the prompt (ADR-0030 §11); its CLI shape diverges from the
-`mem_context_pull` tool and the web pull route, which both require the
-explicit argument. Every one of those consents produces a
+reasons. One surface is mid-migration rather than compliant: `mm context
+pull` now *takes* `--confirm-project-shared` like the rest, but through 0.5.x
+it also still accepts `--yes`, behind a deprecation notice, and only refuses
+it from 0.6.0 (#2318, below). Until that release the rule above describes
+every CLI write surface's vocabulary and every one but `pull`'s behaviour.
+Every one of those consents produces a
 `project_shared.confirmed_via=<surface>` audit line.
 
 > **2026-09 (#2306):** Two corrections to the paragraph above, which
@@ -378,6 +379,163 @@ instead.
 > guard's own docstring states. Until those close, "every
 > `project_shared` write takes two gates" is a claim about the memory
 > CRUD and context surfaces, not about every writer in the tree.
+
+> **2026-09 (#2321):** The LangGraph `MemtomemStore.add()` adapter named
+> above now carries both gates, on every destination it writes to — the
+> caller-supplied `file=` and the derived daily file alike.
+> `confirm_project_shared` is required when the destination lands in the
+> `project_shared` tier, the consent line records
+> `confirmed_via=langgraph_add`, and Gate A is handed that same tier
+> instead of the `user` default it had been scanning under. #2322 remains
+> open, so the paragraph's closing sentence still holds as written.
+>
+> The derived branch is gated too, which is worth saying because it was
+> briefly left out. A daily file lands wherever `memory_dirs` points, and
+> asking an automatic write to carry a confirmation argument looked like
+> #2322's question rather than this one's — but #2322 enumerates four
+> other writers and says in its own text that the caller-controlled case
+> belongs here, so there was nothing to defer it to. Where one directory
+> is registered as both a user and a project memory directory, that daily
+> file really is in the tracked tier, and both gates now say so.
+>
+> What this surface had to settle that the CRUD tools did not — and the
+> caution for any future writer that takes a path from its caller.
+> `classify_scope` decides the tier from the path's *spelling*, and a
+> path can be spelled to defeat it in both directions. A target nested at
+> `<registered-shared-root>/sub/.memtomem/memories.local/note.md` matches
+> the `project_local` pattern first — a tier that asks for no
+> confirmation and admits `force_unsafe=True` — while every byte of it
+> lands inside the tree the shared root registered. And the default user
+> memory directory is literally `~/.memtomem/memories`, which matches the
+> `project_shared` pattern exactly, so a refusal keyed on "canonical
+> shape but unregistered" rejects the most ordinary target there is.
+>
+> The adapter therefore decides the tier by **ownership rather than
+> spelling**: the registered project root that covers the target decides,
+> most specific root winning; failing that, a target covered by a
+> configured user memory directory is `user` whatever it looks like; and
+> only a target covered by nothing is refused for wearing a canonical
+> shape it has not registered.
+>
+> Ownership alone is not sufficient, because the gates and the *rows*
+> answer to different judges. The gates protect the write; `mem_edit` and
+> `mem_delete` read the tier from the persisted chunk, which the indexer
+> labels with `classify_scope` — the spelling answer. So the adapter
+> requires the two to agree and refuses the write when they do not,
+> rather than leaving behind a row it could not gate again. Both
+> directions are real. Gated `project_shared` but stored `project_local`
+> is the nested path above: the add is protected and the later edit is
+> not. Gated `user` but stored `project_shared` is a
+> `project_memory_dirs` entry whose own path is not canonical — it cannot
+> name its own tier, so it does not get to decide one, and without the
+> round-trip check the target would fall through to the user branch and
+> reach the tracked tier having passed neither gate. Making the two
+> judges agree in general means changing the classifier every read
+> surface shares, which is a decision for the classifier and not for one
+> adapter.
+>
+> Two limits are stated rather than closed. The pattern is
+> case-sensitive, so on a case-insensitive filesystem an alternate-case
+> spelling of `.memtomem/memories` is not recognised by the ownership
+> rule or by `classify_scope`: the two agree on `user`, the round-trip
+> check is satisfied, and the write proceeds ungated onto a path the
+> repository still tracks. And the tier is decided before the write lock,
+> as in `_mem_add_core`, so a rename of an ancestor between the resolve
+> and the append is not covered. Both belong to the classifier and the
+> lock contract rather than to any one surface.
+
+> **2026-09 (#2318):** The `mm context pull` exception recorded by #2306 is
+> being closed in two stages, and only the first has landed. The command now
+> *takes* `--confirm-project-shared` like every other CLI write surface, so
+> the vocabulary matches its own `mem_context_pull` tool and web route today;
+> the behaviour matches them in 0.6.0, when `--yes` stops being accepted.
+> Read the paragraph above as describing that end state, not 0.5.x.
+>
+> Unlike the #2317 edit change, this one gets an accept-and-warn window,
+> because the two situations are not alike. There, a missing argument meant
+> a consent was never *taken*, and a release spent accepting unconfirmed
+> edits would keep producing the very gap #2306 closed. Here the consent was
+> always taken and always recorded — `--yes` carried it, and the audit line
+> already named the flag. What was wrong was the vocabulary, not the record,
+> so nothing leaks by spending a release fixing it in a way that does not
+> break `mm context pull … --scope project_shared --yes` in every existing
+> script. Through 0.5.x that invocation still works and prints a yellow
+> stderr notice naming the flip; from 0.6.0 it gets the standard refusal
+> ("`--yes` alone is not sufficient"). Until then the consent line keeps
+> reporting `flag='--yes'` on that path, which is what tells an operator the
+> deprecated spelling is still in use.
+>
+> The notice is deliberately not emitted beside the consent. `prepare_pull`
+> returns early on a divergent-source refusal, a canonical-exists refusal,
+> the byte-identical no-op and a Gate A block, all before Gate B is reached,
+> and an automation owner needs the migration signal on those runs too. A
+> notice reports a *spelling*; the consent line reports an *authorisation*.
+> Only the second one is withheld when nothing was authorised.
+>
+> This also brings `pull` inside
+> `test_project_shared_confirmation_audit_guard.py`, which closes the one
+> identifier-invisible Gate B that guard's docstring used to name — a Gate B
+> spelled another way. It does not close the wider class, which is the
+> *absence* of a gate rather than a different spelling of one: #2321 closed
+> that way a day earlier, and #2322's four derived-target writers are still
+> open, with nothing for a scan keyed on the flag to find in them.
+
+> **2026-09 (#2322):** the derived-destination half above is closed —
+> which corrects the last sentence of the #2318 note, written while it was
+> still open — and not by adding a third gate. Those writers take no
+> destination from their caller — they ask `memory_scope.require_user_base` for the
+> user-tier base — so the honest fix was at the derivation: that helper
+> now classifies the base it is about to return and refuses a registered
+> project tier outright, naming both config fields. Gate B never becomes
+> reachable on those surfaces because the *destination* never does.
+>
+> Growing a `confirm_project_shared` argument instead would have put a
+> confirmation prompt on an automatic `mem_session_end` summary, where
+> there is no human to answer it; a session end now declines the shared
+> archive and keeps the summary on the row. Rejecting the
+> `memory_dirs ∩ project_memory_dirs` overlap at config validation was
+> the other candidate and was not taken: it would refuse to *load* a
+> configuration that reads perfectly well, when only these writes are
+> unsafe.
+>
+> This is the same rule the install/update note above states from the
+> other side. There, Gate B is absent because the verb carries the
+> surface intent (`mm context install` has no `--scope` choice). Here it
+> is absent because the surface has no project-tier destination at all —
+> in neither case is a missing confirmation a missing consent. The
+> refusal covers more than the four sites #2322 listed: scratch promote,
+> `mm review approve`, `mm agent share` and `mm shell`'s `add` derive
+> the same base and did not even pass `scope=` to Gate A.
+> `tests/test_user_base_derivation_guard.py` keeps the derivation in one
+> place — a hand-rolled `memory_dirs[0]` is how `mem_session_end`
+> escaped the helper in the first place, and widening that guard to
+> aliases immediately turned up one more: `PinnedContextStore` derived
+> its `user_base` the same way, and both of `set`'s gates keyed on the
+> caller's declared scope, so a `scope="user"` block landed in the tier.
+> Both mutating methods refuse — `set` and `delete`, since removing bytes
+> the project committed changes the shared tier as much as adding them —
+> while every read path stays total, because `mem_context_compose`
+> answering with an internal error is the shape #1768 exists to prevent.
+
+> **2026-09 (#2336):** the note above about `MemtomemStore.add()` has a
+> sibling. `MemtomemBaseStore` takes an arbitrary `root=` and gated only
+> on the *declared* `scope`, so `root=<proj>/.memtomem/memories/…,
+> scope="user"` cleared Gate B and then ran every `put`'s Gate A as
+> `user`. It now classifies the root and **escalates only** — a declared
+> `project_shared` survives an unregistered path, because inferring
+> `user` there would reopen the bypass it is meant to close. The
+> classification reads a throwaway config loaded with `migrate=False`:
+> the store's own configuration is untouched, so an explicit-`root`
+> caller does not start inheriting a persisted embedding provider, and a
+> lookup done for a *refusal* cannot rewrite `~/.memtomem/config.json` as
+> a side effect of constructing a store that then raises.
+>
+> With #2321, #2322 and this closed, "every `project_shared` write takes
+> two gates" holds for every first-party writer in the tree except the
+> one named in #2333: `POST /api/scratch/{key}/promote` still accepts a
+> caller-supplied `file=` under any `memory_dirs` entry with no `scope=`
+> on its Gate A.
+
 
 Before PR-D, `mem_batch_add` bypassed `enforce_write_guard` and used
 an inline `privacy.scan` instead — the batch path was the obvious

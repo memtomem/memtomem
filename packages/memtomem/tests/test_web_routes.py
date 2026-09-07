@@ -3889,7 +3889,11 @@ class TestAddMemoryProjectTier:
         assert detail["surface"] == "web_api_add"
         assert detail["scope"] == "project_shared"
         assert "confirm_project_shared" in detail["message"]
-        assert detail["cli_hint"] == "mm mem add --scope project_shared"
+        # ``mm mem`` has only init / rescan / rescan-files; the add command is
+        # top-level. The hint said ``mm mem add`` and this assertion pinned the
+        # string rather than the command's existence, so it locked the wrong
+        # instruction in place instead of catching it.
+        assert detail["cli_hint"] == "mm add --scope project_shared"
         # Docs URL must point at the canonical-residency ADR — pin the
         # filename so a re-org of the ADR tree gets caught here rather
         # than producing a silently dead link in production toasts.
@@ -6652,6 +6656,43 @@ class TestConfigErrorHandler:
         assert "indexing.memory_dirs is empty" in resp.json()["detail"]
         appender.assert_not_called()
         app.state.storage.scratch_promote.assert_not_called()
+
+    async def test_scratch_promote_default_target_project_tier_409(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """#2322 — the same shape for the other unusable configuration: a
+        ``memory_dirs[0]`` that is a registered project tier. Promotion takes
+        no ``confirm_project_shared``, so it must refuse rather than append
+        into the git-tracked tier."""
+        tier = tmp_path / "proj" / ".memtomem" / "memories"
+        tier.mkdir(parents=True)
+        app.state.config.indexing.memory_dirs = [tier]
+        app.state.config.indexing.project_memory_dirs = [tier]
+        app.state.storage.scratch_get = AsyncMock(
+            return_value={"key": "note", "value": "promote me"}
+        )
+        app.state.storage.scratch_promote = AsyncMock()
+
+        with patch("memtomem.tools.memory_writer.append_entry") as appender:
+            resp = await client.post("/api/scratch/note/promote", json={})
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert "indexing.memory_dirs[0]" in detail
+        assert "indexing.project_memory_dirs" in detail
+        appender.assert_not_called()
+        app.state.storage.scratch_promote.assert_not_called()
+
+    async def test_api_add_user_scope_project_tier_409(self, app, client: AsyncClient, tmp_path):
+        """``POST /api/add`` with the default ``scope='user'`` derives the same
+        base and must refuse it too (#2322)."""
+        tier = tmp_path / "proj" / ".memtomem" / "memories"
+        tier.mkdir(parents=True)
+        app.state.config.indexing.memory_dirs = [tier]
+        app.state.config.indexing.project_memory_dirs = [tier]
+
+        resp = await client.post("/api/add", json={"content": "hello"})
+        assert resp.status_code == 409
+        assert "indexing.memory_dirs[0]" in resp.json()["detail"]
 
 
 class TestDeleteSourceParity:

@@ -2187,7 +2187,7 @@ async def add_memory(
                     "scope='project_shared' writes to a git-tracked directory. "
                     "Re-submit with confirm_project_shared=true to proceed."
                 ),
-                "cli_hint": "mm mem add --scope project_shared",
+                "cli_hint": "mm add --scope project_shared",
                 "docs_url": (
                     "https://github.com/memtomem/memtomem/blob/main/docs/adr/"
                     "0011-canonical-artifact-scope-hierarchy.md"
@@ -2263,7 +2263,7 @@ async def add_memory(
     if req.scope == "user":
         from memtomem.memory_scope import require_user_base
 
-        base = require_user_base(config.indexing.memory_dirs)
+        base = require_user_base(config.indexing.memory_dirs, config.indexing.project_memory_dirs)
     else:
         from memtomem.memory_scope import (
             MemoryScopeError,

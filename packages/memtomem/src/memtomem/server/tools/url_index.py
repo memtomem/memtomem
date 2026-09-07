@@ -49,7 +49,9 @@ async def mem_fetch(
 
     app = await _get_app_initialized(ctx)
     try:
-        memory_dir = require_user_base(app.config.indexing.memory_dirs)
+        memory_dir = require_user_base(
+            app.config.indexing.memory_dirs, app.config.indexing.project_memory_dirs
+        )
     except ConfigError as exc:
         return f"Error: {exc}"
     output_dir = memory_dir / "_fetched"
