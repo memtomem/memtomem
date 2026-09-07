@@ -283,11 +283,12 @@ Continue? [y/N]:
 requests, neither of which has a terminal to prompt at. On every surface
 that takes `--confirm-project-shared`, `--yes` alone does **not** satisfy
 Gate B — it is a generic "skip prompts" flag users alias for unrelated
-reasons. The exception is `mm context pull`, which has no
-`--confirm-project-shared` of its own and whose Gate B is satisfied by
-`--yes` or the prompt (ADR-0030 §11); its CLI shape diverges from the
-`mem_context_pull` tool and the web pull route, which both require the
-explicit argument. Every one of those consents produces a
+reasons. One surface is mid-migration rather than compliant: `mm context
+pull` now *takes* `--confirm-project-shared` like the rest, but through 0.5.x
+it also still accepts `--yes`, behind a deprecation notice, and only refuses
+it from 0.6.0 (#2318, below). Until that release the rule above describes
+every CLI write surface's vocabulary and every one but `pull`'s behaviour.
+Every one of those consents produces a
 `project_shared.confirmed_via=<surface>` audit line.
 
 > **2026-09 (#2306):** Two corrections to the paragraph above, which
@@ -442,6 +443,42 @@ instead.
 > as in `_mem_add_core`, so a rename of an ancestor between the resolve
 > and the append is not covered. Both belong to the classifier and the
 > lock contract rather than to any one surface.
+
+> **2026-09 (#2318):** The `mm context pull` exception recorded by #2306 is
+> being closed in two stages, and only the first has landed. The command now
+> *takes* `--confirm-project-shared` like every other CLI write surface, so
+> the vocabulary matches its own `mem_context_pull` tool and web route today;
+> the behaviour matches them in 0.6.0, when `--yes` stops being accepted.
+> Read the paragraph above as describing that end state, not 0.5.x.
+>
+> Unlike the #2317 edit change, this one gets an accept-and-warn window,
+> because the two situations are not alike. There, a missing argument meant
+> a consent was never *taken*, and a release spent accepting unconfirmed
+> edits would keep producing the very gap #2306 closed. Here the consent was
+> always taken and always recorded — `--yes` carried it, and the audit line
+> already named the flag. What was wrong was the vocabulary, not the record,
+> so nothing leaks by spending a release fixing it in a way that does not
+> break `mm context pull … --scope project_shared --yes` in every existing
+> script. Through 0.5.x that invocation still works and prints a yellow
+> stderr notice naming the flip; from 0.6.0 it gets the standard refusal
+> ("`--yes` alone is not sufficient"). Until then the consent line keeps
+> reporting `flag='--yes'` on that path, which is what tells an operator the
+> deprecated spelling is still in use.
+>
+> The notice is deliberately not emitted beside the consent. `prepare_pull`
+> returns early on a divergent-source refusal, a canonical-exists refusal,
+> the byte-identical no-op and a Gate A block, all before Gate B is reached,
+> and an automation owner needs the migration signal on those runs too. A
+> notice reports a *spelling*; the consent line reports an *authorisation*.
+> Only the second one is withheld when nothing was authorised.
+>
+> This also brings `pull` inside
+> `test_project_shared_confirmation_audit_guard.py`, which closes the one
+> identifier-invisible Gate B that guard's docstring used to name — a Gate B
+> spelled another way. It does not close the wider class, which is the
+> *absence* of a gate rather than a different spelling of one: #2321 closed
+> that way a day earlier, and #2322's four derived-target writers are still
+> open, with nothing for a scan keyed on the flag to find in them.
 
 Before PR-D, `mem_batch_add` bypassed `enforce_write_guard` and used
 an inline `privacy.scan` instead — the batch path was the obvious
