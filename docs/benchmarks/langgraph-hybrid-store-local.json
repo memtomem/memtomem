@@ -1,0 +1,200 @@
+{
+  "measured_at": "2026-09-07T09:00:37.607763+00:00",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "python": "3.12.11",
+  "langgraph": "1.2.11",
+  "sqlite_vec": "0.1.9",
+  "warmup": 1,
+  "trials": 10,
+  "results": [
+    {
+      "size": 1000,
+      "dims": 32,
+      "ingest_seconds": 0.171,
+      "database_bytes": 479232,
+      "peak_rss_mib": 64.03,
+      "search": {
+        "bm25": {
+          "unfiltered": {
+            "median_ms": 1.133,
+            "max_ms": 1.229,
+            "candidate_counts": {
+              "bm25": 100,
+              "dense": 0
+            }
+          },
+          "filtered_1_percent": {
+            "median_ms": 0.565,
+            "max_ms": 0.755,
+            "candidate_counts": {
+              "bm25": 10,
+              "dense": 0
+            }
+          }
+        },
+        "dense": {
+          "unfiltered": {
+            "median_ms": 4.338,
+            "max_ms": 4.609,
+            "candidate_counts": {
+              "bm25": 0,
+              "dense": 100
+            }
+          },
+          "filtered_1_percent": {
+            "median_ms": 3.16,
+            "max_ms": 3.997,
+            "candidate_counts": {
+              "bm25": 0,
+              "dense": 10
+            }
+          }
+        },
+        "hybrid": {
+          "unfiltered": {
+            "median_ms": 5.406,
+            "max_ms": 5.703,
+            "candidate_counts": {
+              "bm25": 100,
+              "dense": 100
+            }
+          },
+          "filtered_1_percent": {
+            "median_ms": 3.583,
+            "max_ms": 3.844,
+            "candidate_counts": {
+              "bm25": 10,
+              "dense": 10
+            }
+          }
+        }
+      }
+    },
+    {
+      "size": 10000,
+      "dims": 32,
+      "ingest_seconds": 1.733,
+      "database_bytes": 4055040,
+      "peak_rss_mib": 65.98,
+      "search": {
+        "bm25": {
+          "unfiltered": {
+            "median_ms": 5.056,
+            "max_ms": 5.18,
+            "candidate_counts": {
+              "bm25": 100,
+              "dense": 0
+            }
+          },
+          "filtered_1_percent": {
+            "median_ms": 4.394,
+            "max_ms": 4.82,
+            "candidate_counts": {
+              "bm25": 100,
+              "dense": 0
+            }
+          }
+        },
+        "dense": {
+          "unfiltered": {
+            "median_ms": 36.797,
+            "max_ms": 47.631,
+            "candidate_counts": {
+              "bm25": 0,
+              "dense": 100
+            }
+          },
+          "filtered_1_percent": {
+            "median_ms": 28.563,
+            "max_ms": 35.414,
+            "candidate_counts": {
+              "bm25": 0,
+              "dense": 100
+            }
+          }
+        },
+        "hybrid": {
+          "unfiltered": {
+            "median_ms": 43.547,
+            "max_ms": 52.955,
+            "candidate_counts": {
+              "bm25": 100,
+              "dense": 100
+            }
+          },
+          "filtered_1_percent": {
+            "median_ms": 32.502,
+            "max_ms": 37.341,
+            "candidate_counts": {
+              "bm25": 100,
+              "dense": 100
+            }
+          }
+        }
+      }
+    },
+    {
+      "size": 100000,
+      "dims": 32,
+      "ingest_seconds": 20.492,
+      "database_bytes": 41066496,
+      "peak_rss_mib": 66.19,
+      "search": {
+        "bm25": {
+          "unfiltered": {
+            "median_ms": 47.2,
+            "max_ms": 68.422,
+            "candidate_counts": {
+              "bm25": 100,
+              "dense": 0
+            }
+          },
+          "filtered_1_percent": {
+            "median_ms": 43.527,
+            "max_ms": 60.881,
+            "candidate_counts": {
+              "bm25": 100,
+              "dense": 0
+            }
+          }
+        },
+        "dense": {
+          "unfiltered": {
+            "median_ms": 369.139,
+            "max_ms": 419.4,
+            "candidate_counts": {
+              "bm25": 0,
+              "dense": 100
+            }
+          },
+          "filtered_1_percent": {
+            "median_ms": 281.835,
+            "max_ms": 327.774,
+            "candidate_counts": {
+              "bm25": 0,
+              "dense": 100
+            }
+          }
+        },
+        "hybrid": {
+          "unfiltered": {
+            "median_ms": 415.688,
+            "max_ms": 420.006,
+            "candidate_counts": {
+              "bm25": 100,
+              "dense": 100
+            }
+          },
+          "filtered_1_percent": {
+            "median_ms": 318.079,
+            "max_ms": 347.528,
+            "candidate_counts": {
+              "bm25": 100,
+              "dense": 100
+            }
+          }
+        }
+      }
+    }
+  ]
+}

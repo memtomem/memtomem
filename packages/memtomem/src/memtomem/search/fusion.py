@@ -8,6 +8,19 @@ from uuid import UUID
 from memtomem.models import Chunk, SearchResult
 
 
+def weighted_rank_scores[T](
+    result_lists: list[list[T]], weights: list[float], k: int = 60
+) -> dict[T, float]:
+    """Accumulate weighted reciprocal ranks for already deduplicated lists."""
+    scores: dict[T, float] = {}
+    for results, weight in zip(result_lists, weights, strict=True):
+        if weight <= 0:
+            continue
+        for rank, identity in enumerate(results, 1):
+            scores[identity] = scores.get(identity, 0.0) + weight / (k + rank)
+    return scores
+
+
 def reciprocal_rank_fusion(
     result_lists: list[list[SearchResult]],
     k: int = 60,
@@ -45,7 +58,11 @@ def reciprocal_rank_fusion(
             f"leg{i}" for i in range(len(list_labels), len(result_lists))
         ]
 
-    scores: dict[UUID, float] = {}
+    scores = weighted_rank_scores(
+        [[result.chunk.id for result in results] for results in result_lists],
+        weights[: len(result_lists)],
+        k,
+    )
     chunk_map: dict[UUID, Chunk] = {}
     hit_counts: dict[UUID, int] = {}
     hit_lists: dict[UUID, list[int]] = {}
@@ -55,10 +72,8 @@ def reciprocal_rank_fusion(
         w = weights[list_idx]
         if w <= 0:
             continue
-        for rank_0, result in enumerate(result_list):
-            rank = rank_0 + 1  # 1-based
+        for result in result_list:
             cid = result.chunk.id
-            scores[cid] = scores.get(cid, 0.0) + w / (k + rank)
             chunk_map[cid] = result.chunk
             hit_counts[cid] = hit_counts.get(cid, 0) + 1
             hit_lists.setdefault(cid, []).append(list_idx)

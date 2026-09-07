@@ -332,6 +332,13 @@ jobs:
           version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
       - run: uv run pytest packages/memtomem/tests/test_notebooks.py --tb=short -q
+      - name: Execute model-free beginner notebooks in a minimal environment
+        run: |
+          uv venv /tmp/beginner-notebooks
+          uv pip install --python /tmp/beginner-notebooks/bin/python -e 'packages/memtomem[langgraph]' nbclient ipykernel
+          /tmp/beginner-notebooks/bin/python tools/check_beginner_notebooks.py --json
+          /tmp/beginner-notebooks/bin/python examples/onboarding/retry-policy/demo.py
+          /tmp/beginner-notebooks/bin/python -m unittest discover -s examples/onboarding/retry-policy
 
   test-js:
     name: js-unit (vitest + jsdom)

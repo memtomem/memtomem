@@ -154,6 +154,10 @@ class TestConsumerRegressionPin:
         # canonical default store root; explicit project scopes still pass
         # through the normal scope resolver and confirmation gate.
         "memtomem/integrations/langgraph_store.py",
+        # Dedicated SQLite Store: scope guards need separate user/project
+        # registries to identify ownership. all_index_roots() would erase that
+        # distinction; this is target validation, not retrieval fan-out.
+        "memtomem/integrations/langgraph_hybrid_store.py",
         # Pinned context anchors user-scoped blocks in the primary user-tier
         # directory, then resolves project-local/shared scopes explicitly.
         "memtomem/pinned.py",
