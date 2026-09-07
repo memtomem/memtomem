@@ -3,6 +3,8 @@
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+import shutil
+
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -869,6 +871,9 @@ class TestGetDelete:
             "source": str(Path("n/a.md")),
             "tags": ["x"],
             "namespace": "ns",
+            # #2335: the tier a caller needs in order to know whether
+            # ``delete`` will demand ``confirm_project_shared``.
+            "scope": "user",
         }
         comp.storage.get_chunk.assert_awaited_once_with(chunk.id)
 
@@ -885,7 +890,12 @@ class TestGetDelete:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("deleted_rows", "expected"), [(1, True), (0, False)])
-    async def test_delete_reports_whether_rows_were_deleted(self, deleted_rows, expected):
+    async def test_delete_reports_whether_rows_were_deleted(self, deleted_rows, expected, tmp_path):
+        """``source_file`` is a real path because #2335 gave delete a lock.
+
+        The sidecar is keyed on the resolved source file, so a relative stub
+        path would create a lockfile next to the test runner's cwd.
+        """
         from memtomem.integrations.langgraph import MemtomemStore
 
         from memtomem.models import Chunk, ChunkMetadata
@@ -897,7 +907,7 @@ class TestGetDelete:
         comp.storage.get_chunk = AsyncMock(
             return_value=Chunk(
                 content="c",
-                metadata=ChunkMetadata(source_file=Path("n/a.md")),
+                metadata=ChunkMetadata(source_file=tmp_path / "n.md"),
                 id=cid,
             )
         )
@@ -1916,3 +1926,483 @@ class TestAddProjectSharedGateB:
         lines = consent_lines(caplog)
         assert len(lines) == 2, lines
         assert all("confirmed_via=langgraph_add" in line for line in lines)
+
+
+class TestDeleteProjectSharedGateB:
+    """ADR-0011 §5 Gate B on the LangGraph adapter's ``delete`` (#2335).
+
+    ``MemtomemStore.delete`` removed a ``project_shared`` chunk with no
+    confirmation, no consent record and no lock, while ``mem_delete`` refused
+    the same chunk. "It only drops index rows" is not what separated them:
+    ``mem_delete``'s ``source_file=`` branch deletes no bytes either and still
+    asks.
+
+    These are the behavioural half the AST guard in
+    ``test_project_shared_confirmation_audit_guard.py`` cannot cover — that
+    the emit's predicate mirrors the gate's, that the surface name is this
+    adapter's own, and that the tier judged is the one re-read under the lock
+    rather than the one the unlocked probe saw.
+
+    Real components with a genuinely registered ``project_memory_dirs``: the
+    property under test is the *persisted* scope the indexer wrote, so a
+    fixture that stamped the scope itself would let the test agree with
+    itself.
+    """
+
+    _BODY = "Rollout notes for the shared runbook."
+
+    @pytest.fixture
+    def tiers(self, tmp_path, monkeypatch):
+        """A store whose three tiers are all real, registered directories.
+
+        The cwd moves into the project root, and that is load-bearing rather
+        than tidiness: ADR-0036 resolves a chunk *by id* only inside the
+        caller's project boundary, so from outside ``proj`` a
+        ``project_shared`` row is not reachable by ``delete`` at all. Running
+        inside the project is the state in which this gap is reachable, so it
+        is the state the gate has to be tested in.
+        """
+        from helpers import isolate_memtomem_env
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        isolate_memtomem_env(monkeypatch)
+
+        user_dir = tmp_path / "user_mem"
+        proj_root = tmp_path / "proj"
+        shared_dir = proj_root / ".memtomem" / "memories"
+        local_dir = proj_root / ".memtomem" / "memories.local"
+        for d in (user_dir, shared_dir, local_dir):
+            d.mkdir(parents=True)
+        monkeypatch.chdir(proj_root)
+
+        store = MemtomemStore(
+            config_overrides={
+                "storage": {"sqlite_path": tmp_path / "lg.db"},
+                "indexing": {
+                    "memory_dirs": [user_dir],
+                    "project_memory_dirs": [shared_dir, local_dir],
+                },
+                "embedding": {"dimension": 1024},
+                "search": {"enable_dense": False},
+            }
+        )
+        yield (
+            store,
+            {"user": user_dir, "project_shared": shared_dir, "project_local": local_dir},
+        )
+
+    async def _seed(self, store, dirs, tier):
+        """Index one chunk into ``tier`` and return ``(comp, target, id)``.
+
+        Seeded through the indexer rather than through ``add`` on purpose:
+        ``add(confirm_project_shared=True)`` would record a consent of its
+        own, and every assertion below is about which consent lines exist.
+        Reaching for ``caplog.clear()`` instead would leave the tests one
+        forgotten call away from asserting nothing.
+
+        The scope assertion is the premise check. Without it the refusal
+        tests could pass for the wrong reason — a chunk that was never
+        ``project_shared`` is not refused because the gate works.
+        """
+        target = dirs[tier] / f"{tier}.md"
+        target.write_text(f"## {tier} note\n\n{self._BODY}\n", encoding="utf-8")
+        comp = await store._ensure_init()
+        stats = await comp.index_engine.index_file(target)
+        assert stats.indexed_chunks >= 1, stats
+        chunks = await comp.storage.list_chunks_by_source(target)
+        assert len(chunks) == 1, chunks
+        assert (chunks[0].metadata.scope or "user") == tier, chunks[0].metadata.scope
+        return comp, target, str(chunks[0].id)
+
+    @pytest.mark.asyncio
+    async def test_shared_chunk_without_confirm_refuses_and_keeps_the_row(self, tiers, caplog):
+        """The refusal raises: ``False`` already means "no such chunk"."""
+        import logging
+
+        from helpers import consent_lines
+
+        from memtomem.errors import ProjectSharedConfirmationRequiredError
+
+        store, dirs = tiers
+        try:
+            _comp, _target, cid = await self._seed(store, dirs, "project_shared")
+            with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+                with pytest.raises(
+                    ProjectSharedConfirmationRequiredError, match="confirm_project_shared=True"
+                ):
+                    await store.delete(cid)
+
+            assert await store.get(cid) is not None, "the refused row must still be there"
+            assert consent_lines(caplog) == []
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_is_distinguishable_from_a_malformed_id(self, tiers):
+        """Both raise ``ValueError``; only one is fixed by passing the flag.
+
+        ``delete`` parses its ``chunk_id``, so a caller that catches the bare
+        type cannot tell "this id is not a UUID" — never retryable — from
+        "you have not consented yet" — retryable the moment the flag is
+        passed. The typed refusal is what separates them.
+        """
+        from memtomem.errors import ProjectSharedConfirmationRequiredError
+
+        store, dirs = tiers
+        try:
+            _comp, _target, cid = await self._seed(store, dirs, "project_shared")
+
+            with pytest.raises(ProjectSharedConfirmationRequiredError):
+                await store.delete(cid)
+
+            with pytest.raises(ValueError) as malformed:
+                await store.delete("not-a-uuid")
+            assert not isinstance(malformed.value, ProjectSharedConfirmationRequiredError)
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_shared_chunk_with_confirm_deletes_and_records_one_consent(self, tiers, caplog):
+        import logging
+
+        from helpers import consent_lines
+
+        store, dirs = tiers
+        try:
+            _comp, _target, cid = await self._seed(store, dirs, "project_shared")
+            with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+                assert await store.delete(cid, confirm_project_shared=True) is True
+
+            assert await store.get(cid) is None
+            # Exactly one line, naming this surface and this verb. A second
+            # would mean one human decision is audited twice; ``action=write``
+            # would mean the delete is filed under ``add``'s consent.
+            lines = consent_lines(caplog)
+            assert len(lines) == 1, lines
+            assert "project_shared.confirmed_via=langgraph_delete" in lines[0]
+            assert "mechanism=param" in lines[0]
+            assert "action=delete" in lines[0]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tier", ["user", "project_local"])
+    @pytest.mark.parametrize("confirmed", [False, True])
+    async def test_other_tiers_delete_without_asking_and_record_no_consent(
+        self, tiers, caplog, tier, confirmed
+    ):
+        """Neither axis may leak into the other.
+
+        ``project_local`` catches a gate widened from ``== "project_shared"``
+        to ``!= "user"`` — ``memories.local`` is gitignored and was never
+        meant to ask. The ``confirmed=True`` axis catches an emit that fires
+        on the flag rather than on the tier, filing a consent for a chunk
+        nobody was asked about.
+        """
+        import logging
+
+        from helpers import consent_lines
+
+        store, dirs = tiers
+        try:
+            _comp, _target, cid = await self._seed(store, dirs, tier)
+            with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+                assert await store.delete(cid, confirm_project_shared=confirmed) is True
+
+            assert await store.get(cid) is None
+            assert consent_lines(caplog) == []
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_vanished_source_directory_still_deletes_and_stays_gone(self, tiers):
+        """#2346's property, inherited through the shared lock helper.
+
+        A row can outlive the directory its source lived in. Taking the full
+        sidecar there would ``mkdir`` the removed directory back just to lock
+        a delete, so the span degrades — and this method may proceed under a
+        degraded span precisely because it writes no bytes.
+
+        Both halves are asserted: the row goes, and the directory the user
+        removed does not come back.
+        """
+        store, dirs = tiers
+        try:
+            _comp, target, cid = await self._seed(store, dirs, "user")
+            parent = target.parent
+            shutil.rmtree(parent)
+            assert not parent.exists()
+
+            assert await store.delete(cid) is True
+
+            assert await store.get(cid) is None
+            assert not parent.exists(), sorted(p.name for p in parent.iterdir())
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_get_reports_the_persisted_tier(self, tiers):
+        """The caller can see the gate coming instead of tripping it."""
+        store, dirs = tiers
+        try:
+            _comp, _target, shared_id = await self._seed(store, dirs, "project_shared")
+            _comp, _target, user_id = await self._seed(store, dirs, "user")
+
+            assert (await store.get(shared_id))["scope"] == "project_shared"
+            assert (await store.get(user_id))["scope"] == "user"
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_index_refuses_a_path_outside_every_configured_root(self, tiers, tmp_path):
+        """#2335's second half, measured rather than assumed.
+
+        The issue reported ``index(path=...)`` as an uncontained
+        caller-supplied path. It is not: the adapter calls ``index_path``
+        with the default ``path_scope="configured"``, and the engine refuses
+        anything outside ``memory_dirs`` + ``project_memory_dirs``. Pinned
+        here so the containment becomes this surface's contract rather than
+        an inherited default a later ``path_scope="explicit"`` could drop.
+        """
+        store, _dirs = tiers
+        outside = tmp_path / "not_registered"
+        outside.mkdir()
+        (outside / "leak.md").write_text("## Leak\n\nsecretless but unregistered\n", "utf-8")
+
+        try:
+            stats = await store.index(path=str(outside))
+        finally:
+            await store.close()
+
+        assert stats["indexed_chunks"] == 0
+        assert stats["total_files"] == 0
+        assert any("outside configured memory directories" in e for e in stats["errors"]), stats
+
+
+class TestDeleteGateBUnderTheLock:
+    """The tier is judged on the chunk re-fetched under the source file lock.
+
+    ADR-0011 §5 requires it. The span is
+    ``tools.memory_mutation.locked_source_chunk`` — the surface-neutral helper
+    the web chunk routes take — rather than ``mem_delete``'s ``_locked_chunk``,
+    which lives in ``memtomem.server`` and so is out of reach here
+    (``test_runtime_import_hygiene``). What is adapter-local, and therefore has
+    to be pinned here, is the bounded re-key when that helper reports
+    ``moved``: the web route answers 409 and lets the client re-issue the
+    request, and an in-process call has no request to re-issue.
+
+    These are sequenced doubles, not real contention: they prove the gate
+    *reads* the second fetch, not that the lock excludes a concurrent writer.
+    Real contention on the Gate B re-fetch is #2326, for every surface.
+    """
+
+    @staticmethod
+    def _chunk(cid, source_file, scope, project_root):
+        from memtomem.models import Chunk, ChunkMetadata
+
+        return Chunk(
+            content="c",
+            metadata=ChunkMetadata(
+                source_file=source_file,
+                scope=scope,
+                project_root=None if scope == "user" else project_root,
+            ),
+            id=cid,
+        )
+
+    def _store(self, monkeypatch, tmp_path, chunks, deleted_rows=1):
+        """A store whose ``get_chunk`` answers ``chunks`` in order.
+
+        The project boundary is pinned to ``tmp_path`` because ADR-0036 makes
+        a ``project_shared`` row unreachable by id from outside its project —
+        without it these cases would return ``False`` at the probe and never
+        reach the gate they are about. Patched on the defining module, which
+        is where this adapter looks the name up.
+        """
+        import memtomem.runtime.project_context as project_context
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        monkeypatch.setattr(project_context, "_resolve_project_context_root", lambda comp: tmp_path)
+        comp = MagicMock()
+        comp.storage.get_chunk = AsyncMock(side_effect=list(chunks))
+        comp.storage.delete_chunks = AsyncMock(return_value=deleted_rows)
+        store = MemtomemStore()
+        store._components = comp
+        return store, comp
+
+    @pytest.mark.asyncio
+    async def test_a_rescope_into_the_shared_tier_is_caught_by_the_re_fetch(
+        self, tmp_path, monkeypatch
+    ):
+        """Probe says ``user``, the locked re-fetch says ``project_shared``.
+
+        A gate reading the probe would delete a git-tracked row on no
+        consent at all.
+        """
+        cid = uuid4()
+        src = tmp_path / "n.md"
+        store, comp = self._store(
+            monkeypatch,
+            tmp_path,
+            [
+                self._chunk(cid, src, "user", tmp_path),
+                self._chunk(cid, src, "project_shared", tmp_path),
+            ],
+        )
+
+        from memtomem.errors import ProjectSharedConfirmationRequiredError
+
+        with pytest.raises(ProjectSharedConfirmationRequiredError, match="confirm_project_shared"):
+            await store.delete(str(cid))
+
+        comp.storage.delete_chunks.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_rescope_out_of_the_shared_tier_is_also_taken_from_the_re_fetch(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The mirror case, which a "gate on the probe" reading would fail too.
+
+        Probe says ``project_shared``, the locked re-fetch says ``user``: the
+        delete proceeds unasked, and records no consent — the row that is
+        actually removed is not in the tracked tier.
+        """
+        import logging
+
+        from helpers import consent_lines
+
+        cid = uuid4()
+        src = tmp_path / "n.md"
+        store, comp = self._store(
+            monkeypatch,
+            tmp_path,
+            [
+                self._chunk(cid, src, "project_shared", tmp_path),
+                self._chunk(cid, src, "user", tmp_path),
+            ],
+        )
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            assert await store.delete(str(cid)) is True
+
+        assert consent_lines(caplog) == []
+        comp.storage.delete_chunks.assert_awaited_once_with([cid])
+
+    @pytest.mark.asyncio
+    async def test_a_chunk_moved_before_the_lock_is_re_keyed_onto_its_new_file(
+        self, tmp_path, monkeypatch
+    ):
+        """``memory-migrate`` moved the row while we waited for the old lock.
+
+        The file we hold is no longer this row's, so nothing it says is
+        authoritative; re-key onto the new path and judge there.
+        """
+        cid = uuid4()
+        old = tmp_path / "old.md"
+        new = tmp_path / "new.md"
+        store, comp = self._store(
+            monkeypatch,
+            tmp_path,
+            [
+                self._chunk(cid, old, "user", tmp_path),  # attempt 1 probe → old
+                self._chunk(cid, new, "user", tmp_path),  # under old's lock: moved
+                self._chunk(cid, new, "user", tmp_path),  # attempt 2 probe → new
+                self._chunk(cid, new, "user", tmp_path),  # under new's lock: settled
+            ],
+        )
+
+        assert await store.delete(str(cid)) is True
+
+        # Two full attempts of the helper's probe-then-refetch, not one
+        # attempt that shrugged and deleted on the stale key.
+        assert comp.storage.get_chunk.await_count == 4
+        comp.storage.delete_chunks.assert_awaited_once_with([cid])
+
+    @pytest.mark.asyncio
+    async def test_a_chunk_that_keeps_moving_refuses_rather_than_looping(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Bounded re-key: an endless move must not spin, and must not delete."""
+        import logging
+
+        from helpers import consent_lines
+        from memtomem.integrations.langgraph import _CHUNK_LOCK_MOVE_RETRIES
+
+        cid = uuid4()
+        store, comp = self._store(
+            monkeypatch,
+            tmp_path,
+            [self._chunk(cid, tmp_path / f"m{i}.md", "user", tmp_path) for i in range(40)],
+        )
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            with pytest.raises(TimeoutError, match="being moved concurrently"):
+                await store.delete(str(cid))
+
+        # Exactly the configured bound, two fetches per attempt — a loop that
+        # gave up early would pass a bare "it raised" assertion just as well.
+        assert comp.storage.get_chunk.await_count == 2 * _CHUNK_LOCK_MOVE_RETRIES
+        comp.storage.delete_chunks.assert_not_awaited()
+        assert consent_lines(caplog) == []
+
+    @pytest.mark.asyncio
+    async def test_a_sidecar_held_by_another_writer_times_out(self, tmp_path, monkeypatch):
+        """The acquire timeout surfaces as ``TimeoutError``, not as ``False``.
+
+        ``False`` means "no such chunk"; a lock held by a migration means
+        "ask again", and a caller that cannot tell them apart will treat a
+        transient refusal as a completed delete.
+
+        The holder here is a coroutine in this same interpreter, so what is
+        exercised is the sidecar's **in-process** layer — deliberately, since
+        that is the layer this adapter relies on for same-process callers.
+        It is not evidence about the flock; the cross-process half is covered
+        where the primitive itself is tested. The refusal's wording says
+        "another writer" for the same reason.
+        """
+        from memtomem.context import _atomic
+        from memtomem.context._atomic import async_file_lock, memory_lock_path
+
+        cid = uuid4()
+        src = tmp_path / "n.md"
+        store, comp = self._store(monkeypatch, tmp_path, [self._chunk(cid, src, "user", tmp_path)])
+        monkeypatch.setattr(_atomic, "_CRUD_SIDECAR_LOCK_BUDGET_S", 0.05)
+
+        # Held for the whole call, so the wait is bounded by the budget rather
+        # than by a race — nothing here releases it.
+        async with async_file_lock(memory_lock_path(src), timeout=5):
+            with pytest.raises(TimeoutError, match="locked by another writer"):
+                await store.delete(str(cid))
+
+        comp.storage.delete_chunks.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_row_is_removed_while_the_lock_is_still_held(self, tmp_path, monkeypatch):
+        """A delete outside the span can be undone by a concurrent re-index.
+
+        Observed on the sidecar's own in-process layer rather than on the
+        sidecar *file*: sidecars are never unlinked, so "the lockfile exists"
+        is true whether or not anyone holds it, and a delete moved out of the
+        span would pass that check unchanged.
+        """
+        from memtomem.context._atomic import _intra_async_lock_for, memory_lock_path
+
+        cid = uuid4()
+        src = tmp_path / "n.md"
+        sidecar = memory_lock_path(src)
+        held: list[bool] = []
+
+        store, comp = self._store(
+            monkeypatch,
+            tmp_path,
+            [self._chunk(cid, src, "user", tmp_path), self._chunk(cid, src, "user", tmp_path)],
+        )
+
+        async def _spy(ids):
+            held.append(_intra_async_lock_for(sidecar).locked())
+            return 1
+
+        comp.storage.delete_chunks = AsyncMock(side_effect=_spy)
+
+        assert await store.delete(str(cid)) is True
+        assert held == [True], held

@@ -536,6 +536,54 @@ instead.
 > caller-supplied `file=` under any `memory_dirs` entry with no `scope=`
 > on its Gate A.
 
+> **2026-09 (#2335):** The same adapter's `delete()` now carries Gate B.
+> It removes index rows and leaves the markdown file alone, so it is not a
+> host write and Gate A has nothing to scan — but ADR-0011 §5's consent is
+> not a property of writing bytes. `mem_delete` already gates a row-only
+> removal on its `source_file=` branch, for the reason that applies here
+> too: a note the project shares stops being findable for everyone who
+> searches the store, decided by a caller who did not author it alone. The
+> consent line carries `confirmed_via=langgraph_delete` and
+> `action=delete`, matching `mem_delete`'s verb for the same chunk.
+>
+> Two shape differences from the CRUD tools are deliberate and worth
+> naming for the next in-process surface. First, the refusal **raises**
+> instead of returning a value: `delete()` answers `bool`, and `False`
+> already means "no such chunk, or not in your project" (ADR-0036) —
+> folding a refusal into it would make a gate that fires indistinguishable
+> from one that never applied. It raises a *typed*
+> `ProjectSharedConfirmationRequiredError` (a `ValueError` subclass) rather
+> than the bare class, because the same method parses its `chunk_id` and a
+> malformed id raises a plain `ValueError`: a caller catching the bare type
+> would read "not retryable at all" and "retryable by passing the flag" as
+> the same event. Any future library surface whose success value cannot
+> carry a refusal should reach for the same type. Second, the tier is
+> re-read under the source file's **L2 sidecar only**, through
+> `tools.memory_mutation.locked_source_chunk` — the surface-neutral span
+> the web chunk routes already take, so the two delete surfaces cannot
+> drift. `_locked_chunk` takes L1 as well, but L1 is the MCP server's
+> `AppContext` lock and `integrations/` may not import `memtomem.server`;
+> the sidecar's own in-process layer gives same-process serialization, so
+> what is missing is not exclusion but the `AppContext` bookkeeping this
+> adapter has no part in. What the adapter does keep for itself is the
+> bounded re-key when that helper reports `moved`: the web route answers
+> 409 there and lets the client re-issue the request, and an in-process
+> call has no request to re-issue. Since #2346 that span also degrades to
+> the lock's in-process half when the source's directory has been removed,
+> rather than recreating it to lock a delete; the condition attached to a
+> degraded span is "write no bytes", which this method satisfies by
+> construction, so it proceeds there as the row-only CRUD branches do.
+>
+> The issue that raised this also raised `MemtomemStore.index(path=...)`
+> as a caller-supplied path with no containment check. Measured against
+> the source, it has one: the adapter calls `index_path` with the default
+> `path_scope="configured"`, and `IndexEngine` refuses any path outside
+> `all_index_roots()` — `memory_dirs` plus `project_memory_dirs` — before
+> it opens a file. Nothing was changed there. Recorded here so the next
+> reader does not re-open it, and pinned on the adapter so a later
+> `path_scope="explicit"` on that call would fail rather than quietly
+> widen it.
+
 
 Before PR-D, `mem_batch_add` bypassed `enforce_write_guard` and used
 an inline `privacy.scan` instead — the batch path was the obvious
