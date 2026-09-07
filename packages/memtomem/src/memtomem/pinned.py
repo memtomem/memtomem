@@ -13,7 +13,11 @@ from memtomem import privacy
 from memtomem.config import Mem2MemConfig, TargetScope
 from memtomem.context._atomic import atomic_write_text
 from memtomem.errors import ConfigError
-from memtomem.memory_scope import EMPTY_MEMORY_DIRS_ERROR, resolve_memory_scope_dir
+from memtomem.memory_scope import (
+    EMPTY_MEMORY_DIRS_ERROR,
+    require_user_base,
+    resolve_memory_scope_dir,
+)
 
 # Runtime import (not TYPE_CHECKING): the alias must resolve for
 # typing.get_type_hints(ContextBundle) — this is a public payload dataclass
@@ -125,7 +129,29 @@ class PinnedContextStore:
         # the store constructs, reads skip the user tier, and only writes
         # that need the user-tier base refuse (via ``_base``).
         mdirs = config.indexing.memory_dirs
+        # ``memory_dirs[0]`` kept verbatim on purpose — see below. Guard
+        # registry: tests/test_user_base_derivation_guard.py.
         self.user_base: Path | None = Path(mdirs[0]).expanduser().resolve() if mdirs else None
+        # #2322: that base can be a *registered project tier* when
+        # ``memory_dirs`` and ``project_memory_dirs`` overlap, and both of
+        # ``set``'s gates key on the caller's declared ``scope`` — so a
+        # ``scope="user"`` block would land in the git-tracked tier with
+        # neither gate consulted about where it actually went.
+        #
+        # The refusal is remembered rather than raised, and the raw path is
+        # kept, because reads must stay total: ``search_exclusion_roots`` and
+        # the shadowing logic need to know where the user tier *is*, and
+        # ``mem_context_compose`` answering with an internal error instead of
+        # a bundle is the shape #1768 exists to prevent. The two *mutating*
+        # methods refuse — ``set`` and ``delete`` — because removing bytes the
+        # project committed is as much a change to the shared tier as adding
+        # them; every read path is left alone.
+        self._user_base_refusal: str | None = None
+        if mdirs:
+            try:
+                require_user_base(mdirs, config.indexing.project_memory_dirs)
+            except ConfigError as exc:
+                self._user_base_refusal = str(exc)
 
     def _base(self, scope: TargetScope) -> Path:
         if scope == "user":
@@ -172,6 +198,13 @@ class PinnedContextStore:
             raise ValueError(f"Pinned Context block exceeds {PINNED_BLOCK_MAX_CHARS} characters")
         if scope == "project_shared" and not confirm_project_shared:
             raise ValueError("project_shared Pinned Context requires explicit confirmation")
+        # #2322: both gates below key on the *declared* scope, so a
+        # ``scope="user"`` write whose user-tier base is a registered project
+        # tier would pass them and still land in that tier. There is no
+        # consent to take here — the caller asked for the user tier — so the
+        # write is refused. Reads are unaffected (see ``__init__``).
+        if scope == "user" and self._user_base_refusal is not None:
+            raise ConfigError(self._user_base_refusal)
         # ADR-0011 §5 Gate B consent (#2306). This library method is the only
         # gate on the path — the CLI and MCP surfaces forward the kwarg
         # without gating — so the consent is recorded here. The caller names
@@ -249,6 +282,15 @@ class PinnedContextStore:
     ) -> bool:
         if scope == "project_shared" and not confirm_project_shared:
             raise ValueError("project_shared Pinned Context requires explicit confirmation")
+        # #2322, same as ``set``: with an overlapping config a ``scope="user"``
+        # delete resolves into a project tier and unlinks a block filed there.
+        # For ``project_shared`` that is a block the project committed, removed
+        # having asked nobody — removing shared bytes is a mutation of the
+        # shared tier exactly as adding them is, which is why ``mem_delete``
+        # takes a confirmation at all. For ``project_local`` the objection is
+        # the tier itself: the caller asked for the user tier.
+        if scope == "user" and self._user_base_refusal is not None:
+            raise ConfigError(self._user_base_refusal)
         # ADR-0011 §5 Gate B consent (#2306) — see ``set``. The block may
         # already be gone (``missing_ok``); the consent still happened.
         if scope == "project_shared":

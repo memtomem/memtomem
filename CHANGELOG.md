@@ -32,6 +32,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   **Upgrading:** an agent or script that edits shared-tier notes must pass the
   new argument; the refusal names it. (#2317)
 
+<<<<<<< HEAD
 ### Deprecated
 
 - **`mm context pull` now asks for consent in the same words as everywhere
@@ -60,6 +61,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
   **Upgrading:** replace `--yes` with `--confirm-project-shared` in any
   `mm context pull … --scope project_shared` invocation. (#2318)
+=======
+- **The LangGraph JSON store now reads the directory you hand it.**
+  `MemtomemBaseStore` asked about the `scope=` you declared and never looked
+  at `root=`, so pointing a store at a project's shared tier while calling it
+  `user` put every later `put` into a repository-tracked directory with no
+  confirmation — and scanned each one as if it were on your own machine, which
+  left `force_unsafe=True` open on a tier where it is supposed to be
+  impossible. The store now classifies the root. Declaring a stricter scope
+  than the path suggests still works: it never talks you down to a weaker one,
+  since inferring `user` from an unregistered directory would reopen the very
+  bypass this closes.
+
+  **Upgrading:** pass `confirm_project_shared=True` when `root=` is in a
+  project's shared tier; the refusal names it. Nothing changes for the default
+  destination or for any path outside a registered project tier. (#2336)
+>>>>>>> c44a3bbb (fix(privacy): settle the destination tier before writing to it (#2322, #2336))
 
 ### Added
 
@@ -193,6 +210,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   flag's name, and a surface carrying no such argument is invisible to it. The
   sibling writers named in that guard's own boundary note (#2322) are still
   open.
+
+- **Writes that pick their own destination no longer land in the Git-tracked
+  tier** (#2322) — a session-end summary archive, the Notion and Obsidian
+  importers, `mem_fetch`, promoting a scratch note, approving a memory
+  candidate, `mm agent share` and `mm shell`'s `add` all take no scope from
+  you: they write to the first entry of `indexing.memory_dirs`. If that entry
+  was also registered in `indexing.project_memory_dirs` — nothing stopped you
+  configuring both — those writes went into the repository-tracked tier
+  without the confirmation every other write there takes, and with no consent
+  recorded, because none had been given. They now refuse instead, with a
+  message naming both config fields and the two ways out. The same refusal
+  covers a project's *private* tier, for a different reason the message
+  states: nothing is exposed there, but the write would be filed under a tier
+  its caller never asked for and an ordinary read would not find it. A session
+  end is the
+  one case that does not fail: it skips the shared archive and keeps the
+  summary, since there is no human at a session end to ask. Ordinary
+  configurations are unaffected — the default `~/.memtomem/memories` is not a
+  registered project tier — and deliberately writing to the shared tier still
+  works through the surfaces that take a scope and a confirmation.
+
+  Pinned Context was found the same way, by widening the guard that keeps this
+  derivation in one place: `mm pinned set` (and its MCP and web twins) asked
+  about the scope you named and not about where the block would land, so a
+  `user` block went into the tier unasked. Setting one now refuses; reading,
+  listing and composing context are unchanged, so a machine in this state
+  still answers rather than erroring.
 
 - **A transfer's cleanup and promote now act on the staging entry they
   created, not on its name** (#2314) — `mm context move` / `copy`, receiving a

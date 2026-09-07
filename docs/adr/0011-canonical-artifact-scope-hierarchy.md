@@ -259,7 +259,7 @@ project_shared, the sync write is blocked regardless of `--force-unsafe`.
 > `allow_host_writes`, and still subject to the sync-time valve.
 
 **Gate B (surface).** Explicit `--scope project_shared` flag plus
-confirm prompt at the CLI/MCP write surface (`mm mem add`,
+confirm prompt at the CLI/MCP write surface (`mm add`,
 `mm context init`, `mm context migrate --to project_shared`). The flag must be passed
 explicitly — no env var or config-field default. There is
 deliberately **no** `memory.default_write_scope` config field: the
@@ -479,6 +479,63 @@ instead.
 > *absence* of a gate rather than a different spelling of one: #2321 closed
 > that way a day earlier, and #2322's four derived-target writers are still
 > open, with nothing for a scan keyed on the flag to find in them.
+
+> **2026-09 (#2322):** the derived-destination half above is closed —
+> which corrects the last sentence of the #2318 note, written while it was
+> still open — and not by adding a third gate. Those writers take no
+> destination from their caller — they ask `memory_scope.require_user_base` for the
+> user-tier base — so the honest fix was at the derivation: that helper
+> now classifies the base it is about to return and refuses a registered
+> project tier outright, naming both config fields. Gate B never becomes
+> reachable on those surfaces because the *destination* never does.
+>
+> Growing a `confirm_project_shared` argument instead would have put a
+> confirmation prompt on an automatic `mem_session_end` summary, where
+> there is no human to answer it; a session end now declines the shared
+> archive and keeps the summary on the row. Rejecting the
+> `memory_dirs ∩ project_memory_dirs` overlap at config validation was
+> the other candidate and was not taken: it would refuse to *load* a
+> configuration that reads perfectly well, when only these writes are
+> unsafe.
+>
+> This is the same rule the install/update note above states from the
+> other side. There, Gate B is absent because the verb carries the
+> surface intent (`mm context install` has no `--scope` choice). Here it
+> is absent because the surface has no project-tier destination at all —
+> in neither case is a missing confirmation a missing consent. The
+> refusal covers more than the four sites #2322 listed: scratch promote,
+> `mm review approve`, `mm agent share` and `mm shell`'s `add` derive
+> the same base and did not even pass `scope=` to Gate A.
+> `tests/test_user_base_derivation_guard.py` keeps the derivation in one
+> place — a hand-rolled `memory_dirs[0]` is how `mem_session_end`
+> escaped the helper in the first place, and widening that guard to
+> aliases immediately turned up one more: `PinnedContextStore` derived
+> its `user_base` the same way, and both of `set`'s gates keyed on the
+> caller's declared scope, so a `scope="user"` block landed in the tier.
+> Both mutating methods refuse — `set` and `delete`, since removing bytes
+> the project committed changes the shared tier as much as adding them —
+> while every read path stays total, because `mem_context_compose`
+> answering with an internal error is the shape #1768 exists to prevent.
+
+> **2026-09 (#2336):** the note above about `MemtomemStore.add()` has a
+> sibling. `MemtomemBaseStore` takes an arbitrary `root=` and gated only
+> on the *declared* `scope`, so `root=<proj>/.memtomem/memories/…,
+> scope="user"` cleared Gate B and then ran every `put`'s Gate A as
+> `user`. It now classifies the root and **escalates only** — a declared
+> `project_shared` survives an unregistered path, because inferring
+> `user` there would reopen the bypass it is meant to close. The
+> classification reads a throwaway config loaded with `migrate=False`:
+> the store's own configuration is untouched, so an explicit-`root`
+> caller does not start inheriting a persisted embedding provider, and a
+> lookup done for a *refusal* cannot rewrite `~/.memtomem/config.json` as
+> a side effect of constructing a store that then raises.
+>
+> With #2321, #2322 and this closed, "every `project_shared` write takes
+> two gates" holds for every first-party writer in the tree except the
+> one named in #2333: `POST /api/scratch/{key}/promote` still accepts a
+> caller-supplied `file=` under any `memory_dirs` entry with no `scope=`
+> on its Gate A.
+
 
 Before PR-D, `mem_batch_add` bypassed `enforce_write_guard` and used
 an inline `privacy.scan` instead — the batch path was the obvious
