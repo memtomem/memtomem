@@ -28,15 +28,31 @@ The boundary of that claim, stated plainly because the first draft
 overclaimed it. This scan finds a Gate B by the ``confirm_project_shared``
 identifier, and the inventory it enforces was itself built from that same
 identifier — so a Gate B expressed another way is invisible to both, and
-the enumeration cannot certify itself. Exactly one such site exists:
-``cli/context_cmd.py:pull_cmd`` gates a ``project_shared`` pull on
-``--yes`` or a prompt, per ADR-0030 §11, and carries no
-``confirm_project_shared`` at all. It emits its consent line (#2306), but
-nothing here would notice if it stopped. A future surface that gates a
-git-tracked write without the flag is likewise on its own; ``mm context
-pull`` diverging from the ``mem_context_pull`` tool and the web pull
-route is the sibling-parity question that would close that door
-properly.
+the enumeration cannot certify itself. ``cli/context_cmd.py:pull_cmd`` used
+to be the worked example of that: it gated a ``project_shared`` pull on
+``--yes`` or a prompt per ADR-0030 §11, carried no ``confirm_project_shared``
+at all, and emitted a consent line that could have been deleted without a
+single assertion here going red. #2318 gave it the standard flag, so the scan
+reaches it now.
+
+That closed one hole, not the class. Two things are still true. Sites that
+have *no* Gate B are invisible for the same reason a differently-spelled one
+is — this scan has nothing to find in them. ADR-0011 §5's riders record the
+population: the LangGraph ``MemtomemStore.add()`` adapter was one until #2321
+gated it, and #2322's four derived-target writers still write to the
+git-tracked tier having asked nobody. And what the scan buys
+on a site it *does* reach is narrow: that the emit survives as long as the
+conditional does. It does not check that ``--yes`` is refused, that the
+emit's predicate mirrors the gate's, or that exactly one emit fires. Gate
+*deletion* is out of scope too, with one deliberate exception — the surfaces
+named in :func:`test_scan_reaches_the_sites_the_adr_names` are pinned as a
+floor, so removing or respelling one of *those* gates does go red here. Every
+other site can lose its gate silently as far as this file is concerned.
+
+During the #2318 deprecation window this file
+is green while ``mm context pull`` still accepts ``--yes``, and it would stay
+green after the 0.6.0 flip if that acceptance were left in by accident. The
+behavioural tests in ``test_cli_context_pull.py`` are what pin those.
 
 Placement rule, and why it is strict. The emit must be a *later sibling*
 of the gate in the gate's own statement list (or nested inside one), never
@@ -427,6 +443,12 @@ def test_scan_reaches_the_sites_the_adr_names() -> None:
     ADR-0011 §5 names ``mm mem add`` and the MCP write tool explicitly, so
     those two are the floor. Not a count: counts rot on every legitimate
     addition, and the detector is the pin.
+
+    ``pull_cmd`` is here for a second reason. It was the one site the scan
+    could not see (#2318 gave it the flag), and the module docstring says so
+    — if the gate were spelled back into a ``--yes``-only shape, or deleted,
+    every other assertion in this file would stay green. This is the line
+    that goes red.
     """
     found: set[tuple[str, str]] = set()
     for path in _src_files():
@@ -435,6 +457,7 @@ def test_scan_reaches_the_sites_the_adr_names() -> None:
             found.add((_rel(path), _enclosing_function(tree, gate.lineno)))
     assert ("cli/memory.py", "_add") in found
     assert ("server/tools/memory_crud.py", "_mem_add_core") in found
+    assert ("cli/context_cmd.py", "pull_cmd") in found
 
 
 # ── detector self-tests ───────────────────────────────────────────────────

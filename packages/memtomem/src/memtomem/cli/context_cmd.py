@@ -1512,7 +1512,22 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     "-y",
     "yes",
     is_flag=True,
-    help="Skip the confirmation prompt. Requires --apply.",
+    help=(
+        "Skip the confirmation prompt. Requires --apply. Deprecated as Gate B "
+        "consent for a project_shared landing: it still carries the consent "
+        "through 0.5.x with a notice, and stops satisfying Gate B in 0.6.0 "
+        "(#2318) — pass --confirm-project-shared instead."
+    ),
+)
+@click.option(
+    "--confirm-project-shared",
+    "confirm_project_shared",
+    is_flag=True,
+    help=(
+        "Consent for a project_shared landing, as on every other mm write "
+        "surface. From 0.6.0 it is the only flag that carries it — --yes "
+        "stops substituting, leaving this or the prompt (#2318); adopt it now."
+    ),
 )
 @click.option(
     "--force-unsafe-import",
@@ -1540,6 +1555,7 @@ def pull_cmd(
     show_diff: bool,
     apply_: bool,
     yes: bool,
+    confirm_project_shared: bool,
     force_unsafe_import: bool,
     json_out: bool,
 ) -> None:
@@ -1604,6 +1620,37 @@ def pull_cmd(
             "--apply into the git-tracked project_shared tier requires an explicit "
             "--scope project_shared (ADR-0030 §11)."
         )
+    gate_b_applies = scope == "project_shared"
+    # Was the consent carried by the deprecated spelling? One definition, read
+    # by both the notice below and the audit line's ``flag=`` key, so the two
+    # cannot come to different conclusions about which flag authorised the
+    # write. (The gate itself keeps naming ``confirm_project_shared``
+    # literally: ``test_project_shared_confirmation_audit_guard.py`` finds Gate
+    # B sites by that identifier, and a gate phrased through a derived variable
+    # would drop back out of its view.)
+    deprecated_yes = gate_b_applies and yes and not confirm_project_shared
+    if deprecated_yes:
+        # Deprecation window (#2318), and **this block is the 0.6.0 flip
+        # point**: replace the notice with the siblings' refusal
+        # ("--yes alone is not sufficient") and the window is over.
+        #
+        # It lives here, before ``prepare_pull``, for two reasons. The notice
+        # has to reach runs that never get as far as Gate B — ``prepare_pull``
+        # returns early on a divergent-source refusal, a canonical-exists
+        # refusal, the byte-identical no-op and a Gate A block, and those are
+        # exactly the scheduled jobs whose owner still needs telling. And when
+        # this becomes a refusal it must be pre-flight like every sibling's,
+        # or a --yes-only run would be answered with whatever ``prepare_pull``
+        # objected to instead of the refusal every other surface gives.
+        #
+        # A notice is not a consent: the audit line below still records only a
+        # run that reached a writable plan.
+        click.secho(
+            "Note: --yes alone will stop satisfying Gate B for a project_shared "
+            "pull in 0.6.0; pass --confirm-project-shared instead (#2318).",
+            fg="yellow",
+            err=True,
+        )
     outcome = prepare_pull(
         artifact_kind,
         name,
@@ -1622,36 +1669,46 @@ def pull_cmd(
 
     plan = outcome
     _render_pull_plan(plan)
-    if not yes:
-        if scope == "project_shared":
-            prompt = (
-                f"\n--scope=project_shared writes to git-tracked {root}/.memtomem/. "
-                f"Pull {kind}/{name} from {plan.selected_runtime}. Continue?"
-            )
-            if not click.confirm(prompt, default=False):
-                raise click.Abort()
-        else:
-            click.confirm(
-                f"\nPull {kind}/{name} from {plan.selected_runtime} into {scope}?",
-                abort=True,
-            )
-    # ADR-0011 §5 Gate B consent (#2306). This surface satisfies Gate B
-    # differently from its MCP and web twins, which take an explicit
-    # ``confirm_project_shared``: ADR-0030 §11 accepts ``--yes`` *or* the
-    # prompt here. The consent is recorded either way — the audit line is
-    # about what was authorised, not about which spelling authorised it —
-    # and ``audit_context`` names the flag so the two are told apart. The
-    # divergence itself is a sibling-parity question, not this line's.
-    if scope == "project_shared":
+    # ADR-0011 §5 Gate B, now spelled the way every other CLI surface spells it
+    # (#2318). The ordinary "skip the prompt" meaning of ``--yes`` on the other
+    # tiers is untouched — there it was never Gate B. The 0.6.0 flip is made in
+    # the compatibility block above, not here.
+    #
+    # ``consent_mechanism`` is the audit line's only input. Both flag paths —
+    # the standard one and the deprecated ``--yes`` — record ``flag``, so the
+    # seed covers them and only the prompt arm has to say otherwise. The gate
+    # keeps ``not confirm_project_shared`` literally for the AST guard, and
+    # reuses ``deprecated_yes`` rather than re-testing ``yes``: one definition
+    # decides the notice, this branch, and the ``flag=`` key together.
+    consent_mechanism = "flag"
+    if gate_b_applies and not confirm_project_shared and not deprecated_yes:
+        if not click.confirm(
+            f"\n--scope=project_shared writes to git-tracked {root}/.memtomem/. "
+            f"Pull {kind}/{name} from {plan.selected_runtime}. Continue?",
+            default=False,
+        ):
+            raise click.Abort()
+        consent_mechanism = "prompt"
+    elif not gate_b_applies and not yes:
+        click.confirm(
+            f"\nPull {kind}/{name} from {plan.selected_runtime} into {scope}?",
+            abort=True,
+        )
+    # ADR-0011 §5 Gate B consent (#2306). A *later sibling* of the gate and
+    # never inside its body: that body runs only when the consent flag is
+    # absent, so an emit there would miss every --confirm-project-shared run.
+    # ``audit_context`` names the flag only when the deprecated ``--yes``
+    # carried the consent, which is what ADR-0011 §5 asks for.
+    if gate_b_applies:
         privacy.emit_project_shared_confirmation(
             surface="cli_context_pull",
-            mechanism="flag" if yes else "prompt",
+            mechanism=consent_mechanism,
             action="pull",
             audit_context={
                 "kind": kind,
                 "name": name,
                 "runtime": plan.selected_runtime,
-                **({"flag": "--yes"} if yes else {}),
+                **({"flag": "--yes"} if deprecated_yes else {}),
             },
         )
     result = commit_pull(plan)
@@ -5919,7 +5976,10 @@ async def _memory_migrate_run(
         # independently of the user tier.
         try:
             if "user" in (from_scope, to_scope):
-                user_base = require_user_base(comp.config.indexing.memory_dirs)
+                user_base = require_user_base(
+                    comp.config.indexing.memory_dirs,
+                    comp.config.indexing.project_memory_dirs,
+                )
                 from_dir = resolve_memory_scope_dir(from_scope, project_root, user_base=user_base)
                 to_dir = resolve_memory_scope_dir(to_scope, project_root, user_base=user_base)
             else:

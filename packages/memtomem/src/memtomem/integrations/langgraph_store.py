@@ -150,39 +150,97 @@ class MemtomemBaseStore(BaseStore):
         embedding: EmbeddingConfig | None = None,
         force_unsafe: bool = False,
     ) -> None:
-        if scope == "project_shared" and not confirm_project_shared:
+        config = Mem2MemConfig()
+        from memtomem.config import classify_scope, load_config_d, load_config_overrides
+
+        # Registry lookup only, on a throwaway config. Two reasons it is not
+        # the store's own ``config``:
+        #
+        # * loading overrides into ``config`` would change what an
+        #   explicit-``root`` caller gets for everything else it carries —
+        #   notably ``self._embedding_config = embedding or config.embedding``,
+        #   which would start resolving a persisted (possibly remote)
+        #   provider where it used to see defaults. That is unrelated to
+        #   which tier this store writes to.
+        # * ``load_config_overrides`` defaults to ``migrate=True``, so a
+        #   lookup done for a *refusal* could rewrite ~/.memtomem/config.json
+        #   as a side effect of constructing a store that then raises. Read
+        #   paths pass ``migrate=False`` for exactly this reason (see
+        #   ``feedback_doctor_no_migration_loader``).
+        def _registered_project_dirs() -> list:
+            registry = Mem2MemConfig()
+            load_config_d(registry)
+            load_config_overrides(registry, migrate=False)
+            return list(registry.indexing.project_memory_dirs)
+
+        # The tier this store actually writes to, not the one it was told.
+        # ``root`` is caller-supplied and is never validated against the
+        # project registry, so ``MemtomemBaseStore(root=<proj>/.memtomem/
+        # memories/x, scope="user")`` used to clear the gate below on the
+        # declared scope and then put files into the git-tracked tier —
+        # with every later ``put`` running Gate A as ``user``, so the
+        # project_shared hard refusal of ``force_unsafe`` never fired.
+        # Escalate only: a caller who declares ``project_shared`` keeps it
+        # even when the path does not classify (an unregistered project
+        # tree), because downgrading would *weaken* their Gate A.
+        effective_scope: TargetScope = scope
+        if root is not None:
+            inferred, _ = classify_scope(
+                Path(root).expanduser().resolve(), _registered_project_dirs()
+            )
+            if inferred == "project_shared":
+                effective_scope = "project_shared"
+
+        if effective_scope == "project_shared" and not confirm_project_shared:
             raise ValueError(
                 "scope='project_shared' requires confirm_project_shared=True because writes are git-tracked"
+                + (
+                    ""
+                    if scope == effective_scope
+                    else f" (scope inferred from root=; {root} is a registered project_shared tier)"
+                )
             )
         # ADR-0011 §5 Gate B consent (#2306). The consent is per-store, not
         # per-put: constructing the store with this scope authorises every
         # later ``put``, so it is recorded once, here. Each put still runs
         # Gate A under ``langgraph_basestore_put``.
-        if scope == "project_shared":
+        if effective_scope == "project_shared":
             privacy.emit_project_shared_confirmation(
                 surface="langgraph_basestore_init",
                 mechanism="param",
                 action="init",
+                audit_context={"scope_inferred_from_root": scope != effective_scope},
             )
-        config = Mem2MemConfig()
         if root is None:
-            from memtomem.config import load_config_d, load_config_overrides
-
+            # Unchanged from before #2321: the derived-root branch loads the
+            # real configuration into ``config`` (migration included), and an
+            # explicit-root store keeps seeing defaults here.
             load_config_d(config)
             load_config_overrides(config)
             project = Path(project_root).expanduser().resolve() if project_root else None
             if scope == "user":
                 # Raises ConfigError on empty ``memory_dirs`` — this store
-                # mkdirs its root, so it needs a real write target (#1768).
+                # mkdirs its root, so it needs a real write target (#1768) —
+                # and on a ``memory_dirs[0]`` that is itself a registered
+                # project tier, which would put this store's writes in the
+                # git-tracked tier with no Gate B (#2322).
                 base = resolve_memory_scope_dir(
-                    scope, project, require_user_base(config.indexing.memory_dirs)
+                    scope,
+                    project,
+                    require_user_base(
+                        config.indexing.memory_dirs, config.indexing.project_memory_dirs
+                    ),
                 )
             else:
                 base = resolve_memory_scope_dir(scope, project)
             root = base / "langgraph-store"
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.scope = scope
+        # Every ``put``'s Gate A reads this, so it has to be the tier the
+        # files land in — otherwise a caller-supplied project_shared ``root``
+        # keeps scanning as ``user`` and ``force_unsafe`` stays open on a
+        # git-tracked destination.
+        self.scope = effective_scope
         self.force_unsafe = force_unsafe
         self._embedding_config = embedding or config.embedding
         self._embedder: EmbeddingProvider | None = None
