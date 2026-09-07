@@ -182,7 +182,8 @@ Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdow
 |-------|-------------|
 | [Getting Started](docs/guides/getting-started.md) | Install, configure, save and find your first memory |
 | [한국어 바이브코딩 빠른 시작](docs/guides/vibe-coding-getting-started-ko.md) | Claude Code·Codex CLI에서 10~15분 안에 기억 저장·검색 |
-| [Example notebooks](examples/notebooks/) | Runnable Python-API walkthrough (start with `01_hello_memory.ipynb`, local ONNX — no server) |
+| [Example notebooks](examples/notebooks/) | Start with 05–06 for free, model-free LangGraph labs (Korean); 01–04 cover local ONNX APIs |
+| [Coding-agent sample](examples/onboarding/retry-policy/) | Recover a decision and its ADR source across sessions; isolated CLI proof and copyable prompts |
 | [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
 | [Cross-runtime handoff](docs/guides/integrations/cross-runtime-handoff.md) | Claude Code·Codex CLI·Kimi Code 순차 공동 개발 |
 | [Core memory tools](docs/guides/reference/core-memory-tools.md) | Index existing notes, search, and manage memories |
