@@ -5,7 +5,7 @@ notebook, any embedder — drive memtomem in-process. They build components
 through :mod:`memtomem.runtime` and never import the MCP server or the web
 stack; ``tests/test_runtime_import_hygiene.py`` enforces that.
 
-Both names resolve lazily so importing this package stays cheap and does not
+Adapter names resolve lazily so importing this package stays cheap and does not
 require optional dependencies:
 
 - :class:`~memtomem.integrations.langgraph.MemtomemStore` needs nothing beyond
@@ -17,6 +17,9 @@ require optional dependencies:
   or a deepagents ``StoreBackend``) and requires ``memtomem[langgraph]``. It
   keeps its records as inspectable JSON under its own root — a separate corpus
   from the markdown memories ``MemtomemStore`` searches.
+- :class:`~memtomem.integrations.langgraph_hybrid_store.MemtomemHybridStore`
+  implements the same optional contract with dedicated SQLite persistence,
+  BM25/dense/RRF retrieval, TTL, and diagnostics.
 """
 
 from __future__ import annotations
@@ -29,6 +32,9 @@ if TYPE_CHECKING:
     # needs one because it is deliberately out of ``__all__`` (see below).
     from memtomem.integrations.langgraph import MemtomemStore as MemtomemStore
     from memtomem.integrations.langgraph_store import MemtomemBaseStore as MemtomemBaseStore
+    from memtomem.integrations.langgraph_hybrid_store import (
+        MemtomemHybridStore as MemtomemHybridStore,
+    )
 
 # ``MemtomemBaseStore`` is deliberately absent: ``__all__`` drives
 # ``from memtomem.integrations import *``, which would then import the
@@ -40,6 +46,7 @@ __all__ = ["MemtomemStore"]
 _LAZY = {
     "MemtomemStore": "memtomem.integrations.langgraph",
     "MemtomemBaseStore": "memtomem.integrations.langgraph_store",
+    "MemtomemHybridStore": "memtomem.integrations.langgraph_hybrid_store",
 }
 
 

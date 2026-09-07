@@ -44,15 +44,20 @@ from memtomem.constants import (
 )
 from memtomem.services.search_service import rrf_weights_from
 
-__all__ = ["MemtomemBaseStore", "MemtomemStore"]
+__all__ = ["MemtomemBaseStore", "MemtomemHybridStore", "MemtomemStore"]
 
 if TYPE_CHECKING:
+    from memtomem.integrations.langgraph_hybrid_store import MemtomemHybridStore
     from memtomem.integrations.langgraph_store import MemtomemBaseStore
     from memtomem.runtime.components import Components
 
 
 def __getattr__(name: str) -> Any:
     """Lazily expose adapters that require optional dependencies."""
+    if name == "MemtomemHybridStore":
+        from memtomem.integrations.langgraph_hybrid_store import MemtomemHybridStore
+
+        return MemtomemHybridStore
     if name == "MemtomemBaseStore":
         from memtomem.integrations.langgraph_store import MemtomemBaseStore
 

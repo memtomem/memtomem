@@ -82,6 +82,7 @@ def tokenize_for_fts(
     *,
     for_query: bool = False,
     use_or: bool = False,
+    tokenizer: str | None = None,
 ) -> str:
     """Tokenize *text* for FTS5 insertion or query.
 
@@ -97,7 +98,9 @@ def tokenize_for_fts(
     if not text:
         return text
 
-    if _active_tokenizer == "kiwipiepy":
+    if tokenizer not in (None, "unicode61", "kiwipiepy"):
+        raise ValueError(f"Unknown tokenizer: {tokenizer!r}")
+    if (tokenizer or _active_tokenizer) == "kiwipiepy":
         tokens = _kiwi_tokenize(text)
         if for_query:
             parts = [_format_query_token(t) for t in tokens]
