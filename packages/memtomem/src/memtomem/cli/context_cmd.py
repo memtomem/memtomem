@@ -5222,7 +5222,23 @@ def _print_migrate_plan_human(plan) -> None:
     "yes",
     is_flag=True,
     default=False,
-    help="Skip the confirmation prompt and the host-write prompt. Requires --apply.",
+    help=(
+        "Skip the host-write prompt (a source or target outside the project "
+        "root). Requires --apply. Does NOT satisfy --confirm-project-shared."
+    ),
+)
+@click.option(
+    "--confirm-project-shared",
+    "confirm_project_shared",
+    is_flag=True,
+    default=False,
+    help=(
+        "Required (in addition to --apply) when either leg is "
+        "project_shared: the target tier file is tracked by this "
+        "repository, and so is the source the migration strips. --yes "
+        "alone does not satisfy this opt-in (mirrors "
+        "`mm context settings-copy`)."
+    ),
 )
 @click.option(
     "--json",
@@ -5236,6 +5252,7 @@ def settings_migrate_cmd(
     to_scope: str,
     apply_: bool,
     yes: bool,
+    confirm_project_shared: bool,
     json_out: bool,
 ) -> None:
     """Move memtomem-managed hook entries between settings tiers.
@@ -5252,8 +5269,15 @@ def settings_migrate_cmd(
     outside the project root require an interactive confirmation (or
     ``--yes``).
 
-    Exit codes: ``0`` clean (or dry-run), ``1`` user declined the
-    confirmation prompt or the plan reported conflicts requiring manual
+    Two independent gates, because they answer different questions. The
+    host-write prompt asks about leaving the project; ADR-0011 §5 Gate B
+    asks about touching the tier this repository tracks, and it fires
+    whenever **either** leg is ``project_shared`` — the target because
+    entries land in the tracked file, the source because the migration
+    strips them out of it. ``--yes`` answers only the first.
+
+    Exit codes: ``0`` clean (or dry-run), ``1`` user declined either
+    confirmation or the plan reported conflicts requiring manual
     resolution.
     """
     root = _find_project_root()
@@ -5268,6 +5292,22 @@ def settings_migrate_cmd(
 
     conflicts = [m for m in plan.moves if m.conflict_at_target]
     summary = format_plan_summary(plan)
+
+    # ADR-0011 §5 Gate B predicate. Exactly one leg can be project_shared —
+    # plan_migration rejects a same-scope and same-path request — and either
+    # one is a pending change to a file this repository tracks: the target
+    # receives entries, the source has them stripped out. ``applicable_moves``
+    # (not ``moves``) keeps the #1263 contract that a no-op or all-conflict
+    # plan, which writes nothing, never prompts. A move the planner marked
+    # ``already_at_target`` stays in scope: apply re-classifies against the
+    # live tier and restores an entry that drifted away in between.
+    applicable = plan.applicable_moves
+    shared_leg = (
+        "target"
+        if plan.target_scope == "project_shared"
+        else ("source" if plan.source_scope == "project_shared" else None)
+    )
+    git_tracked_write = bool(applicable) and shared_leg is not None
 
     if json_out:
         payload: dict[str, Any] = {
@@ -5299,19 +5339,100 @@ def settings_migrate_cmd(
         if json_out:
             click.echo(json.dumps(payload, indent=2))
         else:
-            click.echo("\nRun with --apply to execute.")
+            confirm_note = " --confirm-project-shared" if git_tracked_write else ""
+            click.echo(f"\nRun with --apply{confirm_note} to execute.")
         return
 
     # --apply path. ``is_noop`` is True both when there is nothing to
     # migrate at all AND when every move is a conflict (applicable_moves
     # is empty in both cases). Differentiate so all-conflict still exits
     # 1 — the user has unresolved drift to fix.
-    applicable = plan.applicable_moves
     if plan.is_noop and not conflicts:
         if json_out:
             payload["applied"] = True
             click.echo(json.dumps(payload, indent=2))
         return
+
+    # ADR-0011 §5 Gate B. Before the host-write prompt, because the two
+    # gates are not interchangeable: --yes answers the host prompt, and
+    # nothing but --confirm-project-shared answers this one.
+    if git_tracked_write and not confirm_project_shared:
+        if shared_leg == "target":
+            refusal = (
+                "--to project_shared requires --confirm-project-shared. "
+                "--yes alone is not sufficient: project_shared writes go to "
+                "the tier this repository tracks and require explicit opt-in."
+            )
+        else:
+            refusal = (
+                "--from project_shared requires --confirm-project-shared. "
+                "--yes alone is not sufficient: the migration strips the "
+                "entries out of the tier this repository tracks, and "
+                "removing bytes the project committed requires the same "
+                "explicit opt-in as adding them."
+            )
+        # ``--json`` is answered before ``--yes`` so a machine caller always
+        # gets a machine answer. The plan-time ValueError branch above
+        # already hands this command's JSON callers a structured error; a
+        # bare stderr line here would be the single refusal they could not
+        # parse. ``--yes`` is not silently ignored — it comes back as
+        # ``error``, so a script can tell "you passed the wrong flag" from
+        # "you passed no flag".
+        if json_out:
+            refusal_payload: dict[str, Any] = {
+                "status": "needs_confirmation",
+                "applied": False,
+                "from": plan.source_scope,
+                "to": plan.target_scope,
+                "source_path": str(plan.source_path),
+                "target_path": str(plan.target_path),
+                "project_shared_leg": shared_leg,
+                "project_shared_path": str(
+                    plan.target_path if shared_leg == "target" else plan.source_path
+                ),
+                "hint": "Re-run with --confirm-project-shared after confirming.",
+            }
+            if yes:
+                refusal_payload["error"] = refusal
+            click.echo(json.dumps(refusal_payload, indent=2))
+            raise click.exceptions.Exit(1)
+        if yes:
+            raise click.ClickException(refusal)
+        count = len(applicable)
+        entries = "entry" if count == 1 else "entries"
+        if shared_leg == "target":
+            question = (
+                f"\nThis will write {count} hook {entries} into the "
+                f"project_shared tier ({plan.target_path}), which this "
+                f"repository tracks. Continue?"
+            )
+        else:
+            question = (
+                f"\nThis will remove {count} hook {entries} from the "
+                f"project_shared tier ({plan.source_path}), which this "
+                f"repository tracks. Continue?"
+            )
+        if not click.confirm(question, default=False):
+            raise click.Abort()
+
+    # ADR-0011 §5 Gate B consent (#2306). After the block, not inside it —
+    # the block runs only when the flag is absent. What is recorded is the
+    # consent given, not the write landing: the host-write prompt below and
+    # Gate A inside the engine can still refuse afterwards, and the record
+    # stays. ``from_scope``/``to_scope`` name the shared leg between them,
+    # so no separate action verb is invented for a removal.
+    if git_tracked_write:
+        privacy.emit_project_shared_confirmation(
+            surface="cli_context_settings_migrate",
+            mechanism="flag" if confirm_project_shared else "prompt",
+            action="move",
+            audit_context={
+                "from_scope": plan.source_scope,
+                "to_scope": plan.target_scope,
+                "shared_leg": shared_leg,
+                "moves": len(applicable),
+            },
+        )
 
     # Host-write confirmation: target outside the project root requires
     # the same gate as `mm context sync --include=settings` so a stray
@@ -5359,7 +5480,36 @@ def settings_migrate_cmd(
             )
             raise click.exceptions.Exit(1)
 
-    result = apply_migration(plan)
+    try:
+        result = apply_migration(plan, surface="cli_context_settings_migrate")
+    except PrivacyScanError as exc:
+        # Gate A refused inside the engine. Answer a JSON caller in JSON, as
+        # the plan-time failure above and the Gate B refusal already do —
+        # this is the last refusal this command can make, and leaving it as
+        # the one unparseable one is what the Gate B fix set out to avoid.
+        # ``status`` reuses the plan-time vocabulary rather than inventing a
+        # value a consumer does not branch on; ``refusal`` is the machine
+        # discriminator, since both carry a human message under ``error``.
+        # Any consent recorded above stands: it reports the consent given,
+        # not the write landing.
+        if json_out:
+            click.echo(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "refusal": "gate_a",
+                        "applied": False,
+                        "from": plan.source_scope,
+                        "to": plan.target_scope,
+                        "source_path": str(plan.source_path),
+                        "target_path": str(plan.target_path),
+                        "error": exc.message,
+                    },
+                    indent=2,
+                )
+            )
+            raise click.exceptions.Exit(1) from exc
+        raise click.ClickException(exc.message) from exc
     # Drift the planner could not see — the target changed between plan and
     # apply — surfaces as apply-time warnings (#1123 B4-3). Treat it like a
     # plan-time conflict for reporting and the exit code.

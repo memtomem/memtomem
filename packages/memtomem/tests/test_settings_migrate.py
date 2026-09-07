@@ -12,10 +12,12 @@ Covers two surfaces:
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 from click.testing import CliRunner
 
+from memtomem.context.privacy_scan import PrivacyBlockedError
 from memtomem.context.settings import CANONICAL_SETTINGS_FILE, MalformedHookMatcherError
 from memtomem.context.settings_migrate import (
     MigrateMove,
@@ -26,7 +28,7 @@ from memtomem.context.settings_migrate import (
     plan_migration,
 )
 from memtomem.context.settings_doctor import HookSignature
-from .helpers import set_home
+from .helpers import consent_lines, set_home
 
 
 def _make_move(
@@ -353,7 +355,7 @@ class TestApplyMigration:
         _write_canonical(project_root, _bundled_hook())
         _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
         plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
         assert result.target_written is True
         assert result.source_written is True
 
@@ -380,11 +382,11 @@ class TestApplyMigration:
         _write_canonical(project_root, _bundled_hook())
         _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
         plan1 = plan_migration(project_root, source_scope="user", target_scope="project_local")
-        apply_migration(plan1)
+        apply_migration(plan1, surface="test_settings_migrate")
 
         plan2 = plan_migration(project_root, source_scope="user", target_scope="project_local")
         assert plan2.is_noop is True
-        result2 = apply_migration(plan2)
+        result2 = apply_migration(plan2, surface="test_settings_migrate")
         assert result2.target_written is False
         assert result2.source_written is False
 
@@ -397,7 +399,7 @@ class TestApplyMigration:
             _settings_doc(_bundled_hook()),
         )
         plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
         # Target already had the entry → no rewrite needed.
         assert result.target_written is False
         # Source was cleaned.
@@ -419,7 +421,7 @@ class TestApplyMigration:
         }
         _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(mixed))
         plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
-        apply_migration(plan)
+        apply_migration(plan, surface="test_settings_migrate")
 
         user_doc = _read_settings(fake_home / ".claude" / "settings.json")
         post = user_doc["hooks"]["PostToolUse"]
@@ -444,7 +446,7 @@ class TestApplyMigration:
         _write_settings(project_root / ".claude" / "settings.local.json", target_doc)
 
         plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
         assert result.target_written is False
         assert result.source_written is False
 
@@ -474,7 +476,7 @@ class TestApplyMigration:
         }
         _write_settings(fake_home / ".claude" / "settings.json", source_doc)
         plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
-        apply_migration(plan)
+        apply_migration(plan, surface="test_settings_migrate")
 
         user_doc = _read_settings(fake_home / ".claude" / "settings.json")
         assert user_doc["permissions"] == {"allow": ["Bash(ls *)"]}
@@ -504,7 +506,7 @@ class TestApplyMigration:
         )
         before = path.read_bytes()
 
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
 
         assert result.target_written is False
         assert result.source_written is False
@@ -695,9 +697,18 @@ class TestSettingsMigrateCli:
         # Disk untouched.
         assert not (project_root / ".claude" / "settings.local.json").is_file()
 
-    def test_project_to_project_no_host_prompt(self, project_root, fake_home, monkeypatch):
-        """project_shared → project_local stays in-tree, so no
-        host-write prompt fires even without --yes."""
+    def test_project_to_project_asks_gate_b_not_the_host_prompt(
+        self, project_root, fake_home, monkeypatch
+    ):
+        """project_shared → project_local stays in-tree, so the host-write
+        prompt does not fire — but Gate B does, on the source leg (#2348).
+
+        Both legs are inside the project root, which is what made this
+        direction look ungated: the one prompt the command used to have
+        keys on leaving the project. The tier this repository tracks is
+        being stripped, so the question that gets asked names the source
+        file, and the host-write wording must be absent from the output.
+        """
         _write_canonical(project_root, _bundled_hook())
         _write_settings(
             project_root / ".claude" / "settings.json",
@@ -709,9 +720,735 @@ class TestSettingsMigrateCli:
         result = CliRunner().invoke(
             settings_migrate_cmd,
             ["--from=project_shared", "--to=project_local", "--apply"],
+            input="y\n",
         )
         assert result.exit_code == 0, result.output
         assert (project_root / ".claude" / "settings.local.json").is_file()
+        assert "outside this project" not in result.output
+        assert "remove 1 hook entry from the project_shared tier" in result.output
+        assert str(project_root / ".claude" / "settings.json") in result.output
+
+
+# ── ADR-0011 §5 gates (#2348) ──────────────────────────────────────
+
+
+SECRET = "api_key=AKIA1234567890ABCDEF"
+
+
+class TestSettingsMigrateGateB:
+    """``--to``/``--from project_shared`` takes the ADR-0011 §5 gates (#2348).
+
+    The command already had a prompt, which is why it read as covered: the
+    host-write check, keyed on a leg lying *outside* the project root. A
+    ``project_shared`` path is ``<root>/.claude/settings.json`` by
+    construction, so that prompt can never fire for the one tier that needs
+    a gate. These pin the second gate and its consent record.
+
+    ``consent_lines`` asserts on the whole list, not on membership: a
+    refused, dry-run or untracked-tier run must record *nothing*.
+    """
+
+    def _shared_target_setup(self, project_root, monkeypatch):
+        """Source ``project_local`` → target ``project_shared``. Both legs
+        are in-tree, so the host-write prompt is out of the picture."""
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc(_bundled_hook()),
+        )
+        monkeypatch.chdir(project_root)
+        from memtomem.cli.context_cmd import settings_migrate_cmd
+
+        return settings_migrate_cmd
+
+    def test_apply_without_confirmation_refuses_and_writes_nothing(
+        self, project_root, fake_home, monkeypatch, caplog
+    ):
+        """The issue's reproduction, inverted: no stdin, nothing written."""
+        cmd = self._shared_target_setup(project_root, monkeypatch)
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(
+                cmd,
+                ["--from=project_local", "--to=project_shared", "--apply"],
+                input="",
+            )
+        assert result.exit_code != 0, result.output
+        assert not (project_root / ".claude" / "settings.json").exists()
+        assert consent_lines(caplog) == []
+        # The source is left carrying the entries it started with.
+        source_doc = _read_settings(project_root / ".claude" / "settings.local.json")
+        assert "PostToolUse" in source_doc["hooks"]
+
+    def test_yes_alone_does_not_satisfy_gate_b(self, project_root, fake_home, monkeypatch, caplog):
+        cmd = self._shared_target_setup(project_root, monkeypatch)
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(
+                cmd,
+                ["--from=project_local", "--to=project_shared", "--apply", "--yes"],
+            )
+        assert result.exit_code != 0
+        assert "--confirm-project-shared" in result.output
+        assert "--yes alone is not sufficient" in result.output
+        assert not (project_root / ".claude" / "settings.json").exists()
+        assert consent_lines(caplog) == []
+
+    def test_interactive_decline_aborts(self, project_root, fake_home, monkeypatch, caplog):
+        cmd = self._shared_target_setup(project_root, monkeypatch)
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(
+                cmd,
+                ["--from=project_local", "--to=project_shared", "--apply"],
+                input="n\n",
+            )
+        assert result.exit_code != 0
+        assert not (project_root / ".claude" / "settings.json").exists()
+        assert consent_lines(caplog) == []
+
+    def test_interactive_accept_writes_and_records_prompt_consent(
+        self, project_root, fake_home, monkeypatch, caplog
+    ):
+        cmd = self._shared_target_setup(project_root, monkeypatch)
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(
+                cmd,
+                ["--from=project_local", "--to=project_shared", "--apply"],
+                input="y\n",
+            )
+        assert result.exit_code == 0, result.output
+        target_doc = _read_settings(project_root / ".claude" / "settings.json")
+        assert "PostToolUse" in target_doc["hooks"]
+        lines = consent_lines(caplog)
+        assert len(lines) == 1
+        assert "project_shared.confirmed_via=cli_context_settings_migrate" in lines[0]
+        assert "mechanism=prompt" in lines[0]
+        assert "action=move" in lines[0]
+        assert "from_scope='project_local'" in lines[0]
+        assert "to_scope='project_shared'" in lines[0]
+        assert "shared_leg='target'" in lines[0]
+
+    def test_flag_writes_and_records_flag_consent(
+        self, project_root, fake_home, monkeypatch, caplog
+    ):
+        cmd = self._shared_target_setup(project_root, monkeypatch)
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(
+                cmd,
+                [
+                    "--from=project_local",
+                    "--to=project_shared",
+                    "--apply",
+                    "--confirm-project-shared",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert (project_root / ".claude" / "settings.json").is_file()
+        lines = consent_lines(caplog)
+        assert len(lines) == 1
+        assert "mechanism=flag" in lines[0]
+
+    def test_shared_source_removal_is_gated_and_recorded(
+        self, project_root, fake_home, monkeypatch, caplog
+    ):
+        """The reverse direction is a change to the tracked tier too (#2348).
+
+        The issue filed only the ``--to`` half, on the reasoning that
+        ``project_shared → project_local`` writes the gitignored file. It
+        also *strips* the tracked one, and ADR-0011 §5 treats removing bytes
+        the project committed as the same class of change as adding them.
+        The consent line names the source leg.
+        """
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(
+            project_root / ".claude" / "settings.json",
+            _settings_doc(_bundled_hook()),
+        )
+        monkeypatch.chdir(project_root)
+        from memtomem.cli.context_cmd import settings_migrate_cmd
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            refused = CliRunner().invoke(
+                settings_migrate_cmd,
+                ["--from=project_shared", "--to=project_local", "--apply", "--yes"],
+            )
+        assert refused.exit_code != 0
+        assert "--from project_shared requires --confirm-project-shared" in refused.output
+        assert consent_lines(caplog) == []
+        # Untouched: the tracked tier still carries the entry.
+        assert "PostToolUse" in _read_settings(project_root / ".claude" / "settings.json")["hooks"]
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            accepted = CliRunner().invoke(
+                settings_migrate_cmd,
+                [
+                    "--from=project_shared",
+                    "--to=project_local",
+                    "--apply",
+                    "--confirm-project-shared",
+                ],
+            )
+        assert accepted.exit_code == 0, accepted.output
+        assert _read_settings(project_root / ".claude" / "settings.json")["hooks"] == {}
+        lines = consent_lines(caplog)
+        assert len(lines) == 1
+        assert "shared_leg='source'" in lines[0]
+        assert "from_scope='project_shared'" in lines[0]
+
+    def test_json_apply_without_flag_needs_confirmation(
+        self, project_root, fake_home, monkeypatch, caplog
+    ):
+        cmd = self._shared_target_setup(project_root, monkeypatch)
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(
+                cmd,
+                ["--from=project_local", "--to=project_shared", "--apply", "--json"],
+            )
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output)
+        assert payload["status"] == "needs_confirmation"
+        assert payload["applied"] is False
+        assert payload["project_shared_leg"] == "target"
+        assert payload["project_shared_path"] == str(project_root / ".claude" / "settings.json")
+        assert "--confirm-project-shared" in payload["hint"]
+        assert not (project_root / ".claude" / "settings.json").exists()
+        assert consent_lines(caplog) == []
+
+    def test_dry_run_names_the_flag_and_records_nothing(
+        self, project_root, fake_home, monkeypatch, caplog
+    ):
+        cmd = self._shared_target_setup(project_root, monkeypatch)
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(cmd, ["--from=project_local", "--to=project_shared"])
+        assert result.exit_code == 0, result.output
+        assert "Run with --apply --confirm-project-shared to execute." in result.output
+        assert consent_lines(caplog) == []
+
+    def test_untracked_target_keeps_the_plain_footer(
+        self, project_root, fake_home, monkeypatch, caplog
+    ):
+        """A ``project_local`` target names no flag and records no consent."""
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+        monkeypatch.chdir(project_root)
+        from memtomem.cli.context_cmd import settings_migrate_cmd
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(settings_migrate_cmd, ["--from=user", "--to=project_local"])
+        assert result.exit_code == 0, result.output
+        assert "Run with --apply to execute." in result.output
+        assert consent_lines(caplog) == []
+
+    def test_noop_rerun_asks_nothing(self, project_root, fake_home, monkeypatch, caplog):
+        """Nothing pending never prompts (#1263) — including the second run."""
+        cmd = self._shared_target_setup(project_root, monkeypatch)
+        first = CliRunner().invoke(
+            cmd,
+            [
+                "--from=project_local",
+                "--to=project_shared",
+                "--apply",
+                "--confirm-project-shared",
+            ],
+        )
+        assert first.exit_code == 0, first.output
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            second = CliRunner().invoke(
+                cmd,
+                ["--from=project_local", "--to=project_shared", "--apply"],
+                input="",
+            )
+        assert second.exit_code == 0, second.output
+        assert consent_lines(caplog) == []
+
+    def test_json_refusal_stays_json_even_with_yes(
+        self, project_root, fake_home, monkeypatch, caplog
+    ):
+        """``--json --yes`` is still answered in JSON, with ``--yes`` named.
+
+        This command already hands its JSON callers a structured error on the
+        plan-time failure, so a bare stderr line here would be the one refusal
+        a script could not parse. The ``error`` key is what separates "you
+        passed the wrong flag" from "you passed no flag" — both are
+        ``needs_confirmation``, and only one of them mentions ``--yes``.
+        """
+        cmd = self._shared_target_setup(project_root, monkeypatch)
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(
+                cmd,
+                ["--from=project_local", "--to=project_shared", "--apply", "--json", "--yes"],
+            )
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output)
+        assert payload["status"] == "needs_confirmation"
+        assert payload["applied"] is False
+        assert "--yes alone is not sufficient" in payload["error"]
+        assert not (project_root / ".claude" / "settings.json").exists()
+        assert consent_lines(caplog) == []
+
+    def test_only_already_at_target_moves_still_ask(
+        self, project_root, fake_home, monkeypatch, caplog
+    ):
+        """A plan whose every move is ``already_at_target`` is still gated.
+
+        Nothing here is written to the shared target *as the plan sees it* —
+        the entries are all there already — so narrowing Gate B to the moves
+        the planner marked as writes looks harmless and passes every other
+        case in this class. It is not harmless: apply re-classifies against
+        the live tier under its lock, so a target that lost the entry in
+        between turns this into a write into the tracked file. The source is
+        cleaned either way, which is itself a change the plan commits to.
+        """
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc(_bundled_hook()),
+        )
+        _write_settings(
+            project_root / ".claude" / "settings.json",
+            _settings_doc(_stamped_bundled_hook()),
+        )
+        monkeypatch.chdir(project_root)
+        from memtomem.cli.context_cmd import settings_migrate_cmd
+
+        plan = plan_migration(
+            project_root, source_scope="project_local", target_scope="project_shared"
+        )
+        assert [m.already_at_target for m in plan.applicable_moves] == [True]
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(
+                settings_migrate_cmd,
+                ["--from=project_local", "--to=project_shared", "--apply", "--yes"],
+            )
+        assert result.exit_code != 0
+        assert "--confirm-project-shared" in result.output
+        assert consent_lines(caplog) == []
+        # The source keeps its entry: the refusal precedes the clean-up.
+        source_doc = _read_settings(project_root / ".claude" / "settings.local.json")
+        assert "PostToolUse" in source_doc["hooks"]
+
+    def test_all_conflict_plan_asks_nothing(self, project_root, fake_home, monkeypatch, caplog):
+        """An all-conflict plan writes nothing, so it must not ask.
+
+        The absence is asserted by making the prompt itself fail, not by
+        reading the outcome: an EOF on an unanswered prompt also exits 1, and
+        the word "conflict" is already in the plan preview above it, so a gate
+        that wrongly fired here would look exactly like a gate that correctly
+        stayed quiet.
+        """
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc(_bundled_hook()),
+        )
+        _write_settings(
+            project_root / ".claude" / "settings.json",
+            _settings_doc({"PostToolUse": [_rule("Edit|Write", inners=[_inner("user-script")])]}),
+        )
+        monkeypatch.chdir(project_root)
+        from memtomem.cli import context_cmd as ctx
+
+        def _no_prompt(*args, **kwargs):
+            raise AssertionError("a plan that writes nothing must not prompt")
+
+        monkeypatch.setattr(ctx.click, "confirm", _no_prompt)
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(
+                ctx.settings_migrate_cmd,
+                ["--from=project_local", "--to=project_shared", "--apply"],
+                input="",
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 1, result.output
+        assert "conflict" in result.output.lower()
+        assert consent_lines(caplog) == []
+
+    def test_host_prompt_still_runs_after_consent_is_recorded(
+        self, project_root, fake_home, monkeypatch, caplog
+    ):
+        """Two gates, two questions — and the consent survives a later refusal.
+
+        ``--from user --to project_shared`` trips both: the source is outside
+        the project root, the target is the tracked tier. ``--yes`` answers
+        only the host prompt and ``--confirm-project-shared`` only Gate B.
+        Declining the host prompt still leaves the Gate B consent recorded,
+        because the line reports consent *given*, not the write landing
+        (ADR-0011 §5, #2306).
+        """
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+        monkeypatch.chdir(project_root)
+        from memtomem.cli.context_cmd import settings_migrate_cmd
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            declined = CliRunner().invoke(
+                settings_migrate_cmd,
+                [
+                    "--from=user",
+                    "--to=project_shared",
+                    "--apply",
+                    "--confirm-project-shared",
+                ],
+                input="n\n",
+            )
+        assert declined.exit_code == 1, declined.output
+        assert "Aborted" in declined.output
+        assert not (project_root / ".claude" / "settings.json").exists()
+        assert len(consent_lines(caplog)) == 1
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            accepted = CliRunner().invoke(
+                settings_migrate_cmd,
+                [
+                    "--from=user",
+                    "--to=project_shared",
+                    "--apply",
+                    "--confirm-project-shared",
+                    "--yes",
+                ],
+            )
+        assert accepted.exit_code == 0, accepted.output
+        assert (project_root / ".claude" / "settings.json").is_file()
+        assert len(consent_lines(caplog)) == 1
+
+
+class TestSettingsMigrateGateA:
+    """The privacy scan on a ``project_shared`` target (#2348)."""
+
+    def test_secret_bearing_rule_blocks_before_any_write(self, project_root):
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]},
+        )
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc({"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]}),
+        )
+        plan = plan_migration(
+            project_root, source_scope="project_local", target_scope="project_shared"
+        )
+        assert plan.applicable_moves
+
+        with pytest.raises(PrivacyBlockedError) as exc_info:
+            apply_migration(plan, surface="test_settings_migrate")
+
+        assert SECRET not in str(exc_info.value)  # never echo the matched bytes
+        assert not (project_root / ".claude" / "settings.json").exists()
+        # Source untouched — the block precedes both writes.
+        source_doc = _read_settings(project_root / ".claude" / "settings.local.json")
+        assert "PostToolUse" in source_doc["hooks"]
+
+    def test_untracked_target_is_not_scanned(self, project_root):
+        """The same secret migrating to ``project_local`` is allowed through.
+
+        Gate A here is conditional on the target tier, unlike the copy
+        sibling's unconditional scan: migrate writes no canonical, so an
+        untracked target exposes nothing, and refusing it with no force valve
+        would block the very move that gets a secret out of a shared tier.
+        """
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]},
+        )
+        _write_settings(
+            project_root / ".claude" / "settings.json",
+            _settings_doc({"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]}),
+        )
+        plan = plan_migration(
+            project_root, source_scope="project_shared", target_scope="project_local"
+        )
+        result = apply_migration(plan, surface="test_settings_migrate")
+        assert result.target_written is True
+        assert result.warnings == []
+
+    def test_every_applicable_rule_under_one_event_is_scanned(self, project_root):
+        """Several moves can share an event; all of their rules are scanned.
+
+        A payload keyed by event that kept only the last rule would scan the
+        clean entry and write the secret-bearing one. The secret is placed
+        first and a clean rule second, so that shape goes green while the
+        block is what is correct.
+        """
+        _write_canonical(
+            project_root,
+            {
+                "PostToolUse": [
+                    _rule("Edit", inners=[_inner(f"echo {SECRET}")]),
+                    _rule("Write", inners=[_inner("mm index")]),
+                ]
+            },
+        )
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc(
+                {
+                    "PostToolUse": [
+                        _rule("Edit", inners=[_inner(f"echo {SECRET}")]),
+                        _rule("Write", inners=[_inner("mm index")]),
+                    ]
+                }
+            ),
+        )
+        plan = plan_migration(
+            project_root, source_scope="project_local", target_scope="project_shared"
+        )
+        assert len(plan.applicable_moves) == 2
+
+        with pytest.raises(PrivacyBlockedError):
+            apply_migration(plan, surface="test_settings_migrate")
+        assert not (project_root / ".claude" / "settings.json").exists()
+
+    def test_the_scanned_bytes_are_the_rules_that_would_be_written(self, project_root, monkeypatch):
+        """Pin *what* reaches the scanner, not just that something did.
+
+        Three wrong implementations pass every blocking assertion in this
+        class, because they all still scan a payload containing the secret:
+        scanning the source tier's bytes instead of the canonical rules that
+        get written, keeping only the first rule under an event instead of
+        the last, and scanning a conflicted move that will never be written.
+        The spy separates them — the payload must be the stamped canonical
+        output for exactly the applicable moves.
+        """
+        canonical = {
+            "PostToolUse": [
+                _rule("Edit", inners=[_inner("mm session start")]),
+                _rule("Write", inners=[_inner("mm index")]),
+            ],
+            "SessionStart": [_rule("startup", inners=[_inner("mm status")])],
+        }
+        _write_canonical(project_root, canonical)
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc(canonical),
+        )
+        # A conflict on the SessionStart move: the target holds a different
+        # inner under the same (event, matcher), so it is never written.
+        _write_settings(
+            project_root / ".claude" / "settings.json",
+            _settings_doc({"SessionStart": [_rule("startup", inners=[_inner("user-script")])]}),
+        )
+        plan = plan_migration(
+            project_root, source_scope="project_local", target_scope="project_shared"
+        )
+        assert len(plan.moves) == 3
+        assert len(plan.applicable_moves) == 2
+
+        seen: dict[str, object] = {}
+
+        def _spy(text, **kwargs):
+            seen["text"] = text
+            seen.update(kwargs)
+            return _real_scan(text, **kwargs)
+
+        from memtomem.context import settings_migrate as engine
+
+        _real_scan = engine.scan_text_content
+        monkeypatch.setattr(engine, "scan_text_content", _spy)
+        result = apply_migration(plan, surface="test_settings_migrate")
+        assert result.target_written is True
+
+        scanned = json.loads(str(seen["text"]))
+        # Both applicable rules under the one shared event, in write order.
+        assert [r["matcher"] for r in scanned["PostToolUse"]] == ["Edit", "Write"]
+        # The conflicted move is absent: it is never written, so scanning it
+        # would refuse a migration over bytes that stay where they are.
+        assert "SessionStart" not in scanned
+        # The stamped canonical rule, not the source tier's copy of it.
+        assert scanned["PostToolUse"][0]["hooks"][0]["statusMessage"] == "memtomem · PostToolUse"
+        assert seen["scope"] == "project_shared"
+        assert seen["source_path"] == project_root / CANONICAL_SETTINGS_FILE
+
+    def test_a_blocked_scan_takes_no_lock(self, project_root, monkeypatch):
+        """Gate A precedes the pair-lock, and the source is left byte-identical.
+
+        Moving the scan inside the lock would keep every other assertion in
+        this class green: the refusal still lands before either write. What
+        changes is that a refused migration starts creating lock sidecars and
+        contending with a concurrent settings write for a run that was never
+        going to proceed.
+        """
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]},
+        )
+        source = project_root / ".claude" / "settings.local.json"
+        _write_settings(
+            source,
+            _settings_doc({"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]}),
+        )
+        before = source.read_bytes()
+        plan = plan_migration(
+            project_root, source_scope="project_local", target_scope="project_shared"
+        )
+
+        from memtomem.context import settings_migrate as engine
+
+        def _no_lock(*args, **kwargs):
+            raise AssertionError("Gate A must refuse before any lock is taken")
+
+        monkeypatch.setattr(engine, "_file_lock", _no_lock)
+        with pytest.raises(PrivacyBlockedError):
+            apply_migration(plan, surface="test_settings_migrate")
+        assert source.read_bytes() == before
+
+    def test_an_abandoned_caller_is_not_scanned(self, project_root, monkeypatch):
+        """The entry abandonment check precedes Gate A.
+
+        ``test_settings_migrate_abandon.py`` cannot see this: its plans target
+        an untracked tier, where the scan is a no-op either way. A caller that
+        is already gone should leave no audit record of a scan it never had a
+        reason to run.
+        """
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc(_bundled_hook()),
+        )
+        plan = plan_migration(
+            project_root, source_scope="project_local", target_scope="project_shared"
+        )
+        assert plan.applicable_moves
+
+        from memtomem.context import settings_migrate as engine
+
+        def _no_scan(*args, **kwargs):
+            raise AssertionError("an abandoned apply must not scan")
+
+        monkeypatch.setattr(engine, "gate_a_scan", _no_scan)
+        monkeypatch.setattr(engine, "sync_is_abandoned", lambda: True)
+        result = apply_migration(plan, surface="test_settings_migrate")
+        assert result.target_written is False
+        assert "abandoned" in result.warnings[0]
+
+    def test_a_move_that_drifts_back_into_a_write_was_still_scanned(self, project_root):
+        """An ``already_at_target`` move is scanned, because apply can write it.
+
+        The planner freezes ``already_at_target`` from a snapshot;
+        ``apply_migration`` re-classifies against the live tier, and an entry
+        the target lost in between comes back as a write. Here the target
+        carries the secret-bearing rule at plan time — so the only move is
+        ``already_at_target`` — and the file is deleted before apply. Skipping
+        those moves in the scan is invisible to every other assertion in this
+        file: the run stays green and lands the secret in the tracked tier.
+        """
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]},
+        )
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc({"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]}),
+        )
+        target = project_root / ".claude" / "settings.json"
+        _write_settings(
+            target,
+            _settings_doc({"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]}),
+        )
+        plan = plan_migration(
+            project_root, source_scope="project_local", target_scope="project_shared"
+        )
+        assert [m.already_at_target for m in plan.applicable_moves] == [True]
+
+        target.unlink()  # the drift the planner could not see
+        with pytest.raises(PrivacyBlockedError):
+            apply_migration(plan, surface="test_settings_migrate")
+
+        assert not target.exists()
+        source_doc = _read_settings(project_root / ".claude" / "settings.local.json")
+        assert "PostToolUse" in source_doc["hooks"]
+
+    def test_json_callers_get_the_gate_a_refusal_in_json(
+        self, project_root, fake_home, monkeypatch, caplog
+    ):
+        """The last refusal this command can make is answered in JSON too.
+
+        A caller that cleared Gate B with the flag and is then stopped by the
+        scan is the one path where a machine caller could still get a bare
+        stderr line — the plan-time failure and the Gate B refusal both
+        answer in JSON. ``refusal`` is the discriminator, since the
+        malformed-matcher case shares ``status="error"``. The consent already
+        recorded stands: it reports the consent given, not the write landing.
+
+        Parsed from ``stdout`` alone, which is the contract a machine caller
+        actually has: the consent line is a log record and goes to stderr.
+        Reading the merged ``output`` here would fail on a correct
+        implementation — this is the only refusal in the file that emits a
+        consent line first, so it is also the only place that distinction is
+        observable.
+        """
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]},
+        )
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc({"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]}),
+        )
+        monkeypatch.chdir(project_root)
+        from memtomem.cli.context_cmd import settings_migrate_cmd
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(
+                settings_migrate_cmd,
+                [
+                    "--from=project_local",
+                    "--to=project_shared",
+                    "--apply",
+                    "--json",
+                    "--confirm-project-shared",
+                ],
+            )
+        assert result.exit_code == 1, result.output
+        assert "confirmed_via" not in result.stdout, "the consent log belongs on stderr"
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert payload["refusal"] == "gate_a"
+        assert payload["applied"] is False
+        assert payload["target_path"] == str(project_root / ".claude" / "settings.json")
+        assert "Gate A" in payload["error"]
+        assert SECRET not in payload["error"]
+        assert not (project_root / ".claude" / "settings.json").exists()
+        assert len(consent_lines(caplog)) == 1
+
+    def test_cli_translates_the_block_after_consent_is_recorded(
+        self, project_root, fake_home, monkeypatch, caplog
+    ):
+        """Gate B clears first, then Gate A refuses — and both are visible."""
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]},
+        )
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc({"PostToolUse": [_rule("Edit", inners=[_inner(f"echo {SECRET}")])]}),
+        )
+        monkeypatch.chdir(project_root)
+        from memtomem.cli.context_cmd import settings_migrate_cmd
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
+            result = CliRunner().invoke(
+                settings_migrate_cmd,
+                [
+                    "--from=project_local",
+                    "--to=project_shared",
+                    "--apply",
+                    "--confirm-project-shared",
+                ],
+            )
+        assert result.exit_code != 0, result.output
+        assert "Gate A" in result.output
+        # Scoped to the refusal, not the whole run: the plan preview above it
+        # echoes the source-tier command by design, and that is the user's own
+        # local file. What Gate A must not do is repeat the matched bytes in
+        # the message it produces.
+        gate_a_message = result.output[result.output.index("Gate A") :]
+        assert SECRET not in gate_a_message
+        assert not (project_root / ".claude" / "settings.json").exists()
+        assert len(consent_lines(caplog)) == 1
 
 
 # ── Reporting invariants ───────────────────────────────────────────
@@ -727,14 +1464,17 @@ class TestFormatPlanSummary:
     """
 
     def _plan(self, *moves: MigrateMove) -> MigratePlan:
+        import tempfile
         from pathlib import Path
 
+        root = Path(tempfile.gettempdir()) / "settings-migrate-summary"
         return MigratePlan(
             source_scope="user",
             target_scope="project_local",
-            source_path=Path("/tmp/from"),
-            target_path=Path("/tmp/to"),
+            source_path=root / "from",
+            target_path=root / "to",
             moves=tuple(moves),
+            project_root=root,
         )
 
     def test_empty_plan(self):
@@ -796,7 +1536,7 @@ class TestApplyTimeDrift:
         drift = {"PostToolUse": [_rule("Edit|Write", inners=[_inner("other-command")])]}
         _write_settings(project_root / ".claude" / "settings.local.json", _settings_doc(drift))
 
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
 
         assert result.target_written is False
         assert result.source_written is False
@@ -825,7 +1565,7 @@ class TestApplyTimeDrift:
             _settings_doc(_bundled_hook()),
         )
 
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
 
         # Re-classified as exact → no redundant append, but source IS cleaned.
         assert result.target_written is False
@@ -845,7 +1585,8 @@ class TestApplyTimeDrift:
         _write_canonical(project_root, _bundled_hook())
         _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
 
-        def _fake_apply(plan: MigratePlan) -> MigrateResult:
+        def _fake_apply(plan: MigratePlan, *, surface: str) -> MigrateResult:
+            assert surface == "cli_context_settings_migrate"
             res = MigrateResult(plan=plan)
             res.warnings.append(
                 "target tier already has a rule under 'PostToolUse:Edit|Write' "
@@ -914,7 +1655,7 @@ class TestApplyConcurrencyGuards:
         monkeypatch.setattr(migrate_mod, "_file_lock", spy_file_lock)
         monkeypatch.setattr(migrate_mod, "_write_json", spy_write_json)
 
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
         assert result.target_written is True
         assert result.source_written is True
 
@@ -948,7 +1689,7 @@ class TestApplyConcurrencyGuards:
         # Separate fd in the same process contends (portalocker locks are
         # per open-file-description).
         with _file_lock(_lock_path_for(plan.target_path)):
-            result = apply_migration(plan)
+            result = apply_migration(plan, surface="test_settings_migrate")
 
         assert result.target_written is False
         assert result.source_written is False
@@ -967,7 +1708,7 @@ class TestApplyConcurrencyGuards:
         source_before = _read_settings(plan.source_path)
         monkeypatch.setattr(migrate_mod, "_SETTINGS_LOCK_BUDGET_S", 0.2)
         with _file_lock(_lock_path_for(plan.source_path)):
-            result = apply_migration(plan)
+            result = apply_migration(plan, surface="test_settings_migrate")
 
         assert result.target_written is False
         assert result.source_written is False
@@ -1001,7 +1742,7 @@ class TestApplyConcurrencyGuards:
             return result
 
         with unittest.mock.patch.object(migrate_mod, "_read_with_mtime", patched_read):
-            result = apply_migration(plan)
+            result = apply_migration(plan, surface="test_settings_migrate")
 
         assert result.target_written is False
         assert result.source_written is False
@@ -1046,7 +1787,7 @@ class TestApplyConcurrencyGuards:
             return result
 
         with unittest.mock.patch.object(migrate_mod, "_read_with_mtime", patched_read):
-            result = apply_migration(plan)
+            result = apply_migration(plan, surface="test_settings_migrate")
 
         assert result.target_written is False
         # The fix: the source is NOT cleaned, so the entry survives in the
@@ -1079,7 +1820,7 @@ class TestApplyConcurrencyGuards:
             return result
 
         with unittest.mock.patch.object(migrate_mod, "_read_with_mtime", patched_read):
-            result = apply_migration(plan)
+            result = apply_migration(plan, surface="test_settings_migrate")
 
         assert result.target_written is False
         assert result.source_written is False
@@ -1110,7 +1851,7 @@ class TestApplyConcurrencyGuards:
             return result
 
         with unittest.mock.patch.object(migrate_mod, "_read_with_mtime", patched_read):
-            result = apply_migration(plan)
+            result = apply_migration(plan, surface="test_settings_migrate")
 
         assert result.target_written is True
         assert result.source_written is False
@@ -1129,7 +1870,7 @@ class TestApplyConcurrencyGuards:
         # (the source-side test below covers the decode-error flavor).
         plan.target_path.write_text("[1, 2]", encoding="utf-8")
 
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
 
         assert result.target_written is False
         assert result.source_written is False
@@ -1145,7 +1886,7 @@ class TestApplyConcurrencyGuards:
         plan = self._plan(project_root, fake_home)
         plan.source_path.write_text("[1, 2", encoding="utf-8")
 
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
 
         assert result.target_written is True
         assert result.source_written is False
@@ -1200,7 +1941,7 @@ class TestApplyConcurrencyGuards:
 
         def run(name: str, plan: MigratePlan) -> None:
             try:
-                results[name] = apply_migration(plan)
+                results[name] = apply_migration(plan, surface="test_settings_migrate")
             except BaseException as exc:  # surfaced via the errors list
                 errors.append(exc)
 
