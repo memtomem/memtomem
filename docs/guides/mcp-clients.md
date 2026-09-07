@@ -830,6 +830,29 @@ The `Host` and `Origin` allow-lists are seeded **asymmetrically**:
 > <reachable-host>:<port>` (the SDK only treats `:*`-suffixed values as
 > port wildcards) and Origin-bearing clients are blocked separately.
 
+### Episodic sessions are per server process
+
+`mem_session_start` / `mem_session_end` (`mem_do(action="session_start")` in
+the default tool mode) bind **one active session per server process**, not per
+connected client. Over stdio that distinction never shows: your editor spawns
+its own `memtomem-server`, so the slot is yours alone. On a shared network
+server it does — every connected client writes to the same slot, so a second
+client's `session_start` auto-ends the first client's session and repoints its
+agent-scoped writes to the new `agent_id`.
+
+So on a network transport, **use the session tools from one client at a time**.
+Everything else — search, add, index — is unaffected and safe to share; and
+callers that name the agent on each call (`mem_do(action="agent_search")`,
+`mem_do(action="context_compose")`, both of which take `agent_id`) never touch
+the slot at all.
+
+This is not a gap waiting on a per-connection fix. MCP's 2026-07-28 protocol
+revision is single-exchange: the server builds a fresh connection per request
+and issues no `Mcp-Session-Id`, so there is no connection identity to hang an
+episodic session on. Scoping sessions to something other than the process would
+mean passing an explicit session handle on every call, which memtomem does not
+do today.
+
 ### One server at a time
 
 `memtomem-server` takes a per-user pid lock regardless of transport.
