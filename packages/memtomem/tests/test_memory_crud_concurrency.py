@@ -369,7 +369,7 @@ class TestLockedChunkHelper:
             side_effect=[_chunk(p1), _chunk(p2), _chunk(p2)]
         )
 
-        async with memory_crud._locked_chunk(app, uid, str(uid)) as (chunk, err):
+        async with memory_crud._locked_chunk(app, uid, str(uid)) as (chunk, err, _held):
             assert err is None
             assert chunk is not None
             assert chunk.metadata.source_file == p2
@@ -400,7 +400,7 @@ class TestLockedChunkHelper:
             side_effect=[_chunk(0), _chunk(1), _chunk(2), _chunk(3)]
         )
 
-        async with memory_crud._locked_chunk(app, uid, str(uid)) as (chunk, err):
+        async with memory_crud._locked_chunk(app, uid, str(uid)) as (chunk, err, _held):
             assert chunk is None
             assert err is not None
             assert "being moved concurrently" in err

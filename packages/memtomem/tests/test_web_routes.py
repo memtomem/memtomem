@@ -6574,6 +6574,125 @@ class TestChunkCrudCrossProcessLock:
         # The failed edit was rolled back — original bytes restored.
         assert src.read_text(encoding="utf-8") == original
 
+    async def test_delete_chunk_does_not_resurrect_a_removed_parent_dir(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """#2346 on the surface where the bug is clearest.
+
+        The route already has a supported answer for a source that is gone —
+        the index-only delete at the ``source_exists is False`` branch — but
+        that branch sits *inside* the lock, so before this fix the caller
+        reached it only after the acquire had recreated the directory and
+        dropped a lockfile in it. ``TestDeleteChunk::test_delete_chunk`` covers
+        a missing FILE in a live directory and stays green through the whole
+        bug; the vanished-*parent* cell is the uncovered one.
+
+        In that branch the acquire's ``mkdir`` is the only filesystem write the
+        entire route performs — ``ensure_index_row_absent`` is pure storage —
+        so an empty directory is a complete assertion here.
+        """
+        src = tmp_path / "gone" / "note.md"  # parent 'gone/' never created
+        chunk = self._chunk_on(src)
+        # Route pre-check, the unlocked probe and the under-lock re-fetch in
+        # ``locked_source_chunk``, then ``ensure_index_row_absent``'s own
+        # before/after pair around ``delete_chunks``. Same accounting as
+        # ``TestDeleteChunk::test_delete_chunk``; a short list would make the
+        # row read as already absent and skip the delete under test.
+        app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, chunk, None])
+
+        resp = await client.delete(f"/api/chunks/{chunk.id}")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted"] == 1
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        assert not (tmp_path / "gone").exists()
+        assert not any(tmp_path.iterdir()), f"stray artifacts: {list(tmp_path.iterdir())}"
+
+    async def test_edit_chunk_refuses_a_span_that_holds_no_cross_process_lock(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """PATCH refuses on the LOCK, not on whether the file is there (#2346).
+
+        An edit rewrites the source, and a span whose directory was gone at
+        acquire holds nothing that excludes another process — so if that
+        directory came back, the rewrite would splice a file nobody locked, on
+        line numbers from before it existed. Deciding on the lock instead of
+        on a stat makes that unreachable rather than unlikely: the lock cannot
+        change under us, and a stat can.
+
+        409, not the 500 an unhandled ``FileNotFoundError`` used to produce:
+        this is a state the operator can act on, and it does not clear on its
+        own the way a held sidecar does.
+        """
+        src = tmp_path / "gone" / "note.md"
+        chunk = self._chunk_on(src)
+        app.state.storage.get_chunk = AsyncMock(return_value=chunk)
+
+        resp = await client.patch(f"/api/chunks/{chunk.id}", json={"new_content": "updated"})
+
+        assert resp.status_code == 409, resp.text
+        assert "source directory has been removed" in resp.json()["detail"]
+        assert not (tmp_path / "gone").exists()
+        assert not any(tmp_path.iterdir()), f"stray artifacts: {list(tmp_path.iterdir())}"
+
+    async def test_edit_chunk_still_edits_when_the_lock_is_real(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """The gate must not catch the ordinary edit.
+
+        Without this the refusal above is satisfied by a route that refuses
+        every PATCH.
+        """
+        src = tmp_path / "live" / "note.md"
+        src.parent.mkdir()
+        src.write_text("## H\n\nbody\n", encoding="utf-8")
+        chunk = self._chunk_on(src)
+        app.state.storage.get_chunk = AsyncMock(return_value=chunk)
+
+        resp = await client.patch(f"/api/chunks/{chunk.id}", json={"new_content": "updated"})
+
+        assert resp.status_code == 200, resp.text
+        assert "updated" in src.read_text(encoding="utf-8")
+
+    async def test_delete_chunk_takes_the_index_only_branch_when_degraded(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """DELETE removes rows but never lines, on a degraded span (#2346).
+
+        The route's own answer for an absent source is an index-only delete,
+        and a degraded span must take it *unconditionally* — not "stat, and
+        fall back if the file is missing". The file can reappear between that
+        stat and ``remove_lines``, and the route would then rewrite a file it
+        never locked. Recreating the file here is what makes the distinction
+        observable: a stat-driven route edits it, a lock-driven one does not.
+        """
+        src = tmp_path / "gone" / "note.md"
+        chunk = self._chunk_on(src)
+        answers = [chunk, chunk, chunk, chunk, None]
+
+        async def get_chunk(_chunk_id):
+            """Put the tree back on the under-lock re-fetch.
+
+            That call is the first thing to run *after* the acquire, so the
+            recreation lands in the window the rule exists for. Doing it before
+            the request would simply give the route a live directory and a full
+            lock, and the test would pass while proving nothing.
+            """
+            if len(answers) == 3:  # about to serve the under-lock re-fetch
+                src.parent.mkdir(parents=True, exist_ok=True)
+                src.write_text("## H\n\nrecreated by another writer\n", encoding="utf-8")
+            return answers.pop(0)
+
+        app.state.storage.get_chunk = AsyncMock(side_effect=get_chunk)
+
+        resp = await client.delete(f"/api/chunks/{chunk.id}")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted"] == 1
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        # Untouched: the rows went, the recreated file did not.
+        assert src.read_text(encoding="utf-8") == "## H\n\nrecreated by another writer\n"
+
     async def test_delete_chunk_returns_503_when_sidecar_held(
         self, app, client: AsyncClient, tmp_path: Path, monkeypatch
     ):

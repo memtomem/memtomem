@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import multiprocessing as mp
+import shutil
 import time
 from pathlib import Path
 
@@ -32,7 +33,12 @@ import pytest
 
 from helpers import StubCtx
 from memtomem.context import _atomic as atomic_mod
-from memtomem.context._atomic import _lock_path_for, async_file_lock, memory_lock_path
+from memtomem.context._atomic import (
+    _lock_path_for,
+    async_file_lock,
+    async_memory_file_lock,
+    memory_lock_path,
+)
 from memtomem.indexing import engine as engine_mod
 from memtomem.indexing.engine import IndexEngine
 from memtomem.server.context import AppContext
@@ -817,3 +823,130 @@ async def test_sidecar_lockfiles_are_not_indexed(bm25_only_components):
     assert not any(name.endswith(".lock") for name in sources), (
         f"a sidecar lockfile was indexed: {sorted(sources)}"
     )
+
+
+# ================================ F. removed parent dirs on the CRUD spans (#2346)
+#
+# The engine's #1566 pair in group B pins the INDEXER's half of this rule.
+# These pin the memory-CRUD half: the spans that remove or edit index rows for
+# a file the user already deleted, which used to mkdir the deleted directory
+# back just to lock a delete. Driven end-to-end through the real MCP tools
+# rather than against the lock helper — a spy on the helper cannot see a mkdir
+# that a later change reintroduces somewhere else.
+
+
+async def _indexed_chunk_in_a_subdir(comp, mem_dir, ctx):
+    """Index one note under ``<mem_dir>/sub/`` and hand back its chunk + path."""
+    await memory_crud.mem_add(content="Alpha body", title="Alpha", file="sub/n.md", ctx=ctx)
+    source = (mem_dir / "sub" / "n.md").resolve()
+    (chunk,) = sorted(
+        await comp.storage.list_chunks_by_source(source),
+        key=lambda c: c.metadata.start_line,
+    )
+    return chunk, source
+
+
+@pytest.mark.asyncio
+async def test_mem_delete_by_source_does_not_resurrect_a_removed_subdir(bm25_only_components):
+    """``mem_delete(source_file=…)`` on a vanished directory.
+
+    Two claims in one run, and the bug had both halves. The rows must go — the
+    branch removes no bytes, so a missing file is no reason to refuse — and the
+    directory must stay gone. ``_validate_path`` resolves and range-checks but
+    never stats, so this is the supported "clean up the rows for the file I
+    deleted" path, not an edge case.
+    """
+    comp, mem_dir = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    _chunk, source = await _indexed_chunk_in_a_subdir(comp, mem_dir, ctx)
+    assert await comp.storage.get_chunk_hashes(source)
+
+    shutil.rmtree(source.parent)
+    out = await memory_crud.mem_delete(source_file="sub/n.md", ctx=ctx)
+
+    assert "Removed" in out and "0 chunks" not in out, out
+    assert await comp.storage.get_chunk_hashes(source) == {}
+    assert not source.parent.exists(), "the sidecar acquire resurrected the deleted directory"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["edit", "delete"])
+async def test_the_byte_writing_chunk_branches_refuse_a_degraded_span(bm25_only_components, tool):
+    """#2346's rule, pinned per surface: a degraded span writes no bytes.
+
+    Both branches rewrite the source file — ``mem_edit`` replaces a chunk's
+    lines, ``mem_delete(chunk_id=…)`` removes them — so neither may run on a
+    span that holds no cross-process lock. Parametrized rather than written
+    twice because the two used to give different answers to the same
+    condition: before this rule, ``mem_edit`` surfaced whatever
+    ``read_text`` raised, which said nothing about the lock.
+
+    The refusal is not "the file is missing": it is decided on the lock, so it
+    holds whether or not the file comes back, and a caller can act on it
+    (restore the directory, or reindex).
+    """
+    comp, mem_dir = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    chunk, source = await _indexed_chunk_in_a_subdir(comp, mem_dir, ctx)
+
+    shutil.rmtree(source.parent)
+    if tool == "edit":
+        out = await memory_crud.mem_edit(chunk_id=str(chunk.id), new_content="NEW", ctx=ctx)
+    else:
+        out = await memory_crud.mem_delete(chunk_id=str(chunk.id), ctx=ctx)
+
+    assert "source directory has been removed" in out, out
+    assert "nothing was changed" in out, out
+    assert not source.parent.exists(), "the refusal recreated the deleted directory"
+    # Refused, not half-done: the rows are still there for a retry to act on.
+    assert await comp.storage.get_chunk_hashes(source)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["edit", "delete"])
+async def test_the_chunk_branches_still_write_when_the_lock_is_real(bm25_only_components, tool):
+    """The counterpart, without which the refusal above is unfalsifiable.
+
+    A rule that refused everything would satisfy the previous test exactly.
+    Same two tools on a source whose directory is present must still do the
+    work — this is the branch the ``cross_process_held`` gate must not catch.
+    """
+    comp, mem_dir = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    chunk, source = await _indexed_chunk_in_a_subdir(comp, mem_dir, ctx)
+
+    if tool == "edit":
+        out = await memory_crud.mem_edit(chunk_id=str(chunk.id), new_content="NEW BODY", ctx=ctx)
+        assert "source directory has been removed" not in out, out
+        assert "NEW BODY" in source.read_text(encoding="utf-8")
+    else:
+        out = await memory_crud.mem_delete(chunk_id=str(chunk.id), ctx=ctx)
+        assert "source directory has been removed" not in out, out
+        assert "Alpha body" not in source.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_removed_subdir_delete_still_serializes_in_process(
+    bm25_only_components, monkeypatch
+):
+    """The degraded span is a lock, not a gap in one.
+
+    ``mem_delete``'s source branch holds L1 as well, so this pins the layer the
+    L1-less web/CLI span depends on: hold the degraded L2 for the same file and
+    the tool must report the timeout rather than proceed. Without it, "we still
+    serialize" would rest on the three assertions above, none of which can tell
+    a held lock from no lock at all.
+    """
+    comp, mem_dir = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    _chunk, source = await _indexed_chunk_in_a_subdir(comp, mem_dir, ctx)
+
+    shutil.rmtree(source.parent)
+    monkeypatch.setattr(atomic_mod, "_CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
+
+    async with async_memory_file_lock(source, timeout=5.0):
+        out = await memory_crud.mem_delete(source_file="sub/n.md", ctx=ctx)
+
+    assert "locked by another process" in out
+    assert await comp.storage.get_chunk_hashes(source), "the refused delete removed rows anyway"
+    assert not source.parent.exists()

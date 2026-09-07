@@ -50,6 +50,7 @@ __all__ = [
     "DIRTY_SKIP_SUFFIXES",
     "StrictTreeError",
     "async_file_lock",
+    "async_memory_file_lock",
     "atomic_write_bytes",
     "atomic_write_text",
     "copy_tree_atomic",
@@ -336,7 +337,21 @@ def memory_lock_path(data_path: Path) -> Path:
 #       the flock for the same reason). #1566: if the parent dir is gone,
 #       the sidecar is SKIPPED (never mkdir-resurrect it); that decision
 #       is made once by the outermost acquirer and flows down as
-#       ``index_file(lock_held=True)``.
+#       ``index_file(lock_held=True)``. There are two degradation targets,
+#       because the two outermost acquirers have different things to fall
+#       back to: ``IndexEngine._locked_index`` skips L2 entirely and takes
+#       L3, while the memory-CRUD spans have no L3 and instead take
+#       ``async_memory_file_lock``, which keeps L2's own layer 1 (the same
+#       per-path in-process lock the full acquire takes first) and drops
+#       only the flock (#2346). The memory helper does not PROBE for the
+#       missing parent, it opens the sidecar without creating parents and
+#       reads ENOENT/ENOTDIR as the answer: a probe leaves a window in
+#       which the dir is removed after the check and recreated by the
+#       acquire's own ``mkdir``, which is the failure the rule exists to
+#       prevent, only rarer. ``_locked_index`` still probes and still has
+#       that window; it is pre-existing and narrow (only a concurrent
+#       writer can open it), and closing it there means giving the engine
+#       a way to learn that it degraded, which is not this rule's job.
 #   L3  IndexEngine._index_lock. ``index_file(lock_held=True)`` asserts the
 #       caller already holds (or #1566-skipped) this file's L2 sidecar and
 #       enters at L3 directly; the sidecar is HOISTED above ``_index_lock`` so
@@ -433,6 +448,111 @@ async def async_file_lock(lock_path: Path, *, timeout: float) -> AsyncIterator[N
     data file. ``**Never**`` unlink the sidecar — deleting it reintroduces the
     ``os.replace`` inode race (see
     ``feedback_sidecar_lockfile_for_replaced_files``).
+
+    Memory-file callers whose span can run on a source whose parent directory
+    is gone must take :func:`async_memory_file_lock` instead — this entry point
+    creates the parent, which is correct for a span that is about to write the
+    file and wrong for one that is only removing its index rows (#2346).
+    """
+    async with _sidecar_lock(lock_path, timeout=timeout, create_parent=True):
+        yield
+
+
+@asynccontextmanager
+async def async_memory_file_lock(data_path: Path, *, timeout: float) -> AsyncIterator[bool]:
+    """L2 for a memory FILE, degrading to L2's own in-process layer when the
+    file's parent directory is gone (#1566 / #2346).
+
+    Takes the **data** path and builds the sidecar key itself, so the "one
+    physical file, one sidecar" rule (#2130) cannot be got wrong by a caller;
+    passing an already-built sidecar path in here would key
+    ``..note.md.lock.lock``, a silently different lock.
+
+    The L2 paragraph of the lock-order invariant above requires the outermost
+    acquirer of a memory-file span to decide, once, whether the sidecar can be
+    taken at all: a span that only removes index rows for a file that is
+    already gone must not ``mkdir`` the deleted directory back into existence
+    just to lock a delete. ``IndexEngine._locked_index`` makes that decision
+    for the indexer and falls back to the engine-wide ``_index_lock``; this is
+    the same decision for the memory-CRUD spans, which have no L3 to fall back
+    to.
+
+    **The decision is made by errno, not by a probe.** A ``parent.is_dir()``
+    check before the acquire leaves a window in which the directory is removed
+    after the check and recreated by the acquire's own ``mkdir`` — the very
+    failure this exists to prevent, only rarer. So the sidecar is opened
+    *without* creating its parent and ``ENOENT`` / ``ENOTDIR`` from that open
+    IS the degraded path. Errors that are not absence (``EACCES`` on an
+    unwritable parent, and every other ``OSError``) propagate exactly as they
+    do from :func:`async_file_lock`; this helper answers absence, not
+    permissions.
+
+    **Yields whether the cross-process half was taken.** ``True`` means the
+    flock is held and the span has the full L2 guarantee. ``False`` means the
+    file's directory was gone and only layer 1 is held — the *same*
+    ``_intra_async_lock_for`` object the full acquire takes first, so a
+    degraded span and a full one still exclude each other in both directions
+    within one loop.
+
+    **A caller that yields on ``False`` must not write bytes to the source.**
+    Not "must check whether the file came back" — that check is a race by
+    construction, since the directory can be recreated in the instant after
+    it answers. What is *not* a race is the bit itself: whether this span
+    holds the flock was settled at the acquire and no other process can change
+    it. So the rule is stated on the bit and nothing else, and the surfaces
+    enforce it by refusing the write outright (edit paths) or by taking their
+    index-only branch unconditionally (the delete route). Row-level work is
+    always allowed: at worst a re-index re-adds what it removed.
+
+    Two limits on the degraded guarantee, both worth knowing:
+
+    * **Same event loop only.** ``_intra_async_lock_for`` is keyed by
+      ``(path, running loop)``; production runs one loop, but two loops in one
+      process get two locks and exclude nothing.
+    * **The key is not case-folded** (L1's ``memory_file_lock_key`` folds;
+      ``str(lock_path)`` here does not) and, for a vanished *symlinked*
+      ancestor, ``resolve()`` can no longer follow the alias, so the degraded
+      key is the literal path rather than the pre-removal target. Under the
+      full lock both are harmless because the ``flock`` is on one inode.
+
+    One limit that predates this helper and is not narrowed by it: a writer
+    that took the sidecar *before* the directory was removed holds an ``flock``
+    on an unlinked inode, and nothing at that path can contend with it — the
+    pre-#2346 ``mkdir`` + ``O_CREAT`` created a *new* inode rather than
+    re-attaching to that one, so those two never excluded each other either.
+    A re-index that read the file before the removal can still commit rows
+    after a delete reports success; orphan compaction remains the backstop.
+    """
+    async with _sidecar_lock(
+        memory_lock_path(data_path),
+        timeout=timeout,
+        create_parent=False,
+        degrade_on_missing_parent=True,
+    ) as cross_process_held:
+        yield cross_process_held
+
+
+@asynccontextmanager
+async def _sidecar_lock(
+    lock_path: Path,
+    *,
+    timeout: float,
+    create_parent: bool,
+    degrade_on_missing_parent: bool = False,
+) -> AsyncIterator[bool]:
+    """Shared body of :func:`async_file_lock` and :func:`async_memory_file_lock`.
+
+    Yields whether the CROSS-PROCESS half was taken: ``True`` with the flock
+    held, ``False`` on the degraded path.
+
+    Private on purpose: the two public entry points above are the whole
+    supported surface, and a third caller reaching in here would be choosing
+    the parent policy without the lock-order paragraph that justifies it.
+    ``test_context_c0_prelude_guard`` pins that no other module names it.
+
+    ``create_parent`` and ``degrade_on_missing_parent`` are independent: the
+    first says whether a missing parent should be created, the second whether
+    a missing parent is an answer (hold layer 1 alone) rather than an error.
     """
     deadline = time.monotonic() + timeout
     intra = _intra_async_lock_for(lock_path)
@@ -443,8 +563,29 @@ async def async_file_lock(lock_path: Path, *, timeout: float) -> AsyncIterator[N
             f"could not acquire {lock_path} within {timeout:g}s (in-process contention)"
         ) from None
     try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        if create_parent:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        except (FileNotFoundError, NotADirectoryError):
+            # Deciding here rather than on a prior ``is_dir()`` is what keeps
+            # this race-free in the direction that matters: nothing is ever
+            # created, so no window can end in a resurrected directory.
+            if not degrade_on_missing_parent:
+                raise
+            # ``ENOENT``/``ENOTDIR`` do not by themselves prove the parent is
+            # gone. A dangling symlink at the sidecar's own path answers
+            # ``ENOENT`` while the directory and the memory file are perfectly
+            # live, and degrading there would drop the flock on a file that
+            # still exists. So confirm the premise, and fail CLOSED when it
+            # does not hold: re-raise rather than run unlocked. A parent that
+            # came back between the open and this check re-raises too, which
+            # is the same answer for the same reason — the caller retries and
+            # gets the full sidecar.
+            if lock_path.parent.is_dir():
+                raise
+            yield False
+            return
         try:
             fp = os.fdopen(fd, "rb+")
         except BaseException:
@@ -469,7 +610,7 @@ async def async_file_lock(lock_path: Path, *, timeout: float) -> AsyncIterator[N
                     await asyncio.sleep(min(delay, remaining))
                     delay = min(delay * 2, 0.5)
             try:
-                yield
+                yield True
             except BaseException:
                 # See :func:`_file_lock` — the body's exception wins, and here
                 # that includes the ``CancelledError`` an awaiting caller was

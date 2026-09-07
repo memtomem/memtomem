@@ -41,6 +41,20 @@ logger = logging.getLogger(__name__)
 # instead of spinning.
 _CHUNK_LOCK_MOVE_RETRIES = 3
 
+
+def _degraded_source_error(chunk_id: str) -> str:
+    """The refusal a byte-writing CRUD branch gives on a degraded L2 span.
+
+    One function so ``mem_edit`` and ``mem_delete``'s chunk branch cannot drift
+    into saying different things about the same condition (#2346).
+    """
+    return (
+        f"Error: chunk {chunk_id} source directory has been removed, so its file "
+        "could not be locked; nothing was changed. Restore the directory (or "
+        "reindex) and retry."
+    )
+
+
 # Appended to a result string returned from the idempotency ledger (issue
 # #1573) so a replayed keyed write is distinguishable from the original —
 # nothing machine-parses these strings, but the marker stops an LLM caller
@@ -158,9 +172,15 @@ async def _namespace_mix_refusal(
 @asynccontextmanager
 async def _locked_chunk(
     app: AppContext, uid: UUID, chunk_id: str
-) -> AsyncIterator[tuple[Chunk | None, str | None]]:
-    """Yield ``(chunk, None)`` with the source file's L1+L2 locks held and the
-    chunk re-fetched fresh under them, or ``(None, error_message)``.
+) -> AsyncIterator[tuple[Chunk | None, str | None, bool]]:
+    """Yield ``(chunk, None, cross_process_held)`` with the source file's L1+L2
+    locks held and the chunk re-fetched fresh under them, or
+    ``(None, error_message, cross_process_held)``.
+
+    ``cross_process_held`` is ``False`` when the source's directory was gone and
+    L2 degraded to its in-process layer (#2346). A caller that then writes bytes
+    to the file would be splicing one nothing locked, so the two callers that
+    rewrite the source refuse on it; ``mem_delete``'s row-only work does not.
 
     Three-step acquire (issues #1570, #1587):
 
@@ -168,9 +188,15 @@ async def _locked_chunk(
        which we can only get by reading the chunk.
     2. Acquire that file's in-process per-file lock (L1,
        ``get_memory_file_lock``) *and* its cross-process sidecar (L2,
-       ``async_file_lock``). L2 is held for the whole span, so a second MCP
-       server, the CLI, or ``memory-migrate`` cannot mutate or move the file
-       under us — this is what closes the cross-process hole #1570 left open.
+       ``async_memory_file_lock``). L2 is held for the whole span, so a second
+       MCP server, the CLI, or ``memory-migrate`` cannot mutate or move the
+       file under us — this is what closes the cross-process hole #1570 left
+       open. A chunk can outlive the directory its source lived in, and this
+       span is reached for a *delete* as well as an edit, so L2 is taken
+       through ``async_memory_file_lock``: on a vanished parent it holds the
+       in-process layer alone rather than ``mkdir``-resurrecting the removed
+       directory to lock a delete (#2346). L1 is held either way, so the
+       degraded cell still has this server's own per-file exclusion.
     3. Re-fetch *under both locks* so ``start_line`` / ``end_line`` reflect any
        CRUD write that committed while we waited (chunk UUIDs are stable across
        incremental re-index, ADR-0005 and #1788).
@@ -192,28 +218,28 @@ async def _locked_chunk(
     """
     from memtomem.context._atomic import (
         _CRUD_SIDECAR_LOCK_BUDGET_S,
-        memory_lock_path,
-        async_file_lock,
+        async_memory_file_lock,
     )
 
     boundary = caller_boundary(app)
     chunk = await app.storage.get_chunk(uid)
     if chunk is None or not in_boundary(chunk, boundary):
-        yield None, f"Error: chunk {chunk_id} not found."
+        yield None, f"Error: chunk {chunk_id} not found.", False
         return
     source_file = chunk.metadata.source_file
     for _ in range(_CHUNK_LOCK_MOVE_RETRIES):
         key = AppContext.memory_file_lock_key(source_file)
-        sidecar = memory_lock_path(source_file)
         try:
             async with app.get_memory_file_lock(key):
-                async with async_file_lock(sidecar, timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+                async with async_memory_file_lock(
+                    source_file, timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
+                ) as cross_process_held:
                     fresh = await app.storage.get_chunk(uid)
                     if fresh is None or not in_boundary(fresh, boundary):
-                        yield None, f"Error: chunk {chunk_id} not found."
+                        yield None, f"Error: chunk {chunk_id} not found.", cross_process_held
                         return
                     if AppContext.memory_file_lock_key(fresh.metadata.source_file) == key:
-                        yield fresh, None
+                        yield fresh, None, cross_process_held
                         return
                     # Moved out from under us (migrate re-scoped the chunk before
                     # we took L2): re-key onto the new path and retry there.
@@ -225,9 +251,10 @@ async def _locked_chunk(
                     f"Error: chunk {chunk_id} source file is locked by another process "
                     "(migration in flight?); retry."
                 ),
+                False,
             )
             return
-    yield None, f"Error: chunk {chunk_id} source file is being moved concurrently; retry."
+    yield None, f"Error: chunk {chunk_id} source file is being moved concurrently; retry.", False
 
 
 async def _flag_imprecise_write(
@@ -277,6 +304,12 @@ async def _mutate_file_and_reindex(
     restoring ``original`` reverts only this call's own mutation. Because L2
     is already held, both ``index_file`` calls pass ``lock_held=True`` to skip
     the nested sidecar acquire that would otherwise self-deadlock (#1587).
+
+    "L2" is the full sidecar here. ``_locked_chunk`` can also hold the
+    degraded form on a source whose directory is gone (#2346), which excludes
+    only this process — but it refuses to yield when that directory returns,
+    and a source that is still absent fails the pre-image read below before
+    any of this runs. So a span that reaches this function holds the flock.
 
     Returns ``(stats, None)`` on success or ``(None, error_message)`` after
     a rollback; ``op`` ("edit"/"delete") only shapes the messages.
@@ -1009,9 +1042,17 @@ async def mem_edit(
     # Serialize the whole read → rewrite → re-index → rollback span on the
     # chunk's source file, re-fetching the chunk fresh under the lock so the
     # line range reflects any concurrent CRUD write (issue #1570).
-    async with _locked_chunk(app, uid, chunk_id) as (chunk, lock_err):
+    async with _locked_chunk(app, uid, chunk_id) as (chunk, lock_err, cross_process_held):
         if lock_err:
             return lock_err
+        if not cross_process_held:
+            # #2346: the source's directory was gone when L2 was taken, so this
+            # span holds only the in-process layer — and this branch rewrites
+            # the file. A directory recreated in the meantime can already hold
+            # another writer, so refuse rather than splice a file nothing
+            # locked. Decided on the lock, not on whether the file is back:
+            # that second answer is stale as soon as it is read.
+            return _degraded_source_error(chunk_id)
         assert chunk is not None
         meta = chunk.metadata
 
@@ -1143,9 +1184,14 @@ async def mem_delete(
 
         # Serialize the read → rewrite → re-index → rollback span on the
         # chunk's source file; re-fetch fresh under the lock (issue #1570).
-        async with _locked_chunk(app, uid, chunk_id) as (chunk, lock_err):
+        async with _locked_chunk(app, uid, chunk_id) as (chunk, lock_err, cross_process_held):
             if lock_err:
                 return lock_err
+            if not cross_process_held:
+                # See ``mem_edit``: this branch removes the chunk's lines from
+                # the file, so it may not run on a span that took no
+                # cross-process lock (#2346).
+                return _degraded_source_error(chunk_id)
             assert chunk is not None
             meta = chunk.metadata
             # Confirm gate on the fresh chunk: a migrate could have re-scoped
@@ -1200,20 +1246,30 @@ async def mem_delete(
         # after this delete and re-upsert the whole file, silently
         # resurrecting the rows just removed. The Gate-B scope probe runs under
         # the locks too so it sees the same state the delete acts on.
+        #
+        # L2 through ``async_memory_file_lock`` (#2346): ``_validate_path``
+        # resolves and range-checks ``source_file`` but never stats it, so
+        # "clean up the rows for the file I deleted" reaches here with the
+        # parent directory gone. This branch removes no bytes — it is a pure
+        # index delete — so taking the sidecar would both recreate the removed
+        # directory and, where the directory is simply not there (an unmounted
+        # store), fail a delete that needs no file at all. An unwritable parent
+        # still fails — that is permissions, not absence.
         from memtomem.context._atomic import (
             _CRUD_SIDECAR_LOCK_BUDGET_S,
-            memory_lock_path,
-            async_file_lock,
+            async_memory_file_lock,
         )
 
         try:
             async with (
                 app.get_memory_file_lock(sf_path),
-                async_file_lock(
-                    memory_lock_path(sf_path),
-                    timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
-                ),
+                async_memory_file_lock(sf_path, timeout=_CRUD_SIDECAR_LOCK_BUDGET_S),
             ):
+                # No ``cross_process_held`` gate here, unlike the chunk branch:
+                # this branch writes no bytes (#2346's rule is about the file,
+                # not the rows). If the directory returned after the degrade,
+                # the worst case is rows removed for a file that is back, which
+                # the next index of that file restores.
                 scopes = await app.storage.list_scopes_by_source(sf_path)
                 if "project_shared" in scopes and not confirm_project_shared:
                     logger.info(

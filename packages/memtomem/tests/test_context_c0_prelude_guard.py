@@ -43,6 +43,7 @@ from __future__ import annotations
 import ast
 import functools
 import pathlib
+import re
 from dataclasses import dataclass
 
 _SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "memtomem"
@@ -62,6 +63,18 @@ _WRAPPERS = frozenset(
 #: The raw lock primitives. Only an acquisition when the path argument derives
 #: from a canonical-lock path builder (below).
 _PRIMITIVES = frozenset({"_file_lock", "async_file_lock"})
+
+#: Memory-file (L2) wrappers that build their OWN key from a DATA path.
+#:
+#: They need a discovery form of their own. :data:`_PRIMITIVES` (Form 2) only
+#: fires when the first argument derives from a lock-path builder, which is
+#: exactly what these forbid — so a primitive registration would make every
+#: compliant call site invisible. :data:`_WRAPPERS` (Form 1) fires, but records
+#: the ``ast.Name``, and the MEMORY_L2 rule reads ``site.node.args[0]``.
+#: Form 3 below records the enclosing ``ast.Call`` when there is one and still
+#: records a bare reference, which the rule then reports rather than assumes
+#: compliant.
+_DATA_PATH_WRAPPERS = frozenset({"async_memory_file_lock"})
 
 #: Container methods that carry a lock path into the container they mutate.
 _CONTAINER_MUTATORS = frozenset({"add", "append", "extend", "update"})
@@ -194,8 +207,11 @@ def _qualname_for(spans: list[tuple[int, int, str]], lineno: int) -> str:
     return best
 
 
-def _alias_expand(tree: ast.AST) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-    """``local spelling → canonical name`` for wrappers, primitives and builders.
+def _alias_expand(
+    tree: ast.AST,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+    """``local spelling → canonical name`` for wrappers, primitives, builders
+    and the data-path wrappers.
 
     ``import X as Y`` is the one rename an AST scan cannot see through by
     default, and it is a rename the tree is free to adopt tomorrow. Every local
@@ -205,6 +221,7 @@ def _alias_expand(tree: ast.AST) -> tuple[dict[str, str], dict[str, str], dict[s
         {n: n for n in _WRAPPERS},
         {n: n for n in _PRIMITIVES},
         {n: n for n in _LOCK_PATH_BUILDERS},
+        {n: n for n in _DATA_PATH_WRAPPERS},
     )
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -311,7 +328,14 @@ def sites_in_source(source: str, module: str) -> tuple[list[_Site], ast.AST]:
     # different Name, and a purely name-based scan would see nothing (Codex code
     # gate). The alias is registered under the ORIGINAL name so the registry key
     # stays stable if the alias is later changed.
-    wrappers, primitives, builders = _alias_expand(tree)
+    wrappers, primitives, builders, data_wrappers = _alias_expand(tree)
+    # Form 3 records the Call, so the Name that is its ``.func`` must not also
+    # be recorded as a bare reference — one acquisition, one site.
+    data_wrapper_callee_nodes = {
+        id(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _callee_name(node.func) in data_wrappers
+    }
     # Function-scoped variable analysis for the derived-primitive form.
     fn_nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
     var_cache = {id(n): _canonical_path_vars(n, frozenset(builders)) for n in fn_nodes}
@@ -333,6 +357,21 @@ def sites_in_source(source: str, module: str) -> tuple[list[_Site], ast.AST]:
             continue
         if isinstance(node, ast.Attribute) and node.attr in wrappers:
             hits.append((node.lineno, wrappers[node.attr], node))
+            continue
+        # Form 3 — a data-path wrapper. Recorded on the CALL where there is
+        # one, so the rule below can read the argument it was handed; a bare
+        # reference (handed to an executor, the Form-1 lesson) is still
+        # recorded and the rule reports it for want of a visible argument.
+        if isinstance(node, ast.Call) and _callee_name(node.func) in data_wrappers:
+            hits.append((node.lineno, data_wrappers[_callee_name(node.func)], node))
+            continue
+        if (
+            isinstance(node, (ast.Name, ast.Attribute))
+            and (node.id if isinstance(node, ast.Name) else node.attr) in data_wrappers
+            and id(node) not in data_wrapper_callee_nodes
+        ):
+            spelling = node.id if isinstance(node, ast.Name) else node.attr
+            hits.append((node.lineno, data_wrappers[spelling], node))
             continue
         # Form 2 — a raw primitive whose path argument is canonical-derived.
         if isinstance(node, ast.Call):
@@ -689,30 +728,41 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "in #2105 so the engine-wide file-concurrency slot is taken above it; "
         "still the only L2 acquire in the engine.",
     ),
-    ("server/tools/memory_crud.py", "_locked_chunk", 0, "async_file_lock"): (
+    ("server/tools/memory_crud.py", "_locked_chunk", 0, "async_memory_file_lock"): (
         MEMORY_L2,
         "",
-        "Memory file (L2).",
+        "Memory file (L2), degrading form (#2346). This span is reached for a "
+        "DELETE as well as an edit, and a chunk can outlive the directory its "
+        "source lived in — taking the sidecar there would mkdir the removed "
+        "directory back just to lock a delete. L1 is still held above it, so "
+        "the degraded cell keeps this server's own per-file exclusion.",
     ),
     ("server/tools/memory_crud.py", "_mem_add_core", 0, "async_file_lock"): (
         MEMORY_L2,
         "",
         "Memory file (L2).",
     ),
-    ("server/tools/memory_crud.py", "mem_delete", 0, "async_file_lock"): (
+    ("server/tools/memory_crud.py", "mem_delete", 0, "async_memory_file_lock"): (
         MEMORY_L2,
         "",
-        "Memory file (L2).",
+        "Memory file (L2), degrading form (#2346) — the source_file= branch. "
+        "``_validate_path`` resolves and range-checks but never stats, so "
+        "'clean up the rows for the file I deleted' arrives here with the "
+        "parent gone. The branch removes no bytes, and before the fix the "
+        "sidecar acquire could FAIL it outright wherever the directory is "
+        "simply absent, such as an unmounted store.",
     ),
     ("server/tools/memory_crud.py", "mem_batch_add", 0, "async_file_lock"): (
         MEMORY_L2,
         "",
         "Memory file (L2).",
     ),
-    ("tools/memory_mutation.py", "locked_source_chunk", 0, "async_file_lock"): (
+    ("tools/memory_mutation.py", "locked_source_chunk", 0, "async_memory_file_lock"): (
         MEMORY_L2,
         "",
-        "Memory file (L2).",
+        "Memory file (L2), degrading form (#2346) — the surface-neutral web/CLI "
+        "span, the one of the three with no L1 above it, so the in-process "
+        "layer the degraded cell keeps is its ONLY serializer.",
     ),
     ("web/routes/system.py", "add_memory", 0, "async_file_lock"): (
         MEMORY_L2,
@@ -1018,13 +1068,48 @@ def _rebound_names(tree: ast.AST) -> frozenset[str]:
     return frozenset(bound)
 
 
-def _memory_l2_offense(fn: ast.AST, arg: ast.expr | None, tree: ast.AST) -> str | None:
+def _memory_data_path_offense(fn: ast.AST, arg: ast.expr | None, tree: ast.AST) -> str | None:
+    """Why *arg* is not a valid DATA path for a :data:`_DATA_PATH_WRAPPERS` call.
+
+    The mirror image of :func:`_memory_l2_offense`. Those wrappers build the
+    key themselves, so a caller that kept its old ``memory_lock_path(f)``
+    argument through the conversion produces
+    ``memory_lock_path(memory_lock_path(f))`` — ``..note.md.lock.lock``, a
+    silently *different* lock with no error anywhere. That is the exact mistake
+    converting a site invites, which is why ``memory_lock_path`` is banned here
+    alongside the two builders the L2 rule already bans.
+
+    Known blind spot, stated rather than papered over: the trace is
+    intra-function, so a sidecar arriving through a parameter, a module
+    constant, or an untracked helper's return value reads as a data path. That
+    is the same limit the L2 rule carries (see its "Because the trace is
+    intra-function…" note) and it is narrower here, because these wrappers key
+    on whatever they are handed rather than on a key the caller composed.
+    ``test_data_path_rule_cannot_see_across_a_parameter`` pins it.
+    """
+    if arg is None:
+        return "data path not visible (bare reference)"
+    banned = _imported_as(tree, _LOCK_PATH_BUILDERS) | _LOCK_PATH_BUILDERS
+    if _mentions(arg, _derived_from(fn, banned)):
+        return "keyed on a lock-path builder; pass the DATA path"
+    return None
+
+
+def _memory_l2_offense(
+    fn: ast.AST, arg: ast.expr | None, tree: ast.AST, callee: str = ""
+) -> str | None:
     """Why *arg* is not a valid memory-file (L2) key, or ``None`` if it is.
 
     The single home of the MEMORY_L2 rule, shared by the package scan and the
     synthetic mutation tests below — a synthetic test that only exercised the
     taint helpers would stay green if this logic were deleted outright.
+
+    Two acquire forms, opposite polarity. A raw ``async_file_lock`` composes
+    its own key and must compose it with ``memory_lock_path``; a data-path
+    wrapper composes the key for you and must therefore *not* be handed one.
     """
+    if callee in _DATA_PATH_WRAPPERS:
+        return _memory_data_path_offense(fn, arg, tree)
     approved = _imported_as(tree, _MEMORY_KEY_BUILDER) - _rebound_names(tree)
     # Banned keeps the canonical spellings on top of the imported ones: a
     # locally defined ``_lock_path_for`` is reported rather than waved through,
@@ -1035,6 +1120,18 @@ def _memory_l2_offense(fn: ast.AST, arg: ast.expr | None, tree: ast.AST) -> str 
     if banned and _mentions(arg, _derived_from(fn, banned)):
         return "also keyed on a non-memory builder"
     return None
+
+
+def _first_arg(node: ast.AST) -> ast.expr | None:
+    """The acquisition's first positional argument, or ``None`` if it has none.
+
+    ``getattr`` rather than ``node.args``: Form 1 and the bare-reference half of
+    Form 3 record an ``ast.Name``/``ast.Attribute``, which has no ``.args`` at
+    all. Reading it directly would raise ``AttributeError`` — a crash the
+    caller would have to read as a guard bug rather than as the finding it is.
+    """
+    args = getattr(node, "args", None)
+    return args[0] if args else None
 
 
 def _function_containing(tree: ast.AST, lineno: int) -> ast.AST | None:
@@ -1068,8 +1165,8 @@ def test_memory_l2_sites_key_on_the_resolved_path() -> None:
     itself (#1866) — and would have missed ``_memory_migrate_run``, which this
     guard could not even see until #2130.
 
-    The check is function-scoped and has TWO halves, because either alone is
-    satisfiable by a bug:
+    The check is function-scoped. For a raw acquire it has TWO halves, because
+    either alone is satisfiable by a bug:
 
     * **positive** — the locked path must trace back to a ``memory_lock_path``
       call in the function that takes the lock. Banning ``_lock_path_for``
@@ -1084,9 +1181,19 @@ def test_memory_l2_sites_key_on_the_resolved_path() -> None:
       live shape: ``_memory_migrate_run`` inserts a source key and a target
       key into one set.
 
+    A :data:`_DATA_PATH_WRAPPERS` acquire is judged by the mirror rule instead
+    (:func:`_memory_data_path_offense`): those build the key themselves from a
+    DATA path, so the requirement inverts — the argument must NOT trace to a
+    builder, because handing one in keys ``..note.md.lock.lock``, a valid path
+    and a silently different lock. Same invariant, opposite polarity; the
+    dispatch lives in :func:`_memory_l2_offense` so there is still one home.
+
     Because the trace is intra-function, every memory-file acquire must build
     its own key rather than receive one (see ``IndexEngine._locked_index`` and
-    ``namespace_management._coordinated_mutation``, both moved for this).
+    ``namespace_management._coordinated_mutation``, both moved for this) — and,
+    on the mirror half, a key arriving from outside the function reads as a
+    data path and is not reported. That limit is pinned rather than implied by
+    ``test_data_path_rule_cannot_see_across_a_parameter``.
     """
     sites, trees = _discover()
     offenders: list[str] = []
@@ -1097,8 +1204,8 @@ def test_memory_l2_sites_key_on_the_resolved_path() -> None:
         if fn is None:
             offenders.append(f"{site.module}:{site.lineno} {site.qualname} (no enclosing function)")
             continue
-        arg = site.node.args[0] if site.node.args else None
-        offense = _memory_l2_offense(fn, arg, trees[site.module])
+        arg = _first_arg(site.node)
+        offense = _memory_l2_offense(fn, arg, trees[site.module], site.callee)
         if offense is not None:
             offenders.append(f"{site.module}:{site.lineno} {site.qualname} ({offense})")
     assert not offenders, (
@@ -1114,8 +1221,164 @@ def _offense_for(source: str) -> str | None:
     assert len(sites) == 1, f"expected exactly one discovered acquire, got {len(sites)}"
     fn = _function_containing(tree, sites[0].lineno)
     assert fn is not None
-    arg = sites[0].node.args[0] if sites[0].node.args else None
-    return _memory_l2_offense(fn, arg, tree)
+    arg = _first_arg(sites[0].node)
+    return _memory_l2_offense(fn, arg, tree, sites[0].callee)
+
+
+# ---- the data-path half of the MEMORY_L2 rule (#2346) ---------------------
+#
+# ``async_memory_file_lock`` builds the sidecar key from the DATA path it is
+# handed, so the rule inverts: a caller must NOT hand it a key. The failure it
+# guards is silent — ``memory_lock_path(memory_lock_path(f))`` is a perfectly
+# valid path, just a different lock — so nothing but this rule would report it.
+
+
+def test_data_path_helper_accepts_a_data_path() -> None:
+    """The compliant shape must pass.
+
+    Without this the three rejection tests below assert a constant: a rule that
+    returned an offense unconditionally would satisfy all of them.
+    """
+    source = (
+        "from memtomem.context._atomic import async_memory_file_lock\n"
+        "async def span(note):\n"
+        "    async with async_memory_file_lock(note, timeout=1):\n"
+        "        pass\n"
+    )
+    assert _offense_for(source) is None
+
+
+def test_data_path_helper_is_discovered_without_a_builder_in_its_argument() -> None:
+    """Discovery must not depend on the argument being builder-derived.
+
+    Form 2 fires only on a tainted first argument, which is exactly what this
+    wrapper forbids — so registering it as a primitive would make every
+    COMPLIANT call site invisible while the offending ones stayed visible, and
+    the tree would pass with the rule policing nothing. Assert the site is
+    found at all, and found under its own callee name so its registry key is
+    distinct from the raw-primitive rows.
+    """
+    source = (
+        "from memtomem.context._atomic import async_memory_file_lock\n"
+        "async def span(note):\n"
+        "    async with async_memory_file_lock(note, timeout=1):\n"
+        "        pass\n"
+    )
+    sites, _tree = sites_in_source(source, "synthetic.py")
+    assert [(s.qualname, s.callee) for s in sites] == [("span", "async_memory_file_lock")]
+
+
+def test_data_path_helper_rejects_every_lock_path_builder() -> None:
+    """Handing this wrapper a sidecar keys ``..note.md.lock.lock``.
+
+    All three builders, not just ``memory_lock_path``: the conversion from a
+    raw acquire is what invites this, and a site being converted may have been
+    keyed on any of them (that is what the other half of this rule exists to
+    catch). Drives the real validator, not the taint helpers under it.
+    """
+    for builder in ("memory_lock_path", "_lock_path_for", "canonical_lock_path"):
+        source = (
+            f"from memtomem.context._atomic import async_memory_file_lock, {builder}\n"
+            "async def span(note):\n"
+            f"    async with async_memory_file_lock({builder}(note), timeout=1):\n"
+            "        pass\n"
+        )
+        assert _offense_for(source) == "keyed on a lock-path builder; pass the DATA path", builder
+
+
+def test_data_path_helper_rejects_a_key_carried_by_a_variable() -> None:
+    """One hop through a local must be reported too.
+
+    The nested-call spelling is the obvious one; the two-statement spelling is
+    what a real conversion produces, because the site already had a
+    ``sidecar = memory_lock_path(...)`` line above its acquire. Matching only
+    the nested form would wave the actual regression through.
+    """
+    source = (
+        "from memtomem.context._atomic import async_memory_file_lock, memory_lock_path\n"
+        "async def span(note):\n"
+        "    sidecar = memory_lock_path(note)\n"
+        "    async with async_memory_file_lock(sidecar, timeout=1):\n"
+        "        pass\n"
+    )
+    assert _offense_for(source) == "keyed on a lock-path builder; pass the DATA path"
+
+
+def test_data_path_helper_rejects_an_aliased_builder() -> None:
+    """``import memory_lock_path as p`` must not launder the key.
+
+    Provenance, not spelling — the same closure the other half relies on
+    (:func:`_imported_as`), asserted on this half so a future refactor cannot
+    drop it here while leaving it there.
+    """
+    source = (
+        "from memtomem.context._atomic import async_memory_file_lock\n"
+        "from memtomem.context._atomic import memory_lock_path as p\n"
+        "async def span(note):\n"
+        "    async with async_memory_file_lock(p(note), timeout=1):\n"
+        "        pass\n"
+    )
+    assert _offense_for(source) == "keyed on a lock-path builder; pass the DATA path"
+
+
+def test_data_path_helper_bare_reference_is_reported_not_assumed() -> None:
+    """A reference handed to an executor has no visible argument.
+
+    Form 1's lesson is that such a reference IS an acquisition; the rule's
+    answer is to report it rather than pass it, because "no argument to
+    inspect" and "a good argument" must not produce the same verdict.
+    """
+    source = (
+        "import asyncio\n"
+        "from memtomem.context._atomic import async_memory_file_lock\n"
+        "async def span():\n"
+        "    await asyncio.to_thread(async_memory_file_lock)\n"
+    )
+    assert _offense_for(source) == "data path not visible (bare reference)"
+
+
+def test_data_path_rule_cannot_see_across_a_parameter() -> None:
+    """The documented blind spot, pinned so it stays documented.
+
+    The trace is intra-function, so a sidecar arriving as a parameter reads as
+    a data path and this rule says nothing. Recording it as an expectation is
+    the honest form: a later reader learns the guarantee's edge from a test
+    rather than discovering it from a bug. Narrower than the same limit on the
+    other half, because this wrapper composes the key itself — a caller has to
+    go out of its way to build one to pass in.
+    """
+    source = (
+        "from memtomem.context._atomic import async_memory_file_lock\n"
+        "async def span(already_a_sidecar):\n"
+        "    async with async_memory_file_lock(already_a_sidecar, timeout=1):\n"
+        "        pass\n"
+    )
+    assert _offense_for(source) is None
+
+
+def test_sidecar_lock_is_private_to_the_atomic_module() -> None:
+    """``_sidecar_lock`` is the shared body, not a third entry point.
+
+    It takes ``create_parent`` / ``degrade_on_missing_parent`` as plain
+    booleans, so a caller reaching past the two public wrappers would be
+    choosing the #1566 parent policy with none of the lock-order reasoning that
+    justifies it — and it is invisible to every form above, since it is neither
+    a wrapper nor a primitive. This is the containment the discovery forms do
+    not provide.
+    """
+    offenders = [
+        f"{path.relative_to(_SRC).as_posix()}:{i}"
+        for path in _scan_files()
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        # Word-bounded: ``canonical_sidecar_lock`` is a different domain's
+        # public wrapper and shares the substring.
+        if re.search(r"\b_sidecar_lock\b", line)
+        and path.relative_to(_SRC).as_posix() != "context/_atomic.py"
+    ]
+    assert not offenders, (
+        "_sidecar_lock is private to context/_atomic.py — take async_file_lock "
+        "or async_memory_file_lock instead:\n  " + "\n  ".join(offenders)
+    )
 
 
 def test_memory_l2_guard_rejects_the_other_builders() -> None:

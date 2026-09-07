@@ -104,6 +104,20 @@ NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL = (
     "was changed. Retry once the chunk store is reachable."
 )
 
+#: A chunk edit refused because its span holds no cross-process lock (#2346).
+#:
+#: The source's directory was gone when the lock was taken, so the span runs
+#: on the in-process guard alone — enough for a row-level delete, not enough
+#: to rewrite a file another process may have recreated in the meantime.
+#: Phrased as a state the operator can act on rather than as a lock detail,
+#: and 409 rather than 503: the condition does not clear on its own the way a
+#: held sidecar does.
+DEGRADED_SOURCE_EDIT_DETAIL = (
+    "The chunk's source directory has been removed, so its file could not be "
+    "locked and nothing was changed. Restore the directory (or reindex) and "
+    "retry."
+)
+
 
 def _classify_exception(exc: BaseException) -> str:
     """Map an exception to one of {parse, permission, missing, internal}.
