@@ -354,6 +354,8 @@ companion `mm context settings-migrate` subcommand:
 mm context settings-migrate --from=user --to=project_local           # dry-run
 mm context settings-migrate --from=user --to=project_local --apply   # mutate
 mm context settings-migrate --from=user --to=project_local --json    # CI / scripting
+mm context settings-migrate --from=project_local --to=project_shared \
+    --apply --confirm-project-shared                                 # tracked tier
 ```
 
 Default is a dry-run preview; pass `--apply` to mutate disk. The migrator
@@ -365,6 +367,18 @@ Idempotent — re-running after a clean migration finds nothing to move.
 When the source or target lives outside the project root (e.g.
 `--from=user`, which resolves to `~/.claude/settings.json`), `--apply`
 prompts for confirmation; pass `--yes` to skip the prompt in scripts.
+
+The `project_shared` tier is a separate question, and a separate flag.
+`--to=project_shared` lands the entries in `.claude/settings.json`, which
+your repository tracks, and `--from=project_shared` strips them back out of
+it — both are changes your team will see in the next commit, so `--apply`
+asks before doing either. At a terminal that is a prompt naming the file;
+`--confirm-project-shared` answers it ahead of time, which is what a script
+needs. `--yes` does not: it answers the host-write prompt only, and one run
+can need both flags. A `project_shared` target is also scanned for secrets
+with no force valve, since the rule would be published to everyone with repo
+access. Migrating a secret-bearing rule *out* of the shared tier is still
+allowed — that is the fix, not the leak.
 
 `settings-migrate` moves entries between tiers of ONE project. To propagate
 a single hook to ANOTHER project ("I want this guard hook in project B

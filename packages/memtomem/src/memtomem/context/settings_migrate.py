@@ -30,6 +30,7 @@ from pathlib import Path
 
 from memtomem.context._abandon import sync_is_abandoned
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
+from memtomem.context.privacy_scan import raise_or_collect, scan_text_content
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     MalformedHookMatcher,
@@ -95,6 +96,10 @@ class MigratePlan:
     source_path: Path
     target_path: Path
     moves: tuple[MigrateMove, ...]
+    #: The project root the two tiers were resolved against. Carried on
+    #: the plan rather than passed alongside it so a future dispatcher
+    #: inherits everything :func:`gate_a_scan` needs from one object.
+    project_root: Path
 
     @property
     def is_noop(self) -> bool:
@@ -364,6 +369,7 @@ def plan_migration(
             source_path=source_path,
             target_path=target_path,
             moves=(),
+            project_root=project_root,
         )
 
     if source is None:
@@ -373,6 +379,7 @@ def plan_migration(
             source_path=source_path,
             target_path=target_path,
             moves=(),
+            project_root=project_root,
         )
 
     target_doc = target or {}
@@ -428,7 +435,77 @@ def plan_migration(
         source_path=source_path,
         target_path=target_path,
         moves=tuple(moves),
+        project_root=project_root,
     )
+
+
+# ── Gate A ──────────────────────────────────────────────────────────
+
+
+def gate_a_scan(plan: MigratePlan, surface: str) -> None:
+    """Scan the rules a ``project_shared`` **target** would receive.
+
+    ADR-0011 §5 Gate A for this surface, and the sibling of
+    :func:`memtomem.context.settings_copy.gate_a_scan`. Two differences
+    from that sibling are deliberate:
+
+    * **Target-tier-conditional, not unconditional.** ``settings-copy``
+      always writes the destination's canonical ``.memtomem/settings.json``,
+      which the destination repository tracks whatever tier was asked for,
+      so every copy scans. A migration writes no canonical at all — it
+      lands rules in one runtime tier file — so only a ``project_shared``
+      target reaches a tracked file. Scanning the untracked tiers would
+      add a refusal with no force valve where nothing is exposed.
+    * **The source leg is never scanned**, in either direction. Moving a
+      secret-bearing rule *out* of the shared tier is the remediation
+      Gate A's own message prescribes; scanning the bytes being removed
+      would refuse the fix and leave the secret where it is. Gate B still
+      covers that leg, because a confirmation can be answered and a
+      valve-less scan cannot.
+
+    Every applicable move is scanned, including one the planner marked
+    ``already_at_target``: :func:`apply_migration` re-classifies against
+    the live target and an entry that drifted away between plan and apply
+    becomes a write. Rules are grouped under their event exactly as they
+    would be written, so several moves sharing one event all reach the
+    scanner.
+
+    Raises :class:`~memtomem.context.privacy_scan.PrivacyBlockedError`;
+    surfaces translate (CLI → ``ClickException``).
+    """
+    if plan.target_scope != "project_shared":
+        return
+    applicable = plan.applicable_moves
+    if not applicable:
+        return
+
+    by_event: dict[str, list[dict]] = {}
+    for move in applicable:
+        by_event.setdefault(move.signature.event, []).append(move.rule_to_write_at_target)
+    fragment = json.dumps(by_event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+    canonical_path = plan.project_root / CANONICAL_SETTINGS_FILE
+    scan = scan_text_content(
+        fragment,
+        source_path=canonical_path,
+        surface=surface,
+        scope="project_shared",
+        project_root=plan.project_root,
+    )
+    if scan.decision in ("blocked", "blocked_project_shared"):
+        first = applicable[0].signature
+        raise_or_collect(
+            scan,
+            scope="project_shared",
+            kind="hook rule",
+            artifact_name=f"{first.event}:{first.matcher}",
+            remediation_hint=(
+                f"Remove the secret from the hook rule in {canonical_path}, "
+                f"then re-run the migration. There is no force valve: the "
+                f"target tier ({plan.target_path}) is tracked by this "
+                f"repository."
+            ),
+        )
 
 
 # ── Apply ───────────────────────────────────────────────────────────
@@ -536,7 +613,7 @@ def _canonical_inner_of(move: MigrateMove) -> dict:
     return {}
 
 
-def apply_migration(plan: MigratePlan) -> MigrateResult:
+def apply_migration(plan: MigratePlan, *, surface: str) -> MigrateResult:
     """Apply *plan* to disk.
 
     Write order: **target first, then source.** A crash between the two
@@ -599,6 +676,13 @@ def apply_migration(plan: MigratePlan) -> MigrateResult:
     (#2247). Today every caller is synchronous (the CLI), which never enters
     the scope and so never sees a set flag; the checks are here so the first
     threaded dispatcher inherits the placement instead of choosing its own.
+
+    ``surface`` names the caller for the ADR-0011 §5 Gate A audit record
+    and is required for the same reason ``apply_hook_copy`` requires it:
+    a scan attributed to the wrong surface is worse than one attributed to
+    none. :func:`gate_a_scan` runs here rather than at the CLI so the first
+    web or MCP dispatcher inherits it — the same argument the abandonment
+    checks above make about their own placement.
     """
     result = MigrateResult(plan=plan)
     if plan.is_noop:
@@ -615,6 +699,11 @@ def apply_migration(plan: MigratePlan) -> MigrateResult:
     if sync_is_abandoned():
         result.warnings.append(abandoned_warning)
         return result
+
+    # Gate A before the first lock: an abandoned apply records no scan and
+    # creates no sidecar, and a blocked one raises before either tier is
+    # touched (the ``apply_hook_copy`` ordering).
+    gate_a_scan(plan, surface)
 
     heal_hint = (
         "Re-run `mm context settings-migrate --apply` to finish the "
@@ -828,5 +917,6 @@ __all__ = [
     "MigrateResult",
     "apply_migration",
     "format_plan_summary",
+    "gate_a_scan",
     "plan_migration",
 ]

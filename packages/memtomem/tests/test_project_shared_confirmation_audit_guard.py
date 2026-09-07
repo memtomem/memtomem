@@ -449,6 +449,14 @@ def test_scan_reaches_the_sites_the_adr_names() -> None:
     — if the gate were spelled back into a ``--yes``-only shape, or deleted,
     every other assertion in this file would stay green. This is the line
     that goes red.
+
+    ``settings_migrate_cmd`` is here for the same reason and a sharper one:
+    it had no Gate B at all (#2348), so it was invisible to this scan the way
+    an *absent* gate always is. It also ships the only predicate in the file
+    that fires on a **source** tier, so a regression that narrowed the gate
+    back to the destination would leave the flag in place — and this
+    assertion would still pass. Read it as pinning the site, not the
+    predicate; ``TestSettingsMigrateGateB`` pins what the predicate covers.
     """
     found: set[tuple[str, str]] = set()
     for path in _src_files():
@@ -458,6 +466,7 @@ def test_scan_reaches_the_sites_the_adr_names() -> None:
     assert ("cli/memory.py", "_add") in found
     assert ("server/tools/memory_crud.py", "_mem_add_core") in found
     assert ("cli/context_cmd.py", "pull_cmd") in found
+    assert ("cli/context_cmd.py", "settings_migrate_cmd") in found
 
 
 # ── detector self-tests ───────────────────────────────────────────────────

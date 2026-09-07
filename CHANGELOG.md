@@ -7,6 +7,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Breaking
 
+- **Moving hooks in or out of the Git-tracked settings tier now asks first.**
+  `mm context settings-migrate` had one confirmation, and it was the wrong one
+  for this: it fires when a tier lives outside the project, which the
+  `project_shared` tier never does. So `--to project_shared --apply` appended
+  hook entries to the `.claude/settings.json` your repository tracks having
+  asked nobody, and recorded no consent. Both directions now ask first — the
+  target because the entries land in the tracked file, and the source because
+  the migration strips them out of it, and removing something the project
+  committed changes what your team runs as much as adding it does. At a
+  terminal that is a prompt naming the file; `--confirm-project-shared`
+  answers it ahead of time. `--yes` does not: it still answers only the
+  host-write prompt, and a `--from user --to project_shared` run needs both
+  flags. A `project_shared` target is now scanned for secrets too,
+  with no force valve, the same as the sibling `settings-copy`. Migrating a
+  secret-bearing rule *out* of the shared tier is deliberately still allowed —
+  that is the fix, not the leak.
+
+  Nothing changes for a migration between the `user` and `project_local`
+  tiers, which is the common case and the one every example shows.
+
+  **Upgrading:** a script that migrates into or out of `project_shared` with
+  `--yes` must add `--confirm-project-shared`; the refusal names it, and
+  `--json` callers get a `needs_confirmation` payload naming the affected tier
+  instead. Every refusal this command makes is now answered in JSON for a
+  `--json` caller, including the privacy scan's, which reports
+  `"refusal": "gate_a"`. The consent is recorded as
+  `project_shared.confirmed_via=cli_context_settings_migrate` with
+  `action=move`. (#2348)
+
 - **Rewriting a note that lives in the Git-tracked tier now asks first.**
   `mem_edit` and the web editor's save both refused a privacy-scan bypass on a
   `project_shared` chunk but took no confirmation, so replacing the body of a

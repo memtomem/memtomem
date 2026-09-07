@@ -584,6 +584,62 @@ instead.
 > `path_scope="explicit"` on that call would fail rather than quietly
 > widen it.
 
+> **2026-09 (#2348):** the #2336 note's closing claim — that #2333 was the
+> only first-party writer left outside "every `project_shared` write takes
+> two gates" — was one exception short.
+> `mm context settings-migrate` reached the tracked tier with neither gate,
+> and stayed invisible for the reason #2321 did — no `confirm_project_shared`
+> identifier for the audit scan to find — plus one of its own. It *has* a
+> confirmation prompt, so a reader checking this surface finds one and stops.
+> That prompt is the host-write check, which fires when a tier lies outside
+> the project root; `resolve_scope_path` puts `project_shared` at
+> `<root>/.claude/settings.json`, inside it by construction. The one gate the
+> command had could never fire for the one tier that needed it. A gate whose
+> predicate cannot be true on the path it is read as covering is worse than
+> an absent one, because it answers the question a reviewer asks.
+>
+> This surface is gated rather than made unreachable, which is the #2322
+> rule applied in the other direction: the destination is the caller's own
+> `--to`, so there is someone to ask. Both flags can be needed in one run and
+> neither substitutes for the other — `--yes` answers leaving the project,
+> `--confirm-project-shared` answers touching the tracked tier.
+>
+> **The source leg is gated too**, and that is the part the issue did not
+> ask for. It filed the `--to` half on the reasoning that
+> `project_shared → project_local` writes the gitignored file, which is true
+> and incomplete: the migration also *strips* the entries out of the tracked
+> one. The #2322 note above already settles what to do about that — both of
+> `PinnedContextStore`'s mutating methods refuse, "since removing bytes the
+> project committed changes the shared tier as much as adding them" — and the
+> reachability is not hypothetical: `settings_doctor.format_warning` prints
+> exactly this command, with `--from=project_shared`, whenever the duplicate
+> it found lives in that tier. Both legs record one consent line, with
+> `from_scope` and `to_scope` naming which one was shared; no separate action
+> verb is invented for the removal.
+>
+> **Gate A is conditional here, unlike its `settings-copy` sibling.** That
+> one scans every copy because it always writes the destination's canonical
+> `.memtomem/settings.json`, which is tracked whatever tier was asked for. A
+> migration writes no canonical at all, so only a `project_shared` target
+> reaches a tracked file, and scanning the untracked tiers would add a
+> valve-less refusal where nothing is exposed. The source leg is never
+> scanned in either direction: moving a secret-bearing rule *out* of the
+> shared tier is the remediation Gate A's own message prescribes, and
+> scanning the bytes being removed would refuse the fix and leave the secret
+> in place. Gate B still covers that leg, because a confirmation can be
+> answered and a hard refusal cannot.
+>
+> One consequence worth stating, because it looks like over-reach until the
+> lock contract is read: the scan covers moves the planner marked
+> `already_at_target`. `apply_migration` re-classifies against the live tier
+> under its pair-lock, so an entry the target lost between plan and apply
+> comes back as a write. Scanning only the plan-time writes would leave that
+> transition unscanned. The visible cost is that a run whose sole effect
+> would be cleaning the source is refused when the tracked tier *already*
+> holds the secret — a state worth surfacing rather than tidying around.
+>
+> #2333 remains the last first-party writer outside the claim.
+
 
 Before PR-D, `mem_batch_add` bypassed `enforce_write_guard` and used
 an inline `privacy.scan` instead — the batch path was the obvious
