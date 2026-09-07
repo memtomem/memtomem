@@ -44,6 +44,22 @@ _BARE_LANGFUSE_ENV_VARS = (
 _SESSION_TRACE_ENV_PREFIX = "MEMTOMEM_SESSION_TRACE__"
 
 
+#: Unattributed real-settings changes seen this session, rendered by
+#: ``pytest_terminal_summary``.  A terminal-summary section rather than a
+#: warning: it must stay visible under ``-p no:warnings`` and under any future
+#: ``filterwarnings = error``, and it must not be able to fail a test.
+_UNATTRIBUTED_HOME_CHANGES: list[tuple[str, _home_guard.Violation]] = []
+
+
+class _HomeGuardSession:
+    """Session-scoped state for the real-settings tripwire."""
+
+    def __init__(self, mode: _home_guard.GuardMode, targets: tuple[Path, ...]) -> None:
+        self.mode = mode
+        self.targets = targets
+        self.witness = _home_guard.WriteWitness(targets) if targets else None
+
+
 @pytest.fixture(scope="session")
 def _real_home_guard_targets() -> tuple[Path, ...]:
     """Capture the real user-settings targets before tests can redirect HOME."""
@@ -54,10 +70,23 @@ def _real_home_guard_targets() -> tuple[Path, ...]:
     return targets
 
 
+@pytest.fixture(scope="session")
+def _real_home_guard_session(_real_home_guard_targets: tuple[Path, ...]) -> _HomeGuardSession:
+    """Arm the in-process write witness once for the whole session.
+
+    ``sys.addaudithook`` cannot be removed, so the hook is installed at most
+    once per pytest process and stays inert while no window is open.
+    """
+    session = _HomeGuardSession(_home_guard.guard_mode(), _real_home_guard_targets)
+    if session.witness is not None:
+        session.witness.install()
+    return session
+
+
 @pytest.fixture(autouse=True)
 def _real_home_write_guard(
     request: pytest.FixtureRequest,
-    _real_home_guard_targets: tuple[Path, ...],
+    _real_home_guard_session: _HomeGuardSession,
 ) -> Iterator[None]:
     """Fail the test that leaves a real runtime settings file changed.
 
@@ -65,21 +94,58 @@ def _real_home_write_guard(
     fixtures and torn down after them, so this brackets their writes as well as
     the test body.  The target tuple is session-scoped and lexical: a test's
     later ``set_home`` call cannot redirect the guard away from the real files.
+
+    A net change is only charged to this test when the witness saw this process
+    write that path (#2355).  A change nobody here was seen making is recorded
+    for the session summary, and fails only in strict mode.
     """
-    if not _real_home_guard_targets:
+    guard = _real_home_guard_session
+    witness = guard.witness
+    if witness is None:
         yield
         return
 
-    before = _home_guard.snapshot_files(_real_home_guard_targets)
+    nodeid = request.node.nodeid
+    before = _home_guard.snapshot_files(guard.targets)
     _home_guard.require_armable(before)
+    witness.begin_window(nodeid)
     yield
-    after = _home_guard.snapshot_files(_real_home_guard_targets)
+    after = _home_guard.snapshot_files(guard.targets)
+    observations = witness.drain()
     violations = _home_guard.diff_files(before, after)
-    if violations:
+    attributed, unattributed = _home_guard.classify(violations, observations)
+    if attributed:
         pytest.fail(
-            _home_guard.format_violations(request.node.nodeid, violations),
+            _home_guard.format_violations(nodeid, attributed, observations),
             pytrace=False,
         )
+    if unattributed:
+        if guard.mode == "strict":
+            pytest.fail(
+                _home_guard.format_unattributed(nodeid, unattributed, guard.mode),
+                pytrace=False,
+            )
+        _UNATTRIBUTED_HOME_CHANGES.extend((nodeid, item) for item in unattributed)
+
+
+#: Header of the summary section.  Named so the wiring pins can assert on both
+#: its presence and its absence.
+HOME_GUARD_SUMMARY_HEADER = "home guard: unattributed real-settings change(s)"
+
+
+def pytest_terminal_summary(terminalreporter) -> None:
+    """Report changes to the real settings files that nobody here was seen making."""
+    if not _UNATTRIBUTED_HOME_CHANGES:
+        return
+    terminalreporter.write_sep("=", HOME_GUARD_SUMMARY_HEADER)
+    for nodeid, violation in _UNATTRIBUTED_HOME_CHANGES:
+        terminalreporter.write_line(f"  {violation} — during {nodeid}")
+    terminalreporter.write_line(
+        "  No in-process write to these paths was observed, so no test is being "
+        "blamed. Another owner of the file (an editor session) explains this; so "
+        "does a write shape the witness cannot see. "
+        f"Set {_home_guard.DISABLE_ENV}=strict to fail instead of reporting."
+    )
 
 
 # The root autouse fixtures below explicitly depend on
