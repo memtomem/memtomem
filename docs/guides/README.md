@@ -37,6 +37,8 @@ guides are organized by outcome rather than by feature name.
   and scheduled jobs.
 - **Pin and review context** — [Pinned Context](pinned-context.md) covers
   pinned-first composition, the approval queue, and LangGraph `BaseStore`.
+- **[Hybrid LangGraph Store](langgraph-hybrid-store.md)** — standalone SQLite
+  JSON storage, BM25/dense/RRF retrieval, TTL, and search diagnostics.
 
 <a id="tune"></a>
 ## Improve search quality

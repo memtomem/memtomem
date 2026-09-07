@@ -82,3 +82,19 @@ assert "MemtomemStore" in dir(integrations)
         ],
         check=True,
     )
+
+
+def test_hybrid_store_optional_dependency_and_lazy_exports():
+    _run_without_langgraph(
+        """
+import memtomem.integrations as integrations
+assert "MemtomemHybridStore" in dir(integrations)
+assert "MemtomemHybridStore" not in integrations.__all__
+try:
+    from memtomem.integrations import MemtomemHybridStore
+except ImportError as exc:
+    assert "memtomem[langgraph]" in str(exc)
+else:
+    raise AssertionError("optional dependency must be required")
+"""
+    )

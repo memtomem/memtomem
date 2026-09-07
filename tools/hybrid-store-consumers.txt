@@ -1,0 +1,6 @@
+# Isolated optional integration tests; never runtime requirements.
+langgraph==1.2.11
+langgraph-checkpoint==4.2.0
+langchain-core==1.6.2
+deepagents==0.7.13
+langmem==0.0.30

@@ -161,6 +161,7 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor
 - **Scheduled jobs** — `mm schedule add/list/run-now/delete` (or `mem_do(action="schedule_*")`) for cron-driven compaction, importance decay, dead-link cleanup, and dedup scans
 - **Pinned Context** — keep small user/project/agent Markdown blocks ahead of retrieved results with `mm pinned compose`
 - **LangGraph Store** — optional `MemtomemBaseStore` implements LangGraph's tuple-namespace long-term-memory contract
+- **[Hybrid LangGraph Store](docs/guides/langgraph-hybrid-store.md)** — `MemtomemHybridStore` adds dedicated SQLite persistence, BM25/dense/RRF retrieval, TTL, and diagnostics
 
 ---
 
