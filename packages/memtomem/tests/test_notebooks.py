@@ -24,6 +24,14 @@ EXPECTED_NOTEBOOKS = (
     "06_langgraph_retrieval_memory.ipynb",
 )
 
+# The model-free beginner labs. Named rather than sliced off EXPECTED_NOTEBOOKS
+# so that adding a 07 cannot silently retarget the checks below.
+BEGINNER_NOTEBOOKS = (
+    "05_langgraph_memory_basics.ipynb",
+    "06_langgraph_retrieval_memory.ipynb",
+)
+OPTIONAL_LLM_NOTEBOOK = "06_langgraph_retrieval_memory.ipynb"
+
 
 def _compile_cell(source: str) -> None:
     """Compile a code cell, retrying inside ``async def`` for top-level await."""
@@ -74,7 +82,7 @@ def test_notebook_code_syntax(notebook: Path) -> None:
 _IMPORT_EXCEPTIONS = frozenset({"ModuleNotFoundError", "ImportError"})
 
 
-@pytest.mark.parametrize("name", EXPECTED_NOTEBOOKS[-2:])
+@pytest.mark.parametrize("name", BEGINNER_NOTEBOOKS)
 def test_beginner_notebooks_ship_without_outputs(name: str) -> None:
     data = json.loads((NOTEBOOKS_DIR / name).read_text(encoding="utf-8"))
     assert data["metadata"]["memtomem"]["profile"] == "minimal-langgraph"
@@ -85,8 +93,9 @@ def test_beginner_notebooks_ship_without_outputs(name: str) -> None:
 
 
 def test_optional_llm_is_explicit_unsaved_preview() -> None:
-    data = json.loads((NOTEBOOKS_DIR / EXPECTED_NOTEBOOKS[-1]).read_text(encoding="utf-8"))
-    source = "".join(data["cells"][-1]["source"])
+    data = json.loads((NOTEBOOKS_DIR / OPTIONAL_LLM_NOTEBOOK).read_text(encoding="utf-8"))
+    code_cells = [cell for cell in data["cells"] if cell["cell_type"] == "code"]
+    source = "".join(code_cells[-1]["source"])
     tree = ast.parse(source)
     opt_in = next(
         node
@@ -167,7 +176,7 @@ def test_notebook_starts_with_embedding_backend_preflight(notebook: Path) -> Non
     first_code = next((cell for cell in data["cells"] if cell["cell_type"] == "code"), None)
     assert first_code is not None, f"{notebook.name} has no code cell"
     source = "".join(first_code["source"])
-    if notebook.name.startswith(("05_", "06_")):
+    if notebook.name in BEGINNER_NOTEBOOKS:
         modules = _preflight_modules(source, "memtomem[langgraph]")
         assert {"langgraph", "memtomem"} <= modules
         assert data["metadata"]["memtomem"]["profile"] == "minimal-langgraph"

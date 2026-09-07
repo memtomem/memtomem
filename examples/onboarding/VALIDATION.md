@@ -55,3 +55,33 @@ LLM documentation. The seven Core asset SHA-256 checks passed in local mode.
 Publish reviewed Core assets before the website. The website's main deployment
 checks the exact published bytes before uploading an artifact; a local-only
 asset check does not satisfy that gate. See its `ONBOARDING-RELEASE.md`.
+
+## Review follow-up — 2026-09-07
+
+Applied after review of commit `4684876d` (the evidence above was gathered on
+the pre-commit working tree `64ad7eb2`; the shipped tree is `4684876d`).
+
+- `retry-policy/README.md` step 5 now passes `--format context`. The default
+  table output truncates chunk content to 60 characters (`--format json` and
+  `plain` truncate to 200), and `AUTH_CALLBACK_V2_ENABLED` sits at byte 252 of
+  the ADR, so the step's stated expected evidence was not visible in any of
+  them. Confirmed by running both forms against an isolated store.
+- `tools/check_beginner_notebooks.py` blocks `connect`, `connect_ex`, `sendto`
+  and `create_connection`, and reports that exact list as `network_blocked`
+  instead of claiming `"network": "blocked"`. The guard still does not cover a
+  reference bound before the guard cell or the lower-level `_socket` module.
+- Both notebooks' `isolated_lab()` now keeps proxy and CA-bundle variables
+  (`HTTP(S)_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+  `REQUESTS_CA_BUNDLE`). Without them the optional LLM cell — the one path that
+  makes a network call — could fail opaquely behind a proxy or corporate CA.
+  That path was not executed here; only its `SKIP LLM` default was.
+- `test_notebooks.py` names `BEGINNER_NOTEBOOKS` / `OPTIONAL_LLM_NOTEBOOK`
+  instead of slicing `EXPECTED_NOTEBOOKS[-2:]` and `[-1]`, so adding a 07
+  notebook cannot silently retarget the beginner-only assertions.
+
+Re-run on the patched tree: both notebooks executed in fresh kernels with six
+PASS checks each and `SKIP LLM`; `demo.py` printed its four PASS markers;
+`unittest discover` passed; `pytest test_notebooks.py` reported 22 passed; ruff
+check and format check passed. The website's asset manifest was re-synced to
+the changed bytes, and its suite is now 21 tests (was 18) with the build's link
+check passing over 57 HTML files.

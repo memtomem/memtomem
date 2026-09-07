@@ -1,7 +1,8 @@
 """Execute the two no-model notebooks in fresh kernels without modifying them.
 
 Run with the minimal environment's Python. Outputs stay in memory. No model
-or API SDK is required. Network attempts from notebook Python are rejected.
+or API SDK is required. The socket APIs listed in ``_BLOCKED_SOCKET_APIS``
+are rejected inside the kernel; that is the guard's exact reach.
 """
 
 from __future__ import annotations
@@ -18,6 +19,15 @@ from nbclient import NotebookClient
 
 ROOT = Path(__file__).resolve().parents[1]
 NAMES = ("05_langgraph_memory_basics.ipynb", "06_langgraph_retrieval_memory.ipynb")
+# The outbound calls a notebook could make. This is the guard's exact reach:
+# it does not cover a reference bound before the guard cell ran, nor the
+# lower-level ``_socket`` module.
+_BLOCKED_SOCKET_APIS = (
+    "socket.socket.connect",
+    "socket.socket.connect_ex",
+    "socket.socket.sendto",
+    "socket.create_connection",
+)
 
 
 def execute_notebook(name: str) -> dict:
@@ -26,8 +36,7 @@ def execute_notebook(name: str) -> dict:
         "import socket\n"
         "def _deny_network(*args, **kwargs):\n"
         "    raise RuntimeError('Offline notebook attempted network access')\n"
-        "socket.socket.connect = _deny_network\n"
-        "socket.create_connection = _deny_network\n"
+        + "".join(f"{target} = _deny_network\n" for target in _BLOCKED_SOCKET_APIS)
     )
     notebook.cells.insert(0, guard)
     with tempfile.TemporaryDirectory(prefix="memtomem-nb-check-") as temporary:
@@ -65,7 +74,12 @@ def execute_notebook(name: str) -> dict:
     assert text.count("PASS ") == 6, text
     if name.startswith("06"):
         assert "SKIP LLM" in text, text
-    return {"notebook": name, "checks": 6, "status": "PASS", "network": "blocked"}
+    return {
+        "notebook": name,
+        "checks": 6,
+        "status": "PASS",
+        "network_blocked": list(_BLOCKED_SOCKET_APIS),
+    }
 
 
 def main() -> None:

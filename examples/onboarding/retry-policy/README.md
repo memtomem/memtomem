@@ -65,7 +65,7 @@ $memtomem-search 스킬로 "Retry policy"를 찾고 원본 경로를 보여줘.
 
 ```bash
 mm index docs/auth-callback-adr.md
-mm search "legacy callback"
+mm search "legacy callback" --format context
 ```
 
 그다음 코딩 에이전트에 요청합니다.
