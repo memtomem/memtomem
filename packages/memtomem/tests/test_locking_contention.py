@@ -53,12 +53,56 @@ def _hold_atomic_lock(lock_path_str: str, hold_seconds: float, q) -> None:
         q.put(("released", time.monotonic()))
 
 
+def _probe_lock_free(lock_path: Path) -> bool:
+    """Whether *lock_path* is unheld at this instant, via a separate fd.
+
+    ``portalocker`` locks attach per open file description (POSIX) / per
+    open handle (Windows), so a second descriptor on the same sidecar
+    contends with a holder exactly as another process would — which is what
+    lets this answer "free" or "held" without reading a clock. The probe
+    releases immediately, so the ``_file_lock`` acquire that follows it is
+    still the one under test.
+
+    Contention is the only answer that may be reported as ``False``: a
+    lock-call I/O failure (``EIO``, ``ENOLCK``, a non-lock-violation Win32
+    error) is re-raised, because reporting it as "held" would invent a
+    holder and quietly pass a pin whose whole job is to say who was there.
+    """
+    import portalocker
+
+    from memtomem._lock_errors import LOCK_CALL_ERRORS_WIDE, is_lock_contention
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # Same open shape as ``_file_lock`` — O_CREAT so probing a never-yet-used
+    # sidecar is not itself the thing that fails.
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fp = os.fdopen(fd, "rb+")
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        try:
+            portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+        except LOCK_CALL_ERRORS_WIDE as exc:
+            if not is_lock_contention(exc):
+                raise
+            return False
+        portalocker.unlock(fp)
+        return True
+    finally:
+        fp.close()
+
+
 def _take_atomic_lock(lock_path_str: str, q) -> None:
-    """Try to take ``_file_lock``; record request and acquire timestamps."""
+    """Try to take ``_file_lock``; record the request (with what the lock's
+    state was at that moment) and the acquire."""
     from memtomem.context._atomic import _file_lock
 
-    q.put(("requested", time.monotonic()))
-    with _file_lock(Path(lock_path_str)):
+    lock_path = Path(lock_path_str)
+    requested = time.monotonic()
+    q.put(("requested", requested, _probe_lock_free(lock_path)))
+    with _file_lock(lock_path):
         q.put(("acquired", time.monotonic()))
 
 
@@ -116,7 +160,7 @@ class TestAtomicLockContention:
 
         p2 = _CTX.Process(target=_take_atomic_lock, args=(str(lock_path), q2))
         p2.start()
-        msg, p2_requested = q2.get(timeout=10)
+        msg, p2_requested, p2_saw_free = q2.get(timeout=10)
         assert msg == "requested"
 
         msg, p1_released = q1.get(timeout=10)
@@ -129,6 +173,13 @@ class TestAtomicLockContention:
         assert p1.exitcode == 0
         assert p2.exitcode == 0
 
+        # State pin: p2 actually met a holder. Without this the ordering
+        # below is consistent with a lock that never excluded anything and
+        # merely happened to be asked for late (#2351).
+        assert p2_saw_free is False, (
+            "p2 found the sidecar free while p1 was inside its hold window — "
+            "the lock excluded nobody, so the ordering below proves nothing"
+        )
         # Phase-ordering pin (jitter-immune): p2 made its request while p1
         # still held the lock, and only acquired once p1 had released. The
         # earlier ``(p2_acquired - p2_requested) >= hold_seconds * 0.5``
@@ -146,19 +197,36 @@ class TestAtomicLockContention:
             f"p2 acquired {p2_acquired} before p1 released {p1_released}"
         )
 
-    def test_uncontended_acquire_is_immediate(self, tmp_path: Path):
-        """Negative pin: with no holder, _file_lock acquires without
-        meaningful blocking — pairs with the contention pin to prove
-        the assertion above is symmetric (lock works AND lock blocks)."""
+    def test_uncontended_acquire_meets_no_holder(self, tmp_path: Path):
+        """Negative twin of the pin above: with nobody holding, the taker
+        finds the sidecar free and its acquire completes — so the ordering
+        the contention test observes is caused by the holder, not by
+        ``_file_lock`` making every caller wait.
+
+        This used to read ``(acquired - requested) < 1.0``, an absolute
+        wall-clock ceiling on an operation whose duration is dominated by
+        the runner: it failed at 1.578s on a Windows shard 23 minutes into
+        a JS-lockfile-only dependabot run, where the stall — not the lock —
+        was what the number saw (#2351). Same lesson as #821 one method
+        above, which is where that flake's twin already lived.
+
+        The claim is now stateful rather than timed, and the "does it wait
+        even when free" half moved to an axis a stall cannot move at all:
+        ``TestFileLockTimeout`` in ``test_context_atomic.py`` counts the
+        acquire's attempts and its trips through the backoff sleep. The
+        queue and join timeouts below remain the bound on a hang.
+        """
         lock_path = tmp_path / ".guard.lock"
         q = _CTX.Queue()
         p = _CTX.Process(target=_take_atomic_lock, args=(str(lock_path), q))
         p.start()
-        msg, requested = q.get(timeout=10)
-        msg, acquired = q.get(timeout=10)
+        msg, _requested, saw_free = q.get(timeout=10)
+        assert msg == "requested"
+        assert saw_free is True, "nobody holds this sidecar, yet the probe found it held"
+        msg, _acquired = q.get(timeout=10)
+        assert msg == "acquired"
         p.join(timeout=5)
         assert p.exitcode == 0
-        assert (acquired - requested) < 1.0
 
 
 # ----------------------------------------------------- _Lock (debounce)

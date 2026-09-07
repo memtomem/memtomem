@@ -170,35 +170,95 @@ def test_crash_with_no_preexisting_target_cleans_tempfile(
     assert _list_tmp_siblings(target) == []
 
 
+class _LockWaitRecorder:
+    """Counts what an acquisition *did* — lock attempts, and trips through
+    the backoff sleep — without changing what any of them do.
+
+    Both wrappers delegate to the real call. A no-op stub would remove the
+    layer these tests exist to exercise and leave them green on nothing.
+    """
+
+    def __init__(self, real_lock, real_time) -> None:
+        self._real_lock = real_lock
+        self._real_time = real_time
+        self.attempts = 0
+        self.sleeps = 0
+
+    def lock(self, *args, **kwargs):
+        self.attempts += 1
+        return self._real_lock(*args, **kwargs)
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps += 1
+        self._real_time.sleep(seconds)
+
+    def __getattr__(self, name: str):
+        # Stands in for the ``time`` module inside ``_atomic`` — ``monotonic``
+        # and friends must keep working, so everything but ``sleep`` passes
+        # straight through. Scoped to that module rather than patching
+        # ``time.sleep`` globally, where another thread's sleep would land in
+        # the count.
+        return getattr(self._real_time, name)
+
+    def reset(self) -> None:
+        self.attempts = 0
+        self.sleeps = 0
+
+
 class TestFileLockTimeout:
     """``_file_lock(timeout=...)`` bounds acquisition instead of blocking
     forever (#1145 review) — needed where the lock is taken from a context that
-    must not hang (an async handler's worker thread)."""
+    must not hang (an async handler's worker thread).
 
-    def test_acquires_immediately_when_free(self, tmp_path: Path) -> None:
+    Whether an acquire *waited* is pinned by counting what it did — lock
+    attempts and trips through the backoff sleep — not by timing it. The
+    bounded branch polls with ``LOCK_NB`` and only sleeps after an attempt
+    fails, so ``(1, 0)`` and ``(>=2, >=1)`` are exact statements of "granted
+    at once" and "polled to the deadline", and the sleep count also catches a
+    wait that is not a poll at all. Unlike a wall-clock reading, none of it
+    can be moved by a loaded CI runner (#2351).
+    """
+
+    @pytest.fixture()
+    def acquire(self, monkeypatch: pytest.MonkeyPatch) -> _LockWaitRecorder:
+        recorder = _LockWaitRecorder(portalocker.lock, _atomic_mod.time)
+        monkeypatch.setattr(_atomic_mod.portalocker, "lock", recorder.lock)
+        monkeypatch.setattr(_atomic_mod, "time", recorder)
+        return recorder
+
+    def test_acquires_immediately_when_free(
+        self, tmp_path: Path, acquire: _LockWaitRecorder
+    ) -> None:
         lock = _lock_path_for(tmp_path / "data.json")
         # A free lock with a timeout acquires without raising.
         with _file_lock(lock, timeout=5.0):
             pass
+        assert acquire.attempts == 1, "a free lock was not granted on the first poll"
+        assert acquire.sleeps == 0, "a free lock was waited on"
         # And again, proving it released cleanly.
+        acquire.reset()
         with _file_lock(lock, timeout=5.0):
             pass
+        assert (acquire.attempts, acquire.sleeps) == (1, 0)
 
-    def test_timeout_raises_when_held(self, tmp_path: Path) -> None:
+    def test_timeout_raises_when_held(self, tmp_path: Path, acquire: _LockWaitRecorder) -> None:
         # portalocker locks are per-open-file-description, so a second
         # acquisition (separate fd) in the SAME process contends — mirroring the
         # cross-process case the bound protects. Holding the lock and then
         # requesting it with a short timeout must raise TimeoutError, not hang.
         lock = _lock_path_for(tmp_path / "data.json")
         with _file_lock(lock):
-            start = time.monotonic()
+            acquire.reset()  # drop the holder's own acquire
             with pytest.raises(TimeoutError):
                 with _file_lock(lock, timeout=0.2):
                     pass
-            elapsed = time.monotonic() - start
         # It actually polled to the deadline (not an instant grant) and the
-        # bound fired (not an indefinite block).
-        assert 0.1 <= elapsed < 5.0
+        # bound fired (not an indefinite block). The poll half used to be
+        # ``0.1 <= elapsed < 5.0``; the ceiling there was the same
+        # load-sensitive shape #2351 removed from the contention suite, and
+        # the floor is what the attempt count now says exactly.
+        assert acquire.attempts >= 2, "the bound fired without ever polling"
+        assert acquire.sleeps >= 1, "the poll loop never backed off"
 
     def test_default_is_still_blocking(self, tmp_path: Path) -> None:
         # No timeout → unchanged behavior: a free lock acquires (the indefinite
