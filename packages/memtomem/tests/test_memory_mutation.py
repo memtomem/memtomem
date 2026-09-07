@@ -16,7 +16,11 @@ import click
 import pytest
 
 from memtomem.context import _atomic
-from memtomem.context._atomic import _lock_path_for, async_file_lock
+from memtomem.context._atomic import (
+    _lock_path_for,
+    async_file_lock,
+    async_memory_file_lock,
+)
 from memtomem.models import IndexingStats
 from memtomem.tools.memory_mutation import locked_source_chunk, mutate_source_and_reindex
 
@@ -39,7 +43,11 @@ def _stats() -> IndexingStats:
 async def test_locked_source_chunk_not_found():
     storage = AsyncMock()
     storage.get_chunk = AsyncMock(return_value=None)
-    async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (chunk, reason):
+    async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+        chunk,
+        reason,
+        _held,
+    ):
         assert chunk is None
         assert reason == "not_found"
 
@@ -60,6 +68,7 @@ async def test_locked_source_chunk_times_out(tmp_path, monkeypatch):
         async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
             fresh,
             reason,
+            _held,
         ):
             assert fresh is None
             assert reason == "locked"
@@ -82,9 +91,153 @@ async def test_locked_source_chunk_propagates_body_timeout(tmp_path):
         async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
             fresh,
             reason,
+            _held,
         ):
             assert reason is None
             raise TimeoutError("from body")
+
+
+@pytest.mark.asyncio
+async def test_locked_source_chunk_does_not_resurrect_a_removed_parent(tmp_path):
+    """#2346: a chunk outlives its source directory, and locking a delete must
+    not bring that directory back.
+
+    This is the surface with no L1 above it, so the in-process guard the span
+    degrades to is its only serializer — asserted next door in
+    ``test_locked_source_chunk_serializes_a_degraded_span``. Here the point is
+    the footprint: the helper yields the chunk as it always did, and leaves
+    nothing on disk.
+    """
+    from memtomem.models import Chunk, ChunkMetadata
+
+    src = tmp_path / "gone" / "orphan.md"
+    chunk = Chunk(content="body", metadata=ChunkMetadata(source_file=src, start_line=1, end_line=3))
+    storage = AsyncMock()
+    storage.get_chunk = AsyncMock(return_value=chunk)
+
+    async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+        fresh,
+        reason,
+        _held,
+    ):
+        # The contract is unchanged: no fourth "source_gone" reason, because
+        # every caller's next step already handles an absent source itself.
+        assert reason is None
+        assert fresh is chunk
+
+    assert not (tmp_path / "gone").exists()
+    assert not any(tmp_path.iterdir()), f"stray artifacts: {list(tmp_path.iterdir())}"
+
+
+@pytest.mark.asyncio
+async def test_locked_source_chunk_serializes_a_degraded_span(tmp_path, monkeypatch):
+    """The degraded span still reports ``"locked"`` under contention.
+
+    Two things at once, and both are needed. That a second caller is excluded
+    at all — otherwise the span on a vanished source is a lock in name only.
+    And that the exclusion surfaces through the SAME ``except TimeoutError``
+    arm as a held sidecar, so the web routes keep answering 503 instead of
+    letting a bare ``TimeoutError`` escape as a 500.
+    """
+    from memtomem.models import Chunk, ChunkMetadata
+
+    src = tmp_path / "gone" / "orphan.md"
+    chunk = Chunk(content="body", metadata=ChunkMetadata(source_file=src, start_line=1, end_line=3))
+    storage = AsyncMock()
+    storage.get_chunk = AsyncMock(return_value=chunk)
+    monkeypatch.setattr(_atomic, "_CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
+
+    async with async_memory_file_lock(src, timeout=5.0):
+        async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+            fresh,
+            reason,
+            _held,
+        ):
+            assert fresh is None
+            assert reason == "locked"
+
+    assert not (tmp_path / "gone").exists()
+
+
+@pytest.mark.asyncio
+async def test_locked_source_chunk_reports_that_it_holds_no_cross_process_lock(tmp_path):
+    """The third element is the whole basis of #2346's byte-write rule.
+
+    The helper does not police the rule itself: a delete of index rows under a
+    degraded span is fine, an edit of the file is not, and only the surface
+    knows which it is doing. What the helper owes them is an honest answer
+    about the lock it actually took — asserted on both branches, so a helper
+    that hard-coded either value could not pass.
+    """
+    from memtomem.models import Chunk, ChunkMetadata
+
+    gone = tmp_path / "gone" / "orphan.md"
+    chunk = Chunk(
+        content="body", metadata=ChunkMetadata(source_file=gone, start_line=1, end_line=3)
+    )
+    storage = AsyncMock()
+    storage.get_chunk = AsyncMock(return_value=chunk)
+
+    async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+        fresh,
+        reason,
+        cross_process_held,
+    ):
+        assert reason is None
+        assert fresh is chunk
+        assert cross_process_held is False
+
+    live = tmp_path / "live" / "n.md"
+    live.parent.mkdir()
+    live.write_text("## H\n\nbody\n", encoding="utf-8")
+    chunk = Chunk(
+        content="body", metadata=ChunkMetadata(source_file=live, start_line=1, end_line=3)
+    )
+    storage.get_chunk = AsyncMock(return_value=chunk)
+
+    async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+        fresh,
+        reason,
+        cross_process_held,
+    ):
+        assert reason is None
+        assert cross_process_held is True
+
+
+@pytest.mark.asyncio
+async def test_locked_source_chunk_reports_no_lock_on_every_refusal(tmp_path, monkeypatch):
+    """A refusal must not read as "you hold the flock".
+
+    ``locked`` yields no chunk, so nothing acts on the bit today — but the
+    default a caller would destructure is the dangerous one, and the next
+    surface to consult it should not have to check which reasons are safe.
+    """
+    from memtomem.models import Chunk, ChunkMetadata
+
+    storage = AsyncMock()
+    storage.get_chunk = AsyncMock(return_value=None)
+    async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+        _chunk,
+        reason,
+        cross_process_held,
+    ):
+        assert reason == "not_found"
+        assert cross_process_held is False
+
+    src = tmp_path / "n.md"
+    src.write_text("## H\n\nbody\n", encoding="utf-8")
+    chunk = Chunk(content="body", metadata=ChunkMetadata(source_file=src, start_line=1, end_line=3))
+    storage.get_chunk = AsyncMock(return_value=chunk)
+    monkeypatch.setattr(_atomic, "_CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
+
+    async with async_file_lock(_lock_path_for(src.resolve()), timeout=5.0):
+        async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+            _chunk,
+            reason,
+            cross_process_held,
+        ):
+            assert reason == "locked"
+            assert cross_process_held is False
 
 
 # ------------------------------------------------- mutate_source_and_reindex

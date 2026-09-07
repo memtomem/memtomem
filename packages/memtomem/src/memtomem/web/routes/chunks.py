@@ -23,7 +23,10 @@ from memtomem.web.deps import (
     require_indexed_source,
 )
 from memtomem.web.routes._confirm import needs_confirmation_envelope
-from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
+from memtomem.web.routes._errors import (
+    DEGRADED_SOURCE_EDIT_DETAIL,
+    NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
+)
 from memtomem.web.schemas.core import (
     ChunkOut,
     DeleteResponse,
@@ -121,6 +124,7 @@ async def edit_chunk(
     async with locked_source_chunk(storage, chunk_id, project_context_root=_boundary(config)) as (
         fresh,
         reason,
+        cross_process_held,
     ):
         if reason == "not_found":
             raise HTTPException(status_code=404, detail="Chunk not found")
@@ -132,6 +136,14 @@ async def edit_chunk(
             raise HTTPException(
                 status_code=503, detail="Memory file is locked by another writer; try again."
             )
+        if not cross_process_held:
+            # #2346: the source's directory was gone when the lock was taken,
+            # so this span holds no cross-process exclusion. An edit rewrites
+            # the file, and a directory recreated in the meantime can already
+            # hold another writer — so refuse rather than splice a file nobody
+            # locked. Decided on the lock we hold, not on whether the file is
+            # back: that second question is stale the instant it is answered.
+            raise HTTPException(status_code=409, detail=DEGRADED_SOURCE_EDIT_DETAIL)
         if fresh is None:
             raise HTTPException(status_code=409, detail="Chunk state changed; retry.")
         meta = fresh.metadata
@@ -321,6 +333,7 @@ async def delete_chunk(
     async with locked_source_chunk(storage, chunk_id, project_context_root=_boundary(config)) as (
         fresh,
         reason,
+        cross_process_held,
     ):
         if reason == "not_found":
             raise HTTPException(status_code=404, detail="Chunk not found")
@@ -397,34 +410,46 @@ async def delete_chunk(
                 audit_context={"chunk_id": str(chunk_id)},
             )
 
-        # Only a source that is genuinely absent permits an index-only delete.
-        # ``Path.exists`` collapses permission errors, ELOOP, and other failures
-        # into absence on supported Python versions; that would recreate the
-        # false-success shape fixed here (#2016).  Mirror the fail-closed stat
-        # policy used by the namespace-mix guard (#2017).
-        try:
-            source_stat = source.stat()
-        except (FileNotFoundError, NotADirectoryError):
+        # #2346: a degraded span holds no cross-process lock, so it takes the
+        # index-only branch unconditionally — it must not remove lines from a
+        # file it could not lock. Not "stat, and refuse if the file is back":
+        # the file can come back between that stat and the write, so the only
+        # sound answer is to decide on the lock, which cannot change under us.
+        # Removing the rows is still right and still safe — the source's
+        # directory was gone when this delete began, and if it has returned a
+        # re-index re-adds what belongs to it.
+        if not cross_process_held:
             source_exists = False
-        except OSError as exc:
-            logger.warning("Could not inspect source for chunk %s", chunk_id, exc_info=True)
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Could not access the source file; no index entry was deleted. "
-                    "Retry once the file is accessible."
-                ),
-            ) from exc
+        # Otherwise: only a source that is genuinely absent permits an
+        # index-only delete. ``Path.exists`` collapses permission errors,
+        # ELOOP, and other failures into absence on supported Python versions;
+        # that would recreate the false-success shape fixed here (#2016).
+        # Mirror the fail-closed stat policy used by the namespace-mix guard
+        # (#2017).
         else:
-            source_exists = True
-            if not stat.S_ISREG(source_stat.st_mode):
+            try:
+                source_stat = source.stat()
+            except (FileNotFoundError, NotADirectoryError):
+                source_exists = False
+            except OSError as exc:
+                logger.warning("Could not inspect source for chunk %s", chunk_id, exc_info=True)
                 raise HTTPException(
-                    status_code=409,
+                    status_code=503,
                     detail=(
-                        "The chunk source is not a regular file; no index entry was deleted. "
-                        "Repair or reindex the source before retrying."
+                        "Could not access the source file; no index entry was deleted. "
+                        "Retry once the file is accessible."
                     ),
-                )
+                ) from exc
+            else:
+                source_exists = True
+                if not stat.S_ISREG(source_stat.st_mode):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "The chunk source is not a regular file; no index entry was "
+                            "deleted. Repair or reindex the source before retrying."
+                        ),
+                    )
 
         # Remove lines from the original source file, then re-index. No file
         # rollback here (unlike edit): the intent is deletion, so on a reindex

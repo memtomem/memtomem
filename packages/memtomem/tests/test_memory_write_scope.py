@@ -164,6 +164,12 @@ async def test_mem_edit_inferred_scope_blocks_project_shared_force_unsafe(
     # rewrite the path through tilde-expansion downstream
     # (``feedback_windows_tmp_path_under_userprofile.md``).
     proj = tmp_path / "proj_x"
+    # The directory has to exist: since #2346 a span whose source directory is
+    # gone holds no cross-process lock and refuses to rewrite the file, so
+    # ``mem_edit`` would answer that instead of the Gate-A refusal this test
+    # measures. Before #2346 the lock acquire created this tree itself — which
+    # was the bug — so the fixture had been leaning on it.
+    (proj / ".memtomem" / "memories").mkdir(parents=True)
     chunk_id = uuid4()
     fake_chunk = Chunk(
         content="original",

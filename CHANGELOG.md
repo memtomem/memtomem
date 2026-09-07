@@ -140,6 +140,75 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Deleting a memory's index rows no longer recreates the directory you
+  removed** (#2346) — every memory-CRUD span took the source file's sidecar
+  lock unconditionally, and acquiring that lock creates its parent. So a chunk
+  whose source directory you had deleted could not be removed from the index
+  without `mkdir`-ing that directory back into existence and leaving a
+  `.note.md.lock` inside it. The rows and the file were already gone; what was
+  wrong is that a *delete* wrote to the filesystem on a path you removed. The
+  second half of the same bug is quieter: on a directory that is simply not
+  there — an unmounted store, say — the acquire raised before any of the delete
+  work ran, failing an index-only delete that needed no file at all. A parent
+  that exists but is *unwritable* still fails, deliberately: that is a
+  permissions error rather than a removed directory, and it should be loud.
+
+  The rule is not new — the lock-order invariant has said since #1566 that a
+  memory-file span whose parent is gone must skip the sidecar rather than
+  resurrect it, and the indexer and the namespace-mutation service both honour
+  it. Three spans never did: `mem_delete`'s `source_file=` branch, the MCP
+  `_locked_chunk` behind `mem_edit` / `mem_delete(chunk_id=…)`, and
+  `tools.memory_mutation.locked_source_chunk` behind the web
+  `PATCH` / `DELETE /api/chunks/{id}`. The web delete is the clearest case: the
+  route already had a supported answer for a vanished source — an index-only
+  delete — but that branch sits *inside* the lock, so it was reached only after
+  the directory had come back.
+
+  All three now take `async_memory_file_lock`, one shared entry point that
+  hands back the full sidecar when the file's directory is there and holds only
+  L2's own in-process layer when it is not. That layer is the same per-path
+  lock object the full acquire takes first, so a degraded span and a full one
+  still exclude each other in both directions; what is given up is
+  cross-process exclusion over a file that no longer exists. **The decision is
+  made by errno, not by a probe**: checking `parent.is_dir()` first would leave
+  a window in which the directory is removed after the check and recreated by
+  the acquire's own `mkdir` — the same bug at a lower rate — so the sidecar is
+  opened without creating parents and `ENOENT`/`ENOTDIR` from that open *is*
+  the answer. Absence still has to be confirmed rather than assumed, because
+  that errno can also mean the sidecar's own path is a dangling symlink over a
+  perfectly live file; when the directory turns out to be there, the acquire
+  fails rather than running unlocked. The helper also builds the sidecar key
+  from the data path it is handed, so the #2130 "one physical file, one
+  sidecar" rule cannot be got wrong at a call site, and the AST lock guard
+  gained the matching rule: a caller must pass the data path, never a key.
+
+  **A span that gets the degraded lock does not write bytes.** It cannot
+  exclude another process, and a directory recreated after it degraded can
+  already hold a writer — so an edit would splice a file nothing locked, on
+  line numbers taken from before that file existed. Asking "did the file come
+  back?" is not a defence: the answer is stale the moment it is read. Whether
+  the flock was taken is not, so that is what the rule is stated on. In
+  practice: editing a chunk whose source directory has been removed now
+  refuses with a message naming that state — a 409 on the web route, where an
+  unhandled `FileNotFoundError` used to produce a 500 — and deleting one
+  removes its index rows without touching the source. Removing rows stays
+  allowed throughout; the worst case there is a re-index re-adding them.
+
+  `locked_source_chunk`'s reasons are unchanged — still
+  `not_found` / `moved` / `locked`, with no fourth "the source is gone" value.
+  What it gained is a third yielded element saying which lock the span holds,
+  because only the surface knows whether it is about to remove rows or rewrite
+  a file, and the rule above distinguishes exactly those.
+
+  Two limits, stated rather than implied. The degraded guard is per event loop,
+  so it serializes the one loop a server runs and not two loops in one process.
+  And a re-index that read the file *before* the directory was removed can
+  still commit its rows after a delete reports success — the removal unlinks
+  the sidecar, and the pre-#2346 code created a fresh one at the same path
+  rather than re-attaching to that inode, so the two never excluded each other
+  there either; orphan compaction remains the backstop. Neither is narrowed by
+  this change.
+
 - **The browser offers a privacy-scan bypass that became available while you
   were reading the warning** (#2332) — a note can move between storage tiers
   while a save is in progress: a re-index re-derives the tier from the file's

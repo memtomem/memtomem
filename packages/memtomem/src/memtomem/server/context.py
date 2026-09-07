@@ -238,10 +238,18 @@ class AppContext:
     # MCP server process/event loop. Cross-process races (a second MCP server,
     # the CLI, ``mm web``) and CRUD-vs-``memory-migrate`` are closed by L2 — the
     # per-file cross-process sidecar, held across the whole span via
-    # ``async_file_lock`` and passed down to ``index_file(lock_held=True)`` so
-    # the nested engine acquire is skipped instead of self-deadlocking (#1587).
-    # The CRUD tools acquire L1 then L2; this L1 lock is still needed on its own
-    # for the DB-only bulk ``mem_delete`` namespace branch (no sidecar there).
+    # ``async_memory_file_lock`` and passed down to ``index_file(lock_held=True)``
+    # so the nested engine acquire is skipped instead of self-deadlocking
+    # (#1587). The CRUD tools acquire L1 then L2; this L1 lock is still needed
+    # on its own for the DB-only bulk ``mem_delete`` namespace branch (no
+    # sidecar there).
+    #
+    # One case where L2 does NOT close the cross-process race, and L1 is all
+    # there is: a span on a source whose directory has been removed takes no
+    # sidecar at all, because creating one would recreate that directory
+    # (#2346). Those spans refuse rather than proceed if the directory returns,
+    # so what L1 covers there is a delete of rows for a file that is gone —
+    # nothing another process can be writing.
     #
     # A plain ``dict`` (not the ``web/routes/_locks.py`` per-loop proxy) is
     # correct because an ``AppContext`` never outlives one event loop —
@@ -392,10 +400,14 @@ class AppContext:
 
         This is L1 in the memory-file lock order (``context._atomic``). L2 —
         the cross-process sidecar — is acquired *inside* this lock via
-        ``async_file_lock`` (never the blocking ``_file_lock`` on the loop) and
-        passed to ``index_file(lock_held=True)`` so the engine's own sidecar
-        acquire is skipped rather than self-deadlocking (#1587). Acquire order
-        is always L1 → L2 → L3 (``_index_lock``); never the reverse.
+        ``async_memory_file_lock`` (never the blocking ``_file_lock`` on the
+        loop) and passed to ``index_file(lock_held=True)`` so the engine's own
+        sidecar acquire is skipped rather than self-deadlocking (#1587).
+        Acquire order is always L1 → L2 → L3 (``_index_lock``); never the
+        reverse. When the source's directory is gone, that L2 acquire holds
+        only its in-process layer rather than creating the directory to lock a
+        delete (#2346) — the order is unchanged, the cross-process half is
+        not taken, and the span refuses if the directory comes back.
         """
         key = path if isinstance(path, str) else self.memory_file_lock_key(path)
         lock = self._memory_file_locks.get(key)
