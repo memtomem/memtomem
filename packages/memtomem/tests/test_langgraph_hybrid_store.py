@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sqlite3
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -395,7 +396,14 @@ def test_selected_fields_and_index_false_replace_vectors(tmp_path):
         assert not store.search((), query="apple")
         with sqlite3.connect(store.path) as db:
             assert db.execute("SELECT count(*) FROM vectors").fetchone()[0] == 0
-        assert store.path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file mode (stat.S_IMODE) — Windows ignores POSIX permission bits",
+)
+def test_database_file_is_owner_only(store):
+    assert store.path.stat().st_mode & 0o777 == 0o600
 
 
 def test_periodic_sweeper_and_idempotent_close(tmp_path):
@@ -412,6 +420,35 @@ def test_periodic_sweeper_and_idempotent_close(tmp_path):
         else:
             pytest.fail("Configured sweeper did not remove expired record")
     store.close()
+
+
+def test_sweeper_survives_a_failed_sweep(tmp_path, caplog):
+    """One failing tick logs and keeps sweeping; close() does not re-raise it."""
+    with MemtomemHybridStore(tmp_path / "s.db", ttl={"sweep_interval_minutes": 0.0001}) as store:
+        database = store._database
+        original = database.sweep
+        failures = threading.Event()
+
+        def sweep_once_failing():
+            if not failures.is_set():
+                failures.set()
+                raise sqlite3.OperationalError("database is locked")
+            return original()
+
+        database.sweep = sweep_once_failing
+        assert failures.wait(2), "sweeper never ticked"
+        store.put(("a",), "x", {}, ttl=1)
+        with sqlite3.connect(store.path) as db:
+            db.execute("UPDATE items SET expires_at=0")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with sqlite3.connect(store.path) as db:
+                if db.execute("SELECT count(*) FROM items").fetchone()[0] == 0:
+                    break
+            time.sleep(0.01)
+        else:
+            pytest.fail("Sweeper stopped after a failed sweep")
+    assert any("TTL sweep failed" in record.message for record in caplog.records)
 
 
 def test_async_import_and_embedder(tmp_path):

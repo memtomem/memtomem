@@ -194,18 +194,6 @@ include 1%-selective filters, ingestion time, database size, and maximum latency
 These vectors have 32 synthetic dimensions; real model dimensions and embedding
 latency can substantially increase cost.
 
-Implementation validation on the same date:
-
-- Final affected regression suite: **259 passed, 2 skipped**.
-- Isolated pinned consumer environment, including Store contract tests:
-  **45 passed** (overlaps the regression suite).
-- Full repository run: **14,245 passed, 325 skipped, 46 deselected**, with one
-  architecture-inventory failure. The new scope-validation access was then
-  registered with its ownership rationale and verified in the final regression
-  suite. The full suite was not repeated after that correction.
-- Full `src`/`tests`/`tools` Ruff lint and formatting passed; mypy reported no
-  issues in 356 source files.
-
 This release supplies persistent hybrid retrieval and observable fallback behavior.
 Snapshots/forks, revision history, query replay, reranking, Core corpus bridging,
 and comparative retrieval evaluations remain future work.

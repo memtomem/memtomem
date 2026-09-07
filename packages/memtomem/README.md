@@ -63,7 +63,7 @@ open a new shell. If an install appears stale, re-run it with `--refresh`.
 - **🛠️ 9-tool core mode** — a compact default surface, with `mem_do` routing the full feature set without loading every tool into agent context
 - **📌 Pinned Context** — small file-backed user/project/agent blocks are composed before retrieved memory
 - **🕸️ LangGraph Store** — optional `MemtomemBaseStore` supplies tuple-namespace JSON persistence and search
-- **Hybrid Store** — `MemtomemHybridStore` adds explicit-path SQLite persistence, BM25/dense/RRF retrieval, TTL, and diagnostics; see the [guide](../../docs/guides/langgraph-hybrid-store.md)
+- **Hybrid Store** — `MemtomemHybridStore` adds explicit-path SQLite persistence, BM25/dense/RRF retrieval, TTL, and diagnostics; see the [guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/langgraph-hybrid-store.md)
 
 The full surface contains **100 tools**. It includes the Pinned Context actions
 (`mem_pinned_list/get/set/delete`, `mem_context_compose`) and review-first

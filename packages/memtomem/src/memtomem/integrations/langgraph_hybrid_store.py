@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import struct
 import threading
@@ -36,6 +37,8 @@ from memtomem import privacy
 from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
 from memtomem.integrations.langgraph import _resolve_target_scope
 from memtomem.storage.hybrid_store import HybridDatabase, encode, validate_filter
+
+logger = logging.getLogger(__name__)
 
 
 def _positive(value: Any, name: str) -> None:
@@ -159,9 +162,20 @@ class MemtomemHybridStore(BaseStore):
             self._sweeper = asyncio.create_task(self._sweep_loop())
 
     async def _sweep_loop(self):
+        # A sweep that fails (a busy-timeout against another writer, say) must
+        # not end periodic cleanup for the life of the store, and its error
+        # must not surface later out of close(). Log it and try again on the
+        # next tick; sweep_ttl() still reports the same error synchronously.
         while True:
             await asyncio.sleep(self.ttl_config["sweep_interval_minutes"] * 60)
-            self._database.sweep()
+            try:
+                self._database.sweep()
+            except Exception:
+                logger.warning(
+                    "TTL sweep failed for %s; retrying on the next interval",
+                    self.path,
+                    exc_info=True,
+                )
 
     def _submit(self, function, *args):
         if threading.current_thread() is self._thread:
@@ -476,10 +490,9 @@ class MemtomemHybridStore(BaseStore):
         try:
             if self._sweeper is not None:
                 self._sweeper.cancel()
-                try:
-                    await self._sweeper
-                except asyncio.CancelledError:
-                    pass
+                # return_exceptions keeps a sweeper that died for any reason
+                # from re-raising its stale error out of close().
+                await asyncio.gather(self._sweeper, return_exceptions=True)
         finally:
             self._database.close()
 
