@@ -697,6 +697,78 @@ report("CLOSED", "yes")
     assert "CLOSED=yes\n" in output
 
 
+def test_reentrant_query_embedder_falls_back_to_bm25(tmp_path):
+    """The refusal surfaces where the callback made it, not at the outer search.
+
+    A hybrid search treats the reentry error like any other embedding failure,
+    so the caller gets BM25 results and a warning rather than the RuntimeError.
+    The guide says so; this is what says it is true.
+    """
+    output = _run_reentrancy_scenario(
+        """
+import warnings
+
+reentering = {"now": False}
+
+def embed(texts):
+    if reentering["now"]:
+        store.get(("a",), "x")
+    return vectors(texts)
+
+store = MemtomemHybridStore(sys.argv[1], index={"embed": embed, "dims": 2}, index_id="reentrant")
+store.put(("a",), "x", {"text": "apple"})
+reentering["now"] = True
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    result = store.search_with_diagnostics((), query="apple")
+report("KEYS", [item.key for item in result["items"]])
+report("FALLBACK", result["diagnostics"]["fallback_reason"])
+report("WARNED", any("BM25" in str(warning.message) for warning in caught))
+store.close()
+report("CLOSED", "yes")
+""",
+        tmp_path,
+    )
+    assert "KEYS=['x']\n" in output
+    assert "FALLBACK=query_embedding_failed\n" in output
+    assert "WARNED=True\n" in output
+    assert "CLOSED=yes\n" in output
+
+
+def test_offloaded_close_inside_a_live_callback_is_refused(tmp_path):
+    """`to_thread(close)` during the callback carries the marker to the worker.
+
+    This is the hop the guide calls undetected *after* the callback returns. It
+    is detected while the callback runs, because the context travels with it,
+    and close() is where that refusal lands.
+    """
+    output = _run_reentrancy_scenario(
+        """
+async def embed(texts):
+    try:
+        await asyncio.to_thread(store.close)
+        report("OUTCOME", "close returned")
+    except RuntimeError as exc:
+        report("OUTCOME", exc)
+    return vectors(texts)
+
+store = MemtomemHybridStore(sys.argv[1], index={"embed": embed, "dims": 2}, index_id="reentrant")
+
+async def main():
+    await store.aput(("a",), "x", {"text": "apple"})
+    report("STILL_OPEN", (await store.aget(("a",), "x")) is not None)
+    await store.aclose()
+    report("CLOSED", "yes")
+
+asyncio.run(main())
+""",
+        tmp_path,
+    )
+    assert "OUTCOME=Cannot close the store from its embedding callback\n" in output
+    assert "STILL_OPEN=True\n" in output
+    assert "CLOSED=yes\n" in output
+
+
 def test_sync_embedder_closing_raises_instead_of_hanging(tmp_path):
     """close() from a sync callback is refused, and leaves the store usable."""
     output = _run_reentrancy_scenario(
