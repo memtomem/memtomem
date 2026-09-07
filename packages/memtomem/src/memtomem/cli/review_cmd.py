@@ -209,7 +209,10 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
 
                     from memtomem.memory_scope import require_user_base
 
-                    base = require_user_base(comp.config.indexing.memory_dirs)
+                    base = require_user_base(
+                        comp.config.indexing.memory_dirs,
+                        comp.config.indexing.project_memory_dirs,
+                    )
                     target = base / f"{datetime.now(timezone.utc):%Y-%m-%d}.md"
                     write_location = str(target)
                     async with async_file_lock(

@@ -5976,7 +5976,10 @@ async def _memory_migrate_run(
         # independently of the user tier.
         try:
             if "user" in (from_scope, to_scope):
-                user_base = require_user_base(comp.config.indexing.memory_dirs)
+                user_base = require_user_base(
+                    comp.config.indexing.memory_dirs,
+                    comp.config.indexing.project_memory_dirs,
+                )
                 from_dir = resolve_memory_scope_dir(from_scope, project_root, user_base=user_base)
                 to_dir = resolve_memory_scope_dir(to_scope, project_root, user_base=user_base)
             else:

@@ -485,7 +485,16 @@ class MemtomemStore:
             from memtomem.memory_scope import day_file_name, require_user_base
 
             try:
-                base = require_user_base(comp.config.indexing.memory_dirs)
+                # ``allow_project_tier``: this adapter gates the derived
+                # destination itself (#2321 — the classify + Gate B below
+                # covers the day file as well as a caller's ``file=``), so
+                # #2322's blanket refusal would pre-empt a consented write
+                # the adapter supports rather than add protection.
+                base = require_user_base(
+                    comp.config.indexing.memory_dirs,
+                    comp.config.indexing.project_memory_dirs,
+                    allow_project_tier=True,
+                )
             except ConfigError as exc:
                 return {"error": str(exc)}
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")

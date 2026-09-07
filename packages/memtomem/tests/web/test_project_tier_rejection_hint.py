@@ -8,7 +8,7 @@ The route signals a project-tier rejection with::
                 "surface": "web_api_add",
                 "scope": "project_shared",
                 "message": "scope='project_shared' writes...",
-                "cli_hint": "mm mem add --scope project_shared",
+                "cli_hint": "mm add --scope project_shared",
                 "docs_url": "https://github.com/.../0011-...md"}}
 
 The SPA must parse this nested shape (mirroring the redaction-blocked
@@ -61,7 +61,7 @@ def test_api_add_403_blocked_project_shared_surfaces_cli_hint_and_docs(
 ) -> None:
     """``POST /api/add`` 403 with ``blocked_project_shared`` shape →
     error toast carries both the rejection prose and the literal
-    ``mm mem add --scope project_shared`` CLI hint + docs URL, so the
+    ``mm add --scope project_shared`` CLI hint + docs URL, so the
     operator can copy/paste the equivalent invocation.
 
     Fires the request through ``page.evaluate`` (the compose form
@@ -88,7 +88,7 @@ def test_api_add_403_blocked_project_shared_surfaces_cli_hint_and_docs(
                             "scope='project_shared' writes to a git-tracked "
                             "directory. Re-submit with confirm_project_shared=true."
                         ),
-                        "cli_hint": "mm mem add --scope project_shared",
+                        "cli_hint": "mm add --scope project_shared",
                         "docs_url": (
                             "https://github.com/memtomem/memtomem/blob/main/docs/adr/"
                             "0011-canonical-artifact-scope-hierarchy.md"
@@ -137,7 +137,7 @@ def test_api_add_403_blocked_project_shared_surfaces_cli_hint_and_docs(
     # + docs URL) are the contract.
     toast = page.wait_for_selector("#toast-container .toast", timeout=2_000)
     text = toast.text_content() or ""
-    assert "mm mem add --scope project_shared" in text, f"toast missing CLI hint: {text!r}"
+    assert "mm add --scope project_shared" in text, f"toast missing CLI hint: {text!r}"
     assert "0011-canonical-artifact-scope-hierarchy" in text, f"toast missing docs URL: {text!r}"
 
 
@@ -163,7 +163,7 @@ def test_api_add_403_blocked_project_shared_is_not_redaction_error(page, mm_web_
                         "surface": "web_api_add",
                         "scope": "project_shared",
                         "message": "scope='project_shared' write rejected",
-                        "cli_hint": "mm mem add --scope project_shared",
+                        "cli_hint": "mm add --scope project_shared",
                         "docs_url": "https://example.com/adr-0011",
                     }
                 }

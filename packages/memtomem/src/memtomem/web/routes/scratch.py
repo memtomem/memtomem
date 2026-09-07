@@ -109,7 +109,7 @@ async def promote_scratch(
 
         # ConfigError → the app-level 409 handler; the "index nothing"
         # state has no default promotion destination (#1768).
-        base = require_user_base(config.indexing.memory_dirs)
+        base = require_user_base(config.indexing.memory_dirs, config.indexing.project_memory_dirs)
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         target = base / f"{date_str}.md"
 
