@@ -9,7 +9,6 @@ import os
 import shutil
 import stat
 import sys
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -424,17 +423,17 @@ class TestFileLockFailureClassification:
         monkeypatch.setattr(_atomic_mod.portalocker, "lock", lock_stub)
         monkeypatch.setattr(_atomic_mod.portalocker, "unlock", unlock)
 
-        start = time.monotonic()
         with pytest.raises(OSError) as excinfo:
             with _file_lock(lock, timeout=30.0):
                 pytest.fail("body must not run when acquisition failed")
-        elapsed = time.monotonic() - start
 
         assert not isinstance(excinfo.value, TimeoutError)
         assert excinfo.value.errno == errno.EIO
         assert excinfo.value.filename == str(lock)
-        # Raised on the first failure, not after the 30s budget.
-        assert elapsed < 5.0
+        # One attempt: the failure was raised where it was seen, never
+        # polled toward the 30s budget (#2229). The count says that
+        # exactly; an absolute elapsed ceiling here only added a
+        # dependency on the runner's speed (#2359).
         assert lock_stub.calls == 1
         # Nothing was acquired, so nothing may be released (#1145 contract).
         assert unlock.calls == 0
@@ -675,16 +674,17 @@ class TestAsyncFileLockClassification:
         monkeypatch.setattr(_atomic_mod.portalocker, "lock", lock_stub)
         monkeypatch.setattr(_atomic_mod.portalocker, "unlock", unlock)
 
-        start = time.monotonic()
         with pytest.raises(OSError) as excinfo:
             async with async_file_lock(lock, timeout=30.0):
                 pytest.fail("body must not run when acquisition failed")
-        elapsed = time.monotonic() - start
 
         assert not isinstance(excinfo.value, TimeoutError)
         assert excinfo.value.errno == errno.ENOLCK
         assert excinfo.value.filename == str(lock)
-        assert elapsed < 5.0
+        # One attempt: the failure was raised where it was seen, never
+        # polled toward the 30s budget (#2229). The count says that
+        # exactly; an absolute elapsed ceiling here only added a
+        # dependency on the runner's speed (#2359).
         assert lock_stub.calls == 1
         assert unlock.calls == 0
 
