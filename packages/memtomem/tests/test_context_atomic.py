@@ -173,35 +173,133 @@ def test_crash_with_no_preexisting_target_cleans_tempfile(
     assert _list_tmp_siblings(target) == []
 
 
+class _LockWaitRecorder:
+    """Counts what an acquisition *did* — lock attempts, and every trip
+    through the backoff sleep with the duration it was handed.
+
+    The lock wrapper delegates to the real call: a no-op stub would remove
+    the layer these tests exist to exercise and leave them green on nothing.
+
+    ``virtual_clock`` replaces ``_atomic``'s notion of time instead of
+    observing it. ``monotonic`` then reads a counter that only ``sleep``
+    advances, so the poll loop's arithmetic — how many attempts, how long
+    each backoff was clamped to, when the deadline expired — becomes exact
+    and a stalled CI runner cannot reach it. That is the point: a *real*
+    ``timeout=0.2`` budget makes correct production code raise on its first
+    attempt if the runner stalls 0.2s at the wrong moment, which is the very
+    flake #2351 is about, one layer down.
+
+    The lock itself stays real under a virtual clock — only the clock is
+    simulated, so contention is still observed rather than assumed.
+    """
+
+    def __init__(self, real_lock, real_time, *, virtual_clock: bool = False) -> None:
+        self._real_lock = real_lock
+        self._real_time = real_time
+        self._virtual = virtual_clock
+        self._now = 0.0
+        self.attempts = 0
+        self.slept: list[float] = []
+
+    def lock(self, *args, **kwargs):
+        self.attempts += 1
+        return self._real_lock(*args, **kwargs)
+
+    def monotonic(self) -> float:
+        if self._virtual:
+            return self._now
+        return self._real_time.monotonic()
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        if self._virtual:
+            self._now += seconds
+            return
+        self._real_time.sleep(seconds)
+
+    def __getattr__(self, name: str):
+        # Stands in for the ``time`` module inside ``_atomic``; anything the
+        # module reaches for beyond ``monotonic``/``sleep`` passes straight
+        # through. Scoped to that module rather than patching ``time.sleep``
+        # globally, where another thread's sleep would land in the count.
+        return getattr(self._real_time, name)
+
+    def reset(self) -> None:
+        self.attempts = 0
+        self.slept = []
+
+
 class TestFileLockTimeout:
     """``_file_lock(timeout=...)`` bounds acquisition instead of blocking
     forever (#1145 review) — needed where the lock is taken from a context that
-    must not hang (an async handler's worker thread)."""
+    must not hang (an async handler's worker thread).
 
-    def test_acquires_immediately_when_free(self, tmp_path: Path) -> None:
+    Whether an acquire *waited* is pinned by counting what it did — lock
+    attempts and trips through the backoff sleep — never by timing it, and
+    the contended case runs the poll loop against a simulated clock so its
+    numbers are arithmetic rather than a race with the runner (#2351).
+    """
+
+    @pytest.fixture()
+    def acquire(self, monkeypatch: pytest.MonkeyPatch) -> _LockWaitRecorder:
+        recorder = _LockWaitRecorder(portalocker.lock, _atomic_mod.time)
+        monkeypatch.setattr(_atomic_mod.portalocker, "lock", recorder.lock)
+        monkeypatch.setattr(_atomic_mod, "time", recorder)
+        return recorder
+
+    @pytest.fixture()
+    def acquire_on_a_simulated_clock(self, monkeypatch: pytest.MonkeyPatch) -> _LockWaitRecorder:
+        recorder = _LockWaitRecorder(portalocker.lock, _atomic_mod.time, virtual_clock=True)
+        monkeypatch.setattr(_atomic_mod.portalocker, "lock", recorder.lock)
+        monkeypatch.setattr(_atomic_mod, "time", recorder)
+        return recorder
+
+    @pytest.mark.parametrize("timeout", [None, 5.0])
+    def test_acquires_immediately_when_free(
+        self, tmp_path: Path, acquire: _LockWaitRecorder, timeout: float | None
+    ) -> None:
+        """Both branches, because they wait differently and only one of them
+        polls: the bounded path could return on a second attempt, and the
+        unbounded ``LOCK_EX`` path could block inside portalocker. A sleep in
+        either is a wait, and ``timeout=None`` is the branch the deleted
+        cross-process latency ceiling used to cover (#2351)."""
         lock = _lock_path_for(tmp_path / "data.json")
-        # A free lock with a timeout acquires without raising.
-        with _file_lock(lock, timeout=5.0):
+        # A free lock acquires without raising.
+        with _file_lock(lock, timeout=timeout):
             pass
+        assert acquire.attempts == 1, "a free lock was not granted on the first attempt"
+        assert acquire.slept == [], "a free lock was waited on"
         # And again, proving it released cleanly.
-        with _file_lock(lock, timeout=5.0):
+        acquire.reset()
+        with _file_lock(lock, timeout=timeout):
             pass
+        assert (acquire.attempts, acquire.slept) == (1, [])
 
-    def test_timeout_raises_when_held(self, tmp_path: Path) -> None:
+    def test_timeout_polls_to_the_deadline_when_held(
+        self, tmp_path: Path, acquire_on_a_simulated_clock: _LockWaitRecorder
+    ) -> None:
         # portalocker locks are per-open-file-description, so a second
         # acquisition (separate fd) in the SAME process contends — mirroring the
         # cross-process case the bound protects. Holding the lock and then
         # requesting it with a short timeout must raise TimeoutError, not hang.
+        acquire = acquire_on_a_simulated_clock
         lock = _lock_path_for(tmp_path / "data.json")
         with _file_lock(lock):
-            start = time.monotonic()
+            acquire.reset()  # drop the holder's own acquire
             with pytest.raises(TimeoutError):
                 with _file_lock(lock, timeout=0.2):
                     pass
-            elapsed = time.monotonic() - start
-        # It actually polled to the deadline (not an instant grant) and the
-        # bound fired (not an indefinite block).
-        assert 0.1 <= elapsed < 5.0
+
+        # Exact, because the clock is simulated: 0.05 doubling under a 0.2s
+        # budget gives four attempts and three backoffs, the last one clamped
+        # to what was left rather than overshooting.
+        assert acquire.attempts == 4
+        assert acquire.slept == pytest.approx([0.05, 0.1, 0.05])
+        # The budget was spent, and only the budget. This is the half an
+        # ``elapsed < 5.0`` ceiling used to carry: a production ``deadline``
+        # computed from the wrong multiple of ``timeout`` moves this sum,
+        # while ``attempts >= 2`` alone would not notice.
+        assert sum(acquire.slept) == pytest.approx(0.2)
 
     def test_default_is_still_blocking(self, tmp_path: Path) -> None:
         # No timeout → unchanged behavior: a free lock acquires (the indefinite
