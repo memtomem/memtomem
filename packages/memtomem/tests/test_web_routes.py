@@ -2727,10 +2727,20 @@ class TestEditChunkRedaction:
         yield
         privacy.reset_for_tests()
 
-    async def test_secret_in_new_content_returns_403(self, app, client: AsyncClient):
+    async def test_secret_in_new_content_returns_403(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
         from memtomem import privacy
 
-        chunk = _make_test_chunk()
+        # A real source under ``tmp_path``, like the sibling test below, rather
+        # than ``_make_test_chunk``'s ``/tmp/test.md`` default. That literal is
+        # a directory on POSIX and nothing on Windows, so since #2346 — where a
+        # source whose directory is gone means the edit span holds no
+        # cross-process lock and refuses — the default answered 409 on the
+        # Windows shard and never reached the redaction gate this test is for.
+        source = tmp_path / "memory.md"
+        source.write_text("## H\n\nbody\n", encoding="utf-8")
+        chunk = _make_test_chunk(source=str(source))
         app.state.storage.get_chunk.return_value = chunk
         resp = await client.patch(
             f"/api/chunks/{CHUNK_ID}",
