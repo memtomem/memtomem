@@ -314,6 +314,8 @@ uvx --from 'memtomem==0.5.0' mm mem init --scope project_local
 
 ## 다음 단계
 
+- 결정 이유와 ADR 출처 검색 실습: [재시도 정책 샘플](../../examples/onboarding/retry-policy/README.md)
+- Python으로 기억 설계하기: [모델 없는 한국어 LangGraph 노트북 05–06](../../examples/notebooks/README.md#start-without-a-model-0506)
 - CLI까지 포함한 설치: [Getting Started](getting-started.md)
 - 도구별 수동 설정: [MCP Client Setup](mcp-clients.md)
 - Claude Code 심화: [Claude Code integration](integrations/claude-code.md)

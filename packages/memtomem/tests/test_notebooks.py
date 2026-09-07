@@ -20,7 +20,17 @@ EXPECTED_NOTEBOOKS = (
     "02_index_and_filter.ipynb",
     "03_agent_memory_patterns.ipynb",
     "04_multi_agent_mcp_memory.ipynb",
+    "05_langgraph_memory_basics.ipynb",
+    "06_langgraph_retrieval_memory.ipynb",
 )
+
+# The model-free beginner labs. Named rather than sliced off EXPECTED_NOTEBOOKS
+# so that adding a 07 cannot silently retarget the checks below.
+BEGINNER_NOTEBOOKS = (
+    "05_langgraph_memory_basics.ipynb",
+    "06_langgraph_retrieval_memory.ipynb",
+)
+OPTIONAL_LLM_NOTEBOOK = "06_langgraph_retrieval_memory.ipynb"
 
 
 def _compile_cell(source: str) -> None:
@@ -70,6 +80,36 @@ def test_notebook_code_syntax(notebook: Path) -> None:
 
 
 _IMPORT_EXCEPTIONS = frozenset({"ModuleNotFoundError", "ImportError"})
+
+
+@pytest.mark.parametrize("name", BEGINNER_NOTEBOOKS)
+def test_beginner_notebooks_ship_without_outputs(name: str) -> None:
+    data = json.loads((NOTEBOOKS_DIR / name).read_text(encoding="utf-8"))
+    assert data["metadata"]["memtomem"]["profile"] == "minimal-langgraph"
+    for cell in data["cells"]:
+        if cell["cell_type"] == "code":
+            assert cell["execution_count"] is None
+            assert cell["outputs"] == []
+
+
+def test_optional_llm_is_explicit_unsaved_preview() -> None:
+    data = json.loads((NOTEBOOKS_DIR / OPTIONAL_LLM_NOTEBOOK).read_text(encoding="utf-8"))
+    code_cells = [cell for cell in data["cells"] if cell["cell_type"] == "code"]
+    source = "".join(code_cells[-1]["source"])
+    tree = ast.parse(source)
+    opt_in = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "RUN_LLM" for t in node.targets)
+    )
+    assert isinstance(opt_in.value, ast.Constant) and opt_in.value.value is False
+    assert 'base_url="https://api.openai.com/v1"' in source
+    assert '"approved": False' in source
+    assert "store=False" in source
+    assert 'response.status != "completed"' in source
+    assert 'os.environ["OPENAI_API_KEY"]' in source
+    assert 'os.environ["OPENAI_MODEL"]' in source
 
 
 def _exception_names(node: ast.expr | None) -> set[str]:
@@ -131,11 +171,16 @@ def _preflight_modules(source: str, remediation: str) -> set[str]:
 
 @pytest.mark.parametrize("notebook", _notebook_files(), ids=lambda p: p.stem)
 def test_notebook_starts_with_embedding_backend_preflight(notebook: Path) -> None:
-    """Each notebook fails clearly before setup when the ONNX extra is absent."""
+    """Every notebook checks its own runtime dependencies before setup."""
     data = json.loads(notebook.read_text(encoding="utf-8"))
     first_code = next((cell for cell in data["cells"] if cell["cell_type"] == "code"), None)
     assert first_code is not None, f"{notebook.name} has no code cell"
     source = "".join(first_code["source"])
+    if notebook.name in BEGINNER_NOTEBOOKS:
+        modules = _preflight_modules(source, "memtomem[langgraph]")
+        assert {"langgraph", "memtomem"} <= modules
+        assert data["metadata"]["memtomem"]["profile"] == "minimal-langgraph"
+        return
     modules = _preflight_modules(source, "memtomem[onnx]")
     assert "fastembed" in modules, (
         f"{notebook.name}: the first code cell must import fastembed in the body of a "

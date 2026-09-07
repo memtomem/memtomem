@@ -27,6 +27,12 @@ on:
 # in release.yml.
 env:
   UV_VERSION: "0.11.16"
+  # A CI runner has no owner for ~/.claude/settings.json and its siblings
+  # besides the suite itself, so a change the in-process write witness cannot
+  # attribute is still a leak here and must fail. Developer machines, where an
+  # editor session writes those files concurrently, default to a summary line
+  # instead of blaming whichever test happened to be in flight (#2355).
+  MEMTOMEM_TEST_HOME_GUARD: strict
 
 jobs:
   lint:
@@ -326,6 +332,13 @@ jobs:
           version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
       - run: uv run pytest packages/memtomem/tests/test_notebooks.py --tb=short -q
+      - name: Execute model-free beginner notebooks in a minimal environment
+        run: |
+          uv venv /tmp/beginner-notebooks
+          uv pip install --python /tmp/beginner-notebooks/bin/python -e 'packages/memtomem[langgraph]' nbclient ipykernel
+          /tmp/beginner-notebooks/bin/python tools/check_beginner_notebooks.py --json
+          /tmp/beginner-notebooks/bin/python examples/onboarding/retry-policy/demo.py
+          /tmp/beginner-notebooks/bin/python -m unittest discover -s examples/onboarding/retry-policy
 
   test-js:
     name: js-unit (vitest + jsdom)
