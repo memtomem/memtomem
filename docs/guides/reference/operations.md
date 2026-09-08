@@ -46,11 +46,15 @@ creation bounds (`created_from`, `created_before`) and the ADR-0011 tier filter
 ranges return `422`, as does a `scope` or `namespace` that mixes a comma list
 with a glob, or a `scope` naming something other than `user`,
 `project_shared` or `project_local`, or a glob selecting none of them — the
-tier check is shared with `mem_search` and `mm search --scope`, so the same
-spelling is refused on all three search surfaces (recall takes its `scope`
-through the parser directly and is unaffected). An empty `scope=` / `namespace=` is read as unset, so a client that
-always emits its declared parameters gets the default merge rather than a
-filter that matches nothing.
+tier check is shared with the memory-retrieval surfaces that take a `scope`
+filter — `mem_search`, `mem_ask`, `mem_recall`, `mem_timeline`,
+`mem_entity_search`, `mm search --scope` and `mm recall --scope` — so the same
+spelling is refused on all of them. It does not cover the `--scope` options
+that select a *write* tier (`mm pinned`, `mm context`); those take a fixed
+choice, not a filter. An empty `scope=` / `namespace=` is read as unset,
+so a client that always emits its declared parameters gets the default merge
+rather than a filter that matches nothing; `mm recall --scope ""` and
+`mem_recall(scope="")` read the same way.
 
 `source_exact` and `chunk_type` are deliberately web-API-only. The nine core
 MCP tool descriptions are at their character budget (`test_core_tool_descriptions`),

@@ -9,6 +9,7 @@ import os
 import shutil
 from datetime import datetime
 
+from memtomem.source_provenance import source_span_hash
 from memtomem.tools.memory_writer import (
     RestoreOutcome,
     SourceRemovedError,
@@ -167,7 +168,15 @@ class TestReplaceLines:
         target = tmp_path / "f.md"
         target.write_text("a\nb\nc\nd\n", encoding="utf-8")
 
-        replace_lines(target, 2, 3, "X\nY")
+        replace_lines(
+            target,
+            2,
+            3,
+            "X\nY",
+            expected_source_span_hash=source_span_hash(
+                target.read_text(encoding="utf-8").splitlines(), 2, 3
+            ),
+        )
 
         assert target.read_text(encoding="utf-8") == "a\nX\nY\nd\n"
 
@@ -175,7 +184,15 @@ class TestReplaceLines:
         target = tmp_path / "f.md"
         target.write_text("a\nb\nc\n", encoding="utf-8")
 
-        replace_lines(target, 1, 1, "first")
+        replace_lines(
+            target,
+            1,
+            1,
+            "first",
+            expected_source_span_hash=source_span_hash(
+                target.read_text(encoding="utf-8").splitlines(), 1, 1
+            ),
+        )
 
         assert target.read_text(encoding="utf-8") == "first\nb\nc\n"
 
@@ -183,7 +200,15 @@ class TestReplaceLines:
         target = tmp_path / "f.md"
         target.write_text("a\nb\nc\n", encoding="utf-8")
 
-        replace_lines(target, 3, 3, "last")
+        replace_lines(
+            target,
+            3,
+            3,
+            "last",
+            expected_source_span_hash=source_span_hash(
+                target.read_text(encoding="utf-8").splitlines(), 3, 3
+            ),
+        )
 
         assert target.read_text(encoding="utf-8") == "a\nb\nlast\n"
 
@@ -191,7 +216,15 @@ class TestReplaceLines:
         target = tmp_path / "f.md"
         target.write_text("a\nb\nc", encoding="utf-8")  # no trailing \n
 
-        replace_lines(target, 2, 2, "Z")
+        replace_lines(
+            target,
+            2,
+            2,
+            "Z",
+            expected_source_span_hash=source_span_hash(
+                target.read_text(encoding="utf-8").splitlines(), 2, 2
+            ),
+        )
 
         result = target.read_text(encoding="utf-8")
         assert result == "a\nZ\nc"
@@ -202,7 +235,15 @@ class TestReplaceLines:
         target.write_text("a\nb\n", encoding="utf-8")
 
         with pytest.raises(ValueError):
-            replace_lines(target, 1, 5, "X")
+            replace_lines(
+                target,
+                1,
+                5,
+                "X",
+                expected_source_span_hash=source_span_hash(
+                    target.read_text(encoding="utf-8").splitlines(), 1, 5
+                ),
+            )
         # File is left unchanged on validation error.
         assert target.read_text(encoding="utf-8") == "a\nb\n"
 
@@ -212,7 +253,14 @@ class TestRemoveLines:
         target = tmp_path / "f.md"
         target.write_text("a\nb\nc\nd\n", encoding="utf-8")
 
-        remove_lines(target, 2, 3)
+        remove_lines(
+            target,
+            2,
+            3,
+            expected_source_span_hash=source_span_hash(
+                target.read_text(encoding="utf-8").splitlines(), 2, 3
+            ),
+        )
 
         assert target.read_text(encoding="utf-8") == "a\nd\n"
 
@@ -220,7 +268,14 @@ class TestRemoveLines:
         target = tmp_path / "f.md"
         target.write_text("a\nb\nc\n", encoding="utf-8")
 
-        remove_lines(target, 1, 1)
+        remove_lines(
+            target,
+            1,
+            1,
+            expected_source_span_hash=source_span_hash(
+                target.read_text(encoding="utf-8").splitlines(), 1, 1
+            ),
+        )
 
         assert target.read_text(encoding="utf-8") == "b\nc\n"
 
@@ -228,7 +283,14 @@ class TestRemoveLines:
         target = tmp_path / "f.md"
         target.write_text("a\nb\nc\n", encoding="utf-8")
 
-        remove_lines(target, 3, 3)
+        remove_lines(
+            target,
+            3,
+            3,
+            expected_source_span_hash=source_span_hash(
+                target.read_text(encoding="utf-8").splitlines(), 3, 3
+            ),
+        )
 
         assert target.read_text(encoding="utf-8") == "a\nb\n"
 
@@ -236,7 +298,14 @@ class TestRemoveLines:
         target = tmp_path / "f.md"
         target.write_text("a\nb\n", encoding="utf-8")
 
-        remove_lines(target, 1, 2)
+        remove_lines(
+            target,
+            1,
+            2,
+            expected_source_span_hash=source_span_hash(
+                target.read_text(encoding="utf-8").splitlines(), 1, 2
+            ),
+        )
 
         assert target.read_text(encoding="utf-8") == ""
 
@@ -244,7 +313,14 @@ class TestRemoveLines:
         target = tmp_path / "f.md"
         target.write_text("a\nb\nc", encoding="utf-8")  # no trailing \n
 
-        remove_lines(target, 2, 2)
+        remove_lines(
+            target,
+            2,
+            2,
+            expected_source_span_hash=source_span_hash(
+                target.read_text(encoding="utf-8").splitlines(), 2, 2
+            ),
+        )
 
         result = target.read_text(encoding="utf-8")
         assert result == "a\nc"
@@ -373,11 +449,33 @@ def _identity_of(path):
 #: all in the contract under test, which is that none of them may create.
 _REWRITERS = (
     pytest.param(
-        lambda path, **kw: replace_chunk_body(path, 1, 3, "NEW BODY", **kw),
+        lambda path, **kw: replace_chunk_body(
+            path,
+            1,
+            3,
+            "NEW BODY",
+            expected_source_span_hash=source_span_hash(_BEFORE.splitlines(), 1, 3),
+            **kw,
+        ),
         id="replace_chunk_body",
     ),
-    pytest.param(lambda path, **kw: replace_lines(path, 1, 3, "NEW\n", **kw), id="replace_lines"),
-    pytest.param(lambda path, **kw: remove_lines(path, 1, 3, **kw), id="remove_lines"),
+    pytest.param(
+        lambda path, **kw: replace_lines(
+            path,
+            1,
+            3,
+            "NEW\n",
+            expected_source_span_hash=source_span_hash(_BEFORE.splitlines(), 1, 3),
+            **kw,
+        ),
+        id="replace_lines",
+    ),
+    pytest.param(
+        lambda path, **kw: remove_lines(
+            path, 1, 3, expected_source_span_hash=source_span_hash(_BEFORE.splitlines(), 1, 3), **kw
+        ),
+        id="remove_lines",
+    ),
 )
 
 _BEFORE = "## H\n\nold body\n"

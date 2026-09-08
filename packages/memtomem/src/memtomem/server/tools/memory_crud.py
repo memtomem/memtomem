@@ -27,6 +27,10 @@ from memtomem.server.tools._provenance import (
     record_write_provenance,
 )
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
+from memtomem.source_provenance import (
+    STALE_SOURCE_PROVENANCE_DETAIL,
+    StaleSourceProvenanceError,
+)
 from memtomem.tools.memory_writer import (
     RestoreOutcome,
     SourceChangedError,
@@ -400,6 +404,10 @@ async def _mutate_file_and_reindex(
         await flag_untracked_write(app, provenance_session_id)
         return stats, None
     except Exception as exc:
+        if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:
+            # No byte was written. In particular, do not reindex here: doing
+            # so could erase the stale row and bless an unrelated replacement.
+            return None, f"Error: {STALE_SOURCE_PROVENANCE_DETAIL}"
         if isinstance(exc, SourceChangedError) and not mutation_completed:
             # The write refused before putting a byte on disk (#2367), so there
             # is nothing of ours to undo — and restoring anyway would be the
@@ -1260,6 +1268,7 @@ async def mem_edit(
                 meta.start_line,
                 meta.end_line,
                 new_content,
+                expected_source_span_hash=meta.source_span_hash,
                 expected_identity=pre.identity,
             ),
             op="edit",
@@ -1361,6 +1370,7 @@ async def mem_delete(
                     meta.source_file,
                     meta.start_line,
                     meta.end_line,
+                    expected_source_span_hash=meta.source_span_hash,
                     expected_identity=pre.identity,
                 ),
                 op="delete",

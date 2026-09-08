@@ -33,6 +33,7 @@ from memtomem import privacy
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.context import AppContext
 from memtomem.server.tools import memory_crud
+from memtomem.source_provenance import source_span_hash
 
 _SECRET = "api_key=AKIA1234567890ABCDEF"
 
@@ -235,6 +236,7 @@ async def test_mem_edit_inferred_user_scope_force_unsafe_proceeds(
             project_root=None,
             start_line=1,
             end_line=3,
+            source_span_hash=source_span_hash("## hi\n\noriginal\n".splitlines(), 1, 3),
         ),
         embedding=[0.1] * 1024,
     )
@@ -338,6 +340,7 @@ def _stage_edit_chunk(
                 project_root=None if chunk_scope == "user" else project_root,
                 start_line=1,
                 end_line=3,
+                source_span_hash=source_span_hash(f"## team rule\n\n{body}\n".splitlines(), 1, 3),
             ),
             embedding=[0.1] * 1024,
         )
@@ -1318,6 +1321,9 @@ async def _seed_two_scope_chunks(comp, tmp_path, namespace="default"):
             namespace=namespace,
             start_line=1,
             end_line=3,
+            source_span_hash=source_span_hash(
+                "## personal\n\npersonal note body\n".splitlines(), 1, 3
+            ),
         ),
         embedding=[0.1] * 1024,
     )

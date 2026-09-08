@@ -298,6 +298,38 @@ class TestMemVersion:
         }
         assert "do-not-leak" not in json.dumps(parsed)
 
+    @pytest.mark.parametrize(
+        "search",
+        [
+            {"rrf_k": 60, "rrf_weights": [1.0, 1.0], "bm25_candidates": 50, "dense_candidates": 50},
+            {
+                "rrf_k": 100,
+                "rrf_weights": [0.5, 0.5],
+                "bm25_candidates": 20,
+                "dense_candidates": 80,
+            },
+        ],
+    )
+    async def test_runtime_profile_fusion_config_is_passive(self, monkeypatch, tmp_path, search):
+        from memtomem import config as config_mod
+        from memtomem.server.tools import status_config
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"search": search}))
+        before = config_file.read_bytes()
+        monkeypatch.setattr(config_mod, "_override_path", lambda: config_file)
+        monkeypatch.setattr(config_mod, "_config_d_path", lambda: tmp_path / "config.d")
+
+        async def forbidden(*args, **kwargs):
+            pytest.fail("version must not initialize storage or models")
+
+        monkeypatch.setattr(status_config, "_get_app_initialized", forbidden)
+        parsed = json.loads(await mem_version())
+        assert parsed["capabilities"]["runtime_profile"] == {"schema_version": 1}
+        assert {key: parsed["runtime_profile"]["search"][key] for key in search} == search
+        assert config_file.read_bytes() == before
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["config.json"]
+
     async def test_runtime_profile_reports_onnx_dependency_gap(self, monkeypatch, tmp_path):
         from memtomem import config as config_mod
         from memtomem.server.tools import status_config

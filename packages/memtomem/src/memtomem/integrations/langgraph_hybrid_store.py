@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import struct
 import threading
 import warnings
 from collections.abc import Awaitable, Callable, Iterable
-from concurrent.futures import Future, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
@@ -160,13 +161,29 @@ class MemtomemHybridStore(BaseStore):
                 action="init",
                 audit_context={"scope_inferred_from_path": scope != inferred},
             )
-        self._configuration = {"fields": self.fields, "dims": self.dims, "index_id": index_id}
+        self._configuration = json.loads(
+            encode({"fields": self.fields, "dims": self.dims, "index_id": index_id})
+        )
+        self._guard(
+            [
+                encode(self._configuration),
+                *self._configuration["fields"],
+                *([index_id] if isinstance(index_id, str) else []),
+            ],
+            surface="langgraph_hybridstore_init",
+            message="Store configuration blocked by privacy guard",
+        )
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._state_lock = threading.Lock()
         self._closed = False
         self._close_done = threading.Event()
         self._pending: set[Future[Any]] = set()
+        self._executor_workers: set[threading.Thread] = set()
         self._loop = asyncio.new_event_loop()
+        self._executor = ThreadPoolExecutor(
+            thread_name_prefix="memtomem-hybrid-store-worker", initializer=self._register_worker
+        )
+        self._loop.set_default_executor(self._executor)
         self._thread = threading.Thread(target=self._run, name="memtomem-hybrid-store", daemon=True)
         self._thread.start()
         try:
@@ -182,8 +199,24 @@ class MemtomemHybridStore(BaseStore):
             self._loop.run_forever()
         finally:
             self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            # The loop owns shutdown of the installed executor. Keep worker
+            # identities until it has drained, including during concurrent close.
             self._loop.run_until_complete(self._loop.shutdown_default_executor())
             self._loop.close()
+
+    def _register_worker(self) -> None:
+        # Thread objects avoid mistaking a recycled thread ID for one of ours.
+        with self._state_lock:
+            self._executor_workers.add(threading.current_thread())
+
+    def _on_own_executor(self) -> None:
+        with self._state_lock:
+            own_worker = threading.current_thread() in self._executor_workers
+        if own_worker:
+            raise RuntimeError(
+                "Cannot close the store from its own executor; "
+                "close it from outside the store's own threads"
+            )
 
     async def _initialize(self):
         self._embedder = (
@@ -246,8 +279,8 @@ class MemtomemHybridStore(BaseStore):
         "Cannot run a synchronous store operation from the store's event loop; await the async API"
     )
     # "another thread" would be wrong advice: handing close() to a worker of
-    # the store's *own* loop deadlocks the same way, and no guard here sees
-    # that hop. The safe caller is the code that owns the store.
+    # the store's *own* loop deadlocks the same way. _on_own_executor catches
+    # that hop even after the callback ends. The safe caller owns the store.
     _NO_CLOSING = (
         "Cannot close the store from its own event loop; "
         "close it from outside the store's own threads"
@@ -305,6 +338,21 @@ class MemtomemHybridStore(BaseStore):
             )
         return normalized
 
+    def _guard(self, parts: list[str], *, surface: str, message: str) -> None:
+        # Scan raw identifiers too: JSON escaping can hide a quoted credential
+        # inside a key/selector. Non-whitespace separators keep label patterns
+        # from accidentally spanning two independent fields (#2374).
+        guard = privacy.enforce_write_guard(
+            "\n---\n".join(parts),
+            surface=surface,
+            scope=self.scope,
+            force_unsafe=self.force_unsafe,
+        )
+        if guard.decision != "pass" and not (
+            guard.decision == "bypassed" and self.scope != "project_shared"
+        ):
+            raise ValueError(message)
+
     async def _prepare(self, op: PutOp) -> dict:
         _validate_namespace(op.namespace)
         if not isinstance(op.key, str) or not op.key:
@@ -320,12 +368,12 @@ class MemtomemHybridStore(BaseStore):
             )
         ):
             raise ValueError("index must be None, False, or a list of paths")
-        record = {
-            "namespace": op.namespace,
+        record: dict[str, Any] = {
+            "namespace": tuple(op.namespace),
             "key": op.key,
             "value": op.value,
             "ttl": op.ttl,
-            "index": op.index,
+            "index": list(op.index) if isinstance(op.index, list) else op.index,
             "text": "",
             "vectors": [],
         }
@@ -334,23 +382,22 @@ class MemtomemHybridStore(BaseStore):
         if not isinstance(op.value, dict):
             raise ValueError("Store value must be a JSON object")
         serialized = encode(op.value)
-        guard = privacy.enforce_write_guard(
-            serialized,
-            surface="langgraph_hybridstore_put",
-            scope=self.scope,
-            force_unsafe=self.force_unsafe,
-        )
-        if guard.decision != "pass" and not (
-            guard.decision == "bypassed" and self.scope != "project_shared"
-        ):
-            raise ValueError("Store write blocked by privacy guard")
-        # Detach caller-owned values before awaiting external embedding work.
-        import json
-
+        # Detach every mutable persisted input before the scan and before
+        # awaiting external embedding work, including per-item selectors.
         record["value"] = json.loads(serialized)
-        if op.index is not False:
+        self._guard(
+            [
+                serialized,
+                *record["namespace"],
+                record["key"],
+                *(record["index"] if isinstance(record["index"], list) else []),
+            ],
+            surface="langgraph_hybridstore_put",
+            message="Store write blocked by privacy guard",
+        )
+        if record["index"] is not False:
             texts = []
-            for field in self.fields if op.index is None else op.index:
+            for field in self.fields if record["index"] is None else record["index"]:
                 texts.extend(get_text_at_path(record["value"], field))
             record["text"] = "\n".join(texts)
             if self._embedder is not None and texts:
@@ -582,6 +629,7 @@ class MemtomemHybridStore(BaseStore):
         if self._inside_own_callback():
             raise RuntimeError("Cannot close the store from its embedding callback")
         self._on_own_loop(self._NO_CLOSING)
+        self._on_own_executor()
         with self._state_lock:
             already_closing = self._closed
             self._closed = True
@@ -600,15 +648,14 @@ class MemtomemHybridStore(BaseStore):
             self._close_done.set()
 
     async def aclose(self) -> None:
-        # Both refusals have to happen before the offload. close() would catch
-        # the callback itself, since to_thread carries the marker to the worker,
-        # but answering here keeps that refusal in the frame that caused it. The
-        # loop check has no second chance at all: on the worker it is false, and
-        # that worker then joins the store thread while the store thread waits
-        # for the executor the worker belongs to.
+        # Refuse before offloading, with the callback reason first. A worker
+        # may run aclose() on a separate loop: hopping to that loop's executor
+        # would hide its ownership from close(), while our shutdown still waits
+        # for the original worker. Ordinary external callers remain safe.
         if self._inside_own_callback():
             raise RuntimeError("Cannot close the store from its embedding callback")
         self._on_own_loop(self._NO_CLOSING)
+        self._on_own_executor()
         await asyncio.to_thread(self.close)
 
     def __enter__(self):

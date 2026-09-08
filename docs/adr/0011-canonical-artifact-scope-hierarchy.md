@@ -228,6 +228,38 @@ an instant `git rm` cannot retract it from any clone or reflog. The
 trust boundary moves from "the user's machine" to "every clone of this
 repo forever," so the bypass valve does not belong here.
 
+> **2026-09 (#2374):** `MemtomemHybridStore` scans the persisted record's
+> value JSON **and** the raw namespace labels, key, and per-item index selectors.
+> The constructor also scans its persisted index configuration (`fields`,
+> `dims`, `index_id`), including raw fields and index ID, after scope resolution
+> and Gate B consent but before creating a directory, initializing an embedder,
+> or opening SQLite. That check applies to reopen as well as creation.
+> JSON escaping can hide a quoted credential in an identifier, so scanning a
+> JSON envelope alone is insufficient; raw strings are included with
+> non-whitespace boundaries to avoid matching across independent fields.
+> Caller-owned mutable inputs are copied before scanning, and those copies
+> supply the persisted record and its indexes even if an embedding callback
+> changes the original selectors or value.
+>
+> This is a whole-operation refusal, never redaction or renaming of a routing
+> key. A clean value cannot make a sensitive identifier safe: callers must
+> remove the credential from that identifier or choose a private destination
+> with the existing explicit `force_unsafe` valve. `project_shared` never allows
+> that bypass. The existing patterns are reused without identifier exemptions;
+> regression fixtures pin ordinary names (including `password` and `api_key`),
+> paths, UUIDs, Unicode, and selectors, alongside synthetic credential cases.
+> These fixtures calibrate known examples, not a production false-positive rate.
+>
+> One Gate A outcome is recorded per prepared write under
+> `langgraph_hybridstore_put`, and per constructor check under
+> `langgraph_hybridstore_init`; a passing scan does not prove a later SQL write
+> succeeded. Gate B remains store-scoped. Delete (`value=None`) adds no content
+> and remains unscanned, so legacy sensitive identities can still be removed.
+> Existing rows are not scanned on reopen or automatically cleaned. A sensitive
+> constructor configuration is refused on reopen; this change does not migrate
+> it or alter the database. Batch retains per-operation commits, while a refused
+> import leaves all records uncommitted.
+
 For agents / skills / commands the corresponding chokepoint is the
 `mm context sync` write path, when the canonical is `project_shared`
 and the runtime fan-out is about to write. A new
@@ -639,6 +671,79 @@ instead.
 > holds the secret — a state worth surfacing rather than tidying around.
 >
 > #2333 remains the last first-party writer outside the claim.
+
+> **2026-09 (#2366):** `MemtomemHybridStore` (#2363) is the "next in-process
+> surface" the #2335 note wrote its shape down for, and it answers
+> differently on purpose: its Gate B consent is **store-scoped, taken once at
+> construction**, and `delete` carries no gate of its own. Recorded here so
+> the next parity audit reads that as a decision rather than as the gap #2335
+> had just closed on the sibling adapter.
+>
+> The two stores differ in what one handle can reach. `MemtomemStore` is a
+> view over the whole markdown corpus, where every chunk carries its own
+> `scope` (Decision 4): one handle spans `user`, `project_local` and
+> `project_shared`, so the tier is a property of the *row* and has to be
+> asked about per operation — `delete()` re-reads it under the source file's
+> lock through `locked_source_chunk`, while `add()` resolves it from the
+> destination it was handed. `MemtomemHybridStore` owns one SQLite database
+> at an explicit path. `_resolve_target_scope(self.path, memory_dirs,
+> project_memory_dirs)` classifies that path in `__init__` — the resolved
+> tier is the path's classification, escalated to `project_shared` if either
+> the path or the declared `scope=` says so — and a `project_shared` result
+> raises unless the caller passed `confirm_project_shared=True`, recording
+> `surface=langgraph_hybridstore_init`, `mechanism=param`, `action=init`.
+> Every later mutation, `delete` included (LangGraph spells it
+> `PutOp(value=None)`), runs under that one consent, against the tier
+> resolved for the path the handle was opened on.
+>
+> **The invariant is per handle, because nothing persists a tier.**
+> `hybrid_meta` stores `kind`, `version` and the index configuration and no
+> scope, so a second handle on the same file classifies it afresh, under
+> whatever configuration *it* loads. For the tier this gate exists to
+> protect that is a distinction without a difference: under equivalent
+> effective configuration, a path under a registered **shared-tier** root
+> classifies as `project_shared` for every handle, so no caller reaches the
+> tracked tier ungated. Registration alone does not say which tier —
+> `_owned_tier` takes the most specific covering root and reads *its* tier,
+> so a registered `memories.local` root is `project_local`. What does not
+> survive reopening is the other direction: a caller-declared escalation on
+> a path that classifies as `user` binds only the handle that declared it,
+> and a later default-argument handle on that same file is `user` again.
+> Persisting the declared tier would change that, and is not done.
+>
+> **Gate A is not hoisted with it, and the asymmetry is the point.** Gate A
+> scans bytes, so record checks stay per-`put`. Originally `_prepare`
+> scanned only `encode(op.value)`; #2374 extends that check to raw namespace
+> labels, keys and `index` selectors, and separately checks persisted index
+> configuration before opening the database (see the Gate A note above).
+> A delete reaches neither per-operation gate — Gate A because it has no value to
+> scan, which is #2335's own reasoning for the sibling, and Gate B because
+> the tier it touches was consented to before the store existed. A gate
+> answers a question, and the two questions have different lifetimes: "may
+> these record bytes land" is per-write, "may this store touch the tracked tier" is
+> per-store.
+>
+> **What makes the hoist adequate is a storage fact, and the pin covers only
+> the part of it that is schema-visible.**
+> `test_langgraph_hybrid_store.py::test_items_storage_layout_carries_no_tier`
+> asserts the `items` column tuple and, read as data rather than as DDL text,
+> that a row's identity is `namespace`+`key` and nothing else. So a per-item
+> scope column, or a scope folded into the uniqueness constraint, fails
+> there. Two classes of change do not. A tier can be introduced without
+> moving a column — carried on a `namespace` segment, buried in `value_json`
+> or `index_json`, kept in a second table or a `hybrid_meta` key, or routed
+> by a subclass. And the pin observes one construction path, a freshly
+> created default-argument database, so a column added only under indexing
+> arguments or on reopen is never seen; reopening today *rejects* an
+> unrecognised `hybrid_meta` rather than migrating it, which is why no
+> migration path exists to observe, and why adding one belongs to this
+> question rather than beside it. Naming both classes is the point of this
+> entry: they make the init-time consent cover less than the rows it is read
+> as covering while every guard stays green, so they have to be caught by a
+> reviewer asking the gate question again.
+>
+> No behavior changed under this issue. The hoisted gate is adequate *given*
+> those facts; it is the facts that needed writing down.
 
 
 Before PR-D, `mem_batch_add` bypassed `enforce_write_guard` and used

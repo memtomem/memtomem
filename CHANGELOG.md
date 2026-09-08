@@ -7,6 +7,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Breaking
 
+- **Chunk edits and deletes now require indexed source-span evidence (#2371).**
+  The index stores a hash of each chunk's original line range. MCP `mem_edit`
+  / chunk `mem_delete` and web PATCH/DELETE compare it on the open descriptor
+  before writing, refusing stale provenance with a reindex-and-retry message
+  (HTTP 409 on web). A source replaced before the operation reads it, or edited
+  in place without changing its inode, is left untouched. Refusal does not
+  restore the file, reindex it, or delete its indexed row.
+
+  **Upgrading:** schema generation 2 blocks older binaries that cannot maintain
+  this evidence. Existing and imported chunks remain searchable, but their
+  source must be reindexed before a line edit/delete: use ordinary
+  `mm index <path>` or `mem_index(path="<path>")`, then retrieve the current chunk
+  ID and retry. `--force` is not needed; unchanged content keeps its UUID and
+  vector. Migration never derives evidence from current files for old rows.
+  The digest follows the writer's line-ending semantics and does not depend
+  on transformed retrieval text. External writers remain outside memtomem's
+  cooperative lock; mutation after the descriptor read is not excluded.
+
 - **Moving hooks in or out of the Git-tracked settings tier now asks first.**
   `mm context settings-migrate` had one confirmation, and it was the wrong one
   for this: it fires when a tier lives outside the project, which the
@@ -107,6 +125,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- Expose configured `rrf_k`, `rrf_weights`, `bm25_candidates`, and
+  `dense_candidates` in the schema-1 version runtime profile and human/JSON
+  status (#2377), enabling STM's read-only RRF boundary diagnostic (STM #1012).
+  Version collection remains free of model/storage initialization; values are
+  configuration snapshots, not observed retrieval counts or final-score guarantees.
+
 - **Hand one skill, command, or agent to someone else as a file.**
   `mm context export <kind> <name> --out <file>` packs a single canonical
   artifact — its manifest, its per-vendor overrides, its frozen version history,
@@ -169,6 +193,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A `scope` that is not a tier is now refused on every read surface, not
+  only on search.** #2193 put the closed tier vocabulary in front of
+  `GET /api/search`, `mem_search` and `mm search`, and left `mem_recall`,
+  `mm recall`, `mem_timeline` and `mem_entity_search` on the parser-direct
+  path — so `scope=User` or `projet_*` was an error on one tool and a
+  successful, empty result on the next, indistinguishable from "nothing
+  matched", with the store opened first. The same check now runs on all of
+  them before anything opens (`mem_ask` too, which `run_search` had been
+  catching only after the app was up), in each surface's own idiom: an error
+  string on MCP, a message naming `--scope` on the CLI. The value that reaches
+  storage is the validator's — `--scope ""` on `mm recall` is unset rather than
+  a filter matching nothing, and a padded tier is stripped — while the
+  empty-result diagnostic still quotes the option as typed. An architectural
+  guard now enumerates the functions that parse a scope or forward one into the
+  search core, in the spellings it can recognize syntactically, so a new
+  `scope`-taking surface written the way the existing ones are has to be
+  classified as validated or explained rather than drifting the way this one
+  did. The guard documents what it cannot see — a search bound to a local, a
+  `**kwargs` splat, a wrapper that only calls a helper — and pins those blind
+  spots, so widening it later has to move the claim with the code. (#2295)
+
 - **A memory edit or delete that *succeeds* no longer brings back a file you
   deleted while it ran** (#2367) — the sibling of #2347 below, and the quieter
   of the two, because nothing looked wrong. The helpers that rewrite a chunk's
@@ -188,12 +233,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   half matters as much as the refusal to create: splicing a stranger's file at
   the deleted file's line numbers corrupts it just as surely. Where identity
   is unanswerable the operation still refuses to create, and falls back to
-  editing whatever is at the path, which is what it did before.
+  the existence check; #2371 above additionally requires matching source-span
+  evidence even when identity is unavailable.
 
   The window this closes is the one between the read and the write. A file
   already swapped before the operation looked at it is the file the operation
   was asked to edit, and telling those apart is a question about the index's
-  line numbers rather than about the file's identity. `mem_edit` and `mem_delete` name which
+  line numbers rather than about the file's identity; #2371 above now checks
+  that evidence separately. `mem_edit` and `mem_delete` name which
   of the two they met; the web editor answers 409 with the same distinction;
   and a web delete whose file somebody else already removed now finishes by
   dropping the index row and reporting success, since that is the outcome it
@@ -743,9 +790,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   padded value is stripped before it is searched, not only before it is
   checked. `ScopeFilter.parse` itself stays permissive: it is a predicate
   parser, and callers that need an unrecognized tier to reach no rows rather
-  than raise (portable eval cases) still get that. `mem_recall` and `mm recall`
-  are unchanged — they take a `scope` through the parser directly, so an
-  unrecognized tier is still an empty result there. (#2193)
+  than raise (portable eval cases) still get that. `mem_recall`, `mm recall`
+  and the other read surfaces followed in #2295 (see Fixed, above). (#2193)
 
 - **`mm agent search` mirrors the `mem_agent_search` MCP tool.** Merging an
   agent's own `agent-runtime:<id>` scope with the shared bucket was reachable

@@ -166,7 +166,12 @@ class TestEarlierEntryKeepsItsNamespace:
         # Exactly what ``web/routes/chunks.py`` does on delete.
         preserved = await comp.index_engine.effective_namespace_for(target)
         victim = chunks[0]
-        remove_lines(target, victim.metadata.start_line, victim.metadata.end_line)
+        remove_lines(
+            target,
+            victim.metadata.start_line,
+            victim.metadata.end_line,
+            expected_source_span_hash=victim.metadata.source_span_hash,
+        )
         await comp.index_engine.index_file(
             target, force=True, namespace=preserved, already_scanned=True
         )

@@ -600,13 +600,15 @@ store = MemtomemHybridStore(sys.argv[1], index={"embed": embed, "dims": 2}, inde
 async def main():
     await store.aput(("a",), "x", {"text": "apple"})
     release.set()
-    report("FINISHED", await asyncio.to_thread(finished.wait, 30))
+    report("FINISHED", await asyncio.to_thread(finished.wait, 5))
     report("ON_STORE_THREAD", outcome["thread"] is store._thread)
     report("OUTCOME", outcome["result"])
     # A refusal that lands after close() has already marked the store closed
     # would read the same from the task; only the store's own state tells the
     # two apart, so every scenario reports it.
     report("STILL_OPEN", (await store.aget(("a",), "x")) is not None)
+    await store.aput(("a",), "later", {"text": "pear"}, index=False)
+    report("STILL_WRITABLE", (await store.aget(("a",), "later")) is not None)
     await store.aclose()
     report("CLOSED", "yes")
 
@@ -619,6 +621,7 @@ def _assert_descendant_scenario(output, outcome):
     assert "ON_STORE_THREAD=True\n" in output
     assert f"OUTCOME={outcome}\n" in output
     assert "STILL_OPEN=True\n" in output
+    assert "STILL_WRITABLE=True\n" in output
     assert "CLOSED=yes\n" in output
 
 
@@ -738,9 +741,8 @@ report("CLOSED", "yes")
 def test_offloaded_close_inside_a_live_callback_is_refused(tmp_path):
     """`to_thread(close)` during the callback carries the marker to the worker.
 
-    This is the hop the guide calls undetected *after* the callback returns. It
-    is detected while the callback runs, because the context travels with it,
-    and close() is where that refusal lands.
+    The callback reason must win over the executor reason: the context travels
+    with this call, and close() is where the more specific refusal lands.
     """
     output = _run_reentrancy_scenario(
         """
@@ -844,3 +846,256 @@ asyncio.run(main())
     assert "ON_STORE_THREAD=True\n" in output
     assert "STILL_OPEN=True\n" in output
     assert "CLOSED=yes\n" in output
+
+
+@pytest.mark.parametrize(
+    "dispatch,close_call",
+    [
+        ("await asyncio.to_thread(worker)", "store.close()"),
+        ("await asyncio.get_running_loop().run_in_executor(None, worker)", "store.close()"),
+        ("await asyncio.to_thread(worker)", "asyncio.run(store.aclose())"),
+    ],
+    ids=["to-thread-close", "run-in-executor-close", "worker-aclose"],
+)
+def test_executor_close_after_callback_returns_is_refused(tmp_path, dispatch, close_call):
+    """The callback is over and close is off-loop, but still owns a shutdown dependency."""
+    worker = (
+        """
+def worker():
+    report("WORKER_CALLBACK_MARKER", store._inside_own_callback())
+    report("WORKER_ON_LOOP", threading.current_thread() is store._thread)
+    with store._state_lock:
+        report("REGISTERED_WORKER", threading.current_thread() in store._executor_workers)
+    # In the aclose case, prove the new refusal happens before a second hop.
+    original_to_thread = asyncio.to_thread
+    offloads = []
+    async def record_offload(function, *args, **kwargs):
+        if function == store.close:
+            offloads.append(function)
+        return await original_to_thread(function, *args, **kwargs)
+    asyncio.to_thread = record_offload
+    try:
+        %s
+        return "close returned"
+    finally:
+        asyncio.to_thread = original_to_thread
+        report("WORKER_OFFLOADED", bool(offloads))
+
+"""
+        % close_call
+    )
+    output = _run_reentrancy_scenario(worker + _DESCENDANT_TASK % dispatch, tmp_path)
+    _assert_descendant_scenario(
+        output,
+        "Cannot close the store from its own executor; close it from outside the store's own threads",
+    )
+    assert "WORKER_CALLBACK_MARKER=False\n" in output
+    assert "WORKER_ON_LOOP=False\n" in output
+    assert "REGISTERED_WORKER=True\n" in output
+    assert "WORKER_OFFLOADED=False\n" in output
+
+
+@pytest.mark.parametrize("caller", ["external", "other-store"])
+def test_owned_executor_preserves_embedding_operations_and_external_close(tmp_path, caller):
+    output = _run_reentrancy_scenario(
+        """
+from concurrent.futures import ThreadPoolExecutor
+
+embedding_threads = []
+def embed(texts):
+    embedding_threads.append(threading.current_thread())
+    return vectors(texts)
+
+store = MemtomemHybridStore(sys.argv[1], index={"embed": embed, "dims": 2}, index_id="normal")
+store.put(("a",), "x", {"text": "apple"})
+report("SEARCHED", [item.key for item in store.search(("a",), query="apple")])
+with store._state_lock:
+    workers = set(store._executor_workers)
+report("EMBEDDINGS_ON_WORKERS", len(embedding_threads) >= 2 and all(
+    thread in workers and thread is not store._thread for thread in embedding_threads
+))
+
+def ordinary_operations():
+    store.put(("a",), "later", {"text": "pear"})
+    return store.get(("a",), "later").value
+
+async def use_worker():
+    return await asyncio.to_thread(ordinary_operations)
+
+report("WORKER_OPERATIONS", asyncio.run_coroutine_threadsafe(use_worker(), store._loop).result(5))
+with store._state_lock:
+    workers = set(store._executor_workers)
+
+if %r == "external":
+    with ThreadPoolExecutor() as external:
+        external.submit(store.close).result(5)
+else:
+    other = MemtomemHybridStore(sys.argv[1] + ".other")
+    async def close_other_store():
+        await asyncio.to_thread(store.close)
+    asyncio.run_coroutine_threadsafe(close_other_store(), other._loop).result(5)
+    report("OTHER_STILL_OPEN", other.get(("a",), "missing") is None)
+    other.close()
+
+store.close()
+report("WORKERS_STOPPED", all(not thread.is_alive() for thread in workers))
+report("LOOP_STOPPED", not store._thread.is_alive() and store._loop.is_closed())
+report("CLOSED", "yes")
+"""
+        % caller,
+        tmp_path,
+    )
+    assert "SEARCHED=['x']\n" in output
+    assert "EMBEDDINGS_ON_WORKERS=True\n" in output
+    assert "WORKER_OPERATIONS={'text': 'pear'}\n" in output
+    if caller == "other-store":
+        assert "OTHER_STILL_OPEN=True\n" in output
+    assert "WORKERS_STOPPED=True\n" in output
+    assert "LOOP_STOPPED=True\n" in output
+    assert "CLOSED=yes\n" in output
+
+
+@pytest.mark.parametrize("close_call", ["store.close()", "asyncio.run(store.aclose())"])
+def test_executor_close_during_external_shutdown_is_refused(tmp_path, close_call):
+    """Worker refusal must precede even the already-closing wait on _close_done."""
+    output = _run_reentrancy_scenario(
+        """
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+store = MemtomemHybridStore(sys.argv[1])
+entered, release = threading.Event(), threading.Event()
+
+def worker():
+    entered.set()
+    assert release.wait(5), "external close did not release worker"
+    try:
+        %s
+        return "close returned"
+    except RuntimeError as exc:
+        return str(exc)
+
+async def pending_work():
+    return await asyncio.to_thread(worker)
+
+pending = store._submit(pending_work)
+assert entered.wait(5), "worker did not start"
+with store._state_lock:
+    workers = set(store._executor_workers)
+with ThreadPoolExecutor(max_workers=2) as external:
+    closing = [external.submit(store.close) for _ in range(2)]
+    deadline = time.monotonic() + 5
+    while True:
+        with store._state_lock:
+            if store._closed:
+                break
+        assert time.monotonic() < deadline, "external close did not start"
+        time.sleep(0.01)
+    report("CLOSING_NOT_DONE", not store._close_done.is_set())
+    release.set()
+    report("OUTCOME", pending.result(5))
+    for future in closing:
+        future.result(5)
+report("WORKERS_STOPPED", all(not thread.is_alive() for thread in workers))
+report("LOOP_STOPPED", not store._thread.is_alive() and store._loop.is_closed())
+report("CLOSED", "yes")
+"""
+        % close_call,
+        tmp_path,
+    )
+    assert "CLOSING_NOT_DONE=True\n" in output
+    assert (
+        "OUTCOME=Cannot close the store from its own executor; "
+        "close it from outside the store's own threads\n"
+    ) in output
+    assert "WORKERS_STOPPED=True\n" in output
+    assert "LOOP_STOPPED=True\n" in output
+    assert "CLOSED=yes\n" in output
+
+
+def test_initialization_failure_drains_owned_executor(tmp_path):
+    output = _run_reentrancy_scenario(
+        """
+instances = []
+class BrokenStore(MemtomemHybridStore):
+    async def _initialize(self):
+        instances.append(self)
+        await asyncio.to_thread(lambda: None)
+        raise ValueError("initialization failed")
+
+try:
+    BrokenStore(sys.argv[1])
+except ValueError as exc:
+    report("OUTCOME", exc)
+store = instances[0]
+report("HAD_WORKER", bool(store._executor_workers))
+report("WORKERS_STOPPED", all(not thread.is_alive() for thread in store._executor_workers))
+report("LOOP_STOPPED", not store._thread.is_alive() and store._loop.is_closed())
+""",
+        tmp_path,
+    )
+    assert "OUTCOME=initialization failed\n" in output
+    assert "HAD_WORKER=True\n" in output
+    assert "WORKERS_STOPPED=True\n" in output
+    assert "LOOP_STOPPED=True\n" in output
+
+
+def test_items_storage_layout_carries_no_tier(store):
+    """No stored column or key constraint names a scope (#2366).
+
+    `MemtomemHybridStore` takes ADR-0011 §5's Gate B once, in ``__init__``,
+    against the scope `_resolve_target_scope` reads off ``self.path``. That
+    hoist is adequate only while a row cannot name a tier of its own, so the
+    storage layout is asserted rather than assumed: the ``items`` columns,
+    and the uniqueness constraint read as data through ``index_list`` /
+    ``index_info`` rather than as DDL text, which a reformat would break for
+    no semantic reason.
+
+    **What this does not cover**, stated here because the ADR entry first
+    claimed more than it delivers. A tier can be introduced without moving a
+    column at all — carried on a ``namespace`` segment, buried in
+    ``value_json`` or ``index_json``, kept in a second table or a
+    ``hybrid_meta`` key, or routed by a subclass. And the layout is observed
+    on exactly one path: a *freshly created, default-argument* database. A
+    column added only under indexing arguments, or on reopen, would leave
+    this green. Reopening currently *rejects* an unrecognised
+    ``hybrid_meta`` rather than migrating it, so there is no migration path
+    to observe yet — adding one is itself a reason to re-run the consent
+    audit ADR-0011 §5 describes, not a schema change to make quietly.
+    """
+    with sqlite3.connect(store.path) as db:
+        columns = tuple(row[1] for row in db.execute("PRAGMA table_info(items)"))
+        indexes = [row for row in db.execute("PRAGMA index_list(items)") if row[2]]
+        unique = tuple(
+            sorted(
+                tuple(part[2] for part in db.execute(f"PRAGMA index_info('{row[1]}')"))
+                for row in indexes
+            )
+        )
+
+    assert columns == (
+        "id",
+        "namespace",
+        "key",
+        "value_json",
+        "created_at",
+        "updated_at",
+        "revision",
+        "ttl",
+        "expires_at",
+        "index_json",
+    ), (
+        f"`items` columns changed to {columns}. ADR-0011 §5 records that the "
+        "hybrid store's project_shared consent is hoisted to construction "
+        "because one handle's database holds one tier. A per-item scope "
+        "column makes that false, and the init-time gate then covers less "
+        "than the rows it is read as covering. Re-answer the gate question "
+        "(does delete now need its own Gate B, like MemtomemStore.delete in "
+        "#2335?) before changing this schema."
+    )
+    assert unique == (("namespace", "key"),), (
+        f"`items` uniqueness changed to {unique}. ADR-0011 §5 leans on a "
+        "row's identity being namespace+key and nothing else; a scope folded "
+        "into that key means one database addresses rows per tier, which is "
+        "the shape the hoisted gate cannot cover."
+    )

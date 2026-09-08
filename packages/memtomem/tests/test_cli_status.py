@@ -92,6 +92,24 @@ class TestStatusRegistration:
         assert result.exit_code == 0
         assert "status" in result.output
 
+    async def test_fusion_settings_match_human_and_structured_status(self):
+        from memtomem.server.context import AppContext
+
+        search = {
+            "rrf_k": 100,
+            "rrf_weights": [0.5, 0.5],
+            "bm25_candidates": 20,
+            "dense_candidates": 80,
+        }
+        comp = _mock_components(config=Mem2MemConfig(search=search))
+        data = await collect_status_report(AppContext.from_components(comp))
+        assert {key: data["config"][key] for key in search} == search
+        text = render_status_report(data)
+        assert "RRF k:     100" in text
+        assert "RRF weights: [0.5, 0.5]" in text
+        assert "BM25 candidates: 20" in text
+        assert "Dense candidates: 80" in text
+
     def test_status_help_describes_command(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["status", "--help"])
         assert result.exit_code == 0
@@ -729,6 +747,9 @@ Embedding: onnx / bge-m3
 Dimension: 1024
 Top-K:     10
 RRF k:     60
+RRF weights: [1.0, 1.0]
+BM25 candidates: 50
+Dense candidates: 50
 Watcher:   {effective_watcher_backend(comp.config.indexing)}
 
 Runtime context
