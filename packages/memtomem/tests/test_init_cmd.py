@@ -4182,7 +4182,7 @@ class TestPresetSelection:
         assert state["_preset_applied"] == "minimal"
 
     def test_english_preset_applies_onnx_and_rerank(self) -> None:
-        """English preset: ONNX bge-small-en-v1.5 + English rerank +
+        """English preset: ONNX multilingual-e5-small + English rerank +
         auto-discover providers (the recommended default)."""
         from memtomem.cli.init_cmd import _apply_preset
 
@@ -4190,7 +4190,7 @@ class TestPresetSelection:
         _apply_preset(state, "english")
 
         assert state["provider"] == "onnx"
-        assert state["model"] == "bge-small-en-v1.5"
+        assert state["model"] == "multilingual-e5-small"
         assert state["dimension"] == 384
         assert state["rerank_enabled"] is True
         assert state["rerank_model"] == "Xenova/ms-marco-MiniLM-L-6-v2"
@@ -4198,7 +4198,7 @@ class TestPresetSelection:
         assert state["enable_auto_ns"] is True
 
     def test_korean_preset_applies_bge_m3_and_kiwipiepy(self) -> None:
-        """Korean preset: ONNX bge-m3 + kiwipiepy tokenizer + multilingual
+        """Korean preset: ONNX multilingual-e5-small + kiwipiepy tokenizer + multilingual
         reranker (the Korean-optimized bundle)."""
         from memtomem.cli.init_cmd import _apply_preset
 
@@ -4206,8 +4206,8 @@ class TestPresetSelection:
         _apply_preset(state, "korean")
 
         assert state["provider"] == "onnx"
-        assert state["model"] == "bge-m3"
-        assert state["dimension"] == 1024
+        assert state["model"] == "multilingual-e5-small"
+        assert state["dimension"] == 384
         assert state["rerank_enabled"] is True
         assert state["rerank_model"] == "jinaai/jina-reranker-v2-base-multilingual"
         assert state["tokenizer"] == "kiwipiepy"
@@ -4245,8 +4245,8 @@ class TestPresetSelection:
 
         data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
         assert data["embedding"]["provider"] == "onnx"
-        assert data["embedding"]["model"] == "bge-m3"
-        assert data["embedding"]["dimension"] == 1024
+        assert data["embedding"]["model"] == "multilingual-e5-small"
+        assert data["embedding"]["dimension"] == 384
         assert data["rerank"]["model"] == "jinaai/jina-reranker-v2-base-multilingual"
         assert data["search"]["tokenizer"] == "kiwipiepy"
         assert data["namespace"]["enable_auto_ns"] is True
@@ -4318,7 +4318,7 @@ class TestPresetSelection:
         """``--preset korean --provider onnx -y`` — ``--provider`` re-states
         the preset's own provider, so the default-model reset must NOT fire.
         Regression for a clobber where same-provider override dropped
-        korean's bge-m3 back to onnx's ``all-MiniLM-L6-v2`` default."""
+        korean's multilingual-e5-small back to onnx's ``all-MiniLM-L6-v2`` default."""
         from click.testing import CliRunner
 
         from memtomem.cli.init_cmd import init
@@ -4349,8 +4349,8 @@ class TestPresetSelection:
         data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
         # Preset's model/dimension survive because the provider didn't change.
         assert data["embedding"]["provider"] == "onnx"
-        assert data["embedding"]["model"] == "bge-m3"
-        assert data["embedding"]["dimension"] == 1024
+        assert data["embedding"]["model"] == "multilingual-e5-small"
+        assert data["embedding"]["dimension"] == 384
         assert data["search"]["tokenizer"] == "kiwipiepy"
 
     def test_preset_plus_explicit_flag_override_interactive(
@@ -4598,7 +4598,7 @@ class TestPresetSelection:
         assert result.exit_code == 0, result.output
 
         data = json.loads(config_path.read_text(encoding="utf-8"))
-        assert data["embedding"]["model"] == "bge-m3"  # preset applied
+        assert data["embedding"]["model"] == "multilingual-e5-small"  # preset applied
         assert data["mmr"]["enabled"] is True  # non-init field survived
         assert data["mmr"]["lambda_param"] == 0.3
 
@@ -4616,7 +4616,7 @@ class TestPresetWizardBackNav:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Pick english, hit "b" at memory-dir, re-pick korean. The final
-        config must reflect korean (bge-m3 + kiwipiepy), proving the picker
+        config must reflect korean (multilingual-e5-small + kiwipiepy), proving the picker
         ran a second time AND the re-pick actually overwrote the first
         preset's state."""
         from click.testing import CliRunner
@@ -4646,7 +4646,7 @@ class TestPresetWizardBackNav:
 
         data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
         # Korean re-pick, not the initial English pick.
-        assert data["embedding"]["model"] == "bge-m3"
+        assert data["embedding"]["model"] == "multilingual-e5-small"
         assert data["search"]["tokenizer"] == "kiwipiepy"
 
     def test_advanced_from_picker_routes_to_full_wizard(
@@ -4722,8 +4722,8 @@ class TestPresetWizardBackNav:
         "choice, expected_preset, expected_model, expected_tokenizer",
         [
             ("1", "minimal", "", "unicode61"),
-            ("2", "english", "bge-small-en-v1.5", "unicode61"),
-            ("3", "korean", "bge-m3", "kiwipiepy"),
+            ("2", "english", "multilingual-e5-small", "unicode61"),
+            ("3", "korean", "multilingual-e5-small", "kiwipiepy"),
         ],
     )
     def test_preset_picker_applies_preset_inline_on_non_advanced(
@@ -4792,7 +4792,7 @@ class TestPresetWizardBackNav:
         assert result.exit_code == 0, result.output
 
         data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
-        assert data["embedding"]["model"] == "bge-m3"
+        assert data["embedding"]["model"] == "multilingual-e5-small"
         assert data["search"]["tokenizer"] == "kiwipiepy"
 
     def test_repeated_back_cycle_through_multiple_presets(

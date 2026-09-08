@@ -9,9 +9,8 @@ user how big the download is:
 * ``cli init`` wizard — size text shown to the user.
 
 Sizes come from fastembed's own ``list_supported_models()`` /
-``size_in_GB`` field (rounded to MB). Custom-registered models — only
-``BAAI/bge-m3`` today, see
-``embedding/onnx.py:_register_custom_models_if_needed`` — carry the
+``size_in_GB`` field (rounded to MB). Custom-registered E5 and BGE models (see
+``embedding/onnx.py:_register_custom_models_if_needed``) carry the
 size declared on their ``add_custom_model`` call. Verify with::
 
     from fastembed import TextEmbedding
@@ -28,6 +27,7 @@ from __future__ import annotations
 # Sizes match fastembed metadata exactly so the readiness banner and
 # the init wizard agree.
 ONNX_EMBEDDER_MODELS: dict[str, tuple[str, int, int]] = {
+    "multilingual-e5-small": ("intfloat/multilingual-e5-small", 384, 490),
     "all-MiniLM-L6-v2": ("sentence-transformers/all-MiniLM-L6-v2", 384, 90),
     "bge-small-en-v1.5": ("BAAI/bge-small-en-v1.5", 384, 67),
     # Custom-registered (see embedding/onnx.py:_register_custom_models_if_needed).

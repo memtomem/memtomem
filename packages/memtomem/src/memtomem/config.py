@@ -69,6 +69,10 @@ class EmbeddingConfig(ConfigModel):
     provider: str = "none"
     model: str = ""
     dimension: int = 0
+    onnx_variant: Literal["fp32", "int8-arm64", "int8-avx2", "int8-avx512", "int8-avx512-vnni"] = (
+        "fp32"
+    )
+    onnx_artifact_path: str = ""
     base_url: str = ""
     api_key: str = ""
     batch_size: int = 64
@@ -132,6 +136,36 @@ class EmbeddingConfig(ConfigModel):
     # operator preference.
     progress_threshold: int = 32
 
+    @model_validator(mode="after")
+    def cpu_model_defaults(self) -> "EmbeddingConfig":
+        from memtomem.embedding.profiles import is_e5
+
+        if self.provider.lower() == "onnx" and not self.model:
+            object.__setattr__(self, "model", "multilingual-e5-small")
+        if self.provider.lower() == "onnx" and is_e5(self.model):
+            for key, value in {
+                "dimension": 384,
+                "max_sequence_tokens": 512,
+                "threads": 2,
+                "onnx_batch_size": 4,
+            }.items():
+                if key not in self.model_fields_set:
+                    object.__setattr__(self, key, value)
+            if self.dimension != 384:
+                raise ValueError("multilingual-e5-small requires dimension=384")
+            if self.max_sequence_tokens != 512:
+                raise ValueError("multilingual-e5-small requires max_sequence_tokens=512")
+        if self.onnx_variant == "fp32" and self.onnx_artifact_path:
+            raise ValueError("onnx_artifact_path is only used for explicit quantized variants")
+        if self.onnx_variant != "fp32":
+            if self.provider.lower() != "onnx" or not (
+                is_e5(self.model) or self.model in {"bge-m3", "BAAI/bge-m3"}
+            ):
+                raise ValueError("quantized CPU profiles support ONNX E5-small and BGE-M3 only")
+            if not self.onnx_artifact_path:
+                raise ValueError("quantized ONNX requires a verified onnx_artifact_path")
+        return self
+
     @field_validator("dimension")
     @classmethod
     def dimension_non_negative(cls, v: int) -> int:
@@ -174,7 +208,20 @@ def embedding_policy_fingerprint(config: EmbeddingConfig) -> str:
     """Stable identity for settings that change the generated vector space."""
     provider = config.provider.strip().lower() or "none"
     if provider == "onnx":
-        return f"onnx:v1:max_sequence_tokens={config.max_sequence_tokens}"
+        from memtomem.embedding.profiles import (
+            E5_REVISION,
+            E5_TOKENIZER_SHA256,
+            is_e5,
+            variant_identity,
+        )
+
+        extra = ""
+        if is_e5(config.model):
+            extra = f":e5={E5_REVISION}:tokenizer={E5_TOKENIZER_SHA256}:mean:l2:query-passage:v1"
+        variant = getattr(config, "onnx_variant", "fp32")
+        if variant != "fp32":
+            extra += f":{variant}:{variant_identity(config.onnx_artifact_path)}"
+        return f"onnx:v1:max_sequence_tokens={config.max_sequence_tokens}{extra}"
     return f"{provider}:v1"
 
 
@@ -300,6 +347,7 @@ class IndexingConfig(ConfigModel):
     max_chunk_tokens: int = 512
     # Opt-in exact ceiling, independent of the existing approximate packing goal.
     hard_max_chunk_tokens: int = Field(default=0, ge=0)
+    chunk_input_prefix: str = ""
     chunk_tokenizer_path: str = ""  # local tokenizer.json matching the embedding model
     chunk_context_tokens: int = Field(default=512, ge=1)
     chunk_model_tokens: int = Field(default=8192, ge=1)
@@ -341,6 +389,8 @@ class IndexingConfig(ConfigModel):
     # polling is slower but gives the indexer a reliable default there.  Other
     # platforms retain their native backend unless explicitly overridden.
     watcher_backend: Literal["auto", "native", "polling"] = "auto"
+    watcher_debounce_ms: int = Field(default=5000, ge=1, le=30000)
+    watcher_max_wait_ms: int = Field(default=30000, ge=1, le=30000)
 
     # AI per-source summary (Source tab "✨ AI" preview). Disabled by default —
     # requires ``llm.enabled=true`` and a configured provider, and produces one
@@ -1101,6 +1151,13 @@ class Mem2MemConfig(BaseSettings):
     hooks: HooksConfig = Field(default_factory=HooksConfig)
     session_trace: SessionTraceConfig = Field(default_factory=SessionTraceConfig)
 
+    @model_validator(mode="after")
+    def model_chunk_defaults(self) -> "Mem2MemConfig":
+        from memtomem.embedding.profiles import apply_e5_defaults
+
+        apply_e5_defaults(self)
+        return self
+
 
 # ---------------------------------------------------------------------------
 # Canonical mutable-field definitions and validation
@@ -1727,7 +1784,11 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
             # turn this internal pass into a crash; captured deprecations are
             # re-emitted via the logger rather than swallowed.
             dumped = section_obj.model_dump()
-            payload = section_obj.model_dump(exclude_defaults=True)
+            payload = (
+                section_obj.model_dump(exclude_unset=True)
+                if section_name in {"embedding", "indexing"}
+                else section_obj.model_dump(exclude_defaults=True)
+            )
             payload.update({k: dumped[k] for k in applied_keys if k in dumped})
             try:
                 with warnings.catch_warnings(record=True) as caught:
@@ -1998,7 +2059,11 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
             # committed.  A malformed section therefore cannot partially
             # mutate live startup configuration.
             dumped = section_obj.model_dump()
-            payload = section_obj.model_dump(exclude_defaults=True)
+            payload = (
+                section_obj.model_dump(exclude_unset=True)
+                if section_name in {"embedding", "indexing"}
+                else section_obj.model_dump(exclude_defaults=True)
+            )
             payload.update({key: dumped[key] for key in touched if key in dumped})
             try:
                 validated_section = section_cls.model_validate(payload)

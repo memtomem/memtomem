@@ -1,0 +1,26 @@
+{
+  "corpus_sha256": "2ccd9be9992c54ce9f71b1a7f8597a9aa5c288a6085009ceb61c19a125f0c8c5",
+  "dataset": "MIRACL-dev-MTEB-candidate-pool-subset",
+  "input_sha256": {
+    "en/topics.tsv": "25d9e6d17656674fd7aa3b67ee912c71545e664a842b147bfc17e9ff391db3da",
+    "en/qrels.tsv": "a0af836c300e85088c4d73449492e2378280f967cac032853c9e11f3bc8a8d81",
+    "en/corpus.jsonl": "26ed5dd90e0d58de429a8485d305528dbcec518d04fe2dfbfcd54a15e194394a",
+    "ko/topics.tsv": "a365552cfc997a8915e948a3b5994883f641e7c3f12b6af87bbfaf89729e32a8",
+    "ko/qrels.tsv": "88827ccc5b64e531b25f70eef30202d33daa9bfa3ac8cceadf5cdbd5ca5034df",
+    "ko/corpus.jsonl": "b048ae8a36e5a170bcc4ffd8be0a2fbb6389bee12e11cb8b970e37441b835788"
+  },
+  "omitted_negative_judgments": {
+    "en": 167,
+    "ko": 330
+  },
+  "queries_per_language": 200,
+  "distractors_per_language": 1000,
+  "documents_after_lossless_fragmentation": 6610,
+  "query_selection": "ascending sha256(original query id), first 200 per language",
+  "distractor_selection": "ascending sha256(original document id), 1000 per language from MTEB candidate pool",
+  "scope": "all positive qrels; available judged negatives; MTEB candidate-pool distractors; monolingual ranking; not full MIRACL",
+  "sources": {
+    "en": "https://huggingface.co/datasets/mteb/MIRACLRetrieval_en_top_250_only_w_correct-v2",
+    "ko": "https://huggingface.co/datasets/mteb/MIRACLRetrieval_ko_top_250_only_w_correct-v2"
+  }
+}

@@ -1399,10 +1399,16 @@ class IndexEngine:
         if lock_path is None or not lock_path.parent.is_dir():
             async with self._index_lock:
                 return await run()
+        lock_started = time.monotonic()
         async with async_file_lock(
             lock_path,
             timeout=_MEMORY_SIDECAR_LOCK_BUDGET_S,
         ):
+            logger.debug(
+                "source_index lock_acquired pid=%d lock_ms=%.1f",
+                os.getpid(),
+                (time.monotonic() - lock_started) * 1000,
+            )
             if not engine_serialized:
                 return await run()
             async with self._index_lock:
@@ -2060,6 +2066,7 @@ class IndexEngine:
         # ``\n``-built line table in ``chunking/bounded``, and every CRLF file
         # changes content hash at once. Byte fidelity, where a caller needs it,
         # is that caller's job — see ``indexer_text`` for the one that has it.
+        read_started = time.monotonic()
         try:
             content = file_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -2074,6 +2081,7 @@ class IndexEngine:
         except OSError:
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
+        read_ms = (time.monotonic() - read_started) * 1000
         # Skip binary files (null bytes indicate non-text content)
         if "\x00" in content[:8192]:
             logger.warning("Skipping %s: appears to be a binary file", file_path.name)
@@ -2161,7 +2169,98 @@ class IndexEngine:
             if guard.decision not in ("pass", "bypassed", "exempted"):
                 raise RuntimeError(f"unexpected enforce_write_guard decision: {guard.decision!r}")
 
+        ns_decision = await self._namespace_decision(
+            decision_path,
+            namespace,
+            force=force,
+            reassign=reassign_namespaces,
+            new_source_namespace=new_source_namespace,
+        )
+
+        # Only ordinary, independently guarded indexing can reuse a receipt.
+        # Namespace reassignment and trusted/bypassed ingress are never reused.
+        from memtomem.chunking.bounded import TokenBudget
+        from memtomem.indexing.source_receipt import digest, reusable
+        from memtomem.storage.sqlite_helpers import norm_path
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        receipt_policy = ""
+        source_hash = digest(content)
+        receipt_storage = self._storage if isinstance(self._storage, SqliteBackend) else None
+        if (
+            receipt_storage is not None
+            and not force
+            and not force_unsafe
+            and not already_scanned
+            and namespace is None
+            and not reassign_namespaces
+            and new_source_namespace is None
+            and not self._config.enrich_chunk_context
+            and not self._config.auto_summarize
+        ):
+            receipt_policy = digest(
+                {
+                    "version": 1,
+                    "indexing": self._config.model_dump(mode="python"),
+                    "namespace": self._ns_config.model_dump(mode="python"),
+                    "namespace_target": ns_decision.target,
+                    "projection": digest(projection.guard_content),
+                    "scope": scope_val,
+                    "project": str(project_root),
+                    "embedding": receipt_storage.stored_embedding_info,
+                    "tokenizer": (
+                        TokenBudget(self._config).fingerprint
+                        if self._config.hard_max_chunk_tokens
+                        else "legacy"
+                    ),
+                }
+            )
+            reused = reusable(
+                receipt_storage._get_db(),
+                file_path,
+                source_hash,
+                receipt_policy,
+                self._embedder.dimension,
+            )
+            if reused is not None:
+                await self._validate_source_commit(file_path)
+                if file_path.read_text(encoding="utf-8", errors="replace") != content:
+                    raise RetryableError(
+                        "Source changed during receipt validation; retry latest generation"
+                    )
+                logger.info(
+                    "source_index receipt_hit pid=%d source=%s chunks=%d generation=%s policy=%s",
+                    os.getpid(),
+                    digest(str(decision_path))[:12],
+                    reused,
+                    source_hash[:12],
+                    receipt_policy[:12],
+                )
+                return {
+                    "total": reused,
+                    "indexed": 0,
+                    "skipped": reused,
+                    "deleted": 0,
+                    "errors": [],
+                    "mutated": False,
+                    "exempted": int(exempted),
+                    "namespace_decision": ns_decision,
+                    "namespace_written": False,
+                    "unchanged_chunk_ids": [
+                        row[0]
+                        for row in receipt_storage._get_db()
+                        .execute(
+                            "SELECT id FROM chunks WHERE source_file=? ORDER BY id",
+                            (norm_path(file_path),),
+                        )
+                        .fetchall()
+                    ]
+                    if self._embedder.dimension > 0
+                    else [],
+                }
+        index_started = time.monotonic()
         new_chunks = self.chunk_content(file_path, content, exempt=masking_exempt)
+        chunk_ms = (time.monotonic() - index_started) * 1000
 
         # Resolve namespace: explicit > preserved > bound-new-source > rules >
         # auto_ns > default.
@@ -2173,13 +2272,6 @@ class IndexEngine:
         # stamp from a pre-lock answer would silently undo that write. A
         # failure here fails this file closed; the bulk flatten branches
         # keep the retryable type in ``stats.retryable_errors``.
-        ns_decision = await self._namespace_decision(
-            decision_path,
-            namespace,
-            force=force,
-            reassign=reassign_namespaces,
-            new_source_namespace=new_source_namespace,
-        )
         resolved_ns = ns_decision.target
         if resolved_ns is not None and ns_decision.reason != "mixed_force_refused":
             new_chunks = self._apply_namespace(new_chunks, resolved_ns)
@@ -2342,6 +2434,7 @@ class IndexEngine:
                     "namespace_written": False,
                     "unchanged_chunk_ids": unchanged_ids,
                 }
+        embed_started = time.monotonic()
         if diff_result.to_upsert and self._embedder.dimension > 0:
             texts = [c.retrieval_content for c in diff_result.to_upsert]
             # Threshold gate lives here, not inside the embedder, so callers
@@ -2423,6 +2516,8 @@ class IndexEngine:
                     "unchanged_chunk_ids": unchanged_ids,
                 }
 
+        embed_ms = (time.monotonic() - embed_started) * 1000
+        database_started = time.monotonic()
         # Now safe to mutate DB — embedding succeeded.
         # Wrap delete+upsert in a single transaction for atomicity.
         async with self._storage.transaction():
@@ -2481,6 +2576,36 @@ class IndexEngine:
                 if persisted_upserts:
                     await self._extract_entities_for(persisted_upserts)
             await self._record_source_commit(file_path)
+            if receipt_policy and receipt_storage is not None:
+                from memtomem.indexing.source_receipt import record
+
+                # External writers do not hold our advisory lock. Never mark a
+                # superseded generation complete; retry the latest snapshot.
+                if file_path.read_text(encoding="utf-8", errors="replace") != content:
+                    raise RetryableError("Source changed while indexing; retry latest generation")
+                if len(persisted_upserts) == len(diff_result.to_upsert):
+                    record(
+                        receipt_storage._get_db(),
+                        file_path,
+                        source_hash,
+                        receipt_policy,
+                        self._embedder.dimension,
+                    )
+        logger.info(
+            "source_index completed pid=%d source=%s generation=%s chunk_ms=%.1f "
+            "total_ms=%.1f embedded=%d reused=%d read_ms=%.1f embed_ms=%.1f db_ms=%.1f policy=%s",
+            os.getpid(),
+            digest(str(file_path.resolve()))[:12],
+            source_hash[:12],
+            chunk_ms,
+            (time.monotonic() - index_started) * 1000,
+            len(persisted_upserts),
+            len(diff_result.unchanged),
+            read_ms,
+            embed_ms,
+            (time.monotonic() - database_started) * 1000,
+            receipt_policy[:12],
+        )
 
         # Both metadata mutators return the count of rows they actually
         # changed, so a run whose diff bucketed rows as metadata-only but

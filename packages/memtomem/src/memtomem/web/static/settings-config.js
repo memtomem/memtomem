@@ -16,7 +16,7 @@
 // ``test_no_hardcoded_config_labels`` in tests/test_i18n.py.
 const _CONFIG_LABEL_FIELDS = {
   embedding: ['provider', 'model', 'dimension', 'base_url', 'batch_size', 'onnx_batch_size',
-              'max_sequence_tokens', 'onnx_cpu_mem_arena', 'api_key', 'threads'],
+              'max_sequence_tokens', 'onnx_cpu_mem_arena', 'api_key', 'threads', 'onnx_variant', 'onnx_artifact_path'],
   storage:   ['backend', 'sqlite_path', 'collection_name'],
   search:    ['default_top_k', 'bm25_candidates', 'dense_candidates', 'rrf_k',
               'enable_bm25', 'enable_dense', 'tokenizer', 'rrf_weights'],
@@ -25,7 +25,7 @@ const _CONFIG_LABEL_FIELDS = {
   rerank:    ['enabled', 'provider', 'model', 'api_key', 'oversample', 'min_pool', 'max_pool',
               'timeout_s'],
   indexing:  ['supported_extensions', 'exclude_patterns', 'max_chunk_tokens', 'min_chunk_tokens',
-              'target_chunk_tokens', 'chunk_overlap_tokens', 'structured_chunk_mode'],
+              'target_chunk_tokens', 'chunk_overlap_tokens', 'structured_chunk_mode', 'hard_max_chunk_tokens', 'chunk_context_tokens', 'chunk_model_tokens', 'chunk_tokenizer_path', 'chunk_input_prefix', 'watcher_debounce_ms', 'watcher_max_wait_ms'],
   namespace: ['default_namespace', 'enable_auto_ns'],
 };
 
@@ -36,9 +36,9 @@ const _READONLY_SECTIONS = new Set(['storage']);
 const _READONLY_FIELDS = {
   embedding: new Set([
     'provider', 'model', 'dimension', 'base_url', 'api_key', 'threads',
-    'max_sequence_tokens', 'onnx_cpu_mem_arena',
+    'max_sequence_tokens', 'onnx_cpu_mem_arena', 'onnx_variant', 'onnx_artifact_path',
   ]),
-  indexing: new Set([]),
+  indexing: new Set(['hard_max_chunk_tokens', 'chunk_context_tokens', 'chunk_model_tokens', 'chunk_tokenizer_path', 'chunk_input_prefix', 'watcher_debounce_ms', 'watcher_max_wait_ms']),
   rerank: new Set(['timeout_s']),
 };
 
@@ -611,7 +611,7 @@ async function loadConfig() {
 const _CONFIG_GUIDES = {
   embedding: {
     items: ['provider', 'model', 'dimension', 'base_url', 'batch_size', 'onnx_batch_size',
-            'max_sequence_tokens', 'onnx_cpu_mem_arena', 'api_key', 'threads'],
+            'max_sequence_tokens', 'onnx_cpu_mem_arena', 'api_key', 'threads', 'onnx_variant', 'onnx_artifact_path'],
     envs: [
       'MEMTOMEM_EMBEDDING__PROVIDER=ollama',
       'MEMTOMEM_EMBEDDING__MODEL=bge-m3',

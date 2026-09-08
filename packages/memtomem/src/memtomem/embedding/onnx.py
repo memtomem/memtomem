@@ -8,13 +8,15 @@ import logging
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Sequence
+from pathlib import Path
+from typing import Any, Sequence
 
 from memtomem._settlement import settle_shielded
 from memtomem.config import EmbeddingConfig
 from memtomem.embedding.aliases import resolve_embedder_id
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 from memtomem.errors import EmbeddingError
+from memtomem.embedding.profiles import E5_MODEL, is_e5
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +194,16 @@ def _register_custom_models_if_needed() -> None:
     )
 
     registered = {m.get("model") for m in TextEmbedding.list_supported_models()}
+    if E5_MODEL not in registered:
+        TextEmbedding.add_custom_model(
+            model=E5_MODEL,
+            pooling=PoolingType.MEAN,
+            normalization=True,
+            sources=ModelSource(hf=E5_MODEL),
+            dim=384,
+            model_file="onnx/model.onnx",
+            size_in_gb=0.49,
+        )
     if "BAAI/bge-m3" not in registered:
         TextEmbedding.add_custom_model(
             model="BAAI/bge-m3",
@@ -323,6 +335,32 @@ class OnnxEmbedder:
 
             _register_custom_models_if_needed()
             model_id = resolve_embedder_id(self._config.model)
+            model_options: dict[str, Any] = {}
+            if is_e5(self._config.model) and self._config.onnx_variant == "fp32":
+                from memtomem.embedding.profiles import e5_snapshot
+
+                model_options["specific_model_path"] = str(e5_snapshot())
+            if self._config.onnx_variant != "fp32":
+                from fastembed.common.model_description import ModelSource, PoolingType
+                from memtomem.embedding.profiles import artifact_manifest
+
+                artifact_manifest(
+                    self._config.onnx_artifact_path, model_id, self._config.onnx_variant
+                )
+                custom_id = model_id + ":" + self._config.onnx_variant
+                if custom_id not in {m["model"] for m in TextEmbedding.list_supported_models()}:
+                    TextEmbedding.add_custom_model(
+                        model=custom_id,
+                        pooling=PoolingType.MEAN if is_e5(self._config.model) else PoolingType.CLS,
+                        normalization=True,
+                        sources=ModelSource(hf=model_id),
+                        dim=self.dimension,
+                        model_file="model.onnx",
+                    )
+                model_id = custom_id
+                model_options["specific_model_path"] = str(
+                    Path(self._config.onnx_artifact_path).expanduser().resolve()
+                )
             # threads=0 → leave ORT default (all physical cores); threads>0 caps
             # the intra-op pool so seeding doesn't saturate the machine.
             threads = self._config.threads or None
@@ -342,6 +380,8 @@ class OnnxEmbedder:
                     threads=threads,
                     cache_dir=str(cache_dir),
                     enable_cpu_mem_arena=self._config.onnx_cpu_mem_arena,
+                    providers=["CPUExecutionProvider"],
+                    **model_options,
                 )
                 _verify_cpu_mem_arena(model, self._config.onnx_cpu_mem_arena)
                 tokenizer, active_limit = _configure_tokenizer_limit(
@@ -412,6 +452,11 @@ class OnnxEmbedder:
         truncated = _truncated_input_indexes(
             self._tokenizer, texts, self._active_max_sequence_tokens
         )
+        if truncated and is_e5(self._config.model):
+            raise EmbeddingError(
+                f"E5 input exceeds 512 tokens including its role prefix ({len(truncated)} inputs); "
+                "split/reindex the source using the model chunk profile"
+            )
         if truncated:
             display_indices = chunk_indices or [index + 1 for index in range(len(texts))]
             labels = [display_indices[index] for index in truncated]
@@ -448,10 +493,14 @@ class OnnxEmbedder:
         on_progress: Callable[[int, int], None] | None = None,
         source_path: str | None = None,
         chunk_indices: Sequence[int] | None = None,
+        _query: bool = False,
     ) -> list[list[float]]:
         if not texts:
             return []
         text_list = list(texts)
+        if is_e5(self._config.model):
+            prefix = "query: " if _query else "passage: "
+            text_list = [prefix + text for text in text_list]
         total = len(text_list)
         index_list = list(chunk_indices) if chunk_indices is not None else None
         if index_list is not None and len(index_list) != total:
@@ -466,7 +515,11 @@ class OnnxEmbedder:
         # per batch, so moved boundaries could shift float results) and a
         # concurrent ``set_onnx_batch_size`` applies to the next call only.
         batch_size = self._onnx_batch_size
-        sub = self._subbatch_for(batch_size)
+        sub = (
+            max(batch_size, (8 // batch_size) * batch_size)
+            if is_e5(self._config.model)
+            else self._subbatch_for(batch_size)
+        )
 
         _thread_cb: Callable[[int, int], None] | None = None
         if on_progress is not None:
@@ -567,7 +620,7 @@ class OnnxEmbedder:
     async def embed_query(self, query: str) -> list[float]:
         if not query or not query.strip():
             raise EmbeddingError("Query text cannot be empty")
-        embeddings = await self.embed_texts([query])
+        embeddings = await self.embed_texts([query], _query=True)
         if not embeddings:
             raise EmbeddingError("No embeddings returned for query")
         return embeddings[0]

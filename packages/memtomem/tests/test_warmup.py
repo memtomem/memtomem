@@ -184,6 +184,8 @@ class TestLifespanWarmup:
 
         monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "true")
         monkeypatch.setenv("MEMTOMEM_EMBEDDING__PROVIDER", "onnx")
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__MODEL", "bge-m3")
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__DIMENSION", "1024")
 
         loads: list[str] = []
 
@@ -212,6 +214,8 @@ class TestLifespanWarmup:
 
         monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "true")
         monkeypatch.setenv("MEMTOMEM_EMBEDDING__PROVIDER", "onnx")
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__MODEL", "bge-m3")
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__DIMENSION", "1024")
 
         def broken_get_model(self: OnnxEmbedder) -> object:
             raise RuntimeError("model download failed")
@@ -372,6 +376,8 @@ class TestShutdownThreadSettlement:
 
         monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "true")
         monkeypatch.setenv("MEMTOMEM_EMBEDDING__PROVIDER", "onnx")
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__MODEL", "bge-m3")
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__DIMENSION", "1024")
 
         entered = threading.Event()
         gate = threading.Event()
@@ -404,7 +410,7 @@ class TestShutdownThreadSettlement:
         from memtomem.config import EmbeddingConfig
         from memtomem.embedding.onnx import OnnxEmbedder
 
-        return OnnxEmbedder(EmbeddingConfig(provider="onnx"))
+        return OnnxEmbedder(EmbeddingConfig(provider="onnx", model="bge-m3", dimension=1024))
 
     @pytest.mark.asyncio
     async def test_close_double_cancel_preserves_first_message(self, monkeypatch):
@@ -559,7 +565,9 @@ class TestLoaderConcurrency:
         monkeypatch.setattr(onnx_mod, "resolve_embedder_id", lambda m: m)
         monkeypatch.setattr(onnx_mod, "resolve_fastembed_cache_dir", lambda: tmp_path)
 
-        embedder = onnx_mod.OnnxEmbedder(EmbeddingConfig(provider="onnx"))
+        embedder = onnx_mod.OnnxEmbedder(
+            EmbeddingConfig(provider="onnx", model="bge-m3", dimension=1024)
+        )
         self._hammer(embedder._get_model)
 
         assert len(calls) == 1, f"model constructed {len(calls)}× under concurrency"

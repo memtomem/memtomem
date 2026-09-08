@@ -1756,7 +1756,7 @@
   "settings.config.guide.embedding.item.batch_size.label": "Batch Size",
   "settings.config.guide.embedding.item.batch_size.text": "Number of texts embedded per API call. Higher = faster indexing but more memory. Default 64.",
   "settings.config.guide.embedding.item.onnx_batch_size.label": "ONNX Batch Size",
-  "settings.config.guide.embedding.item.onnx_batch_size.text": "Texts per local FastEmbed/ONNX inference batch. Default 8 bounds activation memory; higher values may improve throughput at the cost of peak RSS. Ignored for ollama/openai.",
+  "settings.config.guide.embedding.item.onnx_batch_size.text": "Texts per local FastEmbed/ONNX inference batch. E5-small defaults to 4; legacy profiles default to 8. Smaller batches bound activation memory; higher values may improve throughput at the cost of peak RSS. Ignored for ollama/openai.",
   "settings.config.guide.embedding.item.max_sequence_tokens.label": "ONNX Max Sequence Tokens",
   "settings.config.guide.embedding.item.max_sequence_tokens.text": "Actual tokenizer cap for each local ONNX input. Default 1024; 0 restores the model limit. Stored text and BM25 stay complete, but the dense vector represents only the prefix when truncation occurs. Restart and force re-index after changing it.",
   "settings.config.guide.embedding.item.onnx_cpu_mem_arena.label": "ONNX CPU Memory Arena",
@@ -1855,5 +1855,18 @@
   "settings.config.decay_status_active": "Score Decay: Active (half-life {days}d)",
   "settings.config.decay_status_inactive": "Score Decay: Inactive",
   "settings.config.ns_default": "Default NS: {ns}",
-  "settings.config.ns_auto_active": "Auto-NS: Active"
+  "settings.config.ns_auto_active": "Auto-NS: Active",
+  "settings.config.label.embedding.onnx_variant": "ONNX precision variant",
+  "settings.config.label.embedding.onnx_artifact_path": "Quantized model directory",
+  "settings.config.label.indexing.hard_max_chunk_tokens": "Exact body token ceiling",
+  "settings.config.label.indexing.chunk_context_tokens": "Description token budget",
+  "settings.config.label.indexing.chunk_model_tokens": "Complete model input limit",
+  "settings.config.label.indexing.chunk_tokenizer_path": "Chunk tokenizer",
+  "settings.config.label.indexing.chunk_input_prefix": "Model input prefix",
+  "settings.config.label.indexing.watcher_debounce_ms": "Watcher quiet period (ms)",
+  "settings.config.label.indexing.watcher_max_wait_ms": "Watcher maximum wait (ms)",
+  "settings.config.guide.embedding.item.onnx_variant.label": "ONNX precision variant",
+  "settings.config.guide.embedding.item.onnx_variant.text": "FP32 is the initial CPU profile. Quantized variants require a verified artifact and explicit index migration; restart required.",
+  "settings.config.guide.embedding.item.onnx_artifact_path.label": "Quantized model directory",
+  "settings.config.guide.embedding.item.onnx_artifact_path.text": "Local directory containing model files and a checksummed manifest.json. Used only for explicit quantized variants."
 }

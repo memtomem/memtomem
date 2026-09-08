@@ -1,0 +1,66 @@
+{
+  "three-clients": [
+    {
+      "elapsed_s": 13.885662708082236,
+      "results": [
+        {
+          "indexed": 0,
+          "skipped": 462,
+          "errors": []
+        }
+      ],
+      "counts": {
+        "chunk_calls": 0,
+        "embed_calls": 0
+      },
+      "model_loaded": false
+    },
+    {
+      "elapsed_s": 13.613942167023197,
+      "results": [
+        {
+          "indexed": 462,
+          "skipped": 0,
+          "errors": []
+        }
+      ],
+      "counts": {
+        "chunk_calls": 1,
+        "embed_calls": 1
+      },
+      "model_loaded": true
+    },
+    {
+      "elapsed_s": 13.782625624909997,
+      "results": [
+        {
+          "indexed": 0,
+          "skipped": 462,
+          "errors": []
+        }
+      ],
+      "counts": {
+        "chunk_calls": 0,
+        "embed_calls": 0
+      },
+      "model_loaded": false
+    }
+  ],
+  "one-client": [
+    {
+      "elapsed_s": 0.1374060830567032,
+      "results": [
+        {
+          "indexed": 0,
+          "skipped": 462,
+          "errors": []
+        }
+      ],
+      "counts": {
+        "chunk_calls": 0,
+        "embed_calls": 0
+      },
+      "model_loaded": false
+    }
+  ]
+}

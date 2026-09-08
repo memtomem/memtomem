@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -145,7 +146,7 @@ class FileWatcher:
         self,
         index_engine: IndexEngine,
         config: IndexingConfig,
-        debounce_ms: int = 1500,
+        debounce_ms: int | None = None,
         *,
         search_pipeline: SearchPipeline | None = None,
     ) -> None:
@@ -155,7 +156,12 @@ class FileWatcher:
         # call sites (server/context.py, web/app.py) pass the live pipeline so
         # a watched-file edit drops the search result cache (#2141).
         self._search_pipeline = search_pipeline
-        self._debounce_s = debounce_ms / 1000.0
+        self._debounce_s = (
+            config.watcher_debounce_ms if debounce_ms is None else debounce_ms
+        ) / 1000.0
+        self._max_wait_s = config.watcher_max_wait_ms / 1000.0
+        self._retry_attempts: dict[Path, int] = {}
+        self._retry_after: dict[Path, float] = {}
         self._observer: BaseObserver | None = None
         # Track what the live observer actually is instead of deriving it from
         # ``_config``: callers may replace or mutate the config before asking
@@ -556,24 +562,48 @@ class FileWatcher:
         single batch before the set is cleared.
         """
         pending: set[Path] = set()
-
+        loop = asyncio.get_running_loop()
+        first: float | None = None
+        last = loop.time()
         while True:
+            now = loop.time()
+            timeout = self._debounce_s
+            if pending and first is not None:
+                timeout = min(last + self._debounce_s, first + self._max_wait_s) - now
             try:
-                file_path = await asyncio.wait_for(self._queue.get(), timeout=self._debounce_s)
+                # Check the deadline before consuming another queued event: a
+                # continuously nonempty queue must not starve the maximum wait.
+                if timeout <= 0:
+                    raise TimeoutError
+                file_path = await asyncio.wait_for(self._queue.get(), timeout=timeout)
                 if file_path == _STOP_SENTINEL:
-                    # Flush remaining pending files before exiting. A file whose
-                    # reindex times out on the sidecar is dropped here (we are
-                    # shutting down; the next start's backfill will catch it).
                     if pending:
                         await self._flush_batch(pending)
                     return
+                if first is None:
+                    first = loop.time()
+                last = loop.time()
                 pending.add(file_path)
+                # A new edit must not inherit an old generation's backoff.
+                self._retry_after.pop(file_path, None)
+                self._retry_attempts.pop(file_path, None)
             except TimeoutError:
                 if pending:
-                    # Reindex the batch and carry forward any file whose sidecar
-                    # acquire timed out, so the next debounce window retries it.
-                    pending = await self._flush_batch(pending)
-                continue
+                    now = loop.time()
+                    ready = {p for p in pending if self._retry_after.get(p, 0) <= now}
+                    retry = await self._flush_batch(ready) if ready else set()
+                    for path in ready - retry:
+                        self._retry_attempts.pop(path, None)
+                        self._retry_after.pop(path, None)
+                    for path in retry:
+                        attempts = min(self._retry_attempts.get(path, 0) + 1, 5)
+                        self._retry_attempts[path] = attempts
+                        self._retry_after[path] = loop.time() + min(
+                            30, 2**attempts
+                        ) * random.uniform(0.8, 1.2)  # nosec B311 - scheduling jitter only
+                    pending = (pending - ready) | retry
+                    first = loop.time() if pending else None
+                    last = loop.time()
 
     async def _flush_batch(self, pending: set[Path]) -> set[Path]:
         """Reindex every file in *pending*; return the set to retry next window.

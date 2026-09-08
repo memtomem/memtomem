@@ -24,6 +24,8 @@ class ConfigEmbeddingOut(BaseModel):
     # Restart-required and excluded from ``MUTABLE_FIELDS`` per
     # ``EmbeddingConfig`` in config.py.
     threads: int = 4
+    onnx_variant: str = "fp32"
+    onnx_artifact_path: str = ""
 
 
 class ConfigStorageOut(BaseModel):
@@ -51,6 +53,13 @@ class ConfigIndexingOut(BaseModel):
     target_chunk_tokens: int = 0
     chunk_overlap_tokens: int = 0
     structured_chunk_mode: str = "original"
+    hard_max_chunk_tokens: int = 0
+    chunk_context_tokens: int = 512
+    chunk_model_tokens: int = 8192
+    chunk_tokenizer_path: str = ""
+    chunk_input_prefix: str = ""
+    watcher_debounce_ms: int = 5000
+    watcher_max_wait_ms: int = 30000
     exclude_patterns: list[str] = []
 
 

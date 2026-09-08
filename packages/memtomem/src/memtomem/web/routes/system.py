@@ -396,6 +396,8 @@ def _build_config_response(
             onnx_cpu_mem_arena=cfg.embedding.onnx_cpu_mem_arena,
             api_key="***" if cfg.embedding.api_key else "",
             threads=cfg.embedding.threads,
+            onnx_variant=getattr(cfg.embedding, "onnx_variant", "fp32"),
+            onnx_artifact_path=getattr(cfg.embedding, "onnx_artifact_path", ""),
         ),
         storage=ConfigStorageOut(
             backend=cfg.storage.backend,
@@ -420,6 +422,13 @@ def _build_config_response(
             target_chunk_tokens=cfg.indexing.target_chunk_tokens,
             chunk_overlap_tokens=cfg.indexing.chunk_overlap_tokens,
             structured_chunk_mode=cfg.indexing.structured_chunk_mode,
+            hard_max_chunk_tokens=getattr(cfg.indexing, "hard_max_chunk_tokens", 0),
+            chunk_context_tokens=getattr(cfg.indexing, "chunk_context_tokens", 512),
+            chunk_model_tokens=getattr(cfg.indexing, "chunk_model_tokens", 8192),
+            chunk_tokenizer_path=getattr(cfg.indexing, "chunk_tokenizer_path", ""),
+            chunk_input_prefix=getattr(cfg.indexing, "chunk_input_prefix", ""),
+            watcher_debounce_ms=getattr(cfg.indexing, "watcher_debounce_ms", 5000),
+            watcher_max_wait_ms=getattr(cfg.indexing, "watcher_max_wait_ms", 30000),
             exclude_patterns=list(cfg.indexing.exclude_patterns),
         ),
         decay=ConfigDecayOut(

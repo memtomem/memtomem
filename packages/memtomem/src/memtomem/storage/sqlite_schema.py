@@ -161,6 +161,13 @@ def create_tables(
     check_schema_downgrade(db)
 
     db.execute("""
+        CREATE TABLE IF NOT EXISTS source_index_receipts (
+            source_file TEXT PRIMARY KEY, source_hash TEXT NOT NULL,
+            policy TEXT NOT NULL, state_hash TEXT NOT NULL
+        )
+    """)
+
+    db.execute("""
         CREATE TABLE IF NOT EXISTS chunks (
             id TEXT PRIMARY KEY,
             content TEXT NOT NULL,

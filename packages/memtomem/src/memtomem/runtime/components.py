@@ -153,7 +153,10 @@ async def create_components(
 
     from memtomem.chunking.bounded import validate_budget_configuration
 
-    validate_budget_configuration(config)
+    from memtomem.embedding.profiles import apply_e5_defaults
+
+    apply_e5_defaults(config)
+    await asyncio.to_thread(validate_budget_configuration, config)
 
     # Initialize FTS tokenizer from config
     from memtomem.storage.fts_tokenizer import set_tokenizer
