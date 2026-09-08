@@ -10,7 +10,7 @@ import struct
 import threading
 import warnings
 from collections.abc import Awaitable, Callable, Iterable
-from concurrent.futures import Future, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
@@ -178,7 +178,12 @@ class MemtomemHybridStore(BaseStore):
         self._closed = False
         self._close_done = threading.Event()
         self._pending: set[Future[Any]] = set()
+        self._executor_workers: set[threading.Thread] = set()
         self._loop = asyncio.new_event_loop()
+        self._executor = ThreadPoolExecutor(
+            thread_name_prefix="memtomem-hybrid-store-worker", initializer=self._register_worker
+        )
+        self._loop.set_default_executor(self._executor)
         self._thread = threading.Thread(target=self._run, name="memtomem-hybrid-store", daemon=True)
         self._thread.start()
         try:
@@ -194,8 +199,24 @@ class MemtomemHybridStore(BaseStore):
             self._loop.run_forever()
         finally:
             self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            # The loop owns shutdown of the installed executor. Keep worker
+            # identities until it has drained, including during concurrent close.
             self._loop.run_until_complete(self._loop.shutdown_default_executor())
             self._loop.close()
+
+    def _register_worker(self) -> None:
+        # Thread objects avoid mistaking a recycled thread ID for one of ours.
+        with self._state_lock:
+            self._executor_workers.add(threading.current_thread())
+
+    def _on_own_executor(self) -> None:
+        with self._state_lock:
+            own_worker = threading.current_thread() in self._executor_workers
+        if own_worker:
+            raise RuntimeError(
+                "Cannot close the store from its own executor; "
+                "close it from outside the store's own threads"
+            )
 
     async def _initialize(self):
         self._embedder = (
@@ -258,8 +279,8 @@ class MemtomemHybridStore(BaseStore):
         "Cannot run a synchronous store operation from the store's event loop; await the async API"
     )
     # "another thread" would be wrong advice: handing close() to a worker of
-    # the store's *own* loop deadlocks the same way, and no guard here sees
-    # that hop. The safe caller is the code that owns the store.
+    # the store's *own* loop deadlocks the same way. _on_own_executor catches
+    # that hop even after the callback ends. The safe caller owns the store.
     _NO_CLOSING = (
         "Cannot close the store from its own event loop; "
         "close it from outside the store's own threads"
@@ -608,6 +629,7 @@ class MemtomemHybridStore(BaseStore):
         if self._inside_own_callback():
             raise RuntimeError("Cannot close the store from its embedding callback")
         self._on_own_loop(self._NO_CLOSING)
+        self._on_own_executor()
         with self._state_lock:
             already_closing = self._closed
             self._closed = True
@@ -626,15 +648,14 @@ class MemtomemHybridStore(BaseStore):
             self._close_done.set()
 
     async def aclose(self) -> None:
-        # Both refusals have to happen before the offload. close() would catch
-        # the callback itself, since to_thread carries the marker to the worker,
-        # but answering here keeps that refusal in the frame that caused it. The
-        # loop check has no second chance at all: on the worker it is false, and
-        # that worker then joins the store thread while the store thread waits
-        # for the executor the worker belongs to.
+        # Refuse before offloading, with the callback reason first. A worker
+        # may run aclose() on a separate loop: hopping to that loop's executor
+        # would hide its ownership from close(), while our shutdown still waits
+        # for the original worker. Ordinary external callers remain safe.
         if self._inside_own_callback():
             raise RuntimeError("Cannot close the store from its embedding callback")
         self._on_own_loop(self._NO_CLOSING)
+        self._on_own_executor()
         await asyncio.to_thread(self.close)
 
     def __enter__(self):

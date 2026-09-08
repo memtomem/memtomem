@@ -125,6 +125,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- Expose configured `rrf_k`, `rrf_weights`, `bm25_candidates`, and
+  `dense_candidates` in the schema-1 version runtime profile and human/JSON
+  status (#2377), enabling STM's read-only RRF boundary diagnostic (STM #1012).
+  Version collection remains free of model/storage initialization; values are
+  configuration snapshots, not observed retrieval counts or final-score guarantees.
+
 - **Hand one skill, command, or agent to someone else as a file.**
   `mm context export <kind> <name> --out <file>` packs a single canonical
   artifact — its manifest, its per-vendor overrides, its frozen version history,

@@ -299,11 +299,14 @@ async def test_import_does_not_trust_external_source_evidence(indexed_source):
     assert source.read_text() == ORIGINAL
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
 @pytest.mark.parametrize("surface", ["mcp_edit", "mcp_delete", "web_edit"])
 async def test_provenance_exception_after_write_still_rolls_back(
-    indexed_source, monkeypatch, surface
+    indexed_source, monkeypatch, surface, newline
 ):
     comp, source, chunk = indexed_source
+    source.write_bytes(ORIGINAL.replace("\n", newline).encode())
+    original_bytes = source.read_bytes()
     original_index = comp.index_engine.index_file
     observed = []
 
@@ -320,5 +323,5 @@ async def test_provenance_exception_after_write_still_rolls_back(
     else:
         assert result.status_code == 409
     assert len(observed) == 2
-    assert observed[0] != ORIGINAL.encode()
-    assert observed[1] == source.read_bytes() == ORIGINAL.encode()
+    assert observed[0] != original_bytes
+    assert observed[1] == source.read_bytes() == original_bytes
