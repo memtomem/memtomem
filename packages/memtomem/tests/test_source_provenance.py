@@ -263,6 +263,27 @@ async def test_range_and_hash_refresh_roll_back_together(indexed_source):
     assert source.read_text() == ORIGINAL
 
 
+async def test_repeated_source_ranges_are_hashed_once_per_snapshot(
+    bm25_only_components, monkeypatch
+):
+    comp, directory = bm25_only_components
+    source = directory / "long-line.md"
+    text = "A sentence with many words. " * 3000
+    spy = Mock(wraps=source_span_hash)
+    monkeypatch.setattr("memtomem.source_provenance.source_span_hash", spy)
+
+    for snapshot in (text, text.replace("sentence", "paragraph")):
+        spy.reset_mock()
+        chunks = comp.index_engine.chunk_content(source, snapshot)
+        ranges = {(c.metadata.start_line, c.metadata.end_line) for c in chunks}
+        assert len(chunks) > len(ranges)
+        assert spy.call_count == len(ranges)
+        for chunk in chunks:
+            assert chunk.metadata.source_span_hash == source_span_hash(
+                snapshot.splitlines(), chunk.metadata.start_line, chunk.metadata.end_line
+            )
+
+
 async def test_import_does_not_trust_external_source_evidence(indexed_source):
     from memtomem.tools.export_import import _chunk_to_dict, _dict_to_chunk
 

@@ -1113,12 +1113,16 @@ class IndexEngine:
         # before heading/tag/wikilink/overlap transforms can lose information.
         # Split once for the whole file, not once per chunk (#2371).
         source_lines = content.splitlines()
+        # A long line can produce many chunks with the same source range.
+        # Reuse hashes only within this snapshot, including invalid (None) spans.
+        span_hashes: dict[tuple[int, int], str | None] = {}
         for chunk in chunks:
+            span = (chunk.metadata.start_line, chunk.metadata.end_line)
+            if span not in span_hashes:
+                span_hashes[span] = source_span_hash(source_lines, *span)
             chunk.metadata = dataclasses.replace(
                 chunk.metadata,
-                source_span_hash=source_span_hash(
-                    source_lines, chunk.metadata.start_line, chunk.metadata.end_line
-                ),
+                source_span_hash=span_hashes[span],
             )
         return chunks
 
