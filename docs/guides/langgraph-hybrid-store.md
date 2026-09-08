@@ -133,14 +133,18 @@ is refused as well, since it would wait on the loop it is running on. Ordinary
 async methods stay open to that task, because awaiting suspends rather than
 blocks. `aclose()` is the exception and is refused there too, since it hands
 `close()` to the loop's own executor. Close the store from the code that owns
-it. Handing `close()` to a worker of the store's own loop by other means, such
-as `asyncio.to_thread(store.close)` from a task on that loop once the callback
-has returned, deadlocks the same way and is not detected: that worker joins the
-store thread while the store thread waits for the executor the worker belongs
-to. The same call made while the callback is still running is refused, because
-the marker travels to the worker with the context. Caller-owned embedding clients
-are not automatically closed. Always close the store. Close drains accepted
-operations; cancelling an async caller does not retract an accepted write.
+it. The store installs its own default executor and identifies its workers.
+Handing `close()` to one of those workers, including with
+`asyncio.to_thread(store.close)` after the embedding callback has returned,
+raises `RuntimeError` before shutdown begins. Calling `aclose()` from such a
+worker is also refused before it can offload the close. While the callback is
+still running, the embedding-callback refusal takes precedence. This executor
+rule applies only to closing; ordinary synchronous operations keep their
+existing callback and loop checks. External callers can still use `close()`
+or `aclose()`. The store's loop drains its executor during shutdown.
+Caller-owned embedding clients are not automatically closed. Always close the
+store. Close drains accepted operations; cancelling an async caller does not
+retract an accepted write.
 
 `batch` commits each operation independently in input order. A later failure does
 not undo earlier successful operations. Do not treat it as an all-or-nothing batch.
