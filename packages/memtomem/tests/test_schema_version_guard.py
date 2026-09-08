@@ -356,3 +356,33 @@ class TestBackendInitialize:
             ).fetchone()[0] == str(SCHEMA_VERSION + 1)
         finally:
             db.close()
+
+
+def test_source_span_migration_keeps_legacy_evidence_unknown_and_fences_old_writers(monkeypatch):
+    """#2371: upgrade never stamps a current file's evidence on an old index row."""
+    from memtomem.storage import sqlite_schema
+
+    db = _connect_with_vec()
+    try:
+        _create_tables(db)
+        db.execute("ALTER TABLE chunks DROP COLUMN source_span_hash")
+        db.execute(
+            "INSERT INTO chunks(id, content, content_hash, source_file, created_at, updated_at) "
+            "VALUES ('old-id', 'old-body', 'hash', '/never/read.md', '2026-01-01', '2026-01-01')"
+        )
+        _seed_schema_version(db, "1")
+        before = db.execute("SELECT * FROM chunks WHERE id='old-id'").fetchone()
+        _create_tables(db)
+        after = db.execute("SELECT * FROM chunks WHERE id='old-id'").fetchone()
+        assert after[:-1] == before
+        assert after[-1] is None
+        assert _stored_version(db) == str(SCHEMA_VERSION)
+        _create_tables(db)  # Idempotent, still no evidence manufactured.
+        assert db.execute("SELECT * FROM chunks WHERE id='old-id'").fetchone() == after
+        changes = db.total_changes
+        monkeypatch.setattr(sqlite_schema, "SCHEMA_VERSION", 1)
+        with pytest.raises(SchemaDowngradeError):
+            _create_tables(db)
+        assert db.total_changes == changes
+    finally:
+        db.close()

@@ -13,6 +13,10 @@ from memtomem.errors import NamespaceResolutionError
 from memtomem.search.visibility import resolve_visible_chunk
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
+from memtomem.source_provenance import (
+    STALE_SOURCE_PROVENANCE_DETAIL,
+    StaleSourceProvenanceError,
+)
 from memtomem.tools.memory_writer import (
     SourceChangedError,
     SourceRemovedError,
@@ -269,6 +273,7 @@ async def edit_chunk(
                     meta.start_line,
                     meta.end_line,
                     body.new_content,
+                    expected_source_span_hash=meta.source_span_hash,
                     expected_identity=pre.identity,
                 ),
             )
@@ -278,6 +283,11 @@ async def edit_chunk(
             # before it must not keep serving the pre-edit body.
             if stats.mutated:
                 search_pipeline.invalidate_cache()
+        except StaleSourceProvenanceError as exc:
+            # Normally a pure refusal. Invalidate conservatively: if this type
+            # came from a later stage, the helper still ran its normal rollback.
+            search_pipeline.invalidate_cache()
+            raise HTTPException(status_code=409, detail=STALE_SOURCE_PROVENANCE_DETAIL) from exc
         except SourceChangedError as exc:
             # The rewrite refused before writing a byte because the source is no
             # longer the file it read (#2367). Ahead of the generic handler: a
@@ -611,6 +621,7 @@ async def delete_chunk(
                         source,
                         meta.start_line,
                         meta.end_line,
+                        expected_source_span_hash=meta.source_span_hash,
                         expected_identity=expected_identity,
                     )
                 except SourceRemovedError:
@@ -641,6 +652,11 @@ async def delete_chunk(
                     logger.warning("Source of chunk %s was replaced mid-delete: %s", chunk_id, exc)
                     raise HTTPException(
                         status_code=409, detail=SOURCE_REPLACED_DURING_WRITE_DETAIL
+                    ) from exc
+                except StaleSourceProvenanceError as exc:
+                    mutation_attempted = False
+                    raise HTTPException(
+                        status_code=409, detail=STALE_SOURCE_PROVENANCE_DETAIL
                     ) from exc
                 except ValueError as exc:
                     logger.warning("Stale line provenance for chunk %s: %s", chunk_id, exc)

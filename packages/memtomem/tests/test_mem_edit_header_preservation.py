@@ -9,6 +9,7 @@ header. ``replace_chunk_body`` is the helper that handles this.
 
 from pathlib import Path
 
+from memtomem.source_provenance import source_span_hash
 from memtomem.tools.memory_writer import replace_chunk_body
 
 
@@ -26,7 +27,15 @@ class TestReplaceChunkBody:
             encoding="utf-8",
         )
         # Chunk range: heading line through final body line.
-        replace_chunk_body(f, start_line=1, end_line=6, new_content="New body.")
+        replace_chunk_body(
+            f,
+            start_line=1,
+            end_line=6,
+            new_content="New body.",
+            expected_source_span_hash=source_span_hash(
+                f.read_text(encoding="utf-8").splitlines(), 1, 6
+            ),
+        )
         result = f.read_text(encoding="utf-8")
         assert "## Cache" in result
         assert "> created: 2026-04-24T22:00:00+00:00" in result
@@ -41,7 +50,15 @@ class TestReplaceChunkBody:
             "## Note\n\n> created: 2026-04-01T10:00:00+00:00\ntags: ['legacy']\n\nOld body line.\n",
             encoding="utf-8",
         )
-        replace_chunk_body(f, start_line=1, end_line=6, new_content="Replaced body.")
+        replace_chunk_body(
+            f,
+            start_line=1,
+            end_line=6,
+            new_content="Replaced body.",
+            expected_source_span_hash=source_span_hash(
+                f.read_text(encoding="utf-8").splitlines(), 1, 6
+            ),
+        )
         result = f.read_text(encoding="utf-8")
         assert "> created: 2026-04-01T10:00:00+00:00" in result
         assert "tags: ['legacy']" in result
@@ -55,7 +72,15 @@ class TestReplaceChunkBody:
             "## Section\n\nOld body content.\n",
             encoding="utf-8",
         )
-        replace_chunk_body(f, start_line=1, end_line=3, new_content="New body content.")
+        replace_chunk_body(
+            f,
+            start_line=1,
+            end_line=3,
+            new_content="New body content.",
+            expected_source_span_hash=source_span_hash(
+                f.read_text(encoding="utf-8").splitlines(), 1, 3
+            ),
+        )
         result = f.read_text(encoding="utf-8")
         assert "## Section" in result
         assert "New body content." in result
@@ -75,6 +100,9 @@ class TestReplaceChunkBody:
             start_line=1,
             end_line=6,
             new_content="## New\n\nFresh body without metadata.",
+            expected_source_span_hash=source_span_hash(
+                f.read_text(encoding="utf-8").splitlines(), 1, 6
+            ),
         )
         result = f.read_text(encoding="utf-8")
         assert "## New" in result
@@ -98,7 +126,15 @@ class TestReplaceChunkBody:
             encoding="utf-8",
         )
         # Edit the second sub-chunk only (lines 7..7) — no header at line 7.
-        replace_chunk_body(f, start_line=7, end_line=7, new_content="Replaced second half.")
+        replace_chunk_body(
+            f,
+            start_line=7,
+            end_line=7,
+            new_content="Replaced second half.",
+            expected_source_span_hash=source_span_hash(
+                f.read_text(encoding="utf-8").splitlines(), 7, 7
+            ),
+        )
         result = f.read_text(encoding="utf-8")
         # Header preserved (it was outside the edit range).
         assert "## Big section" in result
@@ -111,10 +147,26 @@ class TestReplaceChunkBody:
         """Files with a trailing newline retain it; files without don't gain one."""
         f1 = tmp_path / "with_nl.md"
         f1.write_text("## H\n\nBody.\n", encoding="utf-8")
-        replace_chunk_body(f1, 1, 3, "New.")
+        replace_chunk_body(
+            f1,
+            1,
+            3,
+            "New.",
+            expected_source_span_hash=source_span_hash(
+                f1.read_text(encoding="utf-8").splitlines(), 1, 3
+            ),
+        )
         assert f1.read_text(encoding="utf-8").endswith("\n")
 
         f2 = tmp_path / "no_nl.md"
         f2.write_text("## H\n\nBody.", encoding="utf-8")
-        replace_chunk_body(f2, 1, 3, "New.")
+        replace_chunk_body(
+            f2,
+            1,
+            3,
+            "New.",
+            expected_source_span_hash=source_span_hash(
+                f2.read_text(encoding="utf-8").splitlines(), 1, 3
+            ),
+        )
         assert not f2.read_text(encoding="utf-8").endswith("\n")

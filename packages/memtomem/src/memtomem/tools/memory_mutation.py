@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 from memtomem.context import _atomic
 from memtomem.context._atomic import async_memory_file_lock
 from memtomem.search.visibility import chunk_in_scope_boundary
+from memtomem.source_provenance import StaleSourceProvenanceError
 from memtomem.tools.memory_writer import (
     RestoreOutcome,
     SourceChangedError,
@@ -164,6 +165,10 @@ async def mutate_source_and_reindex(
         mutation_completed = True
         return await index_engine.index_file(source_file, already_scanned=True, lock_held=True)
     except Exception as exc:
+        if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:
+            # No byte was written. In particular, do not reindex here: doing
+            # so could erase the stale row and bless an unrelated replacement.
+            raise
         if isinstance(exc, SourceChangedError) and not mutation_completed:
             # The write refused before putting a byte on disk (#2367), so there
             # is no mutation of ours to undo — and restoring anyway would be the

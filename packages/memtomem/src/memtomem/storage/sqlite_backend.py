@@ -1299,7 +1299,7 @@ class SqliteBackend(
                        heading_hierarchy=?, chunk_type=?, start_line=?, end_line=?,
                        language=?, tags=?, namespace=?, updated_at=?,
                        valid_from_unix=?, valid_to_unix=?,
-                       scope=?, project_root=?, origin=?
+                       scope=?, project_root=?, origin=?, source_span_hash=?
                        WHERE id=?""",
                     [
                         (
@@ -1319,6 +1319,7 @@ class SqliteBackend(
                             c.metadata.scope,
                             str(c.metadata.project_root) if c.metadata.project_root else None,
                             c.metadata.origin,
+                            c.metadata.source_span_hash,
                             str(c.id),
                         )
                         for c, _ in to_update
@@ -1377,8 +1378,8 @@ class SqliteBackend(
                         namespace, created_at, updated_at,
                         overlap_before, overlap_after,
                         valid_from_unix, valid_to_unix,
-                        scope, project_root, origin)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        scope, project_root, origin, source_span_hash)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [
                         (
                             str(c.id),
@@ -1401,6 +1402,7 @@ class SqliteBackend(
                             c.metadata.scope,
                             str(c.metadata.project_root) if c.metadata.project_root else None,
                             c.metadata.origin,
+                            c.metadata.source_span_hash,
                         )
                         for c in to_insert
                     ],
@@ -1487,7 +1489,9 @@ class SqliteBackend(
         Incremental indexing reuses the stored UUID when content hashes match.
         A sibling edit can still shift that chunk's source lines, though, so the
         diff path must refresh ``start_line`` / ``end_line`` while leaving FTS,
-        vectors, timestamps, and personalization untouched (#1788).
+        vectors, timestamps, and personalization untouched (#1788). The original
+        source-span hash is refreshed in the same transaction, even when only
+        that evidence changed or was missing on a legacy row (#2371).
 
         The temporary negative line numbers avoid UNIQUE collisions when two
         identical-content chunks move through one another: the uniqueness key
@@ -1506,7 +1510,7 @@ class SqliteBackend(
             for id_batch in _param_batches(ids):
                 rows.extend(
                     db.execute(
-                        f"SELECT id, rowid, start_line, end_line FROM chunks "
+                        f"SELECT id, rowid, start_line, end_line, source_span_hash FROM chunks "
                         f"WHERE id IN ({placeholders(len(id_batch))})",
                         id_batch,
                     ).fetchall()
@@ -1517,6 +1521,7 @@ class SqliteBackend(
                 if (
                     row[2] != chunk_by_id[row[0]].metadata.start_line
                     or row[3] != chunk_by_id[row[0]].metadata.end_line
+                    or row[4] != chunk_by_id[row[0]].metadata.source_span_hash
                 )
             ]
             if not changed:
@@ -1527,11 +1532,12 @@ class SqliteBackend(
                 [(-rowid - 1, -rowid - 1, str(chunk.id)) for chunk, rowid in changed],
             )
             db.executemany(
-                "UPDATE chunks SET start_line=?, end_line=? WHERE id=?",
+                "UPDATE chunks SET start_line=?, end_line=?, source_span_hash=? WHERE id=?",
                 [
                     (
                         chunk.metadata.start_line,
                         chunk.metadata.end_line,
+                        chunk.metadata.source_span_hash,
                         str(chunk.id),
                     )
                     for chunk, _ in changed
@@ -3611,6 +3617,7 @@ class SqliteBackend(
             scope=scope_val,
             project_root=project_root_val,
             origin=origin_val,
+            source_span_hash=row[24] if len(row) >= 25 else None,
         )
 
         # --- timestamps (always timezone-aware) ---
