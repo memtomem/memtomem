@@ -119,9 +119,7 @@ def bound_chunks(
             meta = replace(
                 chunk.metadata,
                 start_line=chunk.metadata.start_line if virtual else line,
-                end_line=chunk.metadata.end_line
-                if virtual
-                else line + body[:-1].count("\n"),
+                end_line=chunk.metadata.end_line if virtual else line + body[:-1].count("\n"),
                 overlap_before=max(0, min(end, chunk.metadata.overlap_before) - start),
                 overlap_after=max(
                     0, end - max(start, len(chunk.content) - chunk.metadata.overlap_after)

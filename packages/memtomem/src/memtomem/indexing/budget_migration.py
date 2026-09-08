@@ -50,7 +50,6 @@ def source_hash(path: Path) -> str:
 
 
 def state_hash(db: sqlite3.Connection, source: Path) -> str:
-    columns = {row[1] for row in db.execute("PRAGMA table_info(chunks)")}
     wanted = [
         "id",
         "content_hash",
@@ -67,11 +66,13 @@ def state_hash(db: sqlite3.Connection, source: Path) -> str:
         "retrieval_context",
         "redaction_count",
     ]
-    defaults = {"retrieval_context": "''", "redaction_count": "0"}
-    fields = ", ".join(name if name in columns else defaults.get(name, "NULL") for name in wanted)
-    rows = db.execute(
-        f"SELECT {fields} FROM chunks WHERE source_file=? ORDER BY id", (str(source),)
-    ).fetchall()
+    defaults = {"retrieval_context": "", "redaction_count": 0}
+    cursor = db.execute("SELECT * FROM chunks WHERE source_file=? ORDER BY id", (str(source),))
+    columns = [item[0] for item in cursor.description]
+    rows = []
+    for row in cursor:
+        values = dict(zip(columns, row, strict=True))
+        rows.append([values.get(name, defaults.get(name)) for name in wanted])
     return digest(rows)
 
 

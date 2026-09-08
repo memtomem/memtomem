@@ -1118,10 +1118,13 @@ class IndexEngine:
         chunks = self._chunk_projected_content(file_path, content)
         if projection.redaction_count:
             for chunk in chunks:
-                context = (f"Index masking: {projection.redaction_count} source values masked.\n"
-                           + chunk.metadata.retrieval_context)
+                context = (
+                    f"Index masking: {projection.redaction_count} source values masked.\n"
+                    + chunk.metadata.retrieval_context
+                )
                 chunk.metadata = dataclasses.replace(
-                    chunk.metadata, redaction_count=projection.redaction_count)
+                    chunk.metadata, redaction_count=projection.redaction_count
+                )
                 if self._config.hard_max_chunk_tokens:
                     from memtomem.chunking.bounded import TokenBudget
 

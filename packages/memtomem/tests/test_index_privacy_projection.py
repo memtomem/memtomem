@@ -100,13 +100,16 @@ async def test_masked_projection_cannot_overwrite_original_via_mem_edit(bm25_onl
     from memtomem.server.tools.memory_crud import mem_edit
 
     comp, directory = bm25_only_components
-    source = directory / 'masked.md'
+    source = directory / "masked.md"
     original = '# Example\n\n`"password": "original private value"`\n'
     source.write_text(original)
     await comp.index_engine.index_file(source)
     chunks = await comp.storage.list_chunks_by_source(source, limit=None)
     assert chunks[0].metadata.redaction_count > 0
-    response = await mem_edit(chunk_id=str(chunks[0].id), new_content='replacement',
-                              ctx=StubCtx(AppContext.from_components(comp)))
-    assert 'masked_projection_read_only' in response
+    response = await mem_edit(
+        chunk_id=str(chunks[0].id),
+        new_content="replacement",
+        ctx=StubCtx(AppContext.from_components(comp)),
+    )
+    assert "masked_projection_read_only" in response
     assert source.read_text() == original

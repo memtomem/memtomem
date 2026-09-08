@@ -499,7 +499,9 @@ class TestDeclaredExemptionIndexing:
         # A ``.yaml`` source has no frontmatter block; leading dashes do not
         # make one.
         comp, mem_dir = bm25_only_components
-        (mem_dir / "conf.yaml").write_text('---\nredaction: documents-patterns\npassword: "unfinished\n')
+        (mem_dir / "conf.yaml").write_text(
+            '---\nredaction: documents-patterns\npassword: "unfinished\n'
+        )
 
         stats = await comp.index_engine.index_path(mem_dir, recursive=True)
 

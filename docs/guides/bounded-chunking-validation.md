@@ -1,38 +1,40 @@
-# 청크 처리 개선 및 운영 검증 — 2026-09-08
+# Bounded chunking validation — 2026-09-08
 
-파일 인덱싱의 공통 경로에 인덱싱용 사본 마스킹을 적용하고, 정확한 토큰 한도와
-구조 설명을 보완했다. 기존 설정으로 실행하는 새 설치본 CLI와 주 Core에서 확인했다.
+The common file-indexing path now applies index-only masking, exact token limits,
+and structural descriptions. The installed CLI and primary Core were verified
+with the existing configuration.
 
-## 보완한 문제
+## Issues addressed
 
-| 문제 | 적용한 처리 |
+| Issue | Resolution |
 |---|---|
-| 중복 키가 있는 큰 JSON의 뒤쪽 값 누락 | 중복 키를 감지하면 원문 보존 분할로 전환 |
-| 빈 줄 병합 후 설명의 줄 번호 불일치 | 최종 청크 확정 후 위치와 조각 번호 생성 |
-| 긴 본문을 매번 전체 토큰화 | 제한된 문자 구간으로 분할 후보를 검사하고 최종 토큰 수 검증 |
-| 문서 속 비밀번호 예시와 빈 환경변수 대입 차단 | 값이 명확하면 사본에서 마스킹, 명확한 빈 대입은 보존 |
-| 마스킹된 청크 편집이 원본을 덮어쓸 가능성 | MCP·웹의 해당 청크 편집 차단, 원본 편집 후 재인덱싱 안내 |
-| 설명 캐시가 이전 소스 버전을 계속 보관 | 소스별 세대 교체, 최대 256개, 소스 삭제 시 정리 |
-| 청크 정책의 부분적인 실시간 적용 | 재시작 필요 항목을 설정 공개 전에 검증 |
-| 임시 스크립트에 의존한 재처리 | 해시 검증·원자적 완료 기록을 사용하는 범용 도구 추가 |
-| 확장자 집합 순서에 따른 설정 해시 오탐 | 집합을 정규화하고 서로 다른 프로세스 해시 시드로 회귀 검증 |
+| Duplicate JSON keys could lose earlier values | Fall back to lossless source splitting |
+| Line references could drift after whitespace packing | Generate positions and fragment numbers after packing |
+| Repeated tokenization of the entire remaining body | Bound candidate windows and validate final token counts |
+| Illustrative passwords and empty environment assignments were blocked | Mask identifiable values in the indexed copy; preserve explicit empty assignments |
+| Editing masked chunks could overwrite original source | Reject MCP/web chunk edits and direct users to edit the source |
+| Description caches retained older source generations | Replace each source generation, cap it at 256 entries, and clear it on deletion |
+| Partial hot reload could mix chunk policies | Validate restart-required settings before publishing configuration |
+| Reprocessing depended on temporary scripts | Add a generic migration tool with hash checks and atomic completion receipts |
+| Set ordering caused inconsistent configuration hashes | Canonicalize sets and test across process hash seeds |
 
-기존 탐지 패턴과 명시적 예외의 감사 기록, 공유 scope 제한은 유지했다.
-처리할 수 없는 값과 구체적인 자격증명 패턴은 계속 차단한다. LLM 설명 보강은
-비활성 상태를 유지했다. 원본 파일은 수정하지 않으며 마스킹된 사본만 청크와
-설명·임베딩에 사용한다. 임의의 개인정보 전체를 익명화하는 기능은 아니다.
+Existing scanner patterns, explicit exemption auditing, and shared-scope guards
+remain in place. Ambiguous values and specific credential patterns still reach
+the guard. Optional LLM enrichment remains disabled. Only the indexed copy is
+masked; source files are preserved. This does not anonymize arbitrary PII.
 
-## 청크와 검사 예시
+## Scanner and chunk examples
 
-실제 `nbrun.py`의 설명 주석 두 곳을 같은 규칙으로 처리했다.
+Two illustrative values in comments in `nbrun.py` were handled consistently:
 
 ```text
-password: required         → password: [REDACTED]
-"password": "secret"      → "password": "[REDACTED]"
-OPENAI_API_KEY=            → 빈 대입 그대로 유지
+password: required         -> password: [REDACTED]
+"password": "secret"       -> "password": "[REDACTED]"
+OPENAI_API_KEY=             -> unchanged empty assignment
 ```
 
-마스킹된 예시가 들어 있는 실제 청크의 본문은 1,373토큰, 설명은 28토큰이다.
+The actual chunk containing the masked examples has a 1,373-token body and a
+28-token description:
 
 ```text
 Index masking: 2 source values masked.
@@ -41,41 +43,49 @@ File: nbrun.py
 Lines: 1-67; fragment 1/2
 ```
 
-`fragment`는 같은 심볼 계층에 속한 청크 안에서의 번호다.
-`redaction_count`는 소스에서 마스킹한 값의 수이며 해당 소스의 청크에 반복해서 기록한다.
+Fragment numbers are relative to the same symbol hierarchy. `redaction_count`
+is the source-level count repeated on each chunk, not a per-chunk count.
 
-## 검증 결과
+## Local validation snapshot
 
-- 관련 테스트 **1,936개 통과**. Ruff 및 소스 361개에 대한 mypy 통과.
-- **148개 소스 / 2,018개 청크** 재처리 완료, 오류 0건.
-- 전체 DB **9,828개 청크**: 본문 최대 **4,096토큰**, 설명 최대 **409토큰**, 합성 입력 최대 **4,295토큰**.
-- 본문·설명·모델 입력 한도 초과 0건. 벡터 누락 0건, FTS 누락 0건, SQLite 검사 `ok`.
-- 원본 148개 파일의 해시와 namespace·scope·태그·유효기간·출처 보존 확인.
-- 설치본 CLI의 합성 파일 시험: 청크 5개, 본문 최대 4,096토큰, 마스킹·원본 보존 확인. 시험용 청크와 파일은 제거했다.
-- 설치한 Python 소스 361개와 작업 브랜치의 내용 일치 확인.
+- 1,936 targeted tests passed; Ruff lint and mypy over 361 source files passed.
+- 148 sources were reprocessed into 2,018 chunks with no migration errors.
+- Whole database: 9,828 chunks; maximum body/context/composed input lengths were 4,096/409/4,295 tokens.
+- Zero budget violations, missing vectors, or missing FTS rows; SQLite check returned `ok`.
+- Source hashes and namespaces, scopes, tags, validity, and provenance were preserved for all 148 sources.
+- Installed CLI canary: five chunks, maximum body 4,096 tokens, masking and source preservation confirmed; test files and rows were removed.
+- All 361 installed Python source files matched the implementation at the time of deployment.
 
-## 설치와 재시작 범위
+These measurements precede the CI follow-up changes. Initial CI additionally
+identified formatting differences, a missing tokenizer extras probe, and two
+SQL construction warnings. The follow-up formats the affected files, adds the
+probe, and uses static SQL without weakening the security baseline.
 
-검증한 wheel을 `~/.local/share/memtomem/releases/<wheel-hash>`에 설치하고
-기존 실행 진입점을 원자적으로 전환했다. 기존 프로세스의 패키지 파일과
-의존성·uv 설치 receipt, Core/STM 설정 파일은 유지했다. 복구용 진입점과 DB 백업을 남겼다.
+## Deployment and restart scope
 
-최종 wheel SHA-256: `53e0b6d5cbc2fe4ece89639aac646292e3e6ff8bdd427e08df098ce3fff61db6`.
+The validated wheel was installed into an immutable release directory and the
+existing console launchers were switched atomically. Existing processes kept
+their package files. Dependencies, the uv installation receipt, and Core/STM
+configuration files were preserved. Launcher and database backups were retained.
 
-주 Core는 PID **90022**로 재연결했고 실제 검색 응답을 확인했다.
-STM 부모 PID **84046**는 유지했다. 주 Core RSS는 재시작 직전
-**13.30 GiB**, 최종 검색 확인 후 **2.22 GiB**였다.
-이는 서로 다른 시점의 측정이며 장기 메모리 누수 해소를 증명하는 부하 시험은 아니다.
-최종 프로세스 관찰에서 좀비는 0개였다.
+Deployed wheel SHA-256: `53e0b6d5cbc2fe4ece89639aac646292e3e6ff8bdd427e08df098ce3fff61db6`.
 
-설치 전부터 살아 있는 다른 Core 프로세스 **12개**는
-세션 보존을 위해 종료하지 않았다. 이 세션들은 클라이언트에서 재연결해야 새 설치본을
-사용한다. 다른 체크아웃의 `uv run mm`는 해당 체크아웃 코드를 사용하므로 별도다.
-변경은 `feat/bounded-contextual-chunks` 작업 브랜치에 있으며 커밋·원격 PR 검증은 수행하지 않았다.
+The primary Core reconnected as PID 90022 and served a live search. Its STM parent,
+PID 84046, was preserved. Primary Core RSS was 13.30 GiB before restart and
+2.22 GiB after the final search check. These are snapshots under different
+workloads, not evidence of long-term leak resolution. The final process snapshot
+contained no zombies.
 
-## Base64 유보
+Twelve other pre-existing Core processes were preserved to avoid disrupting
+active sessions. Their clients must reconnect to load the new installation.
+`uv run mm` in another checkout uses that checkout's code independently.
+The local deployment snapshot does not establish remote CI success.
 
-Base64 자동 감지·제외, 이미지 추출·요약은 계속 유보한다. 검토 후 삭제했던
-기존 Base64 청크와 제외 규칙으로 제거했던 소스가 DB에 없음을 확인했다.
-해당 Base64 소스는 이번 재처리에서 제외했고 원본을 유지했다. 향후 원본 변경 시
-재인덱싱될 가능성까지 차단하는 정책은 구현하지 않았다.
+## Deferred Base64 handling
+
+Automatic Base64 detection/filtering, image extraction, and summarization remain
+deferred. The previously reviewed Base64 chunk and sources removed by exclusion
+rules were confirmed absent from the database. The Base64 source was omitted
+from this migration and its original file preserved. A future source change can
+make it eligible for indexing again; a persistent Base64 ingestion policy has
+not been implemented.

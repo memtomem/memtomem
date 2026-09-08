@@ -30,13 +30,16 @@ def audit(db_path: Path, config: IndexingConfig, omitted: set[str]) -> dict[str,
     with sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True) as db:
         db.execute("PRAGMA query_only=ON")
         columns = {r[1] for r in db.execute("PRAGMA table_info(chunks)")}
-        context_column = "retrieval_context" if "retrieval_context" in columns else "''"
-        rows = db.execute(
-            "SELECT id, source_file, content, content_hash, chunk_type, namespace, scope, "
-            "heading_hierarchy, "
-            + context_column
-            + " FROM chunks ORDER BY source_file, start_line, id"
-        )
+        if "retrieval_context" in columns:
+            rows = db.execute(
+                "SELECT id, source_file, content, content_hash, chunk_type, namespace, scope, "
+                "heading_hierarchy, retrieval_context FROM chunks ORDER BY source_file, start_line, id"
+            )
+        else:
+            rows = db.execute(
+                "SELECT id, source_file, content, content_hash, chunk_type, namespace, scope, "
+                "heading_hierarchy, '' FROM chunks ORDER BY source_file, start_line, id"
+            )
         for row in rows:
             # Stream bodies; retain only the small metadata needed by the preview.
             sources[row[1]].append((*row[:2], None, *row[3:7]))

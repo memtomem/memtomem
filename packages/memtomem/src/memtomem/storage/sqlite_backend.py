@@ -1783,8 +1783,10 @@ class SqliteBackend(
                     if remaining is None:
                         db.execute(
                             "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
-                            (f"{_AI_SUMMARY_KEY_PREFIX}{source_norm}",
-                             f"chunk_descriptions:{_AI_SUMMARY_KEY_PREFIX}{source_norm}"),
+                            (
+                                f"{_AI_SUMMARY_KEY_PREFIX}{source_norm}",
+                                f"chunk_descriptions:{_AI_SUMMARY_KEY_PREFIX}{source_norm}",
+                            ),
                         )
 
             if not self._in_transaction:
@@ -1810,7 +1812,10 @@ class SqliteBackend(
             with self._rolls_back_if_standalone(db):
                 db.execute(
                     "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
-                    (_ai_summary_key(source_file), "chunk_descriptions:" + _ai_summary_key(source_file)),
+                    (
+                        _ai_summary_key(source_file),
+                        "chunk_descriptions:" + _ai_summary_key(source_file),
+                    ),
                 )
                 self._commit_if_standalone(db)
             return 0
@@ -1836,7 +1841,10 @@ class SqliteBackend(
                     )
             db.execute(
                 "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
-                (_ai_summary_key(source_file), "chunk_descriptions:" + _ai_summary_key(source_file)),
+                (
+                    _ai_summary_key(source_file),
+                    "chunk_descriptions:" + _ai_summary_key(source_file),
+                ),
             )
             if not self._in_transaction:
                 db.commit()
@@ -3291,12 +3299,18 @@ class SqliteBackend(
         assert self._meta is not None
         # Never leave a cache orphan when a first-time embedding fails. Existing
         # sources have a lifecycle owner; a new source can cache on its next pass.
-        if self._get_db().execute("SELECT 1 FROM chunks WHERE source_file=? LIMIT 1",
-                                  (norm_path(source),)).fetchone() is None:
+        if (
+            self._get_db()
+            .execute("SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (norm_path(source),))
+            .fetchone()
+            is None
+        ):
             return
         # One bounded record per source; replace the previous generation in full.
-        self._meta.set_meta("chunk_descriptions:" + _ai_summary_key(source),
-                            json.dumps(dict(list(descriptions.items())[:256])))
+        self._meta.set_meta(
+            "chunk_descriptions:" + _ai_summary_key(source),
+            json.dumps(dict(list(descriptions.items())[:256])),
+        )
 
     async def get_ai_summary(self, source_file: Path) -> dict | None:
         """Return the cached AI summary record for ``source_file``, or None.
