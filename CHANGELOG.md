@@ -175,6 +175,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A `scope` that is not a tier is now refused on every read surface, not
+  only on search.** #2193 put the closed tier vocabulary in front of
+  `GET /api/search`, `mem_search` and `mm search`, and left `mem_recall`,
+  `mm recall`, `mem_timeline` and `mem_entity_search` on the parser-direct
+  path — so `scope=User` or `projet_*` was an error on one tool and a
+  successful, empty result on the next, indistinguishable from "nothing
+  matched", with the store opened first. The same check now runs on all of
+  them before anything opens (`mem_ask` too, which `run_search` had been
+  catching only after the app was up), in each surface's own idiom: an error
+  string on MCP, a message naming `--scope` on the CLI. The value that reaches
+  storage is the validator's — `--scope ""` on `mm recall` is unset rather than
+  a filter matching nothing, and a padded tier is stripped — while the
+  empty-result diagnostic still quotes the option as typed. An architectural
+  guard now enumerates the functions that parse a scope or forward one into the
+  search core, in the spellings it can recognize syntactically, so a new
+  `scope`-taking surface written the way the existing ones are has to be
+  classified as validated or explained rather than drifting the way this one
+  did. The guard documents what it cannot see — a search bound to a local, a
+  `**kwargs` splat, a wrapper that only calls a helper — and pins those blind
+  spots, so widening it later has to move the claim with the code. (#2295)
+
 - **A memory edit or delete that *succeeds* no longer brings back a file you
   deleted while it ran** (#2367) — the sibling of #2347 below, and the quieter
   of the two, because nothing looked wrong. The helpers that rewrite a chunk's
@@ -749,9 +770,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   padded value is stripped before it is searched, not only before it is
   checked. `ScopeFilter.parse` itself stays permissive: it is a predicate
   parser, and callers that need an unrecognized tier to reach no rows rather
-  than raise (portable eval cases) still get that. `mem_recall` and `mm recall`
-  are unchanged — they take a `scope` through the parser directly, so an
-  unrecognized tier is still an empty result there. (#2193)
+  than raise (portable eval cases) still get that. `mem_recall`, `mm recall`
+  and the other read surfaces followed in #2295 (see Fixed, above). (#2193)
 
 - **`mm agent search` mirrors the `mem_agent_search` MCP tool.** Merging an
   agent's own `agent-runtime:<id>` scope with the shared bucket was reachable

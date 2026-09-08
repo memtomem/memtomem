@@ -99,8 +99,11 @@ def validate_scope_vocabulary(scope: str | None) -> str | None:
     public vocabulary is a different question, and this is where it is
     answered — before a surface opens anything — so ``scope=User`` is the
     same answer over HTTP, MCP and the CLI instead of a 422 on one and a
-    successful empty search on the others. The three search surfaces call
-    this; recall deliberately does not (see :meth:`ScopeFilter.parse`).
+    successful empty search on the others. Every user-facing read surface
+    that takes a ``scope`` calls this before it opens anything and forwards
+    what it returns; :func:`run_search` repeats it as the in-process
+    backstop, and ``test_scope_vocabulary_architectural_guard`` keeps the
+    caller set enumerated (#2295).
 
     A glob is checked too, against the same vocabulary: the alphabet is
     finite, so "does this pattern select any tier at all" is answerable, and
@@ -336,8 +339,8 @@ async def run_search(
             list with a glob (raised from the pipeline's parse), or ``scope``
             names something outside the tier vocabulary — an unknown exact
             value or a glob selecting no tier — raised here by
-            :func:`validate_scope_vocabulary`. The three search surfaces
-            validate up front, so they see all of these before reaching this
+            :func:`validate_scope_vocabulary`. Every user-facing surface
+            validates up front, so it sees all of these before reaching this
             function; the check here is the backstop for in-process callers.
     """
     as_of_unix = parse_as_of_bound(as_of)
