@@ -51,8 +51,17 @@ The memtomem plugin bundles the exact-pinned MCP server and seven focused slash
 commands. Read workflows can be selected automatically; write and setup
 workflows require direct invocation.
 
-Before `/plugin install`, run `mm doctor --claude-mcp` from the project root.
-Use a CLI version that includes this diagnostic. It reads registrations without
+Before `/plugin install`, review existing registrations in `/mcp`. Published
+PyPI 0.5.0 does not contain the new `--claude-mcp` option. To use it, run the
+following from the project to inspect, replacing the path with a source checkout
+containing this change:
+
+```bash
+uv run --project /path/to/memtomem --package memtomem mm doctor --claude-mcp
+```
+
+`--project` keeps the current directory, unlike `--directory`. Without a source
+checkout, use `/mcp` and the remediation guidance below. The diagnostic reads registrations without
 connecting to MCP servers. `--json` emits `status`, `complete`, and `findings`,
 plus current/prospective risk and whether an existing registration can be reused.
 Exit codes are `0` (no detected conflict), `1` (duplicate risk), and `2`

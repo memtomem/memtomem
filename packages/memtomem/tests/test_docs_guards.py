@@ -511,6 +511,18 @@ class TestPluginManualCoexistenceCallout:
         assert "do not prove two live processes" in claude_code
         assert "same command" in claude_code.lower()
 
+    def test_unreleased_diagnostic_uses_source_checkout_without_changing_cwd(self) -> None:
+        command = "uv run --project /path/to/memtomem --package memtomem mm doctor --claude-mcp"
+        for path in (_PLUGIN_README, _VIBE_GUIDE, _INTEGRATIONS / "claude-code.md"):
+            text = _read(path)
+            assert command in text
+            assert "PyPI" in text and "0.5.0" in text
+            assert "/mcp" in text
+            for line, in_fence in _iter_code_context(text):
+                if in_fence and "doctor --claude-mcp" in line:
+                    assert "uvx" not in line
+                    assert "--directory" not in line
+
     def test_no_doc_promises_unconditional_suppression(self) -> None:
         offenders = [
             str(path.relative_to(_REPO_ROOT))

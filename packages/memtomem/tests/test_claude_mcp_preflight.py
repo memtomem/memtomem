@@ -500,3 +500,107 @@ def test_missing_cli_on_path_does_not_start_a_process(sandbox, monkeypatch):
     monkeypatch.setattr(checks.shutil, "which", lambda name: None)
     assert checks.inspect_claude_mcp().exit_code == 2
     assert sandbox.calls == []
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "python -m memtomem.server",
+        "exec python3 -m memtomem.server",
+        'python -c "import memtomem.server; memtomem.server.main()"',
+        "python -m memtomem.server.__main__",
+    ],
+)
+def test_aliased_module_wrapper_defers_registration(sandbox, script):
+    manual(sandbox, name="my-memory", entry={"command": "sh", "args": ["-c", script]})
+    before = (sandbox.home / ".claude.json").read_bytes()
+    report = checks.inspect_claude_mcp()
+    assert report.exit_code == 2
+    assert not report.reusable
+    assert "manual_registration" in codes(report)
+    result = CliRunner().invoke(cli, ["init", "--non-interactive", "--mcp", "claude"])
+    assert result.exit_code == 2, result.output
+    assert (sandbox.home / ".claude.json").read_bytes() == before
+    assert not (sandbox.project / ".mcp.json").exists()
+    assert not (sandbox.home / ".memtomem").exists()
+
+
+@pytest.mark.parametrize(
+    "module", ["memtomem.serverish", "other.memtomem.server", "memtomem_stm.server"]
+)
+def test_other_module_wrappers_do_not_become_memtomem_candidates(sandbox, module):
+    manual(sandbox, name="other", entry={"command": "sh", "args": ["-c", f"python -m {module}"]})
+    assert checks.preflight() is True
+
+
+@pytest.mark.parametrize("scope", ["user", "project", "local"])
+@pytest.mark.parametrize("mode", ["claude", "json"])
+def test_disabled_plugin_server_is_not_a_reusable_connection(sandbox, scope, mode):
+    plugin(sandbox, scope=scope)
+    write(
+        sandbox.home / ".claude.json",
+        {
+            "projects": {
+                str(sandbox.project): {
+                    "disabledMcpServers": ["plugin:memtomem:memtomem"],
+                }
+            }
+        },
+    )
+    before = (sandbox.home / ".claude.json").read_bytes()
+    report = checks.inspect_claude_mcp()
+    assert report.complete
+    assert not report.reusable
+    assert "plugin_server_disabled" in codes(report)
+    assert "plugin_enabled" not in codes(report)
+    result = CliRunner().invoke(cli, ["init", "--non-interactive", "--mcp", mode])
+    assert result.exit_code == 1, result.output
+    assert "disabled" in result.output
+    assert "additional MCP registration skipped" not in result.output
+    assert (sandbox.home / ".claude.json").read_bytes() == before
+    assert not (sandbox.home / ".memtomem").exists()
+    assert not (sandbox.project / ".mcp.json").exists()
+
+
+def test_active_manual_connection_can_be_reused_with_disabled_plugin_server(sandbox):
+    plugin(sandbox)
+    manual(sandbox, local_extra={"disabledMcpServers": ["plugin:memtomem:memtomem"]})
+    report = checks.inspect_claude_mcp()
+    assert report.reusable and not report.current_risk
+    assert checks.preflight() is False
+
+
+def test_disabling_other_plugin_server_does_not_disable_memtomem(sandbox):
+    plugin(sandbox)
+    write(
+        sandbox.home / ".claude.json",
+        {
+            "projects": {
+                str(sandbox.project): {
+                    "disabledMcpServers": ["plugin:other:memtomem"],
+                }
+            }
+        },
+    )
+    assert checks.inspect_claude_mcp().reusable
+
+
+def test_disabled_server_marker_does_not_hide_other_plugin_servers(sandbox):
+    root = plugin(sandbox)
+    write(root / ".mcp.json", {"mcpServers": {"another-server": pinned()}})
+    write(
+        sandbox.home / ".claude.json",
+        {
+            "projects": {
+                str(sandbox.project): {
+                    "disabledMcpServers": ["plugin:memtomem:memtomem"],
+                }
+            }
+        },
+    )
+    report = checks.inspect_claude_mcp()
+    assert report.exit_code == 2
+    assert "plugin_server_disabled" not in codes(report)
+    with pytest.raises(click.exceptions.Exit) as exc:
+        checks.preflight()
+    assert exc.value.exit_code == 2

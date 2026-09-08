@@ -16,12 +16,19 @@ write-time indexing.
 
 ## Install
 
-Before installing, run this read-only check from your project's root with a
-memtomem CLI that includes the Claude MCP diagnostic:
+Before installing, inspect existing servers with `/mcp` in Claude Code.
+The published PyPI 0.5.0 CLI does **not** include `--claude-mcp`. For the new
+read-only diagnostic, use a source checkout containing this change:
 
 ```bash
-uvx --from 'memtomem==0.5.0' mm doctor --claude-mcp
+uv run --project /path/to/memtomem --package memtomem mm doctor --claude-mcp
 ```
+
+Replace `/path/to/memtomem` with the checkout path and run from the project you
+want to inspect. `--project` selects the CLI's source environment while keeping
+your current directory; do not substitute `--directory`, which would change
+the project being inspected. No source checkout? Use `/mcp` to review the
+registrations and the scope-specific removal guidance below.
 
 It reports current registrations and predicts conflicts with this release's
 plugin command. Exit codes: `0` no detected conflict, `1` duplicate risk,

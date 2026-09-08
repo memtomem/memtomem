@@ -101,7 +101,10 @@ def _candidate(name: str, entry: dict) -> bool:
         isinstance(token, str)
         and (
             _basename(token) == "memtomem-server"
-            or token in {"memtomem.server", "memtomem.server.__main__"}
+            # A shell/Python wrapper can contain the module inside one argv
+            # item. Identify it as a candidate without executing the wrapper;
+            # _launch will then return unknown instead of allowing a duplicate.
+            or re.search(r"(?<![\w.-])memtomem\.server(?:\.__main__)?(?![\w.-])", token) is not None
             or re.search(r"(?<![\w-])memtomem-server(?![\w-])", token) is not None
         )
         for token in tokens
@@ -359,6 +362,18 @@ def _inspect_claude_mcp() -> Report:
         if len(servers) != 1 or not isinstance(entry, dict) or _launch(entry) is None:
             report.unknown("memtomem plugin launch configuration is unsupported.")
             continue
+        # /mcp can disable the bundled server without disabling its plugin.
+        # Plugin inventory enablement alone does not make a connection usable.
+        if "plugin:memtomem:memtomem" in disabled:
+            report.add(
+                "plugin_server_disabled",
+                "memtomem plugin MCP server is disabled for this project; review /mcp to re-enable it.",
+                plugin_id=row["id"],
+                scope=row["scope"],
+                server_name="plugin:memtomem:memtomem",
+                state="disabled",
+            )
+            continue
         plugins.append(entry)
         report.add(
             "plugin_enabled",
@@ -402,7 +417,7 @@ def _inspect_claude_mcp() -> Report:
             report.add(
                 "duplicate_risk" if plugins else "plugin_install_risk",
                 "Different launch commands can expose duplicate tools"
-                + ("." if plugins else " after installing the plugin."),
+                + ("." if plugins else " after installing or enabling the plugin."),
             )
     report.reusable = report.complete and not report.current_risk and bool(manual or plugins)
     report.add(
@@ -457,7 +472,9 @@ def preflight() -> bool:
             "  Claude Code: memtomem is already configured — additional MCP registration skipped. Verify the connection in /mcp."
         )
         return False
-    if any(row["code"] == "manual_registration" for row in report.findings):
+    if any(
+        row["code"] in {"manual_registration", "plugin_server_disabled"} for row in report.findings
+    ):
         click.echo(
             "Existing memtomem registration is disabled; review `/mcp` or use --mcp skip. No registration was added."
         )
