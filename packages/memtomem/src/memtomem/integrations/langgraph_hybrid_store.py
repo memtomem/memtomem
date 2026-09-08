@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import struct
@@ -160,7 +161,18 @@ class MemtomemHybridStore(BaseStore):
                 action="init",
                 audit_context={"scope_inferred_from_path": scope != inferred},
             )
-        self._configuration = {"fields": self.fields, "dims": self.dims, "index_id": index_id}
+        self._configuration = json.loads(
+            encode({"fields": self.fields, "dims": self.dims, "index_id": index_id})
+        )
+        self._guard(
+            [
+                encode(self._configuration),
+                *self._configuration["fields"],
+                *([index_id] if isinstance(index_id, str) else []),
+            ],
+            surface="langgraph_hybridstore_init",
+            message="Store configuration blocked by privacy guard",
+        )
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._state_lock = threading.Lock()
         self._closed = False
@@ -305,6 +317,21 @@ class MemtomemHybridStore(BaseStore):
             )
         return normalized
 
+    def _guard(self, parts: list[str], *, surface: str, message: str) -> None:
+        # Scan raw identifiers too: JSON escaping can hide a quoted credential
+        # inside a key/selector. Non-whitespace separators keep label patterns
+        # from accidentally spanning two independent fields (#2374).
+        guard = privacy.enforce_write_guard(
+            "\n---\n".join(parts),
+            surface=surface,
+            scope=self.scope,
+            force_unsafe=self.force_unsafe,
+        )
+        if guard.decision != "pass" and not (
+            guard.decision == "bypassed" and self.scope != "project_shared"
+        ):
+            raise ValueError(message)
+
     async def _prepare(self, op: PutOp) -> dict:
         _validate_namespace(op.namespace)
         if not isinstance(op.key, str) or not op.key:
@@ -320,12 +347,12 @@ class MemtomemHybridStore(BaseStore):
             )
         ):
             raise ValueError("index must be None, False, or a list of paths")
-        record = {
-            "namespace": op.namespace,
+        record: dict[str, Any] = {
+            "namespace": tuple(op.namespace),
             "key": op.key,
             "value": op.value,
             "ttl": op.ttl,
-            "index": op.index,
+            "index": list(op.index) if isinstance(op.index, list) else op.index,
             "text": "",
             "vectors": [],
         }
@@ -334,23 +361,22 @@ class MemtomemHybridStore(BaseStore):
         if not isinstance(op.value, dict):
             raise ValueError("Store value must be a JSON object")
         serialized = encode(op.value)
-        guard = privacy.enforce_write_guard(
-            serialized,
-            surface="langgraph_hybridstore_put",
-            scope=self.scope,
-            force_unsafe=self.force_unsafe,
-        )
-        if guard.decision != "pass" and not (
-            guard.decision == "bypassed" and self.scope != "project_shared"
-        ):
-            raise ValueError("Store write blocked by privacy guard")
-        # Detach caller-owned values before awaiting external embedding work.
-        import json
-
+        # Detach every mutable persisted input before the scan and before
+        # awaiting external embedding work, including per-item selectors.
         record["value"] = json.loads(serialized)
-        if op.index is not False:
+        self._guard(
+            [
+                serialized,
+                *record["namespace"],
+                record["key"],
+                *(record["index"] if isinstance(record["index"], list) else []),
+            ],
+            surface="langgraph_hybridstore_put",
+            message="Store write blocked by privacy guard",
+        )
+        if record["index"] is not False:
             texts = []
-            for field in self.fields if op.index is None else op.index:
+            for field in self.fields if record["index"] is None else record["index"]:
                 texts.extend(get_text_at_path(record["value"], field))
             record["text"] = "\n".join(texts)
             if self._embedder is not None and texts:
