@@ -501,19 +501,30 @@ async def _recall(
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
     from memtomem.cli._empty_results import explain_empty_result
-    from memtomem.models import NamespaceFilter, ScopeFilter
+    from memtomem.models import InvalidScopeFilterError, NamespaceFilter, ScopeFilter
     from memtomem.server.helpers import _parse_recall_date
     from memtomem.server.tools.search import _resolve_project_context_root
+    from memtomem.services.search_service import validate_scope_vocabulary
 
     since_dt = _parse_recall_date(since) if since else None
     until_dt = _parse_recall_date(until, end_of_period=True) if until else None
+
+    # Same check ``mm search`` runs, ahead of opening anything (#2295). The
+    # recalled value is kept apart from the typed one: storage gets what was
+    # validated (``--scope ""`` normalizes to no filter), while the error here
+    # and the empty-result diagnostic below quote the command line as written.
+    try:
+        effective_scope = validate_scope_vocabulary(scope)
+        ScopeFilter.parse(effective_scope)
+    except InvalidScopeFilterError as e:
+        raise click.ClickException(f"invalid --scope value '{scope}': {e}") from None
 
     async with cli_components() as comp:
         ns_filter = NamespaceFilter.parse(
             namespace,
             system_prefixes=tuple(comp.config.search.system_namespace_prefixes),
         )
-        scope_filter = ScopeFilter.parse(scope)
+        scope_filter = ScopeFilter.parse(effective_scope)
         project_context_root = _resolve_project_context_root(comp)
         chunks = await comp.storage.recall_chunks(
             since=since_dt,

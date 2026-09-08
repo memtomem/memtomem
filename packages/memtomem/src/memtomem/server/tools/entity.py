@@ -10,6 +10,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.services.search_service import validate_scope_vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -197,9 +198,11 @@ async def mem_entity_search(
         return f"Error: limit must be between 1 and 500, got {limit}."
 
     # Reject a malformed filter before touching the app, the way mem_search
-    # does: an unparseable scope is a caller mistake, and an empty result set
-    # would read as "no such entities" instead of "that filter never ran".
+    # does: an unparseable scope or a value outside the tier vocabulary is a
+    # caller mistake, and an empty result set would read as "no such
+    # entities" instead of "that filter never ran".
     try:
+        scope = validate_scope_vocabulary(scope)
         scope_filter = ScopeFilter.parse(scope)
     except InvalidFilterSyntaxError as e:
         return f"Error: {e}"
