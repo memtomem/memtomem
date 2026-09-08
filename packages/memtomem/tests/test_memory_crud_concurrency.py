@@ -32,7 +32,7 @@ from memtomem.models import Chunk, ChunkMetadata, IndexingStats
 from memtomem.server.context import AppContext
 from memtomem.server.tools import memory_crud
 from memtomem.tools import memory_writer
-from memtomem.tools.memory_writer import RestoreOutcome
+from memtomem.tools.memory_writer import RestoreOutcome, SourceRemovedError
 
 
 async def _chunks_by_start_line(comp, path):
@@ -70,13 +70,17 @@ class TestMemEditConcurrency:
         real_replace = memory_writer.replace_chunk_body
         seen: list[int] = []
 
-        def gated_replace(path, start, end, new_content):
+        def gated_replace(*args, **kwargs):
+            # ``*args, **kwargs``: the helper takes ``expected_identity`` since
+            # #2367, and a wrapper that named its parameters would have to be
+            # edited every time the signature grows — a stub that drops a kwarg
+            # silently tests a call the production path never makes.
             first = not seen
             seen.append(1)
             if first:
                 entered.set()
                 release.wait(10)
-            return real_replace(path, start, end, new_content)
+            return real_replace(*args, **kwargs)
 
         monkeypatch.setattr(memory_writer, "replace_chunk_body", gated_replace)
 
@@ -674,3 +678,201 @@ class TestRollbackAgainstExternalRemoval:
         assert not f.exists()
         assert "delete failed" in out
         assert "removed by another process" in out
+
+
+class TestForwardWriteAgainstExternalRemoval:
+    """#2367: the *edit itself* must not recreate or splice a changed source.
+
+    ``TestRollbackAgainstExternalRemoval`` above drives the same removal into
+    the rollback. This class drives it into the window one layer earlier —
+    between the pre-image read and the helper's own write — where a plain
+    ``write_text`` put the deleted note back on disk with the edit applied and
+    reported success.
+    """
+
+    @staticmethod
+    def _sabotage_after_pre_image(monkeypatch, sabotage):
+        """Run *sabotage* on the source right after the span reads its pre-image.
+
+        Hooked there rather than on the helper: it is the real gap the issue
+        describes, and it leaves the production write untouched so the refusal
+        under test is the helper's own.
+        """
+        real_read = memory_crud.read_pre_image
+
+        def read_then_sabotage(path):
+            pre = real_read(path)
+            sabotage(path)
+            return pre
+
+        monkeypatch.setattr(memory_crud, "read_pre_image", read_then_sabotage)
+
+    @staticmethod
+    def _count_restores(monkeypatch):
+        """Count restore calls; a write that refused has nothing to put back."""
+        real_restore = memory_crud.restore_pre_image_quietly
+        calls: list[int] = []
+
+        def counting_restore(path, pre_image):
+            calls.append(1)
+            return real_restore(path, pre_image)
+
+        monkeypatch.setattr(memory_crud, "restore_pre_image_quietly", counting_restore)
+        return calls
+
+    #: The file that takes the source's place. Deliberately *longer* than the
+    #: chunk's line range: a stranger short enough to fail
+    #: ``_validate_line_range`` would be refused by that check instead, and the
+    #: test would pass without the identity check ever running.
+    STRANGER = (
+        "## Stranger\n\nsomebody else's note\n\nline five\nline six\nline seven\nline eight\n"
+    )
+
+    @classmethod
+    def _replace_with_a_stranger(cls, path):
+        newcomer = path.with_name("stranger.md")
+        newcomer.write_text(cls.STRANGER, encoding="utf-8")
+        os.replace(newcomer, path)
+
+    @pytest.mark.asyncio
+    async def test_edit_does_not_recreate_a_source_removed_before_the_write(
+        self, bm25_only_components, monkeypatch
+    ):
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        # Only the file, never the directory: the span holds the sidecar in it,
+        # and Windows refuses to remove a tree with an open handle inside.
+        self._sabotage_after_pre_image(monkeypatch, lambda path: path.unlink())
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        assert not f.exists()  # the note the user deleted stayed deleted
+        assert "removed by another process" in out
+        assert "rolled back" not in out
+        assert await comp.storage.list_chunks_by_source(f.resolve()) == []
+
+    @pytest.mark.asyncio
+    async def test_edit_leaves_a_source_replaced_before_the_write_as_found(
+        self, bm25_only_components, monkeypatch
+    ):
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        self._sabotage_after_pre_image(monkeypatch, self._replace_with_a_stranger)
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        # The stranger's file is not spliced at the old file's line numbers.
+        assert f.read_text(encoding="utf-8") == self.STRANGER
+        assert "replaced by another process" in out
+        assert "EDIT" not in f.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_delete_does_not_recreate_a_source_removed_before_the_write(
+        self, bm25_only_components, monkeypatch
+    ):
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        self._sabotage_after_pre_image(monkeypatch, lambda path: path.unlink())
+
+        out = await memory_crud.mem_delete(chunk_id=str(alpha.id), ctx=ctx)
+
+        assert not f.exists()
+        assert "delete failed" in out
+        assert "removed by another process" in out
+
+    @pytest.mark.asyncio
+    async def test_delete_leaves_a_source_replaced_before_the_write_as_found(
+        self, bm25_only_components, monkeypatch
+    ):
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        self._sabotage_after_pre_image(monkeypatch, self._replace_with_a_stranger)
+
+        out = await memory_crud.mem_delete(chunk_id=str(alpha.id), ctx=ctx)
+
+        assert f.read_text(encoding="utf-8") == self.STRANGER
+        assert "replaced by another process" in out
+
+    @pytest.mark.asyncio
+    async def test_a_refused_write_is_not_rolled_back(self, bm25_only_components, monkeypatch):
+        """Nothing was written, so nothing is restored.
+
+        Restoring anyway is not merely redundant: where the filesystem cannot
+        answer identity the restore proceeds on existence alone, so a file that
+        reappeared in the meantime would be overwritten with the pre-image of a
+        write that never happened — the very resurrection this closes.
+        """
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        restores = self._count_restores(monkeypatch)
+        self._sabotage_after_pre_image(monkeypatch, lambda path: path.unlink())
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        assert restores == []
+        assert "removed by another process" in out
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_after_the_write_landed_is_still_rolled_back(
+        self, bm25_only_components
+    ):
+        """The exemption is about *when*, not about the exception's type.
+
+        The MCP twin of ``test_memory_mutation``'s pin, and it needs its own:
+        this handler covers the re-index plus the cache and provenance work
+        after it, so a ``SourceChangedError`` arriving from a later stage names
+        a mutation that already landed. The two copies of this contract have
+        drifted before, which is what ``test_memory_rollback_parity`` exists
+        for — but parity is structural, and this is behaviour.
+        """
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        before = f.read_text(encoding="utf-8")
+
+        # The write succeeds; the re-index *after* it raises the refusal.
+        real_index = app.index_engine.index_file
+        calls = 0
+
+        async def late_refusal(path, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise SourceRemovedError("late")
+            return await real_index(path, *args, **kwargs)
+
+        app.index_engine.index_file = late_refusal  # type: ignore[method-assign]
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        assert f.read_text(encoding="utf-8") == before  # rolled back, not skipped
+        assert "rolled back" in out

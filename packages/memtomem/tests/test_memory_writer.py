@@ -11,11 +11,14 @@ from datetime import datetime
 
 from memtomem.tools.memory_writer import (
     RestoreOutcome,
+    SourceRemovedError,
+    SourceReplacedError,
     _validate_line_range,
     append_entry,
     format_entry_block,
     read_pre_image,
     remove_lines,
+    replace_chunk_body,
     replace_lines,
     restore_pre_image_quietly,
 )
@@ -357,3 +360,154 @@ class TestRestorePreImage:
         assert outcome is RestoreOutcome.failed
         assert any(str(src) in record.getMessage() for record in caplog.records)
         assert any(record.exc_info for record in caplog.records)
+
+
+def _identity_of(path):
+    """The ``(st_dev, st_ino)`` a caller's pre-image would carry for *path*."""
+    info = path.stat()
+    return None if info.st_ino == 0 else (info.st_dev, info.st_ino)
+
+
+#: The three line-range helpers, each reduced to ``call(path, *, expected_identity)``
+#: so one body can drive all of them. They differ in what they compute and not at
+#: all in the contract under test, which is that none of them may create.
+_REWRITERS = (
+    pytest.param(
+        lambda path, **kw: replace_chunk_body(path, 1, 3, "NEW BODY", **kw),
+        id="replace_chunk_body",
+    ),
+    pytest.param(lambda path, **kw: replace_lines(path, 1, 3, "NEW\n", **kw), id="replace_lines"),
+    pytest.param(lambda path, **kw: remove_lines(path, 1, 3, **kw), id="remove_lines"),
+)
+
+_BEFORE = "## H\n\nold body\n"
+
+
+@pytest.mark.parametrize("rewrite", _REWRITERS)
+class TestLineRangeHelpersNeverCreate:
+    """#2367: a forward write must not resurrect (or splice) a changed source.
+
+    ``write_text`` creates, and the span's locks bind cooperating memtomem
+    writers only — so the single case these helpers could meet mid-write was
+    the single case where writing was wrong. The twin of ``TestRestorePreImage``
+    above, one layer earlier: there the *rollback* must not recreate, here the
+    edit itself must not.
+    """
+
+    def test_it_refuses_a_source_removed_before_the_write(self, rewrite, tmp_path):
+        src = tmp_path / "n.md"
+        src.write_text(_BEFORE, encoding="utf-8")
+        identity = _identity_of(src)
+        src.unlink()
+
+        with pytest.raises(SourceRemovedError):
+            rewrite(src, expected_identity=identity)
+        assert not src.exists()  # nothing was recreated
+
+    def test_it_refuses_a_vanished_parent_as_removed(self, rewrite, tmp_path):
+        holder = tmp_path / "holder"
+        holder.mkdir()
+        src = holder / "n.md"
+        src.write_text(_BEFORE, encoding="utf-8")
+        identity = _identity_of(src)
+        shutil.rmtree(holder)
+
+        with pytest.raises(SourceRemovedError):
+            rewrite(src, expected_identity=identity)
+        assert not holder.exists()
+
+    def test_it_refuses_a_directory_standing_at_the_path(self, rewrite, tmp_path):
+        # POSIX answers EISDIR here and Windows EACCES; the typed error is what
+        # makes this one assertion rather than a platform branch.
+        src = tmp_path / "n.md"
+        src.write_text(_BEFORE, encoding="utf-8")
+        identity = _identity_of(src)
+        src.unlink()
+        src.mkdir()
+
+        with pytest.raises(SourceReplacedError):
+            rewrite(src, expected_identity=identity)
+        assert src.is_dir()
+
+    def test_it_refuses_a_replacement_and_leaves_its_bytes(self, rewrite, tmp_path):
+        src = tmp_path / "n.md"
+        src.write_text(_BEFORE, encoding="utf-8")
+        identity = _identity_of(src)
+        newcomer = tmp_path / "other.md"
+        newcomer.write_text("## OTHER\n\nsomebody else's note\n", encoding="utf-8")
+        os.replace(newcomer, src)
+
+        with pytest.raises(SourceReplacedError):
+            rewrite(src, expected_identity=identity)
+        assert src.read_text(encoding="utf-8") == "## OTHER\n\nsomebody else's note\n"
+
+    def test_it_edits_the_file_its_identity_names(self, rewrite, tmp_path):
+        src = tmp_path / "n.md"
+        src.write_text(_BEFORE, encoding="utf-8")
+
+        rewrite(src, expected_identity=_identity_of(src))
+        assert src.read_text(encoding="utf-8") != _BEFORE
+        assert src.exists()
+
+    def test_it_edits_on_existence_alone_when_identity_is_unanswerable(self, rewrite, tmp_path):
+        # ``st_ino == 0`` on some FUSE/SMB mounts; the restore falls back to
+        # existence there for the same reason, and refusing would leave the
+        # caller unable to edit at all on those filesystems.
+        src = tmp_path / "n.md"
+        src.write_text(_BEFORE, encoding="utf-8")
+
+        rewrite(src, expected_identity=None)
+        assert src.read_text(encoding="utf-8") != _BEFORE
+
+    def test_a_removed_source_is_refused_even_without_identity(self, rewrite, tmp_path):
+        # The open, not the identity check, is what rules out resurrection.
+        src = tmp_path / "n.md"
+        src.write_text(_BEFORE, encoding="utf-8")
+        src.unlink()
+
+        with pytest.raises(SourceRemovedError):
+            rewrite(src, expected_identity=None)
+        assert not src.exists()
+
+    def test_it_refuses_a_replacement_before_decoding_it(self, rewrite, tmp_path):
+        # The identity check runs before the read: a replacement that is not
+        # valid UTF-8 must be refused as a replacement, not raise
+        # ``UnicodeDecodeError`` over the refusal.
+        src = tmp_path / "n.md"
+        src.write_text(_BEFORE, encoding="utf-8")
+        identity = _identity_of(src)
+        newcomer = tmp_path / "other.md"
+        newcomer.write_bytes(b"\xff\xfe not utf-8 \xff\n")
+        os.replace(newcomer, src)
+
+        with pytest.raises(SourceReplacedError):
+            rewrite(src, expected_identity=identity)
+        assert src.read_bytes() == b"\xff\xfe not utf-8 \xff\n"
+
+    def test_an_invalid_range_still_leaves_the_file_intact(self, rewrite, tmp_path):
+        # The truncate happens only after the edit callback returns, so a
+        # range refusal cannot empty the file it refused to edit.
+        src = tmp_path / "n.md"
+        src.write_text("only one line\n", encoding="utf-8")
+
+        with pytest.raises(ValueError):
+            rewrite(src, expected_identity=_identity_of(src))
+        assert src.read_text(encoding="utf-8") == "only one line\n"
+
+
+class TestAppendStillCreates:
+    """The other half of #2367's contract: appending is *meant* to create.
+
+    ``mem_add`` writes a note into a file that need not exist yet, so the
+    refusal above is deliberately scoped to the line-range rewrites. Pinned
+    here so a later sweep cannot generalise "never create" over the whole
+    module.
+    """
+
+    def test_append_entry_creates_a_missing_file(self, tmp_path):
+        target = tmp_path / "nested" / "d.md"
+
+        append_entry(target, "fresh note", title="Fresh")
+
+        assert target.exists()
+        assert "fresh note" in target.read_text(encoding="utf-8")
