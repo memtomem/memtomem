@@ -7,6 +7,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Breaking
 
+- **Chunk edits and deletes now require indexed source-span evidence (#2371).**
+  The index stores a hash of each chunk's original line range. MCP `mem_edit`
+  / chunk `mem_delete` and web PATCH/DELETE compare it on the open descriptor
+  before writing, refusing stale provenance with a reindex-and-retry message
+  (HTTP 409 on web). A source replaced before the operation reads it, or edited
+  in place without changing its inode, is left untouched. Refusal does not
+  restore the file, reindex it, or delete its indexed row.
+
+  **Upgrading:** schema generation 2 blocks older binaries that cannot maintain
+  this evidence. Existing and imported chunks remain searchable, but their
+  source must be reindexed before a line edit/delete: use ordinary
+  `mm index <path>` or `mem_index(path="<path>")`, then retrieve the current chunk
+  ID and retry. `--force` is not needed; unchanged content keeps its UUID and
+  vector. Migration never derives evidence from current files for old rows.
+  The digest follows the writer's line-ending semantics and does not depend
+  on transformed retrieval text. External writers remain outside memtomem's
+  cooperative lock; mutation after the descriptor read is not excluded.
+
 - **Moving hooks in or out of the Git-tracked settings tier now asks first.**
   `mm context settings-migrate` had one confirmation, and it was the wrong one
   for this: it fires when a tier lives outside the project, which the
@@ -209,12 +227,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   half matters as much as the refusal to create: splicing a stranger's file at
   the deleted file's line numbers corrupts it just as surely. Where identity
   is unanswerable the operation still refuses to create, and falls back to
-  editing whatever is at the path, which is what it did before.
+  the existence check; #2371 above additionally requires matching source-span
+  evidence even when identity is unavailable.
 
   The window this closes is the one between the read and the write. A file
   already swapped before the operation looked at it is the file the operation
   was asked to edit, and telling those apart is a question about the index's
-  line numbers rather than about the file's identity. `mem_edit` and `mem_delete` name which
+  line numbers rather than about the file's identity; #2371 above now checks
+  that evidence separately. `mem_edit` and `mem_delete` name which
   of the two they met; the web editor answers 409 with the same distinction;
   and a web delete whose file somebody else already removed now finishes by
   dropping the index row and reporting success, since that is the outcome it

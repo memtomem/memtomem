@@ -67,6 +67,9 @@ class ChunkMetadata:
     # it. Ownership over the virtual summary path is decided on this field
     # rather than on a namespace/tag combination a user chunk can reproduce.
     origin: str | None = None
+    # Indexed original line span, independent of retrieval content (#2371).
+    # Legacy/imported rows have no evidence until locally reindexed.
+    source_span_hash: str | None = None
 
 
 def _like_glob_matches(pattern: str, value: str) -> bool:

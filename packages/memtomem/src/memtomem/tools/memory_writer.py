@@ -15,6 +15,9 @@ from pathlib import Path
 from uuid import uuid4
 
 
+from memtomem.source_provenance import StaleSourceProvenanceError, source_span_hash
+
+
 logger = logging.getLogger(__name__)
 
 _FRONT_MATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
@@ -258,11 +261,12 @@ def _rewrite_in_place(
     about a removal only when the removal beat the open; the ones it does not
     hear about are the ones where nothing came back.
 
-    What the identity closes is the window between the caller's read and this
-    write, and only that. A file already swapped *before* the caller looked is,
-    as far as anything here can tell, the file this call was asked to edit; that
-    its line numbers describe a different file is a question about the index's
-    provenance, which this check does not answer and does not claim to.
+    Identity closes only the window between the caller's read and this write.
+    Each edit callback also checks the indexed original span's hash against
+    this descriptor's text (#2371), so a replacement before the caller's read,
+    or an in-place change retaining the inode, is refused too. Neither check
+    excludes an external writer changing this inode after our descriptor read;
+    the sidecar only serializes cooperating writers.
 
     Ordering inside the ``with`` carries two of the three defects this can have:
     the identity check runs **before** ``read()``, so a non-UTF-8 replacement is
@@ -307,7 +311,11 @@ def _rewrite_in_place(
             raise SourceReplacedError(
                 f"{file_path} is no longer the file that was read; nothing was written"
             )
-        result = edit(handle.read())
+        try:
+            text = handle.read()
+        except UnicodeDecodeError as exc:
+            raise StaleSourceProvenanceError("Source is no longer readable UTF-8") from exc
+        result = edit(text)
         handle.seek(0)
         handle.truncate()
         handle.write(result)
@@ -319,6 +327,7 @@ def replace_chunk_body(
     end_line: int,
     new_content: str,
     *,
+    expected_source_span_hash: str | None,
     expected_identity: tuple[int, int] | None = None,
 ) -> None:
     """Replace a chunk's body in *file_path* while preserving its header.
@@ -344,7 +353,7 @@ def replace_chunk_body(
     def edit(text: str) -> str:
         trailing_newline = text.endswith("\n")
         lines = text.splitlines()
-        _validate_line_range(start_line, end_line, len(lines))
+        _validate_source_span(lines, start_line, end_line, expected_source_span_hash)
 
         stripped_new = new_content.lstrip("\n")
         # ``append_entry`` always emits H2 for entry headings; other heading
@@ -369,6 +378,19 @@ def replace_chunk_body(
     _rewrite_in_place(file_path, expected_identity, edit)
 
 
+def _validate_source_span(
+    lines: list[str], start_line: int, end_line: int, expected: str | None
+) -> None:
+    """Refuse without a write when the indexed span cannot be proved (#2371)."""
+    try:
+        _validate_line_range(start_line, end_line, len(lines))
+    except ValueError as exc:
+        raise StaleSourceProvenanceError(str(exc)) from exc
+    actual = source_span_hash(lines, start_line, end_line)
+    if expected is None or actual != expected:
+        raise StaleSourceProvenanceError("Indexed source span is missing or no longer matches")
+
+
 def _validate_line_range(start_line: int, end_line: int, total_lines: int) -> None:
     """Validate 1-based inclusive line range."""
     if start_line < 1:
@@ -385,6 +407,7 @@ def replace_lines(
     end_line: int,
     new_content: str,
     *,
+    expected_source_span_hash: str | None,
     expected_identity: tuple[int, int] | None = None,
 ) -> None:
     """Replace lines [start_line, end_line] (1-based, inclusive) with new_content.
@@ -396,7 +419,7 @@ def replace_lines(
     def edit(text: str) -> str:
         trailing_newline = text.endswith("\n")
         lines = text.splitlines()
-        _validate_line_range(start_line, end_line, len(lines))
+        _validate_source_span(lines, start_line, end_line, expected_source_span_hash)
         before = lines[: start_line - 1]
         after = lines[end_line:]
         new_lines = before + new_content.splitlines() + after
@@ -413,6 +436,7 @@ def remove_lines(
     start_line: int,
     end_line: int,
     *,
+    expected_source_span_hash: str | None,
     expected_identity: tuple[int, int] | None = None,
 ) -> None:
     """Remove lines [start_line, end_line] (1-based, inclusive) from file.
@@ -426,7 +450,7 @@ def remove_lines(
     def edit(text: str) -> str:
         trailing_newline = text.endswith("\n")
         lines = text.splitlines()
-        _validate_line_range(start_line, end_line, len(lines))
+        _validate_source_span(lines, start_line, end_line, expected_source_span_hash)
         new_lines = lines[: start_line - 1] + lines[end_line:]
         result = "\n".join(new_lines)
         if trailing_newline and new_lines:

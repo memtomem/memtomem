@@ -1097,6 +1097,8 @@ class IndexEngine:
         storage-less engine (the doctor's discovery engine) can use it safely.
         Returns ``[]`` for a suffix no chunker is registered for.
         """
+        from memtomem.source_provenance import source_span_hash
+
         chunks = self._registry.chunk_file(file_path, content)
         # Post-processing: merge short chunks + add overlap
         chunks = _merge_short_chunks(
@@ -1107,6 +1109,17 @@ class IndexEngine:
         )
         if self._config.chunk_overlap_tokens > 0:
             chunks = _add_overlap(chunks, self._config.chunk_overlap_tokens)
+        # Bind the final ranges to the SAME source snapshot the chunker saw,
+        # before heading/tag/wikilink/overlap transforms can lose information.
+        # Split once for the whole file, not once per chunk (#2371).
+        source_lines = content.splitlines()
+        for chunk in chunks:
+            chunk.metadata = dataclasses.replace(
+                chunk.metadata,
+                source_span_hash=source_span_hash(
+                    source_lines, chunk.metadata.start_line, chunk.metadata.end_line
+                ),
+            )
         return chunks
 
     async def _index_file_locked(

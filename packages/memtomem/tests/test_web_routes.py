@@ -29,6 +29,7 @@ from memtomem.config import IndexingConfig, SearchConfig, TargetScope
 from memtomem.context.projects import KnownProjectsStore
 from memtomem.models import Chunk, ChunkMetadata, IndexingStats, SearchResult
 from memtomem.search.pipeline import RetrievalStats
+from memtomem.source_provenance import source_span_hash
 from memtomem.web.app import create_app
 from .helpers import consent_lines, set_home
 from .web.test_upload_quarantine import (
@@ -47,6 +48,15 @@ from .web.test_upload_quarantine import (
 CHUNK_ID = uuid.uuid4()
 
 
+def _fixture_span_hash(source: Path, start: int, end: int) -> str | None:
+    """Snapshot a real fixture at setup time, before any race sabotage (#2371)."""
+    try:
+        text = source.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return source_span_hash(text.splitlines(), start, end)
+
+
 def _make_test_chunk(
     chunk_id: uuid.UUID | None = None,
     content: str = "test chunk content",
@@ -61,6 +71,7 @@ def _make_test_chunk(
             namespace="default",
             start_line=1,
             end_line=5,
+            source_span_hash=_fixture_span_hash(Path(source), 1, 5),
         ),
         id=chunk_id or CHUNK_ID,
         content_hash="abc123",
@@ -1903,6 +1914,7 @@ class TestChunksList:
                     start_line=1,
                     end_line=2,
                     scope=scope,
+                    source_span_hash=_fixture_span_hash(Path("/tmp/test.md"), 1, 2),
                 ),
                 id=CHUNK_ID,
                 content_hash="h",
@@ -1935,6 +1947,7 @@ class TestChunksList:
                 start_line=1,
                 end_line=2,
                 scope="",  # legacy empty-string row
+                source_span_hash=_fixture_span_hash(Path("/tmp/test.md"), 1, 2),
             ),
             id=CHUNK_ID,
             content_hash="h",
@@ -2275,6 +2288,7 @@ class TestEditChunkNamespaceLookupFailure:
                 namespace=chunk.metadata.namespace,
                 start_line=1,
                 end_line=3,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2313,6 +2327,7 @@ class TestEditChunkNamespaceLookupFailure:
                 namespace=chunk.metadata.namespace,
                 start_line=1,
                 end_line=3,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2353,7 +2368,11 @@ class TestDeleteChunk:
         chunk = dataclasses.replace(
             base,
             metadata=dataclasses.replace(
-                base.metadata, source_file=source, start_line=1, end_line=3
+                base.metadata,
+                source_file=source,
+                start_line=1,
+                end_line=3,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
         )
         # Route lookup, unlocked + fresh lookups in ``locked_source_chunk``,
@@ -2575,6 +2594,7 @@ class TestDeleteChunk:
                 end_line=3,
                 scope="project_shared",
                 project_root=proj,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2620,6 +2640,7 @@ class TestDeleteChunk:
                 end_line=3,
                 scope="project_shared",
                 project_root=proj,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2695,6 +2716,7 @@ class TestEditChunk:
                 namespace=chunk.metadata.namespace,
                 start_line=1,
                 end_line=6,
+                source_span_hash=_fixture_span_hash(source, 1, 6),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2771,6 +2793,7 @@ class TestEditChunkRedaction:
                 namespace=chunk.metadata.namespace,
                 start_line=1,
                 end_line=3,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2820,6 +2843,7 @@ class TestEditChunkRedaction:
                 end_line=3,
                 scope="project_shared",
                 project_root=proj,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2932,6 +2956,7 @@ class TestEditChunkProjectSharedGateB:
                     end_line=3,
                     scope=chunk_scope,
                     project_root=None if chunk_scope == "user" else proj,
+                    source_span_hash=_fixture_span_hash(source, 1, 3),
                 ),
                 # One id: this is the same row being re-read, not two rows.
                 id=base.id,
@@ -3206,6 +3231,7 @@ class TestChunkValidityFields:
                 end_line=3,
                 valid_from_unix=1_734_220_800,  # 2024-12-15 00:00 UTC
                 valid_to_unix=1_743_465_599,  # 2025-Q1 end (2025-03-31 23:59:59 UTC)
+                source_span_hash=_fixture_span_hash(Path("/tmp/test.md"), 1, 3),
             ),
             id=CHUNK_ID,
             content_hash="abc123",
@@ -3253,6 +3279,7 @@ class TestChunkValidityFields:
                 valid_to_unix=1_743_465_599,
                 parent_context="Section A",
                 overlap_before=42,
+                source_span_hash=_fixture_span_hash(Path("/tmp/test.md"), 1, 3),
             ),
             id=CHUNK_ID,
             content_hash="abc123",
@@ -6488,6 +6515,7 @@ class TestChunkCrudCrossProcessLock:
                 namespace=c.metadata.namespace,
                 start_line=1,
                 end_line=3,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=c.id,
             content_hash=c.content_hash,
