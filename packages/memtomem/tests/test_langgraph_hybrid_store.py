@@ -844,3 +844,64 @@ asyncio.run(main())
     assert "ON_STORE_THREAD=True\n" in output
     assert "STILL_OPEN=True\n" in output
     assert "CLOSED=yes\n" in output
+
+
+def test_items_storage_layout_carries_no_tier(store):
+    """No stored column or key constraint names a scope (#2366).
+
+    `MemtomemHybridStore` takes ADR-0011 §5's Gate B once, in ``__init__``,
+    against the scope `_resolve_target_scope` reads off ``self.path``. That
+    hoist is adequate only while a row cannot name a tier of its own, so the
+    storage layout is asserted rather than assumed: the ``items`` columns,
+    and the uniqueness constraint read as data through ``index_list`` /
+    ``index_info`` rather than as DDL text, which a reformat would break for
+    no semantic reason.
+
+    **What this does not cover**, stated here because the ADR entry first
+    claimed more than it delivers. A tier can be introduced without moving a
+    column at all — carried on a ``namespace`` segment, buried in
+    ``value_json`` or ``index_json``, kept in a second table or a
+    ``hybrid_meta`` key, or routed by a subclass. And the layout is observed
+    on exactly one path: a *freshly created, default-argument* database. A
+    column added only under indexing arguments, or on reopen, would leave
+    this green. Reopening currently *rejects* an unrecognised
+    ``hybrid_meta`` rather than migrating it, so there is no migration path
+    to observe yet — adding one is itself a reason to re-run the consent
+    audit ADR-0011 §5 describes, not a schema change to make quietly.
+    """
+    with sqlite3.connect(store.path) as db:
+        columns = tuple(row[1] for row in db.execute("PRAGMA table_info(items)"))
+        indexes = [row for row in db.execute("PRAGMA index_list(items)") if row[2]]
+        unique = tuple(
+            sorted(
+                tuple(part[2] for part in db.execute(f"PRAGMA index_info('{row[1]}')"))
+                for row in indexes
+            )
+        )
+
+    assert columns == (
+        "id",
+        "namespace",
+        "key",
+        "value_json",
+        "created_at",
+        "updated_at",
+        "revision",
+        "ttl",
+        "expires_at",
+        "index_json",
+    ), (
+        f"`items` columns changed to {columns}. ADR-0011 §5 records that the "
+        "hybrid store's project_shared consent is hoisted to construction "
+        "because one handle's database holds one tier. A per-item scope "
+        "column makes that false, and the init-time gate then covers less "
+        "than the rows it is read as covering. Re-answer the gate question "
+        "(does delete now need its own Gate B, like MemtomemStore.delete in "
+        "#2335?) before changing this schema."
+    )
+    assert unique == (("namespace", "key"),), (
+        f"`items` uniqueness changed to {unique}. ADR-0011 §5 leans on a "
+        "row's identity being namespace+key and nothing else; a scope folded "
+        "into that key means one database addresses rows per tier, which is "
+        "the shape the hoisted gate cannot cover."
+    )

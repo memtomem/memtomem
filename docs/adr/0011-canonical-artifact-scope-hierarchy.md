@@ -640,6 +640,78 @@ instead.
 >
 > #2333 remains the last first-party writer outside the claim.
 
+> **2026-09 (#2366):** `MemtomemHybridStore` (#2363) is the "next in-process
+> surface" the #2335 note wrote its shape down for, and it answers
+> differently on purpose: its Gate B consent is **store-scoped, taken once at
+> construction**, and `delete` carries no gate of its own. Recorded here so
+> the next parity audit reads that as a decision rather than as the gap #2335
+> had just closed on the sibling adapter.
+>
+> The two stores differ in what one handle can reach. `MemtomemStore` is a
+> view over the whole markdown corpus, where every chunk carries its own
+> `scope` (Decision 4): one handle spans `user`, `project_local` and
+> `project_shared`, so the tier is a property of the *row* and has to be
+> asked about per operation — `delete()` re-reads it under the source file's
+> lock through `locked_source_chunk`, while `add()` resolves it from the
+> destination it was handed. `MemtomemHybridStore` owns one SQLite database
+> at an explicit path. `_resolve_target_scope(self.path, memory_dirs,
+> project_memory_dirs)` classifies that path in `__init__` — the resolved
+> tier is the path's classification, escalated to `project_shared` if either
+> the path or the declared `scope=` says so — and a `project_shared` result
+> raises unless the caller passed `confirm_project_shared=True`, recording
+> `surface=langgraph_hybridstore_init`, `mechanism=param`, `action=init`.
+> Every later mutation, `delete` included (LangGraph spells it
+> `PutOp(value=None)`), runs under that one consent, against the tier
+> resolved for the path the handle was opened on.
+>
+> **The invariant is per handle, because nothing persists a tier.**
+> `hybrid_meta` stores `kind`, `version` and the index configuration and no
+> scope, so a second handle on the same file classifies it afresh, under
+> whatever configuration *it* loads. For the tier this gate exists to
+> protect that is a distinction without a difference: under equivalent
+> effective configuration, a path under a registered **shared-tier** root
+> classifies as `project_shared` for every handle, so no caller reaches the
+> tracked tier ungated. Registration alone does not say which tier —
+> `_owned_tier` takes the most specific covering root and reads *its* tier,
+> so a registered `memories.local` root is `project_local`. What does not
+> survive reopening is the other direction: a caller-declared escalation on
+> a path that classifies as `user` binds only the handle that declared it,
+> and a later default-argument handle on that same file is `user` again.
+> Persisting the declared tier would change that, and is not done.
+>
+> **Gate A is not hoisted with it, and the asymmetry is the point.** Gate A
+> scans bytes, so it stays per-`put` — though "bytes" is narrower than it
+> reads: `_prepare` hands `enforce_write_guard` only `encode(op.value)`, so
+> the namespace tuple, the key and the `index` selectors persist unscanned
+> (#2374). A delete reaches neither gate — Gate A because it has no value to
+> scan, which is #2335's own reasoning for the sibling, and Gate B because
+> the tier it touches was consented to before the store existed. A gate
+> answers a question, and the two questions have different lifetimes: "may
+> this value land" is per-write, "may this store touch the tracked tier" is
+> per-store.
+>
+> **What makes the hoist adequate is a storage fact, and the pin covers only
+> the part of it that is schema-visible.**
+> `test_langgraph_hybrid_store.py::test_items_storage_layout_carries_no_tier`
+> asserts the `items` column tuple and, read as data rather than as DDL text,
+> that a row's identity is `namespace`+`key` and nothing else. So a per-item
+> scope column, or a scope folded into the uniqueness constraint, fails
+> there. Two classes of change do not. A tier can be introduced without
+> moving a column — carried on a `namespace` segment, buried in `value_json`
+> or `index_json`, kept in a second table or a `hybrid_meta` key, or routed
+> by a subclass. And the pin observes one construction path, a freshly
+> created default-argument database, so a column added only under indexing
+> arguments or on reopen is never seen; reopening today *rejects* an
+> unrecognised `hybrid_meta` rather than migrating it, which is why no
+> migration path exists to observe, and why adding one belongs to this
+> question rather than beside it. Naming both classes is the point of this
+> entry: they make the init-time consent cover less than the rows it is read
+> as covering while every guard stays green, so they have to be caught by a
+> reviewer asking the gate question again.
+>
+> No behavior changed under this issue. The hoisted gate is adequate *given*
+> those facts; it is the facts that needed writing down.
+
 
 Before PR-D, `mem_batch_add` bypassed `enforce_write_guard` and used
 an inline `privacy.scan` instead — the batch path was the obvious
