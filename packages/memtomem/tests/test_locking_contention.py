@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import multiprocessing as mp
 import os
+import re
 import time
 from pathlib import Path
 
@@ -1067,3 +1068,129 @@ class TestCheckServerLivenessStoreScope:
         assert state.probe_error is None
         assert warning is None
         assert not missing.exists(), "read-only liveness probes must not create runtime dirs"
+
+
+# ------------------------------------------------- portalocker version pin
+
+
+#: The exact portalocker releases whose lock backends have been read (#2358).
+#: ``_lock_errors`` names this set twice in prose, and its
+#: ``isinstance(exc, AlreadyLocked)`` primary gate is only as good as the
+#: reading, so the set is releases rather than minor series: a patch bump is
+#: a source the classifier has not been checked against, and admitting it
+#: would defeat the pin at exactly the moment it should fire.
+#:
+#: What was read, and how far the claim goes. In each release's *syscall
+#: handlers*, contention becomes ``AlreadyLocked``: POSIX on
+#: ``EACCES``/``EAGAIN``, msvcrt on errnos 13/16/33/36, Win32 on
+#: ``ERROR_LOCK_VIOLATION``. It is not the wider claim that nothing else can
+#: escape those calls — ``_lock_errors`` records the counter-case itself, that
+#: 3.x re-raises a non-lock-violation ``pywintypes.error`` raw, which is why
+#: ``LOCK_CALL_ERRORS_WIDE`` exists — and preparation work outside the
+#: translating ``try`` can raise on its own terms.
+#:
+#: 4.2.0 and 4.3.0 were read directly for #2358: their
+#: ``portalocker/portalocker.py`` and ``exceptions.py`` are byte-identical,
+#: and 4.3.0's changes are confined to typing in ``types.py`` and
+#: ``utils.py``. The 3.x and 4.0/4.1 entries are inherited from the narrower
+#: claim this range replaces, not re-read here.
+VERIFIED_PORTALOCKER_RELEASES = (
+    "3.0.0",
+    "3.1.0",
+    "3.1.1",
+    "3.2.0",
+    "4.0.0",
+    "4.1.0",
+    "4.2.0",
+    "4.3.0",
+)
+
+#: A run of releases as the prose spells them: slash-joined within a major
+#: series, the series joined by " and ".
+_RANGE_RUN = re.compile(
+    r"\d+\.\d+\.\d+(?:/\d+\.\d+\.\d+)*(?: and \d+\.\d+\.\d+(?:/\d+\.\d+\.\d+)*)*"
+)
+
+
+def _documented_range_phrase(releases: tuple[str, ...]) -> str:
+    """Render *releases* the way ``_lock_errors`` spells the range in prose."""
+    by_major: dict[str, list[str]] = {}
+    for release in releases:
+        by_major.setdefault(release.split(".")[0], []).append(release)
+    return " and ".join("/".join(series) for series in by_major.values())
+
+
+def _stated_range(text: str) -> str:
+    """The longest release run *text* states, whitespace- and ``#``-collapsed.
+
+    Longest rather than first, and compared whole by the caller: a substring
+    search accepts prose naming a range that merely *starts* the same, in
+    either direction — a set short of ``4.3.0`` renders a prefix of the
+    documented phrase, and prose extended with " and 5.0.0" still contains
+    the phrase. Taking the maximal run and comparing it for equality is what
+    makes both fail.
+    """
+    flattened = re.sub(r"[\s#]+", " ", text)
+    runs = _RANGE_RUN.findall(flattened)
+    return max(runs, key=len) if runs else ""
+
+
+class TestPortalockerVerifiedRange:
+    """The verified-range claim in ``_lock_errors`` is a pin, not a memory.
+
+    Both sites had drifted two releases behind the lockfile before #2358 —
+    the comment said "3.0 through 4.1" while CI ran 4.3.0, so the paragraph
+    telling the next reader how far the ``isinstance`` gate had been checked
+    was, by its own words, describing an unverified install. Nothing caught
+    it because nothing asserted it. These assertions lock the claim, the set
+    behind it, and the installed release to each other, so a dependency bump
+    fails here instead of quietly making the prose staler.
+    """
+
+    def test_installed_portalocker_is_a_verified_release(self):
+        import portalocker
+
+        assert portalocker.__version__ in VERIFIED_PORTALOCKER_RELEASES, (
+            f"portalocker {portalocker.__version__} is not one of the releases "
+            f"`_lock_errors.py` claims to have source-verified "
+            f"({_documented_range_phrase(VERIFIED_PORTALOCKER_RELEASES)}). "
+            "Read that release's lockers — the POSIX errno mapping, the msvcrt "
+            "errno set, and the Win32 else-branch that must wrap in "
+            "LockException — then extend VERIFIED_PORTALOCKER_RELEASES and the "
+            "two range claims in `_lock_errors.py` together. Do not widen the "
+            "range without reading the backend: the claim is what the pin "
+            "protects. An exact match is deliberate — a patch release is a "
+            "source nobody has checked."
+        )
+
+    def test_both_range_claims_name_the_verified_releases(self):
+        """Each site is extracted and compared whole, not counted.
+
+        ``_lock_errors`` states the range twice — a module-level comment
+        above ``CONTENTION_ERRNOS`` and the ``is_lock_contention`` docstring
+        — and only one is reachable through ``__doc__``. Counting matches
+        across the module would pass with both in one site and none in the
+        other, so each is read on its own and its whole stated range compared
+        against the one derived from ``VERIFIED_PORTALOCKER_RELEASES``.
+        """
+        import inspect
+
+        import memtomem._lock_errors as lock_errors
+
+        expected = _documented_range_phrase(VERIFIED_PORTALOCKER_RELEASES)
+        source = inspect.getsource(lock_errors)
+        comment = source[: source.index("CONTENTION_ERRNOS")].rsplit("\n\n", 1)[-1]
+
+        assert _stated_range(comment) == expected, (
+            f"the comment above CONTENTION_ERRNOS states "
+            f"{_stated_range(comment)!r}, not {expected!r}. It and the "
+            "is_lock_contention docstring must move together with "
+            "VERIFIED_PORTALOCKER_RELEASES."
+        )
+        docstring = lock_errors.is_lock_contention.__doc__ or ""
+        assert _stated_range(docstring) == expected, (
+            f"the is_lock_contention docstring states "
+            f"{_stated_range(docstring)!r}, not {expected!r}. It and the "
+            "comment above CONTENTION_ERRNOS must move together with "
+            "VERIFIED_PORTALOCKER_RELEASES."
+        )
