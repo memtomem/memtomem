@@ -180,9 +180,30 @@ transit does not extend TTL. No implicit migration or in-place reindex is perfor
 
 Configured project directories are consulted only for scope guards, not for an
 implicit database or embedding model. Project-shared destinations require
-`confirm_project_shared=True`; put and import use the existing privacy write guard.
-`force_unsafe` cannot bypass the project-shared secret block. Namespaces organize
-records and are not authentication or tenant-isolation boundaries.
+`confirm_project_shared=True`. Before opening the database, the constructor
+checks the persisted index configuration, including raw `fields` and `index_id`,
+with the privacy write guard. This applies to reopening too; a refused
+configuration creates no directory or database and leaves an existing file intact.
+
+Put and import scan the value JSON, every namespace label, the key, and per-item
+`index` selectors before embedding or storage, even with `index=False` or without
+an embedder. Identifiers are also scanned as raw strings so JSON escaping cannot
+hide a quoted credential. Mutable values and selectors are copied before scanning;
+embedding callbacks cannot change what was approved for storage.
+
+A privacy refusal raises `ValueError` without echoing the sensitive input. It
+rejects the operation rather than redacting or renaming an identity. Remove
+credentials from namespace/key/selector/model-ID strings before retrying; changing
+only the value will not resolve an identifier refusal. Ordinary field names such
+as `password` or `api_key` alone are permitted. The existing `force_unsafe=True`
+valve remains available for `user` and `project_local`; it cannot bypass a
+`project_shared` block, including configuration checks.
+
+There is no retroactive scan or cleanup of existing rows. Reads and deletes can
+still address legacy sensitive identifiers under a valid configuration. Existing
+sensitive constructor settings are refused on reopen unless the private-tier
+bypass applies. Database schema and export format are unchanged. Namespaces
+organize records and are not authentication or tenant-isolation boundaries.
 
 ## Validation and scope
 
