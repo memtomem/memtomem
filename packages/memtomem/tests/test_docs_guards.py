@@ -507,7 +507,8 @@ class TestPluginManualCoexistenceCallout:
         assert "/plugin uninstall memtomem@memtomem" in claude_code
 
     def test_callout_documents_the_duplicate_case(self, claude_code: str) -> None:
-        assert "both servers run" in claude_code
+        assert "duplicate registrations are possible" in claude_code
+        assert "do not prove two live processes" in claude_code
         assert "same command" in claude_code.lower()
 
     def test_no_doc_promises_unconditional_suppression(self) -> None:

@@ -51,6 +51,15 @@ The memtomem plugin bundles the exact-pinned MCP server and seven focused slash
 commands. Read workflows can be selected automatically; write and setup
 workflows require direct invocation.
 
+Before `/plugin install`, run `mm doctor --claude-mcp` from the project root.
+Use a CLI version that includes this diagnostic. It reads registrations without
+connecting to MCP servers. `--json` emits `status`, `complete`, and `findings`,
+plus current/prospective risk and whether an existing registration can be reused.
+Exit codes are `0` (no detected conflict), `1` (duplicate risk), and `2`
+(incomplete inspection). The prospective check uses this CLI release's generated
+plugin contract; an installed plugin is checked against its actual manifest.
+It does not intercept Claude's installation command.
+
 ```
 /plugin marketplace add memtomem/memtomem
 /plugin install memtomem@memtomem
@@ -68,22 +77,24 @@ optional.
 >
 > - **Same command** — Claude Code suppresses the plugin-managed copy, your
 >   manual registration keeps winning, and tools keep their
->   `mcp__memtomem__mem_*` names. Only one server runs.
+>   `mcp__memtomem__mem_*` names. Environment differences are reported separately;
+>   the manual entry wins, including its environment.
 > - **Different command** — and the manual registrations this guide and
 >   [mcp-clients.md](../mcp-clients.md) teach (`memtomem-server` from your
 >   environment, or `uvx --isolated --from "memtomem[all]==0.5.0"
->   memtomem-server`) *are* different — **both servers run**: two processes
->   write the same store, and the tool list doubles under
+>   memtomem-server`) *are* different — **duplicate registrations are possible**,
+>   exposing tools under
 >   `mcp__memtomem__mem_*` plus `mcp__plugin_memtomem_memtomem__mem_*`.
 >
-> To check which case you are in, run `/mcp`: two memtomem servers — or both
-> tool namespaces in the tool list — means both are running. Then pick one:
+> To check the actual session, run `/mcp`. Two tool namespaces suggest
+> duplicate registrations; they do not prove two live processes or shared
+> storage. Then pick one:
 >
 > - **Keep the plugin** (recommended) — remove the manual entry; tools become
 >   `mcp__plugin_memtomem_memtomem__mem_*`:
 >
 >   ```bash
->   claude mcp remove memtomem   # add -s user for a user-scope entry
+>   claude mcp remove memtomem -s user   # use the diagnosed name and scope
 >   ```
 >
 > - **Keep the manual entry** (you need the `[all]` extras or a source
@@ -100,6 +111,25 @@ Prefer manual registration without shipped skills? Use
 Option B below.
 
 ### Option B: Register the MCP server manually
+
+`mm init --mcp claude` and `mm init --mcp json` now perform the same preflight.
+They preserve and reuse an existing usable manual or plugin connection rather
+than adding another registration. Conflicts or incomplete inspection defer the
+MCP step; `--mcp skip` lets you initialize the store independently. A Claude
+registration failure or timeout never writes a fallback `.mcp.json`.
+
+This includes explicit JSON generation because a project-root `.mcp.json` is
+also loaded by Claude. If Claude is unavailable, the preflight is incomplete
+and that generation is deferred. Existing hand-written configuration examples
+below remain available for intentional manual setup.
+
+The diagnostic applies local > project > user name precedence and separates
+disabled or pending-approval entries from usable ones. It respects
+`CLAUDE_CONFIG_DIR`; it reports unsupported wrappers, malformed configuration,
+managed policy, or unresolved parent project configuration as incomplete.
+Run from the actual project root. CLI-only flags such as `--mcp-config`,
+`--strict-mcp-config`, `--settings`, and `--plugin-dir` are outside this on-disk
+inventory: `/mcp` remains the authority for that session.
 
 #### Pick an installation scope
 

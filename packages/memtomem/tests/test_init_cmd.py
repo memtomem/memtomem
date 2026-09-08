@@ -30,6 +30,15 @@ from memtomem.config import Mem2MemConfig
 from .helpers import set_home
 
 
+@pytest.fixture(autouse=True)
+def _clean_claude_inventory(monkeypatch):
+    # These wizard tests own the registration subprocess, not the host's Claude
+    # account. Real preflight integration is covered in test_claude_mcp_preflight.
+    from memtomem.cli import _claude_mcp
+
+    monkeypatch.setattr(_claude_mcp, "inspect_claude_mcp", lambda: _claude_mcp.Report())
+
+
 def test_write_mcp_json_omits_env_when_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2899,12 +2908,7 @@ class TestMcpPasteHints:
 
 
 class TestMcpChoiceOneClaudeAddBranches:
-    """``mcp_choice == 1`` invokes ``claude mcp add`` and must distinguish
-    three failure modes — the old code collapsed all of them into
-    "'claude' not found", which lied to users who had ``claude`` on PATH
-    but already had a ``memtomem`` user-scope entry registered (rerun of
-    ``mm init``).
-    """
+    """An uncertain Claude registration never falls back into another scope."""
 
     @staticmethod
     def _state(tmp_path: Path) -> dict:
@@ -2912,14 +2916,7 @@ class TestMcpChoiceOneClaudeAddBranches:
         state["mcp_choice"] = 1
         return state
 
-    def test_returncode_zero_emits_configured(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        from click import unstyle
-
+    def test_returncode_zero_emits_configured(self, tmp_path, monkeypatch, capsys):
         from memtomem.cli import init_cmd
 
         set_home(monkeypatch, tmp_path)
@@ -2929,40 +2926,19 @@ class TestMcpChoiceOneClaudeAddBranches:
             "_run",
             lambda cmd, timeout=10: subprocess.CompletedProcess(cmd, 0, "", ""),
         )
-
         init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
-
-        out = unstyle(capsys.readouterr().out)
+        out = capsys.readouterr().out
         assert "Claude Code: configured (user scope)" in out
-        # success path must NOT also write the .mcp.json fallback.
+        assert "mm doctor --claude-mcp" in out
         assert not (tmp_path / ".mcp.json").exists()
-        assert "MCP config: wrote ./.mcp.json" not in out
-        # The manual entry coexists with (and duplicates) the plugin-bundled
-        # server — the wizard can't detect plugin installs, so the success
-        # message must carry the session-side check and both remediations,
-        # each command whole on its own line (terminal copy-paste).
-        assert "second server against the same store" in out
-        assert "claude mcp remove memtomem" in out
-        assert "/plugin uninstall memtomem@memtomem" in out
 
-    def test_already_exists_stderr_skips_fallback(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """Reruns of ``mm init`` (or any case where ``memtomem`` is already
-        in the user-scope claude config) must report success and skip the
-        ``.mcp.json`` fallback — Claude Code is already covered by the
-        existing user-scope entry, so a project-scope file would only add
-        duplicate state for the user to clean up.
-        """
-        from click import unstyle
-
+    def test_already_exists_requires_confirmed_registration(self, tmp_path, monkeypatch, capsys):
         from memtomem.cli import init_cmd
 
         set_home(monkeypatch, tmp_path)
         monkeypatch.chdir(tmp_path)
+        decisions = iter([True, True, False])
+        monkeypatch.setattr(init_cmd, "_preflight_mcp_choice", lambda choice: next(decisions))
         monkeypatch.setattr(
             init_cmd,
             "_run",
@@ -2970,42 +2946,12 @@ class TestMcpChoiceOneClaudeAddBranches:
                 cmd, 1, "", "MCP server memtomem already exists in user config\n"
             ),
         )
-
         init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
-
-        out = unstyle(capsys.readouterr().out)
-        assert "Claude Code: already registered (user scope) — skipped" in out
-        # A pre-existing manual entry pairs with an installed plugin exactly
-        # the same way a fresh one would — the coexistence note fires here too.
-        assert "second server against the same store" in out
-        # Regression: the old wording must not leak back in.
-        assert "'claude' not found" not in out
-        # No fallback file should be written — Claude Code already has the
-        # user-scope entry covering it.
+        assert "existing registration confirmed" in capsys.readouterr().out
         assert not (tmp_path / ".mcp.json").exists()
-        assert "MCP config: wrote ./.mcp.json" not in out
-        # And paste-hints (Cursor / Windsurf / Claude Desktop / Antigravity CLI
-        # / Gemini CLI) must NOT fire either — the user opted for "auto-register Claude
-        # Code", and the existing user-scope entry already covers it. A
-        # future refactor that hoists _emit_mcp_paste_hints() out of the
-        # generic-failure block would silently spam unrelated paste paths
-        # in this branch; pin against that.
-        assert "~/.cursor/mcp.json" not in out
-        assert "~/.codeium/windsurf/mcp_config.json" not in out
 
-    def test_generic_nonzero_surfaces_stderr_and_falls_back(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """Any other non-zero return must NOT be reported as "claude not
-        found" — claude clearly ran. Surface the first stderr line so the
-        user can see what actually broke before we fall back to
-        ``.mcp.json``.
-        """
-        from click import unstyle
-
+    @pytest.mark.parametrize("stderr", ["scope user is locked", "already exists", "token=secret"])
+    def test_generic_nonzero_never_falls_back(self, tmp_path, monkeypatch, stderr):
         from memtomem.cli import init_cmd
 
         set_home(monkeypatch, tmp_path)
@@ -3013,82 +2959,34 @@ class TestMcpChoiceOneClaudeAddBranches:
         monkeypatch.setattr(
             init_cmd,
             "_run",
-            lambda cmd, timeout=10: subprocess.CompletedProcess(
-                cmd, 2, "", "claude: error: scope `user` is locked\n"
-            ),
+            lambda cmd, timeout=10: subprocess.CompletedProcess(cmd, 2, "", stderr),
         )
+        with pytest.raises(click.ClickException, match="no fallback .mcp.json") as exc:
+            init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
+        assert "secret" not in str(exc.value)
+        assert not (tmp_path / ".mcp.json").exists()
 
-        init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
-
-        out = unstyle(capsys.readouterr().out)
-        assert "Claude Code: claude mcp add failed" in out
-        assert "scope `user` is locked" in out
-        # Regression: misleading wording must not fire here.
-        assert "'claude' not found" not in out
-        # Generic failure DOES write the fallback — Claude Code is not yet
-        # configured, so user needs the project-scope file to recover.
-        assert (tmp_path / ".mcp.json").exists()
-        assert "MCP config: wrote ./.mcp.json" in out
-
-    def test_filenotfound_keeps_legacy_not_found_message(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """When the ``claude`` binary is genuinely missing the original
-        message is correct and must stay — this is the only branch where
-        "'claude' not found" reflects reality.
-        """
-        from click import unstyle
-
+    @pytest.mark.parametrize(
+        "error,reason",
+        [
+            (FileNotFoundError(), "unavailable"),
+            (subprocess.TimeoutExpired("claude", 10), "timed out"),
+        ],
+    )
+    def test_unavailable_or_unknown_delivery_never_falls_back(
+        self, tmp_path, monkeypatch, error, reason
+    ):
         from memtomem.cli import init_cmd
 
-        def _missing(cmd: list[str], timeout: int = 10) -> subprocess.CompletedProcess:
-            raise FileNotFoundError(2, "No such file or directory: 'claude'")
+        def fail(cmd, timeout=10):
+            raise error
 
         set_home(monkeypatch, tmp_path)
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(init_cmd, "_run", _missing)
-
-        init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
-
-        out = unstyle(capsys.readouterr().out)
-        assert "Claude Code: 'claude' not found" in out
-        assert (tmp_path / ".mcp.json").exists()
-
-    def test_timeout_falls_back_to_not_found_branch(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """``subprocess.TimeoutExpired`` shares the legacy
-        ``FileNotFoundError`` branch (claude hung past 10s). The current
-        wording reuses "'claude' not found" — not strictly accurate for
-        timeouts but the same .mcp.json fallback is the right recovery,
-        so we just pin the existing behavior. If we ever split these
-        cases, this test wants a distinct message for timeouts.
-        """
-        from click import unstyle
-
-        from memtomem.cli import init_cmd
-
-        def _hang(cmd: list[str], timeout: int = 10) -> subprocess.CompletedProcess:
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
-
-        set_home(monkeypatch, tmp_path)
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(init_cmd, "_run", _hang)
-
-        init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
-
-        out = unstyle(capsys.readouterr().out)
-        assert "Claude Code: 'claude' not found" in out
-        # Same fallback path as FileNotFoundError — write .mcp.json so the
-        # user can still wire Claude Code (or other editors) up manually.
-        assert (tmp_path / ".mcp.json").exists()
-        assert "MCP config: wrote ./.mcp.json" in out
+        monkeypatch.setattr(init_cmd, "_run", fail)
+        with pytest.raises(click.ClickException, match=reason):
+            init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
+        assert not (tmp_path / ".mcp.json").exists()
 
 
 class TestClaudeDesktopConfigHint:

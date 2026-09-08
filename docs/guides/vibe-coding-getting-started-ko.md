@@ -90,6 +90,18 @@ database path는 나중에 두 도구가 같은 저장소를 보는지 확인할
 
 Claude Code 세션에서 실행합니다.
 
+기존에 Claude MCP를 등록했다면 프로젝트 루트의 터미널에서 먼저 검사합니다.
+이 진단 명령이 포함된 memtomem CLI를 사용하세요.
+
+```bash
+uvx --from 'memtomem==0.5.0' mm doctor --claude-mcp
+```
+
+종료 코드 `0`은 감지된 충돌 없음, `1`은 중복 위험, `2`는 확인 불완전입니다.
+설정은 자동 삭제하지 않습니다. 안내된 등록 이름과 범위로 기존 연결을
+정리한 뒤 플러그인을 설치하세요. uv 설치와 저장된 메모리는 유지합니다.
+검사와 별개로 `/plugin install`을 바로 실행하면 설치 자체를 막지는 않습니다.
+
 ```text
 /plugin marketplace add memtomem/memtomem
 /plugin install memtomem@memtomem
