@@ -441,6 +441,9 @@ Embedding: none /
 Dimension: 0
 Top-K:     10
 RRF k:     60
+RRF weights: [1.0, 1.0]
+BM25 candidates: 50
+Dense candidates: 50
 Watcher:   native
 
 Runtime context

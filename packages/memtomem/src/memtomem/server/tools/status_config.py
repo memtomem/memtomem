@@ -28,10 +28,20 @@ from memtomem.server.helpers import _set_config_key
 from memtomem.secret_masking import is_secret_key, mask_secrets
 
 if TYPE_CHECKING:
-    from memtomem.config import SaveReceipt
+    from memtomem.config import SaveReceipt, SearchConfig
     from memtomem.server.context import AppContext
 
 logger = logging.getLogger(__name__)
+
+
+def _fusion_settings(search: SearchConfig) -> dict[str, object]:
+    """Configured two-leg RRF inputs, before request limits and score modifiers."""
+    return {
+        "rrf_k": search.rrf_k,
+        "rrf_weights": list(search.rrf_weights),
+        "bm25_candidates": search.bm25_candidates,
+        "dense_candidates": search.dense_candidates,
+    }
 
 
 def _dependency_state(module: str, distribution: str | None = None) -> dict[str, object]:
@@ -51,7 +61,7 @@ def _dependency_state(module: str, distribution: str | None = None) -> dict[str,
 
 
 def collect_runtime_profile() -> dict[str, object]:
-    """Describe the effective retrieval runtime without initializing models or storage."""
+    """Snapshot resolved configuration/dependencies without initializing models or storage."""
     try:
         from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
 
@@ -105,6 +115,7 @@ def collect_runtime_profile() -> dict[str, object]:
             "dimension": int(config.embedding.dimension),
         },
         "search": {
+            **_fusion_settings(config.search),
             "enable_bm25": bool(config.search.enable_bm25),
             "enable_dense": bool(config.search.enable_dense),
             "tokenizer": str(config.search.tokenizer),
@@ -384,7 +395,7 @@ async def collect_status_report(app: AppContext) -> dict:
             "db_path": str(db_path_resolved),
             "embedding": embedding,
             "top_k": config.search.default_top_k,
-            "rrf_k": config.search.rrf_k,
+            **_fusion_settings(config.search),
             "memory_dirs": [
                 str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs
             ],
@@ -649,6 +660,13 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
         StatusLine("kv", key="Dimension:".ljust(11), value=str(emb["dimension"])),
         StatusLine("kv", key="Top-K:".ljust(11), value=str(cfg["top_k"])),
         StatusLine("kv", key="RRF k:".ljust(11), value=str(cfg["rrf_k"])),
+        StatusLine("kv", key="RRF weights: ", value=str(cfg.get("rrf_weights", "(unavailable)"))),
+        StatusLine(
+            "kv", key="BM25 candidates: ", value=str(cfg.get("bm25_candidates", "(unavailable)"))
+        ),
+        StatusLine(
+            "kv", key="Dense candidates: ", value=str(cfg.get("dense_candidates", "(unavailable)"))
+        ),
         StatusLine("kv", key="Watcher:".ljust(11), value=str(cfg["watcher_backend"])),
         StatusLine("blank"),
         StatusLine("section", value="Runtime context", meta={"tone": "plain"}),
