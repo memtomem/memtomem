@@ -171,11 +171,12 @@ async def mutate_source_and_reindex(
             # that cannot answer identity the restore proceeds on existence
             # alone, so a file that reappeared in the meantime would be
             # overwritten with the pre-image of a write that never happened.
-            # Gated on the mutation not having completed, not on the type
-            # alone: this handler also covers the re-index (and, on the MCP
+            # Both halves of the condition are load-bearing. The type says
+            # a write refused; the completion flag says it was *this* span's
+            # write. This handler also covers the re-index (and, on the MCP
             # twin, the cache and provenance work after it), so a
-            # ``SourceChangedError`` surfacing from a later stage would
-            # otherwise skip the rollback of a write that did land.
+            # ``SourceChangedError`` surfacing from a later stage names a
+            # mutation that already landed and must still be rolled back.
             outcome = exc.outcome
         else:
             outcome = await asyncio.to_thread(restore_pre_image_quietly, source_file, pre_image)

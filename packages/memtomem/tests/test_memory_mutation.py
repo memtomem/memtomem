@@ -393,6 +393,10 @@ async def test_mutate_source_and_reindex_hands_the_pre_image_to_the_callback(tmp
     src = tmp_path / "n.md"
     src.write_text("orig\n", encoding="utf-8")
     info = src.stat()
+    # The file's bytes as they actually landed, not a literal: ``write_text``
+    # translates the newline on Windows while ``read_pre_image`` reads bytes,
+    # so ``b"orig\n"`` here would pin POSIX rather than the contract.
+    on_disk = src.read_bytes()
     engine = AsyncMock()
     engine.index_file = AsyncMock(return_value=_stats())
     seen = {}
@@ -404,7 +408,7 @@ async def test_mutate_source_and_reindex_hands_the_pre_image_to_the_callback(tmp
     await mutate_source_and_reindex(engine, src, mutate)
 
     assert seen["identity"] == (info.st_dev, info.st_ino)
-    assert seen["data"] == b"orig\n"
+    assert seen["data"] == on_disk
 
 
 @pytest.mark.asyncio

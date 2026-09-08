@@ -182,14 +182,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
   Those rewrites now open the existing file without creating it, and check on
   the open descriptor that it is still the file the operation read. A source
-  that was removed stays removed and a source that was replaced is left
-  exactly as found — the identity check matters as much as the refusal to
-  create, because splicing a stranger's file at the deleted file's line
-  numbers corrupts it just as surely. The window this closes is the one
-  between the read and the write; a file already swapped before the operation
-  looked at it is the file the operation was asked to edit, and telling those
-  apart is a question about the index's line numbers rather than about the
-  file's identity. `mem_edit` and `mem_delete` name which
+  that was removed stays removed, and — wherever the filesystem supplies a
+  usable identity for a file — a source that was replaced is left exactly as
+  found. That second
+  half matters as much as the refusal to create: splicing a stranger's file at
+  the deleted file's line numbers corrupts it just as surely. Where identity
+  is unanswerable the operation still refuses to create, and falls back to
+  editing whatever is at the path, which is what it did before.
+
+  The window this closes is the one between the read and the write. A file
+  already swapped before the operation looked at it is the file the operation
+  was asked to edit, and telling those apart is a question about the index's
+  line numbers rather than about the file's identity. `mem_edit` and `mem_delete` name which
   of the two they met; the web editor answers 409 with the same distinction;
   and a web delete whose file somebody else already removed now finishes by
   dropping the index row and reporting success, since that is the outcome it

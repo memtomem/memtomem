@@ -32,7 +32,7 @@ from memtomem.models import Chunk, ChunkMetadata, IndexingStats
 from memtomem.server.context import AppContext
 from memtomem.server.tools import memory_crud
 from memtomem.tools import memory_writer
-from memtomem.tools.memory_writer import RestoreOutcome
+from memtomem.tools.memory_writer import RestoreOutcome, SourceRemovedError
 
 
 async def _chunks_by_start_line(comp, path):
@@ -836,3 +836,43 @@ class TestForwardWriteAgainstExternalRemoval:
 
         assert restores == []
         assert "removed by another process" in out
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_after_the_write_landed_is_still_rolled_back(
+        self, bm25_only_components
+    ):
+        """The exemption is about *when*, not about the exception's type.
+
+        The MCP twin of ``test_memory_mutation``'s pin, and it needs its own:
+        this handler covers the re-index plus the cache and provenance work
+        after it, so a ``SourceChangedError`` arriving from a later stage names
+        a mutation that already landed. The two copies of this contract have
+        drifted before, which is what ``test_memory_rollback_parity`` exists
+        for — but parity is structural, and this is behaviour.
+        """
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await memory_crud.mem_add(content="Alpha body", title="Alpha", file="d.md", ctx=ctx)
+        f = mem_dir / "d.md"
+        (alpha,) = await _chunks_by_start_line(comp, f)
+        before = f.read_text(encoding="utf-8")
+
+        # The write succeeds; the re-index *after* it raises the refusal.
+        real_index = app.index_engine.index_file
+        calls = 0
+
+        async def late_refusal(path, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise SourceRemovedError("late")
+            return await real_index(path, *args, **kwargs)
+
+        app.index_engine.index_file = late_refusal  # type: ignore[method-assign]
+
+        out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
+
+        assert f.read_text(encoding="utf-8") == before  # rolled back, not skipped
+        assert "rolled back" in out

@@ -250,6 +250,14 @@ def _rewrite_in_place(
     ``st_ino == 0`` FUSE/SMB case, and the default for callers that hold no
     pre-image) falls back to existence, matching the restore's own rule.
 
+    Both checks happen at the open, and a removal *after* it is not detected at
+    all: the descriptor outlives the directory entry, so the write lands on an
+    orphaned inode and the file stays deleted. That is the correct outcome and
+    the reason no check is needed there — what this guards is creation, and a
+    write through a descriptor cannot create. It does mean a caller is told
+    about a removal only when the removal beat the open; the ones it does not
+    hear about are the ones where nothing came back.
+
     What the identity closes is the window between the caller's read and this
     write, and only that. A file already swapped *before* the caller looked is,
     as far as anything here can tell, the file this call was asked to edit; that
