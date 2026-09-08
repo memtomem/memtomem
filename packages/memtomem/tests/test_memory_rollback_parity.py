@@ -127,3 +127,142 @@ def test_both_sites_still_exist_under_these_names():
     for module in (memory_crud, memory_mutation):
         assert callable(getattr(module, _READ))
         assert callable(getattr(module, _RESTORE))
+
+
+# --------------------------------------------------------------------------
+# #2367: the same no-create rule, one layer earlier — on the writer module
+# itself. The guard above pins the two rollback tails; nothing pinned the
+# forward helpers those tails call, and that is where the second copy of the
+# defect lived.
+
+_WRITER = "tools/memory_writer.py"
+
+#: The functions in ``memory_writer`` that are *meant* to create. Appending a
+#: note to a file that need not exist yet is what ``mem_add`` does, so the rule
+#: is an allowlist rather than a blanket ban — and an allowlist small enough to
+#: read is the point. ``append_entry`` delegates here rather than opening.
+_CREATORS = frozenset({"append_blocks"})
+
+_CREATING_MODE_CHARS = "wax"
+
+
+def _writer_functions() -> dict[str, ast.AST]:
+    tree = ast.parse((_SRC / _WRITER).read_text(encoding="utf-8"))
+    return {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _creating_writes(fn: ast.AST) -> list[str]:
+    """The creating writes *fn* spells out literally.
+
+    Recognised: ``.write_text`` / ``.write_bytes`` (as attribute references,
+    called or not), a literal ``O_CREAT`` flag, and ``open`` / ``Path.open``
+    with a literal creating mode — positional or ``mode=``.
+
+    Not recognised, and deliberately so: a mode computed at runtime, an aliased
+    or re-exported ``open``, ``touch()``, a copy or rename that lands on the
+    path, or delegation to a helper that creates. This is a regression check on
+    the shapes this module has actually used, not a proof that nothing here can
+    create a file — read it as a tripwire, and do not take its silence for an
+    audit.
+    """
+    found = []
+    for n in ast.walk(fn):
+        # ``write_text`` / ``write_bytes`` create — the #2367 defect verbatim.
+        # Attribute references rather than calls, for the reason recorded above:
+        # the value can be handed to an executor uncalled.
+        if isinstance(n, ast.Attribute) and n.attr in _BARE_WRITE_ATTRS:
+            found.append(f"line {n.lineno}: .{n.attr}")
+        if isinstance(n, ast.Attribute) and n.attr == "O_CREAT":
+            found.append(f"line {n.lineno}: O_CREAT")
+        if not isinstance(n, ast.Call):
+            continue
+        # The mode's position depends on the call's shape: builtin ``open``
+        # takes the path first, while a bound ``path.open`` already has it, so
+        # reading from a fixed index misses ``path.open("w")`` — and reading
+        # every argument would take a filename like ``"data.md"`` for a mode.
+        if isinstance(n.func, ast.Name) and n.func.id == "open":
+            positional = n.args[1:2]
+        elif isinstance(n.func, ast.Attribute) and n.func.attr == "open":
+            positional = n.args[0:1]
+        else:
+            continue
+        modes = [a.value for a in positional if isinstance(a, ast.Constant)]
+        modes += [
+            kw.value.value
+            for kw in n.keywords
+            if kw.arg == "mode" and isinstance(kw.value, ast.Constant)
+        ]
+        # Containment, not the first character: ``"r+"`` creates nothing while
+        # ``"a+"`` and ``"xb"`` both do.
+        if any(c in str(m) for m in modes for c in _CREATING_MODE_CHARS):
+            found.append(f"line {n.lineno}: open(..., {modes!r})")
+    return found
+
+
+#: One witness per recognised shape, plus the near-misses a looser matcher gets
+#: wrong. A guard whose own recogniser goes untested passes just as happily
+#: once it has stopped recognising anything.
+_GUARD_WITNESSES = (
+    ('p.write_text("x")', True),
+    ('p.write_bytes(b"x")', True),
+    ("os.open(p, os.O_CREAT)", True),
+    ('open(p, "w")', True),
+    ('open(p, "a+")', True),
+    ('p.open("w")', True),
+    ('p.open(mode="x")', True),
+    ('open(p, "r+")', False),
+    ('p.open("r+")', False),
+    # The filename carries an "a"; only the mode position may be read as one.
+    ('open("data.md", "r")', False),
+)
+
+
+@pytest.mark.parametrize(("source", "creates"), _GUARD_WITNESSES)
+def test_the_creating_write_recogniser_reads_each_shape(source, creates):
+    fn = ast.parse(f"def f(p):\n    {source}\n").body[0]
+
+    assert bool(_creating_writes(fn)) is creates, source
+
+
+def test_only_the_declared_creators_in_memory_writer_may_create():
+    """No function outside the allowlist may bring the source file into being.
+
+    Scope comes from the module's own AST rather than a hand-written list of
+    edit helpers: a helper added later is covered the day it is written, which
+    a list of the three that exist today would not be.
+    """
+    functions = _writer_functions()
+    assert _CREATORS <= functions.keys(), (
+        f"the creator allowlist names functions that no longer exist: "
+        f"{sorted(_CREATORS - functions.keys())}"
+    )
+
+    offenders = {
+        name: hits
+        for name, fn in functions.items()
+        if name not in _CREATORS and (hits := _creating_writes(fn))
+    }
+    assert not offenders, (
+        f"{_WRITER}: {offenders} can create the file it was asked to edit. A "
+        "rewrite must open the existing file without O_CREAT so a source "
+        "removed mid-span answers ENOENT instead of being resurrected with "
+        "the edit applied (#2367)."
+    )
+
+
+def test_the_declared_creator_really_creates():
+    """The allowlist must name a function that creates, not a stale name.
+
+    Without this the guard above passes just as well after ``append_blocks``
+    stops creating — at which point the allowlist silently exempts nothing and
+    nobody notices the entry is dead.
+    """
+    fn = _writer_functions()["append_blocks"]
+    assert _creating_writes(fn), (
+        "append_blocks no longer creates; it is on the creator allowlist "
+        "precisely because mem_add's append must create its target file"
+    )

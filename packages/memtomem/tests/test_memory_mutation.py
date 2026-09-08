@@ -26,7 +26,7 @@ from memtomem.context._atomic import (
 from memtomem.models import IndexingStats
 from memtomem.tools import memory_mutation
 from memtomem.tools.memory_mutation import locked_source_chunk, mutate_source_and_reindex
-from memtomem.tools.memory_writer import RestoreOutcome
+from memtomem.tools.memory_writer import RestoreOutcome, SourceRemovedError
 
 
 def _stats() -> IndexingStats:
@@ -254,7 +254,7 @@ async def test_mutate_source_and_reindex_success(tmp_path):
     engine = AsyncMock()
     engine.index_file = AsyncMock(return_value=_stats())
 
-    def mutate():
+    def mutate(_pre):
         src.write_text("mutated\n", encoding="utf-8")
 
     stats = await mutate_source_and_reindex(engine, src, mutate)
@@ -273,7 +273,7 @@ async def test_mutate_source_and_reindex_rolls_back_on_failure(tmp_path):
     # Forward reindex raises; the rollback reindex (2nd call) succeeds.
     engine.index_file = AsyncMock(side_effect=[RuntimeError("boom"), _stats()])
 
-    def mutate():
+    def mutate(_pre):
         src.write_text("mutated\n", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="boom"):
@@ -304,7 +304,7 @@ async def test_mutate_source_and_reindex_does_not_recreate_a_source_removed_mid_
 
     engine.index_file = AsyncMock(side_effect=index_file)
 
-    def mutate():
+    def mutate(_pre):
         src.write_text("mutated\n", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="boom"):
@@ -324,7 +324,7 @@ async def test_mutate_source_and_reindex_reports_the_body_error_when_the_parent_
     engine = AsyncMock()
     engine.index_file = AsyncMock(side_effect=[RuntimeError("boom"), _stats()])
 
-    def mutate():
+    def mutate(_pre):
         src.write_text("mutated\n", encoding="utf-8")
         shutil.rmtree(holder)
 
@@ -349,7 +349,7 @@ async def test_mutate_source_and_reindex_still_raises_the_body_error_when_the_re
         memory_mutation, "restore_pre_image_quietly", lambda *_: RestoreOutcome.failed
     )
 
-    def mutate():
+    def mutate(_pre):
         src.write_text("mutated\n", encoding="utf-8")
 
     with caplog.at_level(logging.ERROR, logger="memtomem.tools.memory_mutation"):
@@ -381,3 +381,85 @@ async def test_cli_add_times_out_when_sidecar_held(bm25_only_components, monkeyp
         with pytest.raises(click.ClickException) as excinfo:
             await cli_memory._add("hello world", None, [], "notes.md")
     assert "locked by another process" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_mutate_source_and_reindex_hands_the_pre_image_to_the_callback(tmp_path):
+    """#2367: the callback needs the identity the span already read.
+
+    Without it the write can only ask "does something exist at this path",
+    which is a different question from "is this still the file I read".
+    """
+    src = tmp_path / "n.md"
+    src.write_text("orig\n", encoding="utf-8")
+    info = src.stat()
+    # The file's bytes as they actually landed, not a literal: ``write_text``
+    # translates the newline on Windows while ``read_pre_image`` reads bytes,
+    # so ``b"orig\n"`` here would pin POSIX rather than the contract.
+    on_disk = src.read_bytes()
+    engine = AsyncMock()
+    engine.index_file = AsyncMock(return_value=_stats())
+    seen = {}
+
+    def mutate(pre):
+        seen["identity"] = pre.identity
+        seen["data"] = pre.data
+
+    await mutate_source_and_reindex(engine, src, mutate)
+
+    assert seen["identity"] == (info.st_dev, info.st_ino)
+    assert seen["data"] == on_disk
+
+
+@pytest.mark.asyncio
+async def test_a_refused_write_is_re_raised_without_a_restore(tmp_path, monkeypatch):
+    """A write that refused wrote nothing, so there is nothing to put back.
+
+    Restoring anyway would recreate the removed file wherever the filesystem
+    cannot answer identity, since the restore falls back to existence there —
+    the resurrection the refusal exists to prevent (#2367).
+    """
+    src = tmp_path / "n.md"
+    src.write_text("orig\n", encoding="utf-8")
+    engine = AsyncMock()
+    engine.index_file = AsyncMock(return_value=_stats())
+    restores: list[int] = []
+    monkeypatch.setattr(
+        memory_mutation,
+        "restore_pre_image_quietly",
+        lambda *_: restores.append(1) or RestoreOutcome.restored,
+    )
+
+    def mutate(_pre):
+        src.unlink()
+        raise SourceRemovedError("gone")
+
+    with pytest.raises(SourceRemovedError):
+        await mutate_source_and_reindex(engine, src, mutate)
+
+    assert restores == []
+    assert not src.exists()
+    # The rollback re-index still ran; only the file restore was skipped.
+    assert engine.index_file.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_after_the_write_landed_is_still_rolled_back(tmp_path):
+    """The exemption is about *when*, not about the exception's type.
+
+    This handler also covers the re-index, so a ``SourceChangedError`` arriving
+    from a later stage would name a write that already happened. Skipping the
+    rollback there would leave that write on disk (#2367 review).
+    """
+    src = tmp_path / "n.md"
+    src.write_text("orig\n", encoding="utf-8")
+    engine = AsyncMock()
+    engine.index_file = AsyncMock(side_effect=[SourceRemovedError("late"), _stats()])
+
+    def mutate(_pre):
+        src.write_text("mutated\n", encoding="utf-8")
+
+    with pytest.raises(SourceRemovedError):
+        await mutate_source_and_reindex(engine, src, mutate)
+
+    assert src.read_text(encoding="utf-8") == "orig\n"  # restored, not skipped

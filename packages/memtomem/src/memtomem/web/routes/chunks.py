@@ -13,7 +13,13 @@ from memtomem.errors import NamespaceResolutionError
 from memtomem.search.visibility import resolve_visible_chunk
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
-from memtomem.tools.memory_writer import remove_lines, replace_chunk_body
+from memtomem.tools.memory_writer import (
+    SourceChangedError,
+    SourceRemovedError,
+    SourceReplacedError,
+    remove_lines,
+    replace_chunk_body,
+)
 from memtomem.web.deps import (
     get_config,
     get_embedder,
@@ -26,6 +32,8 @@ from memtomem.web.routes._confirm import needs_confirmation_envelope
 from memtomem.web.routes._errors import (
     DEGRADED_SOURCE_EDIT_DETAIL,
     NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
+    SOURCE_REMOVED_DURING_WRITE_DETAIL,
+    SOURCE_REPLACED_DURING_WRITE_DETAIL,
 )
 from memtomem.web.schemas.core import (
     ChunkOut,
@@ -253,8 +261,15 @@ async def edit_chunk(
             stats = await mutate_source_and_reindex(
                 index_engine,
                 meta.source_file,
-                lambda: replace_chunk_body(
-                    meta.source_file, meta.start_line, meta.end_line, body.new_content
+                # ``expected_identity`` is the pre-image's: the rewrite refuses
+                # rather than recreating a source removed since it was read, or
+                # splicing a replacement at the old file's line numbers (#2367).
+                lambda pre: replace_chunk_body(
+                    meta.source_file,
+                    meta.start_line,
+                    meta.end_line,
+                    body.new_content,
+                    expected_identity=pre.identity,
                 ),
             )
             # #2141, the web twin of ``memory_crud._mutate_file_and_reindex``:
@@ -263,6 +278,26 @@ async def edit_chunk(
             # before it must not keep serving the pre-edit body.
             if stats.mutated:
                 search_pipeline.invalidate_cache()
+        except SourceChangedError as exc:
+            # The rewrite refused before writing a byte because the source is no
+            # longer the file it read (#2367). Ahead of the generic handler: a
+            # 500 would tell the caller to file a bug about somebody else's
+            # ``rm``, and the two conditions need different advice, which the
+            # shared details carry.
+            #
+            # Invalidate for the same reason both branches below do: the
+            # rollback re-index inside ``mutate_source_and_reindex`` is itself a
+            # write, so the index may have moved even though the file did not.
+            search_pipeline.invalidate_cache()
+            logger.warning("Chunk edit %s refused: %s", chunk_id, exc)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    SOURCE_REMOVED_DURING_WRITE_DETAIL
+                    if isinstance(exc, SourceRemovedError)
+                    else SOURCE_REPLACED_DURING_WRITE_DETAIL
+                ),
+            ) from exc
         except NamespaceResolutionError as exc:
             # Before the generic handler below, and the web twin of the MCP
             # ``_mutate_file_and_reindex`` re-raise (#2005 follow-up): the
@@ -356,19 +391,27 @@ async def delete_chunk(
         meta = fresh.metadata
         source = meta.source_file
 
-        async def ensure_index_row_absent(*, source_removed: bool) -> None:
+        async def ensure_index_row_absent(*, source_line_removed: bool) -> None:
             """Finish an index-only delete and verify the route's post-condition.
 
             Once the source line has been removed, a failed cleanup is a partial
             success and must not invite the caller to repeat DELETE with the now
             stale line range.  Keep that response distinct from failures before
             the source mutation (#2016).
+
+            ``source_line_removed`` asks whether *this route* took the entry out
+            of the file — not whether the file is still there. A delete that
+            found the whole source already gone (or that met
+            ``SourceRemovedError`` mid-write, #2367) passes ``False``: it edited
+            nothing, so "no source file was changed" is the true half of the
+            message, and telling the operator to reindex before retrying would
+            point at a file that does not exist.
             """
 
             failure_detail = (
                 "The source entry was removed, but index cleanup did not complete. "
                 "Reindex the source before attempting another delete."
-                if source_removed
+                if source_line_removed
                 else "Index-only deletion failed; no source file was changed. Check server logs."
             )
             try:
@@ -416,6 +459,12 @@ async def delete_chunk(
                 audit_context={"chunk_id": str(chunk_id)},
             )
 
+        # The identity ``remove_lines`` refuses on (#2367), set by the stat
+        # below. Declared ahead of the branch so every path has it: the
+        # degraded branch never reaches the write, and a source that is simply
+        # absent never opens one.
+        expected_identity: tuple[int, int] | None = None
+
         # #2346: a degraded span holds no cross-process lock, so it takes the
         # index-only branch unconditionally — it must not remove lines from a
         # file it could not lock. Not "stat, and refuse if the file is back":
@@ -456,6 +505,15 @@ async def delete_chunk(
                             "deleted. Repair or reindex the source before retrying."
                         ),
                     )
+                # This stat is on the *path*, so it is stale the instant it is
+                # read — which is the point: it is carried to the write, where
+                # the same identity is re-checked on the open descriptor and a
+                # swap in between is refused rather than spliced (#2367). A
+                # filesystem that cannot answer identity (``st_ino == 0`` on
+                # some FUSE/SMB mounts) falls back to existence, as the restore
+                # does.
+                if source_stat.st_ino != 0:
+                    expected_identity = (source_stat.st_dev, source_stat.st_ino)
 
         # Remove lines from the original source file, then re-index. No file
         # rollback here (unlike edit): the intent is deletion, so on a reindex
@@ -548,7 +606,42 @@ async def delete_chunk(
                     # Armed before the call, not after: a partial write that
                     # then raises is exactly the case the flag must cover.
                     mutation_attempted = True
-                    await asyncio.to_thread(remove_lines, source, meta.start_line, meta.end_line)
+                    await asyncio.to_thread(
+                        remove_lines,
+                        source,
+                        meta.start_line,
+                        meta.end_line,
+                        expected_identity=expected_identity,
+                    )
+                except SourceRemovedError:
+                    # Somebody removed the source between the stat above and the
+                    # write (#2367). The write refused rather than recreating
+                    # it, and that is not a failure of *this* request: the entry
+                    # the caller asked to delete is gone from disk, which is the
+                    # post-condition a delete promises. So finish the way a
+                    # delete whose source was already absent finishes — drop the
+                    # row and report success — rather than answering 503 and
+                    # inviting a retry that will meet the same absent file.
+                    #
+                    # ``source_line_removed=False``: this route edited nothing.
+                    # No re-index either; there is no file to index, and the
+                    # ``else`` branch below is skipped for exactly that reason.
+                    logger.info(
+                        "Source of chunk %s was removed while the delete ran; "
+                        "removing the index row only",
+                        chunk_id,
+                    )
+                    await ensure_index_row_absent(source_line_removed=False)
+                except SourceReplacedError as exc:
+                    # A *different* file now stands at the path, so the line
+                    # range this delete carries describes a file that is no
+                    # longer there. Nothing was written. 409 like the sibling
+                    # "not a regular file" refusal above: a retry re-reads the
+                    # same stale provenance, a reindex is what fixes it.
+                    logger.warning("Source of chunk %s was replaced mid-delete: %s", chunk_id, exc)
+                    raise HTTPException(
+                        status_code=409, detail=SOURCE_REPLACED_DURING_WRITE_DETAIL
+                    ) from exc
                 except ValueError as exc:
                     logger.warning("Stale line provenance for chunk %s: %s", chunk_id, exc)
                     raise HTTPException(
@@ -575,37 +668,43 @@ async def delete_chunk(
                         status_code=500,
                         detail="Source deletion failed; no index entry was deleted. Check server logs.",
                     ) from exc
-
-                try:
-                    # No ``namespace=``: see the pre-flight above. The engine
-                    # preserves the file's stored namespace in-lock, which is both
-                    # the correct value and a fresher one than anything read here.
-                    stats = await index_engine.index_file(
-                        source,
-                        force=True,
-                        already_scanned=True,
-                        lock_held=True,
-                    )
-                except Exception as exc:
-                    logger.warning("Re-index failed after deleting chunk %s: %s", chunk_id, exc)
                 else:
-                    if stats.errors:
-                        logger.warning(
-                            "Re-index reported errors after deleting chunk %s: %s",
-                            chunk_id,
-                            "; ".join(stats.errors),
+                    # Only when the line really came out of the file. The
+                    # refusal arms above must not reach here: re-indexing a
+                    # source that was removed or replaced would either do
+                    # nothing or index somebody else's file, and the
+                    # post-condition below would be checked against the wrong
+                    # write (#2367).
+                    try:
+                        # No ``namespace=``: see the pre-flight above. The engine
+                        # preserves the file's stored namespace in-lock, which is both
+                        # the correct value and a fresher one than anything read here.
+                        stats = await index_engine.index_file(
+                            source,
+                            force=True,
+                            already_scanned=True,
+                            lock_held=True,
                         )
+                    except Exception as exc:
+                        logger.warning("Re-index failed after deleting chunk %s: %s", chunk_id, exc)
+                    else:
+                        if stats.errors:
+                            logger.warning(
+                                "Re-index reported errors after deleting chunk %s: %s",
+                                chunk_id,
+                                "; ".join(stats.errors),
+                            )
 
-                # A single-file index can report an error in IndexingStats instead
-                # of raising (for example, an embedding failure), or can finish with
-                # zero work after a read error.  Verify the target row rather than
-                # treating the await itself as proof of deletion.
-                await ensure_index_row_absent(source_removed=True)
+                    # A single-file index can report an error in IndexingStats instead
+                    # of raising (for example, an embedding failure), or can finish with
+                    # zero work after a read error.  Verify the target row rather than
+                    # treating the await itself as proof of deletion.
+                    await ensure_index_row_absent(source_line_removed=True)
             else:
                 # The index-only branch deletes rows directly inside the
                 # helper, so it is a mutation by definition.
                 mutation_attempted = True
-                await ensure_index_row_absent(source_removed=False)
+                await ensure_index_row_absent(source_line_removed=False)
         finally:
             if mutation_attempted:
                 search_pipeline.invalidate_cache()
