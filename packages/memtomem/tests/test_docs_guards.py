@@ -513,7 +513,20 @@ class TestPluginManualCoexistenceCallout:
 
     def test_unreleased_diagnostic_uses_source_checkout_without_changing_cwd(self) -> None:
         command = "uv run --project /path/to/memtomem --package memtomem mm doctor --claude-mcp"
-        for path in (_PLUGIN_README, _VIBE_GUIDE, _INTEGRATIONS / "claude-code.md"):
+        plugin_guidance = [
+            _REPO_ROOT / path
+            for workflow in ("setup", "status")
+            for path in (
+                f"packages/memtomem-plugin-assets/workflows/{workflow}.claude.md",
+                f"packages/memtomem-claude-plugin/skills/{workflow}/SKILL.md",
+            )
+        ]
+        for path in (
+            _PLUGIN_README,
+            _VIBE_GUIDE,
+            _INTEGRATIONS / "claude-code.md",
+            *plugin_guidance,
+        ):
             text = _read(path)
             assert command in text
             assert "PyPI" in text and "0.5.0" in text
