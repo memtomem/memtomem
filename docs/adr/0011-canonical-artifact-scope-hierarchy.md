@@ -712,14 +712,15 @@ instead.
 > Persisting the declared tier would change that, and is not done.
 >
 > **Gate A is not hoisted with it, and the asymmetry is the point.** Gate A
-> scans bytes, so it stays per-`put` — though "bytes" is narrower than it
-> reads: `_prepare` hands `enforce_write_guard` only `encode(op.value)`, so
-> the namespace tuple, the key and the `index` selectors persist unscanned
-> (#2374). A delete reaches neither gate — Gate A because it has no value to
+> scans bytes, so record checks stay per-`put`. Originally `_prepare`
+> scanned only `encode(op.value)`; #2374 extends that check to raw namespace
+> labels, keys and `index` selectors, and separately checks persisted index
+> configuration before opening the database (see the Gate A note above).
+> A delete reaches neither per-operation gate — Gate A because it has no value to
 > scan, which is #2335's own reasoning for the sibling, and Gate B because
 > the tier it touches was consented to before the store existed. A gate
 > answers a question, and the two questions have different lifetimes: "may
-> this value land" is per-write, "may this store touch the tracked tier" is
+> these record bytes land" is per-write, "may this store touch the tracked tier" is
 > per-store.
 >
 > **What makes the hoist adequate is a storage fact, and the pin covers only
