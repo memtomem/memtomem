@@ -70,7 +70,7 @@ except ImportError:
 # Non-blocking-lock errnos that mean "held by someone else": POSIX
 # ``fcntl.flock`` documents both ``EACCES`` and ``EAGAIN`` for a held lock,
 # and the POSIX backend of every source-verified release
-# (3.0/3.1/3.2 and 4.0/4.1/4.2/4.3) maps exactly this pair to
+# (3.0.0/3.1.0/3.1.1/3.2.0 and 4.0.0/4.1.0/4.2.0/4.3.0) maps this pair to
 # ``AlreadyLocked``. Scoped to POSIX on purpose — the Windows msvcrt backend
 # treats a wider errno set as contention (13, 16, 33 and 36) — and the floor
 # is a floor, so a release past the verified ceiling is unverified by
@@ -101,9 +101,10 @@ def is_lock_contention(exc: BaseException) -> bool:
     own I/O uncertainty to ``"unknown"``, so a bare ``False`` there would
     need that translation.
 
-    Across every source-verified release (portalocker 3.0/3.1/3.2 and
-    4.0/4.1/4.2/4.3 — the floor is ``>=3.0`` and the ceiling is the release
-    the lockfile pins) genuine contention is *always* the ``AlreadyLocked``
+    Across every source-verified release (portalocker
+    3.0.0/3.1.0/3.1.1/3.2.0 and 4.0.0/4.1.0/4.2.0/4.3.0 — the floor is
+    ``>=3.0`` and the ceiling is the release the lockfile pins) genuine
+    contention reaches this function as the ``AlreadyLocked``
     subclass — POSIX ``EACCES``/``EAGAIN`` and Windows
     ``ERROR_LOCK_VIOLATION`` alike — so the ``isinstance`` check below
     catches it regardless of how the original error is chained. Anything
