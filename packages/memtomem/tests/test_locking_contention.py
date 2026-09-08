@@ -1067,3 +1067,89 @@ class TestCheckServerLivenessStoreScope:
         assert state.probe_error is None
         assert warning is None
         assert not missing.exists(), "read-only liveness probes must not create runtime dirs"
+
+
+# ------------------------------------------------- portalocker version pin
+
+
+#: The portalocker minor series whose backends have actually been read
+#: (#2358). ``_lock_errors`` documents this set twice, and its
+#: ``isinstance(exc, AlreadyLocked)`` primary gate is only as good as the
+#: reading: every release here maps POSIX ``EACCES``/``EAGAIN``, msvcrt
+#: errnos 13/16/33/36 and Win32 ``ERROR_LOCK_VIOLATION`` to
+#: ``AlreadyLocked`` and everything else to a plain ``LockException``.
+#: 4.2.0 and 4.3.0 ship a byte-identical ``portalocker/portalocker.py``;
+#: 4.3.0's only delta is typing in ``utils.py``.
+VERIFIED_PORTALOCKER_MINORS = ((3, 0), (3, 1), (3, 2), (4, 0), (4, 1), (4, 2), (4, 3))
+
+
+def _documented_range_phrase(minors: tuple[tuple[int, int], ...]) -> str:
+    """Render *minors* the way ``_lock_errors`` spells the range in prose."""
+    by_major: dict[int, list[str]] = {}
+    for major, minor in minors:
+        by_major.setdefault(major, []).append(f"{major}.{minor}")
+    return " and ".join("/".join(series) for series in by_major.values())
+
+
+class TestPortalockerVerifiedRange:
+    """The verified-range claim in ``_lock_errors`` is a pin, not a memory.
+
+    Both sites had drifted two releases behind the lockfile before #2358 —
+    the comment said "3.0 through 4.1" while CI ran 4.3.0, so the paragraph
+    telling the next reader how far the ``isinstance`` gate had been checked
+    was, by its own words, describing an unverified install. Nothing caught
+    it because nothing asserted it. These three assertions lock the claim,
+    the set behind it, and the installed version to each other, so a
+    dependabot bump fails here instead of quietly making the prose staler.
+    """
+
+    def test_installed_portalocker_is_inside_the_documented_range(self):
+        import portalocker
+
+        installed = tuple(int(part) for part in portalocker.__version__.split(".")[:2])
+
+        assert installed in VERIFIED_PORTALOCKER_MINORS, (
+            f"portalocker {portalocker.__version__} is outside the range "
+            f"`_lock_errors.py` claims to have source-verified "
+            f"({_documented_range_phrase(VERIFIED_PORTALOCKER_MINORS)}). "
+            "Re-read that release's lockers — POSIX errno mapping, the msvcrt "
+            "errno set, and the Win32 else-branch that must wrap in "
+            "LockException — then extend VERIFIED_PORTALOCKER_MINORS and the "
+            "two range claims in `_lock_errors.py` together. Do not widen the "
+            "range without reading the backend: the claim is what the pin "
+            "protects."
+        )
+
+    def test_both_range_claims_name_the_verified_set(self):
+        """Both sites, and the set, must spell the same range.
+
+        ``_lock_errors`` states the range twice — a module-level comment
+        above ``CONTENTION_ERRNOS`` and the ``is_lock_contention``
+        docstring — and only one is reachable through ``__doc__``. The
+        assertion reads the source so an edit that updates one site and
+        misses the other fails, and derives the expected phrase from
+        ``VERIFIED_PORTALOCKER_MINORS`` so widening the set without
+        rewriting the prose fails too.
+        """
+        import inspect
+        import re
+
+        import memtomem._lock_errors as lock_errors
+
+        phrase = _documented_range_phrase(VERIFIED_PORTALOCKER_MINORS)
+        # The prose wraps mid-phrase in both places, and one of them is a
+        # ``#`` comment block, so compare against a whitespace- and
+        # comment-marker-collapsed rendering rather than raw lines.
+        flattened = re.sub(r"[\s#]+", " ", inspect.getsource(lock_errors))
+        # Anchored on both ends: a bare substring search would accept prose
+        # naming a *longer* range than the set (dropping ``(4, 3)`` leaves
+        # "…4.0/4.1/4.2", still a prefix of the documented
+        # "…4.0/4.1/4.2/4.3"), which is the exact drift this pins.
+        found = re.findall(rf"(?<![\d./]){re.escape(phrase)}(?![\d./])", flattened)
+
+        assert len(found) == 2, (
+            f"expected both range claims in `_lock_errors.py` to read exactly "
+            f"{phrase!r}, found {len(found)} of 2. The claim lives above "
+            "CONTENTION_ERRNOS and in the is_lock_contention docstring; both "
+            "must move together with VERIFIED_PORTALOCKER_MINORS."
+        )
