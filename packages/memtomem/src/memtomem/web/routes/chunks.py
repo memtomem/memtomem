@@ -14,6 +14,7 @@ from memtomem.search.visibility import resolve_visible_chunk
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
 from memtomem.source_provenance import (
+    SOURCE_READ_ONLY_DETAIL,
     STALE_SOURCE_PROVENANCE_DETAIL,
     StaleSourceProvenanceError,
 )
@@ -172,6 +173,11 @@ async def edit_chunk(
         # too. Evaluated on the fresh chunk (re-fetched under the lock) so a
         # concurrent migrate cannot leave us validating a stale scope.
         # Mirrors MCP ``mem_edit``.
+        if chunk.metadata.redaction_count:
+            raise HTTPException(status_code=409, detail="masked_projection_read_only")
+        if meta.source_read_only:
+            raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+
         inferred_scope = meta.scope or "user"
 
         # ADR-0011 §5 Gate B (#2317), the web twin of the ``mem_edit`` gate
@@ -539,6 +545,8 @@ async def delete_chunk(
         mutation_attempted = False
         try:
             if source_exists:
+                if meta.source_read_only or meta.redaction_count:
+                    raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
                 if meta.start_line < 1 or meta.end_line < meta.start_line:
                     raise HTTPException(
                         status_code=409,

@@ -264,6 +264,13 @@ def _default_memory_dirs() -> list[Path]:
     return [Path("~/.memtomem/memories")]
 
 
+#: Tokens reserved, on top of body and context, for what composing them costs:
+#: the ``\n\n`` separator and the tokenizer's special tokens (BERT-family
+#: models add two). Small and fixed on purpose — see the use site in
+#: ``IndexingConfig``.
+_COMPOSED_INPUT_RESERVE = 8
+
+
 class IndexingConfig(ConfigModel):
     memory_dirs: Annotated[list[Path], APPEND] = Field(
         default_factory=lambda: _default_memory_dirs()
@@ -291,6 +298,12 @@ class IndexingConfig(ConfigModel):
         }
     )
     max_chunk_tokens: int = 512
+    # Opt-in exact ceiling, independent of the existing approximate packing goal.
+    hard_max_chunk_tokens: int = Field(default=0, ge=0)
+    chunk_tokenizer_path: str = ""  # local tokenizer.json matching the embedding model
+    chunk_context_tokens: int = Field(default=512, ge=1)
+    chunk_model_tokens: int = Field(default=8192, ge=1)
+    enrich_chunk_context: bool = False
     min_chunk_tokens: int = 128
     # Soft goal for semantic packing: merge adjacent short siblings while
     # cur < target and combined <= max. Set to 0 to disable Pass 2 packing.
@@ -389,6 +402,26 @@ class IndexingConfig(ConfigModel):
                 f"target_chunk_tokens ({self.target_chunk_tokens}) must be "
                 f"<= max_chunk_tokens ({self.max_chunk_tokens})"
             )
+        if self.hard_max_chunk_tokens:
+            if not self.chunk_tokenizer_path:
+                raise ValueError("hard_max_chunk_tokens requires chunk_tokenizer_path")
+            # The embedder is handed ``description + "\n\n" + body`` wrapped in
+            # the tokenizer's special tokens, so body and context are not the
+            # whole composed input. Reserving a small allowance here keeps a
+            # configuration that passes validation from producing full-size
+            # chunks the budget then refuses. The allowance is deliberately a
+            # constant: this validator runs before any tokenizer is loaded (it
+            # is what decides whether one is loadable at all), so the true
+            # overhead is not knowable here. ``TokenBudget.describe`` trims
+            # against the real composed count as the backstop; this reserve is
+            # what keeps that backstop from having to fire on ordinary configs.
+            if (
+                self.hard_max_chunk_tokens + self.chunk_context_tokens + _COMPOSED_INPUT_RESERVE
+                >= self.chunk_model_tokens
+            ):
+                raise ValueError("chunk model budget must exceed body plus context budgets")
+        if self.enrich_chunk_context and not self.hard_max_chunk_tokens:
+            raise ValueError("enrich_chunk_context requires a hard chunk budget")
         return self
 
     def all_index_roots(self) -> list[Path]:

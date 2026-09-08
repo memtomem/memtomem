@@ -163,10 +163,12 @@ class TestComputeDiff:
         # exactly how these bugs (#2124, #2140) arise in the first place.
         chunk = _mk("same body")
         chunk.metadata = replace(chunk.metadata, heading_hierarchy=("s",))
-        six = {str(uuid4()): (chunk.content_hash, ("s",), (), None, None, "future-field")}
+        seven = {
+            str(uuid4()): (chunk.content_hash, ("s",), (), None, None, "context", "future-field")
+        }
         four = {str(uuid4()): (chunk.content_hash, ("s",), (), None)}
 
-        for existing in (six, four):
+        for existing in (seven, four):
             with pytest.raises(ValueError, match="unsupported chunk state width"):
                 compute_diff(existing, [chunk])
 

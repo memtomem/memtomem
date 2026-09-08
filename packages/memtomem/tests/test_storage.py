@@ -210,6 +210,7 @@ class TestChunkCRUD:
             ("alpha",),
             10,
             20,
+            "",
         )
 
     @pytest.mark.asyncio

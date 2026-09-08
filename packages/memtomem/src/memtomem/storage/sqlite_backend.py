@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from memtomem.config import IndexingConfig
+
 import asyncio
 import errno
 import hashlib
@@ -383,9 +385,12 @@ class SqliteBackend(
         embedding_policy_fingerprint: str = "",
         embedding_max_sequence_tokens: int | None = None,
         strict_dim_check: bool = True,
+        chunk_budget_config: "IndexingConfig | None" = None,
     ) -> None:
         self._config = config
+        self._chunk_budget_config = chunk_budget_config
         self._dimension = dimension
+        self._chunk_column_positions: dict[str, int] = {}
         self._embedding_provider = embedding_provider
         self._embedding_model = embedding_model
         self._embedding_policy_fingerprint = embedding_policy_fingerprint
@@ -517,6 +522,11 @@ class SqliteBackend(
                 embedding_max_sequence_tokens=self._embedding_max_sequence_tokens,
                 strict_dim_check=self._strict_dim_check,
             )
+            # Main and bounded-chunking installations appended different columns
+            # at position 24. SELECT * readers must follow this DB's actual order.
+            self._chunk_column_positions = {
+                column[1]: column[0] for column in self._db.execute("PRAGMA table_info(chunks)")
+            }
             stored_policy = self._meta.get_meta("embedding_policy_fingerprint")
             stored_max_raw = self._meta.get_meta("embedding_max_sequence_tokens")
             stored_max = int(stored_max_raw) if stored_max_raw is not None else None
@@ -1261,6 +1271,13 @@ class SqliteBackend(
 
     # ---- chunk CRUD ----------------------------------------------------------
 
+    async def configure_chunk_budget(self, config: IndexingConfig) -> None:
+        if config.hard_max_chunk_tokens:
+            from memtomem.chunking.bounded import TokenBudget
+
+            TokenBudget(config)
+        self._chunk_budget_config = config.model_copy(deep=True)
+
     async def upsert_chunks(self, chunks: Sequence[Chunk]) -> int:
         if not chunks:
             return 0
@@ -1269,22 +1286,97 @@ class SqliteBackend(
         try:
             chunk_ids = [str(c.id) for c in chunks]
 
-            # Batch fetch existing {id: rowid} (P1) — one query per
-            # host-parameter batch, because a single ``IN (...)`` would raise
-            # ``too many SQL variables`` on a file large enough to fill it
-            # (#2265), and the id list here is the file's whole upsert bucket.
+            # Batch fetch existing rows (P1) — one query per host-parameter
+            # batch, because a single ``IN (...)`` would raise ``too many SQL
+            # variables`` on a file large enough to fill it (#2265), and the id
+            # list here is the file's whole upsert bucket.
+            #
+            # ``content`` is read only when a chunk budget is active, because
+            # that is the only case that needs it and it is the file's entire
+            # text. It is read as the stored *string*, not as ``content_hash``:
+            # the hash is taken over NFC-normalised text, so two bodies with
+            # different byte lengths — and different token counts — hash the
+            # same. Grandfathering on the hash let a 60-token row be replaced
+            # by a 90-token one under an active 64-token ceiling.
+            enforce_budget = bool(
+                self._chunk_budget_config is not None
+                and self._chunk_budget_config.hard_max_chunk_tokens
+            )
             existing_rowid_map: dict[str, int] = {}
+            existing_bodies: dict[str, str] = {}
             for id_batch in _param_batches(chunk_ids):
-                existing_rowid_map.update(
-                    {
-                        row[0]: row[1]
-                        for row in db.execute(
-                            f"SELECT id, rowid FROM chunks "
-                            f"WHERE id IN ({placeholders(len(id_batch))})",
-                            id_batch,
-                        ).fetchall()
-                    }
-                )
+                if enforce_budget:
+                    rows = db.execute(
+                        f"SELECT id, rowid, content FROM chunks "
+                        f"WHERE id IN ({placeholders(len(id_batch))})",
+                        id_batch,
+                    ).fetchall()
+                else:
+                    rows = db.execute(
+                        f"SELECT id, rowid, '' FROM chunks "
+                        f"WHERE id IN ({placeholders(len(id_batch))})",
+                        id_batch,
+                    ).fetchall()
+                for row in rows:
+                    existing_rowid_map[row[0]] = row[1]
+                    existing_bodies[row[0]] = row[2]
+
+            if enforce_budget:
+                assert self._chunk_budget_config is not None
+                from memtomem.chunking.bounded import TokenBudget
+
+                budget = TokenBudget(self._chunk_budget_config)
+                for chunk in chunks:
+                    # Grandfather bodies the store already holds, and only
+                    # those. A budget switched on over an existing DB leaves
+                    # oversized rows behind by design (``mm index --force``
+                    # converts them), so a caller changing only tags or a
+                    # namespace must still be able to write that row back —
+                    # auto-tag, dedup and the consolidation engine all rebuild a
+                    # Chunk from the stored content and re-upsert it.
+                    #
+                    # The exemption is narrow twice over.
+                    #
+                    # By *component*: it waives the body and composed-input
+                    # checks, never the description, which is new text the
+                    # caller chose on this write.
+                    #
+                    # And by *condition*: only a body that cannot pass is
+                    # exempt. "Unchanged" is not the same test — a row written
+                    # under the current budget also has an unchanged body, and
+                    # waiving anything for it would let a caller push a valid
+                    # row past a ceiling by growing only its description.
+                    #
+                    # What is waived is the *per-chunk* ceiling alone, because
+                    # that is the one a legacy row violates by construction.
+                    # The model ceiling still holds: a body over the per-chunk
+                    # limit can compose well under the model limit, so exempting
+                    # it there would reopen the same growing-description hole
+                    # one level up. The only escape is a body that on its own
+                    # exceeds the model budget — no description makes that fit,
+                    # so demanding it would make the row unwritable, which is
+                    # the failure this exemption exists to prevent.
+                    stored = existing_bodies.get(str(chunk.id))
+                    body_tokens = budget.count(chunk.content)
+                    try:
+                        if (
+                            stored is not None
+                            and stored == chunk.content
+                            and body_tokens > budget.body
+                        ):
+                            budget.validate_description(chunk)
+                            if body_tokens <= budget.model:
+                                budget.validate_composed(chunk)
+                        else:
+                            budget.validate(chunk)
+                    except ValueError as exc:
+                        # Callers map ``StorageError``; a bare ``ValueError``
+                        # from inside a write would escape every one of them,
+                        # and inside ``storage.transaction()`` it aborts the
+                        # whole group.
+                        raise StorageError(
+                            f"chunk {chunk.id} from {chunk.metadata.source_file}: {exc}"
+                        ) from exc
 
             to_update = [
                 (c, existing_rowid_map[str(c.id)])
@@ -1299,7 +1391,7 @@ class SqliteBackend(
                        heading_hierarchy=?, chunk_type=?, start_line=?, end_line=?,
                        language=?, tags=?, namespace=?, updated_at=?,
                        valid_from_unix=?, valid_to_unix=?,
-                       scope=?, project_root=?, origin=?, source_span_hash=?
+                       scope=?, project_root=?, origin=?, source_span_hash=?, retrieval_context=?, redaction_count=?, overlap_before=?, overlap_after=?, source_read_only=?
                        WHERE id=?""",
                     [
                         (
@@ -1320,6 +1412,11 @@ class SqliteBackend(
                             str(c.metadata.project_root) if c.metadata.project_root else None,
                             c.metadata.origin,
                             c.metadata.source_span_hash,
+                            c.metadata.retrieval_context,
+                            c.metadata.redaction_count,
+                            c.metadata.overlap_before,
+                            c.metadata.overlap_after,
+                            int(c.metadata.source_read_only),
                             str(c.id),
                         )
                         for c, _ in to_update
@@ -1378,8 +1475,8 @@ class SqliteBackend(
                         namespace, created_at, updated_at,
                         overlap_before, overlap_after,
                         valid_from_unix, valid_to_unix,
-                        scope, project_root, origin, source_span_hash)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        scope, project_root, origin, source_span_hash, retrieval_context, redaction_count, source_read_only)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [
                         (
                             str(c.id),
@@ -1403,6 +1500,9 @@ class SqliteBackend(
                             str(c.metadata.project_root) if c.metadata.project_root else None,
                             c.metadata.origin,
                             c.metadata.source_span_hash,
+                            c.metadata.retrieval_context,
+                            c.metadata.redaction_count,
+                            int(c.metadata.source_read_only),
                         )
                         for c in to_insert
                     ],
@@ -1467,6 +1567,14 @@ class SqliteBackend(
 
             if not self._in_transaction:
                 db.commit()
+        except StorageError:
+            # Already the caller-facing error (the chunk-budget refusal above,
+            # raised before any write). Roll back like any other failure, but
+            # do not re-wrap it as "transaction rolled back: …" — that reads as
+            # a storage fault and buries which chunk was refused and why.
+            if not self._in_transaction:
+                db.rollback()
+            raise
         except Exception as exc:
             if not self._in_transaction:
                 db.rollback()
@@ -1510,7 +1618,7 @@ class SqliteBackend(
             for id_batch in _param_batches(ids):
                 rows.extend(
                     db.execute(
-                        f"SELECT id, rowid, start_line, end_line, source_span_hash FROM chunks "
+                        f"SELECT id, rowid, start_line, end_line, source_span_hash, source_read_only FROM chunks "
                         f"WHERE id IN ({placeholders(len(id_batch))})",
                         id_batch,
                     ).fetchall()
@@ -1522,6 +1630,7 @@ class SqliteBackend(
                     row[2] != chunk_by_id[row[0]].metadata.start_line
                     or row[3] != chunk_by_id[row[0]].metadata.end_line
                     or row[4] != chunk_by_id[row[0]].metadata.source_span_hash
+                    or bool(row[5]) != chunk_by_id[row[0]].metadata.source_read_only
                 )
             ]
             if not changed:
@@ -1532,12 +1641,13 @@ class SqliteBackend(
                 [(-rowid - 1, -rowid - 1, str(chunk.id)) for chunk, rowid in changed],
             )
             db.executemany(
-                "UPDATE chunks SET start_line=?, end_line=?, source_span_hash=? WHERE id=?",
+                "UPDATE chunks SET start_line=?, end_line=?, source_span_hash=?, source_read_only=? WHERE id=?",
                 [
                     (
                         chunk.metadata.start_line,
                         chunk.metadata.end_line,
                         chunk.metadata.source_span_hash,
+                        int(chunk.metadata.source_read_only),
                         str(chunk.id),
                     )
                     for chunk, _ in changed
@@ -1762,8 +1872,11 @@ class SqliteBackend(
                     ).fetchone()
                     if remaining is None:
                         db.execute(
-                            "DELETE FROM _memtomem_meta WHERE key=?",
-                            (f"{_AI_SUMMARY_KEY_PREFIX}{source_norm}",),
+                            "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
+                            (
+                                f"{_AI_SUMMARY_KEY_PREFIX}{source_norm}",
+                                f"chunk_descriptions:{_AI_SUMMARY_KEY_PREFIX}{source_norm}",
+                            ),
                         )
 
             if not self._in_transaction:
@@ -1788,8 +1901,11 @@ class SqliteBackend(
             # file. Cheap (single row by primary key) so we don't gate it.
             with self._rolls_back_if_standalone(db):
                 db.execute(
-                    "DELETE FROM _memtomem_meta WHERE key=?",
-                    (_ai_summary_key(source_file),),
+                    "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
+                    (
+                        _ai_summary_key(source_file),
+                        "chunk_descriptions:" + _ai_summary_key(source_file),
+                    ),
                 )
                 self._commit_if_standalone(db)
             return 0
@@ -1814,8 +1930,11 @@ class SqliteBackend(
                         rowids,
                     )
             db.execute(
-                "DELETE FROM _memtomem_meta WHERE key=?",
-                (_ai_summary_key(source_file),),
+                "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
+                (
+                    _ai_summary_key(source_file),
+                    "chunk_descriptions:" + _ai_summary_key(source_file),
+                ),
             )
             if not self._in_transaction:
                 db.commit()
@@ -2159,7 +2278,7 @@ class SqliteBackend(
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("DELETE FROM chunks_fts")
                 cursor = conn.execute(
-                    "SELECT rowid, content, source_file, heading_hierarchy FROM chunks"
+                    "SELECT rowid, content, source_file, heading_hierarchy, retrieval_context FROM chunks"
                 )
                 total = 0
                 try:
@@ -2172,7 +2291,13 @@ class SqliteBackend(
                             [
                                 (
                                     r[0],
-                                    _fts.tokenize_for_fts(_rebuild_fts_retrieval(r[1], r[3])),
+                                    _fts.tokenize_for_fts(
+                                        (
+                                            f"{r[4]}\n\n{r[1]}"
+                                            if r[4]
+                                            else _rebuild_fts_retrieval(r[1], r[3])
+                                        )
+                                    ),
                                     r[2],
                                 )
                                 for r in batch
@@ -2624,7 +2749,7 @@ class SqliteBackend(
 
     async def get_chunk_index_state(
         self, source_file: Path
-    ) -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None]]:
+    ) -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None, str]]:
         """Return hash, hierarchy and retrieval metadata for a source's chunks.
 
         The fields the differ compares. Beyond hash and hierarchy it carries the
@@ -2635,12 +2760,14 @@ class SqliteBackend(
         """
         db = self._get_db()
         rows = db.execute(
-            "SELECT id, content_hash, heading_hierarchy, tags, valid_from_unix, valid_to_unix"
+            "SELECT id, content_hash, heading_hierarchy, tags, valid_from_unix, valid_to_unix, retrieval_context"
             " FROM chunks WHERE source_file=?",
             (norm_path(source_file),),
         ).fetchall()
-        state: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None]] = {}
-        for chunk_id, content_hash, heading_json, tags_json, valid_from, valid_to in rows:
+        state: dict[
+            str, tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None, str]
+        ] = {}
+        for chunk_id, content_hash, heading_json, tags_json, valid_from, valid_to, context in rows:
             try:
                 hierarchy = tuple(json.loads(heading_json))
             except (json.JSONDecodeError, TypeError):
@@ -2651,7 +2778,7 @@ class SqliteBackend(
             except (json.JSONDecodeError, TypeError):
                 logger.warning("Corrupted tags for chunk %s", chunk_id)
                 tags = ()
-            state[chunk_id] = (content_hash, hierarchy, tags, valid_from, valid_to)
+            state[chunk_id] = (content_hash, hierarchy, tags, valid_from, valid_to, context)
         return state
 
     async def get_chunk_ids_by_hashes(self, content_hashes: Sequence[str]) -> dict[str, UUID]:
@@ -3249,6 +3376,32 @@ class SqliteBackend(
 
     # ---- AI summary cache (per-source LLM-generated preview) ----------------
 
+    async def get_chunk_descriptions(self, source: Path) -> dict[str, str]:
+        assert self._meta is not None
+        raw = self._meta.get_meta("chunk_descriptions:" + _ai_summary_key(source))
+        try:
+            data = json.loads(raw) if raw else {}
+            return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+        except (ValueError, AttributeError):
+            return {}
+
+    async def set_chunk_descriptions(self, source: Path, descriptions: dict[str, str]) -> None:
+        assert self._meta is not None
+        # Never leave a cache orphan when a first-time embedding fails. Existing
+        # sources have a lifecycle owner; a new source can cache on its next pass.
+        if (
+            self._get_db()
+            .execute("SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (norm_path(source),))
+            .fetchone()
+            is None
+        ):
+            return
+        # One bounded record per source; replace the previous generation in full.
+        self._meta.set_meta(
+            "chunk_descriptions:" + _ai_summary_key(source),
+            json.dumps(dict(list(descriptions.items())[:256])),
+        )
+
     async def get_ai_summary(self, source_file: Path) -> dict | None:
         """Return the cached AI summary record for ``source_file``, or None.
 
@@ -3601,6 +3754,12 @@ class SqliteBackend(
         if len(row) >= 24:
             origin_val = row[23]
 
+        extra = {
+            name: row[position]
+            for name, position in self._chunk_column_positions.items()
+            if position >= 24 and position < len(row)
+        }
+
         metadata = ChunkMetadata(
             source_file=Path(source_file),
             heading_hierarchy=hh,
@@ -3617,7 +3776,10 @@ class SqliteBackend(
             scope=scope_val,
             project_root=project_root_val,
             origin=origin_val,
-            source_span_hash=row[24] if len(row) >= 25 else None,
+            source_span_hash=extra.get("source_span_hash"),
+            retrieval_context=extra.get("retrieval_context") or "",
+            redaction_count=int(extra.get("redaction_count") or 0),
+            source_read_only=bool(extra.get("source_read_only")),
         )
 
         # --- timestamps (always timezone-aware) ---

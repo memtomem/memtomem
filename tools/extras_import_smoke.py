@@ -43,7 +43,7 @@ from pathlib import Path
 # provides — verified to *belong* to it, not merely to be importable — or
 # ``DIST_ONLY`` for a distribution that installs no importable module.
 EXTRA_PROBES: dict[str, dict[str, str]] = {
-    "onnx": {"fastembed": "fastembed", "urllib3": "urllib3"},
+    "onnx": {"fastembed": "fastembed", "urllib3": "urllib3", "tokenizers": "tokenizers"},
     "ollama": {"ollama": "ollama"},
     "openai": {"openai": "openai"},
     "korean": {"kiwipiepy": "kiwipiepy"},

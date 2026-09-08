@@ -27,6 +27,7 @@ from memtomem.models import ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata, C
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 
 if TYPE_CHECKING:
+    from memtomem.config import IndexingConfig
     from memtomem.embedding.base import EmbeddingProvider
     from memtomem.storage.sqlite_backend import SqliteBackend
 
@@ -195,6 +196,9 @@ def _chunk_to_dict(chunk: Chunk) -> dict:
         "content": chunk.content,
         "source_file": str(meta.source_file),
         "heading_hierarchy": list(meta.heading_hierarchy),
+        "retrieval_context": meta.retrieval_context,
+        "redaction_count": meta.redaction_count,
+        "source_read_only": meta.source_read_only,
         "chunk_type": meta.chunk_type.value,
         "start_line": meta.start_line,
         "end_line": meta.end_line,
@@ -217,14 +221,20 @@ def _import_scan_text(chunk: Chunk) -> str:
     arrives verbatim from an untrusted bundle and is then embedded
     (``retrieval_content`` = heading hierarchy + content), stored, and
     retrievable. So the foreign-bundle redaction scan covers the full
-    retrievable surface here (content + heading + ``source_file`` + ``tags``),
+    retrievable surface here (content + context + heading + ``source_file`` + ``tags``),
     not just ``content`` as on the locally-derived-metadata write surfaces
     (``mem_add`` / ``mem_batch_add``). Self-exports skip this scan entirely, so
     the wider coverage never affects round-trip fidelity — it only closes the
     metadata-smuggling vector on genuinely foreign bundles.
     """
     return "\n".join(
-        [chunk.retrieval_content, str(chunk.metadata.source_file), *chunk.metadata.tags]
+        [
+            chunk.content,
+            chunk.metadata.retrieval_context,
+            *chunk.metadata.heading_hierarchy,
+            str(chunk.metadata.source_file),
+            *chunk.metadata.tags,
+        ]
     )
 
 
@@ -287,6 +297,7 @@ async def import_chunks(
     provenance_key_path: Path | None = None,
     surface: str = "import",
     extract_entities: bool = True,
+    indexing_config: IndexingConfig | None = None,
 ) -> ImportStats:
     """Import chunks from a JSON bundle file.
 
@@ -409,6 +420,24 @@ async def import_chunks(
     # (malformed records were already dropped above and are never scanned).
     if not is_self_export:
         _enforce_import_redaction(parsed, force_unsafe=force_unsafe, surface=surface)
+
+    if indexing_config is not None and indexing_config.hard_max_chunk_tokens:
+        from memtomem.chunking.bounded import TokenBudget
+
+        budget = TokenBudget(indexing_config)
+        for chunk, _ in parsed:
+            prefix = chunk.metadata.retrieval_context or " > ".join(
+                chunk.metadata.heading_hierarchy
+            )
+            if (
+                budget.count(chunk.content) > budget.body
+                or budget.count(prefix) > budget.context
+                or budget.count(chunk.retrieval_content, special=True) > budget.model
+            ):
+                raise ValueError(
+                    "Import exceeds configured chunk token budgets; reindex the original source "
+                    "with bounded chunking before exporting. No records were imported."
+                )
 
     conflict_skipped = 0
     updated = 0
@@ -572,6 +601,9 @@ def _dict_to_chunk(
     meta = ChunkMetadata(
         source_file=Path(record["source_file"]),
         heading_hierarchy=tuple(record.get("heading_hierarchy", [])),
+        retrieval_context=str(record.get("retrieval_context", "")),
+        redaction_count=max(0, int(record.get("redaction_count", 0))),
+        source_read_only=bool(record.get("source_read_only", False)),
         chunk_type=ChunkType(record.get("chunk_type", "raw_text")),
         start_line=int(record.get("start_line", 0)),
         end_line=int(record.get("end_line", 0)),

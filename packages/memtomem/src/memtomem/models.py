@@ -70,6 +70,9 @@ class ChunkMetadata:
     # Indexed original line span, independent of retrieval content (#2371).
     # Legacy/imported rows have no evidence until locally reindexed.
     source_span_hash: str | None = None
+    retrieval_context: str = ""  # bounded description; never part of body identity
+    redaction_count: int = 0  # source-level count; indexed projection is read-only
+    source_read_only: bool = False  # no safe whole-line source rewrite for this chunk
 
 
 def _like_glob_matches(pattern: str, value: str) -> bool:
@@ -393,6 +396,8 @@ class Chunk:
         chunk.content stores the pure text (no hierarchy prefix).
         This property prepends the hierarchy for retrieval quality.
         """
+        if self.metadata.retrieval_context:
+            return f"{self.metadata.retrieval_context}\n\n{self.content}"
         h = self.metadata.heading_hierarchy
         if not h:
             return self.content

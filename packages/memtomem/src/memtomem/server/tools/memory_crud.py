@@ -28,6 +28,7 @@ from memtomem.server.tools._provenance import (
 )
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
 from memtomem.source_provenance import (
+    SOURCE_READ_ONLY_DETAIL,
     STALE_SOURCE_PROVENANCE_DETAIL,
     StaleSourceProvenanceError,
 )
@@ -1192,6 +1193,14 @@ async def mem_edit(
             return _degraded_source_error(chunk_id)
         assert chunk is not None
         meta = chunk.metadata
+        if meta.redaction_count:
+            return (
+                "Error: masked_projection_read_only. "
+                "Edit the original source and reindex this masked projection."
+            )
+
+        if meta.source_read_only:
+            return f"Error: {SOURCE_READ_ONLY_DETAIL}"
 
         # ADR-0011: infer scope from the loaded chunk's persisted metadata.
         # Both gates below see the same scope the chunk lives under, so
@@ -1339,6 +1348,8 @@ async def mem_delete(
                 return _degraded_source_error(chunk_id)
             assert chunk is not None
             meta = chunk.metadata
+            if meta.source_read_only or meta.redaction_count:
+                return f"Error: {SOURCE_READ_ONLY_DETAIL}"
             # Confirm gate on the fresh chunk: a migrate could have re-scoped
             # it while we waited for the lock (see mem_edit for the rationale).
             inferred_scope = meta.scope or "user"

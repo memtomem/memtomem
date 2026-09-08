@@ -278,6 +278,24 @@ def create_tables(
         if "duplicate column" not in str(e).lower():
             raise
 
+    try:
+        db.execute("ALTER TABLE chunks ADD COLUMN retrieval_context TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+
+    try:
+        db.execute("ALTER TABLE chunks ADD COLUMN redaction_count INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+
+    try:
+        db.execute("ALTER TABLE chunks ADD COLUMN source_read_only INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+
     db.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
         USING fts5(content, source_file, tokenize='unicode61')

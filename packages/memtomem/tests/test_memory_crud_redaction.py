@@ -364,3 +364,104 @@ class TestRedactionStatsTool:
         assert snap["outcomes"]["bypassed"] >= 1
         assert "mem_add" in snap["by_tool"]
         assert snap["by_tool"]["mem_add"]["blocked"] >= 1
+
+
+#: A *maskable* secret: a generic label with its value on the same line. The
+#: ``sk-`` sample above is a provider token, which the index-only projection
+#: never masks, so it cannot tell a verbatim store from a masked one.
+_MASKABLE_SAMPLE = "# Credentials\n\npassword: hunter2-very-secret\n"
+
+
+@pytest.fixture
+def projecting(monkeypatch):
+    """Turn the index-only masking projection on for one test.
+
+    It ships disabled — see ``indexing/privacy_projection``'s module docstring —
+    so a test that exercises masking has to say so rather than inherit a default
+    that is deliberately off.
+    """
+    from memtomem.indexing import privacy_projection
+
+    monkeypatch.setattr(privacy_projection, "PROJECTION_ENABLED", True)
+
+
+class TestForceAllowedContentIsStoredVerbatim:
+    """An explicit allow-this must not become a lossy write.
+
+    Every case here runs with ``projecting``, i.e. with the index-only masking
+    projection switched on. Without it the projection returns the text unchanged
+    for everything and these would pass whether or not the exemption is threaded
+    through at all — green for the wrong reason.
+
+    The index-only masking projection runs inside the chunker, so it applied to
+    every file — including the ones the guard had just admitted verbatim. The
+    audit log said "bypass" while the store held ``[REDACTED]``, and that
+    projection is read-only to ``mem_edit``: the user's own valve silently
+    turned their note into an uneditable, partially erased copy.
+    """
+
+    async def test_mem_add_force_unsafe_stores_the_maskable_value(
+        self, bm25_only_components, projecting
+    ):
+        comp, mem_dir = bm25_only_components
+        ctx = StubCtx(AppContext.from_components(comp))
+        target = mem_dir / "verbatim.md"
+
+        result = await mem_add(  # type: ignore[arg-type]
+            content=_MASKABLE_SAMPLE,
+            file=str(target),
+            force_unsafe=True,
+            ctx=ctx,
+        )
+
+        assert "Memory added" in result
+        chunks = await comp.storage.list_chunks_by_source(target)
+        assert chunks
+        body = "".join(c.content for c in chunks)
+        assert "hunter2-very-secret" in body
+        assert "[REDACTED]" not in body
+        assert all(c.metadata.redaction_count == 0 for c in chunks)
+
+    async def test_index_force_unsafe_stores_the_maskable_value(
+        self, bm25_only_components, projecting
+    ):
+        comp, mem_dir = bm25_only_components
+        target = mem_dir / "valve.md"
+        target.write_text(_MASKABLE_SAMPLE)
+
+        stats = await comp.index_engine.index_file(target, force_unsafe=True)
+
+        assert not stats.errors
+        chunks = await comp.storage.list_chunks_by_source(target)
+        assert chunks
+        assert "hunter2-very-secret" in "".join(c.content for c in chunks)
+        assert all(c.metadata.redaction_count == 0 for c in chunks)
+
+    async def test_declared_exemption_stores_the_maskable_value(
+        self, bm25_only_components, projecting
+    ):
+        comp, mem_dir = bm25_only_components
+        target = mem_dir / "declared.md"
+        target.write_text("---\nredaction: documents-patterns\n---\n" + _MASKABLE_SAMPLE)
+
+        stats = await comp.index_engine.index_file(target)
+
+        assert stats.exempted_files == 1
+        chunks = await comp.storage.list_chunks_by_source(target)
+        assert chunks
+        assert "hunter2-very-secret" in "".join(c.content for c in chunks)
+
+    async def test_an_unadjudicated_file_is_still_masked(self, bm25_only_components, projecting):
+        """The three pins above must not have disabled masking itself."""
+        comp, mem_dir = bm25_only_components
+        target = mem_dir / "plain.md"
+        target.write_text(_MASKABLE_SAMPLE)
+
+        stats = await comp.index_engine.index_file(target)
+
+        assert not stats.errors
+        chunks = await comp.storage.list_chunks_by_source(target)
+        assert chunks
+        body = "".join(c.content for c in chunks)
+        assert "hunter2-very-secret" not in body
+        assert "[REDACTED]" in body

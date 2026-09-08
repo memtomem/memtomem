@@ -415,6 +415,7 @@ def render_search_results(query: str, fmt: str, payload: SearchPayload) -> None:
                 "source": str(r.chunk.metadata.source_file),
                 "chunk_id": str(r.chunk.id),
                 "content": r.chunk.content[:200],
+                "retrieval_context": r.chunk.metadata.retrieval_context,
             }
             for r in results
         ]

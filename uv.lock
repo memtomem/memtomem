@@ -1165,6 +1165,7 @@ all = [
     { name = "langgraph" },
     { name = "ollama" },
     { name = "openai" },
+    { name = "tokenizers" },
     { name = "tree-sitter" },
     { name = "tree-sitter-javascript" },
     { name = "tree-sitter-python" },
@@ -1193,6 +1194,7 @@ ollama = [
 ]
 onnx = [
     { name = "fastembed" },
+    { name = "tokenizers" },
     { name = "urllib3" },
 ]
 openai = [
@@ -1230,6 +1232,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "sqlite-vec", specifier = ">=0.1.6" },
     { name = "starlette", specifier = ">=1.3.1" },
+    { name = "tokenizers", marker = "extra == 'onnx'", specifier = ">=0.21,<1" },
     { name = "tree-sitter", marker = "extra == 'code'", specifier = ">=0.25" },
     { name = "tree-sitter-javascript", marker = "extra == 'code'", specifier = ">=0.23" },
     { name = "tree-sitter-python", marker = "extra == 'code'", specifier = ">=0.23" },

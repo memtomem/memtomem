@@ -269,8 +269,67 @@ class TestFormatStructuredResults:
         r = self._make_result()
         parsed = json.loads(_format_structured_results([r]))
         item = parsed["results"][0]
-        expected_keys = {"rank", "score", "source", "hierarchy", "namespace", "chunk_id", "content"}
+        expected_keys = {
+            "rank",
+            "score",
+            "source",
+            "hierarchy",
+            "namespace",
+            "chunk_id",
+            "content",
+        }
         assert set(item.keys()) == expected_keys
+
+    def test_recall_payload_keeps_the_same_narrow_shape(self):
+        """``_format_recall_structured`` had no key-set pin at all.
+
+        Its docstring claims the two bounded-chunking keys are "shared in their
+        optionality: both appear only when set". Nothing checked that, so the
+        claim and the code were free to drift apart.
+        """
+        import json
+        from dataclasses import replace
+
+        from memtomem.server.formatters import _format_recall_structured
+
+        chunk = self._make_result().chunk
+        item = json.loads(_format_recall_structured([chunk]))["results"][0]
+        assert set(item) == {
+            "chunk_id",
+            "namespace",
+            "source",
+            "hierarchy",
+            "content",
+            "created_at",
+            "tags",
+        }
+
+        chunk.metadata = replace(chunk.metadata, retrieval_context="Section A", redaction_count=1)
+        item = json.loads(_format_recall_structured([chunk]))["results"][0]
+        assert item["retrieval_context"] == "Section A"
+        assert item["redaction_count"] == 1
+
+    def test_bounded_chunk_metadata_is_present_only_when_set(self):
+        """``retrieval_context`` / ``redaction_count`` ride the narrow shape.
+
+        Both are absent on every ordinary chunk, so emitting them
+        unconditionally would put an empty string and a zero on every result of
+        every search and change the payload shape for every existing consumer.
+        Present means "this chunk has one" — the same rule
+        ``via_session_summary`` follows.
+        """
+        import json
+        from dataclasses import replace
+
+        r = self._make_result()
+        r.chunk.metadata = replace(
+            r.chunk.metadata,
+            retrieval_context="Deploy notes > Staging box",
+            redaction_count=2,
+        )
+        item = json.loads(_format_structured_results([r]))["results"][0]
+        assert item["retrieval_context"] == "Deploy notes > Staging box"
+        assert item["redaction_count"] == 2
 
     def test_score_precision(self):
         import json

@@ -263,7 +263,7 @@ async def test_range_and_hash_refresh_roll_back_together(indexed_source):
     assert source.read_text() == ORIGINAL
 
 
-async def test_repeated_source_ranges_are_hashed_once_per_snapshot(
+async def test_repeated_source_ranges_never_authorize_source_writes(
     bm25_only_components, monkeypatch
 ):
     comp, directory = bm25_only_components
@@ -277,11 +277,10 @@ async def test_repeated_source_ranges_are_hashed_once_per_snapshot(
         chunks = comp.index_engine.chunk_content(source, snapshot)
         ranges = {(c.metadata.start_line, c.metadata.end_line) for c in chunks}
         assert len(chunks) > len(ranges)
-        assert spy.call_count == len(ranges)
+        spy.assert_not_called()
         for chunk in chunks:
-            assert chunk.metadata.source_span_hash == source_span_hash(
-                snapshot.splitlines(), chunk.metadata.start_line, chunk.metadata.end_line
-            )
+            assert chunk.metadata.source_read_only
+            assert chunk.metadata.source_span_hash is None
 
 
 async def test_import_does_not_trust_external_source_evidence(indexed_source):

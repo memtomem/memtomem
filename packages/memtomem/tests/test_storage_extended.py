@@ -215,7 +215,7 @@ class TestStorageExtended:
         # The differ compares every column a search reads that the chunk text
         # cannot speak for: tags (#2124) and the validity window (#2140).
         assert state == {
-            str(chunk.id): (chunk.content_hash, ("Parent", "Child"), ("alpha",), 10, 20)
+            str(chunk.id): (chunk.content_hash, ("Parent", "Child"), ("alpha",), 10, 20, "")
         }
 
     # ---- get_embeddings_for_chunks -------------------------------------------

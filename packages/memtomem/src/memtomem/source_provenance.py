@@ -6,6 +6,12 @@ import hashlib
 from collections.abc import Sequence
 
 
+SOURCE_READ_ONLY_DETAIL = (
+    "source_read_only: this chunk is a source fragment or projection. "
+    "Edit the original source file and reindex it."
+)
+
+
 STALE_SOURCE_PROVENANCE_DETAIL = (
     "Chunk source-line provenance is stale; reindex the source and retry."
 )
