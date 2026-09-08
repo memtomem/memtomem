@@ -49,7 +49,7 @@ async def test_fragments_refuse_source_mutation(
         monkeypatch.setattr(privacy_projection, "PROJECTION_ENABLED", True)
     filename, body = bodies[kind]
     source = directory / filename
-    source.write_text(body)
+    source.write_text(body, encoding="utf-8")
     config = bounded_config.model_copy(update={"memory_dirs": [directory]})
     if kind == "pre_split_markdown":
         config = config.model_copy(
