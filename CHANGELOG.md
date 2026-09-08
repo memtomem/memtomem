@@ -169,6 +169,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A memory edit or delete that *succeeds* no longer brings back a file you
+  deleted while it ran** (#2367) — the sibling of #2347 below, and the quieter
+  of the two, because nothing looked wrong. The helpers that rewrite a chunk's
+  line range read the file, computed the new text, and committed it with a
+  plain write. A plain write creates. So an `rm`, an `mv`, or an editor saving
+  via rename landing in that gap did not fail the edit: it recreated the note
+  you had just deleted, with your edit applied, reported success, and indexed
+  the result. The content was exactly what you asked for, which is why the
+  result gave no hint that the file underneath it was one nobody meant to
+  exist.
+
+  Those rewrites now open the existing file without creating it, and check on
+  the open descriptor that it is still the file the operation read. A source
+  that was removed stays removed and a source that was replaced is left
+  exactly as found — the identity check matters as much as the refusal to
+  create, because splicing a stranger's file at the deleted file's line
+  numbers corrupts it just as surely. The window this closes is the one
+  between the read and the write; a file already swapped before the operation
+  looked at it is the file the operation was asked to edit, and telling those
+  apart is a question about the index's line numbers rather than about the
+  file's identity. `mem_edit` and `mem_delete` name which
+  of the two they met; the web editor answers 409 with the same distinction;
+  and a web delete whose file somebody else already removed now finishes by
+  dropping the index row and reporting success, since that is the outcome it
+  was asked for. A refused write is not rolled back, because it wrote nothing.
+
+  Adding a note still creates its file: `mem_add` writes into a day file that
+  need not exist yet, and that has not changed. The refusal is scoped to the
+  three helpers that edit an existing range, and a test now enforces that
+  scope so a fourth cannot quietly join the creating side.
+
 - **A memory edit or delete that fails no longer brings back a file you
   deleted while it ran** (#2347) — when `mem_edit`, `mem_delete` or the web
   editor's save cannot re-index what it just wrote, it puts the file's

@@ -29,6 +29,7 @@ from memtomem.server.tools._provenance import (
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
 from memtomem.tools.memory_writer import (
     RestoreOutcome,
+    SourceChangedError,
     read_pre_image,
     restore_pre_image_quietly,
 )
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from memtomem.models import Chunk, IndexingStats
+    from memtomem.tools.memory_writer import PreImage
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +348,7 @@ async def _flag_imprecise_write(
 async def _mutate_file_and_reindex(
     app: AppContext,
     source_file: Path,
-    mutate: Callable[[], None],
+    mutate: Callable[[PreImage], None],
     op: str,
 ) -> tuple[IndexingStats | None, str | None]:
     """Backup-read → ``mutate`` → incremental re-index, rolling back on failure.
@@ -376,6 +378,11 @@ async def _mutate_file_and_reindex(
     release path). Only a ``restored`` outcome leaves the pre-state the caller
     assumed, so only that one re-raises a ``RetryableError``.
 
+    ``mutate`` receives the pre-image so its own write can be refused on that
+    same identity (#2367) — the forward twin of the rule above, since a plain
+    write recreates a removed source just as a plain restore did. A refusal is
+    reported through the same vocabulary and takes no restore: it wrote nothing.
+
     Returns ``(stats, None)`` on success or ``(None, error_message)`` after
     a rollback; ``op`` ("edit"/"delete") only shapes the messages.
     """
@@ -384,14 +391,30 @@ async def _mutate_file_and_reindex(
     # inherit a mutation that happened in its predecessor.
     provenance_session_id = await capture_session_for_untracked_write(app)
     pre_image = await asyncio.to_thread(read_pre_image, source_file)
+    mutation_completed = False
     try:
-        await asyncio.to_thread(mutate)
+        await asyncio.to_thread(mutate, pre_image)
+        mutation_completed = True
         stats = await app.index_engine.index_file(source_file, already_scanned=True, lock_held=True)
         app.search_pipeline.invalidate_cache()
         await flag_untracked_write(app, provenance_session_id)
         return stats, None
     except Exception as exc:
-        outcome = await asyncio.to_thread(restore_pre_image_quietly, source_file, pre_image)
+        if isinstance(exc, SourceChangedError) and not mutation_completed:
+            # The write refused before putting a byte on disk (#2367), so there
+            # is nothing of ours to undo — and restoring anyway would be the
+            # resurrection the refusal exists to prevent: where the filesystem
+            # cannot answer identity the restore proceeds on existence alone,
+            # so a file that reappeared in between would be overwritten with
+            # the pre-image of a write that never happened.
+            # Gated on the mutation not having completed, not on the type
+            # alone: this handler also covers the re-index (and, on the MCP
+            # twin, the cache and provenance work after it), so a
+            # ``SourceChangedError`` surfacing from a later stage would
+            # otherwise skip the rollback of a write that did land.
+            outcome = exc.outcome
+        else:
+            outcome = await asyncio.to_thread(restore_pre_image_quietly, source_file, pre_image)
         reconciled = True
         try:
             rollback_stats = await app.index_engine.index_file(
@@ -1228,8 +1251,15 @@ async def mem_edit(
         stats, mutate_err = await _mutate_file_and_reindex(
             app,
             meta.source_file,
-            lambda: replace_chunk_body(
-                meta.source_file, meta.start_line, meta.end_line, new_content
+            # ``expected_identity`` is the pre-image's, so the rewrite refuses
+            # rather than recreating a source removed since it was read, or
+            # splicing a replacement at the removed file's line numbers (#2367).
+            lambda pre: replace_chunk_body(
+                meta.source_file,
+                meta.start_line,
+                meta.end_line,
+                new_content,
+                expected_identity=pre.identity,
             ),
             op="edit",
         )
@@ -1324,7 +1354,14 @@ async def mem_delete(
             stats, mutate_err = await _mutate_file_and_reindex(
                 app,
                 meta.source_file,
-                lambda: remove_lines(meta.source_file, meta.start_line, meta.end_line),
+                # See ``mem_edit``: the pre-image's identity is what keeps this
+                # from recreating a source somebody else already removed (#2367).
+                lambda pre: remove_lines(
+                    meta.source_file,
+                    meta.start_line,
+                    meta.end_line,
+                    expected_identity=pre.identity,
+                ),
                 op="delete",
             )
             if mutate_err:
