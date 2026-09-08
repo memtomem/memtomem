@@ -123,8 +123,9 @@ Use `mem_do(action="help")` to see all available actions, or `mem_do(action="hel
 
 The additive `runtime_profile.search` fields `rrf_k`, `rrf_weights` (BM25,
 dense order), `bm25_candidates`, and `dense_candidates` expose the configured
-two-leg RRF inputs (#2377). `mem_status` and `mm status --format json` also
-include them in `config`, and human status renders them. Clients must check
+two-leg RRF inputs (#2377). `mm status --format json` includes these fields in
+its `config` object; `mem_status` and human-readable `mm status` render them
+as text. Clients must check
 field presence: older schema-1 profiles omit them. A version profile is a
 collection-time configuration snapshot; a client or daemon holding a negotiated
 profile must reconnect after changing Core configuration.
