@@ -7104,6 +7104,12 @@ class TestStepHeaderPosition:
         from memtomem.cli.init_cmd import init
 
         set_home(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".claude").mkdir()
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
 
         runner = CliRunner()
@@ -7113,7 +7119,7 @@ class TestStepHeaderPosition:
         # 1. embedding: 1 (quick start / none)
         # 2. reranker: N (no)
         # 3. memory_dir: path, y create
-        # 4. provider_dirs: N (skip for all three categories)
+        # 4. provider_dirs: no prompts (empty inventory above)
         # 5. storage: accept default (empty line)
         # 6. namespace: N (no auto-ns), default namespace accept
         # 7. search: top_k default (empty), decay N
@@ -7123,7 +7129,9 @@ class TestStepHeaderPosition:
         result = runner.invoke(
             init,
             ["--advanced"],
-            input=f"1\nn\n{memory_dir}\ny\nn\nn\nn\n\nn\n\n\n\nn\n1\nn\n3\n",
+            input="\n".join(
+                ["1", "n", str(memory_dir), "y", "", "n", "", "", "n", "1", "n", "3", ""]
+            ),
         )
         assert result.exit_code == 0, result.output
 
@@ -7138,6 +7146,8 @@ class TestStepHeaderPosition:
         assert "8. Language" in out
         assert "9. Claude Code Hooks" in out
         assert "10. Connect to AI Editor" in out
+        assert "Select [1]: 3" in out
+        assert not (tmp_path / ".mcp.json").exists()
 
     def test_default_preset_flow_renumbers_from_picker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
