@@ -27,7 +27,7 @@ from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import _display_path, _format_recall_structured
 from memtomem.server.helpers import _announce_dim_mismatch_once, _parse_recall_date
-from memtomem.services.search_service import hidden_namespace_hint
+from memtomem.services.search_service import hidden_namespace_hint, validate_scope_vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +77,18 @@ async def mem_recall(
             "Supported: compact, structured."
         )
 
-    from memtomem.models import NamespaceFilter, ScopeFilter
+    from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter, ScopeFilter
     from memtomem.server.tools.search import _resolve_project_context_root
+
+    # Same pre-app check mem_search does (#2295): the tier vocabulary is
+    # closed, so a misspelled tier is answerable here instead of being served
+    # as an empty recall. The validator also normalizes — ``scope`` is rebound
+    # to what comes back so a padded or blank value never reaches storage.
+    try:
+        scope = validate_scope_vocabulary(scope)
+        ScopeFilter.parse(scope)
+    except InvalidFilterSyntaxError as e:
+        return f"Error: {e}"
 
     app = await _get_app_initialized(ctx)
 

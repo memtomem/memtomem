@@ -597,8 +597,9 @@ class TestValidateScopeVocabulary:
 
     ``ScopeFilter.parse`` stays permissive on purpose — callers depend on an
     unrecognized tier reaching no rows rather than raising — so the public
-    vocabulary is checked here instead, and the read surfaces call this
-    before they open anything.
+    vocabulary is checked here instead, and every read surface that takes a
+    ``scope`` calls this before it opens anything (the set is enumerated by
+    ``test_scope_vocabulary_architectural_guard``).
     """
 
     @pytest.mark.parametrize("tier", sorted(get_args(TargetScope)))
