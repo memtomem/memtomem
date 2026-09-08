@@ -118,6 +118,32 @@ DEGRADED_SOURCE_EDIT_DETAIL = (
     "retry."
 )
 
+#: A chunk write refused because the source changed under it mid-span (#2367).
+#:
+#: The span's lock binds cooperating memtomem writers, never an external ``rm``
+#: / ``mv`` / editor saving via rename. Writing anyway would recreate a file
+#: somebody deleted, or splice a replacement at the removed file's line
+#: numbers, so the write refuses and says which of the two it met.
+#:
+#: 409 rather than 503, and for the same reason as the sibling above: retrying
+#: does not clear the condition, because the file the request was about is not
+#: there any more. Path-free — the caller supplied the chunk id, not the path,
+#: and the loopback dashboard is not the place to reflect ``$HOME`` back.
+SOURCE_REMOVED_DURING_WRITE_DETAIL = (
+    "The chunk's source file was removed by another process while the request "
+    "ran; nothing was written and the file was not recreated. Refresh — the "
+    "entry no longer exists on disk."
+)
+#: The replacement twin. Deliberately distinct from the removal above: the file
+#: is *there*, so "refresh, it is gone" would be wrong advice, and the operator
+#: needs to know that a different file now stands where the chunk's line
+#: numbers came from.
+SOURCE_REPLACED_DURING_WRITE_DETAIL = (
+    "The chunk's source file was replaced by another process while the request "
+    "ran; the replacement was left exactly as found and nothing was written. "
+    "Reindex the source and retry."
+)
+
 
 def _classify_exception(exc: BaseException) -> str:
     """Map an exception to one of {parse, permission, missing, internal}.

@@ -117,9 +117,34 @@ Candidate scoring and value hydration use the same SQLite snapshot. Operations
 within an instance serialize on a dedicated event-loop thread, including embedding
 calls. Sync methods can therefore be used from a host with an event loop, although
 async methods avoid blocking that host. Embedders must work on the store's loop;
-they must not call back into the same store. Caller-owned embedding clients are
-not automatically closed. Always close the store. Close drains accepted operations;
-cancelling an async caller does not retract an accepted write.
+they must not call back into the same store. The reentrant call raises
+`RuntimeError` rather than deadlocking, whether it asks for a store operation or
+`close()` / `aclose()`, and the store stays usable. What the *outer* call then
+reports is the embedder's own business: a hybrid search treats that error like
+any other embedding failure and falls back to BM25 with a `RuntimeWarning`, so
+plan to see the refusal where the callback made it. The refusal reads a
+contextvar, so it covers a callback that keeps the store's context: a plain sync
+embedder, which LangChain dispatches through the default executor, and an async
+one on the store's loop. An embedder that hands its work to an executor or pool of
+its own without copying the context is invisible to that check, and reentering
+from there still deadlocks. A second rule outlives the callback: a synchronous
+method called on the store's own loop, as a task an embedder spawned would do,
+is refused as well, since it would wait on the loop it is running on. Ordinary
+async methods stay open to that task, because awaiting suspends rather than
+blocks. `aclose()` is the exception and is refused there too, since it hands
+`close()` to the loop's own executor. Close the store from the code that owns
+it. The store installs its own default executor and identifies its workers.
+Handing `close()` to one of those workers, including with
+`asyncio.to_thread(store.close)` after the embedding callback has returned,
+raises `RuntimeError` before shutdown begins. Calling `aclose()` from such a
+worker is also refused before it can offload the close. While the callback is
+still running, the embedding-callback refusal takes precedence. This executor
+rule applies only to closing; ordinary synchronous operations keep their
+existing callback and loop checks. External callers can still use `close()`
+or `aclose()`. The store's loop drains its executor during shutdown.
+Caller-owned embedding clients are not automatically closed. Always close the
+store. Close drains accepted operations; cancelling an async caller does not
+retract an accepted write.
 
 `batch` commits each operation independently in input order. A later failure does
 not undo earlier successful operations. Do not treat it as an all-or-nothing batch.
@@ -159,9 +184,30 @@ transit does not extend TTL. No implicit migration or in-place reindex is perfor
 
 Configured project directories are consulted only for scope guards, not for an
 implicit database or embedding model. Project-shared destinations require
-`confirm_project_shared=True`; put and import use the existing privacy write guard.
-`force_unsafe` cannot bypass the project-shared secret block. Namespaces organize
-records and are not authentication or tenant-isolation boundaries.
+`confirm_project_shared=True`. Before opening the database, the constructor
+checks the persisted index configuration, including raw `fields` and `index_id`,
+with the privacy write guard. This applies to reopening too; a refused
+configuration creates no directory or database and leaves an existing file intact.
+
+Put and import scan the value JSON, every namespace label, the key, and per-item
+`index` selectors before embedding or storage, even with `index=False` or without
+an embedder. Identifiers are also scanned as raw strings so JSON escaping cannot
+hide a quoted credential. Mutable values and selectors are copied before scanning;
+embedding callbacks cannot change what was approved for storage.
+
+A privacy refusal raises `ValueError` without echoing the sensitive input. It
+rejects the operation rather than redacting or renaming an identity. Remove
+credentials from namespace/key/selector/model-ID strings before retrying; changing
+only the value will not resolve an identifier refusal. Ordinary field names such
+as `password` or `api_key` alone are permitted. The existing `force_unsafe=True`
+valve remains available for `user` and `project_local`; it cannot bypass a
+`project_shared` block, including configuration checks.
+
+There is no retroactive scan or cleanup of existing rows. Reads and deletes can
+still address legacy sensitive identifiers under a valid configuration. Existing
+sensitive constructor settings are refused on reopen unless the private-tier
+bypass applies. Database schema and export format are unchanged. Namespaces
+organize records and are not authentication or tenant-isolation boundaries.
 
 ## Validation and scope
 

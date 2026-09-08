@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import struct
 import threading
 import warnings
-from collections.abc import Iterable
-from concurrent.futures import Future, wait
+from collections.abc import Awaitable, Callable, Iterable
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -39,6 +41,39 @@ from memtomem.integrations.langgraph import _resolve_target_scope
 from memtomem.storage.hybrid_store import HybridDatabase, encode, validate_filter
 
 logger = logging.getLogger(__name__)
+
+# The embedding calls this context is inside. A ContextVar is what "a callback
+# is in flight" actually means here: thread identity cannot express it, because
+# a sync embedder runs on the loop's default executor (a foreign thread) while
+# an async one runs on the loop thread itself, so either check passes in one
+# direction and the reentrant call then blocks forever on the lock its own
+# caller holds (#2365). The marker survives both hops that
+# separate the callback from the guard: langchain_core's run_in_executor
+# wraps the sync call in copy_context().run, and asyncio.to_thread copies the
+# context by contract. Each entry names its store, so a callback that reaches
+# a *different* store is still allowed. What no such marker can reach is an
+# embedder that dispatches to an executor of its own without copying the
+# context -- langchain_core skips the copy when handed an explicit executor --
+# so reentry from there still deadlocks, and the guide says so.
+_EMBEDDING_CALLBACKS: ContextVar[tuple[_Callback, ...]] = ContextVar(
+    "memtomem_hybrid_store_embedding_callback", default=()
+)
+
+
+class _Callback:
+    """One embedding call, and whether it is still running.
+
+    Resetting the ContextVar cannot reach a context that was *copied* from the
+    callback -- a task spawned inside it keeps the tuple it inherited -- so the
+    marker carries its own liveness and the refusal ends when the call does
+    rather than outliving it for whatever the callback started.
+    """
+
+    __slots__ = ("running", "store")
+
+    def __init__(self, store: MemtomemHybridStore):
+        self.store = store
+        self.running = True
 
 
 def _positive(value: Any, name: str) -> None:
@@ -126,13 +161,29 @@ class MemtomemHybridStore(BaseStore):
                 action="init",
                 audit_context={"scope_inferred_from_path": scope != inferred},
             )
-        self._configuration = {"fields": self.fields, "dims": self.dims, "index_id": index_id}
+        self._configuration = json.loads(
+            encode({"fields": self.fields, "dims": self.dims, "index_id": index_id})
+        )
+        self._guard(
+            [
+                encode(self._configuration),
+                *self._configuration["fields"],
+                *([index_id] if isinstance(index_id, str) else []),
+            ],
+            surface="langgraph_hybridstore_init",
+            message="Store configuration blocked by privacy guard",
+        )
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._state_lock = threading.Lock()
         self._closed = False
         self._close_done = threading.Event()
         self._pending: set[Future[Any]] = set()
+        self._executor_workers: set[threading.Thread] = set()
         self._loop = asyncio.new_event_loop()
+        self._executor = ThreadPoolExecutor(
+            thread_name_prefix="memtomem-hybrid-store-worker", initializer=self._register_worker
+        )
+        self._loop.set_default_executor(self._executor)
         self._thread = threading.Thread(target=self._run, name="memtomem-hybrid-store", daemon=True)
         self._thread.start()
         try:
@@ -148,8 +199,24 @@ class MemtomemHybridStore(BaseStore):
             self._loop.run_forever()
         finally:
             self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            # The loop owns shutdown of the installed executor. Keep worker
+            # identities until it has drained, including during concurrent close.
             self._loop.run_until_complete(self._loop.shutdown_default_executor())
             self._loop.close()
+
+    def _register_worker(self) -> None:
+        # Thread objects avoid mistaking a recycled thread ID for one of ours.
+        with self._state_lock:
+            self._executor_workers.add(threading.current_thread())
+
+    def _on_own_executor(self) -> None:
+        with self._state_lock:
+            own_worker = threading.current_thread() in self._executor_workers
+        if own_worker:
+            raise RuntimeError(
+                "Cannot close the store from its own executor; "
+                "close it from outside the store's own threads"
+            )
 
     async def _initialize(self):
         self._embedder = (
@@ -177,8 +244,54 @@ class MemtomemHybridStore(BaseStore):
                     exc_info=True,
                 )
 
-    def _submit(self, function, *args):
+    async def _embed(self, method: Callable[[Any], Awaitable[Any]], argument: Any) -> Any:
+        """Await an embedder with this store marked as the in-flight callback."""
+        callback = _Callback(self)
+        token = _EMBEDDING_CALLBACKS.set((*_EMBEDDING_CALLBACKS.get(), callback))
+        try:
+            return await method(argument)
+        finally:
+            callback.running = False
+            _EMBEDDING_CALLBACKS.reset(token)
+
+    def _inside_own_callback(self) -> bool:
+        return any(
+            callback.store is self and callback.running for callback in _EMBEDDING_CALLBACKS.get()
+        )
+
+    def _on_own_loop(self, refusal: str) -> None:
+        """Refuse a wait that only the loop running it could satisfy.
+
+        The callback marker cannot stand in for this. Code the callback started
+        outlives it -- a task an async embedder spawns keeps running on the
+        store's loop after the marker is cleared -- and a synchronous call from
+        there waits on a future only that same loop can complete. Ordinary
+        async callers on the loop are fine: they suspend instead of blocking,
+        so this belongs to the waits rather than to _submit. Shutdown is the
+        exception among them, which is why aclose() asks too: offloading it
+        leaves the worker joining the store thread while the store thread waits
+        for that worker's executor.
+        """
         if threading.current_thread() is self._thread:
+            raise RuntimeError(refusal)
+
+    _NO_BLOCKING = (
+        "Cannot run a synchronous store operation from the store's event loop; await the async API"
+    )
+    # "another thread" would be wrong advice: handing close() to a worker of
+    # the store's *own* loop deadlocks the same way. _on_own_executor catches
+    # that hop even after the callback ends. The safe caller owns the store.
+    _NO_CLOSING = (
+        "Cannot close the store from its own event loop; "
+        "close it from outside the store's own threads"
+    )
+
+    def _blocking(self, function, *args):
+        self._on_own_loop(self._NO_BLOCKING)
+        return self._submit(function, *args).result()
+
+    def _submit(self, function, *args):
+        if self._inside_own_callback():
             raise RuntimeError("Store operations cannot reenter from an embedding callback")
         with self._state_lock:
             if self._closed:
@@ -197,7 +310,7 @@ class MemtomemHybridStore(BaseStore):
         return await asyncio.shield(asyncio.wrap_future(self._submit(function, *args)))
 
     def batch(self, ops: Iterable[Op]) -> list[Result]:
-        return self._submit(self._batch, list(ops)).result()
+        return self._blocking(self._batch, list(ops))
 
     async def abatch(self, ops: Iterable[Op]) -> list[Result]:
         return await self._await(self._batch, list(ops))
@@ -225,6 +338,21 @@ class MemtomemHybridStore(BaseStore):
             )
         return normalized
 
+    def _guard(self, parts: list[str], *, surface: str, message: str) -> None:
+        # Scan raw identifiers too: JSON escaping can hide a quoted credential
+        # inside a key/selector. Non-whitespace separators keep label patterns
+        # from accidentally spanning two independent fields (#2374).
+        guard = privacy.enforce_write_guard(
+            "\n---\n".join(parts),
+            surface=surface,
+            scope=self.scope,
+            force_unsafe=self.force_unsafe,
+        )
+        if guard.decision != "pass" and not (
+            guard.decision == "bypassed" and self.scope != "project_shared"
+        ):
+            raise ValueError(message)
+
     async def _prepare(self, op: PutOp) -> dict:
         _validate_namespace(op.namespace)
         if not isinstance(op.key, str) or not op.key:
@@ -240,12 +368,12 @@ class MemtomemHybridStore(BaseStore):
             )
         ):
             raise ValueError("index must be None, False, or a list of paths")
-        record = {
-            "namespace": op.namespace,
+        record: dict[str, Any] = {
+            "namespace": tuple(op.namespace),
             "key": op.key,
             "value": op.value,
             "ttl": op.ttl,
-            "index": op.index,
+            "index": list(op.index) if isinstance(op.index, list) else op.index,
             "text": "",
             "vectors": [],
         }
@@ -254,28 +382,27 @@ class MemtomemHybridStore(BaseStore):
         if not isinstance(op.value, dict):
             raise ValueError("Store value must be a JSON object")
         serialized = encode(op.value)
-        guard = privacy.enforce_write_guard(
-            serialized,
-            surface="langgraph_hybridstore_put",
-            scope=self.scope,
-            force_unsafe=self.force_unsafe,
-        )
-        if guard.decision != "pass" and not (
-            guard.decision == "bypassed" and self.scope != "project_shared"
-        ):
-            raise ValueError("Store write blocked by privacy guard")
-        # Detach caller-owned values before awaiting external embedding work.
-        import json
-
+        # Detach every mutable persisted input before the scan and before
+        # awaiting external embedding work, including per-item selectors.
         record["value"] = json.loads(serialized)
-        if op.index is not False:
+        self._guard(
+            [
+                serialized,
+                *record["namespace"],
+                record["key"],
+                *(record["index"] if isinstance(record["index"], list) else []),
+            ],
+            surface="langgraph_hybridstore_put",
+            message="Store write blocked by privacy guard",
+        )
+        if record["index"] is not False:
             texts = []
-            for field in self.fields if op.index is None else op.index:
+            for field in self.fields if record["index"] is None else record["index"]:
                 texts.extend(get_text_at_path(record["value"], field))
             record["text"] = "\n".join(texts)
             if self._embedder is not None and texts:
                 record["vectors"] = self._vectors(
-                    await self._embedder.aembed_documents(texts), len(texts)
+                    await self._embed(self._embedder.aembed_documents, texts), len(texts)
                 )
         return record
 
@@ -304,7 +431,9 @@ class MemtomemHybridStore(BaseStore):
                 fallback = "embeddings_not_configured"
             elif mode == "dense" or self.retrieval["weights"][1] > 0:
                 try:
-                    vector = self._vectors([await self._embedder.aembed_query(op.query)], 1)[0]
+                    vector = self._vectors(
+                        [await self._embed(self._embedder.aembed_query, op.query)], 1
+                    )[0]
                 except Exception:
                     if mode == "dense":
                         raise
@@ -378,7 +507,7 @@ class MemtomemHybridStore(BaseStore):
     def search_with_diagnostics(
         self, namespace_prefix, *, query=None, filter=None, limit=10, offset=0, refresh_ttl=None
     ):
-        return self._submit(
+        return self._blocking(
             self._diagnostics,
             SearchOp(
                 namespace_prefix,
@@ -390,7 +519,7 @@ class MemtomemHybridStore(BaseStore):
                 if refresh_ttl is None
                 else refresh_ttl,
             ),
-        ).result()
+        )
 
     async def asearch_with_diagnostics(
         self, namespace_prefix, *, query=None, filter=None, limit=10, offset=0, refresh_ttl=None
@@ -436,7 +565,7 @@ class MemtomemHybridStore(BaseStore):
 
     def export_json(self) -> dict:
         """Return a JSON-serializable envelope of live records; never write a file."""
-        return self._submit(self._export).result()
+        return self._blocking(self._export)
 
     async def aexport_json(self) -> dict:
         return await self._await(self._export)
@@ -474,7 +603,7 @@ class MemtomemHybridStore(BaseStore):
             return len(records)
 
     def import_json(self, envelope: dict) -> int:
-        return self._submit(self._import, envelope).result()
+        return self._blocking(self._import, envelope)
 
     async def aimport_json(self, envelope: dict) -> int:
         return await self._await(self._import, envelope)
@@ -484,7 +613,7 @@ class MemtomemHybridStore(BaseStore):
             return self._database.sweep()
 
     def sweep_ttl(self) -> int:
-        return self._submit(self._sweep).result()
+        return self._blocking(self._sweep)
 
     async def _shutdown(self):
         try:
@@ -497,8 +626,10 @@ class MemtomemHybridStore(BaseStore):
             self._database.close()
 
     def close(self) -> None:
-        if threading.current_thread() is self._thread:
+        if self._inside_own_callback():
             raise RuntimeError("Cannot close the store from its embedding callback")
+        self._on_own_loop(self._NO_CLOSING)
+        self._on_own_executor()
         with self._state_lock:
             already_closing = self._closed
             self._closed = True
@@ -517,6 +648,14 @@ class MemtomemHybridStore(BaseStore):
             self._close_done.set()
 
     async def aclose(self) -> None:
+        # Refuse before offloading, with the callback reason first. A worker
+        # may run aclose() on a separate loop: hopping to that loop's executor
+        # would hide its ownership from close(), while our shutdown still waits
+        # for the original worker. Ordinary external callers remain safe.
+        if self._inside_own_callback():
+            raise RuntimeError("Cannot close the store from its embedding callback")
+        self._on_own_loop(self._NO_CLOSING)
+        self._on_own_executor()
         await asyncio.to_thread(self.close)
 
     def __enter__(self):

@@ -47,6 +47,19 @@ _CLEAN = "# Notes\n\nJust some ordinary prose with nothing sensitive in it.\n"
 _LEAK = f"# Leak\n\napi token: {_SECRET}\n"
 
 
+@pytest.fixture
+def projecting(monkeypatch):
+    """Turn the index-only masking projection on for one test.
+
+    It ships disabled — see ``indexing/privacy_projection``'s module docstring —
+    so a test that exercises masking has to say so rather than inherit a default
+    that is deliberately off.
+    """
+    from memtomem.indexing import privacy_projection
+
+    monkeypatch.setattr(privacy_projection, "PROJECTION_ENABLED", True)
+
+
 class TestBulkIndexRedactionGate:
     async def test_secret_file_blocked_clean_indexed(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
@@ -442,7 +455,27 @@ class TestDeclaredExemptionIndexing:
         assert stats.exempted_files == 1
         assert any("declared.md" in p for p in stats.exempted_paths)
 
-    async def test_empty_labels_need_no_declared_exemption(self, bm25_only_components):
+    async def test_undeclared_sibling_is_still_blocked(self, bm25_only_components):
+        """The declaration is per file, not per directory.
+
+        Restored after the index-only projection landed. The original sibling
+        was a note whose labels are all *empty* — the projection now admits
+        that shape without a declaration, which is the sibling case one test
+        below. This one uses a label whose value the projection cannot account
+        for, so what it still proves is the thing that mattered: a declaration
+        in ``declared.md`` waives nothing for the file next to it.
+        """
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "declared.md").write_text(_DECLARED)
+        (mem_dir / "plain.md").write_text("# Notes\n\npassword:\n  hunter2-very-secret\n")
+
+        stats = await comp.index_engine.index_path(mem_dir, recursive=True)
+
+        assert stats.exempted_files == 1
+        assert stats.blocked_files == 1
+        assert any("plain.md" in p for p in stats.blocked_paths)
+
+    async def test_empty_labels_need_no_declared_exemption(self, bm25_only_components, projecting):
         comp, mem_dir = bm25_only_components
         (mem_dir / "declared.md").write_text(_DECLARED)
         (mem_dir / "plain.md").write_text(_DOCUMENTS_PATTERNS)

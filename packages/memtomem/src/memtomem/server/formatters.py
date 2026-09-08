@@ -155,9 +155,19 @@ def _format_structured_results(
             "namespace": meta.namespace,
             "chunk_id": str(r.chunk.id),
             "content": r.chunk.content,
-            "retrieval_context": r.chunk.metadata.retrieval_context,
-            "redaction_count": r.chunk.metadata.redaction_count,
         }
+        # Same rule as the provenance key below, and for the same reason: a
+        # bounded-chunking description and an index-masking count are both
+        # absent on the common path, so emitting them unconditionally would put
+        # an empty string and a zero on every result of every ordinary search
+        # and change the payload shape for every existing consumer. Present
+        # means "this chunk has one".
+        if meta.retrieval_context:
+            entry["retrieval_context"] = meta.retrieval_context
+        if meta.redaction_count:
+            entry["redaction_count"] = meta.redaction_count
+        if meta.source_read_only:
+            entry["source_read_only"] = True
         # RFC P1 Phase C: surface session-summary rescue provenance only
         # when set, so the common case (organic hit) keeps a stable
         # narrow shape and consumers can branch on key presence.
@@ -182,7 +192,9 @@ def _format_recall_structured(chunks: list, hints: list[str] | None = None) -> s
     Recall returns bare ``Chunk`` objects (no rank/score), so this shares the
     shared-meaning field names with ``_format_structured_results`` — namely
     ``chunk_id``, ``namespace``, ``source``, ``hierarchy``, ``content`` — and
-    adds ``created_at`` + ``tags`` which are recall-specific. The top-level
+    adds ``created_at`` + ``tags`` which are recall-specific. ``retrieval_context``
+    and ``redaction_count`` are shared too, and shared in their optionality:
+    both appear only when set. The top-level
     ``kind`` field lets consumers distinguish recall from search payloads on
     the first property; search remains ``kind``-less for backwards compat.
 
@@ -195,19 +207,23 @@ def _format_recall_structured(chunks: list, hints: list[str] | None = None) -> s
     for c in chunks:
         meta = c.metadata
         hierarchy = " > ".join(meta.heading_hierarchy) if meta.heading_hierarchy else ""
-        out.append(
-            {
-                "chunk_id": str(c.id),
-                "namespace": meta.namespace,
-                "source": _short_path(meta.source_file),
-                "hierarchy": hierarchy,
-                "content": c.content,
-                "retrieval_context": c.metadata.retrieval_context,
-                "redaction_count": c.metadata.redaction_count,
-                "created_at": c.created_at.isoformat(),
-                "tags": list(meta.tags),
-            }
-        )
+        entry: dict[str, object] = {
+            "chunk_id": str(c.id),
+            "namespace": meta.namespace,
+            "source": _short_path(meta.source_file),
+            "hierarchy": hierarchy,
+            "content": c.content,
+            "created_at": c.created_at.isoformat(),
+            "tags": list(meta.tags),
+        }
+        # Optional, present-means-set — see ``_format_structured_results``.
+        if meta.retrieval_context:
+            entry["retrieval_context"] = meta.retrieval_context
+        if meta.redaction_count:
+            entry["redaction_count"] = meta.redaction_count
+        if meta.source_read_only:
+            entry["source_read_only"] = True
+        out.append(entry)
     payload: dict[str, object] = {"kind": "recall", "results": out}
     if hints:
         payload["hints"] = list(hints)

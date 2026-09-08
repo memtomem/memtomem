@@ -1199,16 +1199,26 @@ def _confirm_stale(
     # file still carries hit-shaped bytes, and a chunker that fails to parse
     # it would quote the offending line into the log all the same.
     has_redaction_hits = bool(privacy.scan(content))
+    # A file the guard admits verbatim must be chunked verbatim, or the hashes
+    # this diff compares are the masked projection's and every declared-
+    # exemption file reads as permanently stale. ``force_unsafe`` is not
+    # knowable from here — it is a per-run valve, not a property of the file —
+    # so a file last indexed through that valve can still read as stale.
+    exempt = decision == "exempted"
     try:
         if has_redaction_hits:
             previously_disabled = _logging.root.manager.disable
             _logging.disable(_logging.CRITICAL)
             try:
-                new_chunks = engine.chunk_content(path, content)  # type: ignore[attr-defined]
+                new_chunks = engine.chunk_content(  # type: ignore[attr-defined]
+                    path, content, exempt=exempt
+                )
             finally:
                 _logging.disable(previously_disabled)
         else:
-            new_chunks = engine.chunk_content(path, content)  # type: ignore[attr-defined]
+            new_chunks = engine.chunk_content(  # type: ignore[attr-defined]
+                path, content, exempt=exempt
+            )
     except Exception:  # pragma: no cover - defensive: a chunker crash is not a finding
         return "skip", decision
     try:

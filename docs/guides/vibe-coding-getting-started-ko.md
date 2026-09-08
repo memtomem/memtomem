@@ -90,6 +90,24 @@ database path는 나중에 두 도구가 같은 저장소를 보는지 확인할
 
 Claude Code 세션에서 실행합니다.
 
+기존에 Claude MCP를 등록했다면 Claude Code의 `/mcp`에서 먼저 확인합니다.
+PyPI에 배포된 0.5.0에는 `--claude-mcp` 옵션이 없습니다. 아래 진단 명령은
+이번 변경이 포함된 memtomem 소스 체크아웃이 있을 때 사용합니다.
+
+```bash
+uv run --project /path/to/memtomem --package memtomem mm doctor --claude-mcp
+```
+
+`/path/to/memtomem`을 소스 체크아웃 경로로 바꾸고, 검사할 프로젝트의
+루트에서 실행하세요. `--project`는 현재 작업 디렉터리를 유지합니다.
+작업 디렉터리를 바꾸는 `--directory`로 대체하면 다른 프로젝트를 검사하게 됩니다.
+소스 체크아웃이 없다면 `/mcp`에서 기존 등록을 확인하면 됩니다.
+
+종료 코드 `0`은 감지된 충돌 없음, `1`은 중복 위험, `2`는 확인 불완전입니다.
+설정은 자동 삭제하지 않습니다. 안내된 등록 이름과 범위로 기존 연결을
+정리한 뒤 플러그인을 설치하세요. uv 설치와 저장된 메모리는 유지합니다.
+검사와 별개로 `/plugin install`을 바로 실행하면 설치 자체를 막지는 않습니다.
+
 ```text
 /plugin marketplace add memtomem/memtomem
 /plugin install memtomem@memtomem

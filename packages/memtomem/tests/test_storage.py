@@ -60,7 +60,9 @@ class TestChunkCRUD:
             "SELECT embedding FROM chunks_vec WHERE rowid=?", (before[0],)
         ).fetchone()
 
-        chunk.metadata = dataclasses.replace(chunk.metadata, start_line=40, end_line=45)
+        chunk.metadata = dataclasses.replace(
+            chunk.metadata, start_line=40, end_line=45, source_span_hash="a" * 64
+        )
         assert await storage.update_chunk_line_ranges([chunk]) == 1
         assert await storage.update_chunk_line_ranges([chunk]) == 0
 
@@ -71,6 +73,13 @@ class TestChunkCRUD:
         ).fetchone()
         assert after[:5] == before[:5]
         assert after[5:] == (40, 45)
+        refreshed = await storage.get_chunk(chunk.id)
+        assert refreshed.metadata.source_span_hash == "a" * 64
+        # Evidence-only changes use this same cheap path (#2371).
+        chunk.metadata = dataclasses.replace(chunk.metadata, source_span_hash="b" * 64)
+        assert await storage.update_chunk_line_ranges([chunk]) == 1
+        refreshed = await storage.get_chunk(chunk.id)
+        assert refreshed.metadata.source_span_hash == "b" * 64
         assert (
             db.execute(
                 "SELECT content, source_file FROM chunks_fts WHERE rowid=?", (after[0],)

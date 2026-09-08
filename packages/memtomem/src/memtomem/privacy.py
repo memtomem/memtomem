@@ -478,6 +478,34 @@ EXEMPTIBLE_DOC_PATTERNS: tuple[str, ...] = (
     _LABEL_RULE_UNQUOTED_PASSWORD,
 )
 
+#: The quoted-JSON twin of the two rules above, by value for the same reason.
+_LABEL_RULE_QUOTED_JSON = (
+    r"(?i)[\"'](?:api[_-]?key|secret[_-]?(?:access[_-]?)?key"
+    r"|(?:access|session)[_-]?token|password|passwd)[\"']\s*:\s*[\"']"
+)
+
+#: The label rules whose *value* the index-only projection
+#: (``memtomem.indexing.privacy_projection``) is allowed to adjudicate: the
+#: label names a bounded value the projection can replace with a marker. Every
+#: other rule — provider tokens, PEM material, AWS key IDs — matches the secret
+#: itself, so there is no separable value to mask and the file must block.
+#:
+#: Keyed by literal regex string, never by index, for the reason spelled out
+#: above ``EXEMPTIBLE_DOC_PATTERNS``: a resync from memtomem-stm may reorder
+#: ``DEFAULT_PATTERNS``, and an ordinal would then silently re-point the
+#: projection at whatever moved into that slot — a provider-token hit would
+#: become "maskable" and its file would index instead of blocking.
+PROJECTABLE_LABEL_PATTERNS: tuple[str, ...] = (
+    _LABEL_RULE_UNQUOTED_KEYS,
+    _LABEL_RULE_UNQUOTED_PASSWORD,
+    _LABEL_RULE_QUOTED_JSON,
+)
+
+#: Subset of the above whose match ends *on the opening quote of the value*
+#: rather than on the ``:``/``=`` separator, so the value span starts inside a
+#: quoted string. The projection needs this distinction to find the value end.
+QUOTED_LABEL_PATTERNS: tuple[str, ...] = (_LABEL_RULE_QUOTED_JSON,)
+
 
 def exemption_covers(hits: list[RedactionHit]) -> bool:
     """True when a declared exemption may waive **every** hit in ``hits``.

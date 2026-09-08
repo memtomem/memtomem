@@ -77,7 +77,7 @@ def _source_hooks(plan) -> dict:
 def test_a_migration_abandoned_before_it_starts_writes_nothing(plan):
     with abandon_sync_on_exit() as abandoned:
         abandoned.set()
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
 
     assert not result.target_written and not result.source_written, result
     assert not plan.target_path.exists(), "the target tier was created anyway"
@@ -112,7 +112,7 @@ def test_abandonment_while_waiting_for_the_locks_stops_before_the_reads(plan, mo
 
         monkeypatch.setattr(migrate_mod, "_file_lock", _lock_then_abandon)
         monkeypatch.setattr(migrate_mod, "_read_with_mtime", _recording_read)
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
 
     assert reads == [], (
         "the apply read the tiers after its caller gave up — the post-lock "
@@ -138,7 +138,7 @@ def test_abandonment_during_the_reclassification_stops_before_the_target_write(p
             return out
 
         monkeypatch.setattr(migrate_mod, "_read_with_mtime", _read_then_abandon)
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
 
     assert not result.target_written and not result.source_written, result
     assert not plan.target_path.exists()
@@ -163,7 +163,7 @@ def test_abandonment_between_the_two_writes_still_cleans_the_source(plan, monkey
             abandoned.set()
 
         monkeypatch.setattr(migrate_mod, "_write_json", _write_then_abandon)
-        result = apply_migration(plan)
+        result = apply_migration(plan, surface="test_settings_migrate")
 
     assert result.target_written, result
     assert result.source_written, (
@@ -176,7 +176,7 @@ def test_abandonment_between_the_two_writes_still_cleans_the_source(plan, monkey
 
 def test_a_migration_nobody_abandoned_applies_normally(plan):
     """The default, and the only path any caller takes today (the CLI)."""
-    result = apply_migration(plan)
+    result = apply_migration(plan, surface="test_settings_migrate")
 
     assert result.target_written and result.source_written, result
     assert not any("abandoned" in w for w in result.warnings), result.warnings

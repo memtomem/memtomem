@@ -1,8 +1,41 @@
 # Bounded chunking validation — 2026-09-08
 
-The common file-indexing path now applies index-only masking, exact token limits,
-and structural descriptions. The installed CLI and primary Core were verified
-with the existing configuration.
+This document retains a historical deployment snapshot from before the review
+follow-ups. It does not establish deployment or runtime verification of the final
+PR fixes. Exact token limits remain opt-in.
+
+## Review follow-up verification
+
+The final changes integrate main's source-provenance checks, retain disabled
+automatic masking, scan imported metadata independently, and prevent source
+rewrites for fragments sharing physical lines. SQLite reads accommodate either
+branch's column order. The focused safety tests exercise MCP/web edit and delete,
+whole-entry edits, ordinary reindexing, foreign and verified self-imports, newline
+parity, and schema upgrades/reopening.
+
+Final local validation on macOS / Python 3.12:
+
+- Full non-live suite: **15,124 passed, 326 skipped, 46 deselected** (603.12 seconds).
+- Focused safety, provenance, chunking, and indexing checks: **411 passed**.
+- Ruff lint and format checks passed; mypy passed for 364 source files.
+- Bandit passed against the existing baseline; no baseline changes were made.
+- Merge conflicts with main `d67a8de` are resolved locally; whitespace checks passed.
+- The original feature worktree's staged changes were verified unchanged.
+
+The full-suite command excludes `test_golden_path.py` and markers `ollama` and
+`llm`, matching the general CI job. This is local evidence: refreshed remote CI,
+Windows execution, model-backed golden-path checks, and deployment are not
+established by this run. The resolved merge and fixes are staged, not committed
+or pushed.
+
+Tested code/test/configuration snapshot SHA-256:
+`ec1d83c8899703d3abc865b8b0c034e99f107cceda4c37f6282b3cd74574e344`.
+
+
+The index-only masking projection described in earlier drafts of this document
+ships **disabled**; see "Index-only masking — not enabled" in
+`bounded-chunking.md`. Rows below that describe masking record what the disabled
+implementation would do, not what this release does.
 
 ## Issues addressed
 
@@ -11,7 +44,7 @@ with the existing configuration.
 | Duplicate JSON keys could lose earlier values | Fall back to lossless source splitting |
 | Line references could drift after whitespace packing | Generate positions and fragment numbers after packing |
 | Repeated tokenization of the entire remaining body | Bound candidate windows and validate final token counts |
-| Illustrative passwords and empty environment assignments were blocked | Mask identifiable values in the indexed copy; preserve explicit empty assignments |
+| Illustrative passwords and empty environment assignments were blocked | Not resolved in this release — the masking projection ships disabled, so these stay blocked |
 | Editing masked chunks could overwrite original source | Reject MCP/web chunk edits and direct users to edit the source |
 | Description caches retained older source generations | Replace each source generation, cap it at 256 entries, and clear it on deletion |
 | Partial hot reload could mix chunk policies | Validate restart-required settings before publishing configuration |
@@ -20,8 +53,9 @@ with the existing configuration.
 
 Existing scanner patterns, explicit exemption auditing, and shared-scope guards
 remain in place. Ambiguous values and specific credential patterns still reach
-the guard. Optional LLM enrichment remains disabled. Only the indexed copy is
-masked; source files are preserved. This does not anonymize arbitrary PII.
+the guard. Optional LLM enrichment remains disabled by default. Automatic masking is also
+disabled; source files are preserved. The historical masking examples below do
+not describe the shipped default and do not claim to anonymize arbitrary PII.
 
 ## Scanner and chunk examples
 
@@ -37,14 +71,15 @@ The actual chunk containing the masked examples has a 1,373-token body and a
 28-token description:
 
 ```text
-Index masking: 2 source values masked.
 nbrun
 File: nbrun.py
-Lines: 1-67; fragment 1/2
+Fragment 1/2
 ```
 
-Fragment numbers are relative to the same symbol hierarchy. `redaction_count`
-is the source-level count repeated on each chunk, not a per-chunk count.
+Fragment numbers are relative to the same symbol hierarchy. Line ranges are
+deliberately absent from the description: it is embedded and BM25-indexed, and a
+position in it would make every chunk below an edit re-embed. The range lives in
+the `start_line` / `end_line` columns, which a re-index refreshes on its own.
 
 ## Local validation snapshot
 

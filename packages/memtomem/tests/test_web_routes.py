@@ -29,6 +29,7 @@ from memtomem.config import IndexingConfig, SearchConfig, TargetScope
 from memtomem.context.projects import KnownProjectsStore
 from memtomem.models import Chunk, ChunkMetadata, IndexingStats, SearchResult
 from memtomem.search.pipeline import RetrievalStats
+from memtomem.source_provenance import source_span_hash
 from memtomem.web.app import create_app
 from .helpers import consent_lines, set_home
 from .web.test_upload_quarantine import (
@@ -47,6 +48,15 @@ from .web.test_upload_quarantine import (
 CHUNK_ID = uuid.uuid4()
 
 
+def _fixture_span_hash(source: Path, start: int, end: int) -> str | None:
+    """Snapshot a real fixture at setup time, before any race sabotage (#2371)."""
+    try:
+        text = source.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return source_span_hash(text.splitlines(), start, end)
+
+
 def _make_test_chunk(
     chunk_id: uuid.UUID | None = None,
     content: str = "test chunk content",
@@ -61,6 +71,7 @@ def _make_test_chunk(
             namespace="default",
             start_line=1,
             end_line=5,
+            source_span_hash=_fixture_span_hash(Path(source), 1, 5),
         ),
         id=chunk_id or CHUNK_ID,
         content_hash="abc123",
@@ -1903,6 +1914,7 @@ class TestChunksList:
                     start_line=1,
                     end_line=2,
                     scope=scope,
+                    source_span_hash=_fixture_span_hash(Path("/tmp/test.md"), 1, 2),
                 ),
                 id=CHUNK_ID,
                 content_hash="h",
@@ -1935,6 +1947,7 @@ class TestChunksList:
                 start_line=1,
                 end_line=2,
                 scope="",  # legacy empty-string row
+                source_span_hash=_fixture_span_hash(Path("/tmp/test.md"), 1, 2),
             ),
             id=CHUNK_ID,
             content_hash="h",
@@ -2275,6 +2288,7 @@ class TestEditChunkNamespaceLookupFailure:
                 namespace=chunk.metadata.namespace,
                 start_line=1,
                 end_line=3,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2313,6 +2327,7 @@ class TestEditChunkNamespaceLookupFailure:
                 namespace=chunk.metadata.namespace,
                 start_line=1,
                 end_line=3,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2353,7 +2368,11 @@ class TestDeleteChunk:
         chunk = dataclasses.replace(
             base,
             metadata=dataclasses.replace(
-                base.metadata, source_file=source, start_line=1, end_line=3
+                base.metadata,
+                source_file=source,
+                start_line=1,
+                end_line=3,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
         )
         # Route lookup, unlocked + fresh lookups in ``locked_source_chunk``,
@@ -2575,6 +2594,7 @@ class TestDeleteChunk:
                 end_line=3,
                 scope="project_shared",
                 project_root=proj,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2620,6 +2640,7 @@ class TestDeleteChunk:
                 end_line=3,
                 scope="project_shared",
                 project_root=proj,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2695,6 +2716,7 @@ class TestEditChunk:
                 namespace=chunk.metadata.namespace,
                 start_line=1,
                 end_line=6,
+                source_span_hash=_fixture_span_hash(source, 1, 6),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2771,6 +2793,7 @@ class TestEditChunkRedaction:
                 namespace=chunk.metadata.namespace,
                 start_line=1,
                 end_line=3,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2820,6 +2843,7 @@ class TestEditChunkRedaction:
                 end_line=3,
                 scope="project_shared",
                 project_root=proj,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=chunk.id,
             content_hash=chunk.content_hash,
@@ -2932,6 +2956,7 @@ class TestEditChunkProjectSharedGateB:
                     end_line=3,
                     scope=chunk_scope,
                     project_root=None if chunk_scope == "user" else proj,
+                    source_span_hash=_fixture_span_hash(source, 1, 3),
                 ),
                 # One id: this is the same row being re-read, not two rows.
                 id=base.id,
@@ -3206,6 +3231,7 @@ class TestChunkValidityFields:
                 end_line=3,
                 valid_from_unix=1_734_220_800,  # 2024-12-15 00:00 UTC
                 valid_to_unix=1_743_465_599,  # 2025-Q1 end (2025-03-31 23:59:59 UTC)
+                source_span_hash=_fixture_span_hash(Path("/tmp/test.md"), 1, 3),
             ),
             id=CHUNK_ID,
             content_hash="abc123",
@@ -3253,6 +3279,7 @@ class TestChunkValidityFields:
                 valid_to_unix=1_743_465_599,
                 parent_context="Section A",
                 overlap_before=42,
+                source_span_hash=_fixture_span_hash(Path("/tmp/test.md"), 1, 3),
             ),
             id=CHUNK_ID,
             content_hash="abc123",
@@ -6488,6 +6515,7 @@ class TestChunkCrudCrossProcessLock:
                 namespace=c.metadata.namespace,
                 start_line=1,
                 end_line=3,
+                source_span_hash=_fixture_span_hash(source, 1, 3),
             ),
             id=c.id,
             content_hash=c.content_hash,
@@ -6734,6 +6762,146 @@ class TestChunkCrudCrossProcessLock:
         async with async_file_lock(_lock_path_for(target), timeout=5.0):
             resp = await client.post("/api/add", json={"content": "hello", "file": "pinned.md"})
         assert resp.status_code == 503
+
+    # --- #2367: the forward write refuses a source changed mid-span ----------
+    #
+    # The sabotage is hooked on ``read_pre_image`` (PATCH) / ``remove_lines``
+    # (DELETE, which holds no pre-image) so the production write itself is
+    # untouched and the refusal under test is the helper's own. Only the source
+    # file is removed or swapped — never the directory, which holds the span's
+    # open sidecar and would fail ``rmtree`` on Windows.
+
+    @staticmethod
+    def _sabotage_after_pre_image(monkeypatch, sabotage):
+        from memtomem.tools import memory_mutation
+
+        real_read = memory_mutation.read_pre_image
+
+        def read_then_sabotage(path):
+            pre = real_read(path)
+            sabotage(path)
+            return pre
+
+        monkeypatch.setattr(memory_mutation, "read_pre_image", read_then_sabotage)
+
+    @staticmethod
+    def _stranger_over(path: Path) -> str:
+        text = "## Stranger\n\nsomebody else's note\n"
+        newcomer = path.with_name("stranger.md")
+        newcomer.write_text(text, encoding="utf-8")
+        os.replace(newcomer, path)
+        return text
+
+    async def test_edit_chunk_answers_409_when_the_source_is_removed_mid_span(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
+    ):
+        src = tmp_path / "note.md"
+        src.write_text("## H\n\nold body\n", encoding="utf-8")
+        chunk = self._chunk_on(src)
+        app.state.storage.get_chunk = AsyncMock(return_value=chunk)
+        self._sabotage_after_pre_image(monkeypatch, lambda path: path.unlink())
+        from memtomem.web.routes._errors import SOURCE_REMOVED_DURING_WRITE_DETAIL
+
+        resp = await client.patch(f"/api/chunks/{chunk.id}", json={"new_content": "new body"})
+
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == SOURCE_REMOVED_DURING_WRITE_DETAIL
+        assert not src.exists()  # the deleted note was not written back
+        app.state.search_pipeline.invalidate_cache.assert_called()
+
+    async def test_edit_chunk_answers_409_when_the_source_is_replaced_mid_span(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
+    ):
+        src = tmp_path / "note.md"
+        src.write_text("## H\n\nold body\n", encoding="utf-8")
+        chunk = self._chunk_on(src)
+        app.state.storage.get_chunk = AsyncMock(return_value=chunk)
+        stranger = {}
+        self._sabotage_after_pre_image(
+            monkeypatch, lambda path: stranger.setdefault("text", self._stranger_over(path))
+        )
+        from memtomem.web.routes._errors import SOURCE_REPLACED_DURING_WRITE_DETAIL
+
+        resp = await client.patch(f"/api/chunks/{chunk.id}", json={"new_content": "new body"})
+
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == SOURCE_REPLACED_DURING_WRITE_DETAIL
+        # The stranger's file was not spliced at the old file's line numbers.
+        assert src.read_text(encoding="utf-8") == stranger["text"]
+
+    def _delete_lookups(self, app, chunk):
+        """``get_chunk`` answers the chunk until the row is actually deleted.
+
+        Pinned on the store's own state rather than on a fixed-length
+        ``side_effect`` list: the route's lookup count differs per branch, and a
+        list one entry short would make the row read as already absent and skip
+        the delete under test.
+        """
+
+        async def get_chunk(_chunk_id):
+            if app.state.storage.delete_chunks.await_count:
+                return None
+            return chunk
+
+        app.state.storage.get_chunk = AsyncMock(side_effect=get_chunk)
+
+    async def test_delete_chunk_finishes_index_only_when_the_source_is_removed_mid_span(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
+    ):
+        """Somebody else's ``rm`` satisfies the delete's intent.
+
+        The entry the caller asked to remove is gone from disk, so answering
+        503 would invite a retry against a file that will never come back.
+        """
+        src = tmp_path / "note.md"
+        src.write_text("## H\n\nbody\n", encoding="utf-8")
+        chunk = self._chunk_on(src)
+        self._delete_lookups(app, chunk)
+        from memtomem.web.routes import chunks as chunks_route
+
+        real_remove = chunks_route.remove_lines
+
+        def remove_after_unlink(path, *args, **kwargs):
+            path.unlink()
+            return real_remove(path, *args, **kwargs)
+
+        monkeypatch.setattr(chunks_route, "remove_lines", remove_after_unlink)
+
+        resp = await client.delete(f"/api/chunks/{chunk.id}")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted"] == 1
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        assert not src.exists()  # nothing was recreated
+        # No re-index of a file that is not there.
+        app.state.index_engine.index_file.assert_not_awaited()
+
+    async def test_delete_chunk_answers_409_when_the_source_is_replaced_mid_span(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
+    ):
+        src = tmp_path / "note.md"
+        src.write_text("## H\n\nbody\n", encoding="utf-8")
+        chunk = self._chunk_on(src)
+        self._delete_lookups(app, chunk)
+        from memtomem.web.routes import chunks as chunks_route
+        from memtomem.web.routes._errors import SOURCE_REPLACED_DURING_WRITE_DETAIL
+
+        real_remove = chunks_route.remove_lines
+        stranger = {}
+
+        def remove_after_replace(path, *args, **kwargs):
+            stranger["text"] = self._stranger_over(path)
+            return real_remove(path, *args, **kwargs)
+
+        monkeypatch.setattr(chunks_route, "remove_lines", remove_after_replace)
+
+        resp = await client.delete(f"/api/chunks/{chunk.id}")
+
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == SOURCE_REPLACED_DURING_WRITE_DETAIL
+        # Neither the stranger's lines nor the index row were touched.
+        assert src.read_text(encoding="utf-8") == stranger["text"]
+        app.state.storage.delete_chunks.assert_not_awaited()
 
 
 class TestConfigErrorHandler:

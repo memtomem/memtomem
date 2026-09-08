@@ -820,12 +820,17 @@ class TestConfigSaveValidationAndRollback:
         # unused: nothing was accepted, so the route must not touch
         # ``~/.memtomem/config.json`` — this test builds a synthetic config,
         # and a delta-only save of it would rewrite the developer's real file.
+        # ``configure_chunk_budget`` is awaited on every applied patch, so the
+        # storage stand-in needs an async attribute there; a bare ``MagicMock``
+        # returns a mock that cannot be awaited.
+        storage_mock = MagicMock()
+        storage_mock.configure_chunk_budget = AsyncMock()
         with patch("memtomem.web.routes.system.save_config_overrides") as save:
             resp = await patch_config(
                 request=request_mock,
                 req=req,
                 persist=True,
-                storage=MagicMock(),
+                storage=storage_mock,
                 search_pipeline=MagicMock(),
             )
         save.assert_not_called()

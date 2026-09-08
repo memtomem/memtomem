@@ -1177,18 +1177,17 @@ def _claude_desktop_config_hint() -> str:
 
 
 def _emit_plugin_coexistence_note() -> None:
-    """Warn that a manual user-scope entry duplicates the plugin's server.
+    """Point manual users at the read-only check before installing a plugin."""
+    click.echo("  Before installing the memtomem Claude plugin, check for duplicates:")
+    click.echo("    mm doctor --claude-mcp")
 
-    The wizard cannot see plugin installs (they are not recorded in
-    ``~/.claude.json``), so it cannot detect the pair itself — point at the
-    observable session-side check instead. Each remediation command stays on
-    its own line so a terminal copy-paste grabs the whole command.
-    """
-    click.echo("  Note: if the memtomem Claude Code plugin is also installed, this")
-    click.echo("  manual entry runs a second server against the same store. Check")
-    click.echo("  /mcp for two memtomem servers; keep one:")
-    click.echo("    claude mcp remove memtomem            (keep the plugin)")
-    click.echo("    /plugin uninstall memtomem@memtomem   (keep this manual entry)")
+
+def _preflight_mcp_choice(choice: int) -> bool:
+    if choice not in (1, 2):
+        return True
+    from memtomem.cli._claude_mcp import preflight
+
+    return preflight()
 
 
 def _emit_mcp_paste_hints() -> None:
@@ -2234,6 +2233,8 @@ def _write_config_and_summary(
     custom keys outside the canonical ``Mem2MemConfig`` shape are also
     preserved. A timestamped backup is written first iff at least one key
     is going to be dropped — otherwise the run is a no-op on disk."""
+    # Also covers direct callers and interactive choices before config writes.
+    _preflight_mcp_choice(state["mcp_choice"])
     if base_dir is None:
         base_dir = Path.home()
     config_dir = base_dir / ".memtomem"
@@ -2483,54 +2484,36 @@ def _write_config_and_summary(
 
     # MCP integration
     mcp_choice = state["mcp_choice"]
+    # Re-read immediately before registration. A previously absent plugin may
+    # have been enabled while the wizard was running. Do not mutate the user's
+    # choice: both checks must inspect the same requested operation.
+    if not _preflight_mcp_choice(mcp_choice):
+        mcp_choice = 3
     if mcp_choice == 1:
         claude_cmd = ["claude", "mcp", "add", "memtomem", "-s", "user", "--"]
         claude_cmd.append(server_cmd)
         claude_cmd.extend(server_args)
 
-        # Three failure modes need distinct UX, but the old code collapsed
-        # all of them into "'claude' not found":
-        #   1. FileNotFoundError → claude binary genuinely missing.
-        #   2. returncode != 0 with "already exists" stderr → memtomem MCP
-        #      is already registered in the user's claude config (rerun of
-        #      `mm init`, or manual `claude mcp add` earlier). Treat as
-        #      success and skip the .mcp.json fallback — the existing user
-        #      scope entry already covers Claude Code.
-        #   3. returncode != 0 for any other reason → surface stderr so the
-        #      user can see what actually failed before we fall back.
+        # A failed/unknown delivery must never create a second registration
+        # in another scope. The account may have been written before timeout.
         try:
             result = _run(claude_cmd, timeout=10)
-            if result.returncode == 0:
-                click.secho("  Claude Code: configured (user scope)", fg="green")
-                _emit_plugin_coexistence_note()
-            elif "already exists" in (result.stderr or ""):
-                # Brittle by design: depends on Claude Code's stderr wording
-                # ("MCP server <name> already exists in user config") staying
-                # English-stable. If upstream rephrases or localizes, this
-                # branch silently regresses to the generic-failure path
-                # below — which still writes .mcp.json successfully but
-                # leaves duplicate state. Re-grep claude's source if/when
-                # users report a "claude mcp add failed (...)" with an
-                # already-exists-shaped stderr.
-                click.secho(
-                    "  Claude Code: already registered (user scope) — skipped",
-                    fg="green",
-                )
-                # The pre-existing manual entry pairs with an installed plugin
-                # exactly the same way a fresh one would — same note applies.
-                _emit_plugin_coexistence_note()
-            else:
-                stderr_line = (result.stderr or "").strip().splitlines()[0:1]
-                detail = stderr_line[0] if stderr_line else f"exit {result.returncode}"
-                click.echo(f"  Claude Code: claude mcp add failed ({detail}).")
-                _write_mcp_json(server_cmd, server_args, mcp_env)
-                click.echo("  MCP config: wrote ./.mcp.json")
-                _emit_mcp_paste_hints()
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            click.echo("  Claude Code: 'claude' not found. Use .mcp.json instead.")
-            _write_mcp_json(server_cmd, server_args, mcp_env)
-            click.echo("  MCP config: wrote ./.mcp.json")
-            _emit_mcp_paste_hints()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            reason = "timed out" if isinstance(exc, subprocess.TimeoutExpired) else "unavailable"
+            raise click.ClickException(
+                f"Claude MCP registration {reason}; no fallback .mcp.json was written. "
+                "Check `mm doctor --claude-mcp` before retrying, or use --mcp skip."
+            ) from None
+        if result.returncode == 0:
+            click.secho("  Claude Code: configured (user scope)", fg="green")
+            _emit_plugin_coexistence_note()
+        elif "already exists" in (result.stderr or "") and not _preflight_mcp_choice(1):
+            click.secho("  Claude Code: existing registration confirmed — skipped", fg="green")
+        else:
+            raise click.ClickException(
+                "Claude MCP registration failed; no fallback .mcp.json was written. "
+                "Check `mm doctor --claude-mcp` before retrying, or use --mcp skip."
+            )
     elif mcp_choice == 2:
         _write_mcp_json(server_cmd, server_args, mcp_env)
         click.echo("  MCP config: wrote ./.mcp.json")
@@ -3198,6 +3181,11 @@ def init(
 
     if preset and advanced:
         raise click.UsageError("--preset and --advanced are mutually exclusive")
+
+    # Explicit requests are checked before wizard steps can create memory
+    # directories or settings. --mcp skip / kimi do not inspect Claude.
+    if mcp_mode in ("claude", "json"):
+        _preflight_mcp_choice(1 if mcp_mode == "claude" else 2)
 
     advanced_steps = [
         _step_embedding,

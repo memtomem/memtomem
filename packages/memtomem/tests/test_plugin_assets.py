@@ -118,7 +118,8 @@ def test_generated_assets_have_no_cross_runtime_or_legacy_leaks() -> None:
             assert marker not in text, f"Claude-only sidecar {sidecar.name} leaked into {label}"
 
 
-def test_claude_setup_skill_carries_the_registration_check() -> None:
+@pytest.mark.parametrize("workflow", ["setup", "status"])
+def test_claude_setup_skill_carries_the_registration_check(workflow: str) -> None:
     """The Claude setup skill must keep the duplicate-registration check.
 
     Manual `claude mcp add` entries that don't match the plugin's exact launch
@@ -128,7 +129,7 @@ def test_claude_setup_skill_carries_the_registration_check() -> None:
     the check and names the remediation inline; it must never remove a
     registration itself.
     """
-    setup = (_ROOT / "packages/memtomem-claude-plugin/skills/setup/SKILL.md").read_text(
+    setup = (_ROOT / f"packages/memtomem-claude-plugin/skills/{workflow}/SKILL.md").read_text(
         encoding="utf-8"
     )
     # Past frontmatter (allowed-tools also names both prefixes); collapse the
@@ -139,8 +140,10 @@ def test_claude_setup_skill_carries_the_registration_check() -> None:
     assert "claude mcp remove memtomem" in body
     assert "/plugin uninstall memtomem@memtomem" in body
     assert "Never remove either registration yourself" in body
+    assert "mm doctor --claude-mcp" in body
+    assert "does not prove two live processes or a shared database" in body
 
-    sidecar = _ROOT / "packages/memtomem-plugin-assets/workflows/setup.claude.md"
+    sidecar = _ROOT / f"packages/memtomem-plugin-assets/workflows/{workflow}.claude.md"
     assert sidecar.is_file(), "Claude-only appendix moved; update the renderer sidecar path"
 
 

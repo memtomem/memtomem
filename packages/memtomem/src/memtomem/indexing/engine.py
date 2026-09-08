@@ -1095,7 +1095,7 @@ class IndexEngine:
             return self._discover_files(path, recursive)
         return []
 
-    def chunk_content(self, file_path: Path, content: str) -> list[Chunk]:
+    def chunk_content(self, file_path: Path, content: str, *, exempt: bool = False) -> list[Chunk]:
         """Chunk ``content`` exactly as indexing would, post-processing included.
 
         Single source of truth for "which chunks would this file produce" — the
@@ -1104,26 +1104,56 @@ class IndexEngine:
         the *same* chunk boundaries and content hashes the indexer would write
         in order to tell a real content change from a bare ``touch`` (#2078).
 
-        Pure: no storage, no embedder, no privacy scan, no namespace/scope
-        resolution — those stay in ``_index_file``, and none of them affect
-        ``content_hash`` or ``heading_hierarchy``. Callers that only hold a
-        storage-less engine (the doctor's discovery engine) can use it safely.
-        Returns ``[]`` for a suffix no chunker is registered for.
-        """
-        from memtomem.indexing.privacy_projection import prepare_index_content
+        Storage-free and embedder-free, so a caller holding only the doctor's
+        discovery engine can use it. Returns ``[]`` for a suffix no chunker is
+        registered for.
 
+        It is not privacy-free in *shape*: the index-only masking projection
+        changes the bytes that get chunked, so it runs on this side of the
+        boundary or the doctor would hash different content than the indexer
+        wrote. It is privacy-free in *effect* today, because that projection
+        ships disabled (``privacy_projection.PROJECTION_ENABLED``) and returns
+        every input unchanged — both branches below currently produce the same
+        text.
+
+        ``exempt`` says the caller already adjudicated this content and it must
+        be stored verbatim: a ``force_unsafe`` valve, a file-declared
+        frontmatter exemption, or an ingress that ran the write guard itself
+        (``already_scanned``). It is a no-op while the projection is off, and
+        is threaded anyway so that turning the projection on cannot silently
+        make an explicit allow-this into a lossy write — the store would hold a
+        masked projection while the audit log said "bypass", and that
+        projection is read-only to ``mem_edit``.
+        """
+        from memtomem.indexing.privacy_projection import IndexProjection, prepare_index_content
+
+        original_content = content
         scope, _ = self._resolve_scope(file_path.resolve())
-        projection = prepare_index_content(content, scope=scope)
+        projection = (
+            IndexProjection(content, content)
+            if exempt
+            else prepare_index_content(content, scope=scope)
+        )
         content = projection.content
         chunks = self._chunk_projected_content(file_path, content)
         if projection.redaction_count:
             for chunk in chunks:
-                context = (
-                    f"Index masking: {projection.redaction_count} source values masked.\n"
-                    + chunk.metadata.retrieval_context
+                # Keep whatever retrieval text the chunker produced. On the
+                # unbounded path ``retrieval_context`` is empty and the heading
+                # hierarchy is what ``Chunk.retrieval_content`` would have
+                # composed, so take it explicitly: assigning a bare note here
+                # sets a non-empty context, and that makes the composition
+                # short-circuit and drop the headings from the embedded and
+                # BM25 text — every masked chunk indexing the same sentence.
+                base = chunk.metadata.retrieval_context or " > ".join(
+                    chunk.metadata.heading_hierarchy
                 )
+                note = f"Index masking: {projection.redaction_count} source values masked."
+                context = "\n".join(filter(None, (note, base)))
                 chunk.metadata = dataclasses.replace(
-                    chunk.metadata, redaction_count=projection.redaction_count
+                    chunk.metadata,
+                    redaction_count=projection.redaction_count,
+                    source_read_only=True,
                 )
                 if self._config.hard_max_chunk_tokens:
                     from memtomem.chunking.bounded import TokenBudget
@@ -1131,6 +1161,54 @@ class IndexEngine:
                     TokenBudget(self._config).describe(chunk, context)
                 else:
                     chunk.metadata = dataclasses.replace(chunk.metadata, retrieval_context=context)
+        from memtomem.source_provenance import source_span_hash
+
+        # Bind only complete, writable spans to the original source snapshot.
+        # A matching line hash cannot authorize editing one slice of that line.
+        source_lines = original_content.splitlines()
+        # The writer uses splitlines(), whereas parsers and the token limiter
+        # track LF boundaries. Unicode separators (or an untranslated CR from
+        # a direct caller) can therefore make a valid hash cover only part of
+        # a chunk. The writer would also normalize those separators outside
+        # the edited span. Refuse source rewrites for that entire snapshot.
+        lf_lines = original_content.split("\n")
+        if original_content.endswith("\n"):
+            lf_lines.pop()
+        incompatible_lines = source_lines != lf_lines
+        span_hashes: dict[tuple[int, int], str | None] = {}
+        # Earlier chunkers can already have subdivided a line into pieces
+        # smaller than the hard budget. No individual piece owns shared source
+        # lines, even if the exact limiter did not split it again. A sweep also
+        # catches partially overlapping ranges, such as a first fragment that
+        # includes the section heading and later fragments on its last line.
+        shared_lines: set[int] = set()
+        furthest_end = 0
+        furthest_index = -1
+        ranges = sorted(
+            (c.metadata.start_line, c.metadata.end_line, i)
+            for i, c in enumerate(chunks)
+            if 1 <= c.metadata.start_line <= c.metadata.end_line
+        )
+        for start, end, index in ranges:
+            if start <= furthest_end:
+                shared_lines.update((furthest_index, index))
+            if end > furthest_end:
+                furthest_end, furthest_index = end, index
+        for index, chunk in enumerate(chunks):
+            span = (chunk.metadata.start_line, chunk.metadata.end_line)
+            read_only = (
+                chunk.metadata.source_read_only
+                or bool(chunk.metadata.redaction_count)
+                or index in shared_lines
+                or incompatible_lines
+            )
+            if not read_only and span not in span_hashes:
+                span_hashes[span] = source_span_hash(source_lines, *span)
+            chunk.metadata = dataclasses.replace(
+                chunk.metadata,
+                source_read_only=read_only,
+                source_span_hash=None if read_only else span_hashes[span],
+            )
         return chunks
 
     def _chunk_projected_content(self, file_path: Path, content: str) -> list[Chunk]:
@@ -1970,13 +2048,23 @@ class IndexEngine:
                 ],
             }
 
+        # Universal newlines, deliberately. Every reader downstream of this one
+        # is *specified* over the text ``read_text`` yields, and says so:
+        # ``indexing/redaction_exemption.indexer_text`` calls that parity
+        # structural rather than a second implementation of the translation
+        # (#2310), and ``chunking/markdown._FRONT_MATTER_RE`` is this repo's
+        # definition of frontmatter. Reading with ``newline=""`` leaves ``\r``
+        # in the text and every one of them silently stops matching: a
+        # CRLF-authored note loses its tags, its validity window and its
+        # ``redaction:`` declaration, a lone-CR source desynchronises the
+        # ``\n``-built line table in ``chunking/bounded``, and every CRLF file
+        # changes content hash at once. Byte fidelity, where a caller needs it,
+        # is that caller's job — see ``indexer_text`` for the one that has it.
         try:
-            with file_path.open(encoding="utf-8", newline="") as stream:
-                content = stream.read()
+            content = file_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             logger.warning("Non-UTF-8 content in %s, replacing invalid bytes", file_path.name)
-            with file_path.open(encoding="utf-8", errors="replace", newline="") as stream:
-                content = stream.read()
+            content = file_path.read_text(encoding="utf-8", errors="replace")
         except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
             # File is gone as a *file*: unlinked between stat and read (TOCTOU),
             # or the leaf path was replaced by a directory (``IsADirectoryError``
@@ -2036,13 +2124,19 @@ class IndexEngine:
         # hard-refuses it for ``project_shared`` exactly as it does the valve.
         scope_val, project_root = self._resolve_scope(decision_path)
         exempted = False
+        # Verbatim storage is the caller's explicit decision in three cases: an
+        # ingress that already ran the guard, a file that declares its own
+        # frontmatter exemption, and the ``force_unsafe`` valve. Carried out of
+        # this block so the chunker below gets the same answer the guard got.
+        masking_exempt = already_scanned
         if not already_scanned:
             declared = declared_exemption(decision_path, content)
             from memtomem.indexing.privacy_projection import prepare_index_content
 
             projection = prepare_index_content(content, scope=scope_val)
+            masking_exempt = bool(declared) or force_unsafe
             guard = privacy.enforce_write_guard(
-                content if declared or force_unsafe else projection.guard_content,
+                content if masking_exempt else projection.guard_content,
                 surface="index",
                 force_unsafe=force_unsafe,
                 scope=scope_val,
@@ -2067,7 +2161,7 @@ class IndexEngine:
             if guard.decision not in ("pass", "bypassed", "exempted"):
                 raise RuntimeError(f"unexpected enforce_write_guard decision: {guard.decision!r}")
 
-        new_chunks = self.chunk_content(file_path, content)
+        new_chunks = self.chunk_content(file_path, content, exempt=masking_exempt)
 
         # Resolve namespace: explicit > preserved > bound-new-source > rules >
         # auto_ns > default.
@@ -2878,12 +2972,13 @@ class IndexEngine:
         scope_val, _ = self._resolve_scope(decision_path)
         from memtomem.indexing.privacy_projection import prepare_index_content
 
+        declared = declared_exemption(decision_path, content)
         projection = prepare_index_content(content, scope=scope_val)
         return privacy.enforce_write_guard(
-            content if declared_exemption(decision_path, content) else projection.guard_content,
+            content if declared else projection.guard_content,
             surface="memory_doctor",
             scope=scope_val,
-            declared_exemption=declared_exemption(decision_path, content),
+            declared_exemption=declared,
             record_outcome=False,
         ).decision
 

@@ -84,6 +84,7 @@ async def chunk_resource(chunk_id: str, ctx: CtxType = None) -> str:
             "content": chunk.content,
             "retrieval_context": meta.retrieval_context,
             "redaction_count": meta.redaction_count,
+            "source_read_only": meta.source_read_only,
             "source_file": str(meta.source_file),
             "heading_hierarchy": list(meta.heading_hierarchy),
             "tags": list(meta.tags),

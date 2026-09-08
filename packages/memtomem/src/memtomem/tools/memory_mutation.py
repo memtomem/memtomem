@@ -25,6 +25,13 @@ from typing import TYPE_CHECKING
 from memtomem.context import _atomic
 from memtomem.context._atomic import async_memory_file_lock
 from memtomem.search.visibility import chunk_in_scope_boundary
+from memtomem.source_provenance import StaleSourceProvenanceError
+from memtomem.tools.memory_writer import (
+    RestoreOutcome,
+    SourceChangedError,
+    read_pre_image,
+    restore_pre_image_quietly,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -32,6 +39,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from memtomem.models import Chunk, IndexingStats
+    from memtomem.tools.memory_writer import PreImage
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +129,7 @@ async def locked_source_chunk(
 async def mutate_source_and_reindex(
     index_engine,
     source_file: Path,
-    mutate: Callable[[], None],
+    mutate: Callable[[PreImage], None],
 ) -> IndexingStats:
     """Backup-read → ``mutate`` (in a worker thread) → incremental re-index with
     ``lock_held=True``, restoring the pre-image and re-raising on failure.
@@ -134,15 +142,64 @@ async def mutate_source_and_reindex(
     self-deadlock. Mirrors the MCP
     ``_mutate_file_and_reindex`` rollback contract, giving the web edit path the
     rollback it previously lacked.
+
+    The pre-image goes back only when the source is still the file it was read
+    from: that lock binds cooperating writers, never an external ``rm`` / ``mv``
+    / save-via-rename, so an unconditional write would recreate a file somebody
+    deleted while this ran (#2347). The restore reports instead of raising, and
+    this function always re-raises the *body's* exception — the route
+    (``web/routes/chunks.py``) classifies on its type, and a restore's own
+    ``ENOENT`` arriving in its place would answer 500 to a transient failure the
+    caller should have been told to retry. What the restore did is said in the
+    log, where the route's handler already points.
+
+    ``mutate`` receives the pre-image so the write it performs can refuse on the
+    same identity the rollback would check (#2367); a mutation that refuses says
+    so with a ``SourceChangedError`` and is not rolled back, since it wrote
+    nothing to roll back.
     """
-    original = await asyncio.to_thread(source_file.read_text, encoding="utf-8")
+    pre_image = await asyncio.to_thread(read_pre_image, source_file)
+    mutation_completed = False
     try:
-        await asyncio.to_thread(mutate)
+        await asyncio.to_thread(mutate, pre_image)
+        mutation_completed = True
         return await index_engine.index_file(source_file, already_scanned=True, lock_held=True)
-    except Exception:
-        await asyncio.to_thread(source_file.write_text, original, encoding="utf-8")
+    except Exception as exc:
+        if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:
+            # No byte was written. In particular, do not reindex here: doing
+            # so could erase the stale row and bless an unrelated replacement.
+            raise
+        if isinstance(exc, SourceChangedError) and not mutation_completed:
+            # The write refused before putting a byte on disk (#2367), so there
+            # is no mutation of ours to undo — and restoring anyway would be the
+            # very resurrection this refusal exists to prevent: on a filesystem
+            # that cannot answer identity the restore proceeds on existence
+            # alone, so a file that reappeared in the meantime would be
+            # overwritten with the pre-image of a write that never happened.
+            # Both halves of the condition are load-bearing. The type says
+            # a write refused; the completion flag says it was *this* span's
+            # write. This handler also covers the re-index (and, on the MCP
+            # twin, the cache and provenance work after it), so a
+            # ``SourceChangedError`` surfacing from a later stage names a
+            # mutation that already landed and must still be rolled back.
+            outcome = exc.outcome
+        else:
+            outcome = await asyncio.to_thread(restore_pre_image_quietly, source_file, pre_image)
         try:
             await index_engine.index_file(source_file, already_scanned=True, lock_held=True)
         except Exception:
             logger.warning("Rollback re-index also failed", exc_info=True)
+        if outcome is RestoreOutcome.failed:
+            logger.error(
+                "%s: the rollback failed after %s; the file may still hold the partial edit",
+                source_file,
+                exc,
+            )
+        elif outcome is not RestoreOutcome.restored:
+            logger.warning(
+                "%s: not rolled back (%s) — the source was changed by another process while "
+                "the edit ran, so nothing was written back over it",
+                source_file,
+                outcome,
+            )
         raise

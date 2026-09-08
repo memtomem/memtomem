@@ -27,11 +27,23 @@ from memtomem.server.tools._provenance import (
     record_write_provenance,
 )
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
+from memtomem.source_provenance import (
+    SOURCE_READ_ONLY_DETAIL,
+    STALE_SOURCE_PROVENANCE_DETAIL,
+    StaleSourceProvenanceError,
+)
+from memtomem.tools.memory_writer import (
+    RestoreOutcome,
+    SourceChangedError,
+    read_pre_image,
+    restore_pre_image_quietly,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from memtomem.models import Chunk, IndexingStats
+    from memtomem.tools.memory_writer import PreImage
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +65,56 @@ def _degraded_source_error(chunk_id: str) -> str:
         "could not be locked; nothing was changed. Restore the directory (or "
         "reindex) and retry."
     )
+
+
+def _rollback_error(
+    op: str,
+    source_file: Path,
+    exc: Exception,
+    outcome: RestoreOutcome,
+    *,
+    reconciled: bool,
+) -> str:
+    """The result string for a failed ``op`` and what its rollback managed (#2347).
+
+    One function, for the same reason as :func:`_degraded_source_error`:
+    ``mem_edit`` and ``mem_delete``'s chunk branch must not drift into wording
+    the same condition differently. Each outcome states what is on disk now,
+    because only ``restored`` leaves the pre-state the caller assumed.
+
+    ``reconciled`` is what the caller *verified* about the index, never what it
+    assumed: a rollback re-index reports trouble in ``stats.errors`` rather than
+    raising, and on a removed source it can return a clean zero result while
+    purging nothing (#1566's brake). So the messages below promise a purge only
+    where one was confirmed, and otherwise name the doubt and point at
+    ``mem_index``.
+    """
+    if outcome is RestoreOutcome.source_removed:
+        index_note = (
+            "its index rows were removed too"
+            if reconciled
+            else "its index rows may still be there (see the server log); run mem_index"
+        )
+        return (
+            f"Error: {op} failed, and {source_file} was removed by another process while "
+            f"it ran; nothing was recreated and {index_note}: {exc}"
+        )
+    if outcome is RestoreOutcome.source_replaced:
+        index_note = (
+            "re-indexed in place"
+            if reconciled
+            else "left un-reindexed (see the server log); run mem_index"
+        )
+        return (
+            f"Error: {op} failed, and {source_file} was replaced by another process while "
+            f"it ran; the replacement was left exactly as found and {index_note}: {exc}"
+        )
+    if outcome is RestoreOutcome.failed:
+        return (
+            f"Error: {op} failed and the rollback failed too; {source_file} may still hold "
+            f"the partial {op} (see the server log): {exc}"
+        )
+    return f"Error: {op} failed and rolled back: {exc}"
 
 
 # Appended to a result string returned from the idempotency ledger (issue
@@ -291,7 +353,7 @@ async def _flag_imprecise_write(
 async def _mutate_file_and_reindex(
     app: AppContext,
     source_file: Path,
-    mutate: Callable[[], None],
+    mutate: Callable[[PreImage], None],
     op: str,
 ) -> tuple[IndexingStats | None, str | None]:
     """Backup-read → ``mutate`` → incremental re-index, rolling back on failure.
@@ -300,9 +362,9 @@ async def _mutate_file_and_reindex(
     rollback contract lives in exactly one place. The caller MUST hold the
     file's L1 *and* L2 locks (via ``_locked_chunk``): under them, no other
     CRUD writer — in this process or any other, and no ``memory-migrate`` —
-    can commit between the backup read and the rollback ``write_text``, so
-    restoring ``original`` reverts only this call's own mutation. Because L2
-    is already held, both ``index_file`` calls pass ``lock_held=True`` to skip
+    can commit between the backup read and the restore, so putting the
+    pre-image back reverts only this call's own mutation. Because L2 is
+    already held, both ``index_file`` calls pass ``lock_held=True`` to skip
     the nested sidecar acquire that would otherwise self-deadlock (#1587).
 
     "L2" is the full sidecar here. ``_locked_chunk`` can also hold the
@@ -311,6 +373,21 @@ async def _mutate_file_and_reindex(
     and a source that is still absent fails the pre-image read below before
     any of this runs. So a span that reaches this function holds the flock.
 
+    What those locks do *not* bind is an external mutation of the data file —
+    an ``rm``, an ``mv``, an editor saving via rename (``indexing/engine.py``
+    states the same limit). So the restore is
+    :func:`~memtomem.tools.memory_writer.restore_pre_image_quietly`, which
+    never creates and never raises: it will not resurrect a file somebody
+    deleted while this ran, and its own failure is logged under the body's
+    exception rather than over it (#2347, the rule #2229 set on the lock's
+    release path). Only a ``restored`` outcome leaves the pre-state the caller
+    assumed, so only that one re-raises a ``RetryableError``.
+
+    ``mutate`` receives the pre-image so its own write can be refused on that
+    same identity (#2367) — the forward twin of the rule above, since a plain
+    write recreates a removed source just as a plain restore did. A refusal is
+    reported through the same vocabulary and takes no restore: it wrote nothing.
+
     Returns ``(stats, None)`` on success or ``(None, error_message)`` after
     a rollback; ``op`` ("edit"/"delete") only shapes the messages.
     """
@@ -318,29 +395,90 @@ async def _mutate_file_and_reindex(
     # re-index would otherwise lose the flag, and one that starts would
     # inherit a mutation that happened in its predecessor.
     provenance_session_id = await capture_session_for_untracked_write(app)
-    original = await asyncio.to_thread(source_file.read_text, encoding="utf-8")
+    pre_image = await asyncio.to_thread(read_pre_image, source_file)
+    mutation_completed = False
     try:
-        await asyncio.to_thread(mutate)
+        await asyncio.to_thread(mutate, pre_image)
+        mutation_completed = True
         stats = await app.index_engine.index_file(source_file, already_scanned=True, lock_held=True)
         app.search_pipeline.invalidate_cache()
         await flag_untracked_write(app, provenance_session_id)
         return stats, None
     except Exception as exc:
-        await asyncio.to_thread(source_file.write_text, original, encoding="utf-8")
+        if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:
+            # No byte was written. In particular, do not reindex here: doing
+            # so could erase the stale row and bless an unrelated replacement.
+            return None, f"Error: {STALE_SOURCE_PROVENANCE_DETAIL}"
+        if isinstance(exc, SourceChangedError) and not mutation_completed:
+            # The write refused before putting a byte on disk (#2367), so there
+            # is nothing of ours to undo — and restoring anyway would be the
+            # resurrection the refusal exists to prevent: where the filesystem
+            # cannot answer identity the restore proceeds on existence alone,
+            # so a file that reappeared in between would be overwritten with
+            # the pre-image of a write that never happened.
+            # Both halves of the condition are load-bearing. The type says
+            # a write refused; the completion flag says it was *this* span's
+            # write. This handler also covers the re-index (and, on the MCP
+            # twin, the cache and provenance work after it), so a
+            # ``SourceChangedError`` surfacing from a later stage names a
+            # mutation that already landed and must still be rolled back.
+            outcome = exc.outcome
+        else:
+            outcome = await asyncio.to_thread(restore_pre_image_quietly, source_file, pre_image)
+        reconciled = True
         try:
-            await app.index_engine.index_file(source_file, already_scanned=True, lock_held=True)
+            rollback_stats = await app.index_engine.index_file(
+                source_file, already_scanned=True, lock_held=True
+            )
         except Exception:
+            reconciled = False
             logger.warning("Rollback re-index also failed", exc_info=True)
+        else:
+            # A re-index that returns is not a re-index that reconciled. It
+            # reports per-file trouble in ``stats.errors`` instead of raising,
+            # so reading only the exception would call an oversized or
+            # unreadable replacement a clean reconcile.
+            reconciled = not rollback_stats.errors
+        if outcome is RestoreOutcome.source_removed and reconciled:
+            # And a clean return still is not evidence for a *removed* source:
+            # ``_delete_missing_source`` deliberately no-ops when the whole
+            # containing index root is gone (#1566's mass-orphan brake) and
+            # returns a zero result that looks exactly like "nothing to do".
+            # Whether the rows are gone is answerable directly, so ask rather
+            # than infer — the alternative is a message that assures the caller
+            # of a purge that never happened.
+            try:
+                reconciled = not await app.storage.list_chunks_by_source(source_file.resolve())
+            except Exception:
+                # This check runs inside the rollback handler, so it lives under
+                # the same rule as the restore beside it (#2347): a cleanup step
+                # that fails must not become the exception the caller sees, and
+                # must not skip the cache invalidation below. An unanswerable
+                # question is reported as unreconciled rather than as a purge.
+                reconciled = False
+                logger.warning("Rollback index check failed for %s", source_file, exc_info=True)
         app.search_pipeline.invalidate_cache()
-        logger.error("mem_%s rollback after indexing failure: %s", op, exc, exc_info=True)
-        if isinstance(exc, RetryableError):
+        logger.error(
+            "mem_%s rollback after indexing failure (restore: %s): %s",
+            op,
+            outcome,
+            exc,
+            exc_info=True,
+        )
+        if outcome is RestoreOutcome.restored and isinstance(exc, RetryableError):
             # Rolled back cleanly, and the cause was transient — re-raise so
             # ``tool_handler`` labels it ``Error (retryable):``. Flattening it
             # into the generic string here would tell the caller a transient
             # store failure was a permanent one, and a retry is exactly the
             # right response to it.
+            #
+            # Gated on the outcome (#2347): "retryable" is a claim that the
+            # pre-state is back. Where the source was removed, replaced, or the
+            # restore failed, a retry answers something unrelated — "not found",
+            # or #2346's degraded refusal — and the caller never learns what
+            # actually happened to its file. Those say so in the result string.
             raise
-        return None, f"Error: {op} failed and rolled back: {exc}"
+        return None, _rollback_error(op, source_file, exc, outcome, reconciled=reconciled)
 
 
 def _validate_path(
@@ -1061,6 +1199,9 @@ async def mem_edit(
                 "Edit the original source and reindex this masked projection."
             )
 
+        if meta.source_read_only:
+            return f"Error: {SOURCE_READ_ONLY_DETAIL}"
+
         # ADR-0011: infer scope from the loaded chunk's persisted metadata.
         # Both gates below see the same scope the chunk lives under, so
         # editing a project_shared chunk gets the project_shared rules even
@@ -1128,8 +1269,16 @@ async def mem_edit(
         stats, mutate_err = await _mutate_file_and_reindex(
             app,
             meta.source_file,
-            lambda: replace_chunk_body(
-                meta.source_file, meta.start_line, meta.end_line, new_content
+            # ``expected_identity`` is the pre-image's, so the rewrite refuses
+            # rather than recreating a source removed since it was read, or
+            # splicing a replacement at the removed file's line numbers (#2367).
+            lambda pre: replace_chunk_body(
+                meta.source_file,
+                meta.start_line,
+                meta.end_line,
+                new_content,
+                expected_source_span_hash=meta.source_span_hash,
+                expected_identity=pre.identity,
             ),
             op="edit",
         )
@@ -1199,6 +1348,8 @@ async def mem_delete(
                 return _degraded_source_error(chunk_id)
             assert chunk is not None
             meta = chunk.metadata
+            if meta.source_read_only or meta.redaction_count:
+                return f"Error: {SOURCE_READ_ONLY_DETAIL}"
             # Confirm gate on the fresh chunk: a migrate could have re-scoped
             # it while we waited for the lock (see mem_edit for the rationale).
             inferred_scope = meta.scope or "user"
@@ -1224,7 +1375,15 @@ async def mem_delete(
             stats, mutate_err = await _mutate_file_and_reindex(
                 app,
                 meta.source_file,
-                lambda: remove_lines(meta.source_file, meta.start_line, meta.end_line),
+                # See ``mem_edit``: the pre-image's identity is what keeps this
+                # from recreating a source somebody else already removed (#2367).
+                lambda pre: remove_lines(
+                    meta.source_file,
+                    meta.start_line,
+                    meta.end_line,
+                    expected_source_span_hash=meta.source_span_hash,
+                    expected_identity=pre.identity,
+                ),
                 op="delete",
             )
             if mutate_err:

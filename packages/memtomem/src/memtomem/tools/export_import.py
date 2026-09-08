@@ -198,6 +198,7 @@ def _chunk_to_dict(chunk: Chunk) -> dict:
         "heading_hierarchy": list(meta.heading_hierarchy),
         "retrieval_context": meta.retrieval_context,
         "redaction_count": meta.redaction_count,
+        "source_read_only": meta.source_read_only,
         "chunk_type": meta.chunk_type.value,
         "start_line": meta.start_line,
         "end_line": meta.end_line,
@@ -220,14 +221,20 @@ def _import_scan_text(chunk: Chunk) -> str:
     arrives verbatim from an untrusted bundle and is then embedded
     (``retrieval_content`` = heading hierarchy + content), stored, and
     retrievable. So the foreign-bundle redaction scan covers the full
-    retrievable surface here (content + heading + ``source_file`` + ``tags``),
+    retrievable surface here (content + context + heading + ``source_file`` + ``tags``),
     not just ``content`` as on the locally-derived-metadata write surfaces
     (``mem_add`` / ``mem_batch_add``). Self-exports skip this scan entirely, so
     the wider coverage never affects round-trip fidelity — it only closes the
     metadata-smuggling vector on genuinely foreign bundles.
     """
     return "\n".join(
-        [chunk.retrieval_content, str(chunk.metadata.source_file), *chunk.metadata.tags]
+        [
+            chunk.content,
+            chunk.metadata.retrieval_context,
+            *chunk.metadata.heading_hierarchy,
+            str(chunk.metadata.source_file),
+            *chunk.metadata.tags,
+        ]
     )
 
 
@@ -596,6 +603,7 @@ def _dict_to_chunk(
         heading_hierarchy=tuple(record.get("heading_hierarchy", [])),
         retrieval_context=str(record.get("retrieval_context", "")),
         redaction_count=max(0, int(record.get("redaction_count", 0))),
+        source_read_only=bool(record.get("source_read_only", False)),
         chunk_type=ChunkType(record.get("chunk_type", "raw_text")),
         start_line=int(record.get("start_line", 0)),
         end_line=int(record.get("end_line", 0)),

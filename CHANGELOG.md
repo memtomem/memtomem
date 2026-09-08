@@ -7,6 +7,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Breaking
 
+- **Chunk edits and deletes now require indexed source-span evidence (#2371).**
+  The index stores a hash of each chunk's original line range. MCP `mem_edit`
+  / chunk `mem_delete` and web PATCH/DELETE compare it on the open descriptor
+  before writing, refusing stale provenance with a reindex-and-retry message
+  (HTTP 409 on web). A source replaced before the operation reads it, or edited
+  in place without changing its inode, is left untouched. Refusal does not
+  restore the file, reindex it, or delete its indexed row.
+
+  **Upgrading:** schema generation 2 blocks older binaries that cannot maintain
+  this evidence. Existing and imported chunks remain searchable, but their
+  source must be reindexed before a line edit/delete: use ordinary
+  `mm index <path>` or `mem_index(path="<path>")`, then retrieve the current chunk
+  ID and retry. `--force` is not needed; unchanged content keeps its UUID and
+  vector. Migration never derives evidence from current files for old rows.
+  The digest follows the writer's line-ending semantics and does not depend
+  on transformed retrieval text. External writers remain outside memtomem's
+  cooperative lock; mutation after the descriptor read is not excluded.
+
+- **Moving hooks in or out of the Git-tracked settings tier now asks first.**
+  `mm context settings-migrate` had one confirmation, and it was the wrong one
+  for this: it fires when a tier lives outside the project, which the
+  `project_shared` tier never does. So `--to project_shared --apply` appended
+  hook entries to the `.claude/settings.json` your repository tracks having
+  asked nobody, and recorded no consent. Both directions now ask first — the
+  target because the entries land in the tracked file, and the source because
+  the migration strips them out of it, and removing something the project
+  committed changes what your team runs as much as adding it does. At a
+  terminal that is a prompt naming the file; `--confirm-project-shared`
+  answers it ahead of time. `--yes` does not: it still answers only the
+  host-write prompt, and a `--from user --to project_shared` run needs both
+  flags. A `project_shared` target is now scanned for secrets too,
+  with no force valve, the same as the sibling `settings-copy`. Migrating a
+  secret-bearing rule *out* of the shared tier is deliberately still allowed —
+  that is the fix, not the leak.
+
+  Nothing changes for a migration between the `user` and `project_local`
+  tiers, which is the common case and the one every example shows.
+
+  **Upgrading:** a script that migrates into or out of `project_shared` with
+  `--yes` must add `--confirm-project-shared`; the refusal names it, and
+  `--json` callers get a `needs_confirmation` payload naming the affected tier
+  instead. Every refusal this command makes is now answered in JSON for a
+  `--json` caller, including the privacy scan's, which reports
+  `"refusal": "gate_a"`. The consent is recorded as
+  `project_shared.confirmed_via=cli_context_settings_migrate` with
+  `action=move`. (#2348)
+
 - **Rewriting a note that lives in the Git-tracked tier now asks first.**
   `mem_edit` and the web editor's save both refused a privacy-scan bypass on a
   `project_shared` chunk but took no confirmation, so replacing the body of a
@@ -78,6 +125,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- Expose configured `rrf_k`, `rrf_weights`, `bm25_candidates`, and
+  `dense_candidates` in the schema-1 version runtime profile and human/JSON
+  status (#2377), enabling STM's read-only RRF boundary diagnostic (STM #1012).
+  Version collection remains free of model/storage initialization; values are
+  configuration snapshots, not observed retrieval counts or final-score guarantees.
+
 - **Hand one skill, command, or agent to someone else as a file.**
   `mm context export <kind> <name> --out <file>` packs a single canonical
   artifact — its manifest, its per-vendor overrides, its frozen version history,
@@ -139,6 +192,99 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   could only ever end in the "initialize it first" conflict. (#2297)
 
 ### Fixed
+
+- **A `scope` that is not a tier is now refused on every read surface, not
+  only on search.** #2193 put the closed tier vocabulary in front of
+  `GET /api/search`, `mem_search` and `mm search`, and left `mem_recall`,
+  `mm recall`, `mem_timeline` and `mem_entity_search` on the parser-direct
+  path — so `scope=User` or `projet_*` was an error on one tool and a
+  successful, empty result on the next, indistinguishable from "nothing
+  matched", with the store opened first. The same check now runs on all of
+  them before anything opens (`mem_ask` too, which `run_search` had been
+  catching only after the app was up), in each surface's own idiom: an error
+  string on MCP, a message naming `--scope` on the CLI. The value that reaches
+  storage is the validator's — `--scope ""` on `mm recall` is unset rather than
+  a filter matching nothing, and a padded tier is stripped — while the
+  empty-result diagnostic still quotes the option as typed. An architectural
+  guard now enumerates the functions that parse a scope or forward one into the
+  search core, in the spellings it can recognize syntactically, so a new
+  `scope`-taking surface written the way the existing ones are has to be
+  classified as validated or explained rather than drifting the way this one
+  did. The guard documents what it cannot see — a search bound to a local, a
+  `**kwargs` splat, a wrapper that only calls a helper — and pins those blind
+  spots, so widening it later has to move the claim with the code. (#2295)
+
+- **A memory edit or delete that *succeeds* no longer brings back a file you
+  deleted while it ran** (#2367) — the sibling of #2347 below, and the quieter
+  of the two, because nothing looked wrong. The helpers that rewrite a chunk's
+  line range read the file, computed the new text, and committed it with a
+  plain write. A plain write creates. So an `rm`, an `mv`, or an editor saving
+  via rename landing in that gap did not fail the edit: it recreated the note
+  you had just deleted, with your edit applied, reported success, and indexed
+  the result. The content was exactly what you asked for, which is why the
+  result gave no hint that the file underneath it was one nobody meant to
+  exist.
+
+  Those rewrites now open the existing file without creating it, and check on
+  the open descriptor that it is still the file the operation read. A source
+  that was removed stays removed, and — wherever the filesystem supplies a
+  usable identity for a file — a source that was replaced is left exactly as
+  found. That second
+  half matters as much as the refusal to create: splicing a stranger's file at
+  the deleted file's line numbers corrupts it just as surely. Where identity
+  is unanswerable the operation still refuses to create, and falls back to
+  the existence check; #2371 above additionally requires matching source-span
+  evidence even when identity is unavailable.
+
+  The window this closes is the one between the read and the write. A file
+  already swapped before the operation looked at it is the file the operation
+  was asked to edit, and telling those apart is a question about the index's
+  line numbers rather than about the file's identity; #2371 above now checks
+  that evidence separately. `mem_edit` and `mem_delete` name which
+  of the two they met; the web editor answers 409 with the same distinction;
+  and a web delete whose file somebody else already removed now finishes by
+  dropping the index row and reporting success, since that is the outcome it
+  was asked for. A refused write is not rolled back, because it wrote nothing.
+
+  Adding a note still creates its file: `mem_add` writes into a day file that
+  need not exist yet, and that has not changed. The refusal is scoped to the
+  three helpers that edit an existing range, and a test now enforces that
+  scope so a fourth cannot quietly join the creating side.
+
+- **A memory edit or delete that fails no longer brings back a file you
+  deleted while it ran** (#2347) — when `mem_edit`, `mem_delete` or the web
+  editor's save cannot re-index what it just wrote, it puts the file's
+  pre-image back. It did that with a plain write, and a plain write *creates*.
+  The lock held across that span binds other memtomem writers, never an
+  outside `rm`, `mv`, or editor saving via rename — so the one thing that
+  could remove the file mid-span was also the one thing the rollback would
+  undo, recreating a note you had deleted and refilling it with content you
+  had not asked to keep.
+
+  The restore now opens the file without creating it and checks, on the open
+  descriptor, that this is still the file the pre-image was read from. A
+  source that was removed is left removed, one that was replaced is left
+  exactly as found, and the tool result says which of those happened instead
+  of claiming a rollback that did not occur. Deciding by errno rather than by
+  asking "is it still there?" first is the rule #2346 arrived at: a question
+  answered before the write is already stale when the write lands.
+
+  The quieter half is what a *failing* rollback used to do to the error it was
+  rolling back. Restoring a file whose directory had gone raised its own
+  "no such file" from inside the failure handler, before the log line and
+  before the retry classification — so a transient store outage surfaced as a
+  missing file, and the branch that would have told the caller to try again
+  never ran. The restore now reports rather than raises, and the original
+  failure reaches the caller intact with the rollback's own trouble recorded
+  beside it. This is the rule #2229 set on the lock's release path, which had
+  never been applied here.
+
+  One consequence worth stating: "retryable" is now claimed only when the
+  pre-state is actually back. Where the source was removed or replaced under
+  the edit, retrying would answer something unrelated, so the result names
+  what happened to the file instead. The web route reports the same states
+  through the server log, and its 503 still invites the retry that a
+  clean rollback earns.
 
 - **Deleting a memory's index rows no longer recreates the directory you
   removed** (#2346) — every memory-CRUD span took the source file's sidecar
@@ -644,9 +790,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   padded value is stripped before it is searched, not only before it is
   checked. `ScopeFilter.parse` itself stays permissive: it is a predicate
   parser, and callers that need an unrecognized tier to reach no rows rather
-  than raise (portable eval cases) still get that. `mem_recall` and `mm recall`
-  are unchanged — they take a `scope` through the parser directly, so an
-  unrecognized tier is still an empty result there. (#2193)
+  than raise (portable eval cases) still get that. `mem_recall`, `mm recall`
+  and the other read surfaces followed in #2295 (see Fixed, above). (#2193)
 
 - **`mm agent search` mirrors the `mem_agent_search` MCP tool.** Merging an
   agent's own `agent-runtime:<id>` scope with the shared bucket was reachable

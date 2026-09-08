@@ -96,28 +96,32 @@ source file. That is a one-time cleanup: reindexing the unchanged source can bri
 the data back. Omit that source from the migration until a content-handling policy
 is agreed, or choose an explicit source exclusion rule.
 
-## Index-only masking and source fidelity
+## Index-only masking — not enabled
 
-Every file-indexing entry point (watcher, CLI, MCP and web), plus the doctor's
-preview, uses the same conservative projection before chunking. Original files
-are never rewritten. Generic key/value matches with a complete, identifiable
-value become `[REDACTED]`; explicit empty assignments and bare inline-code labels
-remain unchanged. Unterminated/ambiguous values, specific provider credentials,
-private-key patterns and `project_shared` refusals still reach the existing guard.
-The shared scanner, explicit exemption accounting and non-file ingress guards
-retain their contracts. No `force_unsafe` bypass is used by the migration.
+An index-only masking projection ships with this release **switched off**
+(`PROJECTION_ENABLED` in `memtomem/indexing/privacy_projection.py`). It is
+inert: a file whose content matches a redaction pattern is refused by the write
+guard exactly as it was before, and nothing is ever written with `[REDACTED]` in
+place of a value.
 
-For example, a Python comment containing `"password": "secret"` is indexed as
-`"password": "[REDACTED]"`. A command containing `OPENAI_API_KEY=` retains its empty
-assignment. Only projected text feeds structural descriptions, optional LLM
-prompts, embeddings, FTS and stored chunk bodies. `redaction_count` is the number
-of values masked in the source, repeated on its chunks (not a per-chunk count).
-It defaults to zero for older rows/exports. Masked projections cannot be edited
-back into their source through the chunk-edit endpoints: edit the source, then
-reindex. This is detected-secret masking, not a claim to anonymize arbitrary PII.
+It is off because deciding where a secret's *value* ends turned out to require
+the grammar of the surrounding document, which the indexer does not have. Three
+review rounds each closed every shape they found and each turned up new ones
+from a grammar the previous round had not considered. The module docstring
+records the specific cases. A version that can be turned on has to be handed a
+parsed document and mask the source span its parser reports.
 
-Code splitting preserves CRLF and Unicode. Descriptions and fragment numbering
-are generated after whitespace packing. JSON with duplicate keys or excessive
+Practical consequences today: `redaction_count` is always zero on freshly
+indexed chunks, and a note containing something the scanner reads as a secret
+still needs the existing remedies — remove the text, `--force-unsafe`, or a
+Markdown note's `redaction: documents-patterns` frontmatter declaration. A
+non-zero `redaction_count` can still arrive from an imported bundle, and such a
+chunk stays read-only to the chunk-edit endpoints.
+
+Chunk bodies are the file's text as the indexer read it, which is UTF-8 with
+universal newlines: a CRLF source is stored with `\n` line endings, and the file
+on disk is never rewritten. Unicode is preserved exactly. Descriptions and
+fragment numbering are generated after whitespace packing. JSON with duplicate keys or excessive
 nesting falls back to raw, lossless splitting; no duplicate value is discarded.
 The token limiter inspects bounded character windows (at most 65,536 characters)
 rather than repeatedly encoding the entire unconsumed file.
@@ -151,3 +155,28 @@ has never committed chunks cannot leave an orphan cache after embedding failure.
 Base64 detection, extraction and summarization remain deferred. Omitting the
 reviewed Base64 source from a migration does not implement a future-ingestion
 exclusion: editing that source can make its content eligible again.
+
+## Source edits and imported metadata
+
+Bounded fragments may share a physical source line, and decoded JSON bodies may
+represent only part of a serialized value. Such chunks carry
+`source_read_only=true`. Subdivided generic chunks, bounded JSON projections,
+partial-line code fragments, chunks with overlapping source ranges, sources with
+incompatible Unicode line boundaries, and masked projections reject source edits
+and chunk-based source deletions through MCP and web (HTTP 409). Edit the original
+file and reindex it. Complete unsplit entries retain their original source
+ranges and remain editable when their source-provenance check succeeds.
+Index-only source deletion and cleanup of missing sources retain their existing
+behavior.
+
+The flag survives SQLite storage, API output, and export/import. Imported
+records never provide trusted source-span hashes; local reindexing derives
+source evidence and refreshes the read-only flag even when the body is unchanged.
+Foreign imports scan body, retrieval context, headings, path, and tags separately.
+A harmless context cannot hide a sensitive heading. Verified self-exports retain
+the existing provenance-based round-trip behavior.
+
+SQLite upgrades support databases that received source provenance before or
+after retrieval-context columns. New column positions are read from the schema;
+no source file is read to manufacture provenance during migration. Regenerate
+reviewed migration previews after updating the implementation or schema.

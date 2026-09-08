@@ -90,17 +90,67 @@ class TokenBudget:
     def describe(self, chunk: Chunk, description: str) -> Chunk:
         context = self.trim(description, self.context)
         chunk.metadata = replace(chunk.metadata, retrieval_context=context)
+        if context and self.count(chunk.retrieval_content, special=True) > self.model:
+            # ``IndexingConfig`` can only bound ``hard_max + context`` against
+            # ``chunk_model_tokens``; the composed input the embedder sees also
+            # carries the tokenizer's special tokens and the ``\n\n`` separator,
+            # which no configuration check can price without the tokenizer. A
+            # body and a description that each fit can therefore still overflow
+            # together, and raising here would fail the whole file for a
+            # description that is free to be shorter. Trim it against the real
+            # composed count instead. Token counts are not monotonic over
+            # prefixes, so this searches for *a* fitting length, exactly as
+            # ``prefix`` does, and never claims maximality.
+            low, high = 0, len(context)
+            while low < high:
+                mid = (low + high + 1) // 2
+                chunk.metadata = replace(chunk.metadata, retrieval_context=context[:mid])
+                if self.count(chunk.retrieval_content, special=True) <= self.model:
+                    low = mid
+                else:
+                    high = mid - 1
+            # An empty ``retrieval_context`` makes ``Chunk.retrieval_content``
+            # fall back to composing the heading hierarchy, which is a
+            # different (and possibly longer) string than the one just
+            # measured. Keep one character so the measured composition is the
+            # one that ships.
+            chunk.metadata = replace(chunk.metadata, retrieval_context=context[: max(1, low)])
         self.validate(chunk)
         return chunk
 
-    def validate(self, chunk: Chunk) -> None:
+    def validate_description(self, chunk: Chunk) -> None:
+        """Check the retrieval description against the context budget."""
         prefix = chunk.metadata.retrieval_context or " > ".join(chunk.metadata.heading_hierarchy)
         if self.count(prefix) > self.context:
             raise ValueError("chunk description exceeds exact token budget")
+
+    def validate_body(self, chunk: Chunk) -> None:
+        """Check the chunk body against the exact per-chunk ceiling.
+
+        Split out for the one caller that must skip it: a store writing back a
+        row whose body predates the budget. That is the only check a legacy row
+        is exempt from — it is the one the row violates by construction, and
+        refusing it would make the row permanently unwritable.
+        """
         if self.count(chunk.content) > self.body:
             raise ValueError("chunk body exceeds exact token budget")
+
+    def validate_composed(self, chunk: Chunk) -> None:
+        """Check what the embedder is actually handed.
+
+        Not the body's to waive. A body over the *per-chunk* ceiling can still
+        compose well under the *model* ceiling, so exempting a legacy row from
+        this one would let a caller push it past the model limit by growing only
+        its description — the growing-description hole the body exemption is not
+        supposed to open.
+        """
         if self.count(chunk.retrieval_content, special=True) > self.model:
             raise ValueError("composed retrieval input exceeds model token budget")
+
+    def validate(self, chunk: Chunk) -> None:
+        self.validate_description(chunk)
+        self.validate_body(chunk)
+        self.validate_composed(chunk)
 
 
 def bound_chunks(
@@ -115,9 +165,13 @@ def bound_chunks(
             line = chunk.metadata.start_line + chunk.content.count("\n", 0, start)
             # Decoded JSON strings have virtual newlines: retain their source
             # scalar span rather than pretending those lines exist in the file.
-            virtual = preserve_source_lines
+            virtual = preserve_source_lines or len(spans) == 1
             meta = replace(
                 chunk.metadata,
+                source_read_only=chunk.metadata.source_read_only
+                or len(spans) > 1
+                or preserve_source_lines,
+                source_span_hash=None,
                 start_line=chunk.metadata.start_line if virtual else line,
                 end_line=chunk.metadata.end_line if virtual else line + body[:-1].count("\n"),
                 overlap_before=max(0, min(end, chunk.metadata.overlap_before) - start),
@@ -127,6 +181,16 @@ def bound_chunks(
             )
             part = chunk if len(spans) == 1 else Chunk(content=body, metadata=meta)
             part.metadata = meta
+            # No line numbers here, deliberately. ``retrieval_context`` is the
+            # embedded and BM25-indexed description, and the differ treats a
+            # changed one as an embed-worthy change — so a single inserted line
+            # near the top of a file would shift every following chunk's
+            # description and re-embed (and re-enrich, since the LLM cache is
+            # keyed on this string) the whole file, instead of taking the
+            # hash-equal ``update_chunk_line_ranges`` path (#1788). The range
+            # lives in ``start_line``/``end_line``, which that path refreshes,
+            # and adds nothing to a vector. The fragment ordinal stays: it
+            # moves only when the split itself moves.
             description = "\n".join(
                 filter(
                     None,
@@ -134,7 +198,7 @@ def bound_chunks(
                         chunk.metadata.retrieval_context,
                         " > ".join(chunk.metadata.heading_hierarchy),
                         f"File: {chunk.metadata.source_file.name}",
-                        f"Lines: {meta.start_line}-{meta.end_line}; fragment {index + 1}/{len(spans)}",
+                        f"Fragment {index + 1}/{len(spans)}",
                     ),
                 )
             )
@@ -153,17 +217,32 @@ class _Symbol:
 
 
 def _python_structure(text: str, lines: list[int]) -> tuple[list[_Symbol], set[int]]:
+    """Symbols and statement boundaries, keyed to offsets in ``lines``.
+
+    ``lines`` is built from ``\n`` alone while ``ast`` counts lines the way
+    universal-newline decoding does, so text carrying a lone ``\r`` gives
+    ``ast`` more lines than the table has. The indexer reads with universal
+    newlines precisely so that cannot happen, but a direct caller holding raw
+    bytes can still get here, and an ``IndexError`` from a parser detail should
+    not cost the whole file. Every lookup goes through ``offset`` and clamps;
+    ``chunk_code`` also catches ``IndexError`` as a second layer, because a
+    clamp only helps at the sites that use it.
+    """
+
+    def offset(lineno: int) -> int:
+        return lines[lineno] if 0 <= lineno < len(lines) else len(text)
+
     tree = ast.parse(text)
     symbols: list[_Symbol] = []
     statements: set[int] = set()
     source_lines = text.splitlines()
     for node in ast.walk(tree):
         if isinstance(node, ast.stmt):
-            statements.add(lines[node.lineno - 1])
+            statements.add(offset(node.lineno - 1))
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             first = min([node.lineno] + [d.lineno for d in node.decorator_list])
-            start = lines[first - 1]
-            end = lines[node.end_lineno] if node.end_lineno else len(text)
+            start = offset(first - 1)
+            end = offset(node.end_lineno) if node.end_lineno else len(text)
             signature_end = node.body[0].lineno - 1 if node.body else node.lineno
             signature = "\n".join(source_lines[node.lineno - 1 : max(node.lineno, signature_end)])
             if node.body and node.body[0].lineno == node.lineno:
@@ -274,7 +353,11 @@ def chunk_code(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
             if path.suffix == ".py"
             else _javascript_structure(path, text)
         )
-    except (ImportError, SyntaxError, ValueError, RecursionError):
+    except (ImportError, IndexError, SyntaxError, ValueError, RecursionError):
+        # ``IndexError``: a parser that counts lines differently from the
+        # ``\n``-built table above can index past it. Semantic boundaries are
+        # optional — the token ceiling and the lossless partition are not — so
+        # degrade to no structure rather than failing the file.
         symbols, statements = [], set()
     # Partition every source character exactly once, including decorators,
     # comments, imports and module constants that symbol-only parsers omitted.
@@ -311,6 +394,10 @@ def chunk_code(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
                     chunk_type=kind,
                     start_line=start_line,
                     end_line=end_line,
+                    source_read_only=(
+                        (start > 0 and text[start - 1] != "\n")
+                        or (end < len(text) and text[end - 1] != "\n")
+                    ),
                     language="python"
                     if path.suffix == ".py"
                     else ("typescript" if path.suffix in {".ts", ".tsx"} else "javascript"),
@@ -332,6 +419,8 @@ def chunk_code(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
                 metadata=replace(
                     previous.metadata,
                     end_line=chunk.metadata.end_line,
+                    source_read_only=previous.metadata.source_read_only
+                    or chunk.metadata.source_read_only,
                 ),
             )
             packed.append(merged)
@@ -354,10 +443,13 @@ def chunk_code(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
         comments = "\n".join(
             line.strip() for line in nearby if line.lstrip().startswith(("#", "//", "/*", "*"))
         )
+        # Position-independent for the reason spelled out in ``bound_chunks``:
+        # a line range in the embedded description turns any edit above a chunk
+        # into a re-embed of everything below it.
         identity = (
             " > ".join(hierarchy)
-            + f"\nFile: {path.name}\nLines: {meta.start_line}-{meta.end_line}; "
-            + f"fragment {seen[hierarchy]}/{totals[hierarchy]}"
+            + f"\nFile: {path.name}\n"
+            + f"Fragment {seen[hierarchy]}/{totals[hierarchy]}"
         )
         # Identity first; reserve room for local comments and concise symbol docs.
         detail_limit = max(1, budget.context // 4)
@@ -455,7 +547,10 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
                 ),
             )
         ]
-    return bound_chunks(chunks, config, preserve_source_lines=serialized)
+    bounded = bound_chunks(chunks, config, preserve_source_lines=serialized)
+    for chunk in bounded:
+        chunk.metadata = replace(chunk.metadata, source_read_only=True, source_span_hash=None)
+    return bounded
 
 
 def validate_budget_configuration(config: Any, previous: Any = None) -> None:

@@ -74,7 +74,8 @@ _UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9a-fA-F]{4}")
 # for disposable user-data tables — a new virtual-table module an older binary
 # can't DROP, or a trigger that repopulates a cleared table, falls outside that
 # envelope and DOES require a bump.
-SCHEMA_VERSION = 1
+# Older writers cannot maintain source_span_hash alongside line ranges (#2371).
+SCHEMA_VERSION = 2
 
 _SCHEMA_VERSION_KEY = "schema_version"
 
@@ -184,7 +185,8 @@ def create_tables(
             valid_to_unix INTEGER,
             scope TEXT NOT NULL DEFAULT 'user',
             project_root TEXT,
-            origin TEXT
+            origin TEXT,
+            source_span_hash TEXT
         )
     """)
 
@@ -268,6 +270,14 @@ def create_tables(
         if "duplicate column" not in str(e).lower():
             raise
 
+    # Do not backfill from files during migration: that would bless stale rows
+    # with evidence from the very replacement they must refuse (#2371).
+    try:
+        db.execute("ALTER TABLE chunks ADD COLUMN source_span_hash TEXT")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+
     try:
         db.execute("ALTER TABLE chunks ADD COLUMN retrieval_context TEXT NOT NULL DEFAULT ''")
     except sqlite3.OperationalError as e:
@@ -276,6 +286,12 @@ def create_tables(
 
     try:
         db.execute("ALTER TABLE chunks ADD COLUMN redaction_count INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+
+    try:
+        db.execute("ALTER TABLE chunks ADD COLUMN source_read_only INTEGER NOT NULL DEFAULT 0")
     except sqlite3.OperationalError as e:
         if "duplicate column" not in str(e).lower():
             raise

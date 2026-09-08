@@ -16,6 +16,7 @@ from typing import Any
 from memtomem.chunking.bounded import TokenBudget
 from memtomem.config import IndexingConfig
 from memtomem.indexing.engine import IndexEngine, _build_exclude_spec, _path_is_excluded
+from memtomem.indexing.redaction_exemption import declared_exemption, indexer_text
 
 CODE_SUFFIXES = {".py", ".js", ".ts", ".jsx", ".tsx", ".mjs"}
 
@@ -73,7 +74,13 @@ def audit(db_path: Path, config: IndexingConfig, omitted: set[str]) -> dict[str,
         }
         try:
             raw = path.read_bytes()
-            content = raw.decode("utf-8")
+            # The digest below is over the raw bytes, but every *decision* this
+            # preview makes — the privacy adjudication, the frontmatter
+            # exemption, the chunk boundaries — has to be made over the text the
+            # indexer would read, or the preview reports a different outcome
+            # than the run it is previewing. ``indexer_text`` is that contract
+            # (#2310): UTF-8 with universal newlines.
+            content = indexer_text(raw)
             decision = engine.preview_redaction_decision(path, content)
             entry["privacy_decision"] = decision
             if decision in {"blocked", "blocked_project_shared"}:
@@ -85,7 +92,9 @@ def audit(db_path: Path, config: IndexingConfig, omitted: set[str]) -> dict[str,
             scope, _ = engine._resolve_scope(path)
             projection = prepare_index_content(content, scope=scope)
             entry["redaction_count"] = projection.redaction_count
-            chunks = engine.chunk_content(path, content)
+            chunks = engine.chunk_content(
+                path, content, exempt=bool(declared_exemption(path, content))
+            )
             entry.update(
                 {
                     "source_sha256": hashlib.sha256(raw).hexdigest(),

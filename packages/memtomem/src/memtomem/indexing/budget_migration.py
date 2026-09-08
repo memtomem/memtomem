@@ -65,8 +65,15 @@ def state_hash(db: sqlite3.Connection, source: Path) -> str:
         "valid_to_unix",
         "retrieval_context",
         "redaction_count",
+        "source_read_only",
+        "source_span_hash",
     ]
-    defaults = {"retrieval_context": "", "redaction_count": 0}
+    defaults = {
+        "retrieval_context": "",
+        "redaction_count": 0,
+        "source_read_only": 0,
+        "source_span_hash": None,
+    }
     cursor = db.execute("SELECT * FROM chunks WHERE source_file=? ORDER BY id", (str(source),))
     columns = [item[0] for item in cursor.description]
     rows = []
