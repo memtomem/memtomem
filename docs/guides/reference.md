@@ -119,7 +119,23 @@ In **core** tool mode (default), most features are accessed through `mem_do(acti
 
 Use `mem_do(action="help")` to see all available actions, or `mem_do(action="help", params={"category": "sessions"})` for per-category details with parameter descriptions. Common aliases are supported (e.g. `health_report` → `eval`, `namespace_set` → `ns_set`).
 
-`mem_do(action="version")` returns the server version, a capability map, and a secret-free `runtime_profile` (`schema_version: 1`) describing the *effective* retrieval runtime — embedding/rerank provider and mode, per-dependency availability, and any missing extras — so a client can adapt to a degraded install without probing.
+`mem_do(action="version")` returns the server version, a capability map, and a secret-free `runtime_profile` (`schema_version: 1`) describing the configured retrieval runtime and locally detectable dependency availability. Collection reads configuration without initializing models or storage or running searches; it is not evidence that each retriever has returned results successfully.
+
+The additive `runtime_profile.search` fields `rrf_k`, `rrf_weights` (BM25,
+dense order), `bm25_candidates`, and `dense_candidates` expose the configured
+two-leg RRF inputs (#2377). `mem_status` and `mm status --format json` also
+include them in `config`, and human status renders them. Clients must check
+field presence: older schema-1 profiles omit them. A version profile is a
+collection-time configuration snapshot; a client or daemon holding a negotiated
+profile must reconnect after changing Core configuration.
+
+Candidate limits are configuration values, not observed counts: search uses
+`max(configured_candidates, request_top_k)` for each leg. RRF adds weighted
+terms without normalization. Its two-leg agreement interval is
+`(max(w1,w2)/(k+1), w1/(k+C1)+w2/(k+C2)]`, and it can be empty. This describes
+two unmodified positive-weight lists only, before rescue, rerank, decay or
+boosts; the `rrf` label alone does not certify those assumptions. Structured
+search rounds scores to four decimals, whereas compose carries raw scores.
 
 ### Context tool parameters
 
