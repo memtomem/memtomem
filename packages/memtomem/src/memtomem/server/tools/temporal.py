@@ -12,6 +12,7 @@ from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.helpers import _names_a_whole_day, _parse_recall_date
+from memtomem.services.search_service import validate_scope_vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +49,12 @@ async def mem_timeline(
     if not 1 <= limit <= 500:
         return f"Error: limit must be between 1 and 500, got {limit}."
 
-    # Same pre-app validation mem_search does: a comma/glob mix is a caller
-    # mistake, and reporting it as an empty timeline would be a lie.
+    # Same pre-app validation mem_search does: a comma/glob mix or a value
+    # outside the tier vocabulary is a caller mistake, and reporting it as an
+    # empty timeline would be a lie. Rebind: the pipeline parses the string it
+    # is handed, so the normalized value is the one that must reach it.
     try:
+        scope = validate_scope_vocabulary(scope)
         ScopeFilter.parse(scope)
     except InvalidFilterSyntaxError as e:
         return f"Error: {e}"

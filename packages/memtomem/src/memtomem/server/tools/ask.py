@@ -16,6 +16,7 @@ from memtomem.services.search_service import (
     InvalidTemporalBoundError,
     parse_as_of_bound,
     run_search,
+    validate_scope_vocabulary,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ async def mem_ask(
     # is accepted.
     try:
         parse_as_of_bound(as_of)
+        scope = validate_scope_vocabulary(scope)
         ScopeFilter.parse(scope)
     except (InvalidTemporalBoundError, InvalidFilterSyntaxError) as e:
         return f"Error: {e}"

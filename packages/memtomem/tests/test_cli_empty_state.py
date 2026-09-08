@@ -158,9 +158,13 @@ class TestEmptyResultNamesTheFilter:
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake)
         return CliRunner().invoke(cli, ["search", *argv])
 
-    def _recall(self, monkeypatch, argv: list[str], namespaces=None):
-        fake, _ = _mock_empty_recall(namespaces)
+    def _recall(self, monkeypatch, argv: list[str], namespaces=None, storage_box=None):
+        fake, storage = _mock_empty_recall(namespaces)
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake)
+        if storage_box is not None:
+            # Hand the stubbed store back so a caller can assert on what the
+            # command actually recalled with, not just on what it printed.
+            storage_box.append(storage)
         return CliRunner().invoke(cli, ["recall", *argv])
 
     def test_an_unknown_namespace_is_named_instead_of_the_index(self, monkeypatch) -> None:
@@ -276,9 +280,9 @@ class TestEmptyResultNamesTheFilter:
         ``mm search`` normalizes ``--scope ""`` to no filter now (#2193), so
         the empty scope is no longer what emptied the result — but someone
         reading the diagnostic is looking for the options they typed, and one
-        that silently disappeared is one they cannot account for. Recall,
-        which does not normalize, still has the filtering version of this:
-        see ``test_recall_reports_an_empty_scope_too``.
+        that silently disappeared is one they cannot account for. ``mm
+        recall`` normalizes the same way since #2295 and keeps the same
+        promise: see ``test_recall_reports_an_empty_scope_too``.
         """
         result = self._search(monkeypatch, ["--scope", "", "hello"], namespaces=[("default", 7)])
 
@@ -303,10 +307,16 @@ class TestEmptyResultNamesTheFilter:
         assert "This query included: --scope '  user  '" in result.stderr
 
     def test_recall_reports_an_empty_scope_too(self, monkeypatch) -> None:
-        result = self._recall(monkeypatch, ["--scope", ""], namespaces=[("default", 7)])
+        """Same split as search: ``--scope ""`` is no filter for storage
+        (#2295) and still the option the reader typed for the diagnostic."""
+        storage_box: list = []
+        result = self._recall(
+            monkeypatch, ["--scope", ""], namespaces=[("default", 7)], storage_box=storage_box
+        )
 
         assert "This query included: --scope ''" in result.stderr
         assert HINT not in result.stderr
+        assert storage_box[0].recall_chunks.await_args.kwargs["scope_filter"] is None
 
     def test_recall_reports_an_empty_namespace(self, monkeypatch) -> None:
         """Recall does not go through ``run_search``, so it applies

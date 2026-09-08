@@ -316,11 +316,13 @@ class ScopeFilter:
         empty-state diagnostics). The *public* vocabulary is enforced one
         level up, in
         :func:`memtomem.services.search_service.validate_scope_vocabulary`,
-        which the three *search* surfaces (``GET /api/search``,
-        ``mem_search``, ``mm search``) call before they open anything — so a
-        misspelled tier is the same answer on HTTP, MCP and the CLI. Recall
-        does not: it parses ``scope`` here directly, and an unrecognized tier
-        stays an empty result set there.
+        which every user-facing read surface that takes a ``scope``
+        (``GET /api/search``; ``mem_search``, ``mem_ask``, ``mem_recall``,
+        ``mem_timeline``, ``mem_entity_search``; ``mm search``, ``mm recall``)
+        calls before it opens anything — so a misspelled tier is the same
+        answer on HTTP, MCP and the CLI — and ``run_search`` repeats as a
+        backstop for in-process callers. The set of surfaces that must call
+        it is enumerated by ``test_scope_vocabulary_architectural_guard``.
 
         Mixing a comma list with a glob is rejected for the same reason as
         in :meth:`NamespaceFilter.parse` — the two spellings map to
