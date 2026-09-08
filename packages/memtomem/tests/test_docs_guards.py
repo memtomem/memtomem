@@ -507,8 +507,34 @@ class TestPluginManualCoexistenceCallout:
         assert "/plugin uninstall memtomem@memtomem" in claude_code
 
     def test_callout_documents_the_duplicate_case(self, claude_code: str) -> None:
-        assert "both servers run" in claude_code
+        assert "duplicate registrations are possible" in claude_code
+        assert "do not prove two live processes" in claude_code
         assert "same command" in claude_code.lower()
+
+    def test_unreleased_diagnostic_uses_source_checkout_without_changing_cwd(self) -> None:
+        command = "uv run --project /path/to/memtomem --package memtomem mm doctor --claude-mcp"
+        plugin_guidance = [
+            _REPO_ROOT / path
+            for workflow in ("setup", "status")
+            for path in (
+                f"packages/memtomem-plugin-assets/workflows/{workflow}.claude.md",
+                f"packages/memtomem-claude-plugin/skills/{workflow}/SKILL.md",
+            )
+        ]
+        for path in (
+            _PLUGIN_README,
+            _VIBE_GUIDE,
+            _INTEGRATIONS / "claude-code.md",
+            *plugin_guidance,
+        ):
+            text = _read(path)
+            assert command in text
+            assert "PyPI" in text and "0.5.0" in text
+            assert "/mcp" in text
+            for line, in_fence in _iter_code_context(text):
+                if in_fence and "doctor --claude-mcp" in line:
+                    assert "uvx" not in line
+                    assert "--directory" not in line
 
     def test_no_doc_promises_unconditional_suppression(self) -> None:
         offenders = [

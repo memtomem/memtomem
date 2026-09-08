@@ -520,13 +520,18 @@ def _row_json(row: InstanceRow) -> dict[str, object]:
 
 @click.command("doctor", epilog=_EPILOG)
 @click.option(
+    "--claude-mcp",
+    is_flag=True,
+    help="Check Claude MCP registrations and prospective plugin conflicts (0=pass, 1=risk, 2=incomplete).",
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
     default=False,
     help="Emit a structured JSON result instead of human-readable output.",
 )
-def doctor(as_json: bool) -> None:
+def doctor(as_json: bool, claude_mcp: bool = False) -> None:
     """Check the memtomem runtime on this machine (read-only).
 
     Reports the server processes running on this host — across *every* store,
@@ -538,12 +543,22 @@ def doctor(as_json: bool) -> None:
     a count alone cannot distinguish an abandoned server from a busy machine.
     Scripts should read ``--json`` rather than the exit code.
 
+    With --claude-mcp, inspect Claude registrations instead (no MCP connections):
+    0 = no detected conflict, 1 = duplicate risk, 2 = incomplete inspection.
+
     Caveats worth knowing when reading the output: ``recorded_parent`` is a
     probe of the parent pid captured at registration, so on Windows (where pids
     are reused and never reparented) an "alive" parent may be an unrelated
     process; and a live parent does not mean a server is in *use* — an idle
     editor session left open for days holds one just as firmly.
     """
+    if claude_mcp:
+        from memtomem.cli._claude_mcp import emit_report, inspect_claude_mcp
+
+        report = inspect_claude_mcp()
+        emit_report(report, as_json=as_json)
+        raise click.exceptions.Exit(report.exit_code)
+
     snapshot = snapshot_all_instances()
     rows = _instance_rows(snapshot)
     results = [

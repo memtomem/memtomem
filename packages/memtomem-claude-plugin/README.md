@@ -16,6 +16,26 @@ write-time indexing.
 
 ## Install
 
+Before installing, inspect existing servers with `/mcp` in Claude Code.
+The published PyPI 0.5.0 CLI does **not** include `--claude-mcp`. For the new
+read-only diagnostic, use a source checkout containing this change:
+
+```bash
+uv run --project /path/to/memtomem --package memtomem mm doctor --claude-mcp
+```
+
+Replace `/path/to/memtomem` with the checkout path and run from the project you
+want to inspect. `--project` selects the CLI's source environment while keeping
+your current directory; do not substitute `--directory`, which would change
+the project being inspected. No source checkout? Use `/mcp` to review the
+registrations and the scope-specific removal guidance below.
+
+It reports current registrations and predicts conflicts with this release's
+plugin command. Exit codes: `0` no detected conflict, `1` duplicate risk,
+`2` incomplete inspection. `--json` provides structured findings. Keep your
+existing uv installation; resolve any manual MCP registration shown by the
+check before installing. The check does not intercept `/plugin install`.
+
 ```
 /plugin marketplace add memtomem/memtomem
 /plugin install memtomem@memtomem
@@ -44,16 +64,24 @@ verifies search. One-shot indexing does not add a watched source directory.
 Use `/memtomem:handoff save` to leave a compact, project-local checkpoint for
 Claude Code, Codex CLI, or Kimi Code; see the cross-runtime guide below.
 
-If you previously registered the server manually, what happens depends on
-the manual entry's command. If it matches the plugin's exact launch command
-(`uvx --from memtomem==0.5.0 memtomem-server`), Claude Code suppresses the
-plugin-managed copy and your manual entry keeps winning. Any other command —
-including a bare `memtomem-server` registration — runs **both** servers
-against the same store and doubles the tool list. Keep one: remove the
-manual entry (`claude mcp remove memtomem`) to switch to the plugin-managed
-server, or `/plugin uninstall memtomem@memtomem` to keep your manual setup.
-The [Claude Code integration guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/claude-code.md)
-shows how to check which case you are in.
+If you previously registered the server manually, identical command and
+arguments are expected to let Claude suppress the plugin copy. Different
+commands can expose duplicate tools; tool visibility does not establish live
+process count or database identity. Check `/mcp` for the actual session state.
+
+The `--mcp claude` and `--mcp json` initialization modes now check before
+registration. A usable
+existing connection is preserved and additional registration is skipped.
+Conflicting or uninspectable configurations defer registration; use
+`--mcp skip` to initialize the store separately. Failed or timed-out Claude
+registration never creates a fallback `.mcp.json`.
+
+To switch to the plugin, remove only the manual entry using the diagnostic's
+name and scope, for example `claude mcp remove memtomem -s user`. To keep the
+manual setup, use `/plugin uninstall memtomem@memtomem`. Neither action removes
+your uv installation or memories. Custom launch wrappers, managed policies,
+and unresolved project approval require manual review; session-only flags
+must be checked in `/mcp`. The diagnostic does not execute configured servers.
 
 ## Docs
 
