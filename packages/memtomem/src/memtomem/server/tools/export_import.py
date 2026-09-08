@@ -159,6 +159,7 @@ async def mem_import(
                 force_unsafe=force_unsafe,
                 surface="mem_import",
                 extract_entities=app.config.indexing.extract_entities,
+                indexing_config=app.config.indexing,
             )
     except ImportPrivacyError as exc:
         return (
@@ -166,6 +167,9 @@ async def mem_import(
             "pattern(s); import rejected. Retry with force_unsafe=True to "
             "bypass (audit-logged)."
         )
+
+    except ValueError as exc:
+        return f"Error: {exc}"
 
     if stats.imported_chunks or stats.updated_chunks:
         await flag_untracked_write(app, provenance_session_id)

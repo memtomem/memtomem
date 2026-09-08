@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict
 
 
 class ChunkOut(BaseModel):
+    retrieval_context: str = ""
+    redaction_count: int = 0
     id: str
     content: str
     source_file: str
@@ -71,6 +73,8 @@ def chunk_to_out(chunk) -> ChunkOut:
     return ChunkOut(
         id=str(chunk.id),
         content=chunk.content,
+        retrieval_context=meta.retrieval_context,
+        redaction_count=meta.redaction_count,
         source_file=str(meta.source_file),
         chunk_type=meta.chunk_type,
         start_line=meta.start_line,

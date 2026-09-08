@@ -291,6 +291,12 @@ class IndexingConfig(ConfigModel):
         }
     )
     max_chunk_tokens: int = 512
+    # Opt-in exact ceiling, independent of the existing approximate packing goal.
+    hard_max_chunk_tokens: int = Field(default=0, ge=0)
+    chunk_tokenizer_path: str = ""  # local tokenizer.json matching the embedding model
+    chunk_context_tokens: int = Field(default=512, ge=1)
+    chunk_model_tokens: int = Field(default=8192, ge=1)
+    enrich_chunk_context: bool = False
     min_chunk_tokens: int = 128
     # Soft goal for semantic packing: merge adjacent short siblings while
     # cur < target and combined <= max. Set to 0 to disable Pass 2 packing.
@@ -389,6 +395,13 @@ class IndexingConfig(ConfigModel):
                 f"target_chunk_tokens ({self.target_chunk_tokens}) must be "
                 f"<= max_chunk_tokens ({self.max_chunk_tokens})"
             )
+        if self.hard_max_chunk_tokens:
+            if not self.chunk_tokenizer_path:
+                raise ValueError("hard_max_chunk_tokens requires chunk_tokenizer_path")
+            if self.hard_max_chunk_tokens + self.chunk_context_tokens >= self.chunk_model_tokens:
+                raise ValueError("chunk model budget must exceed body plus context budgets")
+        if self.enrich_chunk_context and not self.hard_max_chunk_tokens:
+            raise ValueError("enrich_chunk_context requires a hard chunk budget")
         return self
 
     def all_index_roots(self) -> list[Path]:

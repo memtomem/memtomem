@@ -155,6 +155,8 @@ def _format_structured_results(
             "namespace": meta.namespace,
             "chunk_id": str(r.chunk.id),
             "content": r.chunk.content,
+            "retrieval_context": r.chunk.metadata.retrieval_context,
+            "redaction_count": r.chunk.metadata.redaction_count,
         }
         # RFC P1 Phase C: surface session-summary rescue provenance only
         # when set, so the common case (organic hit) keeps a stable
@@ -200,6 +202,8 @@ def _format_recall_structured(chunks: list, hints: list[str] | None = None) -> s
                 "source": _short_path(meta.source_file),
                 "hierarchy": hierarchy,
                 "content": c.content,
+                "retrieval_context": c.metadata.retrieval_context,
+                "redaction_count": c.metadata.redaction_count,
                 "created_at": c.created_at.isoformat(),
                 "tags": list(meta.tags),
             }

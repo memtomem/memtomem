@@ -258,7 +258,7 @@ class TestShellIndexBlockedSurfacing:
         from memtomem.cli.shell import _cmd_index
 
         comp, mem_dir = bm25_only_components
-        (mem_dir / "plain.md").write_text(_DOCUMENTS_PATTERNS)
+        (mem_dir / "plain.md").write_text(_DOCUMENTS_PATTERNS + '\npassword: "unfinished\n')
 
         await _cmd_index(comp, [str(mem_dir)])
 
@@ -273,7 +273,7 @@ class TestShellIndexBlockedSurfacing:
         from memtomem.cli.shell import _cmd_index
 
         comp, mem_dir = bm25_only_components
-        (mem_dir / "conf.yaml").write_text("ok: 1\npassword: hunter2xyz\n")
+        (mem_dir / "conf.yaml").write_text('ok: 1\npassword: "unfinished\n')
 
         await _cmd_index(comp, [str(mem_dir)])
 
@@ -442,7 +442,7 @@ class TestDeclaredExemptionIndexing:
         assert stats.exempted_files == 1
         assert any("declared.md" in p for p in stats.exempted_paths)
 
-    async def test_undeclared_sibling_is_still_blocked(self, bm25_only_components):
+    async def test_empty_labels_need_no_declared_exemption(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         (mem_dir / "declared.md").write_text(_DECLARED)
         (mem_dir / "plain.md").write_text(_DOCUMENTS_PATTERNS)
@@ -450,8 +450,8 @@ class TestDeclaredExemptionIndexing:
         stats = await comp.index_engine.index_path(mem_dir, recursive=True)
 
         assert stats.exempted_files == 1
-        assert stats.blocked_files == 1
-        assert any("plain.md" in p for p in stats.blocked_paths)
+        assert stats.blocked_files == 0
+        assert stats.indexed_chunks == 2
 
     async def test_single_file_index_reports_the_exemption(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
@@ -499,7 +499,7 @@ class TestDeclaredExemptionIndexing:
         # A ``.yaml`` source has no frontmatter block; leading dashes do not
         # make one.
         comp, mem_dir = bm25_only_components
-        (mem_dir / "conf.yaml").write_text("---\nredaction: documents-patterns\npassword: x\n")
+        (mem_dir / "conf.yaml").write_text('---\nredaction: documents-patterns\npassword: "unfinished\n')
 
         stats = await comp.index_engine.index_path(mem_dir, recursive=True)
 
@@ -633,7 +633,7 @@ class TestDeclaredExemptionSymlinkParity:
     ):
         comp, mem_dir = bm25_only_components
         target = tmp_path / "conf.yaml"
-        target.write_text("---\nredaction: documents-patterns\npassword: x\n")
+        target.write_text('---\nredaction: documents-patterns\npassword: "unfinished\n')
         self._symlink(mem_dir / "alias.md", target)
 
         stats = await comp.index_engine.index_path(mem_dir, recursive=True)

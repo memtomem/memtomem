@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from memtomem.config import IndexingConfig
+
 import asyncio
 import errno
 import hashlib
@@ -383,8 +385,10 @@ class SqliteBackend(
         embedding_policy_fingerprint: str = "",
         embedding_max_sequence_tokens: int | None = None,
         strict_dim_check: bool = True,
+        chunk_budget_config: "IndexingConfig | None" = None,
     ) -> None:
         self._config = config
+        self._chunk_budget_config = chunk_budget_config
         self._dimension = dimension
         self._embedding_provider = embedding_provider
         self._embedding_model = embedding_model
@@ -1261,9 +1265,25 @@ class SqliteBackend(
 
     # ---- chunk CRUD ----------------------------------------------------------
 
+    async def configure_chunk_budget(self, config: IndexingConfig) -> None:
+        if config.hard_max_chunk_tokens:
+            from memtomem.chunking.bounded import TokenBudget
+
+            TokenBudget(config)
+        self._chunk_budget_config = config.model_copy(deep=True)
+
     async def upsert_chunks(self, chunks: Sequence[Chunk]) -> int:
         if not chunks:
             return 0
+        if (
+            self._chunk_budget_config is not None
+            and self._chunk_budget_config.hard_max_chunk_tokens
+        ):
+            from memtomem.chunking.bounded import TokenBudget
+
+            budget = TokenBudget(self._chunk_budget_config)
+            for chunk in chunks:
+                budget.validate(chunk)
 
         db = self._get_db()
         try:
@@ -1299,7 +1319,7 @@ class SqliteBackend(
                        heading_hierarchy=?, chunk_type=?, start_line=?, end_line=?,
                        language=?, tags=?, namespace=?, updated_at=?,
                        valid_from_unix=?, valid_to_unix=?,
-                       scope=?, project_root=?, origin=?
+                       scope=?, project_root=?, origin=?, retrieval_context=?, redaction_count=?, overlap_before=?, overlap_after=?
                        WHERE id=?""",
                     [
                         (
@@ -1319,6 +1339,10 @@ class SqliteBackend(
                             c.metadata.scope,
                             str(c.metadata.project_root) if c.metadata.project_root else None,
                             c.metadata.origin,
+                            c.metadata.retrieval_context,
+                            c.metadata.redaction_count,
+                            c.metadata.overlap_before,
+                            c.metadata.overlap_after,
                             str(c.id),
                         )
                         for c, _ in to_update
@@ -1377,8 +1401,8 @@ class SqliteBackend(
                         namespace, created_at, updated_at,
                         overlap_before, overlap_after,
                         valid_from_unix, valid_to_unix,
-                        scope, project_root, origin)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        scope, project_root, origin, retrieval_context, redaction_count)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [
                         (
                             str(c.id),
@@ -1401,6 +1425,8 @@ class SqliteBackend(
                             c.metadata.scope,
                             str(c.metadata.project_root) if c.metadata.project_root else None,
                             c.metadata.origin,
+                            c.metadata.retrieval_context,
+                            c.metadata.redaction_count,
                         )
                         for c in to_insert
                     ],
@@ -1756,8 +1782,9 @@ class SqliteBackend(
                     ).fetchone()
                     if remaining is None:
                         db.execute(
-                            "DELETE FROM _memtomem_meta WHERE key=?",
-                            (f"{_AI_SUMMARY_KEY_PREFIX}{source_norm}",),
+                            "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
+                            (f"{_AI_SUMMARY_KEY_PREFIX}{source_norm}",
+                             f"chunk_descriptions:{_AI_SUMMARY_KEY_PREFIX}{source_norm}"),
                         )
 
             if not self._in_transaction:
@@ -1782,8 +1809,8 @@ class SqliteBackend(
             # file. Cheap (single row by primary key) so we don't gate it.
             with self._rolls_back_if_standalone(db):
                 db.execute(
-                    "DELETE FROM _memtomem_meta WHERE key=?",
-                    (_ai_summary_key(source_file),),
+                    "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
+                    (_ai_summary_key(source_file), "chunk_descriptions:" + _ai_summary_key(source_file)),
                 )
                 self._commit_if_standalone(db)
             return 0
@@ -1808,8 +1835,8 @@ class SqliteBackend(
                         rowids,
                     )
             db.execute(
-                "DELETE FROM _memtomem_meta WHERE key=?",
-                (_ai_summary_key(source_file),),
+                "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
+                (_ai_summary_key(source_file), "chunk_descriptions:" + _ai_summary_key(source_file)),
             )
             if not self._in_transaction:
                 db.commit()
@@ -2153,7 +2180,7 @@ class SqliteBackend(
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("DELETE FROM chunks_fts")
                 cursor = conn.execute(
-                    "SELECT rowid, content, source_file, heading_hierarchy FROM chunks"
+                    "SELECT rowid, content, source_file, heading_hierarchy, retrieval_context FROM chunks"
                 )
                 total = 0
                 try:
@@ -2166,7 +2193,13 @@ class SqliteBackend(
                             [
                                 (
                                     r[0],
-                                    _fts.tokenize_for_fts(_rebuild_fts_retrieval(r[1], r[3])),
+                                    _fts.tokenize_for_fts(
+                                        (
+                                            f"{r[4]}\n\n{r[1]}"
+                                            if r[4]
+                                            else _rebuild_fts_retrieval(r[1], r[3])
+                                        )
+                                    ),
                                     r[2],
                                 )
                                 for r in batch
@@ -2618,7 +2651,7 @@ class SqliteBackend(
 
     async def get_chunk_index_state(
         self, source_file: Path
-    ) -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None]]:
+    ) -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None, str]]:
         """Return hash, hierarchy and retrieval metadata for a source's chunks.
 
         The fields the differ compares. Beyond hash and hierarchy it carries the
@@ -2629,12 +2662,14 @@ class SqliteBackend(
         """
         db = self._get_db()
         rows = db.execute(
-            "SELECT id, content_hash, heading_hierarchy, tags, valid_from_unix, valid_to_unix"
+            "SELECT id, content_hash, heading_hierarchy, tags, valid_from_unix, valid_to_unix, retrieval_context"
             " FROM chunks WHERE source_file=?",
             (norm_path(source_file),),
         ).fetchall()
-        state: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None]] = {}
-        for chunk_id, content_hash, heading_json, tags_json, valid_from, valid_to in rows:
+        state: dict[
+            str, tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None, str]
+        ] = {}
+        for chunk_id, content_hash, heading_json, tags_json, valid_from, valid_to, context in rows:
             try:
                 hierarchy = tuple(json.loads(heading_json))
             except (json.JSONDecodeError, TypeError):
@@ -2645,7 +2680,7 @@ class SqliteBackend(
             except (json.JSONDecodeError, TypeError):
                 logger.warning("Corrupted tags for chunk %s", chunk_id)
                 tags = ()
-            state[chunk_id] = (content_hash, hierarchy, tags, valid_from, valid_to)
+            state[chunk_id] = (content_hash, hierarchy, tags, valid_from, valid_to, context)
         return state
 
     async def get_chunk_ids_by_hashes(self, content_hashes: Sequence[str]) -> dict[str, UUID]:
@@ -3243,6 +3278,26 @@ class SqliteBackend(
 
     # ---- AI summary cache (per-source LLM-generated preview) ----------------
 
+    async def get_chunk_descriptions(self, source: Path) -> dict[str, str]:
+        assert self._meta is not None
+        raw = self._meta.get_meta("chunk_descriptions:" + _ai_summary_key(source))
+        try:
+            data = json.loads(raw) if raw else {}
+            return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+        except (ValueError, AttributeError):
+            return {}
+
+    async def set_chunk_descriptions(self, source: Path, descriptions: dict[str, str]) -> None:
+        assert self._meta is not None
+        # Never leave a cache orphan when a first-time embedding fails. Existing
+        # sources have a lifecycle owner; a new source can cache on its next pass.
+        if self._get_db().execute("SELECT 1 FROM chunks WHERE source_file=? LIMIT 1",
+                                  (norm_path(source),)).fetchone() is None:
+            return
+        # One bounded record per source; replace the previous generation in full.
+        self._meta.set_meta("chunk_descriptions:" + _ai_summary_key(source),
+                            json.dumps(dict(list(descriptions.items())[:256])))
+
     async def get_ai_summary(self, source_file: Path) -> dict | None:
         """Return the cached AI summary record for ``source_file``, or None.
 
@@ -3611,6 +3666,8 @@ class SqliteBackend(
             scope=scope_val,
             project_root=project_root_val,
             origin=origin_val,
+            retrieval_context=(row[24] or "") if len(row) >= 25 else "",
+            redaction_count=int(row[25] or 0) if len(row) >= 26 else 0,
         )
 
         # --- timestamps (always timezone-aware) ---

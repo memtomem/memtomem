@@ -190,6 +190,9 @@ async def reload_if_stale(
 
     try:
         new_cfg = _build_fresh_config()
+        from memtomem.chunking.bounded import validate_budget_configuration
+
+        validate_budget_configuration(new_cfg, getattr(app.state, "config", None))
     except Exception as exc:
         logger.warning(
             "Hot-reload failed for config at %s: %s", _override_path(), exc, exc_info=True
@@ -281,6 +284,9 @@ async def apply_runtime_config_changes(
     settle it, so the rebuild runs inline and this call does not return until it
     finishes (#2214) — non-web callers and focused unit tests.
     """
+    from memtomem.chunking.bounded import validate_budget_configuration
+
+    validate_budget_configuration(new_cfg, old_cfg)
     try:
         tokenizer_changed = old_cfg.search.tokenizer != new_cfg.search.tokenizer
     except AttributeError:
@@ -290,6 +296,9 @@ async def apply_runtime_config_changes(
         onnx_batch_changed = old_cfg.embedding.onnx_batch_size != new_cfg.embedding.onnx_batch_size
     except AttributeError:
         onnx_batch_changed = False
+
+    if storage is not None and hasattr(new_cfg, "indexing"):
+        await storage.configure_chunk_budget(new_cfg.indexing)
 
     if onnx_batch_changed and app is not None:
         embedder = getattr(app.state, "embedder", None)

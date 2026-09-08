@@ -82,7 +82,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-onnx = ["fastembed>=0.8,<0.9", "urllib3>=2.7.0"]
+onnx = ["tokenizers>=0.21,<1", "fastembed>=0.8,<0.9", "urllib3>=2.7.0"]
 ollama = ["ollama>=0.4"]
 openai = ["openai>=1.60"]
 korean = ["kiwipiepy>=0.18"]

@@ -151,6 +151,10 @@ async def create_components(
         load_config_d(config)
         load_config_overrides(config)
 
+    from memtomem.chunking.bounded import validate_budget_configuration
+
+    validate_budget_configuration(config)
+
     # Initialize FTS tokenizer from config
     from memtomem.storage.fts_tokenizer import set_tokenizer
 
@@ -200,6 +204,7 @@ async def create_components(
             embedding_policy_fingerprint=embedding_policy_fingerprint(config.embedding),
             embedding_max_sequence_tokens=config.embedding.max_sequence_tokens,
             strict_dim_check=False,
+            chunk_budget_config=config.indexing,
         )
         try:
             await storage.initialize()

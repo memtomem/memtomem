@@ -269,7 +269,17 @@ class TestFormatStructuredResults:
         r = self._make_result()
         parsed = json.loads(_format_structured_results([r]))
         item = parsed["results"][0]
-        expected_keys = {"rank", "score", "source", "hierarchy", "namespace", "chunk_id", "content"}
+        expected_keys = {
+            "rank",
+            "score",
+            "source",
+            "hierarchy",
+            "namespace",
+            "chunk_id",
+            "content",
+            "retrieval_context",
+            "redaction_count",
+        }
         assert set(item.keys()) == expected_keys
 
     def test_score_precision(self):

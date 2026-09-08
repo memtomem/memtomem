@@ -2112,7 +2112,7 @@ class TestStaleIndex:
 
 
 class TestStaleIndexBlocked:
-    SECRET_LINE = "api_key = " + "z" * 24
+    SECRET_LINE = 'api_key = "' + "z" * 24  # Unterminated value cannot be safely masked.
 
     def _make_blocked(self, note: Path) -> None:
         with note.open("a", encoding="utf-8") as fh:
@@ -2225,7 +2225,7 @@ class TestStaleIndexBlocked:
         finally:
             await backend.close()
 
-        note.write_text(f"ok: 1\nsecret_key: {'y' * 24}\n", encoding="utf-8")
+        note.write_text(f'ok: 1\nsecret_key: "{"y" * 24}\n', encoding="utf-8")
 
         blocked = _stale_findings(config, mem_dir)["stale_index_blocked"]
         assert blocked.items == ["conf.yaml"]
@@ -2418,6 +2418,7 @@ class TestChunkContentParity:
                 tuple(chunk.metadata.tags),
                 chunk.metadata.valid_from_unix,
                 chunk.metadata.valid_to_unix,
+                chunk.metadata.retrieval_context,
             )
 
         assert Counter(_state_of(c) for c in doctor) == Counter(persisted.values())

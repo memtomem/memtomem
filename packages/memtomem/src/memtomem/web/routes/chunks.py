@@ -160,6 +160,9 @@ async def edit_chunk(
         # too. Evaluated on the fresh chunk (re-fetched under the lock) so a
         # concurrent migrate cannot leave us validating a stale scope.
         # Mirrors MCP ``mem_edit``.
+        if chunk.metadata.redaction_count:
+            raise HTTPException(status_code=409, detail="masked_projection_read_only")
+
         inferred_scope = meta.scope or "user"
 
         # ADR-0011 §5 Gate B (#2317), the web twin of the ``mem_edit`` gate

@@ -440,6 +440,9 @@ bounds — apply only to the matched result, not to what surrounds it.
 
 ## Indexing
 
+For exact limits, code context, generic exclusions and migration previews, see
+[Bounded chunking](bounded-chunking.md).
+
 ### `memory_dirs` — reactive watch vs one-shot seed
 
 `indexing.memory_dirs` is the source-of-truth list for the file watcher
@@ -481,7 +484,12 @@ candidate) refuse with a configuration error naming
 | `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` (+ provider folders selected in `mm init`) | Directories watched for reactive re-index (see above) |
 | `MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS` | `[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]` | File types accepted by the indexer and file watcher |
 | `MEMTOMEM_INDEXING__WATCHER_BACKEND` | `auto` | Watch backend: `auto` uses polling on macOS and native events elsewhere; set `native` or `polling` to override |
-| `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Maximum tokens per chunk |
+| `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Approximate packing preference; use the hard limit for an exact ceiling |
+| `MEMTOMEM_INDEXING__HARD_MAX_CHUNK_TOKENS` | `0` | Exact body ceiling (`0` disables); requires a matching local tokenizer |
+| `MEMTOMEM_INDEXING__CHUNK_TOKENIZER_PATH` | empty | Local embedding-model `tokenizer.json`; no model download |
+| `MEMTOMEM_INDEXING__CHUNK_CONTEXT_TOKENS` | `512` | Separate heading/description budget |
+| `MEMTOMEM_INDEXING__CHUNK_MODEL_TOKENS` | `8192` | Composed retrieval input ceiling, including special tokens |
+| `MEMTOMEM_INDEXING__ENRICH_CHUNK_CONTEXT` | `false` | Optional cached LLM descriptions; requires hard-budget mode |
 | `MEMTOMEM_INDEXING__MIN_CHUNK_TOKENS` | `128` | Merge threshold for short chunks |
 | `MEMTOMEM_INDEXING__CHUNK_OVERLAP_TOKENS` | `0` | Token overlap between adjacent chunks |
 | `MEMTOMEM_INDEXING__STRUCTURED_CHUNK_MODE` | `original` | JSON/YAML/TOML chunking: `original` or `recursive` |

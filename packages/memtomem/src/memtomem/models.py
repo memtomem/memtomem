@@ -67,6 +67,8 @@ class ChunkMetadata:
     # it. Ownership over the virtual summary path is decided on this field
     # rather than on a namespace/tag combination a user chunk can reproduce.
     origin: str | None = None
+    retrieval_context: str = ""  # bounded description; never part of body identity
+    redaction_count: int = 0  # source-level count; indexed projection is read-only
 
 
 def _like_glob_matches(pattern: str, value: str) -> bool:
@@ -388,6 +390,8 @@ class Chunk:
         chunk.content stores the pure text (no hierarchy prefix).
         This property prepends the hierarchy for retrieval quality.
         """
+        if self.metadata.retrieval_context:
+            return f"{self.metadata.retrieval_context}\n\n{self.content}"
         h = self.metadata.heading_hierarchy
         if not h:
             return self.content

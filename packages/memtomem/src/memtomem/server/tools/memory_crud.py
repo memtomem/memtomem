@@ -1055,6 +1055,10 @@ async def mem_edit(
             return _degraded_source_error(chunk_id)
         assert chunk is not None
         meta = chunk.metadata
+        if meta.redaction_count:
+            return ("Error: masked_projection_read_only. "
+                    "Edit the original source and reindex this masked projection.")
+
 
         # ADR-0011: infer scope from the loaded chunk's persisted metadata.
         # Both gates below see the same scope the chunk lives under, so

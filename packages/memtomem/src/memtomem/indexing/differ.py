@@ -37,6 +37,7 @@ ChunkState = (
     | tuple[str, tuple[str, ...]]
     | tuple[str, tuple[str, ...], tuple[str, ...]]
     | tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None]
+    | tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None, str]
 )
 
 
@@ -55,6 +56,7 @@ class _RetrievalMetadata:
     and must not be rewritten on every re-index.
     """
 
+    context: str | None = None
     tags: tuple[str, ...] | None = None
     validity: tuple[int | None, int | None] | None = None
 
@@ -70,7 +72,11 @@ class _RetrievalMetadata:
 
     def matches(self, chunk: Chunk) -> bool:
         """Whether every *supplied* field agrees — the strictest reuse test."""
-        return self.tags is not None and not self.differs_from(chunk)
+        return (
+            self.tags is not None
+            and not self.differs_from(chunk)
+            and (self.context is None or self.context == chunk.metadata.retrieval_context)
+        )
 
 
 def _split_state(state: ChunkState) -> tuple[str, tuple[str, ...] | None, _RetrievalMetadata]:
@@ -92,7 +98,18 @@ def _split_state(state: ChunkState) -> tuple[str, tuple[str, ...] | None, _Retri
         # data loss dressed up as a diff. Reject the type instead.
         raise ValueError(
             f"unsupported chunk state type {type(state).__name__}; expected a hash "
-            "string or a 2-, 3- or 5-element tuple (see ChunkState)"
+            "string or a 2-, 3-, 5- or 6-element tuple (see ChunkState)"
+        )
+    if len(state) == 6:
+        chash, hierarchy, tags, valid_from, valid_to, context = state
+        return (
+            chash,
+            hierarchy,
+            _RetrievalMetadata(
+                tags=tags,
+                validity=(valid_from, valid_to),
+                context=context,
+            ),
         )
     if len(state) == 5:
         chash, hierarchy, tags, valid_from, valid_to = state
@@ -105,7 +122,7 @@ def _split_state(state: ChunkState) -> tuple[str, tuple[str, ...] | None, _Retri
         return chash, hierarchy, _RetrievalMetadata()
     raise ValueError(
         f"unsupported chunk state width {len(state)}; expected a bare hash or a "
-        "2-, 3- or 5-element tuple (see ChunkState)"
+        "2-, 3-, 5- or 6-element tuple (see ChunkState)"
     )
 
 
@@ -205,7 +222,10 @@ def compute_diff(
             reuse_id, existing_hierarchy = reuse
             used_ids.add(reuse_id)
             chunk.id = UUID(reuse_id)
-            if existing_hierarchy is not None and existing_hierarchy != new_hierarchy:
+            old_context = existing_meta[reuse_id].context
+            if (existing_hierarchy is not None and existing_hierarchy != new_hierarchy) or (
+                old_context is not None and old_context != chunk.metadata.retrieval_context
+            ):
                 to_upsert.append(chunk)
             else:
                 if existing_meta[reuse_id].differs_from(chunk):

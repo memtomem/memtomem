@@ -114,6 +114,7 @@ async def import_memories(
             force_unsafe=force_unsafe,
             surface="web_api_import",
             extract_entities=config.indexing.extract_entities,
+            indexing_config=config.indexing,
         )
     except ImportPrivacyError as exc:
         # Mirrors the web_api_add 403 shape (system.py); ``blocked_records`` is a
@@ -127,6 +128,8 @@ async def import_memories(
                 "surface": "web_api_import",
             },
         ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         tmp_path.unlink(missing_ok=True)
 

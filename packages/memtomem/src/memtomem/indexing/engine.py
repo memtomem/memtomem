@@ -667,6 +667,19 @@ class IndexEngine:
                 ReStructuredTextChunker(),
             ]
         )
+        if registry is None and config.hard_max_chunk_tokens:
+            from memtomem.chunking.javascript import JavaScriptChunker
+            from memtomem.chunking.python_code import PythonChunker
+
+            self._registry = ChunkerRegistry(
+                [
+                    MarkdownChunker(indexing_config=config),
+                    StructuredChunker(indexing_config=config),
+                    ReStructuredTextChunker(),
+                    PythonChunker(),
+                    JavaScriptChunker(),
+                ]
+            )
         # Level L3 of the memory-file lock order (see ``context._atomic``
         # module docstring): the per-file sidecar (L2) is acquired ABOVE this
         # lock, never below, so no path ever waits on a sidecar while holding
@@ -1097,6 +1110,42 @@ class IndexEngine:
         storage-less engine (the doctor's discovery engine) can use it safely.
         Returns ``[]`` for a suffix no chunker is registered for.
         """
+        from memtomem.indexing.privacy_projection import prepare_index_content
+
+        scope, _ = self._resolve_scope(file_path.resolve())
+        projection = prepare_index_content(content, scope=scope)
+        content = projection.content
+        chunks = self._chunk_projected_content(file_path, content)
+        if projection.redaction_count:
+            for chunk in chunks:
+                context = (f"Index masking: {projection.redaction_count} source values masked.\n"
+                           + chunk.metadata.retrieval_context)
+                chunk.metadata = dataclasses.replace(
+                    chunk.metadata, redaction_count=projection.redaction_count)
+                if self._config.hard_max_chunk_tokens:
+                    from memtomem.chunking.bounded import TokenBudget
+
+                    TokenBudget(self._config).describe(chunk, context)
+                else:
+                    chunk.metadata = dataclasses.replace(chunk.metadata, retrieval_context=context)
+        return chunks
+
+    def _chunk_projected_content(self, file_path: Path, content: str) -> list[Chunk]:
+        if self._config.hard_max_chunk_tokens and file_path.suffix.lower() in {
+            ".py",
+            ".js",
+            ".jsx",
+            ".ts",
+            ".tsx",
+            ".mjs",
+        }:
+            from memtomem.chunking.bounded import chunk_code
+
+            return chunk_code(file_path, content, self._config)
+        if self._config.hard_max_chunk_tokens and file_path.suffix.lower() == ".json":
+            from memtomem.chunking.bounded import chunk_json
+
+            return chunk_json(file_path, content, self._config)
         chunks = self._registry.chunk_file(file_path, content)
         # Post-processing: merge short chunks + add overlap
         chunks = _merge_short_chunks(
@@ -1107,7 +1156,17 @@ class IndexEngine:
         )
         if self._config.chunk_overlap_tokens > 0:
             chunks = _add_overlap(chunks, self._config.chunk_overlap_tokens)
+        if self._config.hard_max_chunk_tokens:
+            from memtomem.chunking.bounded import bound_chunks
+
+            chunks = bound_chunks(chunks, self._config)
         return chunks
+
+    async def _validate_source_commit(self, file_path: Path) -> None:
+        """Migration seam: validate the reviewed source under the write transaction."""
+
+    async def _record_source_commit(self, file_path: Path) -> None:
+        """Migration seam: record an atomic completion receipt with the chunks."""
 
     async def _index_file_locked(
         self,
@@ -1909,10 +1968,12 @@ class IndexEngine:
             }
 
         try:
-            content = file_path.read_text(encoding="utf-8")
+            with file_path.open(encoding="utf-8", newline="") as stream:
+                content = stream.read()
         except UnicodeDecodeError:
             logger.warning("Non-UTF-8 content in %s, replacing invalid bytes", file_path.name)
-            content = file_path.read_text(encoding="utf-8", errors="replace")
+            with file_path.open(encoding="utf-8", errors="replace", newline="") as stream:
+                content = stream.read()
         except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
             # File is gone as a *file*: unlinked between stat and read (TOCTOU),
             # or the leaf path was replaced by a directory (``IsADirectoryError``
@@ -1974,8 +2035,11 @@ class IndexEngine:
         exempted = False
         if not already_scanned:
             declared = declared_exemption(decision_path, content)
+            from memtomem.indexing.privacy_projection import prepare_index_content
+
+            projection = prepare_index_content(content, scope=scope_val)
             guard = privacy.enforce_write_guard(
-                content,
+                content if declared or force_unsafe else projection.guard_content,
                 surface="index",
                 force_unsafe=force_unsafe,
                 scope=scope_val,
@@ -2096,6 +2160,12 @@ class IndexEngine:
         # ``importance_score`` (sqlite_backend.py UPDATE column list). Net
         # effect: force re-indexes content but keeps per-chunk personalization
         # and chunk identity. See ``docs/adr/0005-force-reindex-metadata-contract.md``.
+        if self._config.enrich_chunk_context:
+            from memtomem.indexing.chunk_context import enrich_context
+
+            await enrich_context(
+                new_chunks, self._config, self._llm, cast("SqliteBackend", self._storage)
+            )
         existing_state = await self._storage.get_chunk_index_state(file_path)
         diff_result = compute_diff(existing_state, new_chunks)
         chunk_positions = {id(chunk): index + 1 for index, chunk in enumerate(new_chunks)}
@@ -2259,6 +2329,7 @@ class IndexEngine:
         # Now safe to mutate DB — embedding succeeded.
         # Wrap delete+upsert in a single transaction for atomicity.
         async with self._storage.transaction():
+            await self._validate_source_commit(file_path)
             if diff_result.to_delete:
                 await self._storage.delete_chunks(diff_result.to_delete)
 
@@ -2312,6 +2383,7 @@ class IndexEngine:
                 # same write already paid for.
                 if persisted_upserts:
                     await self._extract_entities_for(persisted_upserts)
+            await self._record_source_commit(file_path)
 
         # Both metadata mutators return the count of rows they actually
         # changed, so a run whose diff bucketed rows as metadata-only but
@@ -2801,8 +2873,11 @@ class IndexEngine:
         except OSError:  # pragma: no cover - defensive: unreadable parent
             decision_path = file_path
         scope_val, _ = self._resolve_scope(decision_path)
+        from memtomem.indexing.privacy_projection import prepare_index_content
+
+        projection = prepare_index_content(content, scope=scope_val)
         return privacy.enforce_write_guard(
-            content,
+            content if declared_exemption(decision_path, content) else projection.guard_content,
             surface="memory_doctor",
             scope=scope_val,
             declared_exemption=declared_exemption(decision_path, content),

@@ -10,6 +10,7 @@ def create_storage(config: Mem2MemConfig) -> SqliteBackend:
     """Return the SQLite storage backend."""
     return SqliteBackend(
         config.storage,
+        chunk_budget_config=config.indexing,
         dimension=config.embedding.dimension,
         embedding_provider=config.embedding.provider,
         embedding_model=config.embedding.model,
