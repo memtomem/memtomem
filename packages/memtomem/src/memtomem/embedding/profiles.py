@@ -82,26 +82,33 @@ def apply_e5_defaults(config: Mem2MemConfig) -> None:
     if config.embedding.provider.lower() != "onnx" or not is_e5(config.embedding.model):
         # A later precedence layer may replace an automatically selected E5.
         # Remove only generated values; explicit budgets remain untouched.
-        if (
-            config.indexing.chunk_input_prefix == "passage: "
-            and "chunk_input_prefix" not in config.indexing.model_fields_set
-        ):
-            from memtomem.config import IndexingConfig
+        #
+        # The condition is "this config is not E5" — already established by the
+        # branch above — never "the prefix still looks generated". Keying on the
+        # prefix let an operator who exports
+        # ``MEMTOMEM_INDEXING__CHUNK_INPUT_PREFIX="passage: "`` (marking that one
+        # field *set*) and then selects bge-m3 keep the whole generated E5 budget:
+        # ``hard_max_chunk_tokens=384``, ``chunk_model_tokens=512`` and the E5
+        # tokenizer, under a 1024-token BGE-M3 embedder whose checksum guard in
+        # ``validate_budget_configuration`` is skipped for non-E5 models. Each
+        # field is still individually protected by its own ``model_fields_set``
+        # check below, so explicit values survive either way.
+        from memtomem.config import IndexingConfig
 
-            baseline = IndexingConfig()
-            for key in (
-                "hard_max_chunk_tokens",
-                "chunk_context_tokens",
-                "chunk_model_tokens",
-                "chunk_tokenizer_path",
-                "max_chunk_tokens",
-                "target_chunk_tokens",
-                "min_chunk_tokens",
-                "chunk_overlap_tokens",
-                "chunk_input_prefix",
-            ):
-                if key not in config.indexing.model_fields_set:
-                    object.__setattr__(config.indexing, key, getattr(baseline, key))
+        baseline = IndexingConfig()
+        for key in (
+            "hard_max_chunk_tokens",
+            "chunk_context_tokens",
+            "chunk_model_tokens",
+            "chunk_tokenizer_path",
+            "max_chunk_tokens",
+            "target_chunk_tokens",
+            "min_chunk_tokens",
+            "chunk_overlap_tokens",
+            "chunk_input_prefix",
+        ):
+            if key not in config.indexing.model_fields_set:
+                object.__setattr__(config.indexing, key, getattr(baseline, key))
         return
     tokenizer_path = E5_TOKENIZER
     if config.embedding.onnx_variant != "fp32":
@@ -166,5 +173,19 @@ def artifact_manifest(directory: str, model: str, variant: str) -> dict[str, obj
 
 
 def variant_identity(directory: str) -> str:
-    """Hash the declared manifest without loading or hashing model weights."""
-    return hashlib.sha256((Path(directory).expanduser() / "manifest.json").read_bytes()).hexdigest()
+    """Hash the declared manifest without loading or hashing model weights.
+
+    ``embedding_policy_fingerprint`` reads like a pure helper and is called from
+    storage init, ``mm status`` and indexing decisions, so a missing or
+    unreadable artifact directory must surface as a configuration error rather
+    than an ``OSError`` escaping a function whose callers expect a string.
+    ``.resolve()`` matches ``artifact_manifest``, so the two agree on which file
+    a given configured path names.
+    """
+    manifest = (Path(directory).expanduser().resolve()) / "manifest.json"
+    try:
+        return hashlib.sha256(manifest.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ValueError(
+            f"ONNX artifact manifest is unreadable at {manifest}: {exc.strerror or exc}"
+        ) from exc

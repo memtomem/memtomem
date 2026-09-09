@@ -565,11 +565,28 @@ class FileWatcher:
         loop = asyncio.get_running_loop()
         first: float | None = None
         last = loop.time()
+        # Backoff deadlines are per-run scheduling state, not durable facts. A
+        # stop()/start() cycle starts a fresh observer and a fresh queue, so a
+        # deadline left over from the previous run would delay the new run's
+        # first flush for a file nobody has failed to index yet.
+        self._retry_after.clear()
+        self._retry_attempts.clear()
         while True:
             now = loop.time()
             timeout = self._debounce_s
             if pending and first is not None:
                 timeout = min(last + self._debounce_s, first + self._max_wait_s) - now
+                blocked = [
+                    deadline
+                    for path in pending
+                    if (deadline := self._retry_after.get(path, 0.0)) > now
+                ]
+                if len(blocked) == len(pending):
+                    # Every pending path is inside its retry backoff, so no
+                    # flush can happen at the debounce/max-wait deadline. Sleep
+                    # to the earliest expiry instead of waking on each tick and
+                    # finding nothing to do.
+                    timeout = max(timeout, min(blocked) - now)
             try:
                 # Check the deadline before consuming another queued event: a
                 # continuously nonempty queue must not starve the maximum wait.
@@ -591,7 +608,17 @@ class FileWatcher:
                 if pending:
                     now = loop.time()
                     ready = {p for p in pending if self._retry_after.get(p, 0) <= now}
-                    retry = await self._flush_batch(ready) if ready else set()
+                    if not ready:
+                        # Every pending path is still inside its retry backoff,
+                        # so there is nothing to flush. Returning to the top
+                        # (rather than calling ``_flush_batch`` with an empty set
+                        # and rewriting the window bookkeeping) lets the timeout
+                        # computed above sleep until the earliest backoff
+                        # expires, instead of waking once per debounce interval
+                        # to discover the same thing. The deadlines are left
+                        # untouched because no work was attempted.
+                        continue
+                    retry = await self._flush_batch(ready)
                     for path in ready - retry:
                         self._retry_attempts.pop(path, None)
                         self._retry_after.pop(path, None)

@@ -576,9 +576,19 @@ def validate_budget_configuration(config: Any, previous: Any = None) -> None:
         return  # Compatibility with callers supplying only unrelated runtime knobs.
     if previous is not None and not isinstance(getattr(previous, "indexing", None), IndexingConfig):
         previous = None
-    if previous is not None and any(
-        getattr(previous.embedding, key, default) != getattr(config.embedding, key, default)
-        for key, default in (("onnx_variant", "fp32"), ("onnx_artifact_path", ""))
+    # Reach for ``.embedding`` through ``getattr`` on both sides: the guard two
+    # lines up only establishes that each object carries an ``indexing``
+    # section, and this function's contract explicitly admits callers that
+    # supply "only unrelated runtime knobs".
+    previous_embedding = getattr(previous, "embedding", None)
+    config_embedding = getattr(config, "embedding", None)
+    if (
+        previous_embedding is not None
+        and config_embedding is not None
+        and any(
+            getattr(previous_embedding, key, default) != getattr(config_embedding, key, default)
+            for key, default in (("onnx_variant", "fp32"), ("onnx_artifact_path", ""))
+        )
     ):
         raise ValueError("Embedding artifact changes require a Core restart")
     fields = (

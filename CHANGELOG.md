@@ -193,6 +193,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The CPU embedding profile no longer disables GPU acceleration, stale-chunks
+  an upgraded install, or breaks dedup (#2383 review).** Six defects in the
+  first cut of the E5 profile:
+  - `providers=["CPUExecutionProvider"]` was passed for *every* ONNX
+    configuration. fastembed only auto-selects CUDA when `providers` is `None`,
+    so an existing `bge-m3` setup with `onnxruntime-gpu` was silently demoted to
+    CPU. The pin now applies only to the INT8 variants, which are
+    architecture-gated to CPU by their own manifest check.
+  - The completed-source receipt policy carried no code identity, so after an
+    upgrade a receipt hit returned before the chunker ran and an unchanged
+    source kept its old boundaries indefinitely. The shipped version now
+    participates in the policy: a release bump costs one re-chunk pass.
+  - `is_duplicate` and the web "similar chunks" route embedded stored document
+    text through `embed_query`, which prefixes `query: ` under E5 and pushed
+    cosine below the dedup threshold. Both embed on the document side now.
+  - Over-length input was refused on every path. Ingress still refuses (the
+    chunker guarantees the budget), but a long *query* truncates and warns
+    again: every query caller wraps embedding in a broad `except` that falls
+    back to BM25-only, so refusing there hid the degradation instead of
+    reporting it.
+  - The non-E5 profile reset keyed on `chunk_input_prefix` still looking
+    generated, so setting `MEMTOMEM_INDEXING__CHUNK_INPUT_PREFIX="passage: "`
+    and selecting `bge-m3` kept the 384/512 E5 budget in front of a 1024-token
+    embedder. It now keys on the model.
+  - A missing or unreadable INT8 `manifest.json` raised `OSError` out of
+    `embedding_policy_fingerprint`; it is reported as a configuration error, and
+    the path is resolved the same way `artifact_manifest` resolves it.
+
+  Also: the receipt completeness check is one statement instead of two queries
+  per chunk row (and no longer names `chunks_vec` on a BM25-only database), the
+  supersede re-read no longer blocks the event loop inside the write transaction,
+  the chunk-tokenizer fingerprint is resolved once per engine rather than per
+  indexed file, receipt rows are removed with their source, and watcher retry
+  backoff neither survives a restart nor wakes the loop once per debounce
+  interval while every pending path is backed off.
+
 - **A `scope` that is not a tier is now refused on every read surface, not
   only on search.** #2193 put the closed tier vocabulary in front of
   `GET /api/search`, `mem_search` and `mm search`, and left `mem_recall`,

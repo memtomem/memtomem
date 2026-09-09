@@ -5564,11 +5564,15 @@ class TestGenerationLease:
         generation = components.generation
         seen: list[int] = []
 
-        async def _watching_embed_query(text):
+        # The probe embeds through the *document* side (``embed_texts``): the
+        # text it is asked about is a passage, and an asymmetric model would
+        # place a "query: "-prefixed vector away from the stored rows it is
+        # compared against.
+        async def _watching_embed_texts(texts, **_kwargs):
             seen.append(generation.leases)
-            return [0.0] * engine._embedder.dimension
+            return [[0.0] * engine._embedder.dimension for _ in texts]
 
-        engine._embedder.embed_query = _watching_embed_query
+        engine._embedder.embed_texts = _watching_embed_texts
 
         await engine.is_duplicate("some text")
 

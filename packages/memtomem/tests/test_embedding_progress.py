@@ -240,7 +240,13 @@ async def test_onnx_streams_progress_per_yield():
     embedder = OnnxEmbedder(config)
 
     def fake_sync(
-        texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+        texts,
+        on_progress=None,
+        source_path=None,
+        chunk_indices=None,
+        *,
+        batch_size=None,
+        refuse_truncation=False,
     ):
         # Mimic the real _embed_sync's per-yield progress fire
         out = []
@@ -279,7 +285,13 @@ async def test_onnx_throttles_thread_hops_for_large_input():
     n = 200
 
     def fake_sync(
-        texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+        texts,
+        on_progress=None,
+        source_path=None,
+        chunk_indices=None,
+        *,
+        batch_size=None,
+        refuse_truncation=False,
     ):
         out = []
         total = len(texts)
@@ -322,7 +334,13 @@ async def test_onnx_no_progress_skips_callback_plumbing():
     received_cb_arg: list = []
 
     def fake_sync(
-        texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+        texts,
+        on_progress=None,
+        source_path=None,
+        chunk_indices=None,
+        *,
+        batch_size=None,
+        refuse_truncation=False,
     ):
         received_cb_arg.append(on_progress)
         return [[0.0] for _ in texts]
@@ -340,7 +358,13 @@ async def test_onnx_progress_callback_exception_swallowed():
     embedder = OnnxEmbedder(config)
 
     def fake_sync(
-        texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+        texts,
+        on_progress=None,
+        source_path=None,
+        chunk_indices=None,
+        *,
+        batch_size=None,
+        refuse_truncation=False,
     ):
         out = []
         total = len(texts)
@@ -366,7 +390,13 @@ async def test_onnx_progress_kwarg_omitted_works():
     embedder = OnnxEmbedder(config)
 
     def fake_sync(
-        texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+        texts,
+        on_progress=None,
+        source_path=None,
+        chunk_indices=None,
+        *,
+        batch_size=None,
+        refuse_truncation=False,
     ):
         return [[0.0] for _ in texts]
 
@@ -385,7 +415,13 @@ async def test_onnx_progress_spans_subbatches_globally():
     embedder._subbatch_for = lambda bs: 2  # type: ignore[method-assign]
 
     def fake_sync(
-        texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+        texts,
+        on_progress=None,
+        source_path=None,
+        chunk_indices=None,
+        *,
+        batch_size=None,
+        refuse_truncation=False,
     ):
         out = []
         total = len(texts)
