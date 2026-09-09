@@ -170,3 +170,11 @@ filesystem experiment; simultaneous first-ever DB initialization is a separate
 failure mode. Supervisors retain child handles and clean up their own children.
 They do not address production processes. Source drift and metadata refusals
 must be rechecked before any separately qualified rollout.
+
+A later user-approved local rollout is recorded at the end of the transition
+report. Explicit masking uses `indexing.index_masking_manifest_path`, with a
+version-1 `sources` map keyed by canonical path. Each reviewed entry names the
+SHA-256 of the exact decoded source and sorted, non-overlapping inclusive line
+`spans` covering complete parsed blocks. Keep this owner-only manifest outside
+Git. Changes fail back to the normal scanner; masked chunks remain read-only.
+This does not enable the dormant automatic value-boundary projection.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import contextlib
 import dataclasses
 import inspect
@@ -1125,14 +1126,14 @@ class IndexEngine:
         masked projection while the audit log said "bypass", and that
         projection is read-only to ``mem_edit``.
         """
-        from memtomem.indexing.privacy_projection import IndexProjection, prepare_index_content
+        from memtomem.indexing.privacy_projection import IndexProjection
 
         original_content = content
         scope, _ = self._resolve_scope(file_path.resolve())
         projection = (
             IndexProjection(content, content)
             if exempt
-            else prepare_index_content(content, scope=scope)
+            else self._prepare_index_projection(file_path, content, scope)
         )
         content = projection.content
         chunks = self._chunk_projected_content(file_path, content)
@@ -2139,9 +2140,7 @@ class IndexEngine:
         masking_exempt = already_scanned
         if not already_scanned:
             declared = declared_exemption(decision_path, content)
-            from memtomem.indexing.privacy_projection import prepare_index_content
-
-            projection = prepare_index_content(content, scope=scope_val)
+            projection = self._prepare_index_projection(decision_path, content, scope_val)
             masking_exempt = bool(declared) or force_unsafe
             guard = privacy.enforce_write_guard(
                 content if masking_exempt else projection.guard_content,
@@ -2523,6 +2522,23 @@ class IndexEngine:
         async with self._storage.transaction():
             await self._validate_source_commit(file_path)
             if diff_result.to_delete:
+                if isinstance(self._storage, SqliteBackend):
+                    deleted_ids = json.dumps([str(i) for i in diff_result.to_delete])
+                    linked = (
+                        self._storage._get_db()
+                        .execute(
+                            "SELECT 1 FROM chunk_links WHERE "
+                            "source_id IN (SELECT value FROM json_each(?)) OR "
+                            "target_id IN (SELECT value FROM json_each(?)) LIMIT 1",
+                            (deleted_ids, deleted_ids),
+                        )
+                        .fetchone()
+                    )
+                    if linked:
+                        raise ValueError(
+                            "Reindex would remove linked chunk identities; "
+                            "explicit link migration is required"
+                        )
                 await self._storage.delete_chunks(diff_result.to_delete)
 
             # Both buckets keep their stored vector, and a sibling edit can have
@@ -3070,6 +3086,16 @@ class IndexEngine:
             )
         return result
 
+    def _prepare_index_projection(self, path: Path, content: str, scope: str):
+        from memtomem.indexing.reviewed_projection import prepare_reviewed_projection
+        from memtomem.indexing.privacy_projection import prepare_index_content
+
+        if self._config.index_masking_manifest_path:
+            return prepare_reviewed_projection(
+                path, content, self._config.index_masking_manifest_path, scope=scope
+            )
+        return prepare_index_content(content, scope=scope)
+
     def preview_redaction_decision(self, file_path: Path, content: str) -> str:
         """What would the redaction gate decide for ``content`` at ``file_path``?
 
@@ -3095,10 +3121,9 @@ class IndexEngine:
         except OSError:  # pragma: no cover - defensive: unreadable parent
             decision_path = file_path
         scope_val, _ = self._resolve_scope(decision_path)
-        from memtomem.indexing.privacy_projection import prepare_index_content
 
         declared = declared_exemption(decision_path, content)
-        projection = prepare_index_content(content, scope=scope_val)
+        projection = self._prepare_index_projection(decision_path, content, scope_val)
         return privacy.enforce_write_guard(
             content if declared else projection.guard_content,
             surface="memory_doctor",

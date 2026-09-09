@@ -347,6 +347,7 @@ class IndexingConfig(ConfigModel):
     max_chunk_tokens: int = 512
     # Opt-in exact ceiling, independent of the existing approximate packing goal.
     hard_max_chunk_tokens: int = Field(default=0, ge=0)
+    index_masking_manifest_path: str = ""  # Exact-source, reviewed masking spans only
     chunk_input_prefix: str = ""
     chunk_tokenizer_path: str = ""  # local tokenizer.json matching the embedding model
     chunk_context_tokens: int = Field(default=512, ge=1)
