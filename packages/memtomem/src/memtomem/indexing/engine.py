@@ -662,9 +662,10 @@ class IndexEngine:
             (_build_exclude_spec([rule.path_glob]), rule) for rule in self._ns_config.rules
         ]
         self._warned_empty_parent_rules: set[int] = set()
-        # Resolved on first use by ``_chunk_tokenizer_fingerprint``; the field it
-        # derives from is restart-required, so one value per engine is correct.
-        self._chunk_tokenizer_fp: str | None = None
+        # Resolved on first use by ``_chunk_tokenizer_fingerprint``. The *path*
+        # is restart-guarded so resolving once is correct; the digest at that
+        # path is not, and is re-taken per call.
+        self._chunk_tokenizer_path: Path | None = None
         self._registry = registry or ChunkerRegistry(
             [
                 MarkdownChunker(),
@@ -1578,6 +1579,12 @@ class IndexEngine:
         """
         from memtomem.models import NamespaceFilter
 
+        # ``embed_query`` refused empty input; the document-side call does not,
+        # and an empty probe would dense-search a meaningless vector and could
+        # report an unrelated row as a duplicate. Keep the old answer.
+        if not text or not text.strip():
+            return False
+
         try:
             # Held, not counted: this is a probe, not an indexing run, so it
             # stays out of ``is_active`` — but it awaits the embedder, so it
@@ -1604,23 +1611,30 @@ class IndexEngine:
             return False
 
     def _chunk_tokenizer_fingerprint(self) -> str:
-        """Tokenizer identity for the receipt policy, resolved once per engine.
+        """Tokenizer identity for the receipt policy.
 
-        ``chunk_tokenizer_path`` sits in the restart-required field set that
-        ``validate_budget_configuration`` guards, so this cannot change under a
-        live engine. Building a ``TokenBudget`` per indexed file to read it made
-        every file pay a ``resolve_tokenizer`` hop — which for the pinned E5
-        identity is an ``hf_hub_download`` call, i.e. a per-file network attempt
-        during a bulk index on a cold cache.
+        Only the *resolution* is cached. Building a whole ``TokenBudget`` per
+        indexed file made every file pay a ``resolve_tokenizer`` hop, which for
+        the pinned E5 identity is an ``hf_hub_download`` call — a per-file
+        network attempt during a bulk index on a cold cache.
+
+        The digest itself is re-taken every call. ``validate_budget_configuration``
+        restart-guards the configured *path*, not the bytes at it, and
+        ``TokenBudget`` picks up a tokenizer replaced in place because its digest
+        is keyed on mtime/size. Remembering one fingerprint for the engine's
+        lifetime would let the receipt policy keep matching while the chunker had
+        already started producing different chunks. ``tokenizer_fingerprint``
+        re-reads only when that metadata moves, so the steady-state cost is a
+        ``stat``.
         """
-        if self._chunk_tokenizer_fp is None:
-            if self._config.hard_max_chunk_tokens:
-                from memtomem.chunking.bounded import TokenBudget
+        if not self._config.hard_max_chunk_tokens:
+            return "legacy"
+        from memtomem.chunking.bounded import tokenizer_fingerprint
+        from memtomem.embedding.profiles import resolve_tokenizer
 
-                self._chunk_tokenizer_fp = TokenBudget(self._config).fingerprint
-            else:
-                self._chunk_tokenizer_fp = "legacy"
-        return self._chunk_tokenizer_fp
+        if self._chunk_tokenizer_path is None:
+            self._chunk_tokenizer_path = resolve_tokenizer(self._config.chunk_tokenizer_path)
+        return tokenizer_fingerprint(self._chunk_tokenizer_path)
 
     async def _source_unchanged(self, file_path: Path, content: str) -> bool:
         """Whether *file_path* still holds exactly *content*.

@@ -410,6 +410,84 @@ async def test_is_duplicate_embeds_through_the_document_side(bm25_only_component
 
 
 # --------------------------------------------------------------------------
+# The tokenizer fingerprint tracks the file, not just the configured path
+# --------------------------------------------------------------------------
+
+
+def _fingerprint_stub(config: IndexingConfig):
+    """Minimal `self` for ``IndexEngine._chunk_tokenizer_fingerprint``."""
+
+    class _Stub:
+        _chunk_tokenizer_path = None
+
+    stub = _Stub()
+    stub._config = config
+    return stub
+
+
+def test_replacing_the_tokenizer_in_place_changes_the_fingerprint(tmp_path):
+    """`validate_budget_configuration` restart-guards the path, not the bytes.
+
+    ``TokenBudget`` keys its digest on mtime/size, so a tokenizer swapped in
+    place immediately changes what the chunker produces. Caching one fingerprint
+    for the engine's lifetime would leave the receipt policy matching while the
+    chunker had already moved — reusing chunks the current tokenizer would not
+    produce.
+    """
+    from memtomem.indexing.engine import IndexEngine
+
+    tok = tmp_path / "tokenizer.json"
+    tok.write_bytes(b'{"version": 1}')
+    config = IndexingConfig(
+        hard_max_chunk_tokens=384, chunk_tokenizer_path=str(tok), memory_dirs=[]
+    )
+    stub = _fingerprint_stub(config)
+
+    first = IndexEngine._chunk_tokenizer_fingerprint(stub)
+    assert stub._chunk_tokenizer_path is not None, "path resolution should be cached"
+
+    tok.write_bytes(b'{"version": 2, "deliberately": "a different size"}')
+    assert IndexEngine._chunk_tokenizer_fingerprint(stub) != first
+
+
+def test_unchanged_tokenizer_keeps_one_fingerprint(tmp_path):
+    from memtomem.indexing.engine import IndexEngine
+
+    tok = tmp_path / "tokenizer.json"
+    tok.write_bytes(b'{"version": 1}')
+    config = IndexingConfig(
+        hard_max_chunk_tokens=384, chunk_tokenizer_path=str(tok), memory_dirs=[]
+    )
+    stub = _fingerprint_stub(config)
+    assert IndexEngine._chunk_tokenizer_fingerprint(
+        stub
+    ) == IndexEngine._chunk_tokenizer_fingerprint(stub)
+
+
+def test_legacy_budget_reports_no_tokenizer_identity():
+    from memtomem.indexing.engine import IndexEngine
+
+    stub = _fingerprint_stub(IndexingConfig(hard_max_chunk_tokens=0, memory_dirs=[]))
+    assert IndexEngine._chunk_tokenizer_fingerprint(stub) == "legacy"
+
+
+@pytest.mark.anyio
+async def test_is_duplicate_refuses_empty_text_without_embedding(bm25_only_components):
+    """The document-side call does not reject empty input the way embed_query did."""
+    comp, _ = bm25_only_components
+    engine = comp.index_engine
+    called: list[str] = []
+
+    async def _texts(texts, **_kwargs):
+        called.append("embed_texts")
+        return [[0.0] * max(engine._embedder.dimension, 1) for _ in texts]
+
+    engine._embedder.embed_texts = _texts
+    assert await engine.is_duplicate("   ") is False
+    assert called == []
+
+
+# --------------------------------------------------------------------------
 # Watcher backoff scheduling
 # --------------------------------------------------------------------------
 

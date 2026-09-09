@@ -37,6 +37,18 @@ def _tokenizer_digest(path: str, mtime: int, size: int) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def tokenizer_fingerprint(path: Path) -> str:
+    """Digest the tokenizer at *path*, re-reading it when its metadata moves.
+
+    Keyed on mtime/size rather than remembered once, so a tokenizer replaced in
+    place is a different identity. Callers that pin chunking decisions to this
+    value depend on that: the configured *path* is restart-guarded, the bytes at
+    it are not.
+    """
+    stat = path.stat()
+    return _tokenizer_digest(str(path), stat.st_mtime_ns, stat.st_size)
+
+
 class TokenBudget:
     def __init__(self, config: IndexingConfig):
         from memtomem.embedding.profiles import resolve_tokenizer
@@ -45,6 +57,7 @@ class TokenBudget:
         stat = path.stat()
         self.tokenizer = _tokenizer(str(path), stat.st_mtime_ns, stat.st_size)
         self.fingerprint = _tokenizer_digest(str(path), stat.st_mtime_ns, stat.st_size)
+        self.tokenizer_path = path
         self.body = config.hard_max_chunk_tokens
         self.context = config.chunk_context_tokens
         self.model = config.chunk_model_tokens

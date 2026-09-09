@@ -223,11 +223,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
   Also: the receipt completeness check is one statement instead of two queries
   per chunk row (and no longer names `chunks_vec` on a BM25-only database), the
-  supersede re-read no longer blocks the event loop inside the write transaction,
-  the chunk-tokenizer fingerprint is resolved once per engine rather than per
-  indexed file, receipt rows are removed with their source, and watcher retry
-  backoff neither survives a restart nor wakes the loop once per debounce
-  interval while every pending path is backed off.
+  receipt-hit supersede re-read runs off the event loop (the one inside the write
+  transaction stays synchronous — that span is owned by a single task), the
+  chunk-tokenizer path is resolved once per engine rather than per indexed file
+  while its digest is still re-taken whenever the file changes, receipt rows are
+  removed with their source, and watcher retry backoff neither survives a restart
+  nor wakes the loop once per debounce interval while every pending path is
+  backed off.
 
 - **A `scope` that is not a tier is now refused on every read surface, not
   only on search.** #2193 put the closed tier vocabulary in front of
