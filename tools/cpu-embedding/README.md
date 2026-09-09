@@ -141,3 +141,32 @@ encoding and query-only resource runs separately. Private text and raw query
 history stay outside the repository; committed summaries contain only aggregates.
 
 The MIRACL fallback sources were [MTEB English](https://huggingface.co/datasets/mteb/MIRACLRetrieval_en_top_250_only_w_correct-v2) and [MTEB Korean](https://huggingface.co/datasets/mteb/MIRACLRetrieval_ko_top_250_only_w_correct-v2), cross-checked against the original MIRACL dev TSVs. See `miracl-provenance.json` for frozen hashes and sampling scope.
+
+## Local transition evaluation (2026-09-09)
+
+See [the local transition report](LOCAL-TRANSITION.ko.md). Its acceptance result
+is **HOLD**, not a production migration. The existing installed binary cannot
+reopen the schema-2 snapshot, and the fresh E5 evaluation index does not preserve
+all production metadata. Never copy an evaluation DB over the live DB.
+
+The `transition_*.py` utilities capture private snapshots, preview token and
+metadata constraints, measure isolated before/after environments, prepare
+**unjudged** query candidates, and verify evaluation integrity. These local
+resource measurements use `resource` (macOS/Linux); the existing `benchmark.py`
+is the separate portable model benchmark. The supervisor additionally requires
+`psutil==7.2.2`. Keep every output directory outside Git and watched memory roots.
+All tools expose `--help`; use explicit before/after Python executables, a pinned
+model cache, and offline model loading. `transition_index_worker.py --limit 60`
+selects an approximately 60-file stratified sample (63 in this corpus).
+
+`transition_query_worker.py --as-of` is for a fixed-time replay and deliberately
+bypasses the runtime cache. Omit it for the measured cache-hit path. Quality
+labels must be independently judged; previous rankings and candidate overlap
+are not relevance labels. The current followup uses compatible PR code for
+BGE query replay, since the installed schema-1 reader refuses this snapshot.
+
+The shared watcher schema is initialized once before the final one/three-client
+filesystem experiment; simultaneous first-ever DB initialization is a separate
+failure mode. Supervisors retain child handles and clean up their own children.
+They do not address production processes. Source drift and metadata refusals
+must be rechecked before any separately qualified rollout.
