@@ -1231,6 +1231,7 @@ Changing from BGE-M3 requires a separate 384-dimensional index and reindexing.
 | `MEMTOMEM_EMBEDDING__ONNX_VARIANT` | `fp32` | `fp32`, `int8-arm64`, `int8-avx2`, `int8-avx512`, or `int8-avx512-vnni`; restart and explicit index migration required when changed |
 | `MEMTOMEM_EMBEDDING__ONNX_ARTIFACT_PATH` | empty | Local exported quantized artifact directory with checksummed `manifest.json`; no automatic fallback |
 | `MEMTOMEM_INDEXING__CHUNK_INPUT_PREFIX` | empty; E5 `passage: ` | Exact model-role prefix included in final input token accounting; restart required |
+| `MEMTOMEM_INDEXING__INDEX_MASKING_MANIFEST_PATH` | empty (disabled) | Owner-only reviewed masking manifest for exact source paths, content SHA-256, and complete-block line spans. Changed sources or invalid manifests use the normal privacy guard; masked chunks are read-only. Does not enable automatic masking. |
 | `MEMTOMEM_INDEXING__WATCHER_DEBOUNCE_MS` | `5000` | Quiet period before automatic reindexing, 1–30000 ms |
 | `MEMTOMEM_INDEXING__WATCHER_MAX_WAIT_MS` | `30000` | Maximum event collection window, 1–30000 ms, even under continuous edits |
 
