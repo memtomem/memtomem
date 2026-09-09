@@ -510,12 +510,14 @@ def _step_embedding(state: dict) -> None:
             f"    [2] bge-small-en-v1.5 — English, better accuracy (~{_bge_small_size}, 384d)"
         )
         click.echo(f"    [3] bge-m3 — multilingual KR/EN/JP/CN (~{_bge_m3_size}, 1024d)")
-        model_choice = nav_prompt("  Select", type=click.IntRange(1, 3), default=1)
+        click.echo("    [4] multilingual-e5-small — multilingual CPU default (~490 MB, 384d)")
+        model_choice = nav_prompt("  Select", type=click.IntRange(1, 4), default=4)
 
         models = {
             1: ("all-MiniLM-L6-v2", 384),
             2: ("bge-small-en-v1.5", 384),
             3: ("bge-m3", 1024),
+            4: ("multilingual-e5-small", 384),
         }
         model, dimension = models[model_choice]
 
@@ -2980,7 +2982,7 @@ def _override_from_flags(
         # Only reset the preset-populated model/dimension when the user
         # actually switches to a different provider AND hasn't supplied
         # their own --model. `mm init --preset korean --provider onnx`
-        # must keep korean's bge-m3 (same provider); `--preset korean
+        # must keep korean's E5 model (same provider); `--preset korean
         # --provider ollama` must fall back to ollama's default model.
         provider_changed = provider != state.get("provider")
         state["provider"] = provider
@@ -2990,7 +2992,7 @@ def _override_from_flags(
                 state["dimension"] = 0
             else:
                 defaults = {
-                    "onnx": ("all-MiniLM-L6-v2", 384),
+                    "onnx": ("multilingual-e5-small", 384),
                     "ollama": ("nomic-embed-text", 768),
                     "openai": ("text-embedding-3-small", 1536),
                 }
@@ -3029,6 +3031,8 @@ _MODEL_DIMS: dict[str, int] = {
     "bge-small-en-v1.5": 384,
     "nomic-embed-text": 768,
     "bge-m3": 1024,
+    "multilingual-e5-small": 384,
+    "intfloat/multilingual-e5-small": 384,
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
 }

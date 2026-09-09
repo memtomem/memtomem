@@ -1756,7 +1756,7 @@
   "settings.config.guide.embedding.item.batch_size.label": "배치 크기",
   "settings.config.guide.embedding.item.batch_size.text": "API 호출당 임베딩하는 텍스트 수. 클수록 인덱싱이 빠르지만 메모리를 더 씁니다. 기본값 64.",
   "settings.config.guide.embedding.item.onnx_batch_size.label": "ONNX 배치 크기",
-  "settings.config.guide.embedding.item.onnx_batch_size.text": "로컬 FastEmbed/ONNX 추론 배치당 텍스트 수입니다. 기본값 8은 활성화 메모리를 제한합니다. 값을 높이면 처리량은 늘 수 있지만 최대 RSS도 증가합니다. ollama/openai에는 적용되지 않습니다.",
+  "settings.config.guide.embedding.item.onnx_batch_size.text": "로컬 FastEmbed/ONNX 추론 배치당 텍스트 수입니다. E5-small 기본값은 4, 기존 모델 기본값은 8입니다. 작은 배치는 활성화 메모리를 줄입니다. 값을 높이면 처리량은 늘 수 있지만 최대 RSS도 증가합니다. ollama/openai에는 적용되지 않습니다.",
   "settings.config.guide.embedding.item.max_sequence_tokens.label": "ONNX 최대 시퀀스 토큰",
   "settings.config.guide.embedding.item.max_sequence_tokens.text": "로컬 ONNX 입력마다 적용하는 실제 토크나이저 상한입니다. 기본값은 1024이며 0은 모델 한도로 복원합니다. 저장 본문과 BM25는 온전하지만 잘린 입력의 dense 벡터는 앞부분만 표현합니다. 변경 후 재시작하고 강제 재인덱싱하세요.",
   "settings.config.guide.embedding.item.onnx_cpu_mem_arena.label": "ONNX CPU 메모리 아레나",
@@ -1855,5 +1855,18 @@
   "settings.config.decay_status_active": "점수 감쇠: 활성 (반감기 {days}일)",
   "settings.config.decay_status_inactive": "점수 감쇠: 비활성",
   "settings.config.ns_default": "기본 NS: {ns}",
-  "settings.config.ns_auto_active": "자동 NS: 활성"
+  "settings.config.ns_auto_active": "자동 NS: 활성",
+  "settings.config.label.embedding.onnx_variant": "ONNX 정밀도 옵션",
+  "settings.config.label.embedding.onnx_artifact_path": "양자화 모델 경로",
+  "settings.config.label.indexing.hard_max_chunk_tokens": "본문 토큰 상한",
+  "settings.config.label.indexing.chunk_context_tokens": "문맥 설명 토큰 예산",
+  "settings.config.label.indexing.chunk_model_tokens": "최종 모델 입력 토큰 상한",
+  "settings.config.label.indexing.chunk_tokenizer_path": "청크 토크나이저",
+  "settings.config.label.indexing.chunk_input_prefix": "모델 입력 접두사",
+  "settings.config.label.indexing.watcher_debounce_ms": "파일 변경 대기 시간 (ms)",
+  "settings.config.label.indexing.watcher_max_wait_ms": "파일 변경 최대 대기 시간 (ms)",
+  "settings.config.guide.embedding.item.onnx_variant.label": "ONNX 정밀도 옵션",
+  "settings.config.guide.embedding.item.onnx_variant.text": "CPU 기본값은 FP32입니다. 양자화 옵션은 검증된 모델 파일과 명시적 인덱스 전환이 필요하며 재시작 후 적용됩니다.",
+  "settings.config.guide.embedding.item.onnx_artifact_path.label": "양자화 모델 경로",
+  "settings.config.guide.embedding.item.onnx_artifact_path.text": "모델 파일과 체크섬을 기록한 manifest.json이 있는 로컬 경로입니다. 양자화 옵션을 명시한 경우에만 사용합니다."
 }

@@ -135,4 +135,7 @@ def build_fresh_config(
     cfg = Mem2MemConfig()
     load_config_d(cfg, strict=strict_fragments)
     load_config_overrides(cfg, migrate=migrate)
+    from memtomem.embedding.profiles import apply_e5_defaults
+
+    apply_e5_defaults(cfg)
     return cfg

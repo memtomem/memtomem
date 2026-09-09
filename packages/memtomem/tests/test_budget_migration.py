@@ -117,3 +117,94 @@ def test_configuration_hash_is_stable_across_process_hash_seeds():
         for seed in (1, 2, 17)
     ]
     assert len(set(results)) == 1
+
+
+@pytest.fixture
+def symbolic_budget_config(tmp_path, monkeypatch):
+    from memtomem.embedding import profiles
+
+    tokenizers = pytest.importorskip("tokenizers")
+    tokenizer = tokenizers.Tokenizer(tokenizers.models.WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
+    path = tmp_path / "resolved-tokenizer.json"
+    tokenizer.save(str(path))
+    config = Mem2MemConfig(
+        embedding={"provider": "onnx", "model": "multilingual-e5-small", "dimension": 384}
+    )
+    monkeypatch.setattr(profiles, "resolve_tokenizer", lambda identifier: path)
+    return config, path
+
+
+async def test_audit_uses_resolved_symbolic_tokenizer(storage, symbolic_budget_config):
+    from memtomem.indexing.budget_audit import audit
+
+    config, path = symbolic_budget_config
+    db_path = Path(storage._get_db().execute("PRAGMA database_list").fetchone()[2])
+    report = audit(db_path, config.indexing, set())
+    assert report["tokenizer_sha256"] == migration.source_hash(path)
+    assert report["budgets"]["model"] == 512
+
+
+async def test_migration_rejects_changed_resolved_tokenizer_before_backup(
+    symbolic_budget_config, tmp_path
+):
+    config, path = symbolic_budget_config
+    plan = {
+        "policy": migration.POLICY_VERSION,
+        "config_hash": migration.digest(config.model_dump(mode="python")),
+        "tokenizer_sha256": "0" * 64,
+    }
+    plan["manifest_id"] = migration.digest(plan)
+    with pytest.raises(ValueError, match="tokenizer changed"):
+        await migration.apply_plan(config, plan, tmp_path / "report.json")
+    assert not list(tmp_path.glob("before-budget-migration-*.db"))
+
+
+async def test_migration_resolves_symbolic_tokenizer_before_database_validation(
+    symbolic_budget_config, tmp_path
+):
+    config, path = symbolic_budget_config
+    plan = {
+        "policy": migration.POLICY_VERSION,
+        "config_hash": migration.digest(config.model_dump(mode="python")),
+        "tokenizer_sha256": migration.source_hash(path),
+        "db_path": "changed-database",
+    }
+    plan["manifest_id"] = migration.digest(plan)
+    with pytest.raises(ValueError, match="database path changed"):
+        await migration.apply_plan(config, plan, tmp_path / "report.json")
+    assert not list(tmp_path.glob("before-budget-migration-*.db"))
+
+
+async def test_audit_cli_accepts_explicit_e5_budget_and_symbolic_tokenizer(
+    storage, symbolic_budget_config, tmp_path, monkeypatch
+):
+    import json
+    from memtomem.indexing import budget_audit
+
+    config, tokenizer = symbolic_budget_config
+    db_path = storage._get_db().execute("PRAGMA database_list").fetchone()[2]
+    report = tmp_path / "audit.json"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "budget_audit",
+            "--db",
+            db_path,
+            "--tokenizer",
+            config.indexing.chunk_tokenizer_path,
+            "--report",
+            str(report),
+            "--body-tokens",
+            "384",
+            "--context-tokens",
+            "96",
+            "--model-tokens",
+            "512",
+            "--input-prefix",
+            "passage: ",
+        ],
+    )
+    budget_audit.main()
+    payload = json.loads(report.read_text())
+    assert payload["budgets"] == {"body": 384, "context": 96, "model": 512}
+    assert payload["tokenizer_sha256"] == migration.source_hash(tokenizer)

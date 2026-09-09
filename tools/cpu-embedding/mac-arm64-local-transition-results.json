@@ -1,0 +1,397 @@
+{
+  "status": "LOCAL_TRANSITION_HOLD",
+  "scope": "Mac ARM64 local evaluation; production unchanged",
+  "representative": {
+    "A": {
+      "runs": 3,
+      "sources": 63,
+      "chunks": 238,
+      "median": {
+        "index_s": 87.48571987496689,
+        "cpu_s": 346.478767,
+        "peak_rss_bytes": 9084960768,
+        "repeat_s": 0.5060827920679003
+      },
+      "individual_runs": [
+        {
+          "index_s": 87.48571987496689,
+          "cpu_s": 346.478767,
+          "peak_rss_bytes": 8859910144,
+          "repeat_s": 0.5109141250140965,
+          "repeat_indexed": 0
+        },
+        {
+          "index_s": 89.3968819999136,
+          "cpu_s": 350.945143,
+          "peak_rss_bytes": 10308567040,
+          "repeat_s": 0.5060827920679003,
+          "repeat_indexed": 0
+        },
+        {
+          "index_s": 87.15693600010127,
+          "cpu_s": 346.137185,
+          "peak_rss_bytes": 9084960768,
+          "repeat_s": 0.5040661669336259,
+          "repeat_indexed": 0
+        }
+      ],
+      "implementation": {
+        "config.py": "fbcb29ed3567bbd982e94ba3e51fa93a49490f9df759f1d9d5a6bb91524d2e55",
+        "embedding/onnx.py": "294128c39be8e66a25de668c6e6d17bc505316d1f17053d4e8d3503a79290d8d",
+        "indexing/engine.py": "f750397ecf14731043e2adc5434d36e8c176c6f41cf7ef4cb498be4a35a8c4cd"
+      },
+      "libraries": {
+        "onnxruntime": "1.29.0",
+        "fastembed": "0.8.0",
+        "numpy": "2.5.2",
+        "tokenizers": "0.23.1"
+      }
+    },
+    "B": {
+      "runs": 3,
+      "sources": 63,
+      "chunks": 268,
+      "median": {
+        "index_s": 144.68057325005066,
+        "cpu_s": 519.896785,
+        "peak_rss_bytes": 18423627776,
+        "repeat_s": 0.5055268340511248
+      },
+      "individual_runs": [
+        {
+          "index_s": 145.49631070904434,
+          "cpu_s": 521.764307,
+          "peak_rss_bytes": 16851632128,
+          "repeat_s": 0.515203082934022,
+          "repeat_indexed": 0
+        },
+        {
+          "index_s": 144.29936345899478,
+          "cpu_s": 519.896785,
+          "peak_rss_bytes": 18423627776,
+          "repeat_s": 0.5054525419836864,
+          "repeat_indexed": 0
+        },
+        {
+          "index_s": 144.68057325005066,
+          "cpu_s": 518.276619,
+          "peak_rss_bytes": 18674155520,
+          "repeat_s": 0.5055268340511248,
+          "repeat_indexed": 0
+        }
+      ],
+      "implementation": {
+        "config.py": "76ae9d1d7c83c4f67a3478eaad3a0e76431ef52aafb00adc2ac422d0425e58a7",
+        "embedding/onnx.py": "f11ca75e43f11709f694fd90a6beddc1e6ac107d9b472af459ac4529cb46770f",
+        "indexing/engine.py": "fb52a5a5303d73638e2d614bddfb1598b40bbd1a2c6cb6ba90619db5923954f3"
+      },
+      "libraries": {
+        "onnxruntime": "1.24.4",
+        "fastembed": "0.8.0",
+        "numpy": "2.4.4",
+        "tokenizers": "0.22.2"
+      }
+    },
+    "C": {
+      "runs": 3,
+      "sources": 63,
+      "chunks": 478,
+      "median": {
+        "index_s": 14.657873874995857,
+        "cpu_s": 27.558967,
+        "peak_rss_bytes": 2017411072,
+        "repeat_s": 0.5039377920329571
+      },
+      "individual_runs": [
+        {
+          "index_s": 14.789313041954301,
+          "cpu_s": 27.794302000000002,
+          "peak_rss_bytes": 2013315072,
+          "repeat_s": 0.526320334058255,
+          "repeat_indexed": 0
+        },
+        {
+          "index_s": 14.533686749986373,
+          "cpu_s": 27.372003999999997,
+          "peak_rss_bytes": 2017411072,
+          "repeat_s": 0.5004062090301886,
+          "repeat_indexed": 0
+        },
+        {
+          "index_s": 14.657873874995857,
+          "cpu_s": 27.558967,
+          "peak_rss_bytes": 2029764608,
+          "repeat_s": 0.5039377920329571,
+          "repeat_indexed": 0
+        }
+      ],
+      "implementation": {
+        "config.py": "76ae9d1d7c83c4f67a3478eaad3a0e76431ef52aafb00adc2ac422d0425e58a7",
+        "embedding/onnx.py": "f11ca75e43f11709f694fd90a6beddc1e6ac107d9b472af459ac4529cb46770f",
+        "indexing/engine.py": "fb52a5a5303d73638e2d614bddfb1598b40bbd1a2c6cb6ba90619db5923954f3"
+      },
+      "libraries": {
+        "onnxruntime": "1.24.4",
+        "fastembed": "0.8.0",
+        "numpy": "2.4.4",
+        "tokenizers": "0.22.2"
+      }
+    }
+  },
+  "full": {
+    "C": {
+      "sources": 2138,
+      "excluded_sources": 5,
+      "load_s": 0.8084042919799685,
+      "index_s": 591.1229147500126,
+      "cpu_s": 1099.202353,
+      "repeat_s": 18.982052458100952,
+      "repeat_indexed": 0,
+      "peak_rss_bytes": 2506637312,
+      "chunks": 18163,
+      "database_bytes": 124895232
+    },
+    "A": "NOT_RUN: user selected representative only",
+    "B": "NOT_RUN: user selected representative only"
+  },
+  "query": {
+    "B": {
+      "profile": "B",
+      "status": "UNJUDGED",
+      "scope": "before stored corpus vs privacy-accepted fresh E5 clone; metadata not migrated",
+      "queries": 100,
+      "repeats": 3,
+      "cpu_s": 90.050768,
+      "elapsed_s": 34.58979191700928,
+      "rerank_enabled": false,
+      "cached_hits": 300,
+      "timings": {
+        "dense": {
+          "p50_ms": 41.47143755108118,
+          "p95_ms": 83.13162496779114
+        },
+        "hybrid_cold": {
+          "p50_ms": 49.776562431361526,
+          "p95_ms": 130.17883303109556
+        },
+        "hybrid_cached": {
+          "p50_ms": 0.8278544992208481,
+          "p95_ms": 0.9725840063765645
+        }
+      },
+      "peak_rss_bytes": 1795964928
+    },
+    "C": {
+      "profile": "C",
+      "status": "UNJUDGED",
+      "scope": "before stored corpus vs privacy-accepted fresh E5 clone; metadata not migrated",
+      "queries": 100,
+      "repeats": 3,
+      "cpu_s": 26.708629,
+      "elapsed_s": 22.46350104198791,
+      "rerank_enabled": false,
+      "cached_hits": 300,
+      "timings": {
+        "dense": {
+          "p50_ms": 12.869708007201552,
+          "p95_ms": 17.846709000878036
+        },
+        "hybrid_cold": {
+          "p50_ms": 24.787978967651725,
+          "p95_ms": 182.25783295929432
+        },
+        "hybrid_cached": {
+          "p50_ms": 0.9130000253207982,
+          "p95_ms": 1.050500082783401
+        }
+      },
+      "peak_rss_bytes": 1792917504
+    },
+    "A": "NOT_RUN: installed binary supports schema 1; snapshot has schema 2; refusal not bypassed",
+    "comparison_note": "B uses existing BGE vectors under compatible PR code; C is fresh evaluation index. Metadata and corpus differences prevent a controlled model-only quality claim."
+  },
+  "watchers": {
+    "B-1": {
+      "profile": "B",
+      "clients": 1,
+      "delivery": "real filesystem writes with configured observer backend",
+      "backend": "auto",
+      "writes": 20,
+      "same_content_generation": true,
+      "chunk_calls": 1,
+      "embed_calls": 1,
+      "cpu_s": 1.975217,
+      "sum_individual_peak_rss_bytes": 2073509888,
+      "peak_note": "sum of individual peaks, not simultaneous physical memory",
+      "supervised_resources": {
+        "exit_code": 0,
+        "wall_s": 13.178249709075317,
+        "sampled_tree_cpu_s": 2.779076024,
+        "sampled_tree_peak_rss_bytes": 2539880448,
+        "max_processes": 2,
+        "sample_interval_s": 0.05,
+        "rss_note": "RSS sum includes shared pages; not exclusive physical RAM"
+      }
+    },
+    "A-1": {
+      "profile": "A",
+      "clients": 1,
+      "delivery": "real filesystem writes with configured observer backend",
+      "backend": "auto",
+      "writes": 20,
+      "same_content_generation": true,
+      "chunk_calls": 1,
+      "embed_calls": 1,
+      "cpu_s": 1.5093130000000001,
+      "sum_individual_peak_rss_bytes": 1769914368,
+      "peak_note": "sum of individual peaks, not simultaneous physical memory",
+      "supervised_resources": {
+        "exit_code": 0,
+        "wall_s": 4.833549165981822,
+        "sampled_tree_cpu_s": 1.7894674240000001,
+        "sampled_tree_peak_rss_bytes": 1831043072,
+        "max_processes": 2,
+        "sample_interval_s": 0.05,
+        "rss_note": "RSS sum includes shared pages; not exclusive physical RAM"
+      }
+    },
+    "C-3": {
+      "profile": "C",
+      "clients": 3,
+      "delivery": "real filesystem writes with configured observer backend",
+      "backend": "auto",
+      "writes": 20,
+      "same_content_generation": true,
+      "chunk_calls": 1,
+      "embed_calls": 1,
+      "cpu_s": 0.8169909999999998,
+      "sum_individual_peak_rss_bytes": 2742272000,
+      "peak_note": "sum of individual peaks, not simultaneous physical memory",
+      "supervised_resources": {
+        "exit_code": 0,
+        "wall_s": 12.861320207943209,
+        "sampled_tree_cpu_s": 2.860039256,
+        "sampled_tree_peak_rss_bytes": 3199369216,
+        "max_processes": 4,
+        "sample_interval_s": 0.05,
+        "rss_note": "RSS sum includes shared pages; not exclusive physical RAM"
+      }
+    },
+    "B-3": {
+      "profile": "B",
+      "clients": 3,
+      "delivery": "real filesystem writes with configured observer backend",
+      "backend": "auto",
+      "writes": 20,
+      "same_content_generation": true,
+      "chunk_calls": 1,
+      "embed_calls": 1,
+      "cpu_s": 1.9299279999999999,
+      "sum_individual_peak_rss_bytes": 3007823872,
+      "peak_note": "sum of individual peaks, not simultaneous physical memory",
+      "supervised_resources": {
+        "exit_code": 0,
+        "wall_s": 13.81757687497884,
+        "sampled_tree_cpu_s": 3.664971332,
+        "sampled_tree_peak_rss_bytes": 3474538496,
+        "max_processes": 4,
+        "sample_interval_s": 0.05,
+        "rss_note": "RSS sum includes shared pages; not exclusive physical RAM"
+      }
+    },
+    "C-1": {
+      "profile": "C",
+      "clients": 1,
+      "delivery": "real filesystem writes with configured observer backend",
+      "backend": "auto",
+      "writes": 20,
+      "same_content_generation": true,
+      "chunk_calls": 1,
+      "embed_calls": 1,
+      "cpu_s": 0.7588440000000001,
+      "sum_individual_peak_rss_bytes": 1778466816,
+      "peak_note": "sum of individual peaks, not simultaneous physical memory",
+      "supervised_resources": {
+        "exit_code": 0,
+        "wall_s": 12.855673292069696,
+        "sampled_tree_cpu_s": 1.751823792,
+        "sampled_tree_peak_rss_bytes": 2240200704,
+        "max_processes": 2,
+        "sample_interval_s": 0.05,
+        "rss_note": "RSS sum includes shared pages; not exclusive physical RAM"
+      }
+    },
+    "A-3": {
+      "profile": "A",
+      "clients": 3,
+      "delivery": "real filesystem writes with configured observer backend",
+      "backend": "auto",
+      "writes": 20,
+      "same_content_generation": true,
+      "chunk_calls": 3,
+      "embed_calls": 1,
+      "cpu_s": 1.56636,
+      "sum_individual_peak_rss_bytes": 1894285312,
+      "peak_note": "sum of individual peaks, not simultaneous physical memory",
+      "supervised_resources": {
+        "exit_code": 0,
+        "wall_s": 5.667726083076559,
+        "sampled_tree_cpu_s": 2.1850954920000003,
+        "sampled_tree_peak_rss_bytes": 1955151872,
+        "max_processes": 4,
+        "sample_interval_s": 0.05,
+        "rss_note": "RSS sum includes shared pages; not exclusive physical RAM"
+      }
+    }
+  },
+  "gates": {
+    "representative_cpu_reduction": 0.920459867602796,
+    "representative_rss_reduction": 0.7779394844382888,
+    "cold_search_p95_change": 0.4000573573720603,
+    "latency_gate": "FAIL: exceeds 10 percent regression",
+    "quality_gate": "PENDING: independent qrels and critical-query user review not complete",
+    "migration_gate": "HOLD: privacy refusals and references require review; fresh DB is not a migration"
+  },
+  "integrity": {
+    "status": "EVALUATION_ONLY_MIGRATION_HOLD",
+    "counts": {
+      "chunks": 18163,
+      "chunks_vec": 18163,
+      "chunks_fts": 18163,
+      "source_index_receipts": 2138,
+      "chunk_links": 0,
+      "chunk_entities": 50188,
+      "namespace_metadata": 0,
+      "sessions": 0,
+      "session_events": 0
+    },
+    "max_final_input_tokens": 484,
+    "input_violations": 0,
+    "missing_vectors": 0,
+    "missing_fts": 0,
+    "quick_check": [
+      [
+        "ok"
+      ]
+    ],
+    "foreign_key_errors": [],
+    "live_config_unchanged": true,
+    "source_drift_count": 6,
+    "migration_blockers": {
+      "sources": 2143,
+      "ready": 2138,
+      "refused": {
+        "privacy refusal": 5
+      },
+      "new_chunks": 18163,
+      "links": 7,
+      "links_without_unique_exact_mapping": 6
+    },
+    "metadata_note": "Fresh evaluation DB intentionally has no migrated links/session history; never replace production with it"
+  },
+  "known_failed_experiments": [
+    "Installed A cannot reopen schema-2 snapshot",
+    "Three A processes racing first-ever empty DB initialization failed at WAL journal; final watcher experiment preinitializes schema",
+    "Explicit as_of bypassed cache; first query replay was not cache-hit evidence. Runtime rerun verified 300/300 cache hits."
+  ]
+}

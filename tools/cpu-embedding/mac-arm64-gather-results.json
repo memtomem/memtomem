@@ -1,0 +1,63 @@
+{
+  "multilingual-e5-small/fp32": {
+    "runs": 3,
+    "corpus_sha256": "1d6d3eaf2f518668eadc313c303d3a9d2bd2b875478f052f3df140698d2a30b9",
+    "median": {
+      "index_s": 1.4358642919687554,
+      "cpu_s": 3.4572309999999997,
+      "load_s": 0.4251093330094591,
+      "query_p50_ms": 1.8951455131173134,
+      "query_p95_ms": 2.1674480056390166,
+      "retained_rss_bytes": 1445199872,
+      "peak_rss_bytes": 1740865536,
+      "peak_cpu_percent": 232.0
+    },
+    "metrics": {
+      "en": {
+        "recall@10": 0.342318327288865,
+        "mrr@10": 0.6772883597883598,
+        "ndcg@10": 0.39830086880306176,
+        "zero_hit": 0.08333333333333333
+      },
+      "ko": {
+        "recall@10": 0.24681350539874566,
+        "mrr@10": 0.6176785714285714,
+        "ndcg@10": 0.3096829986393707,
+        "zero_hit": 0.13333333333333333
+      }
+    }
+  },
+  "multilingual-e5-small/int8-arm64": {
+    "runs": 3,
+    "corpus_sha256": "1d6d3eaf2f518668eadc313c303d3a9d2bd2b875478f052f3df140698d2a30b9",
+    "median": {
+      "index_s": 1.899106458062306,
+      "cpu_s": 4.320414,
+      "load_s": 0.3471567500382662,
+      "query_p50_ms": 1.5073330723680556,
+      "query_p95_ms": 1.9351666793227196,
+      "retained_rss_bytes": 980549632,
+      "peak_rss_bytes": 980549632,
+      "peak_cpu_percent": 230.3
+    },
+    "metrics": {
+      "en": {
+        "recall@10": 0.32383076734478333,
+        "mrr@10": 0.6680753968253968,
+        "ndcg@10": 0.3877789651773726,
+        "zero_hit": 0.15
+      },
+      "ko": {
+        "recall@10": 0.25134921968445995,
+        "mrr@10": 0.63619708994709,
+        "ndcg@10": 0.3122818183678782,
+        "zero_hit": 0.11666666666666667
+      }
+    },
+    "quantization_drift": {
+      "document_cosine_mean": 0.999481201171875,
+      "document_cosine_min": 0.9992972016334534,
+      "top10_overlap_mean": 0.9441666666666666
+    }
+  }
+}

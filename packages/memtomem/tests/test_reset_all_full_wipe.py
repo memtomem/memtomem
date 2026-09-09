@@ -27,6 +27,7 @@ from memtomem.errors import StorageError
 # add it here (and confirm reset covers it). ``reset_all`` itself needs no edit.
 EXPECTED_USER_TABLES = frozenset(
     {
+        "source_index_receipts",
         "access_log",
         "assertion_edges",
         "canonical_entities",

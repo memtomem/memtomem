@@ -1214,3 +1214,32 @@ mem_config(key="search.default_top_k")            # Query a single value
 mem_config(key="search.default_top_k", value="20")  # Change for this server process
 mem_config(key="search.default_top_k", value="20", persist=True)  # Persist to config.json
 ```
+
+### CPU ONNX profiles
+
+New ONNX configurations default to `multilingual-e5-small` (384 dimensions,
+512 input tokens). Explicit existing models, including `bge-m3`, stay selected.
+E5 uses mean pooling, L2 normalization, `query: ` for queries and `passage: `
+for documents. Its pinned tokenizer counts the complete rendered input;
+oversized direct inputs are refused instead of silently truncated.
+The E5 defaults are 384 body tokens, 96 description tokens, soft target 320,
+minimum 96, overlap 0, two inference threads, batch four, and CPU arena off.
+Changing from BGE-M3 requires a separate 384-dimensional index and reindexing.
+
+| Environment variable | Default | Meaning |
+|---|---|---|
+| `MEMTOMEM_EMBEDDING__ONNX_VARIANT` | `fp32` | `fp32`, `int8-arm64`, `int8-avx2`, `int8-avx512`, or `int8-avx512-vnni`; restart and explicit index migration required when changed |
+| `MEMTOMEM_EMBEDDING__ONNX_ARTIFACT_PATH` | empty | Local exported quantized artifact directory with checksummed `manifest.json`; no automatic fallback |
+| `MEMTOMEM_INDEXING__CHUNK_INPUT_PREFIX` | empty; E5 `passage: ` | Exact model-role prefix included in final input token accounting; restart required |
+| `MEMTOMEM_INDEXING__INDEX_MASKING_MANIFEST_PATH` | empty (disabled) | Owner-only reviewed masking manifest for exact source paths, content SHA-256, and complete-block line spans. Changed sources or invalid manifests use the normal privacy guard; masked chunks are read-only. Does not enable automatic masking. |
+| `MEMTOMEM_INDEXING__WATCHER_DEBOUNCE_MS` | `5000` | Quiet period before automatic reindexing, 1–30000 ms |
+| `MEMTOMEM_INDEXING__WATCHER_MAX_WAIT_MS` | `30000` | Maximum event collection window, 1–30000 ms, even under continuous edits |
+
+The watcher coalesces paths and retries transient failures with bounded jitter.
+An unchanged completed source can reuse a transactionally recorded receipt
+under the existing per-source lock, after privacy checks. Forced indexing,
+namespace reassignment, enrichment and automatic summarization use the normal
+indexing path. Receipts check current chunk/index completeness and policy;
+they are not a substitute for backup or database integrity checks. The watcher
+window bounds scheduling; inference and lock contention can add execution time.
+See `tools/cpu-embedding/` for pinned INT8 export and isolated measurements.

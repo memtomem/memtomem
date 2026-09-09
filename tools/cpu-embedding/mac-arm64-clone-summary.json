@@ -1,0 +1,44 @@
+{
+  "e5": {
+    "model": "multilingual-e5-small",
+    "variant": "fp32",
+    "threads": 2,
+    "batch": 4,
+    "index_s": 19.02772308397107,
+    "cpu_s": 36.337737000000004,
+    "repeat_s": 0.13073995802551508,
+    "database_bytes": 4571136,
+    "initial": {
+      "total_files": 3,
+      "total_chunks": 632,
+      "indexed_chunks": 632,
+      "blocked_files": 1
+    },
+    "repeat": {
+      "indexed_chunks": 0,
+      "skipped_chunks": 632,
+      "mutated": false
+    }
+  },
+  "bge": {
+    "model": "bge-m3",
+    "variant": "fp32",
+    "threads": 2,
+    "batch": 4,
+    "index_s": 170.9381623750087,
+    "cpu_s": 327.20966799999997,
+    "repeat_s": 0.13470979197882116,
+    "database_bytes": 5316608,
+    "initial": {
+      "total_files": 3,
+      "total_chunks": 339,
+      "indexed_chunks": 339,
+      "blocked_files": 1
+    },
+    "repeat": {
+      "indexed_chunks": 0,
+      "skipped_chunks": 339,
+      "mutated": false
+    }
+  }
+}

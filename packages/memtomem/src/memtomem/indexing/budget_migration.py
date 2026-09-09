@@ -220,10 +220,8 @@ async def apply_plan(config: Any, plan: dict[str, Any], report: Path) -> dict[st
         or digest(config.model_dump(mode="python")) != plan["config_hash"]
     ):
         raise ValueError("policy or configuration changed; generate a new preview")
-    if (
-        source_hash(Path(config.indexing.chunk_tokenizer_path).expanduser())
-        != plan["tokenizer_sha256"]
-    ):
+    budget = TokenBudget(config.indexing)
+    if budget.fingerprint != plan["tokenizer_sha256"]:
         raise ValueError("tokenizer changed since preview")
     db_path = config.storage.sqlite_path.expanduser().resolve()
     if str(db_path) != plan["db_path"]:
@@ -244,7 +242,6 @@ async def apply_plan(config: Any, plan: dict[str, Any], report: Path) -> dict[st
     runtime.embedding.batch_size = 1
     components = await create_components(runtime, load_ambient_config=False, entity_backfill=False)
     result: dict[str, Any] = {"manifest_id": manifest_id, "backup": str(backup), "files": []}
-    budget = TokenBudget(config.indexing)
     engine = ReviewedEngine(
         components.storage,
         components.embedder,

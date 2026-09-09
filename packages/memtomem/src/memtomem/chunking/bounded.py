@@ -1,13 +1,15 @@
 """Exact, lossless body splitting with separately budgeted retrieval descriptions.
 
-Only enabled by an explicit local tokenizer configuration. Loading the tokenizer
-never creates an embedding session or downloads a model. Parser failures affect
+Enabled by an exact tokenizer configuration (automatic for the E5 profile).
+The pinned E5 tokenizer can be downloaded without allocating an inference session.
+Parser failures affect
 semantic boundaries, never the token ceiling. No content-type exclusion heuristics.
 """
 
 from __future__ import annotations
 
 import ast
+import hashlib
 import bisect
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -30,19 +32,32 @@ def _tokenizer(path: str, mtime: int, size: int) -> Any:
     return tokenizer
 
 
+@lru_cache(maxsize=8)
+def _tokenizer_digest(path: str, mtime: int, size: int) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 class TokenBudget:
     def __init__(self, config: IndexingConfig):
-        path = Path(config.chunk_tokenizer_path).expanduser().resolve()
+        from memtomem.embedding.profiles import resolve_tokenizer
+
+        path = resolve_tokenizer(config.chunk_tokenizer_path)
         stat = path.stat()
         self.tokenizer = _tokenizer(str(path), stat.st_mtime_ns, stat.st_size)
+        self.fingerprint = _tokenizer_digest(str(path), stat.st_mtime_ns, stat.st_size)
         self.body = config.hard_max_chunk_tokens
         self.context = config.chunk_context_tokens
         self.model = config.chunk_model_tokens
+        self.input_prefix = config.chunk_input_prefix
         if self.body < 1:
             raise ValueError("an exact token budget must be positive")
 
     def count(self, text: str, *, special: bool = False) -> int:
-        return len(self.tokenizer.encode(text, add_special_tokens=special).ids)
+        return len(
+            self.tokenizer.encode(
+                self.input_prefix + text if special else text, add_special_tokens=special
+            ).ids
+        )
 
     def prefix(self, text: str, limit: int) -> int:
         """Return a verified fitting character boundary, never decoded token IDs.
@@ -561,7 +576,15 @@ def validate_budget_configuration(config: Any, previous: Any = None) -> None:
         return  # Compatibility with callers supplying only unrelated runtime knobs.
     if previous is not None and not isinstance(getattr(previous, "indexing", None), IndexingConfig):
         previous = None
+    if previous is not None and any(
+        getattr(previous.embedding, key, default) != getattr(config.embedding, key, default)
+        for key, default in (("onnx_variant", "fp32"), ("onnx_artifact_path", ""))
+    ):
+        raise ValueError("Embedding artifact changes require a Core restart")
     fields = (
+        "chunk_input_prefix",
+        "watcher_debounce_ms",
+        "watcher_max_wait_ms",
         "hard_max_chunk_tokens",
         "chunk_tokenizer_path",
         "chunk_context_tokens",
@@ -574,9 +597,14 @@ def validate_budget_configuration(config: Any, previous: Any = None) -> None:
         raise ValueError("Chunk budget changes require a Core restart")
     if not config.indexing.hard_max_chunk_tokens:
         return
-    TokenBudget(config.indexing)  # fail before any component/state mutation
+    budget = TokenBudget(config.indexing)  # fail before any component/state mutation
+    from memtomem.embedding.profiles import E5_TOKENIZER_SHA256, is_e5
+
+    if config.embedding.provider.lower() == "onnx" and is_e5(config.embedding.model):
+        if budget.fingerprint != E5_TOKENIZER_SHA256:
+            raise ValueError("E5 chunk tokenizer checksum differs from its pinned model tokenizer")
     if (
-        config.embedding.provider == "onnx"
+        config.embedding.provider.lower() == "onnx"
         and config.embedding.max_sequence_tokens > 0
         and config.embedding.max_sequence_tokens < config.indexing.chunk_model_tokens
     ):

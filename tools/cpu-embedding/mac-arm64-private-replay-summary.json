@@ -1,0 +1,27 @@
+{
+  "scope": "100 actual queries, unjudged dense replay; 40 Hangul-only / 40 English-script / 20 mixed-script; mixed is not cross-language relevance",
+  "document_inputs": 632,
+  "profiles": {
+    "multilingual-e5-small": {
+      "query_runs": 3,
+      "encoding_runs": 1,
+      "index_s_once": 14.223973167012446,
+      "index_cpu_s_once": 28.751778,
+      "median_query_cpu_s": 0.8416060000000001,
+      "median_query_p50_ms": 3.383750037755817,
+      "median_query_p95_ms": 7.272064907010645,
+      "corpus_sha256": "65ee2c12d6d545ff218f6d521460e117be1afbb3818d426df243665465feff83"
+    },
+    "bge-m3": {
+      "query_runs": 3,
+      "encoding_runs": 1,
+      "index_s_once": 85.04188687494025,
+      "index_cpu_s_once": 170.418468,
+      "median_query_cpu_s": 5.057758,
+      "median_query_p50_ms": 17.18435453949496,
+      "median_query_p95_ms": 45.5341694643721,
+      "corpus_sha256": "65ee2c12d6d545ff218f6d521460e117be1afbb3818d426df243665465feff83"
+    }
+  },
+  "top10_overlap_mean_unjudged": 0.145
+}

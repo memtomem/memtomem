@@ -1,0 +1,4 @@
+# Isolated export environment; inference uses the project's locked runtime.
+onnx==1.19.1
+onnxruntime==1.23.2
+numpy==2.5.3
