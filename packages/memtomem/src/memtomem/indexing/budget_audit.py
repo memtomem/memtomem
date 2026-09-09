@@ -124,9 +124,7 @@ def audit(db_path: Path, config: IndexingConfig, omitted: set[str]) -> dict[str,
         ],
         "omitted_sources": sorted(omitted),
         "reindex": preview,
-        "tokenizer_sha256": hashlib.sha256(
-            Path(config.chunk_tokenizer_path).read_bytes()
-        ).hexdigest(),
+        "tokenizer_sha256": budget.fingerprint,
         "budgets": {"body": budget.body, "context": budget.context, "model": budget.model},
     }
 
@@ -134,15 +132,23 @@ def audit(db_path: Path, config: IndexingConfig, omitted: set[str]) -> dict[str,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, required=True)
-    parser.add_argument("--tokenizer", type=Path, required=True)
+    parser.add_argument(
+        "--tokenizer", required=True, help="Local tokenizer.json or pinned model: identifier"
+    )
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--body-tokens", type=int, default=4096)
+    parser.add_argument("--context-tokens", type=int, default=512)
+    parser.add_argument("--model-tokens", type=int, default=8192)
+    parser.add_argument("--input-prefix", default="")
     parser.add_argument("--exclude-pattern", action="append", default=[])
     parser.add_argument("--omit-source", action="append", default=[])
     args = parser.parse_args()
     config = IndexingConfig(
         hard_max_chunk_tokens=args.body_tokens,
-        chunk_tokenizer_path=str(args.tokenizer.expanduser()),
+        chunk_tokenizer_path=args.tokenizer,
+        chunk_context_tokens=args.context_tokens,
+        chunk_model_tokens=args.model_tokens,
+        chunk_input_prefix=args.input_prefix,
         exclude_patterns=args.exclude_pattern,
         memory_dirs=[],
     )

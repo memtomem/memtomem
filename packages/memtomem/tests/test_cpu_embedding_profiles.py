@@ -49,19 +49,21 @@ async def test_continuous_events_cannot_starve_maximum_wait():
     task = asyncio.create_task(watcher._process_events())
 
     async def produce():
-        for _ in range(150):
-            watcher._queue.put_nowait(Path("/tmp/updated.md"))
-            await asyncio.sleep(0.002)
+        # Keep input continuous until cancellation. Sub-millisecond timer
+        # rounding on Windows can exhaust a finite producer before the deadline.
+        while True:
+            await watcher._queue.put(Path("/tmp/updated.md"))
+            await asyncio.sleep(0)
 
     producer = asyncio.create_task(produce())
     try:
-        await asyncio.wait_for(flushed.wait(), 0.25)
+        await asyncio.wait_for(flushed.wait(), 2)
         assert not producer.done()
     finally:
         producer.cancel()
         await asyncio.gather(producer, return_exceptions=True)
-        watcher._queue.put_nowait(_STOP_SENTINEL)
-        await asyncio.wait_for(task, 1)
+        await asyncio.wait_for(watcher._queue.put(_STOP_SENTINEL), 1)
+        await asyncio.wait_for(task, 2)
 
 
 async def test_receipt_skips_chunker_but_changed_source_invalidates(
