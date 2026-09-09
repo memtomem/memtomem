@@ -2282,7 +2282,23 @@ class IndexEngine:
                     "indexing": self._config.model_dump(mode="python"),
                     "namespace": self._ns_config.model_dump(mode="python"),
                     "namespace_target": ns_decision.target,
-                    "projection": digest(projection.guard_content),
+                    # The whole effective projection, not just the guard input.
+                    # All three fields drive stored state: ``content`` is what
+                    # gets chunked, and ``redaction_count`` stamps
+                    # ``source_read_only`` plus the masking note in every
+                    # chunk's retrieval context — which in turn gates
+                    # ``source_span_hash``. Two reviewed manifests can agree on
+                    # every byte of text and differ only in how many spans they
+                    # claim (a line already reading "# [REDACTED]" masks to
+                    # itself), so digesting text alone let a receipt preserve
+                    # writable chunks for a source that had become read-only.
+                    "projection": digest(
+                        {
+                            "content": content_hash(projection.content),
+                            "guard": content_hash(projection.guard_content),
+                            "redactions": projection.redaction_count,
+                        }
+                    ),
                     "scope": scope_val,
                     "project": str(project_root),
                     "embedding": receipt_storage.stored_embedding_info,

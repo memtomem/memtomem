@@ -378,6 +378,61 @@ async def test_upgrading_memtomem_invalidates_a_receipt(bm25_only_components, mo
 
 
 # --------------------------------------------------------------------------
+# The receipt policy covers the whole projection, not just the guard input
+# --------------------------------------------------------------------------
+
+
+def _masking_manifest(source: Path, content: str, spans: list[list[int]]) -> str:
+    return json.dumps(
+        {
+            "version": 1,
+            "sources": {
+                str(source.resolve()): {
+                    "source_sha256": hashlib.sha256(content.encode()).hexdigest(),
+                    "spans": spans,
+                }
+            },
+        }
+    )
+
+
+@pytest.mark.anyio
+async def test_manifest_span_change_invalidates_a_receipt(bm25_only_components, monkeypatch):
+    """Same bytes, different span count, must still re-chunk.
+
+    A line that already reads ``# [REDACTED]`` masks to itself, so a manifest
+    claiming that span produces byte-identical ``content`` *and* ``guard_content``
+    while ``redaction_count`` goes 0 -> 1. That count stamps
+    ``source_read_only=True`` and the masking note on every chunk, so a receipt
+    keyed on text alone preserved writable chunks for a source that had just
+    become read-only.
+    """
+    comp, directory = bm25_only_components
+    engine = comp.index_engine
+    source = directory / "masked.md"
+    content = "# [REDACTED]\n\nAn ordinary nonsecret body line.\n"
+    source.write_text(content)
+
+    manifest = directory / "masking.json"
+    # The path stays constant across both writes: changing it would move
+    # ``index_masking_manifest_path`` and invalidate the receipt by itself,
+    # which is not the hole being pinned.
+    manifest.write_text(_masking_manifest(source, content, []))
+    object.__setattr__(engine._config, "index_masking_manifest_path", str(manifest))
+
+    assert not (await engine.index_file(source)).errors
+
+    chunker = Mock(wraps=engine.chunk_content)
+    monkeypatch.setattr(engine, "chunk_content", chunker)
+    assert not (await engine.index_file(source)).errors
+    chunker.assert_not_called()  # unchanged everything -> receipt hit
+
+    manifest.write_text(_masking_manifest(source, content, [[1, 1]]))
+    assert not (await engine.index_file(source)).errors
+    chunker.assert_called_once()
+
+
+# --------------------------------------------------------------------------
 # Dedup probes embed on the document side
 # --------------------------------------------------------------------------
 
@@ -492,36 +547,82 @@ async def test_is_duplicate_refuses_empty_text_without_embedding(bm25_only_compo
 # Workflow job-level env may only use contexts available there
 # --------------------------------------------------------------------------
 
-# Contexts GitHub resolves for ``jobs.<id>.env``. ``runner``, ``env``, ``job``
-# and ``steps`` only become available inside a step, and naming one here does not
-# fail the job — it makes the whole *file* invalid, so GitHub emits a zero-job
-# startup failure on every push and no step ever reports why.
+# GitHub's context-availability table gives ``jobs.<job_id>.env`` exactly
+# github/needs/strategy/matrix/vars/secrets/inputs, and
+# ``jobs.<job_id>.steps.env`` those plus job/runner/env/steps. The difference is
+# therefore a closed set of four, which is what makes a deny-list precise here —
+# an allow-list would also flag every function name and literal the matcher
+# happens to see. Naming one of these four does not fail the job: it makes the
+# whole *file* invalid, so GitHub emits a zero-job startup failure on every push
+# and no step ever reports why.
 _JOB_ENV_CONTEXTS = frozenset(
-    {"github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}
+    {"github", "needs", "strategy", "matrix", "vars", "secrets", "inputs"}
 )
-_CONTEXT_REF = re.compile(r"\$\{\{\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*\.")
+_STEP_ONLY_CONTEXTS = frozenset({"job", "runner", "env", "steps"})
+# Every bare identifier inside a ``${{ ... }}`` expression that is followed by a
+# member access — a dot or a subscript. Matching only "right after ``${{``"
+# missed a forbidden context wrapped in a function call, reached through
+# ``runner['temp']``, or sitting second in the expression.
+_EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+_ACCESSED_NAME = re.compile(r"(?<![\w'\".])([a-zA-Z_][a-zA-Z0-9_-]*)\s*(?=[.\[])")
+
+
+def _forbidden_contexts(value: str) -> set[str]:
+    """Contexts referenced in *value* that a job-level ``env`` may not use."""
+    found: set[str] = set()
+    for expression in _EXPRESSION.findall(str(value)):
+        for name in _ACCESSED_NAME.findall(expression):
+            if name in _STEP_ONLY_CONTEXTS:
+                found.add(name)
+    return found
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("${{ runner.temp }}/x", {"runner"}),
+        ("${{ format('{0}', runner.temp) }}", {"runner"}),
+        ("${{ runner['temp'] }}", {"runner"}),
+        ("${{ matrix.os }}-${{ steps.a.outputs.b }}", {"steps"}),
+        ("${{ github.workspace }}/${{ env.FOO }}", {"env"}),
+        ("${{ matrix.os }}", set()),
+        ("${{ github.sha }}", set()),
+        ("plain-value", set()),
+    ],
+)
+def test_forbidden_context_detection_shapes(value, expected):
+    """The matcher has to be wrong-way strict, not just strict.
+
+    A discovery matcher that misses a shape fails silently green, so each shape
+    that has to be caught — and each that must not be — is pinned explicitly.
+    """
+    assert _forbidden_contexts(value) == expected
 
 
 def test_workflow_job_env_uses_only_job_level_contexts():
     """`cpu-onnx-smoke.yml` shipped `${{ runner.temp }}` in job-level `env`.
 
     The symptom is silent: a startup failure has no jobs and no logs, so the run
-    just reads "failure" with nothing to open.
+    just reads "failure" with nothing to open. The allow-list is GitHub's
+    published context-availability table for ``jobs.<job_id>.env``.
     """
     import yaml
 
     workflows = Path(__file__).resolve().parents[3] / ".github" / "workflows"
     assert workflows.is_dir(), workflows
+    # Both extensions: GitHub honours either, and a guard that enumerates only
+    # today's spelling stops covering the first file added with the other one.
+    paths = sorted({*workflows.glob("*.yml"), *workflows.glob("*.yaml")})
+    assert paths, f"no workflow files discovered under {workflows} — guard would pass vacuously"
     offenders: list[str] = []
-    for path in sorted(workflows.glob("*.yml")):
+    for path in paths:
         document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         for job_name, job in (document.get("jobs") or {}).items():
             if not isinstance(job, dict):
                 continue
             for key, value in (job.get("env") or {}).items():
-                for context in _CONTEXT_REF.findall(str(value)):
-                    if context not in _JOB_ENV_CONTEXTS:
-                        offenders.append(f"{path.name}: jobs.{job_name}.env.{key} -> {context}")
+                for context in sorted(_forbidden_contexts(value)):
+                    offenders.append(f"{path.name}: jobs.{job_name}.env.{key} -> {context}")
     assert not offenders, "job-level env may not reference these contexts: " + "; ".join(offenders)
 
 
