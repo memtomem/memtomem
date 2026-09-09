@@ -125,6 +125,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Document the lock sidecars indexing leaves behind (#2387).** Indexing a
+  file takes a cross-process lock on an empty `.<name>.lock` sibling, and that
+  sidecar is deliberately never unlinked — deleting a live one would let two
+  processes lock two different files under one path. Any indexed tree, a user's
+  own source repository included, therefore accumulates them. The Configuration
+  guide now explains what they are, publishes the `.*.lock` ignore recipe (the
+  leading dot keeps a tracked `uv.lock` unmatched), and states the one rule
+  that matters: do not mass-delete them while a memtomem process may be
+  running. This repository's own ignore rule shipped in #2388.
+
 - Expose configured `rrf_k`, `rrf_weights`, `bm25_candidates`, and
   `dense_candidates` in the schema-1 version runtime profile and human/JSON
   status (#2377), enabling STM's read-only RRF boundary diagnostic (STM #1012).
