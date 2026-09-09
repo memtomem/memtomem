@@ -380,10 +380,30 @@ async def embed_text(request: Request, embedder=Depends(get_embedder)):
         raise HTTPException(status_code=500, detail="Embedding failed") from exc
 
 
+def _declared_default(model: type, name: str):
+    """The default ``model`` itself declares for ``name``."""
+    return model.model_fields[name].default
+
+
+def _cfg_value(section: object, model: type, name: str):
+    """Read ``name`` off ``section``, falling back to the config model's default.
+
+    ``cfg`` here is not always a real ``Mem2MemConfig``: partial, duck-typed
+    stand-ins reach this builder too, so a plain attribute read raises on a
+    field they never declared. The fallback still must not *restate* the value —
+    that would put a second copy next to ``config.py`` (and a third in the
+    response schema) free to drift from the one that is load-bearing. Take it
+    from the field that defines it instead.
+    """
+    return getattr(section, name, _declared_default(model, name))
+
+
 def _build_config_response(
     cfg, *, mtime_ns: int = -1, reload_error: str | None = None
 ) -> ConfigResponse:
     """Build ConfigResponse from a Mem2MemConfig instance."""
+    from memtomem.config import EmbeddingConfig, IndexingConfig
+
     return ConfigResponse(
         embedding=ConfigEmbeddingOut(
             provider=cfg.embedding.provider,
@@ -396,8 +416,8 @@ def _build_config_response(
             onnx_cpu_mem_arena=cfg.embedding.onnx_cpu_mem_arena,
             api_key="***" if cfg.embedding.api_key else "",
             threads=cfg.embedding.threads,
-            onnx_variant=getattr(cfg.embedding, "onnx_variant", "fp32"),
-            onnx_artifact_path=getattr(cfg.embedding, "onnx_artifact_path", ""),
+            onnx_variant=_cfg_value(cfg.embedding, EmbeddingConfig, "onnx_variant"),
+            onnx_artifact_path=_cfg_value(cfg.embedding, EmbeddingConfig, "onnx_artifact_path"),
         ),
         storage=ConfigStorageOut(
             backend=cfg.storage.backend,
@@ -422,13 +442,13 @@ def _build_config_response(
             target_chunk_tokens=cfg.indexing.target_chunk_tokens,
             chunk_overlap_tokens=cfg.indexing.chunk_overlap_tokens,
             structured_chunk_mode=cfg.indexing.structured_chunk_mode,
-            hard_max_chunk_tokens=getattr(cfg.indexing, "hard_max_chunk_tokens", 0),
-            chunk_context_tokens=getattr(cfg.indexing, "chunk_context_tokens", 512),
-            chunk_model_tokens=getattr(cfg.indexing, "chunk_model_tokens", 8192),
-            chunk_tokenizer_path=getattr(cfg.indexing, "chunk_tokenizer_path", ""),
-            chunk_input_prefix=getattr(cfg.indexing, "chunk_input_prefix", ""),
-            watcher_debounce_ms=getattr(cfg.indexing, "watcher_debounce_ms", 5000),
-            watcher_max_wait_ms=getattr(cfg.indexing, "watcher_max_wait_ms", 30000),
+            hard_max_chunk_tokens=_cfg_value(cfg.indexing, IndexingConfig, "hard_max_chunk_tokens"),
+            chunk_context_tokens=_cfg_value(cfg.indexing, IndexingConfig, "chunk_context_tokens"),
+            chunk_model_tokens=_cfg_value(cfg.indexing, IndexingConfig, "chunk_model_tokens"),
+            chunk_tokenizer_path=_cfg_value(cfg.indexing, IndexingConfig, "chunk_tokenizer_path"),
+            chunk_input_prefix=_cfg_value(cfg.indexing, IndexingConfig, "chunk_input_prefix"),
+            watcher_debounce_ms=_cfg_value(cfg.indexing, IndexingConfig, "watcher_debounce_ms"),
+            watcher_max_wait_ms=_cfg_value(cfg.indexing, IndexingConfig, "watcher_max_wait_ms"),
             exclude_patterns=list(cfg.indexing.exclude_patterns),
         ),
         decay=ConfigDecayOut(

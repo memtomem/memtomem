@@ -34,6 +34,7 @@ from memtomem.config import (
     provider_for_category,
 )
 from memtomem import privacy
+from memtomem import __version__ as _memtomem_version
 from memtomem.errors import EmbeddingError, NamespaceResolutionError, RetryableError
 from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
@@ -661,6 +662,10 @@ class IndexEngine:
             (_build_exclude_spec([rule.path_glob]), rule) for rule in self._ns_config.rules
         ]
         self._warned_empty_parent_rules: set[int] = set()
+        # Resolved on first use by ``_chunk_tokenizer_fingerprint``. The *path*
+        # is restart-guarded so resolving once is correct; the digest at that
+        # path is not, and is re-taken per call.
+        self._chunk_tokenizer_path: Path | None = None
         self._registry = registry or ChunkerRegistry(
             [
                 MarkdownChunker(),
@@ -1574,12 +1579,25 @@ class IndexEngine:
         """
         from memtomem.models import NamespaceFilter
 
+        # ``embed_query`` refused empty input; the document-side call does not,
+        # and an empty probe would dense-search a meaningless vector and could
+        # report an unrelated row as a duplicate. Keep the old answer.
+        if not text or not text.strip():
+            return False
+
         try:
             # Held, not counted: this is a probe, not an indexing run, so it
             # stays out of ``is_active`` — but it awaits the embedder, so it
             # pins the generation like every other embedder user (#2180).
             with self._generation.hold():
-                embedding = await self._embedder.embed_query(text)
+                # ``text`` is a *document*, not a query. Asymmetric models
+                # (E5 prefixes "query: " in ``embed_query`` and "passage: " in
+                # ``embed_texts``) put the two in different regions of the
+                # space, so embedding it as a query would compare a query
+                # vector against stored passage vectors and push cosine well
+                # below ``threshold`` — an exact re-add would stop reading as a
+                # duplicate. Embed it the same way the stored rows were.
+                embedding = (await self._embedder.embed_texts([text]))[0]
             ns_filter = NamespaceFilter.parse(namespace) if namespace else None
             results = await self._storage.dense_search(
                 embedding,
@@ -1591,6 +1609,48 @@ class IndexEngine:
         except Exception:
             logger.warning("is_duplicate failed; treating as non-duplicate", exc_info=True)
             return False
+
+    def _chunk_tokenizer_fingerprint(self) -> str:
+        """Tokenizer identity for the receipt policy.
+
+        Only the *resolution* is cached. Building a whole ``TokenBudget`` per
+        indexed file made every file pay a ``resolve_tokenizer`` hop, which for
+        the pinned E5 identity is an ``hf_hub_download`` call — a per-file
+        network attempt during a bulk index on a cold cache.
+
+        The digest itself is re-taken every call. ``validate_budget_configuration``
+        restart-guards the configured *path*, not the bytes at it, and
+        ``TokenBudget`` picks up a tokenizer replaced in place because its digest
+        is keyed on mtime/size. Remembering one fingerprint for the engine's
+        lifetime would let the receipt policy keep matching while the chunker had
+        already started producing different chunks. ``tokenizer_fingerprint``
+        re-reads only when that metadata moves, so the steady-state cost is a
+        ``stat``.
+        """
+        if not self._config.hard_max_chunk_tokens:
+            return "legacy"
+        from memtomem.chunking.bounded import tokenizer_fingerprint
+        from memtomem.embedding.profiles import resolve_tokenizer
+
+        if self._chunk_tokenizer_path is None:
+            self._chunk_tokenizer_path = resolve_tokenizer(self._config.chunk_tokenizer_path)
+        return tokenizer_fingerprint(self._chunk_tokenizer_path)
+
+    async def _source_unchanged(self, file_path: Path, content: str) -> bool:
+        """Whether *file_path* still holds exactly *content*.
+
+        External writers do not hold our advisory lock, so a generation can be
+        superseded mid-index and must not be treated as current. The read runs
+        off the event loop, so callers must NOT be inside
+        ``storage.transaction()`` — that span is owned by a single task and
+        yielding inside it lets another task find the connection taken. The
+        in-transaction supersede check therefore reads synchronously on purpose.
+        """
+
+        def _read() -> str:
+            return file_path.read_text(encoding="utf-8", errors="replace")
+
+        return await asyncio.to_thread(_read) == content
 
     def _canonical_namespace(self, namespace: str | None) -> str:
         """The spelling a namespace has once stored.
@@ -2168,6 +2228,16 @@ class IndexEngine:
             if guard.decision not in ("pass", "bypassed", "exempted"):
                 raise RuntimeError(f"unexpected enforce_write_guard decision: {guard.decision!r}")
 
+        # ``force`` no longer skips preservation (#2061): it re-embeds, and only
+        # ``reassign_namespaces`` re-resolves through the rules. This lookup runs
+        # inside the per-file critical section on purpose: a bulk run's pre-write
+        # prepass (issue #2018) answers for the run's *start*, and a concurrent
+        # writer may have moved the file since — deciding the stamp from a
+        # pre-lock answer would silently undo that write. A failure here fails
+        # this file closed; the bulk flatten branches keep the retryable type in
+        # ``stats.retryable_errors``. It sits ahead of the receipt gate because
+        # ``namespace_target`` is part of the receipt policy: a reuse decision
+        # must not be made against a namespace answer it never saw.
         ns_decision = await self._namespace_decision(
             decision_path,
             namespace,
@@ -2178,13 +2248,15 @@ class IndexEngine:
 
         # Only ordinary, independently guarded indexing can reuse a receipt.
         # Namespace reassignment and trusted/bypassed ingress are never reused.
-        from memtomem.chunking.bounded import TokenBudget
-        from memtomem.indexing.source_receipt import digest, reusable
-        from memtomem.storage.sqlite_helpers import norm_path
+        from memtomem.indexing.source_receipt import content_hash, digest, reusable
         from memtomem.storage.sqlite_backend import SqliteBackend
+        from memtomem.storage.sqlite_helpers import norm_path
 
         receipt_policy = ""
-        source_hash = digest(content)
+        # Hash the text directly. ``digest()`` exists for structured policy
+        # payloads and pushes its argument through ``json.dumps`` first, which
+        # on a whole source file is a full escape pass for no benefit.
+        source_hash = content_hash(content)
         receipt_storage = self._storage if isinstance(self._storage, SqliteBackend) else None
         if (
             receipt_storage is not None
@@ -2200,18 +2272,37 @@ class IndexEngine:
             receipt_policy = digest(
                 {
                     "version": 1,
+                    # Code identity. Without it a receipt hit returns before
+                    # ``chunk_content`` ever runs, so a chunker fix shipped in
+                    # a new release would never reach an unchanged source —
+                    # previously every index pass re-chunked and ``compute_diff``
+                    # caught the change. Deliberately coarse: a release bump
+                    # costs one re-chunk pass, which is the safe direction.
+                    "code": _memtomem_version,
                     "indexing": self._config.model_dump(mode="python"),
                     "namespace": self._ns_config.model_dump(mode="python"),
                     "namespace_target": ns_decision.target,
-                    "projection": digest(projection.guard_content),
+                    # The whole effective projection, not just the guard input.
+                    # All three fields drive stored state: ``content`` is what
+                    # gets chunked, and ``redaction_count`` stamps
+                    # ``source_read_only`` plus the masking note in every
+                    # chunk's retrieval context — which in turn gates
+                    # ``source_span_hash``. Two reviewed manifests can agree on
+                    # every byte of text and differ only in how many spans they
+                    # claim (a line already reading "# [REDACTED]" masks to
+                    # itself), so digesting text alone let a receipt preserve
+                    # writable chunks for a source that had become read-only.
+                    "projection": digest(
+                        {
+                            "content": content_hash(projection.content),
+                            "guard": content_hash(projection.guard_content),
+                            "redactions": projection.redaction_count,
+                        }
+                    ),
                     "scope": scope_val,
                     "project": str(project_root),
                     "embedding": receipt_storage.stored_embedding_info,
-                    "tokenizer": (
-                        TokenBudget(self._config).fingerprint
-                        if self._config.hard_max_chunk_tokens
-                        else "legacy"
-                    ),
+                    "tokenizer": self._chunk_tokenizer_fingerprint(),
                 }
             )
             reused = reusable(
@@ -2223,7 +2314,7 @@ class IndexEngine:
             )
             if reused is not None:
                 await self._validate_source_commit(file_path)
-                if file_path.read_text(encoding="utf-8", errors="replace") != content:
+                if not await self._source_unchanged(file_path, content):
                     raise RetryableError(
                         "Source changed during receipt validation; retry latest generation"
                     )
@@ -2261,16 +2352,8 @@ class IndexEngine:
         new_chunks = self.chunk_content(file_path, content, exempt=masking_exempt)
         chunk_ms = (time.monotonic() - index_started) * 1000
 
-        # Resolve namespace: explicit > preserved > bound-new-source > rules >
-        # auto_ns > default.
-        # ``force`` no longer skips preservation (#2061): it re-embeds, and
-        # only ``reassign_namespaces`` re-resolves through the rules. This
-        # lookup runs inside the per-file critical section on purpose: a bulk
-        # run's pre-write prepass (issue #2018) answers for the run's *start*,
-        # and a concurrent writer may have moved the file since — deciding the
-        # stamp from a pre-lock answer would silently undo that write. A
-        # failure here fails this file closed; the bulk flatten branches
-        # keep the retryable type in ``stats.retryable_errors``.
+        # Apply the namespace resolved above (explicit > preserved >
+        # bound-new-source > rules > auto_ns > default).
         resolved_ns = ns_decision.target
         if resolved_ns is not None and ns_decision.reason != "mixed_force_refused":
             new_chunks = self._apply_namespace(new_chunks, resolved_ns)
@@ -2597,6 +2680,14 @@ class IndexEngine:
 
                 # External writers do not hold our advisory lock. Never mark a
                 # superseded generation complete; retry the latest snapshot.
+                #
+                # Read synchronously, unlike the pre-chunk check above: this runs
+                # inside ``self._storage.transaction()``, which is owned by one
+                # task for its whole span. Awaiting here — even on
+                # ``asyncio.to_thread`` — hands the loop to another task that
+                # then finds the connection taken ("SQLite transaction is owned
+                # by another task"). The read is a bounded cost paid once per
+                # actually-mutated file.
                 if file_path.read_text(encoding="utf-8", errors="replace") != content:
                     raise RetryableError("Source changed while indexing; retry latest generation")
                 if len(persisted_upserts) == len(diff_result.to_upsert):

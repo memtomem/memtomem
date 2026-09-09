@@ -1907,6 +1907,10 @@ class SqliteBackend(
                         "chunk_descriptions:" + _ai_summary_key(source_file),
                     ),
                 )
+                db.execute(
+                    "DELETE FROM source_index_receipts WHERE source_file=?",
+                    (norm_path(source_file),),
+                )
                 self._commit_if_standalone(db)
             return 0
 
@@ -1935,6 +1939,15 @@ class SqliteBackend(
                     _ai_summary_key(source_file),
                     "chunk_descriptions:" + _ai_summary_key(source_file),
                 ),
+            )
+            # The completed-source receipt describes chunks that no longer
+            # exist. Leaving it is not a correctness risk — ``source_receipt``
+            # re-derives the stored state and refuses to honour a receipt whose
+            # chunks are gone — but the row would then outlive every source
+            # this database ever indexed and deleted.
+            db.execute(
+                "DELETE FROM source_index_receipts WHERE source_file=?",
+                (norm_path(source_file),),
             )
             if not self._in_transaction:
                 db.commit()

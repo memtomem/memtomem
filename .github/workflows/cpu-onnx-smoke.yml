@@ -11,8 +11,6 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
-    env:
-      MEMTOMEM_FASTEMBED_CACHE: ${{ runner.temp }}/e5-models
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -21,4 +19,11 @@ jobs:
         with:
           version: '0.11.16'
       - run: uv sync --frozen
+      # ``runner`` is not an available context in job-level ``env`` (only
+      # github/inputs/matrix/needs/secrets/strategy/vars are), so declaring the
+      # cache path up there made the whole file invalid: GitHub produced a
+      # zero-job startup failure on every push instead of a dispatch-only
+      # workflow. Step-level ``env`` is where ``runner`` becomes available.
       - run: uv run python tools/cpu-embedding/smoke.py
+        env:
+          MEMTOMEM_FASTEMBED_CACHE: ${{ runner.temp }}/e5-models

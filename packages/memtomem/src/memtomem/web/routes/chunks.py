@@ -775,7 +775,10 @@ async def similar_chunks(
     """Find chunks semantically similar to the given chunk using dense search."""
     chunk = await _screened_chunk(storage, chunk_id, config)
 
-    embedding = await embedder.embed_query(chunk.content)
+    # Stored chunk content is a *passage*: embed it on the document side so an
+    # asymmetric model (E5) compares like against like. ``embed_query`` would
+    # prefix "query: " and score every stored neighbour lower than it should.
+    embedding = (await embedder.embed_texts([chunk.content]))[0]
     # ADR-0011 PR-D round 11 (P2): pin similar-chunk dense search to
     # the SOURCE chunk's own ``project_root`` rather than letting the
     # always-on storage scope filter default to user-only. Without

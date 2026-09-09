@@ -1340,7 +1340,13 @@ class TestOnnxEmbedder:
         calls: list[list[str]] = []
 
         def fake_sync(
-            texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+            texts,
+            on_progress=None,
+            source_path=None,
+            chunk_indices=None,
+            *,
+            batch_size=None,
+            refuse_truncation=False,
         ):
             calls.append(list(texts))
             return [[float(t)] for t in texts]
@@ -1360,7 +1366,13 @@ class TestOnnxEmbedder:
         seen: list[tuple[int, int | None]] = []
 
         def fake_sync(
-            texts, on_progress=None, source_path=None, chunk_indices=None, *, batch_size=None
+            texts,
+            on_progress=None,
+            source_path=None,
+            chunk_indices=None,
+            *,
+            batch_size=None,
+            refuse_truncation=False,
         ):
             seen.append((len(texts), batch_size))
             # Mutate mid-call: later slices must NOT observe this.

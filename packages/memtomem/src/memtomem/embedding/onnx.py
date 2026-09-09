@@ -361,6 +361,15 @@ class OnnxEmbedder:
                 model_options["specific_model_path"] = str(
                     Path(self._config.onnx_artifact_path).expanduser().resolve()
                 )
+                # INT8 artifacts are exported and checksum-gated per CPU
+                # architecture (``artifact_manifest`` refuses a variant that
+                # does not match ``platform.machine()``), so handing one to a
+                # GPU provider is never right. FP32 deliberately does *not*
+                # pin a provider: fastembed's ``_load_onnx_model`` only reaches
+                # its ``cuda == Device.AUTO and cuda_available`` branch when
+                # ``providers`` is None, so passing one here would silently
+                # drop an existing onnxruntime-gpu install back to CPU.
+                model_options["providers"] = ["CPUExecutionProvider"]
             # threads=0 → leave ORT default (all physical cores); threads>0 caps
             # the intra-op pool so seeding doesn't saturate the machine.
             threads = self._config.threads or None
@@ -380,7 +389,6 @@ class OnnxEmbedder:
                     threads=threads,
                     cache_dir=str(cache_dir),
                     enable_cpu_mem_arena=self._config.onnx_cpu_mem_arena,
-                    providers=["CPUExecutionProvider"],
                     **model_options,
                 )
                 _verify_cpu_mem_arena(model, self._config.onnx_cpu_mem_arena)
@@ -434,6 +442,7 @@ class OnnxEmbedder:
         chunk_indices: list[int] | None = None,
         *,
         batch_size: int | None = None,
+        refuse_truncation: bool = False,
     ) -> list[list[float]]:
         """Run inference synchronously — submitted to ``_infer_executor``.
 
@@ -452,7 +461,15 @@ class OnnxEmbedder:
         truncated = _truncated_input_indexes(
             self._tokenizer, texts, self._active_max_sequence_tokens
         )
-        if truncated and is_e5(self._config.model):
+        # Refusal is an *ingress* policy: the chunker guarantees the budget, so
+        # an over-length passage means the budget was bypassed and the stored
+        # vector would silently misrepresent the text. Queries take the opposite
+        # branch — every query caller wraps embedding in a broad ``except`` that
+        # degrades to BM25-only ("Dense search unavailable"), so raising there
+        # converts a visible truncation warning into an invisible capability
+        # loss. Truncate and warn instead; the caller still gets a usable
+        # vector for the prefix.
+        if truncated and refuse_truncation:
             raise EmbeddingError(
                 f"E5 input exceeds 512 tokens including its role prefix ({len(truncated)} inputs); "
                 "split/reindex the source using the model chunk profile"
@@ -608,6 +625,7 @@ class OnnxEmbedder:
                             source_path,
                             slice_indices,
                             batch_size=batch_size,
+                            refuse_truncation=is_e5(self._config.model) and not _query,
                         ),
                     )
                 )
