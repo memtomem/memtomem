@@ -80,3 +80,11 @@ tests/
 # memtomem local artifacts (ADR-0011 project_local tier)
 .memtomem/*.local/
 .memtomem/.staging/
+
+# Cross-process file-lock sidecars. Indexing this checkout drops an empty
+# `.{name}.lock` next to every file whose extension is in
+# indexing.supported_extensions, and context/_atomic.py forbids unlinking them
+# (deleting a sidecar reintroduces the os.replace inode race). Ignore rather
+# than delete. Does not match tracked `uv.lock` — the leading dot is required.
+# See #2387.
+.*.lock
