@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import platform
+import re
 import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
@@ -485,6 +486,43 @@ async def test_is_duplicate_refuses_empty_text_without_embedding(bm25_only_compo
     engine._embedder.embed_texts = _texts
     assert await engine.is_duplicate("   ") is False
     assert called == []
+
+
+# --------------------------------------------------------------------------
+# Workflow job-level env may only use contexts available there
+# --------------------------------------------------------------------------
+
+# Contexts GitHub resolves for ``jobs.<id>.env``. ``runner``, ``env``, ``job``
+# and ``steps`` only become available inside a step, and naming one here does not
+# fail the job — it makes the whole *file* invalid, so GitHub emits a zero-job
+# startup failure on every push and no step ever reports why.
+_JOB_ENV_CONTEXTS = frozenset(
+    {"github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}
+)
+_CONTEXT_REF = re.compile(r"\$\{\{\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*\.")
+
+
+def test_workflow_job_env_uses_only_job_level_contexts():
+    """`cpu-onnx-smoke.yml` shipped `${{ runner.temp }}` in job-level `env`.
+
+    The symptom is silent: a startup failure has no jobs and no logs, so the run
+    just reads "failure" with nothing to open.
+    """
+    import yaml
+
+    workflows = Path(__file__).resolve().parents[3] / ".github" / "workflows"
+    assert workflows.is_dir(), workflows
+    offenders: list[str] = []
+    for path in sorted(workflows.glob("*.yml")):
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job_name, job in (document.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            for key, value in (job.get("env") or {}).items():
+                for context in _CONTEXT_REF.findall(str(value)):
+                    if context not in _JOB_ENV_CONTEXTS:
+                        offenders.append(f"{path.name}: jobs.{job_name}.env.{key} -> {context}")
+    assert not offenders, "job-level env may not reference these contexts: " + "; ".join(offenders)
 
 
 # --------------------------------------------------------------------------
