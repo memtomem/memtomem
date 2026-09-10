@@ -631,6 +631,76 @@ class TestConfigCLI:
         # The write itself is legitimate — it applies once the variable is gone.
         assert json.loads(config_file.read_text())["search"]["default_top_k"] == 44
 
+    def test_config_set_warns_when_a_whole_section_env_var_owns_the_key(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """#2390: the JSON spelling wins too, and the remedy is a wider one.
+
+        Compared in full rather than by substring: the sentence has to say
+        that unsetting the variable releases every field its payload carries,
+        and a substring check on the variable's name would pass on the
+        delimiter wording that does not say it.
+        """
+        import json
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"embedding": {"onnx_batch_size": 33}}))
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", json.dumps({"onnx_batch_size": 7}))
+
+        result = runner.invoke(cli, ["config", "set", "embedding.onnx_batch_size", "44"])
+        assert result.exit_code == 0, result.output
+        assert (
+            "warning: MEMTOMEM_EMBEDDING carries embedding.onnx_batch_size in its JSON "
+            "payload and takes precedence — the effective value is still 7. config.json "
+            "holds your value and it applies once no case spelling of that name carries "
+            "the field — drop onnx_batch_size from that JSON, or unset the variable to "
+            "release every field it carries."
+        ) in " ".join(result.output.split())
+        # The write itself is legitimate — it applies once the variable is gone.
+        assert json.loads(config_file.read_text())["embedding"]["onnx_batch_size"] == 44
+
+    def test_config_set_names_both_shapes_when_both_bind_the_field(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """#2390: clearing the winner alone hands the field to the other shape.
+
+        The remedy is followed here rather than read: both variables are
+        removed in the order the sentence names them, and the value the file
+        holds is asserted at each step. A wording-only assertion would pass on
+        advice that stops one variable short — which is the failure this pin
+        exists for.
+        """
+        import json
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"embedding": {"onnx_batch_size": 33}}))
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", json.dumps({"onnx_batch_size": 7}))
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE", "11")
+
+        result = runner.invoke(cli, ["config", "set", "embedding.onnx_batch_size", "44"])
+        assert result.exit_code == 0, result.output
+        assert (
+            "warning: MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE is set and takes precedence — "
+            "the effective value is still 11. config.json holds your value and it applies "
+            "once neither MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE nor MEMTOMEM_EMBEDDING "
+            "supplies onnx_batch_size — clearing one of them hands the field to the "
+            "other, not to the file."
+        ) in " ".join(result.output.split())
+
+        from memtomem.config import Mem2MemConfig, load_config_overrides
+
+        def effective() -> int:
+            cfg = Mem2MemConfig()
+            load_config_overrides(cfg, migrate=False)
+            return cfg.embedding.onnx_batch_size
+
+        monkeypatch.delenv("MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE")
+        assert effective() == 7  # not the file's 44 — the other shape took over
+        monkeypatch.delenv("MEMTOMEM_EMBEDDING")
+        assert effective() == 44
+
     @pytest.mark.skipif(
         sys.platform == "win32",
         reason="os.environ normalises keys on Windows: two spellings cannot coexist",

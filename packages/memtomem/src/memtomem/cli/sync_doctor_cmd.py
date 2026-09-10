@@ -304,13 +304,17 @@ def _apply_memory_dirs_override_no_write(cfg: object) -> None:
     ``config.json`` on legacy ``auto_discover=True`` installs. The doctor
     must not mutate config (RFC §Non-goals: read-only).
 
-    Env precedence (``MEMTOMEM_INDEXING__MEMORY_DIRS``) is preserved by
-    deferring to whatever ``Mem2MemConfig()`` already loaded.
+    Env precedence is preserved by deferring to whatever ``Mem2MemConfig()``
+    already loaded. Which bindings count is asked of
+    :func:`memtomem.config.env_var_owning` rather than tested against a
+    literal name here: a hand-written literal missed a lowercase export
+    (issue #2109) and the whole-section JSON spelling (issue #2390), so the
+    doctor would have overwritten an env-supplied list that both loaders
+    honour.
     """
     import json
-    import os
 
-    from memtomem.config import _override_path
+    from memtomem.config import _override_path, env_var_owning
 
     path = _override_path()
     if not path.exists():
@@ -325,7 +329,7 @@ def _apply_memory_dirs_override_no_write(cfg: object) -> None:
     md = indexing.get("memory_dirs")
     if not isinstance(md, list):
         return
-    if "MEMTOMEM_INDEXING__MEMORY_DIRS" in os.environ:
+    if env_var_owning("indexing", "memory_dirs") is not None:
         return  # env wins, mirroring load_config_overrides
     try:
         cfg.indexing.memory_dirs = [Path(p) for p in md if isinstance(p, str)]  # type: ignore[attr-defined]

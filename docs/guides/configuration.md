@@ -3,7 +3,10 @@
 memtomem resolves supported user settings from built-in defaults,
 `config.d/` fragments, `config.json`, and environment variables. Environment
 variables use the `MEMTOMEM_` prefix with nested sections separated by `__`
-(double underscore). Unprefixed names are never read, with one documented
+(double underscore). A whole section can also be given as one JSON object —
+`MEMTOMEM_EMBEDDING='{"onnx_batch_size": 7}'` sets the same field as
+`MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=7` — and both shapes rank the same way
+against the file layers. Unprefixed names are never read, with one documented
 exception: the Langfuse SDK credentials described in
 [Session Trace](#session-trace).
 
@@ -64,8 +67,18 @@ of increasing priority:
    `mm init` writes to. Every key here replaces whatever earlier layers
    produced for that field (REPLACE semantics across the board).
 4. **`MEMTOMEM_*` environment variables** — highest priority. If an
-   env var is set, the corresponding entries in `config.d/` and
-   `config.json` are skipped.
+   env var supplies a field, the corresponding entries in `config.d/` and
+   `config.json` are skipped for that field — the rest of the section still
+   comes from the file layers. Both binding shapes count: a
+   `MEMTOMEM_<SECTION>__<FIELD>` variable, and a `MEMTOMEM_<SECTION>`
+   variable whose JSON object carries the field. Export both for one field
+   and the `__` spelling normally wins it, while the JSON object still
+   supplies the other fields it names — the exception is a JSON object that
+   spells one field twice in different cases, where the later spelling in the
+   object wins instead. Clearing whichever one is in force hands the field to
+   the other rather than to the file; `mm config set` names both when both
+   bind. Name matching is case-insensitive, so
+   `memtomem_search__default_top_k` binds as well as the uppercase spelling.
 
 ### List field merge strategies
 
@@ -138,6 +151,9 @@ rather than leaving you to discover the divergence later (issue #2108):
   `config.json` and warns that the variable "is set and takes
   precedence", naming the effective value that remains in force. The
   write is not wasted — it applies the moment the variable is unset.
+  A whole-section variable gets its own wording, because the remedy is
+  wider than the key being reported: it "carries" the field in its JSON
+  payload, and unsetting it releases every other field that payload names.
 - **Setting the value the comparand already supplies removes the pin.**
   If `config.json` pinned `33` and you set the value an env var, a
   fragment, or the default already provides, the delta is empty, so the
@@ -150,7 +166,8 @@ its trailing note reads `(persisted to config.json)` only when the key
 is actually in the file, and otherwise names why it was pruned — and
 when an env var owns the key it says so even then, because `persist`
 promises the value survives a restart and the variable is what the
-next start reads. What the file holds comes from the save's own
+next start reads. It draws the same line between the two shapes that
+`mm config set` does. What the file holds comes from the save's own
 before/after receipt, captured inside the write lock, so a concurrent
 write cannot be mistaken for this one. (The *effective* value quoted
 by `mm config set` is a fresh read taken after the lock is released,

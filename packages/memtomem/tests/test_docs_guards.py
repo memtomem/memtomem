@@ -932,6 +932,26 @@ def _pydantic_env_vars(model: type[pydantic.BaseModel], prefix: str = "MEMTOMEM_
     return out
 
 
+def _pydantic_section_env_vars(
+    model: type[pydantic.BaseModel], prefix: str = "MEMTOMEM_"
+) -> set[str]:
+    """The bare ``MEMTOMEM_<SECTION>`` names, which bind a section as JSON.
+
+    pydantic-settings accepts a whole nested model as one JSON-valued variable
+    alongside the exploded ``__`` spelling, and memtomem honours both against
+    ``config.json`` (issue #2390) — so the guide is allowed to name them.
+    Derived from the model for the same reason the leaf names are: a new
+    section is covered the day it lands.
+    """
+    out: set[str] = set()
+    for name, field in model.model_fields.items():
+        sub = _settings_class(field.annotation)
+        if sub is not None:
+            out.add(f"{prefix}{name.upper()}")
+            out |= _pydantic_section_env_vars(sub, f"{prefix}{name.upper()}__")
+    return out
+
+
 # ``MEMTOMEM_*`` vars read straight from ``os.environ`` rather than declared as
 # pydantic settings fields. A new env-only knob that gets documented must be
 # added here; ``test_env_only_allowlist_is_real`` asserts every entry is an
@@ -967,7 +987,11 @@ class TestDocumentedEnvVarsExist:
         assert not bogus, f"_ENV_ONLY_VARS names not found as literals in src: {sorted(bogus)}"
 
     def test_configuration_env_vars_resolve(self) -> None:
-        valid = _pydantic_env_vars(Mem2MemConfig) | _ENV_ONLY_VARS
+        valid = (
+            _pydantic_env_vars(Mem2MemConfig)
+            | _pydantic_section_env_vars(Mem2MemConfig)
+            | _ENV_ONLY_VARS
+        )
         used = set(re.findall(r"MEMTOMEM_[A-Z0-9_]+", _read(_GUIDES / "configuration.md")))
         unknown = used - valid
         assert not unknown, (
