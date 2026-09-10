@@ -654,8 +654,21 @@ class TestPluginManualCoexistenceCallout:
         assert "do not prove two live processes" in claude_code
         assert "same command" in claude_code.lower()
 
-    def test_unreleased_diagnostic_uses_source_checkout_without_changing_cwd(self) -> None:
-        command = "uv run --project /path/to/memtomem --package memtomem mm doctor --claude-mcp"
+    def test_released_diagnostic_is_offered_both_with_and_without_mm_on_path(self) -> None:
+        """``--claude-mcp`` ships now, but the plugin still does not install ``mm``.
+
+        Through 0.5.x the option existed only in a source checkout, so every
+        one of these surfaces told the reader to run it through
+        ``uv run --project <checkout>``. 0.6.0 published it, which retires that
+        advice — but only half of the original caveat expired. Installing the
+        plugin registers an MCP server, not the CLI, so a plugin-only user
+        still has no ``mm`` on PATH and still needs the second form.
+
+        So this pins both arms and the reason for the second one, and keeps
+        the source-checkout command from coming back: it now points at a
+        workaround for a limitation the release removed, which is worse than
+        no advice because it reads as current.
+        """
         plugin_guidance = [
             _REPO_ROOT / path
             for workflow in ("setup", "status")
@@ -664,6 +677,8 @@ class TestPluginManualCoexistenceCallout:
                 f"packages/memtomem-claude-plugin/skills/{workflow}/SKILL.md",
             )
         ]
+        with (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").open("rb") as handle:
+            version = tomllib.load(handle)["project"]["version"]
         for path in (
             _PLUGIN_README,
             _VIBE_GUIDE,
@@ -671,12 +686,23 @@ class TestPluginManualCoexistenceCallout:
             *plugin_guidance,
         ):
             text = _read(path)
-            assert command in text
-            assert "PyPI" in text and "0.5.0" in text
+            fenced = [line.strip() for line, in_fence in _iter_code_context(text) if in_fence]
+            # The copy-pasteable command is the pinned one, and only that one:
+            # a bare ``mm`` block would fail on the machine these surfaces are
+            # written for, which is what
+            # ``test_plugin_readme_fresh_env_blocks_have_no_bare_mm`` holds.
+            # Compared whole rather than by substring, because the pinned line
+            # itself ends in "mm doctor --claude-mcp".
+            assert f'uvx --from "memtomem[all]=={version}" mm doctor --claude-mcp' in fenced
+            assert "mm doctor --claude-mcp" not in fenced
+            # The shorthand still has to be mentioned, in prose, for readers
+            # who do have the CLI.
+            assert "`mm doctor --claude-mcp`" in text
+            assert "PATH" in text
             assert "/mcp" in text
+            assert "uv run --project" not in text
             for line, in_fence in _iter_code_context(text):
                 if in_fence and "doctor --claude-mcp" in line:
-                    assert "uvx" not in line
                     assert "--directory" not in line
 
     def test_no_doc_promises_unconditional_suppression(self) -> None:
