@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 
-CORE_VERSION = "0.5.0"
+CORE_VERSION = "0.6.0"
 MAX_QUERY_CHARS = 500
 MAX_CONTEXT_CHARS = 10_000
 SUPPORTED_SUFFIXES = {
