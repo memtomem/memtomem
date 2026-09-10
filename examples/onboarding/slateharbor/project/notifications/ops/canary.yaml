@@ -1,0 +1,55 @@
+# Synthetic Slateharbor operational definitions; not deployed infrastructure.
+
+retry_attempts:
+  description: "notification retry policy"
+  policy_value: 5
+  environment: "production"
+  observe: "retry queue 깊이와 429 비율을 확인한다. 전송은 잠시 늦추되 delivery key를 새로 만들지 않는다."
+  failure: "INC-NOTIFY-31에서 공급자 429 이후 12회 즉시 재시도가 retry storm을 만들었다. 결제 webhook의 3회 제한과는 별도 정책이다."
+  runbook: "notifications/docs/runbooks/recovery.md"
+  promotion: "Review observations before expanding beyond the pilot cohort"
+
+backoff_ms:
+  description: "notification backoff"
+  policy_value: 250
+  environment: "production"
+  observe: "실제 대기 히스토그램을 보고 동일 간격에 요청이 몰리는지 확인한다."
+  failure: "같은 시각에 깨어난 worker들이 공급자 quota를 다시 소진했다."
+  runbook: "notifications/docs/runbooks/recovery.md"
+  promotion: "Review observations before expanding beyond the pilot cohort"
+
+batch_size:
+  description: "digest batch"
+  policy_value: 40
+  environment: "production"
+  observe: "tenant별 대기 시간을 확인하고 digest와 실시간 전송을 별도 큐로 분리한다."
+  failure: "주간 digest가 실시간 초대 메일보다 먼저 큐를 독점했다."
+  runbook: "notifications/docs/runbooks/recovery.md"
+  promotion: "Review observations before expanding beyond the pilot cohort"
+
+dedupe_hours:
+  description: "delivery deduplication"
+  policy_value: 24
+  environment: "production"
+  observe: "전송 이력의 key와 TTL을 조회하고 이미 성공한 응답을 반환한다."
+  failure: "공급자 응답 유실 뒤 늦게 재시도한 알림이 두 번 배달됐다."
+  runbook: "notifications/docs/runbooks/recovery.md"
+  promotion: "Review observations before expanding beyond the pilot cohort"
+
+payload_kb:
+  description: "email payload"
+  policy_value: 128
+  environment: "production"
+  observe: "렌더링 후 payload 크기를 측정하고 링크 전환 후 다시 요청한다."
+  failure: "인라인 이미지가 메일 공급자 크기 제한을 넘어 전체 batch가 거절됐다."
+  runbook: "notifications/docs/runbooks/recovery.md"
+  promotion: "Review observations before expanding beyond the pilot cohort"
+
+queue_age_minutes:
+  description: "notification queue age"
+  policy_value: 15
+  environment: "production"
+  observe: "가장 오래된 event 시각을 확인하고 poison message를 격리한다."
+  failure: "낮은 처리량의 tenant 큐가 작아도 오래 대기하는데 경보가 없었다."
+  runbook: "notifications/docs/runbooks/recovery.md"
+  promotion: "Review observations before expanding beyond the pilot cohort"

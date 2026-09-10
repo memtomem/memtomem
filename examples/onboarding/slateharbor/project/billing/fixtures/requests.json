@@ -1,0 +1,62 @@
+{
+  "webhook_attempts": {
+    "description": "billing webhook retry",
+    "inputs": [
+      1,
+      5
+    ],
+    "purpose": "INC-BILL-09에서 공급자 timeout 뒤 재전송을 신규 청구로 처리해 중복 원장이 생겼다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-BILL-21: 중복 수신 계수와 실제 청구 계수를 분리한다."
+  },
+  "invoice_days": {
+    "description": "invoice grace period",
+    "inputs": [
+      10,
+      20
+    ],
+    "purpose": "휴일에 청구서가 승인되지 않아 정상 조직이 읽기조차 못 했다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-BILL-22: 유예 종료 예고 메일에 실제 청구서 링크를 넣는다."
+  },
+  "refund_days": {
+    "description": "refund eligibility",
+    "inputs": [
+      15,
+      45
+    ],
+    "purpose": "정산 종료 뒤 자동 환불이 실행돼 보고서 잔액과 공급자 잔액이 달라졌다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-BILL-23: 경계일 테스트에 월말 구매를 추가한다."
+  },
+  "seat_floor": {
+    "description": "minimum seats",
+    "inputs": [
+      5,
+      1
+    ],
+    "purpose": "팀 요금제 계정이 좌석 1석까지 내려간 채 팀 기능을 계속 쓰면서 개인 요금제 기준 견적을 받았다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-BILL-24: downgrade 경로의 견적 검사를 연결한다."
+  },
+  "reconcile_minutes": {
+    "description": "settlement lag",
+    "inputs": [
+      10,
+      40
+    ],
+    "purpose": "짧은 경보 창으로 정상 지연 건마다 재정산 요청이 생성됐다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-BILL-25: 지연과 영구 누락을 다른 큐로 보낸다."
+  },
+  "currency_scale": {
+    "description": "currency precision",
+    "inputs": [
+      2,
+      3
+    ],
+    "purpose": "부동소수점 변환 후 공급자 요청과 로컬 원장 합계가 달라졌다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-BILL-26: Decimal 변환 경로를 견적 UI와 공유한다."
+  }
+}

@@ -17,8 +17,8 @@ uv run pytest -m "not ollama"          # skip Ollama-dependent tests
 uv run pytest                          # full suite (requires running Ollama)
 
 # Lint and format (same paths CI checks)
-uv run ruff check packages/memtomem/src packages/memtomem/tests tools --fix
-uv run ruff format packages/memtomem/src packages/memtomem/tests tools
+uv run ruff check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py --fix
+uv run ruff format packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py
 
 # Type check
 uv run mypy packages/memtomem/src
@@ -36,8 +36,8 @@ The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](ht
 1. Create a feature branch from `main`
 2. Keep changes focused — one feature or fix per PR
 3. Add tests for new functionality
-4. Ensure `uv run ruff check packages/memtomem/src packages/memtomem/tests tools` and
-   `uv run ruff format --check packages/memtomem/src packages/memtomem/tests tools` pass
+4. Ensure `uv run ruff check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py` and
+   `uv run ruff format --check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py` pass
 5. Ensure `uv run pytest -m "not ollama"` passes
 6. Write a clear commit message describing the "why"
 7. Sign the CLA on your first pull request (see below)

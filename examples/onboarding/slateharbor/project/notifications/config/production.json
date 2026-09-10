@@ -1,0 +1,68 @@
+{
+  "retry_attempts": {
+    "description": "notification retry policy",
+    "value": 5,
+    "environment": "production",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "알림 retry policy는 최대 5회, 250 ms backoff와 jitter다. 수신자에게 중복 메일을 보내지 않도록 delivery key를 유지한다.",
+    "decision": "notifications/docs/decisions/decision-current.md",
+    "implementation": "notifications/src/policy.py",
+    "observability": "retry queue 깊이와 429 비율을 확인한다. 전송은 잠시 늦추되 delivery key를 새로 만들지 않는다."
+  },
+  "backoff_ms": {
+    "description": "notification backoff",
+    "value": 250,
+    "environment": "production",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "재시도 최소 대기 250 ms 위에 jitter를 더해 worker들의 동시 재진입을 분산한다.",
+    "decision": "notifications/docs/decisions/decision-current.md",
+    "implementation": "notifications/src/policy.py",
+    "observability": "실제 대기 히스토그램을 보고 동일 간격에 요청이 몰리는지 확인한다."
+  },
+  "batch_size": {
+    "description": "digest batch",
+    "value": 40,
+    "environment": "production",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "digest 묶음을 줄여 특정 tenant의 대량 전송이 나머지 알림을 막지 않게 한다.",
+    "decision": "notifications/docs/decisions/decision-current.md",
+    "implementation": "notifications/src/policy.py",
+    "observability": "tenant별 대기 시간을 확인하고 digest와 실시간 전송을 별도 큐로 분리한다."
+  },
+  "dedupe_hours": {
+    "description": "delivery deduplication",
+    "value": 24,
+    "environment": "production",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "하루 이내 같은 delivery key는 재전송 결과를 재사용한다. 새 사용자 행동은 새 key를 쓴다.",
+    "decision": "notifications/docs/decisions/decision-current.md",
+    "implementation": "notifications/src/policy.py",
+    "observability": "전송 이력의 key와 TTL을 조회하고 이미 성공한 응답을 반환한다."
+  },
+  "payload_kb": {
+    "description": "email payload",
+    "value": 128,
+    "environment": "production",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "큰 첨부물은 본문 대신 파일 링크로 전달한다. 파일 권한은 수신 시점에 다시 검사한다.",
+    "decision": "notifications/docs/decisions/decision-current.md",
+    "implementation": "notifications/src/policy.py",
+    "observability": "렌더링 후 payload 크기를 측정하고 링크 전환 후 다시 요청한다."
+  },
+  "queue_age_minutes": {
+    "description": "notification queue age",
+    "value": 15,
+    "environment": "production",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "초대·멘션 알림의 지연은 큐 길이보다 가장 오래된 메시지 나이로 감지한다.",
+    "decision": "notifications/docs/decisions/decision-current.md",
+    "implementation": "notifications/src/policy.py",
+    "observability": "가장 오래된 event 시각을 확인하고 poison message를 격리한다."
+  }
+}
