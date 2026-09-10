@@ -764,7 +764,7 @@ def emit_exemption_audit(
 #:                in ``audit_context`` as ``flag='--…'`` so the two are told
 #:                apart without a second mechanism value. The only such spelling
 #:                is ``mm context pull``'s deprecated ``--yes``, which stops
-#:                satisfying Gate B in 0.6.0 (#2318).
+#:                satisfying Gate B in 0.7.0 (#2318).
 #: ``prompt``   — a CLI interactive confirm was answered yes.
 #: ``param``    — an MCP tool kwarg / library kwarg ``confirm_project_shared=True``.
 #: ``request``  — a web request body/query field said true.
