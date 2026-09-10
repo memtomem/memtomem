@@ -1954,44 +1954,68 @@ class TestConfigUnset:
         assert "Unset: mmr.enabled (nothing to remove)" in result.output
         assert not isolated["config_file"].exists()
 
+    _E5 = {"embedding": {"provider": "onnx", "model": "intfloat/multilingual-e5-small"}}
+
     @pytest.mark.parametrize(
-        ("env", "config_json", "key"),
+        ("env", "config_json", "fragment", "key", "expected"),
         [
-            # The E5 profile derives this one; no fragment is involved.
+            # The E5 profile derives this one. Selected three ways, because
+            # which layer picks the model decides whether the profile has
+            # already run by the time the config is built: through the
+            # environment it lands at construction, through the file layers it
+            # lands only in the canonical load's final step.
             (
                 {
                     "MEMTOMEM_EMBEDDING__MODEL": "intfloat/multilingual-e5-small",
                     "MEMTOMEM_EMBEDDING__PROVIDER": "onnx",
                 },
                 None,
+                None,
                 "indexing.max_chunk_tokens",
+                384,
             ),
+            ({}, _E5, None, "indexing.max_chunk_tokens", 384),
+            ({}, None, _E5, "indexing.max_chunk_tokens", 384),
             # config.json is the source of a key it holds no entry for: the
             # deprecated spelling migrates into the replacement field.
-            ({}, {"rerank": {"top_k": 40}}, "rerank.min_pool"),
+            ({}, {"rerank": {"top_k": 40}}, None, "rerank.min_pool", 40),
         ],
     )
-    def test_unset_does_not_blame_a_fragment_that_does_not_exist(
-        self, env, config_json, key, isolated, monkeypatch, runner: CliRunner
+    def test_unset_reports_the_resolved_value_and_blames_no_fragment(
+        self, env, config_json, fragment, key, expected, isolated, monkeypatch, runner: CliRunner
     ) -> None:
         """A non-default value does not prove a fragment wrote it.
 
-        Both rows run with the ``config.d`` directory empty, so any sentence
-        naming a fragment sends the reader to a file that is not there. The
-        value is still reported — that is the actionable half — but the layer
-        is not guessed.
+        Two claims at once, because either alone passes on a broken build. The
+        *value* is asserted against the canonical loader, which is what caught
+        the file-layer rows reading 512 while the app used 384 — a
+        prefix-only assertion was green through that. And no sentence names a
+        layer: three of these four rows have no ``config.d`` fragment at all,
+        so naming one sends the reader to a file that is not there.
         """
         import json as _json
+
+        from memtomem.config_signature import build_fresh_config
 
         for name, value in env.items():
             monkeypatch.setenv(name, value)
         if config_json is not None:
             isolated["config_file"].write_text(_json.dumps(config_json))
-        assert not list(isolated["config_d"].iterdir())
+        if fragment is not None:
+            (isolated["config_d"] / "e5.json").write_text(_json.dumps(fragment))
+
+        section_name, _, field_name = key.partition(".")
+        canonical = getattr(
+            getattr(build_fresh_config(migrate=False, strict_overrides=False), section_name),
+            field_name,
+        )
+        assert canonical == expected, "the scenario stopped producing the value it pins"
 
         result = runner.invoke(cli, ["config", "unset", key])
         assert result.exit_code == 0, result.output
-        assert f"Unset: {key} (nothing to remove — a fresh load puts it at " in result.output
+        assert (
+            f"Unset: {key} (nothing to remove — a fresh load puts it at {expected})"
+        ) in result.output
         assert "fragment" not in result.output
         assert "config.d" not in result.output
 

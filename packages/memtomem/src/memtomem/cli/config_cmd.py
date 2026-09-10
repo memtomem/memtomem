@@ -384,18 +384,24 @@ def _unpinned_sources(keys: list[str]) -> dict[str, str]:
     """
     from pydantic import ValidationError as PydanticValidationError
 
-    from memtomem.config import (
-        Mem2MemConfig,
-        env_bindings_for,
-        load_config_d,
-        load_config_overrides,
-    )
+    from memtomem.config import env_bindings_for
+    from memtomem.config_signature import build_fresh_config
 
     out: dict[str, str] = {}
     try:
-        cfg = Mem2MemConfig()
-        load_config_d(cfg, quiet=True)
-        load_config_overrides(cfg, migrate=False)
+        # The canonical load, not a hand-built stack: it ends with
+        # ``apply_e5_defaults``, which fires on the *file* layers selecting an
+        # E5 model. Rebuilding the steps by hand skipped it, and a config.json
+        # naming ``intfloat/multilingual-e5-small`` then read
+        # ``indexing.max_chunk_tokens`` as 512 while the app used 384 — so the
+        # note said "already at default" about a value nothing resolves to,
+        # which is the very bug this helper exists to end.
+        #
+        # ``strict_overrides=False`` is belt-and-braces rather than load
+        # bearing: ``config_unset`` refuses a non-object ``config.json`` before
+        # it ever gets here, so flipping the flag changes no observable output.
+        # It stays off because this is a reporting path -- see below.
+        cfg = build_fresh_config(migrate=False, strict_overrides=False)
     except Exception:  # noqa: BLE001 - reporting only; see the docstring
         return out
 
@@ -404,9 +410,10 @@ def _unpinned_sources(keys: list[str]) -> dict[str, str]:
         try:
             section = getattr(cfg, section_name)
             effective = getattr(section, field_name)
-            # The section's own class, rebuilt with nothing but its declared
-            # defaults. Read off the live object rather than looked up, so the
-            # comparand cannot drift from the value it is compared against.
+            # Compared against a newly constructed section's declared defaults.
+            # The class is read off the live object rather than looked up by
+            # name, so the two sides cannot be different models; the
+            # construction itself reruns the field factories and validators.
             default = getattr(type(section)(), field_name)
         except (AttributeError, TypeError, PydanticValidationError):
             continue

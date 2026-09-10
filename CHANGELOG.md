@@ -211,8 +211,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   nothing was using: with a fragment setting `mmr.enabled` to `true`, unset
   reported the default `false`.
 
-  The note now reports what a fresh load puts the field at, masked for
-  credentials, and names a `MEMTOMEM_*` variable when one owns the key.
+  The note now reports what the canonical load path puts the field at, masked
+  for credentials, and names a `MEMTOMEM_*` variable when one owns the key.
+  Canonical rather than rebuilt by hand: the last step of that path applies the
+  embedding profile, which fires when the *file* layers select an E5 model, so
+  a hand-built stack read `indexing.max_chunk_tokens` as 512 where the app used
+  384.
   `(already at default)` survives for the case where that is what the load
   actually resolves to. No other layer is named: a non-default value does not
   prove a `config.d` fragment wrote it — the embedding profile derives some

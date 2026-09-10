@@ -244,9 +244,10 @@ suggestion when one is nearby. When every override is removed the
 config file itself is deleted.
 
 For a key the file does not pin, the note is measured rather than
-assumed: `(already at default)` only when a fresh load actually
-resolves to the default, otherwise the value that is in effect, masked
-for credentials. A `MEMTOMEM_*` variable is named when one owns the
+assumed, and measured through the same load path the server uses:
+`(already at default)` only when that load actually resolves to the
+default, otherwise the value that is in effect, masked for
+credentials. A `MEMTOMEM_*` variable is named when one owns the
 field, because that is resolvable exactly and it outranks the file
 either way. No other layer is named — a non-default value does not
 prove a `config.d` fragment wrote it, since the embedding profile
