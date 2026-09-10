@@ -22,7 +22,7 @@ from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.storage.base import NamespaceRenameResult
 from memtomem.web.app import create_app
-from .helpers import set_home
+from .helpers import isolate_config_paths, set_home
 
 
 # ---------------------------------------------------------------------------
@@ -137,8 +137,38 @@ class FakeConfig:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _isolated_config_paths(monkeypatch, tmp_path_factory) -> Path:
+    """Point the ``~/.memtomem`` config layer at a throwaway directory.
+
+    The config and memory-directory handlers in ``routes/system.py`` — ``GET``
+    and ``PATCH /config``, ``POST /config/save``, ``POST /memory-dirs/add`` and
+    ``/memory-dirs/remove`` — start with :func:`hot_reload.reload_if_stale`,
+    which stats ``config.json`` plus the ``config.d`` fragments and — on a
+    mismatch — rebuilds a real :class:`Mem2MemConfig` from them. (Other write
+    handlers such as ``/reset`` and ``/fts-rebuild`` do not; they touch storage,
+    not config.) Unisolated, the rebuild reads the *developer's*
+    ``~/.memtomem/config.json``: ``TestConfigPatch`` asserted the code default
+    ``embedding.onnx_batch_size == 8`` and read whatever the developer had
+    pinned instead (#2386 — E5 profiles ship ``4``).
+
+    Reading it is only the visible half. ``_build_fresh_config()`` defaults to
+    ``migrate=True``, so the same reload can *write* the real file to migrate
+    ``auto_discover`` into an explicit ``memory_dirs`` list. Redirecting both
+    module constants — the ``config.d`` directory as well, or fragments would
+    still be read out of the real home — keeps this file's mocked app off the
+    real config in both directions.
+
+    Patch the constants rather than ``HOME``: ``Path("~/...").expanduser()``
+    resolves at access time, so either works, but the constants are the
+    narrower target and are the pattern the config tests already use (see
+    ``test_cpu_embedding_profiles.py``).
+    """
+    return isolate_config_paths(monkeypatch, tmp_path_factory.mktemp("memtomem-home"))
+
+
 @pytest.fixture
-def app():
+def app(_isolated_config_paths: Path):
     """Create an app without lifespan and wire mock state."""
     application = create_app(lifespan=None, mode="dev")
 
@@ -1883,6 +1913,68 @@ class TestConfigPatch:
             }
         ]
         assert app.state.config.embedding.onnx_batch_size == 4
+
+    async def test_patch_reads_the_isolated_override_file(
+        self, client: AsyncClient, _isolated_config_paths: Path
+    ):
+        """The reload ahead of a patch reads the *fixture's* ``config.json``.
+
+        Pins the ``_CONFIG_OVERRIDE_PATH`` half of ``_isolated_config_paths``:
+        drop that redirect and this handler reads the real
+        ``~/.memtomem/config.json`` again, whose ``onnx_batch_size`` is not 6.
+        """
+        from memtomem.config import _override_path
+
+        (_isolated_config_paths / "config.json").write_text(
+            json.dumps({"embedding": {"onnx_batch_size": 6}}), encoding="utf-8"
+        )
+        # Behaviour alone would still pass if the real file happened to hold 6.
+        assert _override_path() == _isolated_config_paths / "config.json"
+
+        resp = await client.patch(
+            "/api/config",
+            json={"embedding": {"onnx_batch_size": 4}},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["applied"] == [
+            {
+                "field": "embedding.onnx_batch_size",
+                "old_value": "6",
+                "new_value": "4",
+            }
+        ]
+
+    async def test_patch_reads_the_isolated_config_d_fragments(
+        self, client: AsyncClient, _isolated_config_paths: Path
+    ):
+        """Same, for the ``config.d`` half of the redirect.
+
+        ``current_signature`` and the rebuild resolve fragments through their
+        own module constant, so patching only ``_CONFIG_OVERRIDE_PATH`` would
+        still let the real ``~/.memtomem/config.d`` reach the config the
+        handler serves.
+        """
+        from memtomem.config import _config_d_path
+
+        fragments = _isolated_config_paths / "config.d"
+        fragments.mkdir()
+        (fragments / "10-batch.json").write_text(
+            json.dumps({"embedding": {"onnx_batch_size": 6}}), encoding="utf-8"
+        )
+        assert _config_d_path() == fragments
+
+        resp = await client.patch(
+            "/api/config",
+            json={"embedding": {"onnx_batch_size": 4}},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["applied"] == [
+            {
+                "field": "embedding.onnx_batch_size",
+                "old_value": "6",
+                "new_value": "4",
+            }
+        ]
 
     async def test_patch_sequence_cap_is_restart_only(self, client: AsyncClient):
         resp = await client.patch(
