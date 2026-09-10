@@ -81,10 +81,12 @@ tests/
 .memtomem/*.local/
 .memtomem/.staging/
 
-# Cross-process file-lock sidecars. Indexing this checkout drops an empty
-# `.{name}.lock` next to every file whose extension is in
-# indexing.supported_extensions, and context/_atomic.py forbids unlinking them
-# (deleting a sidecar reintroduces the os.replace inode race). Ignore rather
-# than delete. Does not match tracked `uv.lock` — the leading dot is required.
-# See #2387.
+# Cross-process file-lock sidecars. Indexing drops an empty `.{name}.lock`
+# next to each file it locks, and context/_atomic.py forbids unlinking them
+# (deleting a sidecar reintroduces the os.replace inode race), so ignore
+# rather than delete. The leading dot is required and is what keeps the
+# tracked `uv.lock` unmatched. Which files get one, and when it is safe to
+# remove them, are documented once in docs/guides/configuration.md under
+# "Lock sidecars" — kept there rather than restated here, since only the
+# guide's copy is pinned by tests. See #2387.
 .*.lock

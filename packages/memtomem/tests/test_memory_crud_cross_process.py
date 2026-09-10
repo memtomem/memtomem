@@ -825,6 +825,47 @@ async def test_sidecar_lockfiles_are_not_indexed(bm25_only_components):
     )
 
 
+@pytest.mark.asyncio
+async def test_named_file_takes_its_sidecar_before_the_chunker_check(bm25_only_components):
+    """`mm index <file>` leaves a sidecar even for an extension no chunker handles.
+
+    The L2 acquire in ``IndexEngine._locked_index`` runs ABOVE the registry
+    check in ``_index_file``, so a directly named file is locked before
+    anything decides it cannot be chunked. That asymmetry with a directory
+    scan — which filters on the registry during discovery and never reaches
+    the lock — is what ``docs/guides/configuration.md`` "Lock sidecars" tells
+    users about, and prose in a guide cannot pin an acquisition order. Moving
+    the registry check above the acquire would leave the guide's sentence
+    standing while making it false, so pin the behaviour here. (#2387)
+    """
+    comp, mem_dir = bm25_only_components
+    # State the premise instead of assuming it. Which extensions lack a
+    # chunker depends on configuration — this fixture enables a hard chunk
+    # budget, so ``.py`` HAS one here — and a test that silently drifts onto
+    # a chunkable file would exercise the ordinary path while still passing.
+    ext = next(
+        (e for e in (".txt", ".csv", ".ini", ".cfg") if comp.index_engine._registry.get(e) is None),
+        None,
+    )
+    assert ext is not None, (
+        "every candidate extension now has a chunker; pick one without a "
+        "chunker or this test no longer exercises the acquire-before-check path"
+    )
+    orphan = mem_dir / f"mod{ext}"
+    orphan.write_text("plain body\n", encoding="utf-8")
+    sidecar = mem_dir / f".mod{ext}.lock"
+    assert not sidecar.exists(), "fixture already had a sidecar; the pin proves nothing"
+
+    await comp.index_engine.index_file(orphan)
+
+    sources = {p.name for p in await comp.storage.get_all_source_files()}
+    assert orphan.name not in sources, "the unchunkable file was indexed after all"
+    assert sidecar.exists(), (
+        "a directly named file must be locked before the chunker check; "
+        "the guide's single-file warning is now false"
+    )
+
+
 # ================================ F. removed parent dirs on the CRUD spans (#2346)
 #
 # The engine's #1566 pair in group B pins the INDEXER's half of this rule.
