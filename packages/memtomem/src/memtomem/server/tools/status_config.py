@@ -928,26 +928,36 @@ def _persistence_suffix(key: str, receipt: "SaveReceipt | None") -> str:
     durability half of the message changes. The receipt is read instead of
     the file so a concurrent writer cannot rewrite the answer underneath us.
     """
-    from memtomem.config import MISSING, env_var_owning
+    from memtomem.config import MISSING, env_binding_owning
 
     if receipt is None:
         return " (runtime only — not persisted)"
 
     section_name, _, field_name = key.partition(".")
-    env_var = env_var_owning(section_name, field_name)
+    binding = env_binding_owning(section_name, field_name)
+    # Both env shapes outrank the file, so both break the ``persist`` promise;
+    # they differ only in what the operator has to change, which is why the
+    # whole-section shape says where the value is coming from (issue #2390).
+    takes_precedence = (
+        f"{binding.name} carries this field in its JSON payload and takes precedence"
+        if binding is not None and binding.whole_section
+        else f"{binding.name} takes precedence"
+        if binding is not None
+        else ""
+    )
     if receipt.pinned_after(section_name, field_name) is not MISSING:
-        if env_var is None:
+        if binding is None:
             return " (persisted to config.json)"
         # "survives server restarts" is the documented promise of persist=True,
         # and an env var breaks exactly that half: the next start reads the
         # variable, not the file.
         return (
-            f" (persisted to config.json, but {env_var} takes precedence — "
+            f" (persisted to config.json, but {takes_precedence} — "
             f"a restart reads that variable, not this value)"
         )
     reason = (
-        f"{env_var} takes precedence"
-        if env_var
+        takes_precedence
+        if binding is not None
         else "the value already comes from a lower layer (default or config.d)"
     )
     return f" (runtime only — not written to config.json: {reason})"

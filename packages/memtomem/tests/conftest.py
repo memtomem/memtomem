@@ -159,7 +159,7 @@ def pytest_terminal_summary(terminalreporter) -> None:
 def _scrub_ambient_memtomem_env() -> Iterator[None]:
     """Keep the developer's shell ``MEMTOMEM_*`` config env out of the session.
 
-    ``Mem2MemConfig`` binds ``MEMTOMEM_<SECTION>__<FIELD>``, and every loader
+    ``Mem2MemConfig`` binds both shapes described below, and every loader
     yields to the environment: ``load_config_overrides`` skips a ``config.json``
     entry whose field an env var owns (``env_var_owning``). So a test can
     redirect the whole ``~/.memtomem`` config layer at a temp dir and still be

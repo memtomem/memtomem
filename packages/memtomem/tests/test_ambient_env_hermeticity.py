@@ -271,17 +271,17 @@ class TestWhyTheScrubExists:
 
         assert config.embedding.onnx_batch_size == 7
 
-    def test_a_pinned_file_field_beats_the_whole_section_binding(self, monkeypatch, tmp_path):
-        """And the asymmetry that goes with it, so nobody assumes symmetry.
+    def test_a_whole_section_binding_beats_a_pinned_file_field(self, monkeypatch, tmp_path):
+        """And it outranks the file too, so the scrub cannot skip this shape.
 
-        ``load_config_overrides`` yields to the environment only through
-        :func:`memtomem.config.env_var_owning`, which looks for
-        ``memtomem_<section>__<field>`` and nothing else. The whole-section
-        spelling is invisible to it, so a field the file pins is written back
-        over the environment's value — the opposite of what the delimiter
-        spelling does. Scrubbing is what makes the difference moot; without it,
-        which shape a developer exported decides whether an isolated file is
-        honoured.
+        This row used to assert the file won. ``load_config_overrides`` yields
+        to the environment through :func:`memtomem.config.env_var_owning`,
+        which recognised only ``memtomem_<section>__<field>`` — so a field the
+        file pinned was written back over the environment's value, the
+        opposite of what the delimiter spelling did (issue #2390). Both
+        spellings now rank alike, which is why the redirected ``config.json``
+        an isolated test writes is no defence on its own: whichever shape a
+        developer exported reaches the run unless the scrub removes it.
         """
         root = isolate_config_paths(monkeypatch, tmp_path / "memtomem-home")
         (root / "config.json").write_text(
@@ -291,7 +291,7 @@ class TestWhyTheScrubExists:
 
         config = build_fresh_config(migrate=False)
 
-        assert config.embedding.onnx_batch_size == 6
+        assert config.embedding.onnx_batch_size == 7
 
 
 class TestWiring:

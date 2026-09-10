@@ -175,12 +175,11 @@ def ambient_memtomem_config_env(environ: Mapping[str, str]) -> list[str]:
     * ``MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE`` — one field, found by the
       ``env_nested_delimiter``.
     * ``MEMTOMEM_EMBEDDING='{"onnx_batch_size": 7}'`` — the whole section as
-      JSON, a *flat* name. It reaches the running config wherever
-      ``config.json`` does not claim the field, which is every state an
-      isolated config layer is in; where the file *does* pin the field, the
-      file wins, because ``env_var_owning`` only recognises the delimiter
-      spelling. Either way the developer's shell is deciding, which is what
-      the scrub is for. Both outcomes are pinned in
+      JSON, a *flat* name. It reaches the running config whether or not
+      ``config.json`` claims the field: ``env_var_owning`` recognises both
+      spellings since issue #2390, so a redirected config layer is no defence
+      against either. The developer's shell is deciding, which is what the
+      scrub is for. Both outcomes are pinned in
       ``test_ambient_env_hermeticity``.
 
     The second shape is why this function has to know the section names: no

@@ -203,6 +203,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A whole-section environment binding now outranks `config.json`, like the
+  `__` spelling already did (#2390).** pydantic-settings binds a nested
+  section from the environment two ways and memtomem accepts both:
+  `MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=7` and
+  `MEMTOMEM_EMBEDDING='{"onnx_batch_size": 7}'`. Only the first was recognised
+  by the ownership check the override loaders consult, so the second lost to a
+  `config.json` entry that pinned the same field — pydantic read the variable,
+  the loader then wrote the file's value over it. Which spelling an operator
+  happened to use decided whether their file was honoured, and nothing said
+  so.
+
+  Both shapes are now honoured, per field: a JSON payload claims only the
+  fields it names, and the rest of the section still comes from the file
+  layers. Where both spellings are exported for one field, the resolution
+  follows what pydantic-settings actually builds rather than a rule of thumb.
+
+  `mm config set` and `mem_config(persist=true)` name the section variable
+  when it is the one in force, and say that it *carries* the field in its JSON
+  payload — unsetting it releases every other field that payload names, which
+  is wider advice than the delimiter spelling needs. Where both shapes bind
+  one field, `mm config set` names both: clearing only the one in force hands
+  the field to the other rather than to `config.json`. `mm sync-doctor` held a
+  second, narrower copy of the same check and now shares the one helper; it
+  had been overwriting an env-supplied `indexing.memory_dirs` for both the
+  JSON spelling and any lowercase export.
+
 - **The CPU embedding profile no longer disables GPU acceleration, stale-chunks
   an upgraded install, or breaks dedup (#2383 review).** Six defects in the
   first cut of the E5 profile:

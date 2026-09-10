@@ -268,21 +268,52 @@ def _effect_lines(
     supplied it. It is passed in rather than measured here so the caller's FTS
     rebuild acts on the same reading this report describes.
     """
-    from memtomem.config import MISSING, env_var_owning
+    from memtomem.config import MISSING, env_bindings_for
 
-    env_var = env_var_owning(section_name, field_name)
+    bindings = env_bindings_for(section_name, field_name)
+    binding = bindings[0] if bindings else None
+    env_var = binding.name if binding is not None else None
     pruned = receipt.pruned(section_name, field_name)
     pinned_before = receipt.pinned_before(section_name, field_name)
 
     lines: list[str] = []
-    if effective != coerced and env_var is not None:
+    if effective != coerced and binding is not None:
         # Name the variable, never read it: the actionable part is which knob
         # to unset. Quoted values go through the same mask as `old -> new`.
+        # The remedy is the whole reason this line exists, so it has to name
+        # every binding standing between the file and the reader (issue
+        # #2390). Both shapes can bind one field at once, and clearing only
+        # the winner hands the field to the other one rather than to
+        # config.json — advice that looks like it worked.
+        if len(bindings) > 1:
+            # "in any case spelling" is load-bearing here for the same reason
+            # it is in the single-binding branches: each shape can be exported
+            # under several spellings, and this line names one per shape.
+            remedy = (
+                f"it applies once neither {bindings[0].name} nor {bindings[1].name} "
+                f"supplies {field_name}, in any case spelling — clearing one of them "
+                "hands the field to the other, not to the file."
+            )
+        elif binding.whole_section:
+            # One variable, several fields: say so, because unsetting it is
+            # wider than the key being reported.
+            remedy = (
+                "it applies once no case spelling of that name carries the field — drop "
+                f"{field_name} from that JSON, or unset the variable to release every "
+                "field it carries."
+            )
+        else:
+            remedy = "it applies once no case spelling of that name is set."
+        supplies = (
+            f"carries {key} in its JSON payload and takes precedence"
+            if binding.whole_section
+            else "is set and takes precedence"
+        )
         lines.append(
             click.style(
-                f"warning: {env_var} is set and takes precedence — the effective value is "
+                f"warning: {binding.name} {supplies} — the effective value is "
                 f"still {_masked(field_name, effective)}. config.json holds your value and "
-                f"it applies once no case spelling of that name is set.",
+                f"{remedy}",
                 fg="yellow",
             )
         )

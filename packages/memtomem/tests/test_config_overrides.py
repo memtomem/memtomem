@@ -21,6 +21,8 @@ from memtomem import config as _cfg
 from memtomem.config import (
     Mem2MemConfig,
     assign_section_fields,
+    env_binding_owning,
+    env_bindings_for,
     load_config_d,
     load_config_overrides,
 )
@@ -1369,6 +1371,427 @@ class TestEnvNameCaseInsensitivity:
         assert cfg.search.default_top_k == 33
 
 
+class TestWholeSectionEnvSpelling:
+    """#2390: the JSON spelling of a section binding must rank like ``__``.
+
+    pydantic-settings binds a nested model from the environment two ways, and
+    ``Mem2MemConfig`` accepts both::
+
+        MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=7
+        MEMTOMEM_EMBEDDING='{"onnx_batch_size": 7}'
+
+    The ownership helper used to recognise only the first, so the loaders
+    wrote ``config.json`` back over a field the environment had supplied —
+    and the reporting surfaces told the operator no variable owned the key
+    while one did. Which spelling someone happened to export decided whether
+    their file was honoured.
+
+    The end-to-end rows are what matter here: a unit test of the helper alone
+    passed before the fix as well, because the helper's answer was internally
+    consistent — just not with pydantic's.
+    """
+
+    PAYLOAD = json.dumps({"onnx_batch_size": 7})
+
+    def test_env_beats_config_json(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The row the bug report opened with: the file used to win here."""
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", self.PAYLOAD)
+        override_path.write_text(
+            json.dumps({"embedding": {"onnx_batch_size": 6}}), encoding="utf-8"
+        )
+
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg, migrate=False)
+
+        assert cfg.embedding.onnx_batch_size == 7
+
+    def test_env_beats_config_d(self, config_d_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """And the fragment still applies elsewhere in the same section.
+
+        The sibling assertion is what stops this passing vacuously: a loader
+        that stopped reading fragments, or rejected the whole section because
+        one field is env-bound, would satisfy the first assertion alone.
+        """
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", self.PAYLOAD)
+        (config_d_dir / "fragment.json").write_text(
+            json.dumps({"embedding": {"onnx_batch_size": 6, "batch_size": 33}}),
+            encoding="utf-8",
+        )
+
+        cfg = Mem2MemConfig()
+        load_config_d(cfg)
+
+        assert cfg.embedding.onnx_batch_size == 7
+        assert cfg.embedding.batch_size == 33
+
+    def test_it_yields_only_the_field_the_payload_carries(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A section binding is not a section-wide veto.
+
+        Every field of ``embedding`` shares one variable, so a gate keyed on
+        the *section* rather than the field would drop the file's pin on
+        ``batch_size`` too — a much wider regression than the one being
+        fixed, and invisible to a single-field test.
+        """
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", self.PAYLOAD)
+        override_path.write_text(
+            json.dumps({"embedding": {"onnx_batch_size": 6, "batch_size": 33}}),
+            encoding="utf-8",
+        )
+
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg, migrate=False)
+
+        assert cfg.embedding.onnx_batch_size == 7
+        assert cfg.embedding.batch_size == 33
+
+    def test_config_json_still_applies_when_the_payload_is_silent(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", json.dumps({"batch_size": 33}))
+        override_path.write_text(
+            json.dumps({"embedding": {"onnx_batch_size": 6}}), encoding="utf-8"
+        )
+
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg, migrate=False)
+
+        assert cfg.embedding.onnx_batch_size == 6
+        assert env_binding_owning("embedding", "onnx_batch_size") is None
+
+    @pytest.mark.parametrize(
+        ("payload", "owns"),
+        [
+            ('{"onnx_batch_size": 7}', True),
+            ('{"ONNX_BATCH_SIZE": 7}', True),
+            ('{"Onnx_Batch_Size": 7}', True),
+            ('{"batch_size": 33}', False),
+            ("{}", False),
+            ("[1]", False),
+            ("not json", False),
+            ("", False),
+        ],
+    )
+    def test_ownership_follows_the_payload(
+        self, payload: str, owns: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keys fold like pydantic folds them, and junk owns nothing.
+
+        The unparseable rows make ``Mem2MemConfig()`` raise, so no loader ever
+        sees them — but ``_persistence_suffix`` and ``mm config set`` call the
+        helper long after construction, on an environment that may have moved
+        since, so it has to answer rather than raise.
+        """
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", payload)
+
+        binding = env_binding_owning("embedding", "onnx_batch_size")
+
+        assert (binding is not None) is owns
+        if binding is not None:
+            assert binding.whole_section is True
+            assert binding.name == "MEMTOMEM_EMBEDDING"
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="os.environ normalises keys on Windows: two spellings cannot coexist",
+    )
+    def test_a_later_spelling_shadows_an_earlier_payload(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pick the winning *variable* first, then read its payload.
+
+        pydantic folds the environment into a case-normalised dict, so a later
+        ``memtomem_embedding`` replaces an earlier ``MEMTOMEM_EMBEDDING``
+        wholesale rather than merging with it. Choosing the last variable that
+        happens to carry the field would name one pydantic never read, and
+        hold ``config.json`` back in favour of nothing at all.
+        """
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", self.PAYLOAD)
+        monkeypatch.setenv("memtomem_embedding", "{}")
+        override_path.write_text(
+            json.dumps({"embedding": {"onnx_batch_size": 6}}), encoding="utf-8"
+        )
+
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg, migrate=False)
+
+        assert env_binding_owning("embedding", "onnx_batch_size") is None
+        assert cfg.embedding.onnx_batch_size == 6
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="os.environ normalises keys on Windows: two spellings cannot coexist",
+    )
+    def test_a_lowercase_section_name_owns_the_field_too(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("memtomem_embedding", self.PAYLOAD)
+        override_path.write_text(
+            json.dumps({"embedding": {"onnx_batch_size": 6}}), encoding="utf-8"
+        )
+
+        cfg = Mem2MemConfig()
+        load_config_overrides(cfg, migrate=False)
+
+        assert cfg.embedding.onnx_batch_size == 7
+        binding = env_binding_owning("embedding", "onnx_batch_size")
+        assert binding is not None
+        assert binding.name == "memtomem_embedding"
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_name", "whole_section"),
+        [
+            # Deep-updated in place at the lower-case key, so the delimiter's
+            # value is the last spelling standing.
+            ('{"onnx_batch_size": 7}', "MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE", False),
+            # No lower-case key to update, so the delimiter's value is
+            # appended after the payload's spelling — and wins.
+            ('{"ONNX_BATCH_SIZE": 9}', "MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE", False),
+            (
+                '{"ONNX_BATCH_SIZE": 9, "onnx_batch_size": 7}',
+                "MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE",
+                False,
+            ),
+            # The upper spelling folds in *after* the updated lower-case key,
+            # so here the section payload is what reaches the model.
+            ('{"onnx_batch_size": 7, "ONNX_BATCH_SIZE": 9}', "MEMTOMEM_EMBEDDING", True),
+        ],
+    )
+    def test_it_names_the_shape_pydantic_actually_read(
+        self,
+        payload: str,
+        expected_name: str,
+        whole_section: bool,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """With both shapes exported, name the one supplying the value.
+
+        Which one that is comes out of pydantic-settings' merge, not out of a
+        rule of thumb: the exploded ``__`` variable is deep-updated into the
+        decoded payload under the exact lower-case key, and the payload's
+        spellings are then folded in insertion order. The last row is the one
+        a "delimiter always wins" helper gets wrong.
+
+        Every row asserts against a freshly constructed config rather than
+        against a remembered number, so a pydantic-settings upgrade that
+        changes the merge turns this red instead of leaving the helper quietly
+        naming the wrong variable.
+        """
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", payload)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE", "11")
+
+        binding = env_binding_owning("embedding", "onnx_batch_size")
+        assert binding is not None
+        assert binding.name == expected_name
+        assert binding.whole_section is whole_section
+
+        built = Mem2MemConfig().embedding.onnx_batch_size
+        if whole_section:
+            spellings = [
+                value
+                for key, value in json.loads(payload).items()
+                if key.lower() == "onnx_batch_size"
+            ]
+            assert built == spellings[-1]
+        else:
+            assert built == 11
+
+    def test_an_append_list_is_not_extended_by_a_fragment(
+        self, config_d_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """APPEND fields fail differently: a fragment *adds* rather than replaces.
+
+        ``indexing.memory_dirs`` is ``Annotated[list[Path], APPEND]``, so a
+        gate that only stopped scalar replacement would still let a fragment
+        grow the env-supplied list. The whole list is asserted, not its
+        length: an entry appended and one dropped keeps the count.
+        """
+        _clear_all_memtomem_env(monkeypatch)
+        from_env = tmp_path / "from-env"
+        from_fragment = tmp_path / "from-fragment"
+        monkeypatch.setenv("MEMTOMEM_INDEXING", json.dumps({"memory_dirs": [str(from_env)]}))
+        (config_d_dir / "fragment.json").write_text(
+            json.dumps(
+                {
+                    "indexing": {
+                        "memory_dirs": [str(from_fragment)],
+                        "exclude_patterns": ["*.tmp"],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        cfg = Mem2MemConfig()
+        load_config_d(cfg)
+
+        assert cfg.indexing.memory_dirs == [from_env]
+        # The fragment is still being read — the gate is per field, and this
+        # sibling is what separates "the gate held" from "nothing loaded".
+        assert cfg.indexing.exclude_patterns == ["*.tmp"]
+
+    def test_sync_doctor_leaves_the_env_list_alone(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The doctor mirrors the loader, so it has to mirror the same gate.
+
+        It reads ``config.json`` itself rather than calling the loader (the
+        loader can rewrite the file, and the doctor is read-only), which is
+        exactly how it came to hold a second, narrower copy of the ownership
+        rule.
+        """
+        from memtomem.cli.sync_doctor_cmd import _apply_memory_dirs_override_no_write
+
+        _clear_all_memtomem_env(monkeypatch)
+        from_env = tmp_path / "from-env"
+        from_file = tmp_path / "from-file"
+        monkeypatch.setenv("MEMTOMEM_INDEXING", json.dumps({"memory_dirs": [str(from_env)]}))
+        override_path.write_text(
+            json.dumps({"indexing": {"memory_dirs": [str(from_file)]}}), encoding="utf-8"
+        )
+
+        cfg = Mem2MemConfig()
+        _apply_memory_dirs_override_no_write(cfg)
+
+        assert cfg.indexing.memory_dirs == [from_env]
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            # Both shapes carry it: the tuple names the loser too, because
+            # removing the winner alone hands the field to it.
+            (
+                '{"onnx_batch_size": 7}',
+                ("MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE", "MEMTOMEM_EMBEDDING"),
+            ),
+            (
+                '{"onnx_batch_size": 7, "ONNX_BATCH_SIZE": 9}',
+                ("MEMTOMEM_EMBEDDING", "MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE"),
+            ),
+            # The payload does not carry the field, so there is nothing behind
+            # the delimiter spelling: removing it reaches config.json.
+            ('{"batch_size": 33}', ("MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE",)),
+        ],
+    )
+    def test_it_lists_every_shape_standing_between_the_file_and_the_reader(
+        self, payload: str, expected: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Winner first, then whatever removing the winner would expose.
+
+        The order is asserted, not the membership: the surfaces that use this
+        print the first name as the one in force, so a tuple that merely
+        contains both would let them blame the wrong variable.
+        """
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", payload)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE", "11")
+
+        bindings = env_bindings_for("embedding", "onnx_batch_size")
+
+        assert tuple(binding.name for binding in bindings) == expected
+
+    def test_removing_the_winner_exposes_the_shape_behind_it(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The claim the listing makes, walked end to end through the loader."""
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", json.dumps({"onnx_batch_size": 7}))
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE", "11")
+        override_path.write_text(
+            json.dumps({"embedding": {"onnx_batch_size": 6}}), encoding="utf-8"
+        )
+
+        def effective() -> int:
+            cfg = Mem2MemConfig()
+            load_config_overrides(cfg, migrate=False)
+            return cfg.embedding.onnx_batch_size
+
+        assert effective() == 11
+        monkeypatch.delenv("MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE")
+        assert effective() == 7
+        monkeypatch.delenv("MEMTOMEM_EMBEDDING")
+        assert effective() == 6
+
+
+class TestWholeSectionEnvAndDeltaSave:
+    """A recognised env shape is also a lower layer the delta-only save prunes against.
+
+    ``build_comparand`` has always read the whole-section spelling — it just
+    calls ``Mem2MemConfig()`` — so these rows held before the fix as well.
+    They are pinned because #2390 makes the two halves agree for the first
+    time, and a later "simplification" of either half would be free to break
+    the pairing silently: the save deciding an env-supplied value is worth
+    storing, while the loader refuses to apply what it stored.
+    """
+
+    def test_saving_the_env_value_stores_no_pin(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.config import save_config_overrides
+
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", json.dumps({"onnx_batch_size": 7}))
+        override_path.write_text(
+            json.dumps({"embedding": {"onnx_batch_size": 6}}), encoding="utf-8"
+        )
+
+        cfg = Mem2MemConfig()
+        cfg.embedding.onnx_batch_size = 7
+        receipt = save_config_overrides(cfg)
+
+        assert receipt.pruned("embedding", "onnx_batch_size")
+        assert "onnx_batch_size" not in json.loads(override_path.read_text()).get("embedding", {})
+
+    def test_saving_a_different_value_keeps_the_pin(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The write is not wasted — it applies the moment the variable is gone."""
+        from memtomem.config import save_config_overrides
+
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", json.dumps({"onnx_batch_size": 7}))
+        override_path.write_text("{}", encoding="utf-8")
+
+        cfg = Mem2MemConfig()
+        cfg.embedding.onnx_batch_size = 44
+        save_config_overrides(cfg)
+
+        assert json.loads(override_path.read_text())["embedding"]["onnx_batch_size"] == 44
+
+        monkeypatch.delenv("MEMTOMEM_EMBEDDING")
+        reloaded = Mem2MemConfig()
+        load_config_overrides(reloaded, migrate=False)
+        assert reloaded.embedding.onnx_batch_size == 44
+
+    def test_an_unrelated_save_does_not_bake_in_the_env_value(
+        self, override_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.config import save_config_overrides
+
+        _clear_all_memtomem_env(monkeypatch)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", json.dumps({"onnx_batch_size": 7}))
+        override_path.write_text("{}", encoding="utf-8")
+
+        cfg = Mem2MemConfig()
+        cfg.search.default_top_k = 44
+        save_config_overrides(cfg)
+
+        stored = json.loads(override_path.read_text())
+        assert stored["search"]["default_top_k"] == 44
+        assert "onnx_batch_size" not in stored.get("embedding", {})
+
+
 class TestMcpPersistenceSuffix:
     """#2108: `mem_config(persist=True)` must not claim a write the file lacks."""
 
@@ -1416,6 +1839,46 @@ class TestMcpPersistenceSuffix:
         suffix = _persistence_suffix("search.default_top_k", receipt)
         assert "not written to config.json" in suffix
         assert "MEMTOMEM_SEARCH__DEFAULT_TOP_K takes precedence" in suffix
+
+    def test_names_the_whole_section_variable_and_where_the_value_sits(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2390: the JSON shape breaks the restart promise the same way.
+
+        It says *carries this field in its JSON payload* rather than just
+        naming the variable, because the two shapes need different remedies:
+        the variable here supplies several fields at once, so "unset it" is
+        wider advice than the key being reported.
+        """
+        from memtomem.config import SaveReceipt
+        from memtomem.server.tools.status_config import _persistence_suffix
+
+        receipt = SaveReceipt(before={}, after={"embedding": {"onnx_batch_size": 44}})
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", json.dumps({"onnx_batch_size": 7}))
+
+        suffix = _persistence_suffix("embedding.onnx_batch_size", receipt)
+        assert suffix == (
+            " (persisted to config.json, but MEMTOMEM_EMBEDDING carries this field in its "
+            "JSON payload and takes precedence — a restart reads that variable, not this "
+            "value)"
+        )
+
+    def test_names_the_whole_section_variable_when_the_delta_was_pruned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.config import SaveReceipt
+        from memtomem.server.tools.status_config import _persistence_suffix
+
+        receipt = SaveReceipt(
+            before={"embedding": {"onnx_batch_size": 33}}, after={"search": {"rrf_k": 60}}
+        )
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", json.dumps({"onnx_batch_size": 7}))
+
+        suffix = _persistence_suffix("embedding.onnx_batch_size", receipt)
+        assert suffix == (
+            " (runtime only — not written to config.json: MEMTOMEM_EMBEDDING carries this "
+            "field in its JSON payload and takes precedence)"
+        )
 
     def test_blames_a_lower_layer_when_no_env_var_is_set(
         self, monkeypatch: pytest.MonkeyPatch
