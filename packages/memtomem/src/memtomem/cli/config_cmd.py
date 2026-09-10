@@ -356,6 +356,86 @@ def _masked(field_name: str, value: object) -> object:
     return ("***" if value else "") if is_secret_key(field_name) else value
 
 
+def _unpinned_sources(keys: list[str]) -> dict[str, str]:
+    """What actually supplies each key, now that ``config.json`` does not pin it.
+
+    ``unset`` used to answer "already at default" for every key the file had no
+    entry for. That is a claim about the *effective* value, and ``config.json``
+    is only one of the layers that can set it: a ``config.d`` fragment or a
+    ``MEMTOMEM_*`` variable supplies the field just as well, and the command
+    then reported a default the stack was not using. Measure instead of
+    assuming, the way ``mm config set`` already does (issue #2108).
+
+    What is reported is bounded by what can be shown. An environment binding is
+    named because :func:`memtomem.config.env_bindings_for` resolves it exactly
+    and it outranks the file either way. Everything else gets the value and no
+    provenance: a non-default value does not prove a fragment wrote it. Two
+    measured counterexamples, in neither of which a ``config.d`` directory even
+    existed — the E5 embedding profile derives ``indexing.max_chunk_tokens``,
+    and a legacy ``rerank.top_k`` in ``config.json`` migrates into
+    ``rerank.min_pool``, so there the file *is* the source of a key it holds no
+    entry for. Naming a fragment in either case sends the reader to a file that
+    is not there.
+
+    One load answers every key, and the whole diagnosis is optional: it runs
+    after the write, so a config the loaders cannot build must not turn a
+    completed unset into a failure. Keys it cannot speak to are left out and
+    the caller falls back to naming only what it saw itself.
+    """
+    from pydantic import ValidationError as PydanticValidationError
+
+    from memtomem.config import env_bindings_for
+    from memtomem.config_signature import build_fresh_config
+
+    out: dict[str, str] = {}
+    try:
+        # The canonical load, not a hand-built stack: it ends with
+        # ``apply_e5_defaults``, which fires on the *file* layers selecting an
+        # E5 model. Rebuilding the steps by hand skipped it, and a config.json
+        # naming ``intfloat/multilingual-e5-small`` then read
+        # ``indexing.max_chunk_tokens`` as 512 while the app used 384 — so the
+        # note said "already at default" about a value nothing resolves to,
+        # which is the very bug this helper exists to end.
+        #
+        # ``strict_overrides=False`` is belt-and-braces rather than load
+        # bearing: ``config_unset`` refuses a non-object ``config.json`` before
+        # it ever gets here, so flipping the flag changes no observable output.
+        # It stays off because this is a reporting path -- see below.
+        cfg = build_fresh_config(migrate=False, strict_overrides=False)
+    except Exception:  # noqa: BLE001 - reporting only; see the docstring
+        return out
+
+    for key in keys:
+        section_name, _, field_name = key.partition(".")
+        try:
+            section = getattr(cfg, section_name)
+            effective = getattr(section, field_name)
+            # Compared against a newly constructed section's declared defaults.
+            # The class is read off the live object rather than looked up by
+            # name, so the two sides cannot be different models; the
+            # construction itself reruns the field factories and validators.
+            default = getattr(type(section)(), field_name)
+        except (AttributeError, TypeError, PydanticValidationError):
+            continue
+
+        bindings = env_bindings_for(section_name, field_name)
+        if bindings:
+            carries = "carries it in its JSON payload" if bindings[0].whole_section else "is set"
+            out[key] = (
+                f"nothing to remove — {bindings[0].name} {carries} and supplies "
+                f"{_masked(field_name, effective)}"
+            )
+        elif effective == default:
+            out[key] = "already at default"
+        else:
+            # The value, not a layer: that it differs from the default does not
+            # establish where it came from. See the docstring.
+            out[key] = (
+                f"nothing to remove — a fresh load puts it at {_masked(field_name, effective)}"
+            )
+    return out
+
+
 def _canonical_unset_keys() -> set[str]:
     """Union of generic mutable fields and dedicated-endpoint fields.
 
@@ -559,6 +639,7 @@ def config_unset(keys: tuple[str, ...]) -> None:
     path = _override_path()
 
     lines: list[str] = []
+    unpinned: list[tuple[int, str]] = []
     removed_extra_mutation = False
     any_skip = False
 
@@ -615,7 +696,11 @@ def config_unset(keys: tuple[str, ...]) -> None:
                     if field in _EXTRA_MUTATION_FIELDS.get(section, set()):
                         removed_extra_mutation = True
                 else:
-                    lines.append(f"Unset: {key} (already at default)")
+                    # Diagnosed after the lock: saying which layer supplies the
+                    # value needs a config load, and that must not happen while
+                    # holding the write lock.
+                    unpinned.append((len(lines), key))
+                    lines.append("")
 
             if existing:
                 _relativize_config_paths_in_place(existing)
@@ -631,6 +716,11 @@ def config_unset(keys: tuple[str, ...]) -> None:
             )
         )
         raise SystemExit(1) from None
+
+    if unpinned:
+        sources = _unpinned_sources([key for _, key in unpinned])
+        for index, key in unpinned:
+            lines[index] = f"Unset: {key} ({sources.get(key, 'nothing to remove')})"
 
     for line in lines:
         click.echo(line)
