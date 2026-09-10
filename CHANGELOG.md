@@ -107,11 +107,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
   `mm context pull … --scope project_shared` now takes
   `--confirm-project-shared`. Nothing you run today stops working: through
-  0.5.x a bare `--yes` still carries the consent and prints a one-line notice
-  on stderr naming the change; from **0.6.0** it is refused with the same
+  0.6.x a bare `--yes` still carries the consent and prints a one-line notice
+  on stderr naming the change; from **0.7.0** it is refused with the same
   message the other commands give — "`--yes` alone is not sufficient". On the
   `user` tier `--yes` is untouched: it never meant consent there, only "skip
-  the prompt".
+  the prompt". (The refusal was first scheduled for 0.6.0, back when this
+  change was expected to reach you in a 0.5.x patch. It did not — this
+  release is the first one that has the new flag at all — so the window is
+  the release that carries it, and the refusal moves to 0.7.0.)
 
   The notice fires whenever `--yes` is carrying the consent on its own — pass
   both flags and it stays quiet, because there is nothing left to migrate. It

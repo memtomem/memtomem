@@ -300,9 +300,9 @@ def test_yes_flag_records_the_consent_and_names_the_flag(proj: Path, caplog) -> 
 #
 # ``mm context pull`` was the one CLI surface where a generic ``--yes``
 # satisfied Gate B, diverging from its own ``mem_context_pull`` tool and web
-# route. It now takes the standard flag; ``--yes`` keeps working through 0.5.x
-# behind a notice and stops satisfying Gate B in 0.6.0. Each test below pins
-# exactly one cell of that contract, because the flip in 0.6.0 has to be able
+# route. It now takes the standard flag; ``--yes`` keeps working through 0.6.x
+# behind a notice and stops satisfying Gate B in 0.7.0. Each test below pins
+# exactly one cell of that contract, because the flip in 0.7.0 has to be able
 # to change one row without silently rewriting the others.
 
 _FLIP_NOTICE = "--yes alone will stop satisfying Gate B"
@@ -354,14 +354,14 @@ def test_confirm_flag_emits_no_deprecation_notice(proj: Path) -> None:
 
 def test_yes_alone_warns_on_stderr_and_still_applies(proj: Path) -> None:
     """The window's whole point: an existing ``--yes`` script keeps working,
-    and is told once, on stderr, that it will not in 0.6.0."""
+    and is told once, on stderr, that it will not in 0.7.0."""
     _seed_one(proj)
     res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
     assert res.exit_code == 0, res.output
     assert "c" in _canonical_agent_text(proj, "a")
     assert res.stderr.count(_FLIP_NOTICE) == 1
     assert "--confirm-project-shared" in res.stderr
-    assert "0.6.0" in res.stderr
+    assert "0.7.0" in res.stderr
     assert _FLIP_NOTICE not in res.stdout
 
 
@@ -465,13 +465,13 @@ def test_gate_a_block_warns_but_records_no_consent(proj: Path, caplog) -> None:
     assert not (canonical_artifact_dir("agents", "project_shared", proj) / "a").exists()
 
 
-def test_the_yes_deprecation_window_expires_at_0_6_0() -> None:
+def test_the_yes_deprecation_window_expires_at_0_7_0() -> None:
     """The window is a promise with a date on it; this is the alarm clock.
 
     Nothing else in the suite notices when that date passes. The AST guard is
     green whether or not ``--yes`` is accepted — it only checks that a gate
     which mentions the flag also emits — and every test above is *written for*
-    the window, so they all keep passing too. A 0.6.0 release with the
+    the window, so they all keep passing too. A 0.7.0 release with the
     compatibility block still in place would therefore ship green, and the
     deprecation would quietly become permanent, which is the outcome ADR-0011
     §5 objects to in the first place.
@@ -484,13 +484,25 @@ def test_the_yes_deprecation_window_expires_at_0_6_0() -> None:
     ``test_gate_a_block_warns_but_records_no_consent``, the last of which
     should then pin that the Gate B refusal precedes Gate A — and delete this
     test.
+
+    The threshold was 0.6.0 until 2026-09-10. Stage 1 landed after 0.5.0 had
+    shipped and no 0.5.x release followed it, so the "through 0.5.x" window it
+    promised was never installable: released 0.5.0 has no
+    ``--confirm-project-shared`` on ``pull`` at all. Stage 1 therefore ships in
+    0.6.0 — the release the window actually spends — and this alarm moved with
+    it. A window is counted in published releases, not in merges to ``main``.
+
+    That argument is spent once 0.6.0 ships: from then on users have had a
+    release that warned them, and this threshold is a deadline rather than a
+    dial. Moving it again is a maintainer decision that needs its own reason
+    recorded here — not a routine edit to keep the suite green.
     """
     raw = metadata.version("memtomem")
     match = re.match(r"^(\d+)\.(\d+)", raw)
     assert match is not None, f"unparseable version {raw!r}"
-    assert (int(match.group(1)), int(match.group(2))) < (0, 6), (
+    assert (int(match.group(1)), int(match.group(2))) < (0, 7), (
         f"memtomem {raw} still accepts a bare --yes as Gate B on "
-        "`mm context pull`. The #2318 deprecation window ended at 0.6.0 — see "
+        "`mm context pull`. The #2318 deprecation window ended at 0.7.0 — see "
         "this test's docstring for the flip."
     )
 
