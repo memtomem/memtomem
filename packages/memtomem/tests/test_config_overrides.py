@@ -1409,16 +1409,24 @@ class TestWholeSectionEnvSpelling:
         assert cfg.embedding.onnx_batch_size == 7
 
     def test_env_beats_config_d(self, config_d_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """And the fragment still applies elsewhere in the same section.
+
+        The sibling assertion is what stops this passing vacuously: a loader
+        that stopped reading fragments, or rejected the whole section because
+        one field is env-bound, would satisfy the first assertion alone.
+        """
         _clear_all_memtomem_env(monkeypatch)
         monkeypatch.setenv("MEMTOMEM_EMBEDDING", self.PAYLOAD)
         (config_d_dir / "fragment.json").write_text(
-            json.dumps({"embedding": {"onnx_batch_size": 6}}), encoding="utf-8"
+            json.dumps({"embedding": {"onnx_batch_size": 6, "batch_size": 33}}),
+            encoding="utf-8",
         )
 
         cfg = Mem2MemConfig()
         load_config_d(cfg)
 
         assert cfg.embedding.onnx_batch_size == 7
+        assert cfg.embedding.batch_size == 33
 
     def test_it_yields_only_the_field_the_payload_carries(
         self, override_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1614,13 +1622,24 @@ class TestWholeSectionEnvSpelling:
         from_fragment = tmp_path / "from-fragment"
         monkeypatch.setenv("MEMTOMEM_INDEXING", json.dumps({"memory_dirs": [str(from_env)]}))
         (config_d_dir / "fragment.json").write_text(
-            json.dumps({"indexing": {"memory_dirs": [str(from_fragment)]}}), encoding="utf-8"
+            json.dumps(
+                {
+                    "indexing": {
+                        "memory_dirs": [str(from_fragment)],
+                        "exclude_patterns": ["*.tmp"],
+                    }
+                }
+            ),
+            encoding="utf-8",
         )
 
         cfg = Mem2MemConfig()
         load_config_d(cfg)
 
         assert cfg.indexing.memory_dirs == [from_env]
+        # The fragment is still being read — the gate is per field, and this
+        # sibling is what separates "the gate held" from "nothing loaded".
+        assert cfg.indexing.exclude_patterns == ["*.tmp"]
 
     def test_sync_doctor_leaves_the_env_list_alone(
         self, override_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

@@ -73,11 +73,14 @@ of increasing priority:
    `MEMTOMEM_<SECTION>__<FIELD>` variable, and a `MEMTOMEM_<SECTION>`
    variable whose JSON object carries the field. Export both for one field
    and the `__` spelling normally wins it, while the JSON object still
-   supplies the other fields it names — the exception is a JSON object that
-   spells one field twice in different cases, where the later spelling in the
-   object wins instead. Clearing whichever one is in force hands the field to
-   the other rather than to the file; `mm config set` names both when both
-   bind. Name matching is case-insensitive, so
+   supplies the other fields it names. The `__` value is merged into the JSON
+   object under the field's lower-case name — replacing that key where the
+   object already uses it, appended after the object's keys where it does not
+   — and the object's keys are then matched case-insensitively, last one
+   standing. So an object that spells one field twice wins only when its
+   *other* spelling comes after the lower-case one. Clearing whichever
+   variable is in force hands the field to the other rather than to the file;
+   `mm config set` names both when both bind. Name matching is case-insensitive, so
    `memtomem_search__default_top_k` binds as well as the uppercase spelling.
 
 ### List field merge strategies

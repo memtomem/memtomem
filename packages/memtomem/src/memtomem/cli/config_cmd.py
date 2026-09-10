@@ -286,10 +286,13 @@ def _effect_lines(
         # the winner hands the field to the other one rather than to
         # config.json — advice that looks like it worked.
         if len(bindings) > 1:
+            # "in any case spelling" is load-bearing here for the same reason
+            # it is in the single-binding branches: each shape can be exported
+            # under several spellings, and this line names one per shape.
             remedy = (
                 f"it applies once neither {bindings[0].name} nor {bindings[1].name} "
-                f"supplies {field_name} — clearing one of them hands the field to the "
-                "other, not to the file."
+                f"supplies {field_name}, in any case spelling — clearing one of them "
+                "hands the field to the other, not to the file."
             )
         elif binding.whole_section:
             # One variable, several fields: say so, because unsetting it is

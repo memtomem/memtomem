@@ -685,8 +685,8 @@ class TestConfigCLI:
             "warning: MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE is set and takes precedence — "
             "the effective value is still 11. config.json holds your value and it applies "
             "once neither MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE nor MEMTOMEM_EMBEDDING "
-            "supplies onnx_batch_size — clearing one of them hands the field to the "
-            "other, not to the file."
+            "supplies onnx_batch_size, in any case spelling — clearing one of them "
+            "hands the field to the other, not to the file."
         ) in " ".join(result.output.split())
 
         from memtomem.config import Mem2MemConfig, load_config_overrides
@@ -699,6 +699,50 @@ class TestConfigCLI:
         monkeypatch.delenv("MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE")
         assert effective() == 7  # not the file's 44 — the other shape took over
         monkeypatch.delenv("MEMTOMEM_EMBEDDING")
+        assert effective() == 44
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="os.environ normalises keys on Windows: two spellings cannot coexist",
+    )
+    def test_config_set_advice_survives_a_case_collision_within_a_shape(
+        self, tmp_path, monkeypatch, runner: CliRunner
+    ) -> None:
+        """Two names is not two spellings — the remedy has to cover both.
+
+        The warning prints one name per shape, and each shape can be exported
+        under several case spellings. Removing exactly the two printed names
+        leaves the delimiter shape's *other* spelling in force, so the
+        sentence has to say "in any case spelling" the way the single-binding
+        branches already do. Followed here rather than read: the two names are
+        removed and the value is asserted, which is what caught the gap.
+        """
+        import json
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"embedding": {"onnx_batch_size": 33}}))
+        monkeypatch.setattr("memtomem.config._override_path", lambda: config_file)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", json.dumps({"onnx_batch_size": 7}))
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE", "11")
+        monkeypatch.setenv("memtomem_embedding__onnx_batch_size", "13")
+
+        result = runner.invoke(cli, ["config", "set", "embedding.onnx_batch_size", "44"])
+        assert result.exit_code == 0, result.output
+        assert "supplies onnx_batch_size, in any case spelling" in result.output
+
+        from memtomem.config import Mem2MemConfig, load_config_overrides
+
+        def effective() -> int:
+            cfg = Mem2MemConfig()
+            load_config_overrides(cfg, migrate=False)
+            return cfg.embedding.onnx_batch_size
+
+        assert effective() == 13
+        monkeypatch.delenv("memtomem_embedding__onnx_batch_size")
+        monkeypatch.delenv("MEMTOMEM_EMBEDDING")
+        # Both printed names are gone and the file still does not apply.
+        assert effective() == 11
+        monkeypatch.delenv("MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE")
         assert effective() == 44
 
     @pytest.mark.skipif(
