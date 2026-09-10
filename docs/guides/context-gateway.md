@@ -129,8 +129,8 @@ An `--apply` that lands in the git-tracked `project_shared` tier needs the
 same explicit consent as every other write there: pass
 `--confirm-project-shared` alongside `--scope project_shared`, or answer the
 prompt. A bare `--yes` used to be accepted here and no longer is the right
-spelling — it still works through 0.5.x with a notice, and is refused from
-0.6.0 (#2318).
+spelling — it still works through 0.6.x with a notice, and is refused from
+0.7.0 (#2318).
 
 Pull can also *update* an artifact the Store already owns. If you edited a
 skill directly in a runtime's directory and want to keep that edit, pull it

@@ -1515,7 +1515,7 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     help=(
         "Skip the confirmation prompt. Requires --apply. Deprecated as Gate B "
         "consent for a project_shared landing: it still carries the consent "
-        "through 0.5.x with a notice, and stops satisfying Gate B in 0.6.0 "
+        "through 0.6.x with a notice, and stops satisfying Gate B in 0.7.0 "
         "(#2318) — pass --confirm-project-shared instead."
     ),
 )
@@ -1525,7 +1525,7 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     is_flag=True,
     help=(
         "Consent for a project_shared landing, as on every other mm write "
-        "surface. From 0.6.0 it is the only flag that carries it — --yes "
+        "surface. From 0.7.0 it is the only flag that carries it — --yes "
         "stops substituting, leaving this or the prompt (#2318); adopt it now."
     ),
 )
@@ -1630,7 +1630,7 @@ def pull_cmd(
     # would drop back out of its view.)
     deprecated_yes = gate_b_applies and yes and not confirm_project_shared
     if deprecated_yes:
-        # Deprecation window (#2318), and **this block is the 0.6.0 flip
+        # Deprecation window (#2318), and **this block is the 0.7.0 flip
         # point**: replace the notice with the siblings' refusal
         # ("--yes alone is not sufficient") and the window is over.
         #
@@ -1647,7 +1647,7 @@ def pull_cmd(
         # run that reached a writable plan.
         click.secho(
             "Note: --yes alone will stop satisfying Gate B for a project_shared "
-            "pull in 0.6.0; pass --confirm-project-shared instead (#2318).",
+            "pull in 0.7.0; pass --confirm-project-shared instead (#2318).",
             fg="yellow",
             err=True,
         )
@@ -1671,7 +1671,7 @@ def pull_cmd(
     _render_pull_plan(plan)
     # ADR-0011 §5 Gate B, now spelled the way every other CLI surface spells it
     # (#2318). The ordinary "skip the prompt" meaning of ``--yes`` on the other
-    # tiers is untouched — there it was never Gate B. The 0.6.0 flip is made in
+    # tiers is untouched — there it was never Gate B. The 0.7.0 flip is made in
     # the compatibility block above, not here.
     #
     # ``consent_mechanism`` is the audit line's only input. Both flag paths —
