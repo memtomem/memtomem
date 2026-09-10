@@ -239,9 +239,20 @@ mm init --fresh
 `mm config unset <key>` drops a single pinned entry from
 `~/.memtomem/config.json`. Each key is `section.field` form and the
 command is idempotent — running it on a key that isn't pinned exits 0
-with an `(already at default)` note so scripts can re-run safely.
-Unknown keys exit 1 with a typo suggestion when one is nearby. When
-every override is removed the config file itself is deleted.
+so scripts can re-run safely. Unknown keys exit 1 with a typo
+suggestion when one is nearby. When every override is removed the
+config file itself is deleted.
+
+For a key the file does not pin, the note is measured rather than
+assumed: `(already at default)` only when a fresh load actually
+resolves to the default, otherwise the value that is in effect, masked
+for credentials. A `MEMTOMEM_*` variable is named when one owns the
+field, because that is resolvable exactly and it outranks the file
+either way. No other layer is named — a non-default value does not
+prove a `config.d` fragment wrote it, since the embedding profile
+derives some fields and a deprecated key in `config.json` migrates
+into its replacement. The reading is taken after the write, so a config
+the loaders cannot build costs the detail and nothing else.
 
 ```bash
 mm config unset mmr.enabled                    # drop one key

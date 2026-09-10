@@ -1865,6 +1865,136 @@ class TestConfigUnset:
         assert "already at default" in result.output
         assert not isolated["config_file"].exists()
 
+    def test_unset_names_the_fragment_that_supplies_an_unpinned_key(
+        self, isolated, runner: CliRunner
+    ) -> None:
+        """ "Already at default" was a claim about a layer unset cannot see.
+
+        ``config.json`` holding no entry says nothing about the effective
+        value: a ``config.d`` fragment sets the field just as well, and the
+        command reported a default the stack was not using. The default here
+        is ``False`` and the fragment makes it ``True``, so the old wording was
+        not merely vague — it named the wrong value.
+        """
+        import json as _json
+
+        (isolated["config_d"] / "frag.json").write_text(_json.dumps({"mmr": {"enabled": True}}))
+
+        result = runner.invoke(cli, ["config", "unset", "mmr.enabled"])
+        assert result.exit_code == 0, result.output
+        assert (
+            "Unset: mmr.enabled (nothing to remove — a fresh load puts it at True)"
+        ) in result.output
+        assert "already at default" not in result.output
+
+    @pytest.mark.parametrize(
+        ("env_name", "env_value", "phrase"),
+        [
+            ("MEMTOMEM_MMR__ENABLED", "true", "MEMTOMEM_MMR__ENABLED is set"),
+            ("MEMTOMEM_MMR", '{"enabled": true}', "MEMTOMEM_MMR carries it in its JSON payload"),
+        ],
+    )
+    def test_unset_names_the_env_var_that_supplies_an_unpinned_key(
+        self, env_name, env_value, phrase, isolated, monkeypatch, runner: CliRunner
+    ) -> None:
+        """Both binding shapes, because both outrank the file (#2390)."""
+        monkeypatch.setenv(env_name, env_value)
+
+        result = runner.invoke(cli, ["config", "unset", "mmr.enabled"])
+        assert result.exit_code == 0, result.output
+        assert f"nothing to remove — {phrase} and supplies True" in result.output
+        assert "already at default" not in result.output
+
+    def test_unset_still_says_already_at_default_when_it_is(
+        self, isolated, monkeypatch, runner: CliRunner
+    ) -> None:
+        """The common case keeps its short answer — measured, not assumed."""
+        monkeypatch.delenv("MEMTOMEM_MMR__ENABLED", raising=False)
+
+        result = runner.invoke(cli, ["config", "unset", "mmr.enabled"])
+        assert result.exit_code == 0, result.output
+        assert "Unset: mmr.enabled (already at default)" in result.output
+
+    def test_unset_masks_a_secret_the_environment_supplies(
+        self, isolated, monkeypatch, runner: CliRunner
+    ) -> None:
+        """The diagnosis reads a value, so it goes through the same mask.
+
+        A reporting line that names the layer must not become the place a
+        credential is printed.
+        """
+        monkeypatch.setenv("MEMTOMEM_SESSION_TRACE__LANGFUSE_SECRET_KEY", "sk-lf-not-a-real-key")
+
+        result = runner.invoke(cli, ["config", "unset", "session_trace.langfuse_secret_key"])
+        assert result.exit_code == 0, result.output
+        assert (
+            "MEMTOMEM_SESSION_TRACE__LANGFUSE_SECRET_KEY is set and supplies ***" in result.output
+        )
+        assert "sk-lf-not-a-real-key" not in result.output
+
+    def test_unset_still_removes_when_the_diagnosis_cannot_be_built(
+        self, isolated, monkeypatch, runner: CliRunner
+    ) -> None:
+        """A config the loaders refuse must not fail a completed unset.
+
+        The diagnosis runs after the write, so an unparseable section variable
+        — which makes ``Mem2MemConfig()`` raise — costs the extra detail and
+        nothing else. A pinned key is unset alongside the absent one so the
+        removal itself is asserted: a test reading only the fallback line would
+        pass on a build that skipped the write entirely.
+        """
+        import json as _json
+
+        isolated["config_file"].write_text(_json.dumps({"search": {"default_top_k": 33}}))
+        monkeypatch.setenv("MEMTOMEM_MMR", "not json")
+
+        result = runner.invoke(cli, ["config", "unset", "search.default_top_k", "mmr.enabled"])
+        assert result.exit_code == 0, result.output
+        assert "Removed: search.default_top_k" in result.output
+        assert "Unset: mmr.enabled (nothing to remove)" in result.output
+        assert not isolated["config_file"].exists()
+
+    @pytest.mark.parametrize(
+        ("env", "config_json", "key"),
+        [
+            # The E5 profile derives this one; no fragment is involved.
+            (
+                {
+                    "MEMTOMEM_EMBEDDING__MODEL": "intfloat/multilingual-e5-small",
+                    "MEMTOMEM_EMBEDDING__PROVIDER": "onnx",
+                },
+                None,
+                "indexing.max_chunk_tokens",
+            ),
+            # config.json is the source of a key it holds no entry for: the
+            # deprecated spelling migrates into the replacement field.
+            ({}, {"rerank": {"top_k": 40}}, "rerank.min_pool"),
+        ],
+    )
+    def test_unset_does_not_blame_a_fragment_that_does_not_exist(
+        self, env, config_json, key, isolated, monkeypatch, runner: CliRunner
+    ) -> None:
+        """A non-default value does not prove a fragment wrote it.
+
+        Both rows run with the ``config.d`` directory empty, so any sentence
+        naming a fragment sends the reader to a file that is not there. The
+        value is still reported — that is the actionable half — but the layer
+        is not guessed.
+        """
+        import json as _json
+
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        if config_json is not None:
+            isolated["config_file"].write_text(_json.dumps(config_json))
+        assert not list(isolated["config_d"].iterdir())
+
+        result = runner.invoke(cli, ["config", "unset", key])
+        assert result.exit_code == 0, result.output
+        assert f"Unset: {key} (nothing to remove — a fresh load puts it at " in result.output
+        assert "fragment" not in result.output
+        assert "config.d" not in result.output
+
     def test_unset_on_malformed_config_reports_error(self, isolated, runner: CliRunner) -> None:
         isolated["config_file"].write_text("{not valid json")
 

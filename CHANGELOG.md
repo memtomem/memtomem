@@ -203,6 +203,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm config unset` no longer reports a default the stack is not using
+  (#2397).** For a key `config.json` did not pin, the command answered
+  `(already at default)` — a claim about the *effective* value, which
+  `config.json` is only one of the layers that can set. A `config.d` fragment
+  or a `MEMTOMEM_*` variable supplying the field made the note name a value
+  nothing was using: with a fragment setting `mmr.enabled` to `true`, unset
+  reported the default `false`.
+
+  The note now reports what a fresh load puts the field at, masked for
+  credentials, and names a `MEMTOMEM_*` variable when one owns the key.
+  `(already at default)` survives for the case where that is what the load
+  actually resolves to. No other layer is named: a non-default value does not
+  prove a `config.d` fragment wrote it — the embedding profile derives some
+  fields, and a deprecated key in `config.json` migrates into its replacement,
+  so the file can be the source of a key it holds no entry for. The reading is
+  taken after the write, so a config the loaders refuse costs the extra detail
+  rather than failing an unset that already happened.
+
 - **A whole-section environment binding now outranks `config.json`, like the
   `__` spelling already did (#2390).** pydantic-settings binds a nested
   section from the environment two ways and memtomem accepts both:
