@@ -557,8 +557,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the confirmation flag found a hit under `integrations/` and read as covered.
   The architectural guard could not see it either: it finds gates by that
   flag's name, and a surface carrying no such argument is invisible to it. The
-  sibling writers named in that guard's own boundary note (#2322) are still
-  open.
+  sibling writers named in that guard's own boundary note are closed in this
+  same release by #2322, the entry below.
 
 - **Writes that pick their own destination no longer land in the Git-tracked
   tier** (#2322) — a session-end summary archive, the Notion and Obsidian
@@ -631,9 +631,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   now says which path refused, and is never mistaken for a conflict at the
   destination.
 
-- **Moving an artifact to another filesystem no longer discards an edit made
-  while the move was running** (#2313) — when the two stores sit on different
-  volumes, `mm context move` cannot rename the artifact across and has to copy
+- **Moving an artifact to another filesystem no longer discards an edit
+  written through the artifact's own path while the move was running**
+  (#2313) — when the two stores sit on different volumes, `mm context move`
+  cannot rename the artifact across and has to copy
   it instead, and it used to copy from the artifact's own path and then delete
   that path once the destination was in place. A large skill takes a while to
   copy, and anything that wrote to the source in the meantime — an editor
@@ -643,9 +644,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   aside first, in one atomic step, and copies from there; a writer that
   recreates the source path finds it free and keeps what it wrote, because the
   move never removes that path again. What is set aside is removed only once
-  the destination is complete, and put back if anything goes wrong on the way —
-  and never deleted to tidy up a failure, so the bytes always exist somewhere
-  the error message names.
+  the destination is complete, and putting it back is attempted if anything
+  goes wrong on the way — attempted, because the source path may be occupied
+  again by then, in which case it stays where it is and the error names both
+  paths (see the promote/rollback entry for #2312 below). Either way it is
+  never deleted to tidy up a failure, so the bytes always exist somewhere the
+  error message names.
 
   This covers writers that go through the source's path, which is how anything
   outside this tool finds an artifact. A program that opened a file inside the
@@ -653,9 +657,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   still writing to what the move already copied; a copy to another filesystem
   is a snapshot, and only a same-filesystem move can carry such a write along.
 
-  Interrupting a cross-filesystem move now leaves its work-in-progress beside
-  the source rather than at the destination, under the same hidden name a
-  same-filesystem move already used, and nothing removes it automatically:
+  Interrupting a cross-filesystem move now leaves the set-aside original
+  beside the source rather than at the destination — the incomplete copy stays
+  in staging at the destination, as it always did — under the same hidden name
+  a same-filesystem move already used, and nothing removes it automatically:
   rename it back onto the artifact's name to recover it, or delete it once you
   have checked that the destination is complete. Until you do, the artifact
   reads as missing at the source rather than as a half-moved copy. If a copy
@@ -692,9 +697,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   action, `error:` from the migrate one, unchanged in both) — and it is now the
   syscall's refusal rather than a check that could be outrun. A refused rollback is different and is
   reported differently: the failure that triggered the rollback stays the error
-  you see, the staged tree is kept as the only copy of the source bytes, and the
-  logged message names both paths and says the source is occupied instead of
-  advising you to move the tree back on top of whatever is sitting there. An
+  you see, the staged tree is kept — after a same-filesystem move it holds the
+  only copy of the source bytes, while a cross-filesystem move deliberately
+  leaves a second one at the destination (the #2327 entry names what is really
+  on disk) — and the logged message names both paths and says the source is
+  occupied instead of advising you to move the tree back on top of whatever is
+  sitting there. An
   unrelated failure is never dressed up as a collision: a missing staging tree
   or a cross-directory promote still reports what actually went wrong.
 
@@ -711,8 +719,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   than delete, naming the occupied path and saying plainly that nothing was
   removed. The CLI prints that as a one-line error, the web transfer route
   answers 409 `transfer_staging_busy`, and both MCP actions refuse with the same
-  reason; the leftover stays hidden from discovery and can be inspected or
-  removed by hand. The exclusive claim also closes the gap between the old
+  reason; the leftover stays hidden from the discovery walks that consult the
+  predicate — the canonical listing for agents and commands does not yet, as
+  the #2304 entry below records — and can be inspected or removed by hand. The
+  exclusive claim also closes the gap between the old
   existence check and the write that followed it, and refuses two destination
   shapes that check could not handle — a dangling symlink, which it reported as
   absent, and an empty directory, which a plain rename replaces silently.
@@ -726,10 +736,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   commands takes two gates: the privacy scanner refuses a bypass at the
   boundary, and the surface requires an explicit confirmation. (Editing a chunk
   that already lives there had only the scanner when this shipped; the Breaking
-  entry above closes that gap in the same release. A few other writers — the
-  LangGraph adapter, imports, URL indexing, session archives — still have only
-  the scanner, tracked separately.) The refusal has been recorded since that
-  design shipped. The confirmation was specified to leave a
+  entry above closes that gap in the same release. The other writers this note
+  used to list as scanner-only — the LangGraph adapter, imports, URL indexing
+  via `mem_fetch`, session archives — are closed in this release too, by
+  #2321, #2336 and #2322.) The refusal has been recorded since that design
+  shipped. The confirmation was specified to leave a
   matching
   `project_shared.confirmed_via=<surface>` line and left none anywhere, so a
   team reviewing how a note, an agent, a hook, or a bundle came to be in Git
@@ -756,9 +767,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Nothing about what the declaration may waive has changed: a real token still
   refuses. (#2310)
 
-- **A crashed Move/Copy no longer leaves a directory the gateway treats as one
-  of your artifacts.** `mm context move` and `mm context copy` build the new
-  artifact in a staging directory inside the destination store and then promote
+- **A crashed Move/Copy is no longer counted as one of your artifacts by the
+  walks that check for leftovers.** `mm context move` and `mm context copy`
+  build the new artifact in a staging directory inside the destination store
+  and then promote
   it into place. A refused transfer cleans up after itself; but if the process
   is killed in between, or a failed move cannot safely put the source back,
   that directory stays behind. It holds a complete
@@ -773,8 +785,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   random suffix than the other two, so the pattern learned that width per kind
   rather than the engine being narrowed to fit it — narrowing would have missed
   every leftover already on disk and cut the engine's collision entropy on a
-  path that deletes what it collides with. And the leftover is hidden but never
-  deleted automatically, because a same-filesystem move renames your artifact
+  path that, until #2309 above, deleted what it collided with. And the
+  leftover is hidden but never deleted automatically, because a
+  same-filesystem move renames your artifact
   into that directory, making it the only copy until the promote completes.
   Recovering those bytes is still a manual step, they are not yet surfaced
   anywhere now that they are hidden, and the canonical listing for agents and
@@ -898,10 +911,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   default visibility when neither names one — which is not every namespace,
   since `search.system_namespace_prefixes` still hides `agent-runtime:` and
   `archive:` from an unpinned query. It does not hide `shared`, though, so an
-  unresolved agent also disregards `--no-include-shared` — that flag drops the
-  shared leg of a merge, and there is no merge to drop it from. This is the MCP
-  tool's rule too, so the verb reports the flag as disregarded rather than
-  diverging from the tool it mirrors.
+  unresolved agent given `--no-include-shared` selects no bucket at all — that
+  flag drops the shared leg of a merge, and there is no merge to drop it from.
+  The verb and the tool both refuse that combination rather than run a search
+  contradicting the argument; the `--no-include-shared` entry under Fixed
+  (#2296) has the wording and what `mm agent debug-resolve` reports.
   `--include-shared/--no-include-shared`, `--top-k` and
   `--shared-namespace` mirror the tool's options; `--format` uses this CLI's
   vocabulary rather than the MCP tool's, so `--format json` stays the bare
