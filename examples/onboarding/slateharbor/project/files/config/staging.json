@@ -1,0 +1,74 @@
+{
+  "upload_mb": {
+    "description": "file upload limit",
+    "value": 25,
+    "environment": "staging",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "동기 업로드는 25 MB까지 받는다. 큰 파일은 multipart 경로로 보내 worker 메모리를 보호한다.",
+    "decision": "files/docs/decisions/decision-current.md",
+    "implementation": "files/src/policy.py",
+    "observability": "content length와 실제 수신량을 비교하고 multipart upload 상태를 조회한다.",
+    "rollout": "pilot-only; synthetic tenant trial; not production authority"
+  },
+  "signed_url_minutes": {
+    "description": "signed URL lifetime",
+    "value": 10,
+    "environment": "staging",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "다운로드 링크의 수명을 짧게 유지하고 재발급 때 파일 접근 권한을 다시 확인한다.",
+    "decision": "files/docs/decisions/decision-current.md",
+    "implementation": "files/src/policy.py",
+    "observability": "링크 발급 시각과 공유 해제 시각을 비교하고 신규 URL 발급을 중단한다.",
+    "rollout": "pilot-only; synthetic tenant trial; not production authority"
+  },
+  "retention_days": {
+    "description": "trash retention",
+    "value": 30,
+    "environment": "staging",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "휴지통은 30일간 복원 가능하다. 법적 보존 요청이 있는 파일은 별도 hold로 관리한다.",
+    "decision": "files/docs/decisions/decision-current.md",
+    "implementation": "files/src/policy.py",
+    "observability": "삭제 표시와 실제 blob 존재를 확인하고 hold 여부부터 조회한다.",
+    "rollout": "pilot-only; synthetic tenant trial; not production authority"
+  },
+  "scan_seconds": {
+    "description": "malware scan timeout",
+    "value": 120,
+    "environment": "staging",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "스캔 timeout은 안전 판정이 아니다. 결과가 없으면 다운로드를 계속 보류한다.",
+    "decision": "files/docs/decisions/decision-current.md",
+    "implementation": "files/src/policy.py",
+    "observability": "scan 상태가 pending인지 확인하고 재검사 큐로 보낸다.",
+    "rollout": "pilot-only; synthetic tenant trial; not production authority"
+  },
+  "preview_pages": {
+    "description": "document preview",
+    "value": 20,
+    "environment": "staging",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "첫 미리보기는 20쪽으로 제한하고 전체 변환은 비동기 요청으로 분리한다.",
+    "decision": "files/docs/decisions/decision-current.md",
+    "implementation": "files/src/policy.py",
+    "observability": "쪽 수와 preview job 종류를 확인하고 대형 변환을 별도 큐로 보낸다.",
+    "rollout": "pilot-only; synthetic tenant trial; not production authority"
+  },
+  "chunk_mb": {
+    "description": "multipart chunk",
+    "value": 8,
+    "environment": "staging",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "이 데모의 multipart 조각은 최대 8 MB다. 전체 파일 크기 제한과 같은 값이 아니다.",
+    "decision": "files/docs/decisions/decision-current.md",
+    "implementation": "files/src/policy.py",
+    "observability": "실패한 part 번호와 checksum을 확인하고 해당 조각만 재전송한다.",
+    "rollout": "pilot-only; synthetic tenant trial; not production authority"
+  }
+}

@@ -1,0 +1,49 @@
+# Synthetic local policy profile; no service credentials.
+
+[lease_seconds]
+description = "worker lease recovery"
+value = 90
+owner = "jobs-team"
+revision = "2026-08-24"
+reason = "worker lease는 90초이며 완료 체크포인트를 먼저 확인한 후 재할당한다. timeout만 보고 같은 작업을 두 번 시작하지 않는다."
+implementation = "jobs/src/policy.py"
+
+[max_parallel]
+description = "worker concurrency"
+value = 4
+owner = "jobs-team"
+revision = "2026-08-24"
+reason = "CPU 작업 4개를 넘기지 않아 heartbeat 스레드가 굶지 않게 한다."
+implementation = "jobs/src/policy.py"
+
+[checkpoint_seconds]
+description = "checkpoint interval"
+value = 20
+owner = "jobs-team"
+revision = "2026-08-24"
+reason = "20초마다 재개 가능한 offset을 기록한다. 부분 파일이 durable해진 뒤에만 offset을 전진시킨다."
+implementation = "jobs/src/policy.py"
+
+[retry_budget]
+description = "job retry budget"
+value = 2
+owner = "jobs-team"
+revision = "2026-08-24"
+reason = "같은 입력으로 계속 실패하는 CPU 작업은 두 번 뒤 검토 큐로 보낸다. 알림 retry와 다른 예산이다."
+implementation = "jobs/src/policy.py"
+
+[shutdown_seconds]
+description = "worker shutdown grace"
+value = 45
+owner = "jobs-team"
+revision = "2026-08-24"
+reason = "종료 요청 뒤 새 claim은 막고 진행 중인 작업의 마지막 checkpoint에 시간을 준다."
+implementation = "jobs/src/policy.py"
+
+[backlog_limit]
+description = "job admission"
+value = 200
+owner = "jobs-team"
+revision = "2026-08-24"
+reason = "처리 용량을 넘는 작업은 접수 시 재시도 가능한 응답을 준다. 대기열을 무한히 늘리지 않는다."
+implementation = "jobs/src/policy.py"

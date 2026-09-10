@@ -5,6 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **A first-run lab that searches a whole synthetic project, not a single note
+  (`examples/notebooks/00_start_here.ipynb`).** The Korean notebook indexes the
+  new `examples/onboarding/slateharbor/` sample — 150 Markdown/Python/JSON/YAML/
+  TOML files across six domains, 1,032 chunks measured from the resulting
+  SQLite index — and walks a reader from "can I delete this legacy callback?"
+  to the adopted decision, its Python implementation, and the production
+  setting behind it. It needs `memtomem[code]>=0.5.0` and no API key, model
+  download, or embedding server: retrieval is BM25 and every CLI call runs in
+  a throwaway home where Python's `socket.connect`, `connect_ex`, `sendto` and
+  `create_connection` raise. That is the guard's exact reach — it is not an OS
+  firewall, and other socket operations remain available. `generate.py` rebuilds the
+  corpus reproducibly, `validate.py` re-checks structure, policy behavior, and
+  18 authored retrieval cases against the real index, and
+  `tools/build_slateharbor_bundle.py` packages notebook plus sample from an
+  explicit allowlist. Recorded evidence and the explicit non-claims live in
+  `examples/onboarding/slateharbor/VALIDATION.md`.
+
 ## [0.6.0] — 2026-09-10
 
 ### Breaking

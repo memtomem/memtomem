@@ -1,0 +1,62 @@
+{
+  "freshness_minutes": {
+    "description": "report freshness",
+    "inputs": [
+      10,
+      30
+    ],
+    "purpose": "INC-REPORT-08에서 어제 생성된 캐시가 최신 매출처럼 표시돼 운영자가 정산을 다시 요청했다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-REPORT-19: 새 thread에서는 캐시 시각과 마지막 성공 배치부터 확인한다."
+  },
+  "export_rows": {
+    "description": "CSV export rows",
+    "inputs": [
+      5000,
+      20000
+    ],
+    "purpose": "동기 요청 timeout 뒤 사용자가 다시 눌러 같은 export가 여러 번 만들어졌다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-REPORT-20: job 완료 알림에 재다운로드 링크를 넣는다."
+  },
+  "window_days": {
+    "description": "report window",
+    "inputs": [
+      30,
+      180
+    ],
+    "purpose": "1년 범위의 조인 쿼리가 운영 DB의 온라인 트래픽을 밀어냈다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-REPORT-21: 기간 초과 안내에 비동기 export를 제안한다."
+  },
+  "cache_seconds": {
+    "description": "report cache ttl",
+    "inputs": [
+      100,
+      600
+    ],
+    "purpose": "권한 변경 뒤에도 오래된 cache가 보였고 조직 구분이 빠진 key가 발견됐다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-REPORT-22: 권한 축소 후 cache 접근 테스트를 추가한다."
+  },
+  "minimum_group": {
+    "description": "aggregate group privacy",
+    "inputs": [
+      8,
+      2
+    ],
+    "purpose": "한 명뿐인 팀의 통계가 개인 활동 내역처럼 표시됐다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-REPORT-23: 교차 필터로 작은 그룹이 드러나는지 검토한다."
+  },
+  "query_seconds": {
+    "description": "report query timeout",
+    "inputs": [
+      4,
+      15
+    ],
+    "purpose": "30초까지 실행되는 조회가 운영 DB 커넥션을 오래 점유해 같은 시각의 다른 리포트 요청까지 함께 느려졌다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-REPORT-24: empty와 failed 상태의 화면 테스트를 추가한다."
+  }
+}
