@@ -504,6 +504,58 @@ candidate) refuse with a configuration error naming
 | `MEMTOMEM_INDEXING__SUMMARY_MAX_INPUT_CHARS` | `3000` | Clamp the leading source body to this many characters before generating the per-source summary |
 | `MEMTOMEM_INDEXING__SUMMARY_MAX_TOKENS` | `256` | Output token cap for each per-source summary |
 
+### Lock sidecars (`.<name>.lock`)
+
+Indexing and editing a file take a **cross-process lock**, and that lock is
+held on an empty sibling file named `.<name>.lock` rather than on the file
+itself — `notes.md` is locked through `.notes.md.lock` beside it. Locking the
+data file directly does not work: a writer that replaces the file swaps its
+inode mid-operation, and every lock held on the old inode goes stale. The
+sidecar is never replaced, so its inode is stable.
+
+The sidecar sits beside the **resolved** file, so a symlinked source is locked
+next to its target — which may be outside the tree you indexed. That is also
+what makes a symlink and its target share one lock instead of two.
+
+These files are created with mode `0600`, stay empty, and are **left in place
+on purpose**. memtomem never deletes them: removing a sidecar while any
+memtomem process might take it re-introduces exactly the race the lock exists
+to prevent, since two processes would then lock two different files under one
+path and both believe they hold it.
+
+You will see them in any tree you index — a registered `memory_dirs` folder,
+a `mm index <path>` run, or a Reindex from the Web UI — including your own
+source repositories. A directory scan leaves one next to each file it selects
+for indexing, which is the overlap between `indexing.supported_extensions` and
+the extensions a chunker is registered for. With the default settings that
+overlap is `.md`, `.json`, `.yaml`, `.yml` and `.toml`; configuring a hard
+chunk budget (`indexing.hard_max_chunk_tokens`) registers the code chunkers as
+well, and an indexed code repository then picks up sidecars next to its `.py`,
+`.js`, `.ts`, `.jsx` and `.tsx` files too. Naming a single file directly
+(`mm index <file>`) locks it before that check, so it leaves a sidecar even for
+an extension no chunker handles. Sidecars are never indexed themselves:
+`.lock` is not a supported extension.
+
+**Keep them out of version control.** Add the pattern to the repository's
+`.gitignore`, or to your global excludes file
+(`git config --global core.excludesFile`):
+
+```gitignore
+# memtomem cross-process lock sidecars
+.*.lock
+```
+
+The leading dot is required and is what makes the rule safe: it matches
+`.notes.md.lock` but not a tracked `uv.lock` or `package-lock.json`.
+
+**Deleting them.** Do not mass-delete sidecars while an MCP server, `mm web`,
+or any `mm` command may be running — that is the one situation the never-unlink
+rule protects. With every memtomem process stopped they are safe to remove,
+and the next indexing run recreates the ones it needs. There is no `mm`
+command that sweeps them; see
+[issue #2387](https://github.com/memtomem/memtomem/issues/2387) for why a safe
+online sweep is still an open design question.
+
 ### Exclude patterns
 
 `indexing.exclude_patterns` is a `list[str]` of pathspec/gitignore-style
