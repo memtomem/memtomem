@@ -181,6 +181,10 @@ class _ConfigSnapshot:
                 if hasattr(section, key):
                     original = getattr(section, key)
                     values[key] = (original, copy.deepcopy(original))
+            if not values:
+                # A rejected/read-only section has nothing to undo. Recording
+                # it would make restore() assign even non-field attributes.
+                continue
             self._sections[name] = (
                 section,
                 values,
@@ -705,6 +709,9 @@ async def patch_config(
                         {
                             name: updates.keys() & MUTABLE_FIELDS.get(name, set())
                             for name, updates in updates_by_section.items()
+                            # Extra sections may be scalars or lists. Leave
+                            # rejection to the loop below; snapshot only edits.
+                            if name in MUTABLE_FIELDS and isinstance(updates, dict)
                         },
                     )
                     if persist

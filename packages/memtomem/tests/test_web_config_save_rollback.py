@@ -102,9 +102,10 @@ async def test_failed_save_preserves_runtime_and_shared_sections(
         assert (await client.get("/api/config")).json()["search"]["default_top_k"] == 7
 
 
+@pytest.mark.parametrize("extra_section", [None, "model_dump", "model_config", "load_diagnostics"])
 @pytest.mark.parametrize("failure", [TimeoutError, ValueError, PermissionError])
 async def test_failed_multi_section_patch_discards_reranker_without_fanout(
-    failure, home, app, client, monkeypatch
+    extra_section, failure, home, app, client, monkeypatch
 ):
     path = _write_config(home, {"search": {"tokenizer": "unicode61"}})
     app.state.config = hot_reload._build_fresh_config()
@@ -126,13 +127,16 @@ async def test_failed_multi_section_patch_discards_reranker_without_fanout(
         raise failure("injected save failure")
 
     monkeypatch.setattr("memtomem.web.routes.system.save_config_overrides", fail_save)
+    payload = {
+        "rerank": {"enabled": True},
+        "search": {"tokenizer": "kiwipiepy", "default_top_k": 20},
+        "embedding": {"onnx_batch_size": 64},
+    }
+    if extra_section is not None:
+        payload[extra_section] = {}
     call = client.patch(
         "/api/config?persist=true",
-        json={
-            "rerank": {"enabled": True},
-            "search": {"tokenizer": "kiwipiepy", "default_top_k": 20},
-            "embedding": {"onnx_batch_size": 64},
-        },
+        json=payload,
     )
     if failure is PermissionError:
         with pytest.raises(PermissionError, match="injected save failure"):
@@ -149,6 +153,31 @@ async def test_failed_multi_section_patch_discards_reranker_without_fanout(
     app.state.storage.rebuild_fts.assert_not_called()
     set_tokenizer.assert_not_called()
     publish_batch.assert_not_called()
+    assert hot_reload.get_reload_error(app) is not None
+
+
+@pytest.mark.parametrize("value", [1, True, "future", [], ["entry"], {}])
+@pytest.mark.parametrize("with_valid_edit", [False, True])
+async def test_unknown_section_is_rejected_before_snapshotting(
+    value, with_valid_edit, home, app, client, monkeypatch
+):
+    save = MagicMock()
+    monkeypatch.setattr("memtomem.web.routes.system.save_config_overrides", save)
+    payload = {"future_section": value}
+    if with_valid_edit:
+        payload["search"] = {"default_top_k": 20}
+    response = await client.patch("/api/config?persist=true", json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["rejected"] == ["future_section: unknown section"]
+    if with_valid_edit:
+        assert [change["field"] for change in response.json()["applied"]] == [
+            "search.default_top_k"
+        ]
+        assert app.state.config.search.default_top_k == 20
+        save.assert_called_once()
+    else:
+        assert response.json()["applied"] == []
+        save.assert_not_called()
 
 
 async def test_failed_patch_snapshot_is_taken_after_external_reload(home, app, client, monkeypatch):
