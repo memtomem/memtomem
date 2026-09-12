@@ -7,6 +7,7 @@ import json
 
 import click
 
+from memtomem._runtime_paths import scrub_text
 from memtomem.config import (
     FIELD_CONSTRAINTS,
     MUTABLE_FIELDS,
@@ -29,11 +30,19 @@ def _one_line(value: object) -> str:
     Config-load diagnostics carry a filesystem path and a validation message
     assembled from the user's own file, so either can contain a newline (a
     forged second warning line) or an ANSI escape (cursor or screen control).
-    Replaces every C0/C1 control character with its ``\\xNN`` spelling, which
-    keeps the value readable and diagnosable without letting it act.
+    :func:`~memtomem._runtime_paths.scrub_text` replaces every non-printable
+    character with an escape that keeps the value readable and diagnosable
+    without letting it act.
+
+    Delegating rather than spelling it again (#2410): ``mm status`` renders
+    the same diagnostic, and now neutralises it too, so both surfaces have to
+    spell one ``config.d`` filename the same way — an operator pastes both.
+    Keeping a second implementation would not have: this one escaped code
+    points where ``scrub_text`` escapes filesystem bytes, which agree only
+    below ``U+0080`` (``U+0085`` would have been ``\\x85`` here against
+    ``\\xc2\\x85`` there).
     """
-    text = str(value)
-    return "".join(ch if ch.isprintable() or ch == " " else f"\\x{ord(ch):02x}" for ch in text)
+    return scrub_text(str(value))
 
 
 @click.group()

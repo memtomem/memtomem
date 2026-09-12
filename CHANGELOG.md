@@ -26,6 +26,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A status-report value can no longer forge a report row or reach the
+  terminal intact (#2410).** Rows across `mm status` / `mem_status` carry
+  text the code did not write — a `config.d` fragment name and a pydantic
+  message in the new `config_section_rejected` warning, provider and model
+  names off the store and the config, resolved `memory_dirs` entries — and all
+  of it was interpolated verbatim. A newline printed as an extra line that read
+  like a report row of its own and broke the column framing from there down; an
+  ANSI escape reached the terminal and acted. Status output gets pasted into
+  issues and chat, so a forged `- kind: …` row inside it is believable; this is
+  output integrity, not a privilege boundary — anyone who can write to
+  `~/.memtomem/config.d/` can already point `embedding.base_url` elsewhere.
+  `StatusLine` now neutralises the three parts it renders, so the warning block
+  and the rows around it are covered together and the styled terminal output is
+  covered as well as the `NO_COLOR` one. It is a no-op for everything the code
+  composes itself. `mm status --json` renders the collected dict and keeps the
+  real bytes — pinned, because sanitizing there would corrupt every structured
+  consumer to fix a terminal. `mm config show`'s warning from #2385 now shares
+  the one escape function rather than spelling its own, because the two
+  surfaces render the same fragment name and two implementations agree only
+  below `U+0080`. That function also stopped raising on a lone surrogate, which
+  JSON can put in `embedding.model`.
+
 - **A rejected `config.json` section no longer disables embedding silently
   (#2385).** One stale key was enough: with `dimension: 1024` left over from a
   bge-m3 install under an E5 model, the section failed its cross-field

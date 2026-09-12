@@ -141,6 +141,34 @@ def _hint_quote(target: Path | str) -> str:
     return "$'" + "".join(out) + "'"
 
 
+def _escape_unprintable(ch: str) -> list[str]:
+    """Spell one non-printable character as display-safe escape tokens.
+
+    Filesystem bytes (``os.fsencode``) first: a path decoded with
+    ``surrogateescape`` round-trips to the exact bytes ``ls`` shows, and
+    escaping code points instead would name different bytes for anything
+    multi-byte.
+
+    The fallback is for characters the filesystem encoding cannot spell in
+    bytes at all, and which one those are is the encoding's business, not a
+    fixed set: under POSIX UTF-8 with ``surrogateescape`` it is a surrogate
+    outside ``U+DC80``-``U+DCFF`` (``os.fsencode("\\ud800")`` raises there,
+    while Windows ``surrogatepass`` encodes it — PEP 529), and under an ASCII
+    filesystem encoding it is anything above ``U+007F``. JSON puts such a
+    value within reach — ``"model": "\\ud800"`` parses and validates — so it
+    has to be spelled rather than crash its caller. ``\\uNNNN`` is what
+    Python and JSON already use for it.
+
+    Display-only: ``\\uNNNN`` is not ANSI-C quoting that bash 3.2
+    understands, which is why :func:`_hint_quote` keeps its own byte-only
+    loop for copy-pasteable commands.
+    """
+    try:
+        return [f"\\x{b:02x}" for b in os.fsencode(ch)]
+    except UnicodeEncodeError:
+        return [f"\\u{ord(ch):04x}"]
+
+
 def scrub_text(text: str) -> str:
     """Make environment-derived *text* safe to print as prose.
 
@@ -151,6 +179,10 @@ def scrub_text(text: str) -> str:
     terminal — even the prose ahead of the safely quoted command. Printable
     text — including non-ASCII — passes through untouched. Display-only:
     for a copy-paste *command*, use :func:`_hint_quote` instead.
+
+    Total over ``str``, not only over strings that came off a filesystem:
+    a character with no filesystem-byte spelling falls back to ``\\uNNNN``
+    (see :func:`_escape_unprintable`).
     """
     if all(ch.isprintable() for ch in text):
         return text
@@ -159,7 +191,7 @@ def scrub_text(text: str) -> str:
         if ch.isprintable():
             out.append(ch)
         else:
-            out.extend(f"\\x{b:02x}" for b in os.fsencode(ch))
+            out.extend(_escape_unprintable(ch))
     return "".join(out)
 
 
