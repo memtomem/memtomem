@@ -26,6 +26,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Failed Web config saves restore the runtime that preceded the request
+  (#2409).** PATCH and memory-directory changes now restore their original
+  section and list objects when persistence fails, even if the file on disk
+  is invalid. Earlier runtime-only edits are preserved. Disk is re-read only
+  to report reload errors and gate further writes; that diagnostic read does
+  not migrate the file or mark a new revision as applied. A failed save
+  still skips live-component updates and closes an uninstalled reranker.
+
 - **A status-report value can no longer forge a report row or reach the
   terminal intact (#2410).** Rows across `mm status` / `mem_status` carry
   text the code did not write — a `config.d` fragment name and a pydantic

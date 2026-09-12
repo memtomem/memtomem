@@ -212,38 +212,25 @@ def initialize_reload_state(app: FastAPI) -> None:
 _build_fresh_config = _build_fresh_config_impl
 
 
-def revert_runtime_to_disk(app: FastAPI) -> None:
-    """Point the runtime back at what ``config.json`` currently says.
+def record_save_failure(app: FastAPI) -> None:
+    """Diagnose disk after a failed save, without installing its config.
 
-    The write handlers mutate ``app.state.config`` first and persist second,
-    so a failed save has to put the runtime back before answering 400/503.
-    They did that with a bare ``_build_fresh_config()`` call inside the
-    ``except`` block — which is itself a read of a file that may be invalid.
-    When it raised, the handler's own HTTP error was replaced by a 500, the
-    unpersisted mutation stayed live, and per-handler cleanup (closing a
-    validated-but-uninstalled reranker) never ran.
+    Writers restore their pre-mutation snapshots first (#2409). Re-reading
+    here is only for the Settings banner and write gate; even a valid file
+    can differ from the restored runtime because of prior runtime-only edits.
+    Do not migrate disk, replace config, or bank a signature as applied.
 
-    On failure this records a ``ReloadError`` instead, which closes the write
-    gate (``_check_reload_block``) and explains the state in the Settings
-    banner, and returns normally so the caller can finish its own error path.
-
-    Both axes are sampled **before** the rebuild, exactly as
-    ``reload_if_stale`` does: sampling afterwards can bind this failure to a
-    revision someone saved in the meantime, marking that good revision as
-    already-seen and holding the write gate shut until the next edit.
-
-    Known limitation: when disk is invalid there is nothing valid to revert
-    *to*, so the unpersisted mutation stays live until the file is fixed and
-    the next reload replaces it. Restoring a pre-mutation snapshot instead is
-    the fuller fix and is tracked separately.
+    Sample both error axes before reading, so a correction made during the
+    read remains eligible for the next reload. Diagnostic failures must not
+    hide the save's own error or prevent candidate-reranker cleanup.
     """
     attempted_mtime_ns = get_config_mtime_ns()
     attempted_sig = current_signature()
     try:
-        app.state.config = _build_fresh_config()
+        _build_fresh_config(migrate=False)
     except Exception as exc:
         logger.warning(
-            "Could not re-read config at %s while reverting an unsaved change: %s",
+            "Could not re-read config at %s after a failed save: %s",
             _override_path(),
             exc,
             exc_info=True,
@@ -257,7 +244,6 @@ def revert_runtime_to_disk(app: FastAPI) -> None:
                 at_signature=attempted_sig,
             ),
         )
-    _set_last_signature(app, attempted_sig)
 
 
 async def reload_if_stale(

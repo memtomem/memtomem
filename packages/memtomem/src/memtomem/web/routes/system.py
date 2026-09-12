@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ import subprocess
 import sys
 import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -156,6 +157,60 @@ def _revalidate_add_target(base: Path, target: Path) -> None:
 logger = logging.getLogger(__name__)
 
 _LOCALHOST_ADDRS = {"127.0.0.1", "::1", "localhost"}
+
+
+class _ConfigSnapshot:
+    """Undo this request's config edits without replacing shared sections.
+
+    Capture after the writer's reload, before its first mutation. Components
+    can retain the section (or memory_dirs list) itself, so replacing only
+    app.state.config would leave them holding the rejected values. Retain the
+    original objects as well as deep copies of the fields we may change.
+    """
+
+    def __init__(self, config: Any, fields: Mapping[str, Iterable[str]]) -> None:
+        self._config = config
+        self._config_fields_set = copy.copy(getattr(config, "__pydantic_fields_set__", None))
+        self._sections: dict[str, tuple[Any, dict[str, tuple[Any, Any]], set[str] | None]] = {}
+        for name, keys in fields.items():
+            section = getattr(config, name, None)
+            if section is None:
+                continue
+            values = {}
+            for key in keys:
+                if hasattr(section, key):
+                    original = getattr(section, key)
+                    values[key] = (original, copy.deepcopy(original))
+            if not values:
+                # A rejected/read-only section has nothing to undo. Recording
+                # it would make restore() assign even non-field attributes.
+                continue
+            self._sections[name] = (
+                section,
+                values,
+                copy.copy(getattr(section, "__pydantic_fields_set__", None)),
+            )
+
+    def restore(self) -> None:
+        # No await and no disk read: restoration must finish before cleanup
+        # can yield or a diagnostic read can fail. Do not assign app.state
+        # here; a lock-free reader may have installed a newer config meanwhile.
+        for name, (section, values, fields_set) in self._sections.items():
+            for key, (original, saved) in values.items():
+                if isinstance(original, list):
+                    original[:] = saved
+                elif isinstance(original, dict):
+                    original.clear()
+                    original.update(saved)
+                setattr(section, key, original)
+            if fields_set is not None:
+                section.__pydantic_fields_set__.clear()
+                section.__pydantic_fields_set__.update(fields_set)
+            # The rerank handler replaces a section instead of mutating it.
+            setattr(self._config, name, section)
+        if self._config_fields_set is not None:
+            self._config.__pydantic_fields_set__.clear()
+            self._config.__pydantic_fields_set__.update(self._config_fields_set)
 
 
 def _check_reload_block(request: Request) -> None:
@@ -647,7 +702,22 @@ async def patch_config(
                 _check_reload_block(request)
                 config = request.app.state.config
 
-                for section_name, updates in req.model_dump(exclude_none=True).items():
+                updates_by_section = req.model_dump(exclude_none=True)
+                snapshot = (
+                    _ConfigSnapshot(
+                        config,
+                        {
+                            name: updates.keys() & MUTABLE_FIELDS.get(name, set())
+                            for name, updates in updates_by_section.items()
+                            # Extra sections may be scalars or lists. Leave
+                            # rejection to the loop below; snapshot only edits.
+                            if name in MUTABLE_FIELDS and isinstance(updates, dict)
+                        },
+                    )
+                    if persist
+                    else None
+                )
+                for section_name, updates in updates_by_section.items():
                     allowed = MUTABLE_FIELDS.get(section_name, set())
                     section_obj = getattr(config, section_name, None)
                     if section_obj is None:
@@ -800,8 +870,10 @@ async def patch_config(
                 if persist and (applied or rerank_changed):
                     try:
                         save_config_overrides(config)
-                    except (ValueError, TimeoutError) as e:
-                        _hot_reload.revert_runtime_to_disk(request.app)
+                    except Exception as e:
+                        if snapshot is not None:
+                            snapshot.restore()
+                        _hot_reload.record_save_failure(request.app)
                         # Discard the validated-but-uninstalled reranker.
                         if pending_reranker is not None:
                             await _hot_reload._close_reranker_safely(pending_reranker)
@@ -810,7 +882,9 @@ async def patch_config(
                                 503,
                                 "Config update timed out — another update may be in progress",
                             )
-                        raise HTTPException(400, detail=str(e))
+                        if isinstance(e, ValueError):
+                            raise HTTPException(400, detail=str(e))
+                        raise
                     # Self-write mtime bump — otherwise the next GET sees
                     # our own edit as "external" and reloads spuriously.
                     _hot_reload.commit_writer_signature(request.app)
@@ -869,9 +943,13 @@ async def save_config(
                 _check_reload_block(request)
                 try:
                     save_config_overrides(request.app.state.config)
-                except ValueError as e:
-                    _hot_reload.revert_runtime_to_disk(request.app)
-                    raise HTTPException(400, detail=str(e))
+                except Exception as e:
+                    # Saving does not mutate config. Preserve any preceding
+                    # runtime-only edits instead of replacing them from disk.
+                    _hot_reload.record_save_failure(request.app)
+                    if isinstance(e, ValueError):
+                        raise HTTPException(400, detail=str(e))
+                    raise
                 _hot_reload.commit_writer_signature(request.app)
     except TimeoutError:
         raise HTTPException(503, "Config save timed out — another update may be in progress")
@@ -937,17 +1015,18 @@ async def add_memory_dir(
                 already_present = norm_path(resolved) in {norm_path(p) for p in current}
 
                 if not already_present:
+                    snapshot = _ConfigSnapshot(config, {"indexing": {"memory_dirs"}})
                     config.indexing.memory_dirs.append(resolved)
                     try:
                         save_config_overrides(config)
-                    except TimeoutError:
-                        # Cross-process lock timeout (#1567): the append was not
-                        # persisted, so revert runtime to disk state instead of
-                        # keeping an unpersisted dir the 503 claims we didn't add.
-                        _hot_reload.revert_runtime_to_disk(request.app)
-                        raise HTTPException(
-                            503, "memory-dirs/add timed out — another update may be in progress"
-                        )
+                    except Exception as e:
+                        snapshot.restore()
+                        _hot_reload.record_save_failure(request.app)
+                        if isinstance(e, TimeoutError):
+                            raise HTTPException(
+                                503, "memory-dirs/add timed out — another update may be in progress"
+                            )
+                        raise
                     _hot_reload.commit_writer_signature(request.app)
 
                 memory_dirs_snapshot = [
@@ -1092,17 +1171,18 @@ async def remove_memory_dir(
                 if len(new_dirs) == 0:
                     raise HTTPException(status_code=400, detail="Cannot remove last memory_dir")
 
+                snapshot = _ConfigSnapshot(config, {"indexing": {"memory_dirs"}})
                 config.indexing.memory_dirs = new_dirs
                 try:
                     save_config_overrides(config)
-                except TimeoutError:
-                    # Cross-process lock timeout (#1567): the removal was not
-                    # persisted, so revert runtime to disk state instead of
-                    # dropping a dir the 503 claims we kept.
-                    _hot_reload.revert_runtime_to_disk(request.app)
-                    raise HTTPException(
-                        503, "memory-dirs/remove timed out — another update may be in progress"
-                    )
+                except Exception as e:
+                    snapshot.restore()
+                    _hot_reload.record_save_failure(request.app)
+                    if isinstance(e, TimeoutError):
+                        raise HTTPException(
+                            503, "memory-dirs/remove timed out — another update may be in progress"
+                        )
+                    raise
                 _hot_reload.commit_writer_signature(request.app)
 
                 # Chunk cleanup happens after the registration is removed
