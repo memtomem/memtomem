@@ -176,7 +176,6 @@ def unpaired_home_overrides(tree: ast.AST) -> list[tuple[str, int, str]]:
     return sorted(offenders, key=lambda o: (o[1], o[0]))
 
 
-
 def _offender_detail(mapping: str) -> str:
     """Rendered per-hit text used by the suite assertion — keep the pin in lockstep."""
     if mapping == "<dict>":
@@ -328,8 +327,6 @@ def test_stale_allowlist_entries_fail() -> None:
 )
 def test_scanner_discriminates(source: str, expected: int) -> None:
     assert len(unpaired_home_overrides(ast.parse(source))) == expected
-
-
 
 
 def test_rendered_messages_pin_both_shapes() -> None:
