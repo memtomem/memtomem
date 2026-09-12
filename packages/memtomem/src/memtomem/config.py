@@ -25,6 +25,7 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from memtomem.constants import default_system_prefixes
+from memtomem._runtime_paths import scrub_text
 
 
 @dataclass(frozen=True)
@@ -2219,11 +2220,18 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
 
     _log = logging.getLogger(__name__)
 
-    def _warn(msg: str, *args: object) -> None:
+    def _warn(msg: str, *args: object, fragment_path: Path) -> None:
         if strict:
             raise ConfigFragmentError(msg % args)
         if not quiet:
-            _log.warning(msg, *args)
+            # This record's message is display text. Keep the exact filename
+            # separately for structured handlers: scrub_text is not reversible.
+            # Format first so %r keeps its existing representation semantics.
+            _log.warning(
+                "%s",
+                scrub_text(msg % args),
+                extra={"config_fragment_path": str(fragment_path)},
+            )
 
     _reset_load_diagnostics(config, "config.d")
 
@@ -2237,10 +2245,10 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
         try:
             data = _json.loads(path.read_text(encoding="utf-8"))
         except (OSError, _json.JSONDecodeError) as exc:
-            _warn("Failed to read config fragment %s: %s", path, exc)
+            _warn("Failed to read config fragment %s: %s", path, exc, fragment_path=path)
             continue
         if not isinstance(data, dict):
-            _warn("Config fragment %s is not a JSON object (ignored)", path)
+            _warn("Config fragment %s is not a JSON object (ignored)", path, fragment_path=path)
             continue
         for section_name, updates in data.items():
             # Declared fields only — see the same gate in
@@ -2250,12 +2258,18 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
             )
             if section_obj is None or not isinstance(updates, dict):
                 if section_obj is None and isinstance(updates, dict):
-                    _warn("Unknown config section '%s' in %s (ignored)", section_name, path)
+                    _warn(
+                        "Unknown config section '%s' in %s (ignored)",
+                        section_name,
+                        path,
+                        fragment_path=path,
+                    )
                 elif section_obj is not None:
                     _warn(
                         "Config section '%s' in %s is not a JSON object (ignored)",
                         section_name,
                         path,
+                        fragment_path=path,
                     )
                 continue
             section_cls = type(section_obj)
@@ -2263,7 +2277,13 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
             touched: set[str] = set()
             for key, value in updates.items():
                 if not hasattr(section_obj, key):
-                    _warn("Unknown config field '%s.%s' in %s (ignored)", section_name, key, path)
+                    _warn(
+                        "Unknown config field '%s.%s' in %s (ignored)",
+                        section_name,
+                        key,
+                        path,
+                        fragment_path=path,
+                    )
                     continue
                 env_var = env_var_owning(section_name, key)
                 if env_var is not None:
@@ -2284,6 +2304,7 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
                             key,
                             path,
                             type(value).__name__,
+                            fragment_path=path,
                         )
                         continue
                     current = list(getattr(section_obj, key))
@@ -2307,6 +2328,7 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
                                     key,
                                     path,
                                     exc,
+                                    fragment_path=path,
                                 )
                                 continue
                         k = _dedup_key(item)
@@ -2323,6 +2345,7 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
                             key,
                             path,
                             exc,
+                            fragment_path=path,
                         )
                 else:
                     try:
@@ -2347,6 +2370,7 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
                             value,
                             path,
                             exc,
+                            fragment_path=path,
                         )
             if not touched:
                 continue
@@ -2379,7 +2403,13 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
                     error=message,
                     layer="config.d",
                 )
-                _warn("Invalid config section [%s] in %s: %s", section_name, path, exc)
+                _warn(
+                    "Invalid config section [%s] in %s: %s",
+                    section_name,
+                    path,
+                    exc,
+                    fragment_path=path,
+                )
                 continue
             setattr(config, section_name, validated_section)
 
