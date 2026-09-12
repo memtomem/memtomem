@@ -27,8 +27,10 @@ Matcher strictness — deliberately narrow, so a pairing has to be real:
   does not.
 
 Pattern lineage: ``feedback_ast_architectural_guard_pattern.md``. Registry idiom
-mirrors ``test_context_atomic_write_guard.py`` (empty allowlist — every entry
-would be a real Windows hole).
+mirrors ``test_context_atomic_write_guard.py``, with one difference: the dict
+sweep over-approximates, so ``ALLOWED_UNPAIRED_HOME`` carries two entry classes —
+a real Windows hole (none today) and a mapping that never reaches a child
+process (#2391).
 """
 
 from __future__ import annotations
@@ -41,11 +43,16 @@ import pytest
 _TESTS_ROOT = Path(__file__).resolve().parent
 
 #: ``(path relative to tests/, enclosing function)`` pairs allowed to set ``HOME``
-#: without ``USERPROFILE``. Empty by design: an unpaired override is a real
-#: Windows sandbox hole, not a style preference. Add an entry ONLY with an inline
-#: why (e.g. a test that asserts on the *absence* of the variable), mirroring the
-#: DEFERRED registry convention in
+#: without ``USERPROFILE``. Two kinds of entry, and the inline why must say which:
+#: (a) a real Windows sandbox hole, deliberately accepted — none today, and adding
+#: one is a policy decision, not a style preference; (b) a dict literal the sweep
+#: over-approximates into: it carries a ``HOME`` key but never reaches a child
+#: process or ``os.environ`` (#2391). Mirrors the DEFERRED registry convention in
 #: ``test_validate_namespace_architectural_guard.py``.
+#:
+#: Granularity is ``(file, function)``: an entry silences *every* hit in that
+#: function, including a genuine child env added to it later. Tracked separately
+#: in #2394.
 ALLOWED_UNPAIRED_HOME: frozenset[tuple[str, str]] = frozenset()
 
 
@@ -136,6 +143,10 @@ def unpaired_home_overrides(tree: ast.AST) -> list[tuple[str, int, str]]:
       — a ``USERPROFILE`` entry in the *same dict literal*. Scanning dict
       literals wherever they appear covers ``update()``, direct construction and
       an inline ``env=`` argument without having to special-case each call shape.
+      That sweep is deliberately over-approximate: a dict that merely *contains*
+      ``HOME`` is reported the same way. If the mapping never reaches a
+      subprocess, the designed exit is ``ALLOWED_UNPAIRED_HOME``, not a quieter
+      test shape (#2391).
     """
     offenders: list[tuple[str, int, str]] = []
 
@@ -165,6 +176,39 @@ def unpaired_home_overrides(tree: ast.AST) -> list[tuple[str, int, str]]:
     return sorted(offenders, key=lambda o: (o[1], o[0]))
 
 
+def _offender_detail(mapping: str) -> str:
+    """Rendered per-hit text used by the suite assertion — keep the pin in lockstep."""
+    if mapping == "<dict>":
+        return (
+            "<dict> has a 'HOME' key and no matching 'USERPROFILE' key. "
+            "If this mapping is passed as env= (or copied into os.environ / "
+            "a child process), pair USERPROFILE to the same value. If it "
+            "never reaches a subprocess, add (this file, this function) to "
+            "ALLOWED_UNPAIRED_HOME with an inline why."
+        )
+    return (
+        f"{mapping}['HOME'] with no {mapping}['USERPROFILE'] on the same "
+        "mapping — if this dict is a child env, pair USERPROFILE "
+        "unconditionally; if it never reaches a subprocess, use "
+        "ALLOWED_UNPAIRED_HOME."
+    )
+
+
+def _format_offenders(
+    tree: ast.AST,
+    *,
+    rel: str,
+    allowlist: frozenset[tuple[str, str]] = ALLOWED_UNPAIRED_HOME,
+) -> list[str]:
+    """Allowlist-filter-and-format path used by the suite assertion."""
+    lines: list[str] = []
+    for mapping, lineno, func in unpaired_home_overrides(tree):
+        if (rel, func) in allowlist:
+            continue
+        lines.append(f"{rel}:{lineno} ({func}) — {_offender_detail(mapping)}")
+    return lines
+
+
 def _test_files() -> list[Path]:
     return sorted(p for p in _TESTS_ROOT.rglob("*.py") if p.name != Path(__file__).name)
 
@@ -183,20 +227,19 @@ def test_every_subprocess_home_override_pairs_userprofile() -> None:
         except SyntaxError:  # pragma: no cover - a broken test file fails elsewhere
             continue
         rel = str(path.relative_to(_TESTS_ROOT))
-        for mapping, lineno, func in unpaired_home_overrides(tree):
-            if (rel, func) in ALLOWED_UNPAIRED_HOME:
-                continue
-            offenders.append(
-                f"{rel}:{lineno} ({func}) — {mapping}['HOME'] with no {mapping}['USERPROFILE']"
-            )
+        offenders.extend(_format_offenders(tree, rel=rel))
 
     assert not offenders, (
-        "subprocess env overrides HOME but not USERPROFILE — the child process is "
-        "sandboxed on POSIX and reads the runner's REAL home on Windows, where "
-        "Path.home() consults USERPROFILE first. Add "
-        "`env['USERPROFILE'] = env['HOME']` beside each assignment (unconditionally, "
-        "on the same mapping). In-process tests should use tests/helpers.py:set_home "
-        "instead, which sets both. See #1892.\n  " + "\n  ".join(offenders)
+        "HOME override without USERPROFILE. Path.home() reads USERPROFILE first on "
+        "Windows, so a child env that only sets HOME is sandboxed on POSIX and "
+        "writes the runner's REAL home on windows-test-shard. "
+        "For a subprocess env: add `env['USERPROFILE'] = env['HOME']` beside each "
+        "assignment (unconditionally, same mapping). "
+        "For an in-process test: use tests/helpers.py:set_home, which sets both. "
+        "If this mapping never reaches a subprocess at all, it belongs in "
+        "ALLOWED_UNPAIRED_HOME (with an inline why) — that is the designed escape "
+        "hatch, not reshaping the test data to dodge the matcher. See #1892 / #2391.\n  "
+        + "\n  ".join(offenders)
     )
 
 
@@ -284,6 +327,33 @@ def test_stale_allowlist_entries_fail() -> None:
 )
 def test_scanner_discriminates(source: str, expected: int) -> None:
     assert len(unpaired_home_overrides(ast.parse(source))) == expected
+
+
+def test_rendered_messages_pin_both_shapes() -> None:
+    """Positive full-phrase pin so a reworded diagnostic fails loudly.
+
+    A clean repository scan never renders either branch; this is the path
+    that would stay green if the failure text were reverted.
+    """
+    subscript_src = 'def f():\n    env["HOME"] = h\n'
+    dict_src = 'def f():\n    payload = {"HOME": h}\n'
+    subscript = _format_offenders(ast.parse(subscript_src), rel="pin.py")
+    dict_hit = _format_offenders(ast.parse(dict_src), rel="pin.py")
+    assert subscript == [
+        "pin.py:2 (f) — env['HOME'] with no env['USERPROFILE'] on the same "
+        "mapping — if this dict is a child env, pair USERPROFILE "
+        "unconditionally; if it never reaches a subprocess, use "
+        "ALLOWED_UNPAIRED_HOME."
+    ]
+    assert dict_hit == [
+        "pin.py:2 (f) — <dict> has a 'HOME' key and no matching 'USERPROFILE' key. "
+        "If this mapping is passed as env= (or copied into os.environ / "
+        "a child process), pair USERPROFILE to the same value. If it "
+        "never reaches a subprocess, add (this file, this function) to "
+        "ALLOWED_UNPAIRED_HOME with an inline why."
+    ]
+    assert "ALLOWED_UNPAIRED_HOME" in dict_hit[0]
+    assert subscript[0] != dict_hit[0]
 
 
 def test_attribution_uses_containment_not_latest_def() -> None:
