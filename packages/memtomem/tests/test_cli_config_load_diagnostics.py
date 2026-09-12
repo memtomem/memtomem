@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from memtomem import config as _cfg
 from memtomem.cli import cli
 
 from .helpers import set_home
@@ -87,12 +88,56 @@ class TestConfigShowReportsRejectedSections:
 
         assert result.stderr.count(CLI_MARKER) == 1
 
-    def test_control_characters_in_the_path_cannot_forge_a_second_line(
+    def test_control_characters_in_a_diagnostic_cannot_forge_a_second_line(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A fragment filename is attacker-adjacent text that reaches a
-        terminal. A newline in it would print as an extra warning line and an
-        escape could reprogram the display."""
+        """The path and reason are text off disk that reach a terminal.
+
+        A newline in either prints as an extra line that reads like a second
+        warning, and an escape reaches the display intact. The diagnostic is
+        injected rather than provoked through a filename: NTFS refuses a name
+        containing these bytes, so a filesystem reproduction would only ever
+        run on POSIX (see the companion test below), while the rendering this
+        pins has to hold everywhere.
+        """
+        set_home(monkeypatch, tmp_path)
+        for name in list(os.environ):
+            if name.upper().startswith("MEMTOMEM_"):
+                monkeypatch.delenv(name, raising=False)
+
+        def _inject(config, **kwargs) -> None:
+            config._load_diagnostics.append(
+                _cfg.ConfigLoadDiagnostic(
+                    section="embedding",
+                    path="/x/10-a\nforged\x1b[2J.json",
+                    error="bad\x1b[31m",
+                    layer="config.d",
+                )
+            )
+
+        monkeypatch.setattr(_cfg, "load_config_overrides", _inject)
+
+        result = runner.invoke(cli, ["config", "show", "--json"])
+
+        assert result.exit_code == 0, result.output
+        cli_lines = [ln for ln in result.stderr.splitlines() if ln.startswith("warning: config")]
+        assert len(cli_lines) == 1, f"the newline forged extra lines: {result.stderr!r}"
+        assert "\x1b" not in cli_lines[0]
+        assert "\\x1b" in cli_lines[0] and "\\x0a" in cli_lines[0]
+
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="NTFS rejects a filename containing C0 control characters "
+        "(OSError: [Errno 22]), so this reach does not exist on Windows",
+    )
+    def test_a_fragment_filename_really_can_carry_them(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reachability, on the platforms where the filename is legal.
+
+        Without this the test above would be pinning an escape for input that
+        nothing can produce.
+        """
         set_home(monkeypatch, tmp_path)
         for name in list(os.environ):
             if name.upper().startswith("MEMTOMEM_"):
@@ -107,7 +152,6 @@ class TestConfigShowReportsRejectedSections:
         cli_lines = [ln for ln in result.stderr.splitlines() if ln.startswith("warning: config")]
         assert len(cli_lines) == 1
         assert "\x1b[2J" not in cli_lines[0]
-        assert "\\x1b" in cli_lines[0] and "\\x0a" in cli_lines[0]
 
     def test_json_and_format_json_agree_on_stdout(
         self, runner: CliRunner, rejecting_home: Path
