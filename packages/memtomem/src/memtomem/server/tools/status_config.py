@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from memtomem import __version__
+from memtomem._runtime_paths import scrub_text
 from memtomem._instance_registry import (
     enumerate_live_instances as _enumerate_live_instances,
     store_digest_for as _store_digest_for,
@@ -471,6 +472,47 @@ class StatusLine:
     value: str = ""
     suffix: str = ""
     meta: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Neutralise control characters in the three rendered parts (#2410).
+
+        Report rows carry values from outside the code — a ``config.d``
+        fragment name and a pydantic message in the ``config_section_rejected``
+        warning, provider/model names off the store and the config, resolved
+        ``memory_dirs`` paths. A newline in any of them printed as an extra
+        line that reads like a report row of its own (breaking the ``ljust``
+        columns from there down), and an ANSI escape reached the terminal
+        intact — status output gets pasted into issues and chat, so a forged
+        ``- kind: …`` row inside it is believable.
+
+        Here rather than at each call site because both renderers read these
+        parts, not just the joined text: ``render_status_report`` joins
+        ``text`` while the CLI styler colours ``key``/``value``/``suffix``
+        separately, and a per-site call would fix the rows it remembered and
+        leave the next one to re-learn this. The escaping is a no-op for
+        everything the code composes itself: on a report carrying an
+        embedding-mismatch warning it changes none of the 43 lines. Column
+        padding is applied by the callers before construction, on keys this
+        module writes, so escaping a value never shifts a column. ``meta``
+        is deliberately not scrubbed: it selects styles, and nothing in it
+        is displayed.
+
+        The structured surface is untouched: ``mm status --json`` renders
+        ``collect_status_report``'s dict, which keeps the real bytes — and it
+        is the route to an exact value, because this escaping is not
+        reversible. A literal backslash passes through, so ``\x0a`` in a
+        rendered path is ambiguous between an escaped newline and a path that
+        contains those four characters; two different paths can render as one
+        line. That is a property of the human report rather than a new one
+        — ``_shorten_status_path`` already contracts ``$HOME`` and the source
+        lists already group and truncate — so read this text to diagnose, and
+        ``--json`` to identify.
+        """
+        for part in ("key", "value", "suffix"):
+            raw = getattr(self, part)
+            scrubbed = scrub_text(raw)
+            if scrubbed != raw:
+                object.__setattr__(self, part, scrubbed)
 
     @property
     def text(self) -> str:

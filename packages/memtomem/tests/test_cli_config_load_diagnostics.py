@@ -125,6 +125,29 @@ class TestConfigShowReportsRejectedSections:
         assert "\x1b" not in cli_lines[0]
         assert "\\x1b" in cli_lines[0] and "\\x0a" in cli_lines[0]
 
+    def test_config_show_and_the_status_report_spell_one_value_the_same_way(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two surfaces, one fragment name — an operator pastes both (#2410).
+
+        Both neutralise control characters now, and two implementations would
+        have done it in different alphabets: this command escaped code points
+        while the status report's ``scrub_text`` escapes filesystem bytes, so a
+        zero-width space in a fragment name would read ``\\x200b`` here against
+        ``\\xe2\\x80\\x8b`` there. The ASCII-control assertions above cannot see
+        that — every spelling agrees below ``U+0080``.
+        """
+        from memtomem.server.tools.status_config import StatusLine
+
+        from memtomem.cli.config_cmd import _one_line
+
+        hostile = "/x/zero\u200bwidth\x85.json"
+
+        assert _one_line(hostile) == StatusLine("kv", value=hostile).value
+        # Not vacuously equal because neither escaped anything.
+        assert _one_line(hostile) != hostile
+        assert "\\xe2\\x80\\x8b" in _one_line(hostile)
+
     @pytest.mark.skipif(
         os.name == "nt",
         reason="NTFS rejects a filename containing C0 control characters "
