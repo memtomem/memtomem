@@ -16,6 +16,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -1152,6 +1153,28 @@ class Mem2MemConfig(BaseSettings):
     hooks: HooksConfig = Field(default_factory=HooksConfig)
     session_trace: SessionTraceConfig = Field(default_factory=SessionTraceConfig)
 
+    # Sections the loaders read, rejected and therefore ignored (#2385 item 3).
+    # A private attribute rather than a field: it is a record of *this load*,
+    # not configuration, so it must stay out of ``model_dump`` — which is what
+    # ``mm config show`` renders and what the quality profiles round-trip —
+    # while still travelling with the object to every consumer
+    # (``app.state.config``, ``AppContext.config``, ``Components.config``)
+    # without new plumbing. The other two surfaces that must not see it are
+    # already safe by their own construction rather than by this choice:
+    # ``save_config_overrides`` reads an allowlist of ``MUTABLE_FIELDS`` with
+    # ``getattr`` and merges that into the existing file, and
+    # ``current_signature`` stats paths without reading any config object.
+    # Pydantic deep-copies private attributes on ``model_copy``, and the
+    # hot-reload swap is plain assignment, so both preserve it. The one path
+    # that loses it rebuilds a config from a dump (``quality/profiles.py``);
+    # nothing reads diagnostics off that transient stack.
+    _load_diagnostics: list[ConfigLoadDiagnostic] = PrivateAttr(default_factory=list)
+
+    @property
+    def load_diagnostics(self) -> tuple[ConfigLoadDiagnostic, ...]:
+        """Sections rejected while loading this config, in load order."""
+        return tuple(self._load_diagnostics)
+
     @model_validator(mode="after")
     def model_chunk_defaults(self) -> "Mem2MemConfig":
         from memtomem.embedding.profiles import apply_e5_defaults
@@ -1753,6 +1776,85 @@ def validation_error_message(exc: ValidationError) -> str:
     return "; ".join(msgs) if msgs else str(exc)
 
 
+@dataclass(frozen=True)
+class ConfigLoadDiagnostic:
+    """One config section a loader read, rejected, and therefore ignored.
+
+    Both loaders treat a section as a transaction: if the assembled section
+    fails its cross-field validation, nothing from *that file* is kept for it
+    and the pre-layer baseline stands. Tolerant loads only logged that, so a
+    stale ``embedding.dimension`` left over from a previous model could put
+    the running server on ``provider="none"`` with no surface reporting it
+    (#2385 item 3).
+
+    This records the **event**, not the effective state: an early ``config.d``
+    fragment can be rejected and a later fragment — or ``config.json`` — can
+    still supply a valid section. So the wording is "that file's values for
+    the section were ignored", never "the section is running on defaults".
+    Read the config itself for what is in effect.
+    """
+
+    section: str
+    path: str
+    error: str
+    layer: Literal["config.json", "config.d"]
+
+    def as_status_warning(self) -> dict[str, str]:
+        """Render as a ``collect_status_report`` warning entry.
+
+        String values only: the status renderer special-cases ``dict`` values
+        as the embedding ``provider/model (Nd)`` block, so a nested payload
+        would render as a ``KeyError``-shaped surprise there.
+        """
+        return {
+            "kind": "config_section_rejected",
+            "section": self.section,
+            "path": self.path,
+            "error": self.error,
+            "fix": (
+                f"fix [{self.section}] in {self.path}: {self.error} "
+                f"(that file's values for the section are ignored until it validates)"
+            ),
+        }
+
+
+def _record_load_diagnostic(
+    config: object,
+    *,
+    section: str,
+    path: object,
+    error: str,
+    layer: Literal["config.json", "config.d"],
+) -> None:
+    """Append a rejection to the config's load diagnostics, if it has any.
+
+    Tolerant by design: the loaders accept any object with the section
+    attributes (tests build partial doubles), so a missing private attribute
+    must not turn a config warning into a crash.
+    """
+    diagnostics = getattr(config, "_load_diagnostics", None)
+    if diagnostics is None:
+        return
+    diagnostics.append(
+        ConfigLoadDiagnostic(section=section, path=str(path), error=error, layer=layer)
+    )
+
+
+def _reset_load_diagnostics(config: object, layer: Literal["config.json", "config.d"]) -> None:
+    """Drop this layer's previous entries before it re-reads.
+
+    Each loader owns its own layer, so re-loading the same config object
+    replaces that layer's record instead of appending a second copy, while
+    the other layer's entries survive. ``load_config_d`` always runs before
+    ``load_config_overrides`` on any given object (verified across all call
+    sites), so neither ordering loses a live entry.
+    """
+    diagnostics = getattr(config, "_load_diagnostics", None)
+    if diagnostics is None:
+        return
+    diagnostics[:] = [d for d in diagnostics if d.layer != layer]
+
+
 def section_invariant_error(section_obj: object, touched: Iterable[str]) -> str | None:
     """Cross-field validation error for a mutated section, if any.
 
@@ -1820,7 +1922,9 @@ def assign_section_fields(section_obj: object, updates: Mapping[str, object]) ->
     return old_values
 
 
-def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> None:
+def load_config_overrides(
+    config: Mem2MemConfig, *, migrate: bool = True, strict: bool = False
+) -> None:
     """Apply persisted overrides from ~/.memtomem/config.json (if exists).
 
     Precedence: ``MEMTOMEM_<SECTION>__<FIELD>`` env vars win over
@@ -1831,12 +1935,34 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
     required for read-only diagnostic surfaces (e.g. ``mm context detect``,
     scope resolution from config) that must not touch disk as a side
     effect (see ``feedback_doctor_no_migration_loader``).
+
+    ``strict=True`` raises :class:`~memtomem.errors.ConfigError` when a
+    *section* fails its cross-field validation, instead of keeping the
+    pre-override baseline for it. The boundary is deliberate and narrow
+    (#2385 item 3): field-level skips — a value outside its
+    ``FIELD_CONSTRAINTS`` range, an unknown section or field, a key the
+    environment owns — stay tolerant in both modes, because a field an
+    upgrade removed must not close the Web write gate. A rejected section is
+    different in kind: it silently discards an explicit choice, which is how
+    a stale ``embedding.dimension`` could leave a server on
+    ``provider="none"``. Note the split is about *where* the error surfaces,
+    not about the user's intent: a wrong type in a field with no constraint
+    entry reaches section validation and is therefore a section rejection.
+
+    Either way the rejection is appended to the config's load diagnostics
+    (:attr:`Mem2MemConfig.load_diagnostics`), so tolerant callers can report
+    what they ignored. Entries from a previous ``config.json`` load of the
+    same object are replaced, not duplicated.
     """
     import json as _json
     import logging
     import warnings
 
+    from memtomem.errors import ConfigError
+
     _log = logging.getLogger(__name__)
+
+    _reset_load_diagnostics(config, "config.json")
 
     path = _override_path()
     if not path.exists():
@@ -1849,8 +1975,15 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
     if not isinstance(data, dict):
         _log.warning("Config overrides in %s are not a JSON object (ignored)", path)
         return
+    declared_sections = type(config).model_fields
     for section_name, updates in data.items():
-        section_obj = getattr(config, section_name, None)
+        # Resolve sections through the declared fields, not ``getattr``:
+        # otherwise any attribute name is a "section", so ``model_dump`` or
+        # ``load_diagnostics`` in the file resolves to a method/tuple and
+        # crashes at ``.model_copy()`` outside the validation handler below.
+        section_obj = (
+            getattr(config, section_name, None) if section_name in declared_sections else None
+        )
         if section_obj is None or not isinstance(updates, dict):
             if section_obj is None and isinstance(updates, dict):
                 _log.warning("Unknown config section '%s' in %s (ignored)", section_name, path)
@@ -1936,13 +2069,29 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
                     warnings.simplefilter("always")
                     validated_section = type(section_obj).model_validate(payload)
             except ValidationError as exc:
+                # Restore before reporting, so a caller that catches the
+                # strict error is never left holding the half-mutated
+                # section the ``setattr`` loop above built.
+                setattr(config, section_name, section_before)
+                message = validation_error_message(exc)
+                _record_load_diagnostic(
+                    config,
+                    section=section_name,
+                    path=path,
+                    error=message,
+                    layer="config.json",
+                )
+                if strict:
+                    raise ConfigError(
+                        f"Invalid config section [{section_name}] in {path}: {message}"
+                    ) from exc
                 _log.warning(
-                    "Invalid config section [%s] in %s: %s (reverting section to defaults)",
+                    "Invalid config section [%s] in %s: %s "
+                    "(that file's values for the section are ignored)",
                     section_name,
                     path,
-                    exc,
+                    message,
                 )
-                setattr(config, section_name, section_before)
             else:
                 setattr(config, section_name, validated_section)
                 for w in caught:
@@ -2076,10 +2225,13 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
         if not quiet:
             _log.warning(msg, *args)
 
+    _reset_load_diagnostics(config, "config.d")
+
     dir_ = _config_d_path()
     if not dir_.is_dir():
         return
 
+    declared_sections = type(config).model_fields
     fragments = sorted(p for p in dir_.iterdir() if p.is_file() and p.suffix == ".json")
     for path in fragments:
         try:
@@ -2091,7 +2243,11 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
             _warn("Config fragment %s is not a JSON object (ignored)", path)
             continue
         for section_name, updates in data.items():
-            section_obj = getattr(config, section_name, None)
+            # Declared fields only — see the same gate in
+            # ``load_config_overrides`` for why ``getattr`` alone is unsafe.
+            section_obj = (
+                getattr(config, section_name, None) if section_name in declared_sections else None
+            )
             if section_obj is None or not isinstance(updates, dict):
                 if section_obj is None and isinstance(updates, dict):
                     _warn("Unknown config section '%s' in %s (ignored)", section_name, path)
@@ -2210,6 +2366,19 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
                 validated_section = section_cls.model_validate(payload)
             except (TypeError, ValueError, ValidationError) as exc:
                 setattr(config, section_name, section_before)
+                # ``validation_error_message`` reads ``.errors()``, which only
+                # a pydantic ``ValidationError`` has; the bare TypeError /
+                # ValueError arms reach here too.
+                message = (
+                    validation_error_message(exc) if isinstance(exc, ValidationError) else str(exc)
+                )
+                _record_load_diagnostic(
+                    config,
+                    section=section_name,
+                    path=path,
+                    error=message,
+                    layer="config.d",
+                )
                 _warn("Invalid config section [%s] in %s: %s", section_name, path, exc)
                 continue
             setattr(config, section_name, validated_section)

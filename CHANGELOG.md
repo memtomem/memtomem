@@ -26,6 +26,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A rejected `config.json` section no longer disables embedding silently
+  (#2385).** One stale key was enough: with `dimension: 1024` left over from a
+  bge-m3 install under an E5 model, the section failed its cross-field
+  validation, the loader put the whole `embedding` section back to its
+  pre-override baseline, and the server ran on `provider: none` with a single
+  log line as the only trace. `strict_overrides` did not help — it only
+  pre-parsed the file for JSON and OS errors and never reached the loader — so
+  no surface disagreed with the file on disk. `load_config_overrides` now takes
+  a `strict` flag that `build_fresh_config` forwards: a rejected *section*
+  raises `ConfigError`, so a hot re-read keeps the running config, explains
+  itself in the Settings banner and refuses writes, exactly as it already did
+  for malformed JSON. The boundary is deliberately narrow — a value outside its
+  range, an unknown section or field, a key the environment owns are still
+  skipped in both modes, because a field an upgrade removed must not close the
+  write gate. Tolerant loads (MCP startup, the handshake, read-only CLI
+  surfaces) keep booting, and now record what they ignored: `mm status`,
+  `mem_status`, `mm config show` (on stderr, so JSON stdout stays a config
+  document) and `GET /api/config` all report the rejected section and the
+  reason — and a successful save re-derives them, because the delta-only write
+  can drop the rejected section outright while the signature it banks stops a
+  reload from noticing, which left the banner asking for a repair that had
+  already happened. It is re-read rather than cleared: a rejection in a
+  `config.d` fragment survives a save that never touched it. Two nearby
+  defects went with it — both loaders resolved a section with a bare
+  `getattr`, so a key like `model_dump` in the file crashed the tolerant load
+  it was supposed to survive, and a failed save whose rollback re-read an
+  invalid file answered 500 instead of its own 400/503.
 - **Config hot-reload no longer blocks the event loop while it resolves a
   tokenizer (#2385).** Since the E5 CPU profile made `hard_max_chunk_tokens`
   non-zero by default, `validate_budget_configuration` stopped taking its early

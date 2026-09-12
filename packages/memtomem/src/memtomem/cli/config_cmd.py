@@ -23,6 +23,19 @@ from memtomem.secret_masking import is_secret_key, mask_secrets
 # ---------------------------------------------------------------------------
 
 
+def _one_line(value: object) -> str:
+    """Render an untrusted string as one printable terminal line.
+
+    Config-load diagnostics carry a filesystem path and a validation message
+    assembled from the user's own file, so either can contain a newline (a
+    forged second warning line) or an ANSI escape (cursor or screen control).
+    Replaces every C0/C1 control character with its ``\\xNN`` spelling, which
+    keeps the value readable and diagnosable without letting it act.
+    """
+    text = str(value)
+    return "".join(ch if ch.isprintable() or ch == " " else f"\\x{ord(ch):02x}" for ch in text)
+
+
 @click.group()
 def config() -> None:
     """View or modify memtomem configuration."""
@@ -45,6 +58,27 @@ def config_show(fmt: str, *, as_json: bool = False) -> None:
     load_config_d(cfg)
     load_config_overrides(cfg)
     data = mask_secrets(cfg.model_dump())
+
+    # A section the loaders rejected is gone from this view with no trace —
+    # what prints is whatever layer was accepted instead (#2385 item 3). Say
+    # so on stderr: stdout stays the config document, so ``--json | jq`` and
+    # the ``--json`` / ``--format json`` parity contract are untouched.
+    for diagnostic in cfg.load_diagnostics:
+        # The path is a filename off disk and the reason is a pydantic
+        # message built from the file's own values, so both can carry a
+        # newline or an escape sequence that would forge a second warning
+        # line or reprogram the terminal. Neutralise them for this text
+        # surface only; the JSON/status payloads keep the real bytes.
+        click.echo(
+            click.style(
+                f"warning: config section [{_one_line(diagnostic.section)}] "
+                f"in {_one_line(diagnostic.path)} "
+                f"was rejected — {_one_line(diagnostic.error)}; "
+                "that file's values for the section were ignored",
+                fg="yellow",
+            ),
+            err=True,
+        )
 
     if fmt == "json":
         click.echo(json.dumps(data, indent=2, default=str))

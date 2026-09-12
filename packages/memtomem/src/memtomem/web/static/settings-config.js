@@ -59,7 +59,11 @@ const _HIDDEN_CONFIG_FIELDS = {
 // Response fields that live alongside config sections but describe the
 // hot-reload state rather than user-editable config. Kept out of the
 // section iteration below so they don't render as empty cards.
-const _CONFIG_META_FIELDS = new Set(['config_mtime_ns', 'config_reload_error']);
+const _CONFIG_META_FIELDS = new Set([
+  'config_mtime_ns',
+  'config_reload_error',
+  'config_load_warnings',
+]);
 const _CONFIG_SECTION_STORAGE_KEY = 'm2m-config-section';
 const _CONFIG_ALL_SECTION = '__all__';
 let _activeConfigSection = null;
@@ -158,10 +162,18 @@ qs('config-search')?.addEventListener('input', _applyConfigFilter);
 // the browser tab was hidden) and render the "Config file changed
 // externally" banner.
 let _lastConfigMtimeNs = null;
+// Handle for the "changed externally" auto-hide. Cleared on every render:
+// otherwise a timer armed by an info banner fires later and hides the error
+// or warning banner that replaced it, five seconds after the fact.
+let _reloadBannerHideTimer = null;
 
 function _renderReloadBanner(data) {
   const el = qs('config-reload-banner');
   if (!el) return;
+  if (_reloadBannerHideTimer !== null) {
+    clearTimeout(_reloadBannerHideTimer);
+    _reloadBannerHideTimer = null;
+  }
   const err = data.config_reload_error;
   if (err) {
     el.textContent = t('settings.config.reload_invalid', { error: err });
@@ -169,12 +181,31 @@ function _renderReloadBanner(data) {
     show(el);
     return;
   }
+  // A re-read failure outranks this: it means the runtime is not what the
+  // file says at all, while a load warning means the running config is
+  // missing one rejected layer.
+  const loadWarnings = Array.isArray(data.config_load_warnings) ? data.config_load_warnings : [];
+  if (loadWarnings.length > 0) {
+    const first = loadWarnings[0];
+    el.textContent = t('settings.config.load_rejected', {
+      section: first.section,
+      path: first.path,
+      error: first.error,
+    });
+    el.className = 'config-reload-banner warn';
+    show(el);
+    if (typeof data.config_mtime_ns === 'number') _lastConfigMtimeNs = data.config_mtime_ns;
+    return;
+  }
   const mtime = data.config_mtime_ns;
   if (_lastConfigMtimeNs !== null && mtime !== _lastConfigMtimeNs && mtime > 0) {
     el.textContent = t('settings.config.reload_external');
     el.className = 'config-reload-banner info';
     show(el);
-    setTimeout(() => hide(el), 5000);
+    _reloadBannerHideTimer = setTimeout(() => {
+      _reloadBannerHideTimer = null;
+      hide(el);
+    }, 5000);
   } else {
     hide(el);
   }

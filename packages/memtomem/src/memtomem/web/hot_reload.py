@@ -141,18 +141,59 @@ def _set_last_signature(app: FastAPI, sig: Signature) -> None:
 
 
 def commit_writer_signature(app: FastAPI) -> None:
-    """Record the current on-disk signature after a successful write.
+    """Settle reload state after a successful write.
 
     Call this from any request handler that just invoked
     :func:`memtomem.config.save_config_overrides` inside ``_config_lock``.
     Without it, the next ``GET /api/config`` would see our own write as an
     "external change" and trigger a spurious reload from the same file we
-    just wrote. The bump is cheap (one ``os.stat`` per fragment).
+    just wrote.
 
-    This is the public alternative to the internal ``_set_last_signature``
-    for the narrow "writer finalising its own change" use case.
+    Banking that signature is also what makes the load diagnostics on the
+    live config go stale, so they are re-derived here in the same step.
     """
     _set_last_signature(app, current_signature())
+    _refresh_load_diagnostics(app)
+
+
+def _refresh_load_diagnostics(app: FastAPI) -> None:
+    """Re-derive which sections the files on disk currently reject.
+
+    A save can repair the very section a load rejected: the write is
+    delta-only, so a section whose values all match the lower layers is
+    simply dropped from the file. The live config still carries the record
+    from the load that rejected it, and the signature just banked is exactly
+    what stops a reload from replacing it — so without this the warning
+    outlives the file that caused it and keeps telling the user to fix
+    something that is already valid (#2385).
+
+    Re-derived rather than cleared. A rejected section can also *survive* a
+    save: ``save_config_overrides`` merges into the existing file and only
+    owns the ``MUTABLE_FIELDS`` allowlist, and a ``config.d`` fragment is
+    never touched by a save at all. Only a fresh read knows which.
+
+    Deliberately not the reload path: nothing here replaces ``app.state
+    .config`` or touches the runtime. A failure leaves the previous records
+    in place, because a stale warning is a better outcome on a write that
+    otherwise succeeded than a traceback out of it.
+    """
+    config = getattr(app.state, "config", None)
+    diagnostics = getattr(config, "_load_diagnostics", None)
+    if diagnostics is None:
+        return
+    try:
+        # Tolerant and non-migrating: this is a read for reporting only, and
+        # it must not raise on the same file the write just validated, nor
+        # rewrite it.
+        fresh = _build_fresh_config_impl(migrate=False, strict_overrides=False)
+    except Exception:
+        logger.debug(
+            "Could not re-read %s to refresh config load diagnostics after a write",
+            _override_path(),
+            exc_info=True,
+        )
+        return
+    diagnostics[:] = list(fresh.load_diagnostics)
 
 
 def initialize_reload_state(app: FastAPI) -> None:
@@ -169,6 +210,54 @@ def initialize_reload_state(app: FastAPI) -> None:
 # Kept as a module attribute for the same reason as the signature helpers:
 # handlers and tests reach it through ``hot_reload._build_fresh_config``.
 _build_fresh_config = _build_fresh_config_impl
+
+
+def revert_runtime_to_disk(app: FastAPI) -> None:
+    """Point the runtime back at what ``config.json`` currently says.
+
+    The write handlers mutate ``app.state.config`` first and persist second,
+    so a failed save has to put the runtime back before answering 400/503.
+    They did that with a bare ``_build_fresh_config()`` call inside the
+    ``except`` block — which is itself a read of a file that may be invalid.
+    When it raised, the handler's own HTTP error was replaced by a 500, the
+    unpersisted mutation stayed live, and per-handler cleanup (closing a
+    validated-but-uninstalled reranker) never ran.
+
+    On failure this records a ``ReloadError`` instead, which closes the write
+    gate (``_check_reload_block``) and explains the state in the Settings
+    banner, and returns normally so the caller can finish its own error path.
+
+    Both axes are sampled **before** the rebuild, exactly as
+    ``reload_if_stale`` does: sampling afterwards can bind this failure to a
+    revision someone saved in the meantime, marking that good revision as
+    already-seen and holding the write gate shut until the next edit.
+
+    Known limitation: when disk is invalid there is nothing valid to revert
+    *to*, so the unpersisted mutation stays live until the file is fixed and
+    the next reload replaces it. Restoring a pre-mutation snapshot instead is
+    the fuller fix and is tracked separately.
+    """
+    attempted_mtime_ns = get_config_mtime_ns()
+    attempted_sig = current_signature()
+    try:
+        app.state.config = _build_fresh_config()
+    except Exception as exc:
+        logger.warning(
+            "Could not re-read config at %s while reverting an unsaved change: %s",
+            _override_path(),
+            exc,
+            exc_info=True,
+        )
+        _set_reload_error(
+            app,
+            ReloadError(
+                message=f"{type(exc).__name__}: {exc}",
+                at_mtime_ns=attempted_mtime_ns,
+                timestamp=time.time(),
+                at_signature=attempted_sig,
+            ),
+        )
+    _set_last_signature(app, attempted_sig)
 
 
 async def reload_if_stale(
