@@ -26,6 +26,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Config and embedding text output escapes control characters (#2411).**
+  `mm config show` tables, `mm config set` transitions and effective-value
+  notices (also shared by `config unset`), `mem_config` single-key reads,
+  `mem_stats` degraded warnings, and `mem_embedding_reset(mode="status")`
+  now use the status report's display escape. Secrets are masked first;
+  JSON output, stored values, and runtime configuration retain their existing
+  contracts. `config.d` WARNING messages are also escaped after formatting.
+  Log handlers that need the exact filename should use the new raw string
+  `LogRecord.config_fragment_path` field; the rendered message and logging
+  arguments are display text, not filename identity. Strict-mode exceptions
+  and quiet-mode warning suppression retain their existing behavior.
+
 - **Failed Web config saves restore the runtime that preceded the request
   (#2409).** PATCH and memory-directory changes now restore their original
   section and list objects when persistence fails, even if the file on disk

@@ -166,8 +166,10 @@ async def mem_stats(
         cfg = mismatch["configured"]
         out += (
             "\n- Embedding: DEGRADED — "
-            f"stored {stored['provider']}/{stored['model']} ({stored['dimension']}d) "
-            f"vs configured {cfg['provider']}/{cfg['model']} ({cfg['dimension']}d). "
+            f"stored {scrub_text(str(stored['provider']))}/{scrub_text(str(stored['model']))} "
+            f"({stored['dimension']}d) "
+            f"vs configured {scrub_text(str(cfg['provider']))}/{scrub_text(str(cfg['model']))} "
+            f"({cfg['dimension']}d). "
             'Run mem_embedding_reset(mode="apply_current") to repair.'
         )
 
@@ -952,7 +954,7 @@ async def mem_config(
                 node = node[part]
             else:
                 return f"Key '{key}' not found in configuration."
-        return f"{key} = {node}"
+        return f"{scrub_text(key)} = {scrub_text(str(node))}"
 
     import json
 
@@ -1257,13 +1259,17 @@ async def mem_embedding_reset(
         lines = ["Embedding Status"]
         if stored:
             lines.append(
-                f"  DB stored:  {stored['provider']}/{stored['model']} ({stored['dimension']}d)"
+                "  DB stored:  "
+                + scrub_text(f"{stored['provider']}/{stored['model']} ({stored['dimension']}d)")
             )
             if stored.get("max_sequence_tokens") is not None:
                 lines.append(f"  DB max sequence tokens: {stored['max_sequence_tokens']}")
         lines.append(
-            f"  Config:     {config.embedding.provider}/{config.embedding.model} "
-            f"({config.embedding.dimension}d)"
+            "  Config:     "
+            + scrub_text(
+                f"{config.embedding.provider}/{config.embedding.model} "
+                f"({config.embedding.dimension}d)"
+            )
         )
         lines.append(f"  Config max sequence tokens: {config.embedding.max_sequence_tokens}")
         if mismatch is None:

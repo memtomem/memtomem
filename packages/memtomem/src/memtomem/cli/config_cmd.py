@@ -93,12 +93,12 @@ def config_show(fmt: str, *, as_json: bool = False) -> None:
         click.echo(json.dumps(data, indent=2, default=str))
     else:
         for section, values in data.items():
-            click.echo(click.style(f"\n[{section}]", bold=True))
+            click.echo(click.style(f"\n[{_one_line(section)}]", bold=True))
             if isinstance(values, dict):
                 for k, v in values.items():
-                    click.echo(f"  {k} = {v}")
+                    click.echo(f"  {_one_line(k)} = {_one_line(v)}")
             else:
-                click.echo(f"  {values}")
+                click.echo(f"  {_one_line(values)}")
 
 
 @config.command("set")
@@ -168,18 +168,13 @@ def config_set(key: str, value: str) -> None:
         )
         raise SystemExit(1) from None
 
-    def _show(value: object) -> object:
-        if is_secret_key(field_name):
-            return "***" if value else ""
-        return value
-
     # One measurement, shared by the report and the FTS rebuild below: two
     # separate loads could disagree if another process writes in between, and
     # then the index would be built for a tokenizer the user was never told
     # about.
     effective = _effective_value(section_name, field_name)
 
-    click.echo(f"{key}: {_show(old_val)} -> {_show(coerced)}")
+    click.echo(f"{key}: {_masked(field_name, old_val)} -> {_masked(field_name, coerced)}")
     for line in _effect_lines(key, section_name, field_name, coerced, receipt, effective):
         click.echo(line)
 
@@ -395,8 +390,10 @@ def _effect_lines(
     return lines
 
 
-def _masked(field_name: str, value: object) -> object:
-    return ("***" if value else "") if is_secret_key(field_name) else value
+def _masked(field_name: str, value: object) -> str:
+    """Mask secrets before escaping a value for the CLI's text-only reports."""
+    masked = ("***" if value else "") if is_secret_key(field_name) else value
+    return _one_line(masked)
 
 
 def _unpinned_sources(keys: list[str]) -> dict[str, str]:
