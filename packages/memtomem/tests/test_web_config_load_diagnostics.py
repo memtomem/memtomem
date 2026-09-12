@@ -314,7 +314,10 @@ class TestRollbackWhenDiskIsInvalid:
             assert migrate is False
             # Another process corrects the file while this read is in flight.
             cfg_path.write_text(json.dumps({"mmr": {"enabled": True}}), encoding="utf-8")
-            _bump_mtime(cfg_path)
+            # Writes can share a clock tick on Windows. Advance from the
+            # sampled revision, not from the timestamp reset by this write.
+            newer_mtime_ns = read_mtime_ns + 1_000_000_000
+            os.utime(cfg_path, ns=(newer_mtime_ns, newer_mtime_ns))
             raise ValueError("Invalid config section [embedding] in config.json")
 
         # What the read is about to see. Captured here because the rebuild
