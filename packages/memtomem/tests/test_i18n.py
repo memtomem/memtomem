@@ -86,6 +86,52 @@ class TestLocaleFiles:
                 mismatches.append(f"  {key}: en={en_ph} ko={ko_ph}")
         assert not mismatches, "Placeholder mismatch:\n" + "\n".join(mismatches)
 
+    def test_no_placeholder_sits_inside_square_brackets(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """A ``{param}`` inside ``[...]`` renders literally, braces and all.
+
+        ``t()`` scans ``/\\{(\\w+)\\}|\\[([^\\]]+)\\]/g``. At an opening
+        bracket the josa-marker arm wins and consumes everything up to the
+        next ``]``; only the four known allomorph pairs are substituted, and
+        anything else is "left verbatim" — so the user reads the parameter
+        name. Caught in #2385 on a banner that wrote ``[{section}]`` to match
+        the CLI's ``[embedding]`` style.
+
+        Keyed on "a bracket group containing a brace", not on the one spelling
+        that was fixed: ``[ {section} ]`` and ``[{a}/{b}]`` fail in production
+        exactly the same way. Write the placeholder bare, or quote it.
+        """
+        offenders = [
+            f"  {lang} {key}: {value}"
+            for lang, table in (("en", en), ("ko", ko))
+            for key, value in table.items()
+            for group in re.findall(r"\[([^\]]+)\]", value)
+            if "{" in group
+        ]
+        assert not offenders, "Placeholder inside a josa marker:\n" + "\n".join(offenders)
+
+    @pytest.mark.parametrize(
+        "value,is_offender",
+        [
+            ("The [{section}] section", True),
+            ("The [ {section} ] section", True),
+            ("between [{a}/{b}] here", True),
+            ("{type}[을/를] 추가", False),
+            ("{name}[이/가] 있다", False),
+            ("{x}[은/는] 그리고 {y}[으로/로]", False),
+            ("a bare [note] in prose", False),
+            ("no brackets at all {param}", False),
+        ],
+    )
+    def test_bracket_guard_catches_the_class_not_one_spelling(
+        self, value: str, is_offender: bool
+    ) -> None:
+        """The guard above must accept every legitimate josa marker and reject
+        every bracket group that swallows a placeholder."""
+        found = any("{" in group for group in re.findall(r"\[([^\]]+)\]", value))
+        assert found is is_offender
+
     def test_all_values_are_strings(self, en: dict[str, str], ko: dict[str, str]) -> None:
         for name, data in [("en", en), ("ko", ko)]:
             bad = [k for k, v in data.items() if not isinstance(v, str)]

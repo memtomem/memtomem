@@ -311,6 +311,12 @@ async def collect_status_report(app: AppContext) -> dict:
     db_path_resolved = Path(config.storage.sqlite_path).expanduser().resolve()
 
     warnings: list[dict] = []
+    # Sections the config loaders read and rejected (#2385 item 3). A stale
+    # key can cost the whole section — the embedding one takes the server to
+    # ``provider="none"`` — and used to be a log line nothing surfaced.
+    warnings.extend(
+        diagnostic.as_status_warning() for diagnostic in getattr(config, "load_diagnostics", ())
+    )
     if config.scheduler.enabled and not config.health_watchdog.enabled:
         warnings.append(
             {

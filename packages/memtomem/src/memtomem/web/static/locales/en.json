@@ -1835,6 +1835,7 @@
   "settings.config.env_vars_title": "Environment Variables",
   "settings.config.reload_invalid": "Config file invalid on disk: {error} — fix it (or run `mm init --fresh`) before saving from the UI.",
   "settings.config.reload_external": "Config file changed externally — reloaded from disk.",
+  "settings.config.load_rejected": "The {section} section in {path} was rejected: {error}. That file's values for the section are ignored until it validates.",
   "settings.config.reindex_both": "Tokenizer and chunk settings changed. FTS index rebuild and re-indexing recommended for full effect.",
   "settings.config.reindex_fts": "Tokenizer changed. FTS index rebuild is recommended so existing data uses the new tokenizer.",
   "settings.config.reindex_chunk": "Chunk settings changed. Re-indexing is recommended to apply new chunking to existing files.",
