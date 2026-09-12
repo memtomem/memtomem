@@ -240,9 +240,8 @@ class TestLoadWarningsOnTheRunningConfig:
 class TestRollbackWhenDiskIsInvalid:
     """A failed save must still answer its own error.
 
-    The handlers mutate ``app.state.config`` before persisting and revert by
-    re-reading the file. That read can itself fail — which used to replace the
-    handler's 400/503 with a 500 and skip its cleanup.
+    The handlers restore their pre-mutation snapshots. A diagnostic re-read
+    can itself fail, but must not replace the handler's error or skip cleanup.
     """
 
     async def test_save_failure_over_invalid_disk_answers_503_not_500(
@@ -261,10 +260,14 @@ class TestRollbackWhenDiskIsInvalid:
         cfg_path = home / ".memtomem" / "config.json"
         cfg_path.write_text(json.dumps(STALE_E5), encoding="utf-8")
         app.state.config_signature = _hot_reload.current_signature()
+        original_config = app.state.config
+        original_values = original_config.model_dump()
 
         resp = await client.patch("/api/config?persist=true", json={"search": {"default_top_k": 5}})
 
         assert resp.status_code == 503, resp.text
+        assert app.state.config is original_config
+        assert original_config.model_dump() == original_values
 
     async def test_a_failed_revert_leaves_a_banner_and_closes_the_gate(
         self, home: Path, app, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
@@ -290,7 +293,7 @@ class TestRollbackWhenDiskIsInvalid:
         )
         assert again.status_code == 409, again.text
 
-    async def test_a_revision_saved_during_the_failing_revert_is_not_marked_seen(
+    async def test_a_revision_saved_during_the_failing_diagnostic_is_not_marked_seen(
         self, home: Path, app, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The error must be bound to the revision that was *read*.
@@ -307,7 +310,8 @@ class TestRollbackWhenDiskIsInvalid:
         cfg_path.write_text(json.dumps(STALE_E5), encoding="utf-8")
         _bump_mtime(cfg_path)
 
-        def _rebuild_then_someone_fixes_it():
+        def _rebuild_then_someone_fixes_it(*, migrate):
+            assert migrate is False
             # Another process corrects the file while this read is in flight.
             cfg_path.write_text(json.dumps({"mmr": {"enabled": True}}), encoding="utf-8")
             _bump_mtime(cfg_path)
@@ -319,7 +323,9 @@ class TestRollbackWhenDiskIsInvalid:
         read_signature = _hot_reload.current_signature()
 
         monkeypatch.setattr(_hot_reload, "_build_fresh_config", _rebuild_then_someone_fixes_it)
-        _hot_reload.revert_runtime_to_disk(app)
+        original_signature = app.state.config_signature
+        _hot_reload.record_save_failure(app)
+        assert app.state.config_signature == original_signature
 
         err = _hot_reload.get_reload_error(app)
         assert err is not None
@@ -333,16 +339,10 @@ class TestRollbackWhenDiskIsInvalid:
             "the failure was bound to the corrected revision, so it can never be released"
         )
 
-    async def test_a_revision_saved_during_a_successful_revert_is_still_reloaded(
+    async def test_a_revision_saved_during_a_successful_diagnostic_is_still_reloaded(
         self, home: Path, app, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The same pre-rebuild sampling on the path that *succeeds*.
-
-        The signature recorded after a revert has to describe the revision the
-        rebuild actually read. Recording what is on disk afterwards — which is
-        what the inline code this helper replaced did — marks an edit that
-        landed during the read as already seen, and it is never loaded.
-        """
+        """A successful diagnostic must not mark an unapplied revision seen."""
         _write_config(home, {"mmr": {"enabled": False}})
         app.state.config = _hot_reload._build_fresh_config()
         app.state.config_signature = _hot_reload.current_signature()
@@ -350,18 +350,23 @@ class TestRollbackWhenDiskIsInvalid:
         cfg_path = home / ".memtomem" / "config.json"
         real_build = _hot_reload._build_fresh_config
 
-        def _rebuild_while_someone_saves():
-            built = real_build()
+        def _rebuild_while_someone_saves(*, migrate):
+            assert migrate is False
+            built = real_build(migrate=migrate)
             # Another process saves a newer revision during this read.
             cfg_path.write_text(json.dumps({"mmr": {"enabled": True}}), encoding="utf-8")
             _bump_mtime(cfg_path)
             return built
 
         monkeypatch.setattr(_hot_reload, "_build_fresh_config", _rebuild_while_someone_saves)
-        _hot_reload.revert_runtime_to_disk(app)
+        original_config = app.state.config
+        original_signature = app.state.config_signature
+        _hot_reload.record_save_failure(app)
+        assert app.state.config is original_config
+        assert app.state.config_signature == original_signature
         monkeypatch.setattr(_hot_reload, "_build_fresh_config", real_build)
 
-        # The revert succeeded, so no banner — but the newer revision must
+        # The diagnostic succeeded, so no banner — but the newer revision must
         # still look unseen to the next reader.
         assert _hot_reload.get_reload_error(app) is None
         assert app.state.config.mmr.enabled is False
