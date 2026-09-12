@@ -24,6 +24,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   explicit allowlist. Recorded evidence and the explicit non-claims live in
   `examples/onboarding/slateharbor/VALIDATION.md`.
 
+### Fixed
+
+- **Config hot-reload no longer blocks the event loop while it resolves a
+  tokenizer (#2385).** Since the E5 CPU profile made `hard_max_chunk_tokens`
+  non-zero by default, `validate_budget_configuration` stopped taking its early
+  return and now constructs a `TokenBudget` on every reload. On an ONNX install
+  running the E5 model in its `fp32` variant that resolves the pinned Hub
+  tokenizer, so the first reload after the cache is cleared — or on a machine
+  that has never downloaded it — became a network round-trip on the web
+  server's event loop. Other variants read a local artifact path, the revision
+  is commit-pinned so a warm cache resolves offline, and the default provider
+  is `none`; the exposure is narrow, but it sits on the request path.
+  `reload_if_stale` now offloads that pre-commit validation with
+  `asyncio.to_thread`, matching what `create_components` already did at
+  startup. The second, post-commit
+  validation inside `apply_runtime_config_changes` deliberately stays inline:
+  its only production caller is `reload_if_stale`, which has just validated the
+  same config off the loop, and a suspension there would let a second reload
+  commit and run its own fanout in between.
+
+- **A failed config reload no longer leaves a banner that cannot be dismissed
+  (#2385).** Offloading introduces a suspension point the reload path did not
+  have, so a second request can now commit a corrected config while the first
+  attempt is still failing. Two things made that stick: the failure was
+  recorded against whatever `config.json` looked like when the handler ran
+  rather than what the attempt actually read, and the release test consulted
+  that file's mtime alone — so a correction made in a `config.d` fragment,
+  which moves the composite signature without touching `config.json`, could
+  never release it. The error now carries both the mtime it attempted and that
+  attempt's composite signature — each read after the rebuild, since the
+  legacy `auto_discover` migration writes the file mid-build — and a single
+  `reload_error_is_stale` predicate is shared by the release branch and the
+  write gate, which previously each carried their own copy of the test.
+  Without this, the UI kept answering `HTTP 409` on every save until some
+  unrelated edit happened to move the override file.
+
+  The same window also let two failures overlap, so a superseded attempt no
+  longer *replaces* a banner already raised by a newer one: the older error
+  describes a layer set that is no longer on disk, would be released as stale
+  on the next read, and would open the write gate on a configuration that
+  never validated — letting a save overwrite the broken file the banner exists
+  to protect. Raising a banner where none stands is still unconditional, so a
+  superseded failure still surfaces immediately (the `#273` contract). The
+  startup pre-check is untouched; it exists to fail before anything runs
+  against an invalid budget.
+
 ## [0.6.0] — 2026-09-10
 
 ### Breaking

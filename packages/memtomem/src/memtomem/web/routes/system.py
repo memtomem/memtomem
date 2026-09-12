@@ -167,9 +167,10 @@ def _check_reload_block(request: Request) -> None:
     err = _hot_reload.get_reload_error(request.app)
     if err is None:
         return
-    if err.at_mtime_ns != _hot_reload.get_config_mtime_ns():
-        # Disk was fixed since the error was recorded; let the next reload
-        # attempt clear it.
+    if _hot_reload.reload_error_is_stale(err):
+        # Disk was fixed since the error was recorded — the override file, or a
+        # ``config.d`` fragment, which moves the composite signature without
+        # touching that file's mtime. Let the next reload attempt clear it.
         return
     raise HTTPException(
         status_code=409,

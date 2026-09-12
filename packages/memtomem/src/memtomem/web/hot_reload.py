@@ -28,8 +28,8 @@ Design (see ``project_web_hot_reload_bridge.md`` for the full rationale):
 
 The public surface is intentionally small: :func:`current_signature`,
 :func:`reload_if_stale`, :func:`apply_runtime_config_changes`, and the
-helpers :func:`get_config_mtime_ns`, :func:`get_reload_error`. Everything
-else is private.
+helpers :func:`get_config_mtime_ns`, :func:`get_reload_error`,
+:func:`reload_error_is_stale`. Everything else is private.
 """
 
 from __future__ import annotations
@@ -98,10 +98,34 @@ class ReloadError:
     message: str
     at_mtime_ns: int
     timestamp: float
+    #: Composite signature of the layer set this attempt read. ``at_mtime_ns``
+    #: alone describes ``config.json`` only, so a correction made in a
+    #: ``config.d`` fragment leaves it unchanged and the error can never be
+    #: released. Defaulted so an error recorded without one still behaves as
+    #: it did before — mtime decides.
+    at_signature: Signature | None = None
 
 
 def get_reload_error(app: FastAPI) -> ReloadError | None:
     return getattr(app.state, "last_reload_error", None)
+
+
+def reload_error_is_stale(err: ReloadError) -> bool:
+    """True when the disk no longer looks like what *err* was recorded against.
+
+    One predicate for both consumers — the signature-match branch of
+    :func:`reload_if_stale`, which releases the banner, and
+    ``_check_reload_block``, which gates writes on it. They have to agree:
+    a write refused for a state the reader considers recoverable strands the
+    UI with a 409 nothing will clear.
+
+    Either axis moving is enough. ``config.json`` is only one of the layers a
+    reload reads, so a fragment edit changes the composite signature while the
+    override mtime stands still.
+    """
+    if err.at_mtime_ns != get_config_mtime_ns():
+        return True
+    return err.at_signature is not None and err.at_signature != current_signature()
 
 
 def _set_reload_error(app: FastAPI, err: ReloadError | None) -> None:
@@ -178,33 +202,65 @@ async def reload_if_stale(
     sig = current_signature()
     last = _get_last_signature(app)
     if last == sig:
-        # Signature matches; if a prior error was tied to a different
-        # on-disk mtime than what we see now, clear it — the user either
-        # fixed the file (mtime bumped forward) or the file vanished
-        # (mtime == -1). If both signature matches AND at_mtime_ns still
-        # equals current mtime, the error is still live, leave it.
+        # Signature matches; if the disk no longer looks like what a prior
+        # error was recorded against, clear it — the user fixed the override
+        # file (mtime moved), fixed a ``config.d`` fragment (composite
+        # signature moved), or the file vanished (mtime == -1). If neither
+        # axis moved, the error is still live — leave it.
         err = get_reload_error(app)
-        if err is not None and err.at_mtime_ns != get_config_mtime_ns():
+        if err is not None and reload_error_is_stale(err):
             _set_reload_error(app, None)
         return False
 
+    # What the error below is bound to. Seeded here so a failure inside the
+    # rebuild still describes the disk it read.
+    attempted_mtime_ns = get_config_mtime_ns()
+    attempted_sig = sig
     try:
         new_cfg = _build_fresh_config()
+        # Re-read both axes once the config exists, and before the awaited
+        # validation. The build itself can write ``config.json`` (the legacy
+        # ``auto_discover`` migration), and the await lets someone correct the
+        # file while this attempt is on the worker — an error carrying either
+        # of those later states is released the moment it is recorded, or
+        # never. ``sig`` stays as observed at entry: the CAS below is about
+        # what *this reader* saw, while the error must describe the layer set
+        # that was actually validated.
+        attempted_mtime_ns = get_config_mtime_ns()
+        attempted_sig = current_signature()
         from memtomem.chunking.bounded import validate_budget_configuration
 
-        validate_budget_configuration(new_cfg, getattr(app.state, "config", None))
+        # Off the event loop: with an E5 profile selected this constructs a
+        # ``TokenBudget``, whose ``resolve_tokenizer`` reaches
+        # ``hf_hub_download`` and blocks on a cold cache. ``create_components``
+        # already offloads the same call (``runtime/components.py``). Stays
+        # inside this ``try`` so a validation failure keeps the existing
+        # config and is recorded as a ``ReloadError`` exactly as before.
+        await asyncio.to_thread(
+            validate_budget_configuration, new_cfg, getattr(app.state, "config", None)
+        )
     except Exception as exc:
         logger.warning(
             "Hot-reload failed for config at %s: %s", _override_path(), exc, exc_info=True
         )
-        _set_reload_error(
-            app,
-            ReloadError(
-                message=f"{type(exc).__name__}: {exc}",
-                at_mtime_ns=get_config_mtime_ns(),
-                timestamp=time.time(),
-            ),
-        )
+        # A superseded attempt must not *replace* a banner that is already up:
+        # the one standing describes a newer layer set than ours, and ours
+        # would be released as stale on the next read — opening the write gate
+        # on a configuration that never validated, which is precisely what
+        # ``_check_reload_block`` exists to prevent. Raising a banner where
+        # there is none stays unconditional, so the #273 contract below (a
+        # superseded failure still surfaces) is untouched.
+        superseded = _get_last_signature(app) != last
+        if get_reload_error(app) is None or not superseded:
+            _set_reload_error(
+                app,
+                ReloadError(
+                    message=f"{type(exc).__name__}: {exc}",
+                    at_mtime_ns=attempted_mtime_ns,
+                    timestamp=time.time(),
+                    at_signature=attempted_sig,
+                ),
+            )
         # Update the signature we've seen so we don't re-try on every hit;
         # we only retry once disk mtime changes again. Mirror of the
         # success-path CAS (#269 / issue #273): if a writer's
@@ -212,7 +268,7 @@ async def reload_if_stale(
         # failing, don't revert their bump — their view is strictly fresher
         # than the one we just failed to rebuild, and their signature will
         # satisfy the stale check on the next read.
-        if _get_last_signature(app) == last:
+        if not superseded:
             _set_last_signature(app, sig)
         return False
 
@@ -286,6 +342,18 @@ async def apply_runtime_config_changes(
     """
     from memtomem.chunking.bounded import validate_budget_configuration
 
+    # Deliberately *not* offloaded, unlike the pre-commit validation in
+    # ``reload_if_stale``. This call runs after the caller installed the new
+    # config, and the head of this function — ``configure_chunk_budget`` (no
+    # await inside it), the ONNX batch publish, ``set_tokenizer`` — must reach
+    # the runtime without yielding: a suspension here lets a second reload
+    # commit and run its own fanout in between, after which neither ordering is
+    # recoverable (the loser's values land on top, or are dropped while the
+    # winner never applied them because it diffed against the loser's config).
+    # Nothing is lost by keeping it inline: the only production caller is
+    # ``reload_if_stale``, which has just validated this same config off the
+    # loop, so the cold-cache ``hf_hub_download`` is already paid and
+    # ``_tokenizer`` / ``_tokenizer_digest`` are warm ``lru_cache`` hits.
     validate_budget_configuration(new_cfg, old_cfg)
     try:
         tokenizer_changed = old_cfg.search.tokenizer != new_cfg.search.tokenizer
