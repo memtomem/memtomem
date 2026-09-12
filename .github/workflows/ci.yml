@@ -52,8 +52,8 @@ jobs:
       # `uv sync --frozen` (which neither checks nor regenerates the lock).
       - run: uv lock --check
       - run: uv sync --frozen
-      - run: uv run ruff check packages/memtomem/src packages/memtomem/tests tools
-      - run: uv run ruff format --check packages/memtomem/src packages/memtomem/tests tools
+      - run: uv run ruff check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py
+      - run: uv run ruff format --check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py
 
   typecheck:
     runs-on: ubuntu-latest
@@ -334,11 +334,22 @@ jobs:
       - run: uv run pytest packages/memtomem/tests/test_notebooks.py --tb=short -q
       - name: Execute model-free beginner notebooks in a minimal environment
         run: |
+          # 05/06 stay in a [langgraph]-only environment: that is the install
+          # their own setup section documents, and sharing an environment with
+          # 00 would let an accidental tree-sitter import in them pass here.
           uv venv /tmp/beginner-notebooks
           uv pip install --python /tmp/beginner-notebooks/bin/python -e 'packages/memtomem[langgraph]' nbclient ipykernel
-          /tmp/beginner-notebooks/bin/python tools/check_beginner_notebooks.py --json
+          /tmp/beginner-notebooks/bin/python tools/check_beginner_notebooks.py --notebook 05_langgraph_memory_basics.ipynb --json
+          /tmp/beginner-notebooks/bin/python tools/check_beginner_notebooks.py --notebook 06_langgraph_retrieval_memory.ipynb --json
           /tmp/beginner-notebooks/bin/python examples/onboarding/retry-policy/demo.py
           /tmp/beginner-notebooks/bin/python -m unittest discover -s examples/onboarding/retry-policy
+          # 00 and the Slateharbor sample need the code extra for tree-sitter.
+          uv venv /tmp/first-user-notebook
+          uv pip install --python /tmp/first-user-notebook/bin/python -e 'packages/memtomem[code]' nbclient ipykernel
+          /tmp/first-user-notebook/bin/python tools/check_beginner_notebooks.py --notebook 00_start_here.ipynb --json
+          /tmp/first-user-notebook/bin/python examples/onboarding/slateharbor/generate.py --check
+          /tmp/first-user-notebook/bin/python examples/onboarding/slateharbor/build_notebook.py --check
+          /tmp/first-user-notebook/bin/python examples/onboarding/slateharbor/validate.py --json
 
   test-js:
     name: js-unit (vitest + jsdom)

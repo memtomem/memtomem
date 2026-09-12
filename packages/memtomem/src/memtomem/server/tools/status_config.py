@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from memtomem import __version__
+from memtomem._runtime_paths import scrub_text
 from memtomem._instance_registry import (
     enumerate_live_instances as _enumerate_live_instances,
     store_digest_for as _store_digest_for,
@@ -311,6 +312,12 @@ async def collect_status_report(app: AppContext) -> dict:
     db_path_resolved = Path(config.storage.sqlite_path).expanduser().resolve()
 
     warnings: list[dict] = []
+    # Sections the config loaders read and rejected (#2385 item 3). A stale
+    # key can cost the whole section — the embedding one takes the server to
+    # ``provider="none"`` — and used to be a log line nothing surfaced.
+    warnings.extend(
+        diagnostic.as_status_warning() for diagnostic in getattr(config, "load_diagnostics", ())
+    )
     if config.scheduler.enabled and not config.health_watchdog.enabled:
         warnings.append(
             {
@@ -465,6 +472,47 @@ class StatusLine:
     value: str = ""
     suffix: str = ""
     meta: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Neutralise control characters in the three rendered parts (#2410).
+
+        Report rows carry values from outside the code — a ``config.d``
+        fragment name and a pydantic message in the ``config_section_rejected``
+        warning, provider/model names off the store and the config, resolved
+        ``memory_dirs`` paths. A newline in any of them printed as an extra
+        line that reads like a report row of its own (breaking the ``ljust``
+        columns from there down), and an ANSI escape reached the terminal
+        intact — status output gets pasted into issues and chat, so a forged
+        ``- kind: …`` row inside it is believable.
+
+        Here rather than at each call site because both renderers read these
+        parts, not just the joined text: ``render_status_report`` joins
+        ``text`` while the CLI styler colours ``key``/``value``/``suffix``
+        separately, and a per-site call would fix the rows it remembered and
+        leave the next one to re-learn this. The escaping is a no-op for
+        everything the code composes itself: on a report carrying an
+        embedding-mismatch warning it changes none of the 43 lines. Column
+        padding is applied by the callers before construction, on keys this
+        module writes, so escaping a value never shifts a column. ``meta``
+        is deliberately not scrubbed: it selects styles, and nothing in it
+        is displayed.
+
+        The structured surface is untouched: ``mm status --json`` renders
+        ``collect_status_report``'s dict, which keeps the real bytes — and it
+        is the route to an exact value, because this escaping is not
+        reversible. A literal backslash passes through, so ``\x0a`` in a
+        rendered path is ambiguous between an escaped newline and a path that
+        contains those four characters; two different paths can render as one
+        line. That is a property of the human report rather than a new one
+        — ``_shorten_status_path`` already contracts ``$HOME`` and the source
+        lists already group and truncate — so read this text to diagnose, and
+        ``--json`` to identify.
+        """
+        for part in ("key", "value", "suffix"):
+            raw = getattr(self, part)
+            scrubbed = scrub_text(raw)
+            if scrubbed != raw:
+                object.__setattr__(self, part, scrubbed)
 
     @property
     def text(self) -> str:
@@ -928,26 +976,36 @@ def _persistence_suffix(key: str, receipt: "SaveReceipt | None") -> str:
     durability half of the message changes. The receipt is read instead of
     the file so a concurrent writer cannot rewrite the answer underneath us.
     """
-    from memtomem.config import MISSING, env_var_owning
+    from memtomem.config import MISSING, env_binding_owning
 
     if receipt is None:
         return " (runtime only — not persisted)"
 
     section_name, _, field_name = key.partition(".")
-    env_var = env_var_owning(section_name, field_name)
+    binding = env_binding_owning(section_name, field_name)
+    # Both env shapes outrank the file, so both break the ``persist`` promise;
+    # they differ only in what the operator has to change, which is why the
+    # whole-section shape says where the value is coming from (issue #2390).
+    takes_precedence = (
+        f"{binding.name} carries this field in its JSON payload and takes precedence"
+        if binding is not None and binding.whole_section
+        else f"{binding.name} takes precedence"
+        if binding is not None
+        else ""
+    )
     if receipt.pinned_after(section_name, field_name) is not MISSING:
-        if env_var is None:
+        if binding is None:
             return " (persisted to config.json)"
         # "survives server restarts" is the documented promise of persist=True,
         # and an env var breaks exactly that half: the next start reads the
         # variable, not the file.
         return (
-            f" (persisted to config.json, but {env_var} takes precedence — "
+            f" (persisted to config.json, but {takes_precedence} — "
             f"a restart reads that variable, not this value)"
         )
     reason = (
-        f"{env_var} takes precedence"
-        if env_var
+        takes_precedence
+        if binding is not None
         else "the value already comes from a lower layer (default or config.d)"
     )
     return f" (runtime only — not written to config.json: {reason})"

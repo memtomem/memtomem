@@ -122,6 +122,15 @@ class ConfigNamespaceOut(BaseModel):
     enable_auto_ns: bool
 
 
+class ConfigLoadWarningOut(BaseModel):
+    """One config section the loaders read, rejected and ignored (#2385)."""
+
+    section: str
+    path: str
+    error: str
+    fix: str
+
+
 class ConfigResponse(BaseModel):
     embedding: ConfigEmbeddingOut
     storage: ConfigStorageOut
@@ -136,6 +145,11 @@ class ConfigResponse(BaseModel):
     # banner when disk state is invalid (see web/hot_reload.py).
     config_mtime_ns: int = -1
     config_reload_error: str | None = None
+    # Sections the *current* config was loaded without, because the file that
+    # declared them failed validation. Distinct from ``config_reload_error``:
+    # that one means a re-read failed and the runtime kept the previous
+    # config, this one means the running config itself is missing a layer.
+    config_load_warnings: list[ConfigLoadWarningOut] = []
 
 
 class ConfigPatchRequest(BaseModel):

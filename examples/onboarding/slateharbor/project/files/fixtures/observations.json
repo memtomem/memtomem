@@ -1,0 +1,44 @@
+{
+  "upload_mb": {
+    "description": "file upload limit",
+    "recorded_at": "2026-07-11T09:10:00+09:00",
+    "observation": "INC-FILES-12에서 동시 대형 업로드가 작은 첨부 요청까지 OOM으로 실패시켰다.",
+    "triage": "content length와 실제 수신량을 비교하고 multipart upload 상태를 조회한다.",
+    "source": "files/docs/incidents/review.md"
+  },
+  "signed_url_minutes": {
+    "description": "signed URL lifetime",
+    "recorded_at": "2026-07-12T09:10:00+09:00",
+    "observation": "외부로 전달된 링크가 공유 해제 뒤에도 오래 동작했다.",
+    "triage": "링크 발급 시각과 공유 해제 시각을 비교하고 신규 URL 발급을 중단한다.",
+    "source": "files/docs/incidents/review.md"
+  },
+  "retention_days": {
+    "description": "trash retention",
+    "recorded_at": "2026-07-13T09:10:00+09:00",
+    "observation": "실수 삭제를 일주일 뒤 발견해 복구 기간을 놓친 조직이 있었다.",
+    "triage": "삭제 표시와 실제 blob 존재를 확인하고 hold 여부부터 조회한다.",
+    "source": "files/docs/incidents/review.md"
+  },
+  "scan_seconds": {
+    "description": "malware scan timeout",
+    "recorded_at": "2026-07-14T09:10:00+09:00",
+    "observation": "timeout을 clean으로 취급한 경로 때문에 검사가 끝나지 않은 파일이 공개됐다.",
+    "triage": "scan 상태가 pending인지 확인하고 재검사 큐로 보낸다.",
+    "source": "files/docs/incidents/review.md"
+  },
+  "preview_pages": {
+    "description": "document preview",
+    "recorded_at": "2026-07-15T09:10:00+09:00",
+    "observation": "긴 PDF 한 개가 preview worker를 점유해 이미지 썸네일까지 지연됐다.",
+    "triage": "쪽 수와 preview job 종류를 확인하고 대형 변환을 별도 큐로 보낸다.",
+    "source": "files/docs/incidents/review.md"
+  },
+  "chunk_mb": {
+    "description": "multipart chunk",
+    "recorded_at": "2026-07-16T09:10:00+09:00",
+    "observation": "큰 조각 재전송이 느린 네트워크에서 계속 timeout됐다.",
+    "triage": "실패한 part 번호와 checksum을 확인하고 해당 조각만 재전송한다.",
+    "source": "files/docs/incidents/review.md"
+  }
+}

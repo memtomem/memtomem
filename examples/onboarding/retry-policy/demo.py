@@ -1,6 +1,6 @@
 """Verify the sample's CLI journey without touching the user's store.
 
-Run with Python from an environment containing memtomem==0.5.0.
+Run with Python from an environment containing memtomem==0.6.0.
 All writes are confined to a disposable home; no client is registered.
 This proves CLI/source persistence, not an AI client's fresh-session behavior.
 """
@@ -26,7 +26,7 @@ DECISION = (
 def main():
     mm = shutil.which("mm", path=str(Path(sys.executable).parent))
     if mm is None:
-        raise RuntimeError("Install memtomem==0.5.0 in this Python environment first.")
+        raise RuntimeError("Install memtomem==0.6.0 in this Python environment first.")
     digest = hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
     with tempfile.TemporaryDirectory(prefix="memtomem-coding-demo-") as temporary:
         root = Path(temporary).resolve()

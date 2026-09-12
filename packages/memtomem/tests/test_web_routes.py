@@ -31,7 +31,7 @@ from memtomem.models import Chunk, ChunkMetadata, IndexingStats, SearchResult
 from memtomem.search.pipeline import RetrievalStats
 from memtomem.source_provenance import source_span_hash
 from memtomem.web.app import create_app
-from .helpers import consent_lines, set_home
+from .helpers import consent_lines, isolate_config_paths, set_home
 from .web.test_upload_quarantine import (
     TestUploadQuarantineBoundaries,  # noqa: F401
     TestUploadQuarantineLifecycle,  # noqa: F401
@@ -166,8 +166,21 @@ class FakeConfig:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _isolated_config_paths(monkeypatch, tmp_path_factory) -> Path:
+    """Keep the ``~/.memtomem`` config layer out of reach — see #2386.
+
+    The signature pin below already stops the reload from *rebuilding* over
+    this file's ``FakeConfig``, but it pins to whatever the developer's real
+    ``config.json`` happened to look like when the fixture ran, so an edit to
+    that file mid-suite still reopens the swap. Redirecting the two module
+    constants makes the pin hermetic instead.
+    """
+    return isolate_config_paths(monkeypatch, tmp_path_factory.mktemp("memtomem-home"))
+
+
 @pytest.fixture
-def app():
+def app(_isolated_config_paths: Path):
     """Create an app without lifespan and wire mock state."""
     application = create_app(lifespan=None, mode="dev")
 
@@ -528,6 +541,28 @@ class TestStats:
 
 
 class TestConfig:
+    async def test_reload_reads_the_isolated_override_file(
+        self, client: AsyncClient, _isolated_config_paths: Path
+    ):
+        """A reload triggered here rebuilds from the fixture's ``config.json``.
+
+        The signature pin in the ``app`` fixture holds only while the on-disk
+        config is unchanged; writing one releases it, which is what makes this
+        a live check of *which* file the rebuild reads. Unwire
+        ``_isolated_config_paths`` and that is the developer's real
+        ``~/.memtomem/config.json`` again (#2386).
+        """
+        from memtomem.config import _override_path
+
+        (_isolated_config_paths / "config.json").write_text(
+            json.dumps({"search": {"default_top_k": 33}}), encoding="utf-8"
+        )
+        assert _override_path() == _isolated_config_paths / "config.json"
+
+        resp = await client.get("/api/config")
+        assert resp.status_code == 200
+        assert resp.json()["search"]["default_top_k"] == 33
+
     async def test_config_returns_sections(self, client: AsyncClient):
         resp = await client.get("/api/config")
         assert resp.status_code == 200

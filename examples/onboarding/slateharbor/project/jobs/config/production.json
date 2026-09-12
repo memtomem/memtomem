@@ -1,0 +1,68 @@
+{
+  "lease_seconds": {
+    "description": "worker lease recovery",
+    "value": 90,
+    "environment": "production",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "worker lease는 90초이며 완료 체크포인트를 먼저 확인한 후 재할당한다. timeout만 보고 같은 작업을 두 번 시작하지 않는다.",
+    "decision": "jobs/docs/decisions/decision-current.md",
+    "implementation": "jobs/src/policy.py",
+    "observability": "checkpoint와 lease owner를 함께 읽는다. 완료면 결과를 재사용하고 만료·미완료일 때만 다시 claim한다."
+  },
+  "max_parallel": {
+    "description": "worker concurrency",
+    "value": 4,
+    "environment": "production",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "CPU 작업 4개를 넘기지 않아 heartbeat 스레드가 굶지 않게 한다.",
+    "decision": "jobs/docs/decisions/decision-current.md",
+    "implementation": "jobs/src/policy.py",
+    "observability": "CPU와 heartbeat 지연을 함께 보고 동시 작업 수를 낮춘다."
+  },
+  "checkpoint_seconds": {
+    "description": "checkpoint interval",
+    "value": 20,
+    "environment": "production",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "20초마다 재개 가능한 offset을 기록한다. 부분 파일이 durable해진 뒤에만 offset을 전진시킨다.",
+    "decision": "jobs/docs/decisions/decision-current.md",
+    "implementation": "jobs/src/policy.py",
+    "observability": "출력 flush와 checkpoint 순서를 확인하고 마지막 durable offset부터 재개한다."
+  },
+  "retry_budget": {
+    "description": "job retry budget",
+    "value": 2,
+    "environment": "production",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "같은 입력으로 계속 실패하는 CPU 작업은 두 번 뒤 검토 큐로 보낸다. 알림 retry와 다른 예산이다.",
+    "decision": "jobs/docs/decisions/decision-current.md",
+    "implementation": "jobs/src/policy.py",
+    "observability": "입력 checksum과 실패 원인이 같은지 확인하고 재현 자료를 격리한다."
+  },
+  "shutdown_seconds": {
+    "description": "worker shutdown grace",
+    "value": 45,
+    "environment": "production",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "종료 요청 뒤 새 claim은 막고 진행 중인 작업의 마지막 checkpoint에 시간을 준다.",
+    "decision": "jobs/docs/decisions/decision-current.md",
+    "implementation": "jobs/src/policy.py",
+    "observability": "draining 상태와 마지막 checkpoint를 확인한 뒤 프로세스를 종료한다."
+  },
+  "backlog_limit": {
+    "description": "job admission",
+    "value": 200,
+    "environment": "production",
+    "revision": "2026-08-24",
+    "status": "current",
+    "reason": "처리 용량을 넘는 작업은 접수 시 재시도 가능한 응답을 준다. 대기열을 무한히 늘리지 않는다.",
+    "decision": "jobs/docs/decisions/decision-current.md",
+    "implementation": "jobs/src/policy.py",
+    "observability": "tenant별 입장 제한을 확인하고 예약 작업의 backpressure를 켠다."
+  }
+}

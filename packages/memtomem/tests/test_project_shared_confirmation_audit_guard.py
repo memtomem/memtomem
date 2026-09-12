@@ -51,7 +51,7 @@ other site can lose its gate silently as far as this file is concerned.
 
 During the #2318 deprecation window this file
 is green while ``mm context pull`` still accepts ``--yes``, and it would stay
-green after the 0.6.0 flip if that acceptance were left in by accident. The
+green after the 0.7.0 flip if that acceptance were left in by accident. The
 behavioural tests in ``test_cli_context_pull.py`` are what pin those.
 
 Placement rule, and why it is strict. The emit must be a *later sibling*

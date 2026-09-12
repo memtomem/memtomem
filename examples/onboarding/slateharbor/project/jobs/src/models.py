@@ -1,0 +1,39 @@
+"""Slateharbor jobs: synthetic local policy sample, no external services."""
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class LeaseSecondsRequest:
+    """worker lease recovery: worker lease는 90초이며 완료 체크포인트를 먼저 확인한 후 재할당한다. timeout만 보고 같은 작업을 두 번 시작하지 않는다."""
+    heartbeat_age: int
+    environment: str = 'production'
+
+@dataclass(frozen=True)
+class MaxParallelRequest:
+    """worker concurrency: CPU 작업 4개를 넘기지 않아 heartbeat 스레드가 굶지 않게 한다."""
+    running: int
+    environment: str = 'production'
+
+@dataclass(frozen=True)
+class CheckpointSecondsRequest:
+    """checkpoint interval: 20초마다 재개 가능한 offset을 기록한다. 부분 파일이 durable해진 뒤에만 offset을 전진시킨다."""
+    elapsed_seconds: int
+    environment: str = 'production'
+
+@dataclass(frozen=True)
+class RetryBudgetRequest:
+    """job retry budget: 같은 입력으로 계속 실패하는 CPU 작업은 두 번 뒤 검토 큐로 보낸다. 알림 retry와 다른 예산이다."""
+    attempts: int
+    environment: str = 'production'
+
+@dataclass(frozen=True)
+class ShutdownSecondsRequest:
+    """worker shutdown grace: 종료 요청 뒤 새 claim은 막고 진행 중인 작업의 마지막 checkpoint에 시간을 준다."""
+    elapsed_seconds: int
+    environment: str = 'production'
+
+@dataclass(frozen=True)
+class BacklogLimitRequest:
+    """job admission: 처리 용량을 넘는 작업은 접수 시 재시도 가능한 응답을 준다. 대기열을 무한히 늘리지 않는다."""
+    queued: int
+    environment: str = 'production'
+

@@ -1,0 +1,131 @@
+{
+  "description": "Authored relevance judgments; not indexed and not read by the notebook or lab helper.",
+  "cases": [
+    {
+      "id": "auth-decision",
+      "query": "legacy callback",
+      "source_filter": "decision-current.md",
+      "expected_source": "auth/docs/decisions/decision-current.md",
+      "required_text": "legacy callback"
+    },
+    {
+      "id": "auth-implementation",
+      "query": "legacy callback",
+      "source_filter": "policy.py",
+      "expected_source": "auth/src/policy.py",
+      "required_text": "legacy callback"
+    },
+    {
+      "id": "auth-configuration",
+      "query": "legacy callback",
+      "source_filter": "production.json",
+      "expected_source": "auth/config/production.json",
+      "required_text": "legacy callback"
+    },
+    {
+      "id": "billing-decision",
+      "query": "billing webhook retry",
+      "source_filter": "decision-current.md",
+      "expected_source": "billing/docs/decisions/decision-current.md",
+      "required_text": "billing webhook retry"
+    },
+    {
+      "id": "billing-implementation",
+      "query": "billing webhook retry",
+      "source_filter": "policy.py",
+      "expected_source": "billing/src/policy.py",
+      "required_text": "billing webhook retry"
+    },
+    {
+      "id": "billing-configuration",
+      "query": "billing webhook retry",
+      "source_filter": "production.json",
+      "expected_source": "billing/config/production.json",
+      "required_text": "billing webhook retry"
+    },
+    {
+      "id": "notifications-decision",
+      "query": "notification retry policy",
+      "source_filter": "decision-current.md",
+      "expected_source": "notifications/docs/decisions/decision-current.md",
+      "required_text": "notification retry policy"
+    },
+    {
+      "id": "notifications-implementation",
+      "query": "notification retry policy",
+      "source_filter": "policy.py",
+      "expected_source": "notifications/src/policy.py",
+      "required_text": "notification retry policy"
+    },
+    {
+      "id": "notifications-configuration",
+      "query": "notification retry policy",
+      "source_filter": "production.json",
+      "expected_source": "notifications/config/production.json",
+      "required_text": "notification retry policy"
+    },
+    {
+      "id": "jobs-decision",
+      "query": "worker lease recovery",
+      "source_filter": "decision-current.md",
+      "expected_source": "jobs/docs/decisions/decision-current.md",
+      "required_text": "worker lease recovery"
+    },
+    {
+      "id": "jobs-implementation",
+      "query": "worker lease recovery",
+      "source_filter": "policy.py",
+      "expected_source": "jobs/src/policy.py",
+      "required_text": "worker lease recovery"
+    },
+    {
+      "id": "jobs-configuration",
+      "query": "worker lease recovery",
+      "source_filter": "production.json",
+      "expected_source": "jobs/config/production.json",
+      "required_text": "worker lease recovery"
+    },
+    {
+      "id": "files-decision",
+      "query": "file upload limit",
+      "source_filter": "decision-current.md",
+      "expected_source": "files/docs/decisions/decision-current.md",
+      "required_text": "file upload limit"
+    },
+    {
+      "id": "files-implementation",
+      "query": "file upload limit",
+      "source_filter": "policy.py",
+      "expected_source": "files/src/policy.py",
+      "required_text": "file upload limit"
+    },
+    {
+      "id": "files-configuration",
+      "query": "file upload limit",
+      "source_filter": "production.json",
+      "expected_source": "files/config/production.json",
+      "required_text": "file upload limit"
+    },
+    {
+      "id": "reports-decision",
+      "query": "report freshness",
+      "source_filter": "decision-current.md",
+      "expected_source": "reports/docs/decisions/decision-current.md",
+      "required_text": "report freshness"
+    },
+    {
+      "id": "reports-implementation",
+      "query": "report freshness",
+      "source_filter": "policy.py",
+      "expected_source": "reports/src/policy.py",
+      "required_text": "report freshness"
+    },
+    {
+      "id": "reports-configuration",
+      "query": "report freshness",
+      "source_filter": "production.json",
+      "expected_source": "reports/config/production.json",
+      "required_text": "report freshness"
+    }
+  ]
+}

@@ -519,6 +519,48 @@ class TestScrub:
     def test_multibyte_non_printable_scrubs_filesystem_bytes(self):
         assert scrub_text("a​b") == "a\\xe2\\x80\\x8bb"
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="the U+DCxx spelling of an undecodable byte is what POSIX "
+        "surrogateescape decoding produces; Windows encodes the filesystem "
+        "with surrogatepass (PEP 529), where U+DCE9 is a character in its own "
+        "right and re-encodes to three bytes instead of the one it stood for",
+    )
+    def test_a_surrogate_a_filesystem_produced_is_still_spelled_in_bytes(self):
+        """``surrogateescape`` decoding is the reason the bytes branch exists.
+
+        An undecodable filename byte arrives as ``U+DCxx``; that round-trips
+        through ``os.fsencode`` to the single byte it stood for, so it must
+        not fall back to a code point and rename it.
+        """
+        assert "caf\udce9".encode("utf-8", "surrogateescape") == b"caf\xe9"
+
+        assert scrub_text("caf\udce9") == "caf\\xe9"
+
+    def test_a_lone_surrogate_is_escaped_rather_than_crashing_the_caller(self):
+        """It must not take the caller down, on either platform.
+
+        JSON puts one within reach — ``json.loads('"\\ud800"')`` succeeds and
+        ``EmbeddingConfig`` accepts the result as ``model``, which the status
+        report renders (#2410) — so this is a value to spell, not to crash on.
+        Which spelling depends on the filesystem encoding, and both are
+        asserted here rather than one being called *the* answer: POSIX
+        ``surrogateescape`` re-encodes only ``U+DC80``-``U+DCFF`` and raises on
+        this one, so the code-point fallback is what renders; Windows
+        ``surrogatepass`` (PEP 529) gives it a byte spelling and never reaches
+        the fallback at all.
+        """
+        scrubbed = scrub_text("model-\ud800")
+        assert scrubbed.isprintable()
+
+        if os.name == "nt":
+            assert "\ud800".encode("utf-8", "surrogatepass") == b"\xed\xa0\x80"
+            assert scrubbed == "model-\\xed\\xa0\\x80"
+        else:
+            with pytest.raises(UnicodeEncodeError):
+                os.fsencode("\ud800")
+            assert scrubbed == "model-\\ud800"
+
 
 @pytest.mark.skipif(
     os.name == "nt",

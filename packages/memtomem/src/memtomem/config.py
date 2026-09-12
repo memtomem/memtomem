@@ -16,6 +16,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -1152,6 +1153,28 @@ class Mem2MemConfig(BaseSettings):
     hooks: HooksConfig = Field(default_factory=HooksConfig)
     session_trace: SessionTraceConfig = Field(default_factory=SessionTraceConfig)
 
+    # Sections the loaders read, rejected and therefore ignored (#2385 item 3).
+    # A private attribute rather than a field: it is a record of *this load*,
+    # not configuration, so it must stay out of ``model_dump`` — which is what
+    # ``mm config show`` renders and what the quality profiles round-trip —
+    # while still travelling with the object to every consumer
+    # (``app.state.config``, ``AppContext.config``, ``Components.config``)
+    # without new plumbing. The other two surfaces that must not see it are
+    # already safe by their own construction rather than by this choice:
+    # ``save_config_overrides`` reads an allowlist of ``MUTABLE_FIELDS`` with
+    # ``getattr`` and merges that into the existing file, and
+    # ``current_signature`` stats paths without reading any config object.
+    # Pydantic deep-copies private attributes on ``model_copy``, and the
+    # hot-reload swap is plain assignment, so both preserve it. The one path
+    # that loses it rebuilds a config from a dump (``quality/profiles.py``);
+    # nothing reads diagnostics off that transient stack.
+    _load_diagnostics: list[ConfigLoadDiagnostic] = PrivateAttr(default_factory=list)
+
+    @property
+    def load_diagnostics(self) -> tuple[ConfigLoadDiagnostic, ...]:
+        """Sections rejected while loading this config, in load order."""
+        return tuple(self._load_diagnostics)
+
     @model_validator(mode="after")
     def model_chunk_defaults(self) -> "Mem2MemConfig":
         from memtomem.embedding.profiles import apply_e5_defaults
@@ -1554,15 +1577,95 @@ def _section_value(data: dict, section_name: str, field_name: str) -> object:
     return section[field_name]
 
 
-def env_var_owning(section_name: str, field_name: str) -> str | None:
-    """The env var that actually *wins* this key, or ``None``.
+@dataclass(frozen=True)
+class EnvBinding:
+    """Which environment variable supplies a config field, and in what shape.
+
+    ``whole_section`` distinguishes the two spellings pydantic-settings binds
+    a nested model from, because the remedy differs: unsetting a
+    ``MEMTOMEM_<SECTION>__<FIELD>`` variable releases one field, while
+    unsetting a ``MEMTOMEM_<SECTION>`` variable releases every field its JSON
+    payload carries. A reporting surface that named the section variable
+    without saying so would be advising a wider change than the reader asked
+    for.
+    """
+
+    name: str
+    whole_section: bool
+
+
+def _decode_section_payload(name: str) -> dict | None:
+    """The JSON object a whole-section env var carries, or ``None``.
+
+    ``None`` covers every reading under which the variable supplies no field:
+    unset, unparseable, or parsed to something other than an object. Those
+    first two make ``Mem2MemConfig()`` raise, so a live server never reaches
+    the loaders with one — but this helper is also called from reporting
+    surfaces long after construction, on an environment that may have moved
+    since, so it answers rather than raises.
+
+    The payload is never logged or returned to a caller: a section variable
+    can carry ``api_key`` alongside the field being asked about.
+    """
+    import json as _json
+
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    try:
+        parsed = _json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _payload_outranks_delimiter(payload: dict, field_name: str) -> bool:
+    """With both shapes bound, does the section payload supply ``field_name``?
+
+    Which of the two reaches the model is decided by pydantic-settings' merge,
+    and that merge is measured, not assumed (pydantic-settings 2.15): the
+    exploded ``__`` variable is deep-updated into the decoded payload under
+    the *exact lower-case* key — replacing it in place when the payload
+    already spells it that way, appended at the end when it does not — and the
+    payload's case spellings are then folded in insertion order, last one
+    standing. So ``{"onnx_batch_size": 7, "ONNX_BATCH_SIZE": 9}`` beats a
+    delimiter variable (the upper spelling folds in after it) while
+    ``{"ONNX_BATCH_SIZE": 9, "onnx_batch_size": 7}`` loses to it.
+
+    Payloads that spell one field twice are pathological, but the answer here
+    is a variable name we hand an operator to unset, so it names the one that
+    is actually supplying the value. Callers establish that the payload
+    carries the field at all before asking.
+    """
+    if field_name not in payload:
+        # The delimiter's value is appended after every spelling here.
+        return False
+    spellings = [key for key in payload if isinstance(key, str) and key.lower() == field_name]
+    return spellings[-1] != field_name
+
+
+def env_binding_owning(section_name: str, field_name: str) -> EnvBinding | None:
+    """The env binding that actually *wins* this key, or ``None``.
 
     This is the single source of truth for "does the environment own this
     key": both override loaders (``load_config_overrides`` /
     ``load_config_d``) call it to decide whether to yield, and the reporting
-    surfaces (``mm config set``, ``mem_config(persist=True)``) call it to
-    decide what to tell the user (issue #2108). One function, so "read by
-    pydantic" and "honoured by the loaders" cannot drift apart.
+    surfaces (``mm config set``, ``mem_config(persist=True)``,
+    ``mm sync-doctor``) call it to decide what to tell the user (issue
+    #2108). One function, so "read by pydantic" and "honoured by the loaders"
+    cannot drift apart.
+
+    pydantic-settings binds a nested model from the environment two ways and
+    ``Mem2MemConfig`` accepts both, so both are recognised here (issue
+    #2390)::
+
+        MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=7        # one field
+        MEMTOMEM_EMBEDDING='{"onnx_batch_size": 7}'  # the whole section
+
+    Recognising only the first is what #2390 reported: pydantic read the JSON
+    spelling, the loaders did not honour it, and ``config.json`` was written
+    back over a value the environment had supplied — the opposite of what the
+    same setting does under the other spelling.
 
     Matching is case-insensitive, because that is how pydantic-settings reads
     the variable in the first place (``case_sensitive`` defaults to false).
@@ -1588,13 +1691,73 @@ def env_var_owning(section_name: str, field_name: str) -> str | None:
     unsetting it then reveals the next spelling rather than ``config.json``,
     which is why the reporting surfaces phrase the remedy over every spelling
     of the name rather than over the one they print.
+
+    That last-wins rule is why the winning *section* name is chosen before its
+    payload is read rather than after: a later ``memtomem_embedding='{}'``
+    shadows an earlier ``MEMTOMEM_EMBEDDING='{"onnx_batch_size": 7}'``
+    entirely, so picking the last name that happens to carry the field would
+    name a variable pydantic never read and hold ``config.json`` back for
+    nothing.
     """
-    wanted = f"memtomem_{section_name}__{field_name}".lower()
-    owning: str | None = None
+    bindings = env_bindings_for(section_name, field_name)
+    return bindings[0] if bindings else None
+
+
+def env_bindings_for(section_name: str, field_name: str) -> tuple[EnvBinding, ...]:
+    """Every *shape* the environment binds this field through, the winner first.
+
+    At most two entries, one per shape. A second entry means removing the
+    winner hands the field to the other shape rather than to ``config.json``,
+    which is the difference between advice that works and advice that looks
+    like it worked — so a surface that tells the user what to unset asks for
+    the whole tuple, while a loader deciding whether to yield reads only the
+    first (:func:`env_binding_owning`).
+
+    Same-*name* collisions are not separate entries: several case spellings of
+    one name are one shape, and the reporting surfaces already phrase their
+    remedy over every spelling of the name rather than over the one they
+    print.
+    """
+    field_wanted = f"memtomem_{section_name}__{field_name}".lower()
+    section_wanted = f"memtomem_{section_name}".lower()
+    field_var: str | None = None
+    section_var: str | None = None
     for name in os.environ:
-        if name.lower() == wanted:
-            owning = name
-    return owning
+        lowered = name.lower()
+        if lowered == field_wanted:
+            field_var = name
+        elif lowered == section_wanted:
+            section_var = name
+
+    payload = _decode_section_payload(section_var) if section_var is not None else None
+    section_carries = payload is not None and any(
+        isinstance(key, str) and key.lower() == field_name.lower() for key in payload
+    )
+    if field_var is None:
+        if section_carries:
+            return (EnvBinding(cast(str, section_var), whole_section=True),)
+        return ()
+
+    delimiter = EnvBinding(field_var, whole_section=False)
+    if not section_carries:
+        return (delimiter,)
+
+    section = EnvBinding(cast(str, section_var), whole_section=True)
+    if _payload_outranks_delimiter(cast(dict, payload), field_name.lower()):
+        return (section, delimiter)
+    return (delimiter, section)
+
+
+def env_var_owning(section_name: str, field_name: str) -> str | None:
+    """The name of the env var that wins this key, or ``None``.
+
+    Thin reading of :func:`env_binding_owning` for the callers that only need
+    the name — the loaders, whose gate is "does the environment own this at
+    all". Surfaces that *advise* the user go through ``env_binding_owning``
+    instead, because the advice depends on which shape supplies the value.
+    """
+    binding = env_binding_owning(section_name, field_name)
+    return binding.name if binding is not None else None
 
 
 def validation_error_message(exc: ValidationError) -> str:
@@ -1611,6 +1774,85 @@ def validation_error_message(exc: ValidationError) -> str:
             msg = msg[len("Value error, ") :]
         msgs.append(msg)
     return "; ".join(msgs) if msgs else str(exc)
+
+
+@dataclass(frozen=True)
+class ConfigLoadDiagnostic:
+    """One config section a loader read, rejected, and therefore ignored.
+
+    Both loaders treat a section as a transaction: if the assembled section
+    fails its cross-field validation, nothing from *that file* is kept for it
+    and the pre-layer baseline stands. Tolerant loads only logged that, so a
+    stale ``embedding.dimension`` left over from a previous model could put
+    the running server on ``provider="none"`` with no surface reporting it
+    (#2385 item 3).
+
+    This records the **event**, not the effective state: an early ``config.d``
+    fragment can be rejected and a later fragment — or ``config.json`` — can
+    still supply a valid section. So the wording is "that file's values for
+    the section were ignored", never "the section is running on defaults".
+    Read the config itself for what is in effect.
+    """
+
+    section: str
+    path: str
+    error: str
+    layer: Literal["config.json", "config.d"]
+
+    def as_status_warning(self) -> dict[str, str]:
+        """Render as a ``collect_status_report`` warning entry.
+
+        String values only: the status renderer special-cases ``dict`` values
+        as the embedding ``provider/model (Nd)`` block, so a nested payload
+        would render as a ``KeyError``-shaped surprise there.
+        """
+        return {
+            "kind": "config_section_rejected",
+            "section": self.section,
+            "path": self.path,
+            "error": self.error,
+            "fix": (
+                f"fix [{self.section}] in {self.path}: {self.error} "
+                f"(that file's values for the section are ignored until it validates)"
+            ),
+        }
+
+
+def _record_load_diagnostic(
+    config: object,
+    *,
+    section: str,
+    path: object,
+    error: str,
+    layer: Literal["config.json", "config.d"],
+) -> None:
+    """Append a rejection to the config's load diagnostics, if it has any.
+
+    Tolerant by design: the loaders accept any object with the section
+    attributes (tests build partial doubles), so a missing private attribute
+    must not turn a config warning into a crash.
+    """
+    diagnostics = getattr(config, "_load_diagnostics", None)
+    if diagnostics is None:
+        return
+    diagnostics.append(
+        ConfigLoadDiagnostic(section=section, path=str(path), error=error, layer=layer)
+    )
+
+
+def _reset_load_diagnostics(config: object, layer: Literal["config.json", "config.d"]) -> None:
+    """Drop this layer's previous entries before it re-reads.
+
+    Each loader owns its own layer, so re-loading the same config object
+    replaces that layer's record instead of appending a second copy, while
+    the other layer's entries survive. ``load_config_d`` always runs before
+    ``load_config_overrides`` on any given object (verified across all call
+    sites), so neither ordering loses a live entry.
+    """
+    diagnostics = getattr(config, "_load_diagnostics", None)
+    if diagnostics is None:
+        return
+    diagnostics[:] = [d for d in diagnostics if d.layer != layer]
 
 
 def section_invariant_error(section_obj: object, touched: Iterable[str]) -> str | None:
@@ -1680,7 +1922,9 @@ def assign_section_fields(section_obj: object, updates: Mapping[str, object]) ->
     return old_values
 
 
-def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> None:
+def load_config_overrides(
+    config: Mem2MemConfig, *, migrate: bool = True, strict: bool = False
+) -> None:
     """Apply persisted overrides from ~/.memtomem/config.json (if exists).
 
     Precedence: ``MEMTOMEM_<SECTION>__<FIELD>`` env vars win over
@@ -1691,12 +1935,34 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
     required for read-only diagnostic surfaces (e.g. ``mm context detect``,
     scope resolution from config) that must not touch disk as a side
     effect (see ``feedback_doctor_no_migration_loader``).
+
+    ``strict=True`` raises :class:`~memtomem.errors.ConfigError` when a
+    *section* fails its cross-field validation, instead of keeping the
+    pre-override baseline for it. The boundary is deliberate and narrow
+    (#2385 item 3): field-level skips — a value outside its
+    ``FIELD_CONSTRAINTS`` range, an unknown section or field, a key the
+    environment owns — stay tolerant in both modes, because a field an
+    upgrade removed must not close the Web write gate. A rejected section is
+    different in kind: it silently discards an explicit choice, which is how
+    a stale ``embedding.dimension`` could leave a server on
+    ``provider="none"``. Note the split is about *where* the error surfaces,
+    not about the user's intent: a wrong type in a field with no constraint
+    entry reaches section validation and is therefore a section rejection.
+
+    Either way the rejection is appended to the config's load diagnostics
+    (:attr:`Mem2MemConfig.load_diagnostics`), so tolerant callers can report
+    what they ignored. Entries from a previous ``config.json`` load of the
+    same object are replaced, not duplicated.
     """
     import json as _json
     import logging
     import warnings
 
+    from memtomem.errors import ConfigError
+
     _log = logging.getLogger(__name__)
+
+    _reset_load_diagnostics(config, "config.json")
 
     path = _override_path()
     if not path.exists():
@@ -1709,8 +1975,15 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
     if not isinstance(data, dict):
         _log.warning("Config overrides in %s are not a JSON object (ignored)", path)
         return
+    declared_sections = type(config).model_fields
     for section_name, updates in data.items():
-        section_obj = getattr(config, section_name, None)
+        # Resolve sections through the declared fields, not ``getattr``:
+        # otherwise any attribute name is a "section", so ``model_dump`` or
+        # ``load_diagnostics`` in the file resolves to a method/tuple and
+        # crashes at ``.model_copy()`` outside the validation handler below.
+        section_obj = (
+            getattr(config, section_name, None) if section_name in declared_sections else None
+        )
         if section_obj is None or not isinstance(updates, dict):
             if section_obj is None and isinstance(updates, dict):
                 _log.warning("Unknown config section '%s' in %s (ignored)", section_name, path)
@@ -1796,13 +2069,29 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
                     warnings.simplefilter("always")
                     validated_section = type(section_obj).model_validate(payload)
             except ValidationError as exc:
+                # Restore before reporting, so a caller that catches the
+                # strict error is never left holding the half-mutated
+                # section the ``setattr`` loop above built.
+                setattr(config, section_name, section_before)
+                message = validation_error_message(exc)
+                _record_load_diagnostic(
+                    config,
+                    section=section_name,
+                    path=path,
+                    error=message,
+                    layer="config.json",
+                )
+                if strict:
+                    raise ConfigError(
+                        f"Invalid config section [{section_name}] in {path}: {message}"
+                    ) from exc
                 _log.warning(
-                    "Invalid config section [%s] in %s: %s (reverting section to defaults)",
+                    "Invalid config section [%s] in %s: %s "
+                    "(that file's values for the section are ignored)",
                     section_name,
                     path,
-                    exc,
+                    message,
                 )
-                setattr(config, section_name, section_before)
             else:
                 setattr(config, section_name, validated_section)
                 for w in caught:
@@ -1936,10 +2225,13 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
         if not quiet:
             _log.warning(msg, *args)
 
+    _reset_load_diagnostics(config, "config.d")
+
     dir_ = _config_d_path()
     if not dir_.is_dir():
         return
 
+    declared_sections = type(config).model_fields
     fragments = sorted(p for p in dir_.iterdir() if p.is_file() and p.suffix == ".json")
     for path in fragments:
         try:
@@ -1951,7 +2243,11 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
             _warn("Config fragment %s is not a JSON object (ignored)", path)
             continue
         for section_name, updates in data.items():
-            section_obj = getattr(config, section_name, None)
+            # Declared fields only — see the same gate in
+            # ``load_config_overrides`` for why ``getattr`` alone is unsafe.
+            section_obj = (
+                getattr(config, section_name, None) if section_name in declared_sections else None
+            )
             if section_obj is None or not isinstance(updates, dict):
                 if section_obj is None and isinstance(updates, dict):
                     _warn("Unknown config section '%s' in %s (ignored)", section_name, path)
@@ -2070,6 +2366,19 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
                 validated_section = section_cls.model_validate(payload)
             except (TypeError, ValueError, ValidationError) as exc:
                 setattr(config, section_name, section_before)
+                # ``validation_error_message`` reads ``.errors()``, which only
+                # a pydantic ``ValidationError`` has; the bare TypeError /
+                # ValueError arms reach here too.
+                message = (
+                    validation_error_message(exc) if isinstance(exc, ValidationError) else str(exc)
+                )
+                _record_load_diagnostic(
+                    config,
+                    section=section_name,
+                    path=path,
+                    error=message,
+                    layer="config.d",
+                )
                 _warn("Invalid config section [%s] in %s: %s", section_name, path, exc)
                 continue
             setattr(config, section_name, validated_section)

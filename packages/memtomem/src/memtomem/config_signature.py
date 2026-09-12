@@ -112,10 +112,21 @@ def build_fresh_config(
     which a roots-reconciler would act on by unwatching every directory. So
     ``config.json`` is pre-parsed here before delegating.
 
+    ``strict_overrides`` covers two levels. The pre-parse below is file-level:
+    the whole override file is unreadable or is not an object. The same flag
+    is then forwarded to the loader as section-level strictness, so a section
+    whose cross-field validation fails raises instead of silently leaving the
+    pre-override baseline in place — a stale ``embedding.dimension`` used to
+    put a re-reader on ``provider="none"`` with nothing but a log line
+    (#2385 item 3). Field-level skips stay tolerant in both modes; see
+    :func:`load_config_overrides` for that boundary.
+
     ``strict_overrides=False`` preserves the historical tolerant startup
-    behavior: a malformed ``config.json`` is logged and ignored. It is for
-    handshake-time service discovery, where refusing the whole MCP handshake
-    would also make repair/status tools unreachable.
+    behavior: a malformed ``config.json`` is logged and ignored, and a
+    rejected section is recorded in ``cfg.load_diagnostics`` for the status
+    and config surfaces to report. It is for handshake-time service
+    discovery, where refusing the whole MCP handshake would also make
+    repair/status tools unreachable.
 
     ``strict_fragments=True`` extends strictness to the ``config.d``
     fragments, which :func:`load_config_d` otherwise logs and skips one at a
@@ -134,7 +145,7 @@ def build_fresh_config(
 
     cfg = Mem2MemConfig()
     load_config_d(cfg, strict=strict_fragments)
-    load_config_overrides(cfg, migrate=migrate)
+    load_config_overrides(cfg, migrate=migrate, strict=strict_overrides)
     from memtomem.embedding.profiles import apply_e5_defaults
 
     apply_e5_defaults(cfg)

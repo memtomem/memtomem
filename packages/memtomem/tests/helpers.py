@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from uuid import uuid4
 
@@ -123,6 +124,116 @@ def set_home(monkeypatch: pytest.MonkeyPatch, path: Path | str) -> None:
     """
     monkeypatch.setenv("HOME", str(path))
     monkeypatch.setenv("USERPROFILE", str(path))
+
+
+def _settings_env_config() -> tuple[str, str]:
+    """``(env_prefix, env_nested_delimiter)`` as ``Mem2MemConfig`` declares them.
+
+    Read off ``model_config`` rather than retyped: these two strings decide what
+    the scrub below considers config, so a change to either has to move the
+    scrub with it. ``test_ambient_env_hermeticity`` pins the values, so a change
+    is loud rather than silent.
+    """
+    from memtomem.config import Mem2MemConfig
+
+    settings = Mem2MemConfig.model_config
+    return settings["env_prefix"].upper(), settings["env_nested_delimiter"]
+
+
+#: Everything ``Mem2MemConfig`` binds from the environment lives under this
+#: prefix; the delimiter is what separates a *section* from a *field* in a
+#: binding — ``MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE``.
+MEMTOMEM_ENV_PREFIX, MEMTOMEM_ENV_NESTED_DELIMITER = _settings_env_config()
+
+
+def memtomem_config_section_names() -> frozenset[str]:
+    """Top-level ``Mem2MemConfig`` section names, uppercased.
+
+    Read off the model rather than written down, so a new section is covered
+    the day it lands.
+    """
+    from memtomem.config import Mem2MemConfig
+
+    return frozenset(name.upper() for name in Mem2MemConfig.model_fields)
+
+
+def ambient_memtomem_config_env(environ: Mapping[str, str]) -> list[str]:
+    """Names in ``environ`` that bind config, in either of the two shapes.
+
+    The prefix alone is *not* the config surface, so it cannot be the boundary:
+    this package also reads flat ``MEMTOMEM_*`` switches straight from the
+    environment — ``MEMTOMEM_UPDATE_WIRE_GOLDENS`` (documented as the way to
+    regenerate the wire goldens), ``MEMTOMEM_TOOL_MODE``,
+    ``MEMTOMEM_LOG_LEVEL``, ``MEMTOMEM_WIKI_PATH``, ``MEMTOMEM_FASTEMBED_CACHE``,
+    ``MEMTOMEM_INDEX_DEBOUNCE_QUEUE``, ``MEMTOMEM_TEST_*``. A developer exports
+    those to steer the run they are starting; scrubbing them silently disables
+    the workflow they asked for.
+
+    pydantic-settings binds a nested model from the environment two ways, and
+    both are here:
+
+    * ``MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE`` — one field, found by the
+      ``env_nested_delimiter``.
+    * ``MEMTOMEM_EMBEDDING='{"onnx_batch_size": 7}'`` — the whole section as
+      JSON, a *flat* name. It reaches the running config whether or not
+      ``config.json`` claims the field: ``env_var_owning`` recognises both
+      spellings since issue #2390, so a redirected config layer is no defence
+      against either. The developer's shell is deciding, which is what the
+      scrub is for. Both outcomes are pinned in
+      ``test_ambient_env_hermeticity``.
+
+    The second shape is why this function has to know the section names: no
+    lexical rule separates ``MEMTOMEM_EMBEDDING`` from ``MEMTOMEM_TOOL_MODE``.
+    Prefix, delimiter and section names are all read off ``Mem2MemConfig``, so
+    a new config field or section is covered without anyone updating a list,
+    and a new flat switch is spared without anyone adding an exemption — as
+    long as the model keeps the shape those three readings assume. A top-level
+    validation alias would bind a name outside the prefix, and a section that
+    is itself a ``BaseSettings`` would read its own environment; neither is
+    visible in the parent's ``model_fields``, and
+    ``test_ambient_env_hermeticity`` fails loudly if either appears.
+
+    Matching is case-insensitive because pydantic-settings binds env names
+    case-insensitively — a lowercase ``memtomem_embedding__onnx_batch_size``
+    owns the field just as well.
+    """
+    sections = memtomem_config_section_names()
+    selected = []
+    for key in environ:
+        upper = key.upper()
+        if not upper.startswith(MEMTOMEM_ENV_PREFIX):
+            continue
+        rest = upper[len(MEMTOMEM_ENV_PREFIX) :]
+        if MEMTOMEM_ENV_NESTED_DELIMITER in rest or rest in sections:
+            selected.append(key)
+    return selected
+
+
+def isolate_config_paths(monkeypatch: pytest.MonkeyPatch, root: Path) -> Path:
+    """Point the ``~/.memtomem`` config layer at ``root`` and return it.
+
+    ``config.json`` *and* the ``config.d`` directory: they are separate module
+    constants and every reader — :func:`memtomem.config.load_config_overrides`,
+    :func:`memtomem.config.load_config_d`,
+    :func:`memtomem.config_signature.current_signature` — resolves them
+    independently, so redirecting one still leaves the other pointing at the
+    developer's real home.
+
+    For a test that only needs the real home kept out of reach, this is the
+    narrower alternative to :func:`set_home`: it moves nothing but the config
+    layer. A test whose subject *is* ``Path.home()`` still wants ``set_home``.
+
+    Give ``root`` a directory of its own — ``tmp_path_factory.mktemp()`` — and
+    not the test's own ``tmp_path``: a test that asserts its ``tmp_path`` came
+    out empty (``TestChunkCrudCrossProcessLock`` in ``test_web_routes.py``)
+    counts a config home dropped there as a stray artifact of the route.
+    """
+    import memtomem.config as _config_module
+
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(_config_module, "_CONFIG_OVERRIDE_PATH", root / "config.json")
+    monkeypatch.setattr(_config_module, "_CONFIG_D_PATH", root / "config.d")
+    return root
 
 
 #: Written to stdout by every poisoned click prompt entry point. Any test that

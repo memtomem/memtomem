@@ -886,6 +886,414 @@ class TestReloadIfStale:
         assert err.at_mtime_ns == _hot_reload.get_config_mtime_ns()
 
 
+class TestBudgetValidationRunsOffTheLoop:
+    """``validate_budget_configuration`` must not run on the event loop.
+
+    With an E5 profile selected it builds a ``TokenBudget``, and
+    ``resolve_tokenizer`` reaches ``hf_hub_download`` — a cold cache turns
+    every reload into a network round-trip on the loop thread. The witness is
+    the recorded thread ident, so each test also asserts the patched callable
+    actually ran: an assertion that only compares idents passes vacuously when
+    the call site is removed.
+    """
+
+    @staticmethod
+    def _thread_recorder(record: list[int], *, raises: BaseException | None = None):
+        def _validate(*_args: object, **_kwargs: object) -> None:
+            record.append(threading.get_ident())
+            if raises is not None:
+                raise raises
+
+        return _validate
+
+    async def test_reload_if_stale_validates_in_a_worker_thread(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.chunking.bounded as bounded
+
+        record: list[int] = []
+        monkeypatch.setattr(bounded, "validate_budget_configuration", self._thread_recorder(record))
+
+        app = create_app(lifespan=None, mode="dev")
+        _write_config(home, {"mmr": {"enabled": False}})
+        app.state.config = _hot_reload._build_fresh_config()
+        app.state.config_signature = _hot_reload.current_signature()
+        app.state.last_reload_error = None
+
+        _write_config(home, {"mmr": {"enabled": True}})
+        loop_thread = threading.get_ident()
+
+        assert await _hot_reload.reload_if_stale(app) is True
+
+        assert record, "validate_budget_configuration was never called"
+        assert loop_thread not in record, "budget validation ran on the event loop thread"
+
+    async def test_reload_if_stale_keeps_config_when_the_worker_raises(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.chunking.bounded as bounded
+
+        record: list[int] = []
+        monkeypatch.setattr(
+            bounded,
+            "validate_budget_configuration",
+            self._thread_recorder(record, raises=ValueError("budget boom")),
+        )
+
+        app = create_app(lifespan=None, mode="dev")
+        _write_config(home, {"mmr": {"enabled": False}})
+        app.state.config = _hot_reload._build_fresh_config()
+        app.state.config_signature = _hot_reload.current_signature()
+        app.state.last_reload_error = None
+        old = app.state.config
+
+        _write_config(home, {"mmr": {"enabled": True}})
+        loop_thread = threading.get_ident()
+
+        assert await _hot_reload.reload_if_stale(app) is False
+
+        assert record, "validate_budget_configuration was never called"
+        assert loop_thread not in record
+        # Offloading must not change the failure contract: same config object,
+        # same ReloadError shape, same mtime binding as an in-loop raise.
+        assert app.state.config is old
+        err = _hot_reload.get_reload_error(app)
+        assert err is not None
+        assert err.message == "ValueError: budget boom"
+        assert err.at_mtime_ns == _hot_reload.get_config_mtime_ns()
+
+    async def test_apply_runtime_config_changes_propagates_and_skips_fanout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The post-commit validation stays inline, and still gates the fanout.
+
+        It sits outside ``reload_if_stale``'s ``except``, so a failure has to
+        reach the caller rather than being folded into a ``ReloadError`` — and
+        nothing downstream may run against the budget that just failed.
+        """
+        import memtomem.chunking.bounded as bounded
+
+        record: list[int] = []
+        monkeypatch.setattr(
+            bounded,
+            "validate_budget_configuration",
+            self._thread_recorder(record, raises=ValueError("budget boom")),
+        )
+
+        old = MagicMock()
+        old.search.tokenizer = "unicode61"
+        new = MagicMock()
+        new.search.tokenizer = "kiwi"
+        storage = AsyncMock()
+        search_pipeline = MagicMock()
+        loop_thread = threading.get_ident()
+
+        with pytest.raises(ValueError, match="budget boom"):
+            await _hot_reload.apply_runtime_config_changes(
+                old, new, storage=storage, search_pipeline=search_pipeline
+            )
+
+        assert record, "validate_budget_configuration was never called"
+        # Inline is the contract here, not an oversight: the fanout below must
+        # reach the runtime without yielding. Offloading this call would keep
+        # every assertion below green, so the thread is the witness.
+        assert record == [loop_thread], "post-commit validation left the event loop"
+        storage.configure_chunk_budget.assert_not_called()
+        storage.rebuild_fts.assert_not_called()
+        search_pipeline.invalidate_cache.assert_not_called()
+
+
+class TestOffloadedValidationSupersession:
+    """The offloaded validation adds a suspension point where there was none.
+
+    Before the ``to_thread`` move, ``reload_if_stale``'s ``try`` block and the
+    head of ``apply_runtime_config_changes`` ran without yielding, so no other
+    reload could interleave. These pin what must stay true now that one can.
+    """
+
+    async def test_superseded_failure_self_clears_on_the_next_read(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A concurrent reload fixed the file and won; our failure is stale.
+
+        The error branch still raises the banner — that contract is #273's, and
+        ``test_reload_if_stale_error_branch_cas_yields_to_concurrent_writer_bump``
+        pins it. What must hold is that the banner is bound to the state *this*
+        attempt read, so the very next reload releases it instead of refusing
+        writes (``_check_reload_block`` → HTTP 409) against a config that is
+        already loaded and valid.
+        """
+        import memtomem.chunking.bounded as bounded
+
+        entered = threading.Event()
+        release = threading.Event()
+        calls: list[int] = []
+
+        def _validate(*_args: object, **_kwargs: object) -> None:
+            calls.append(1)
+            if len(calls) == 1:
+                entered.set()
+                assert release.wait(10), "test deadlock: release was never set"
+                raise ValueError("stale attempt")
+
+        monkeypatch.setattr(bounded, "validate_budget_configuration", _validate)
+
+        app = create_app(lifespan=None, mode="dev")
+        _write_config(home, {"mmr": {"enabled": False}})
+        app.state.config = _hot_reload._build_fresh_config()
+        app.state.config_signature = _hot_reload.current_signature()
+        app.state.last_reload_error = None
+
+        # Attempt A starts against this edit and parks on the worker thread.
+        _write_config(home, {"mmr": {"enabled": True}})
+        task_a = asyncio.create_task(_hot_reload.reload_if_stale(app))
+        try:
+            assert await asyncio.to_thread(entered.wait, 10), "A never reached validation"
+
+            # Attempt B sees a further edit, validates cleanly, and commits.
+            _write_config(home, {"mmr": {"enabled": True}, "search": {"default_top_k": 7}})
+            assert await _hot_reload.reload_if_stale(app) is True
+            assert app.state.config.search.default_top_k == 7
+        finally:
+            # Unblock the worker even if an assertion above failed, so the
+            # failure is what surfaces rather than a 10s hang and a task that
+            # is still running when the loop closes.
+            release.set()
+            assert await task_a is False
+        assert len(calls) == 2, "both attempts must have reached validation"
+
+        # A's banner is up, but bound to the file A read — not B's correction.
+        err = _hot_reload.get_reload_error(app)
+        assert err is not None
+        assert err.at_mtime_ns != _hot_reload.get_config_mtime_ns()
+
+        # So the next read releases it and B's config stays in place. Whether
+        # that read re-swaps is not the claim — A's own rebuild may have
+        # rewritten the file via the legacy migration and moved the signature
+        # again; what must hold is that the stale banner is gone and the
+        # configuration on disk is the one in effect.
+        await _hot_reload.reload_if_stale(app)
+        assert _hot_reload.get_reload_error(app) is None
+        assert app.state.config.search.default_top_k == 7
+
+    async def test_older_failure_does_not_replace_a_newer_ones_banner(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Two overlapping failures: the newer one owns the banner.
+
+        If the older attempt overwrote it, its error would be released as
+        stale on the very next read — the mtime it recorded is not the one on
+        disk — and the write gate would open on a layer set that never
+        validated. Saving then overwrites the broken file, which is the
+        recovery trail ``_check_reload_block`` is there to protect.
+        """
+        from fastapi import HTTPException
+
+        from memtomem.web.routes.system import _check_reload_block
+
+        import memtomem.chunking.bounded as bounded
+
+        entered = threading.Event()
+        release = threading.Event()
+        seen: list[str] = []
+
+        def _validate(config: object, *_args: object, **_kwargs: object) -> None:
+            which = "old" if getattr(config.search, "default_top_k", None) == 3 else "new"
+            seen.append(which)
+            if which == "old":
+                entered.set()
+                assert release.wait(10), "test deadlock: release was never set"
+                raise ValueError("older failure")
+            raise ValueError("newer failure")
+
+        monkeypatch.setattr(bounded, "validate_budget_configuration", _validate)
+
+        app = create_app(lifespan=None, mode="dev")
+        _write_config(home, {"search": {"default_top_k": 1}})
+        app.state.config = _hot_reload._build_fresh_config()
+        app.state.config_signature = _hot_reload.current_signature()
+        app.state.last_reload_error = None
+
+        # A reads this edit and parks on the worker thread.
+        _write_config(home, {"search": {"default_top_k": 3}})
+        task_a = asyncio.create_task(_hot_reload.reload_if_stale(app))
+        try:
+            assert await asyncio.to_thread(entered.wait, 10), "A never reached validation"
+
+            # B reads a further, still-broken edit and fails first.
+            _write_config(home, {"search": {"default_top_k": 4}})
+            assert await _hot_reload.reload_if_stale(app) is False
+            newer = _hot_reload.get_reload_error(app)
+            assert newer is not None and newer.message == "ValueError: newer failure"
+        finally:
+            # See the sibling handshake: release unconditionally so a failed
+            # assertion is not masked by a hung worker.
+            release.set()
+            assert await task_a is False
+        assert "old" in seen and "new" in seen, seen
+
+        # B's banner survives A's later failure, and the disk it describes is
+        # still broken — so it is not released, and writes stay refused.
+        err = _hot_reload.get_reload_error(app)
+        assert err is not None
+        assert err.message == "ValueError: newer failure"
+        assert _hot_reload.reload_error_is_stale(err) is False
+
+        # A follow-up read may re-attempt and raise its own banner; what must
+        # never happen is the older attempt's message standing here, because
+        # that one *would* be released and would open the gate.
+        assert await _hot_reload.reload_if_stale(app) is False
+        current = _hot_reload.get_reload_error(app)
+        assert current is not None
+        assert current.message == "ValueError: newer failure"
+        with pytest.raises(HTTPException) as excinfo:
+            _check_reload_block(SimpleNamespace(app=app))  # type: ignore[arg-type]
+        assert excinfo.value.status_code == 409
+
+    async def test_failure_binds_to_the_attempted_mtime_not_the_current_one(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The file was corrected while validation ran; the next read must retry.
+
+        ``reload_if_stale`` clears a recorded error only when its
+        ``at_mtime_ns`` differs from what is on disk. Stamping the error with
+        the mtime read *after* the correction makes the two equal, and the
+        error never clears.
+        """
+        import memtomem.chunking.bounded as bounded
+
+        cfg_path = home / ".memtomem" / "config.json"
+
+        def _validate(*_args: object, **_kwargs: object) -> None:
+            # Stand in for an editor saving a fix while we are on the worker.
+            _write_config(home, {"mmr": {"enabled": True}, "search": {"default_top_k": 9}})
+            raise ValueError("boom")
+
+        app = create_app(lifespan=None, mode="dev")
+        _write_config(home, {"mmr": {"enabled": False}})
+        app.state.config = _hot_reload._build_fresh_config()
+        app.state.config_signature = _hot_reload.current_signature()
+        app.state.last_reload_error = None
+
+        _write_config(home, {"mmr": {"enabled": True}})
+        monkeypatch.setattr(bounded, "validate_budget_configuration", _validate)
+
+        assert await _hot_reload.reload_if_stale(app) is False
+
+        err = _hot_reload.get_reload_error(app)
+        assert err is not None
+        assert err.at_mtime_ns != _hot_reload.get_config_mtime_ns(), (
+            "error bound to the corrected file — it can never clear"
+        )
+        assert cfg_path.exists()
+
+
+class TestReloadErrorReleaseIsCompositeAware:
+    """A banner must be released by a fix in *any* layer the reload reads.
+
+    ``at_mtime_ns`` describes ``config.json``. A correction made in a
+    ``config.d`` fragment leaves that mtime alone, so an error keyed on it
+    outlives the problem — and ``_check_reload_block`` keeps answering 409.
+    Reachable only because the offloaded validation lets a second reload commit
+    the corrected layer set while the first attempt is still failing.
+    """
+
+    async def test_fragment_only_correction_releases_the_banner(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import memtomem.chunking.bounded as bounded
+
+        frag_dir = home / ".memtomem" / "config.d"
+        frag_dir.mkdir(parents=True, exist_ok=True)
+        frag = frag_dir / "10-local.json"
+
+        app = create_app(lifespan=None, mode="dev")
+        _write_config(home, {"mmr": {"enabled": False}})
+        frag.write_text(json.dumps({"search": {"default_top_k": 5}}), encoding="utf-8")
+        _bump_mtime(frag)
+        app.state.config = _hot_reload._build_fresh_config()
+        app.state.config_signature = _hot_reload.current_signature()
+        app.state.last_reload_error = None
+
+        override_mtime_before = _hot_reload.get_config_mtime_ns()
+
+        # An attempt against a fragment edit fails.
+        frag.write_text(json.dumps({"search": {"default_top_k": 6}}), encoding="utf-8")
+        _bump_mtime(frag)
+        monkeypatch.setattr(
+            bounded,
+            "validate_budget_configuration",
+            lambda *a, **k: (_ for _ in ()).throw(ValueError("bad fragment")),
+        )
+        assert await _hot_reload.reload_if_stale(app) is False
+        err = _hot_reload.get_reload_error(app)
+        assert err is not None
+
+        # The fragment is corrected. config.json never moved.
+        monkeypatch.setattr(bounded, "validate_budget_configuration", lambda *a, **k: None)
+        frag.write_text(json.dumps({"search": {"default_top_k": 7}}), encoding="utf-8")
+        _bump_mtime(frag)
+        assert _hot_reload.get_config_mtime_ns() == override_mtime_before, (
+            "fixture no longer exercises the fragment-only path"
+        )
+
+        # Pin the state the stuck case produced: signature already matches, so
+        # the release branch — not a rebuild — is what has to let go.
+        _hot_reload._set_last_signature(app, _hot_reload.current_signature())
+        assert _hot_reload.reload_error_is_stale(err) is True
+        assert await _hot_reload.reload_if_stale(app) is False
+        assert _hot_reload.get_reload_error(app) is None
+
+    async def test_write_gate_and_release_branch_agree(self, home: Path):
+        """Both consumers read the same predicate, so neither can strand the UI."""
+        from fastapi import HTTPException
+
+        from memtomem.web.routes.system import _check_reload_block
+
+        app = create_app(lifespan=None, mode="dev")
+        _write_config(home, {"mmr": {"enabled": False}})
+        app.state.config = _hot_reload._build_fresh_config()
+        app.state.config_signature = _hot_reload.current_signature()
+
+        live = _hot_reload.ReloadError(
+            message="boom",
+            at_mtime_ns=_hot_reload.get_config_mtime_ns(),
+            timestamp=time.time(),
+            at_signature=_hot_reload.current_signature(),
+        )
+        app.state.last_reload_error = live
+        assert _hot_reload.reload_error_is_stale(live) is False
+        request = SimpleNamespace(app=app)
+        with pytest.raises(HTTPException) as excinfo:
+            _check_reload_block(request)  # type: ignore[arg-type]
+        assert excinfo.value.status_code == 409
+
+        # The disagreement case, which is the one that stranded the UI: a
+        # fragment correction leaves config.json's mtime alone, so a write gate
+        # reading mtime only still refuses while the release branch lets go.
+        frag_dir = home / ".memtomem" / "config.d"
+        frag_dir.mkdir(parents=True, exist_ok=True)
+        frag = frag_dir / "10-local.json"
+        frag.write_text(json.dumps({"search": {"default_top_k": 7}}), encoding="utf-8")
+        _bump_mtime(frag)
+        assert live.at_mtime_ns == _hot_reload.get_config_mtime_ns(), (
+            "fixture no longer exercises the fragment-only path"
+        )
+
+        assert _hot_reload.reload_error_is_stale(live) is True
+        _check_reload_block(request)  # type: ignore[arg-type]  # must not raise
+
+        # An error with no recorded signature keeps the pre-existing behaviour:
+        # mtime alone decides.
+        legacy = _hot_reload.ReloadError(
+            message="boom",
+            at_mtime_ns=_hot_reload.get_config_mtime_ns(),
+            timestamp=time.time(),
+        )
+        assert legacy.at_signature is None
+        assert _hot_reload.reload_error_is_stale(legacy) is False
+
+
 class TestApplyRuntimeConfigChanges:
     def _cfg(self, *, rerank_enabled: bool, provider: str = "fastembed"):
         return SimpleNamespace(

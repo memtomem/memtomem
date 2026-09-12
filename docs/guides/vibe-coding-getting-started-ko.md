@@ -71,8 +71,8 @@ Claude Code와 Codex CLI 중 어느 쪽을 쓰더라도 완전히 새 환경에�
 다음 두 명령을 한 번 실행합니다.
 
 ```bash
-uvx --from 'memtomem==0.5.0' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem==0.5.0' mm status
+uvx --from 'memtomem==0.6.0' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem==0.6.0' mm status
 ```
 
 `--mcp skip`은 다음 단계의 플러그인이 MCP 연결을 제공하므로 다른
@@ -91,12 +91,15 @@ database path는 나중에 두 도구가 같은 저장소를 보는지 확인할
 Claude Code 세션에서 실행합니다.
 
 기존에 Claude MCP를 등록했다면 Claude Code의 `/mcp`에서 먼저 확인합니다.
-PyPI에 배포된 0.5.0에는 `--claude-mcp` 옵션이 없습니다. 아래 진단 명령은
-이번 변경이 포함된 memtomem 소스 체크아웃이 있을 때 사용합니다.
+등록 상태는 아래 진단 명령으로 점검합니다.
 
 ```bash
-uv run --project /path/to/memtomem --package memtomem mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.0" mm doctor --claude-mcp
 ```
+
+핀을 쓰는 이유는 플러그인 설치가 MCP 서버를 등록할 뿐 `mm` 을 PATH에 올리지
+않기 때문입니다. CLI 를 이미 설치했다면 `mm doctor --claude-mcp` 도 같은
+점검입니다.
 
 `/path/to/memtomem`을 소스 체크아웃 경로로 바꾸고, 검사할 프로젝트의
 루트에서 실행하세요. `--project`는 현재 작업 디렉터리를 유지합니다.
@@ -224,7 +227,7 @@ $memtomem-setup 스킬로 /path/to/project/docs를 인덱싱하고 검색까지 
 해당하는 기억은 실제 Git 저장소 루트에서 별도 초기화합니다.
 
 ```bash
-uvx --from 'memtomem==0.5.0' mm mem init --scope project_local
+uvx --from 'memtomem==0.6.0' mm mem init --scope project_local
 ```
 
 이 명령은 Git에 올라가지 않는 로컬 기억 계층을 만들고 등록합니다. 실행

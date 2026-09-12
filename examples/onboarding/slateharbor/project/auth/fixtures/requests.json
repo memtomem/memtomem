@@ -1,0 +1,62 @@
+{
+  "legacy_callback": {
+    "description": "legacy callback",
+    "inputs": [
+      true,
+      false
+    ],
+    "purpose": "INC-AUTH-17에서 신규 웹 로그인은 정상인데 구형 데스크톱만 callback 404가 발생했다. 웹 성공률 대시보드에는 장애가 드러나지 않았다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-AUTH-42: 데스크톱 cohort별 사용량 관찰을 추가한다. 삭제 PR은 아직 승인되지 않았다."
+  },
+  "session_minutes": {
+    "description": "session expiry",
+    "inputs": [
+      30,
+      90
+    ],
+    "purpose": "교대 종료 후 같은 브라우저를 쓰던 다른 직원에게 이전 tenant 화면이 노출됐다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-AUTH-43: session age 경계값을 프런트 안내 문구와 맞춘다."
+  },
+  "login_attempts": {
+    "description": "login throttle",
+    "inputs": [
+      2,
+      8
+    ],
+    "purpose": "계정당 10회를 허용하는 동안 자동화 도구가 유효 계정 목록을 추려냈고, IP 단위로 막자 같은 사무실의 정상 로그인까지 함께 차단됐다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-AUTH-44: 계정별 throttle 로그에 원인 코드를 추가한다."
+  },
+  "invite_hours": {
+    "description": "invite validity",
+    "inputs": [
+      12,
+      72
+    ],
+    "purpose": "회수된 초대 메일의 링크가 일주일 뒤에도 사용됐다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-AUTH-45: 만료와 회수 상태를 초대 화면에서 구분한다."
+  },
+  "clock_skew_seconds": {
+    "description": "clock skew",
+    "inputs": [
+      10,
+      90
+    ],
+    "purpose": "시간 동기화가 끊긴 worker가 만료된 세션을 허용했다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-AUTH-46: 시계 편차 경보를 readiness와 분리한다."
+  },
+  "recovery_codes": {
+    "description": "recovery inventory",
+    "inputs": [
+      3,
+      0
+    ],
+    "purpose": "복구 코드 4개를 모두 소진한 사용자가 재발급 전까지 로그인하지 못해 지원팀 수동 처리로 몰렸다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-AUTH-47: 남은 코드 수가 임계값 아래로 내려가면 재발급을 안내하는 경고를 추가한다."
+  }
+}

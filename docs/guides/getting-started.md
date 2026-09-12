@@ -222,6 +222,11 @@ mm search "a phrase from those notes"
 See [Core memory tools](reference/core-memory-tools.md) for incremental
 indexing, filters, namespaces, redaction, and force-reindex behavior.
 
+Indexing leaves an empty `.<name>.lock` file next to each indexed file. Those
+are cross-process lock sidecars, they are meant to stay, and they belong in
+your `.gitignore` — see
+[Configuration → Lock sidecars](configuration.md#lock-sidecars-namelock).
+
 ### 5. Organise memories with namespaces
 
 Namespaces are optional labels such as `work`, `personal`, or a project name.
@@ -254,7 +259,7 @@ claude mcp add memtomem -s user -- memtomem-server
 
 This reuses the persistent `memtomem[all]` environment installed above. For a
 one-off setup without a persistent install, use `uvx --isolated --from
-"memtomem[all]==0.5.0" memtomem-server`. Claude Code users can instead
+"memtomem[all]==0.6.0" memtomem-server`. Claude Code users can instead
 install the [memtomem plugin](integrations/claude-code.md#mcp-server-setup),
 which provides an exact-pinned MCP server and seven focused workflows. Automatic
 indexing hooks are supplied only by the separate `memtomem-automation` plugin.

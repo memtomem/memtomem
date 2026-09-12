@@ -61,6 +61,7 @@ from memtomem.web.schemas.config import (
     ConfigEmbeddingOut,
     ConfigIndexingOut,
     ConfigMMROut,
+    ConfigLoadWarningOut,
     ConfigNamespaceOut,
     ConfigPatchChange,
     ConfigPatchRequest,
@@ -167,9 +168,10 @@ def _check_reload_block(request: Request) -> None:
     err = _hot_reload.get_reload_error(request.app)
     if err is None:
         return
-    if err.at_mtime_ns != _hot_reload.get_config_mtime_ns():
-        # Disk was fixed since the error was recorded; let the next reload
-        # attempt clear it.
+    if _hot_reload.reload_error_is_stale(err):
+        # Disk was fixed since the error was recorded — the override file, or a
+        # ``config.d`` fragment, which moves the composite signature without
+        # touching that file's mtime. Let the next reload attempt clear it.
         return
     raise HTTPException(
         status_code=409,
@@ -474,6 +476,15 @@ def _build_config_response(
         ),
         config_mtime_ns=mtime_ns,
         config_reload_error=reload_error,
+        config_load_warnings=[
+            ConfigLoadWarningOut(
+                section=diagnostic.section,
+                path=diagnostic.path,
+                error=diagnostic.error,
+                fix=diagnostic.as_status_warning()["fix"],
+            )
+            for diagnostic in getattr(cfg, "load_diagnostics", ())
+        ],
     )
 
 
@@ -790,10 +801,7 @@ async def patch_config(
                     try:
                         save_config_overrides(config)
                     except (ValueError, TimeoutError) as e:
-                        request.app.state.config = _hot_reload._build_fresh_config()
-                        _hot_reload._set_last_signature(
-                            request.app, _hot_reload.current_signature()
-                        )
+                        _hot_reload.revert_runtime_to_disk(request.app)
                         # Discard the validated-but-uninstalled reranker.
                         if pending_reranker is not None:
                             await _hot_reload._close_reranker_safely(pending_reranker)
@@ -862,8 +870,7 @@ async def save_config(
                 try:
                     save_config_overrides(request.app.state.config)
                 except ValueError as e:
-                    request.app.state.config = _hot_reload._build_fresh_config()
-                    _hot_reload._set_last_signature(request.app, _hot_reload.current_signature())
+                    _hot_reload.revert_runtime_to_disk(request.app)
                     raise HTTPException(400, detail=str(e))
                 _hot_reload.commit_writer_signature(request.app)
     except TimeoutError:
@@ -937,10 +944,7 @@ async def add_memory_dir(
                         # Cross-process lock timeout (#1567): the append was not
                         # persisted, so revert runtime to disk state instead of
                         # keeping an unpersisted dir the 503 claims we didn't add.
-                        request.app.state.config = _hot_reload._build_fresh_config()
-                        _hot_reload._set_last_signature(
-                            request.app, _hot_reload.current_signature()
-                        )
+                        _hot_reload.revert_runtime_to_disk(request.app)
                         raise HTTPException(
                             503, "memory-dirs/add timed out — another update may be in progress"
                         )
@@ -1095,8 +1099,7 @@ async def remove_memory_dir(
                     # Cross-process lock timeout (#1567): the removal was not
                     # persisted, so revert runtime to disk state instead of
                     # dropping a dir the 503 claims we kept.
-                    request.app.state.config = _hot_reload._build_fresh_config()
-                    _hot_reload._set_last_signature(request.app, _hot_reload.current_signature())
+                    _hot_reload.revert_runtime_to_disk(request.app)
                     raise HTTPException(
                         503, "memory-dirs/remove timed out — another update may be in progress"
                     )

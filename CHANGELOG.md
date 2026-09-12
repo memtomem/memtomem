@@ -5,6 +5,122 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **A first-run lab that searches a whole synthetic project, not a single note
+  (`examples/notebooks/00_start_here.ipynb`).** The Korean notebook indexes the
+  new `examples/onboarding/slateharbor/` sample — 150 Markdown/Python/JSON/YAML/
+  TOML files across six domains, 1,032 chunks measured from the resulting
+  SQLite index — and walks a reader from "can I delete this legacy callback?"
+  to the adopted decision, its Python implementation, and the production
+  setting behind it. It needs `memtomem[code]>=0.5.0` and no API key, model
+  download, or embedding server: retrieval is BM25 and every CLI call runs in
+  a throwaway home where Python's `socket.connect`, `connect_ex`, `sendto` and
+  `create_connection` raise. That is the guard's exact reach — it is not an OS
+  firewall, and other socket operations remain available. `generate.py` rebuilds the
+  corpus reproducibly, `validate.py` re-checks structure, policy behavior, and
+  18 authored retrieval cases against the real index, and
+  `tools/build_slateharbor_bundle.py` packages notebook plus sample from an
+  explicit allowlist. Recorded evidence and the explicit non-claims live in
+  `examples/onboarding/slateharbor/VALIDATION.md`.
+
+### Fixed
+
+- **A status-report value can no longer forge a report row or reach the
+  terminal intact (#2410).** Rows across `mm status` / `mem_status` carry
+  text the code did not write — a `config.d` fragment name and a pydantic
+  message in the new `config_section_rejected` warning, provider and model
+  names off the store and the config, resolved `memory_dirs` entries — and all
+  of it was interpolated verbatim. A newline printed as an extra line that read
+  like a report row of its own and broke the column framing from there down; an
+  ANSI escape reached the terminal and acted. Status output gets pasted into
+  issues and chat, so a forged `- kind: …` row inside it is believable; this is
+  output integrity, not a privilege boundary — anyone who can write to
+  `~/.memtomem/config.d/` can already point `embedding.base_url` elsewhere.
+  `StatusLine` now neutralises the three parts it renders, so the warning block
+  and the rows around it are covered together and the styled terminal output is
+  covered as well as the `NO_COLOR` one. It is a no-op for everything the code
+  composes itself. `mm status --json` renders the collected dict and keeps the
+  real bytes — pinned, because sanitizing there would corrupt every structured
+  consumer to fix a terminal. `mm config show`'s warning from #2385 now shares
+  the one escape function rather than spelling its own, because the two
+  surfaces render the same fragment name and two implementations agree only
+  below `U+0080`. That function also stopped raising on a lone surrogate, which
+  JSON can put in `embedding.model`.
+
+- **A rejected `config.json` section no longer disables embedding silently
+  (#2385).** One stale key was enough: with `dimension: 1024` left over from a
+  bge-m3 install under an E5 model, the section failed its cross-field
+  validation, the loader put the whole `embedding` section back to its
+  pre-override baseline, and the server ran on `provider: none` with a single
+  log line as the only trace. `strict_overrides` did not help — it only
+  pre-parsed the file for JSON and OS errors and never reached the loader — so
+  no surface disagreed with the file on disk. `load_config_overrides` now takes
+  a `strict` flag that `build_fresh_config` forwards: a rejected *section*
+  raises `ConfigError`, so a hot re-read keeps the running config, explains
+  itself in the Settings banner and refuses writes, exactly as it already did
+  for malformed JSON. The boundary is deliberately narrow — a value outside its
+  range, an unknown section or field, a key the environment owns are still
+  skipped in both modes, because a field an upgrade removed must not close the
+  write gate. Tolerant loads (MCP startup, the handshake, read-only CLI
+  surfaces) keep booting, and now record what they ignored: `mm status`,
+  `mem_status`, `mm config show` (on stderr, so JSON stdout stays a config
+  document) and `GET /api/config` all report the rejected section and the
+  reason — and a successful save re-derives them, because the delta-only write
+  can drop the rejected section outright while the signature it banks stops a
+  reload from noticing, which left the banner asking for a repair that had
+  already happened. It is re-read rather than cleared: a rejection in a
+  `config.d` fragment survives a save that never touched it. Two nearby
+  defects went with it — both loaders resolved a section with a bare
+  `getattr`, so a key like `model_dump` in the file crashed the tolerant load
+  it was supposed to survive, and a failed save whose rollback re-read an
+  invalid file answered 500 instead of its own 400/503.
+- **Config hot-reload no longer blocks the event loop while it resolves a
+  tokenizer (#2385).** Since the E5 CPU profile made `hard_max_chunk_tokens`
+  non-zero by default, `validate_budget_configuration` stopped taking its early
+  return and now constructs a `TokenBudget` on every reload. On an ONNX install
+  running the E5 model in its `fp32` variant that resolves the pinned Hub
+  tokenizer, so the first reload after the cache is cleared — or on a machine
+  that has never downloaded it — became a network round-trip on the web
+  server's event loop. Other variants read a local artifact path, the revision
+  is commit-pinned so a warm cache resolves offline, and the default provider
+  is `none`; the exposure is narrow, but it sits on the request path.
+  `reload_if_stale` now offloads that pre-commit validation with
+  `asyncio.to_thread`, matching what `create_components` already did at
+  startup. The second, post-commit
+  validation inside `apply_runtime_config_changes` deliberately stays inline:
+  its only production caller is `reload_if_stale`, which has just validated the
+  same config off the loop, and a suspension there would let a second reload
+  commit and run its own fanout in between.
+
+- **A failed config reload no longer leaves a banner that cannot be dismissed
+  (#2385).** Offloading introduces a suspension point the reload path did not
+  have, so a second request can now commit a corrected config while the first
+  attempt is still failing. Two things made that stick: the failure was
+  recorded against whatever `config.json` looked like when the handler ran
+  rather than what the attempt actually read, and the release test consulted
+  that file's mtime alone — so a correction made in a `config.d` fragment,
+  which moves the composite signature without touching `config.json`, could
+  never release it. The error now carries both the mtime it attempted and that
+  attempt's composite signature — each read after the rebuild, since the
+  legacy `auto_discover` migration writes the file mid-build — and a single
+  `reload_error_is_stale` predicate is shared by the release branch and the
+  write gate, which previously each carried their own copy of the test.
+  Without this, the UI kept answering `HTTP 409` on every save until some
+  unrelated edit happened to move the override file.
+
+  The same window also let two failures overlap, so a superseded attempt no
+  longer *replaces* a banner already raised by a newer one: the older error
+  describes a layer set that is no longer on disk, would be released as stale
+  on the next read, and would open the write gate on a configuration that
+  never validated — letting a save overwrite the broken file the banner exists
+  to protect. Raising a banner where none stands is still unconditional, so a
+  superseded failure still surfaces immediately (the `#273` contract). The
+  startup pre-check is untouched; it exists to fail before anything runs
+  against an invalid budget.
+
+## [0.6.0] — 2026-09-10
+
 ### Breaking
 
 - **Chunk edits and deletes now require indexed source-span evidence (#2371).**
@@ -107,11 +223,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
   `mm context pull … --scope project_shared` now takes
   `--confirm-project-shared`. Nothing you run today stops working: through
-  0.5.x a bare `--yes` still carries the consent and prints a one-line notice
-  on stderr naming the change; from **0.6.0** it is refused with the same
+  0.6.x a bare `--yes` still carries the consent and prints a one-line notice
+  on stderr naming the change; from **0.7.0** it is refused with the same
   message the other commands give — "`--yes` alone is not sufficient". On the
   `user` tier `--yes` is untouched: it never meant consent there, only "skip
-  the prompt".
+  the prompt". (The refusal was first scheduled for 0.6.0, back when this
+  change was expected to reach you in a 0.5.x patch. It did not — this
+  release is the first one that has the new flag at all — so the window is
+  the release that carries it, and the refusal moves to 0.7.0.)
 
   The notice fires whenever `--yes` is carrying the consent on its own — pass
   both flags and it stays quiet, because there is nothing left to migrate. It
@@ -124,6 +243,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mm context pull … --scope project_shared` invocation. (#2318)
 
 ### Added
+
+- **Document the lock sidecars indexing leaves behind (#2387).** Indexing a
+  file takes a cross-process lock on an empty `.<name>.lock` sibling, and that
+  sidecar is deliberately never unlinked — deleting a live one would let two
+  processes lock two different files under one path. Any indexed tree, a user's
+  own source repository included, therefore accumulates them. The Configuration
+  guide now explains what they are, publishes the `.*.lock` ignore recipe (the
+  leading dot keeps a tracked `uv.lock` unmatched), and states the one rule
+  that matters: do not mass-delete them while a memtomem process may be
+  running. This repository's own ignore rule shipped in #2388.
 
 - Expose configured `rrf_k`, `rrf_weights`, `bm25_candidates`, and
   `dense_candidates` in the schema-1 version runtime profile and human/JSON
@@ -192,6 +321,54 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   could only ever end in the "initialize it first" conflict. (#2297)
 
 ### Fixed
+
+- **`mm config unset` no longer reports a default the stack is not using
+  (#2397).** For a key `config.json` did not pin, the command answered
+  `(already at default)` — a claim about the *effective* value, which
+  `config.json` is only one of the layers that can set. A `config.d` fragment
+  or a `MEMTOMEM_*` variable supplying the field made the note name a value
+  nothing was using: with a fragment setting `mmr.enabled` to `true`, unset
+  reported the default `false`.
+
+  The note now reports what the canonical load path puts the field at, masked
+  for credentials, and names a `MEMTOMEM_*` variable when one owns the key.
+  Canonical rather than rebuilt by hand: the last step of that path applies the
+  embedding profile, which fires when the *file* layers select an E5 model, so
+  a hand-built stack read `indexing.max_chunk_tokens` as 512 where the app used
+  384.
+  `(already at default)` survives for the case where that is what the load
+  actually resolves to. No other layer is named: a non-default value does not
+  prove a `config.d` fragment wrote it — the embedding profile derives some
+  fields, and a deprecated key in `config.json` migrates into its replacement,
+  so the file can be the source of a key it holds no entry for. The reading is
+  taken after the write, so a config the loaders refuse costs the extra detail
+  rather than failing an unset that already happened.
+
+- **A whole-section environment binding now outranks `config.json`, like the
+  `__` spelling already did (#2390).** pydantic-settings binds a nested
+  section from the environment two ways and memtomem accepts both:
+  `MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=7` and
+  `MEMTOMEM_EMBEDDING='{"onnx_batch_size": 7}'`. Only the first was recognised
+  by the ownership check the override loaders consult, so the second lost to a
+  `config.json` entry that pinned the same field — pydantic read the variable,
+  the loader then wrote the file's value over it. Which spelling an operator
+  happened to use decided whether their file was honoured, and nothing said
+  so.
+
+  Both shapes are now honoured, per field: a JSON payload claims only the
+  fields it names, and the rest of the section still comes from the file
+  layers. Where both spellings are exported for one field, the resolution
+  follows what pydantic-settings actually builds rather than a rule of thumb.
+
+  `mm config set` and `mem_config(persist=true)` name the section variable
+  when it is the one in force, and say that it *carries* the field in its JSON
+  payload — unsetting it releases every other field that payload names, which
+  is wider advice than the delimiter spelling needs. Where both shapes bind
+  one field, `mm config set` names both: clearing only the one in force hands
+  the field to the other rather than to `config.json`. `mm sync-doctor` held a
+  second, narrower copy of the same check and now shares the one helper; it
+  had been overwriting an env-supplied `indexing.memory_dirs` for both the
+  JSON spelling and any lowercase export.
 
 - **The CPU embedding profile no longer disables GPU acceleration, stale-chunks
   an upgraded install, or breaks dedup (#2383 review).** Six defects in the
@@ -499,8 +676,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the confirmation flag found a hit under `integrations/` and read as covered.
   The architectural guard could not see it either: it finds gates by that
   flag's name, and a surface carrying no such argument is invisible to it. The
-  sibling writers named in that guard's own boundary note (#2322) are still
-  open.
+  sibling writers named in that guard's own boundary note are closed in this
+  same release by #2322, the entry below.
 
 - **Writes that pick their own destination no longer land in the Git-tracked
   tier** (#2322) — a session-end summary archive, the Notion and Obsidian
@@ -573,9 +750,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   now says which path refused, and is never mistaken for a conflict at the
   destination.
 
-- **Moving an artifact to another filesystem no longer discards an edit made
-  while the move was running** (#2313) — when the two stores sit on different
-  volumes, `mm context move` cannot rename the artifact across and has to copy
+- **Moving an artifact to another filesystem no longer discards an edit
+  written through the artifact's own path while the move was running**
+  (#2313) — when the two stores sit on different volumes, `mm context move`
+  cannot rename the artifact across and has to copy
   it instead, and it used to copy from the artifact's own path and then delete
   that path once the destination was in place. A large skill takes a while to
   copy, and anything that wrote to the source in the meantime — an editor
@@ -585,9 +763,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   aside first, in one atomic step, and copies from there; a writer that
   recreates the source path finds it free and keeps what it wrote, because the
   move never removes that path again. What is set aside is removed only once
-  the destination is complete, and put back if anything goes wrong on the way —
-  and never deleted to tidy up a failure, so the bytes always exist somewhere
-  the error message names.
+  the destination is complete, and putting it back is attempted if anything
+  goes wrong on the way — attempted, because the source path may be occupied
+  again by then, in which case it stays where it is and the error names both
+  paths (see the promote/rollback entry for #2312 below). Either way it is
+  never deleted to tidy up a failure, so the bytes always exist somewhere the
+  error message names.
 
   This covers writers that go through the source's path, which is how anything
   outside this tool finds an artifact. A program that opened a file inside the
@@ -595,9 +776,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   still writing to what the move already copied; a copy to another filesystem
   is a snapshot, and only a same-filesystem move can carry such a write along.
 
-  Interrupting a cross-filesystem move now leaves its work-in-progress beside
-  the source rather than at the destination, under the same hidden name a
-  same-filesystem move already used, and nothing removes it automatically:
+  Interrupting a cross-filesystem move now leaves the set-aside original
+  beside the source rather than at the destination — the incomplete copy stays
+  in staging at the destination, as it always did — under the same hidden name
+  a same-filesystem move already used, and nothing removes it automatically:
   rename it back onto the artifact's name to recover it, or delete it once you
   have checked that the destination is complete. Until you do, the artifact
   reads as missing at the source rather than as a half-moved copy. If a copy
@@ -634,9 +816,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   action, `error:` from the migrate one, unchanged in both) — and it is now the
   syscall's refusal rather than a check that could be outrun. A refused rollback is different and is
   reported differently: the failure that triggered the rollback stays the error
-  you see, the staged tree is kept as the only copy of the source bytes, and the
-  logged message names both paths and says the source is occupied instead of
-  advising you to move the tree back on top of whatever is sitting there. An
+  you see, the staged tree is kept — after a same-filesystem move it holds the
+  only copy of the source bytes, while a cross-filesystem move deliberately
+  leaves a second one at the destination (the #2327 entry names what is really
+  on disk) — and the logged message names both paths and says the source is
+  occupied instead of advising you to move the tree back on top of whatever is
+  sitting there. An
   unrelated failure is never dressed up as a collision: a missing staging tree
   or a cross-directory promote still reports what actually went wrong.
 
@@ -653,8 +838,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   than delete, naming the occupied path and saying plainly that nothing was
   removed. The CLI prints that as a one-line error, the web transfer route
   answers 409 `transfer_staging_busy`, and both MCP actions refuse with the same
-  reason; the leftover stays hidden from discovery and can be inspected or
-  removed by hand. The exclusive claim also closes the gap between the old
+  reason; the leftover stays hidden from the discovery walks that consult the
+  predicate — the canonical listing for agents and commands does not yet, as
+  the #2304 entry below records — and can be inspected or removed by hand. The
+  exclusive claim also closes the gap between the old
   existence check and the write that followed it, and refuses two destination
   shapes that check could not handle — a dangling symlink, which it reported as
   absent, and an empty directory, which a plain rename replaces silently.
@@ -668,10 +855,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   commands takes two gates: the privacy scanner refuses a bypass at the
   boundary, and the surface requires an explicit confirmation. (Editing a chunk
   that already lives there had only the scanner when this shipped; the Breaking
-  entry above closes that gap in the same release. A few other writers — the
-  LangGraph adapter, imports, URL indexing, session archives — still have only
-  the scanner, tracked separately.) The refusal has been recorded since that
-  design shipped. The confirmation was specified to leave a
+  entry above closes that gap in the same release. The other writers this note
+  used to list as scanner-only — the LangGraph adapter, imports, URL indexing
+  via `mem_fetch`, session archives — are closed in this release too, by
+  #2321, #2336 and #2322.) The refusal has been recorded since that design
+  shipped. The confirmation was specified to leave a
   matching
   `project_shared.confirmed_via=<surface>` line and left none anywhere, so a
   team reviewing how a note, an agent, a hook, or a bundle came to be in Git
@@ -698,9 +886,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Nothing about what the declaration may waive has changed: a real token still
   refuses. (#2310)
 
-- **A crashed Move/Copy no longer leaves a directory the gateway treats as one
-  of your artifacts.** `mm context move` and `mm context copy` build the new
-  artifact in a staging directory inside the destination store and then promote
+- **A crashed Move/Copy is no longer counted as one of your artifacts by the
+  walks that check for leftovers.** `mm context move` and `mm context copy`
+  build the new artifact in a staging directory inside the destination store
+  and then promote
   it into place. A refused transfer cleans up after itself; but if the process
   is killed in between, or a failed move cannot safely put the source back,
   that directory stays behind. It holds a complete
@@ -715,8 +904,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   random suffix than the other two, so the pattern learned that width per kind
   rather than the engine being narrowed to fit it — narrowing would have missed
   every leftover already on disk and cut the engine's collision entropy on a
-  path that deletes what it collides with. And the leftover is hidden but never
-  deleted automatically, because a same-filesystem move renames your artifact
+  path that, until #2309 above, deleted what it collided with. And the
+  leftover is hidden but never deleted automatically, because a
+  same-filesystem move renames your artifact
   into that directory, making it the only copy until the promote completes.
   Recovering those bytes is still a manual step, they are not yet surfaced
   anywhere now that they are hidden, and the canonical listing for agents and
@@ -840,10 +1030,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   default visibility when neither names one — which is not every namespace,
   since `search.system_namespace_prefixes` still hides `agent-runtime:` and
   `archive:` from an unpinned query. It does not hide `shared`, though, so an
-  unresolved agent also disregards `--no-include-shared` — that flag drops the
-  shared leg of a merge, and there is no merge to drop it from. This is the MCP
-  tool's rule too, so the verb reports the flag as disregarded rather than
-  diverging from the tool it mirrors.
+  unresolved agent given `--no-include-shared` selects no bucket at all — that
+  flag drops the shared leg of a merge, and there is no merge to drop it from.
+  The verb and the tool both refuse that combination rather than run a search
+  contradicting the argument; the `--no-include-shared` entry under Fixed
+  (#2296) has the wording and what `mm agent debug-resolve` reports.
   `--include-shared/--no-include-shared`, `--top-k` and
   `--shared-namespace` mirror the tool's options; `--format` uses this CLI's
   vocabulary rather than the MCP tool's, so `--format json` stays the bare

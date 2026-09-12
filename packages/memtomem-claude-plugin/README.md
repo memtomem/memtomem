@@ -16,19 +16,17 @@ write-time indexing.
 
 ## Install
 
-Before installing, inspect existing servers with `/mcp` in Claude Code.
-The published PyPI 0.5.0 CLI does **not** include `--claude-mcp`. For the new
-read-only diagnostic, use a source checkout containing this change:
+Before installing, inspect existing servers with `/mcp` in Claude Code, then
+run the read-only diagnostic from the project you want to inspect:
 
 ```bash
-uv run --project /path/to/memtomem --package memtomem mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.0" mm doctor --claude-mcp
 ```
 
-Replace `/path/to/memtomem` with the checkout path and run from the project you
-want to inspect. `--project` selects the CLI's source environment while keeping
-your current directory; do not substitute `--directory`, which would change
-the project being inspected. No source checkout? Use `/mcp` to review the
-registrations and the scope-specific removal guidance below.
+The pin is there because installing the plugin does not put `mm` on your PATH —
+it registers an MCP server, not the CLI. If you already have the CLI installed,
+`mm doctor --claude-mcp` is the same check. Neither is required: `/mcp` plus the
+scope-specific removal guidance below covers the same ground by hand.
 
 It reports current registrations and predicts conflicts with this release's
 plugin command. Exit codes: `0` no detected conflict, `1` duplicate risk,
@@ -44,8 +42,8 @@ check before installing. The check does not intercept `/plugin install`.
 On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```bash
-uvx --from 'memtomem==0.5.0' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem==0.5.0' mm status
+uvx --from 'memtomem==0.6.0' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem==0.6.0' mm status
 ```
 
 The plugin intentionally cannot perform this trust-establishing step over MCP.
@@ -56,7 +54,7 @@ gitignored local tier explicitly:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem==0.5.0' mm mem init --scope project_local
+uvx --from 'memtomem==0.6.0' mm mem init --scope project_local
 ```
 
 After that, `/memtomem:setup /path/to/notes` performs a one-shot index and

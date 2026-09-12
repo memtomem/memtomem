@@ -317,6 +317,149 @@ class TestFreshnessCorrections:
         assert "MEMTOMEM_FASTEMBED_CACHE" in readme
 
 
+class TestLockSidecarDocs:
+    """Pin the lock-sidecar section to the primitive and config it describes.
+
+    Three guards are derived from behaviour: the sidecar name and placement
+    come from the same ``memory_lock_path`` the indexer keys on, the two
+    extension lists from a real ``discover_indexable_files`` run, and the
+    "never indexed" claim from the live ``supported_extensions`` default. The
+    other three pin prose the code cannot express — the ignore glob a reader
+    copies, the never-delete-while-running rule, and the warning that naming a
+    single file locks it before the chunker check. Those three guard the
+    wording, not the behaviour behind it. (#2387)
+    """
+
+    @staticmethod
+    def _section() -> str:
+        guide = _read(_CONFIGURATION_GUIDE)
+        heading = "### Lock sidecars"
+        assert heading in guide, "configuration.md lost its lock-sidecar section"
+        return guide.split(heading, 1)[1].split("\n### ", 1)[0]
+
+    def test_guide_shows_the_real_sidecar_name_and_placement(self, tmp_path: Path) -> None:
+        # ``memory_lock_path``, not ``_lock_path_for``: the indexer keys on the
+        # former (indexing/engine.py ``_locked_index``), and only the former
+        # resolves. Pinning the raw builder would stay green if the memory
+        # domain moved its locks elsewhere, which is exactly the change that
+        # would invalidate the guide's "beside the resolved file" claim.
+        from memtomem.context._atomic import memory_lock_path
+
+        source = tmp_path / "dir" / "notes.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# notes\n", encoding="utf-8")
+        built = memory_lock_path(source)
+        # An alias in a *different* directory is what makes the resolution
+        # claim testable: without it, dropping ``.resolve()`` from
+        # ``memory_lock_path`` leaves every other assertion here green while
+        # the guide's "beside the resolved file" sentence becomes false.
+        alias_dir = tmp_path / "alias"
+        alias_dir.mkdir()
+        alias = alias_dir / "link.md"
+        try:
+            alias.symlink_to(source)
+        except (OSError, NotImplementedError):  # pragma: no cover - Windows w/o privilege
+            pytest.skip("symlink creation is unavailable on this platform")
+        assert memory_lock_path(alias) == built, (
+            "an alias must take the target's sidecar, not one beside the link"
+        )
+        section = _unwrapped(self._section())
+        # The whole sentence, not the bare name: the name also appears in the
+        # ignore-glob paragraph below, so a substring check stays green even
+        # after the sentence that *teaches* the rule has been broken.
+        assert f"`{source.name}` is locked through `{built.name}` beside it" in section, (
+            f"the guide must teach the mapping the code builds ({source.name} -> {built.name})"
+        )
+        # Adjacency is a claim about placement, so assert placement, not just
+        # the filename: a central lock directory would keep the name and break
+        # the sentence.
+        assert built.parent == source.resolve().parent, (
+            f"sidecar is no longer beside its source: {built}"
+        )
+        assert "beside the **resolved** file" in _unwrapped(section)
+
+    def test_guide_publishes_the_ignore_glob_with_its_leading_dot(self) -> None:
+        section = self._section()
+        # The whole safety of the recipe is the leading dot: ``*.lock`` would
+        # also match a tracked ``uv.lock``. Pin the line a reader copies, and
+        # pin it as a full line so a weakened glob cannot satisfy it.
+        assert "\n.*.lock\n" in section, "the guide lost its `.*.lock` ignore line"
+        assert "\n*.lock\n" not in section, "the guide publishes a glob that matches uv.lock"
+
+    def test_guide_states_the_never_delete_while_running_rule(self) -> None:
+        # ``_atomic.py`` forbids unlinking a live sidecar; the guide is the
+        # only place a user is told so. Positive full-phrase comparison.
+        assert (
+            "Do not mass-delete sidecars while an MCP server, `mm web`, "
+            "or any `mm` command may be running"
+        ) in _unwrapped(self._section())
+
+    @staticmethod
+    def _discovered_extensions(tmp_path: Path, **overrides: object) -> set[str]:
+        """Extensions a real directory scan selects, measured not reasoned.
+
+        The guide's list is the overlap of ``supported_extensions`` with the
+        registered chunkers, and that overlap is not the config set: the code
+        chunkers are only registered when a hard chunk budget is configured.
+        Driving ``discover_indexable_files`` over a tree with one file per
+        configured extension is what makes this pin measure the promise a
+        reader acts on rather than restate a constant.
+        """
+        from memtomem.indexing.engine import IndexEngine
+
+        config = Mem2MemConfig().indexing
+        for key, value in overrides.items():
+            setattr(config, key, value)
+        tree = tmp_path / "tree"
+        tree.mkdir(parents=True)
+        for ext in Mem2MemConfig().indexing.supported_extensions:
+            (tree / f"sample{ext}").write_text("x\n", encoding="utf-8")
+        # ``__init__`` only stores storage/embedder; discovery touches neither.
+        engine = IndexEngine(storage=None, embedder=None, config=config)  # type: ignore[arg-type]
+        found = engine.discover_indexable_files(tree, True, path_scope="explicit")
+        return {path.suffix for path in found}
+
+    def test_guide_lists_the_extensions_a_default_scan_really_selects(self, tmp_path: Path) -> None:
+        default = self._discovered_extensions(tmp_path / "a")
+        extra = self._discovered_extensions(tmp_path / "b", hard_max_chunk_tokens=256) - default
+        section = _unwrapped(self._section())
+        # Exact sets, both directions: the guide previously promised sidecars
+        # next to every configured extension, which no default scan produces.
+        assert default == {".md", ".json", ".yaml", ".yml", ".toml"}, default
+        assert extra == {".py", ".js", ".ts", ".jsx", ".tsx"}, extra
+        # Sentence boundaries, not bare lists: without the trailing punctuation
+        # an appended extension keeps the substring, and without the enabling
+        # clause the guide could invert the condition ("without configuring a
+        # hard chunk budget") and still satisfy every assertion here.
+        assert (
+            "With the default settings that overlap is "
+            "`.md`, `.json`, `.yaml`, `.yml` and `.toml`;" in section
+        ), "the guide's default-overlap list no longer matches discovery"
+        assert (
+            "configuring a hard chunk budget (`indexing.hard_max_chunk_tokens`) "
+            "registers the code chunkers as well" in section
+        ), "the guide no longer states the condition that adds the code chunkers"
+        assert (
+            "picks up sidecars next to its "
+            "`.py`, `.js`, `.ts`, `.jsx` and `.tsx` files too." in section
+        ), "the guide's hard-budget list no longer matches discovery"
+
+    def test_guide_warns_that_a_named_file_locks_before_the_chunker_check(self) -> None:
+        # Measured: `mm index mod.py` on a default config leaves `.mod.py.lock`
+        # even though no Python chunker is registered, because the L2 acquire in
+        # ``_locked_index`` runs above the registry check in ``_index_file``.
+        assert (
+            "Naming a single file directly (`mm index <file>`) locks it before that check"
+            in _unwrapped(self._section())
+        )
+
+    def test_sidecars_are_really_outside_the_indexed_extensions(self) -> None:
+        # The guide promises sidecars are never indexed themselves. That is
+        # true only while ``.lock`` stays out of the default extension set.
+        assert ".lock" not in Mem2MemConfig().indexing.supported_extensions
+        assert "`.lock` is not a supported extension" in _unwrapped(self._section())
+
+
 class TestIntegrationsMmStatus:
     def test_claude_code_surfaces_mm_status(self, claude_code: str) -> None:
         assert "mm status" in claude_code
@@ -511,8 +654,21 @@ class TestPluginManualCoexistenceCallout:
         assert "do not prove two live processes" in claude_code
         assert "same command" in claude_code.lower()
 
-    def test_unreleased_diagnostic_uses_source_checkout_without_changing_cwd(self) -> None:
-        command = "uv run --project /path/to/memtomem --package memtomem mm doctor --claude-mcp"
+    def test_released_diagnostic_is_offered_both_with_and_without_mm_on_path(self) -> None:
+        """``--claude-mcp`` ships now, but the plugin still does not install ``mm``.
+
+        Through 0.5.x the option existed only in a source checkout, so every
+        one of these surfaces told the reader to run it through
+        ``uv run --project <checkout>``. 0.6.0 published it, which retires that
+        advice — but only half of the original caveat expired. Installing the
+        plugin registers an MCP server, not the CLI, so a plugin-only user
+        still has no ``mm`` on PATH and still needs the second form.
+
+        So this pins both arms and the reason for the second one, and keeps
+        the source-checkout command from coming back: it now points at a
+        workaround for a limitation the release removed, which is worse than
+        no advice because it reads as current.
+        """
         plugin_guidance = [
             _REPO_ROOT / path
             for workflow in ("setup", "status")
@@ -521,6 +677,8 @@ class TestPluginManualCoexistenceCallout:
                 f"packages/memtomem-claude-plugin/skills/{workflow}/SKILL.md",
             )
         ]
+        with (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").open("rb") as handle:
+            version = tomllib.load(handle)["project"]["version"]
         for path in (
             _PLUGIN_README,
             _VIBE_GUIDE,
@@ -528,12 +686,23 @@ class TestPluginManualCoexistenceCallout:
             *plugin_guidance,
         ):
             text = _read(path)
-            assert command in text
-            assert "PyPI" in text and "0.5.0" in text
+            fenced = [line.strip() for line, in_fence in _iter_code_context(text) if in_fence]
+            # The copy-pasteable command is the pinned one, and only that one:
+            # a bare ``mm`` block would fail on the machine these surfaces are
+            # written for, which is what
+            # ``test_plugin_readme_fresh_env_blocks_have_no_bare_mm`` holds.
+            # Compared whole rather than by substring, because the pinned line
+            # itself ends in "mm doctor --claude-mcp".
+            assert f'uvx --from "memtomem[all]=={version}" mm doctor --claude-mcp' in fenced
+            assert "mm doctor --claude-mcp" not in fenced
+            # The shorthand still has to be mentioned, in prose, for readers
+            # who do have the CLI.
+            assert "`mm doctor --claude-mcp`" in text
+            assert "PATH" in text
             assert "/mcp" in text
+            assert "uv run --project" not in text
             for line, in_fence in _iter_code_context(text):
                 if in_fence and "doctor --claude-mcp" in line:
-                    assert "uvx" not in line
                     assert "--directory" not in line
 
     def test_no_doc_promises_unconditional_suppression(self) -> None:
@@ -789,6 +958,26 @@ def _pydantic_env_vars(model: type[pydantic.BaseModel], prefix: str = "MEMTOMEM_
     return out
 
 
+def _pydantic_section_env_vars(
+    model: type[pydantic.BaseModel], prefix: str = "MEMTOMEM_"
+) -> set[str]:
+    """The bare ``MEMTOMEM_<SECTION>`` names, which bind a section as JSON.
+
+    pydantic-settings accepts a whole nested model as one JSON-valued variable
+    alongside the exploded ``__`` spelling, and memtomem honours both against
+    ``config.json`` (issue #2390) — so the guide is allowed to name them.
+    Derived from the model for the same reason the leaf names are: a new
+    section is covered the day it lands.
+    """
+    out: set[str] = set()
+    for name, field in model.model_fields.items():
+        sub = _settings_class(field.annotation)
+        if sub is not None:
+            out.add(f"{prefix}{name.upper()}")
+            out |= _pydantic_section_env_vars(sub, f"{prefix}{name.upper()}__")
+    return out
+
+
 # ``MEMTOMEM_*`` vars read straight from ``os.environ`` rather than declared as
 # pydantic settings fields. A new env-only knob that gets documented must be
 # added here; ``test_env_only_allowlist_is_real`` asserts every entry is an
@@ -824,7 +1013,11 @@ class TestDocumentedEnvVarsExist:
         assert not bogus, f"_ENV_ONLY_VARS names not found as literals in src: {sorted(bogus)}"
 
     def test_configuration_env_vars_resolve(self) -> None:
-        valid = _pydantic_env_vars(Mem2MemConfig) | _ENV_ONLY_VARS
+        valid = (
+            _pydantic_env_vars(Mem2MemConfig)
+            | _pydantic_section_env_vars(Mem2MemConfig)
+            | _ENV_ONLY_VARS
+        )
         used = set(re.findall(r"MEMTOMEM_[A-Z0-9_]+", _read(_GUIDES / "configuration.md")))
         unknown = used - valid
         assert not unknown, (

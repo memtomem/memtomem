@@ -1,0 +1,538 @@
+{
+  "supported_floor": "memtomem[code]>=0.5.0 (no upper bound; lab.py raises on unknown CLI output)",
+  "source_base": "84c445dba76e9e47d2bf41f370d552bd4c112275",
+  "corpus_manifest_sha256": "bb7da7defa16c9416df3ce82ae1bdc232700eaefc50bcff6e3a56f512b107f00",
+  "source": {
+    "status": "PASS",
+    "python": "3.12.11",
+    "memtomem": "0.5.0",
+    "inventory": {
+      "formats": {
+        ".json": {
+          "files": 30,
+          "chunks": 180,
+          "min_chunks": 6
+        },
+        ".md": {
+          "files": 60,
+          "chunks": 480,
+          "min_chunks": 8
+        },
+        ".yaml": {
+          "files": 12,
+          "chunks": 72,
+          "min_chunks": 6
+        },
+        ".toml": {
+          "files": 6,
+          "chunks": 36,
+          "min_chunks": 6
+        },
+        ".py": {
+          "files": 42,
+          "chunks": 264,
+          "min_chunks": 2
+        }
+      },
+      "files": 150,
+      "chunks": 1032,
+      "index_seconds": 1.18
+    },
+    "retrieval_cases": [
+      {
+        "id": "auth-decision",
+        "rank": 1
+      },
+      {
+        "id": "auth-implementation",
+        "rank": 1
+      },
+      {
+        "id": "auth-configuration",
+        "rank": 1
+      },
+      {
+        "id": "billing-decision",
+        "rank": 1
+      },
+      {
+        "id": "billing-implementation",
+        "rank": 1
+      },
+      {
+        "id": "billing-configuration",
+        "rank": 1
+      },
+      {
+        "id": "notifications-decision",
+        "rank": 1
+      },
+      {
+        "id": "notifications-implementation",
+        "rank": 1
+      },
+      {
+        "id": "notifications-configuration",
+        "rank": 1
+      },
+      {
+        "id": "jobs-decision",
+        "rank": 1
+      },
+      {
+        "id": "jobs-implementation",
+        "rank": 1
+      },
+      {
+        "id": "jobs-configuration",
+        "rank": 1
+      },
+      {
+        "id": "files-decision",
+        "rank": 1
+      },
+      {
+        "id": "files-implementation",
+        "rank": 1
+      },
+      {
+        "id": "files-configuration",
+        "rank": 1
+      },
+      {
+        "id": "reports-decision",
+        "rank": 1
+      },
+      {
+        "id": "reports-implementation",
+        "rank": 1
+      },
+      {
+        "id": "reports-configuration",
+        "rank": 1
+      }
+    ],
+    "policy_tests": 36,
+    "negative_cases": [
+      "unknown query",
+      "wrong namespace",
+      "wrong source",
+      "historical policy"
+    ],
+    "guarded_socket_apis": [
+      "socket.create_connection",
+      "socket.socket.connect",
+      "socket.socket.connect_ex",
+      "socket.socket.sendto"
+    ],
+    "checks": [
+      "fresh CLI process",
+      "update and reindex",
+      "custom memory",
+      "child socket guard",
+      "source integrity",
+      "cleanup"
+    ]
+  },
+  "published_0_5_compatibility": {
+    "status": "PASS",
+    "python": "3.13.2",
+    "memtomem": "0.5.0",
+    "inventory": {
+      "formats": {
+        ".json": {
+          "files": 30,
+          "chunks": 180,
+          "min_chunks": 6
+        },
+        ".md": {
+          "files": 60,
+          "chunks": 480,
+          "min_chunks": 8
+        },
+        ".yaml": {
+          "files": 12,
+          "chunks": 72,
+          "min_chunks": 6
+        },
+        ".toml": {
+          "files": 6,
+          "chunks": 36,
+          "min_chunks": 6
+        },
+        ".py": {
+          "files": 42,
+          "chunks": 264,
+          "min_chunks": 2
+        }
+      },
+      "files": 150,
+      "chunks": 1032,
+      "index_seconds": 1.47
+    },
+    "retrieval_cases": [
+      {
+        "id": "auth-decision",
+        "rank": 1
+      },
+      {
+        "id": "auth-implementation",
+        "rank": 1
+      },
+      {
+        "id": "auth-configuration",
+        "rank": 1
+      },
+      {
+        "id": "billing-decision",
+        "rank": 1
+      },
+      {
+        "id": "billing-implementation",
+        "rank": 1
+      },
+      {
+        "id": "billing-configuration",
+        "rank": 1
+      },
+      {
+        "id": "notifications-decision",
+        "rank": 1
+      },
+      {
+        "id": "notifications-implementation",
+        "rank": 1
+      },
+      {
+        "id": "notifications-configuration",
+        "rank": 1
+      },
+      {
+        "id": "jobs-decision",
+        "rank": 1
+      },
+      {
+        "id": "jobs-implementation",
+        "rank": 1
+      },
+      {
+        "id": "jobs-configuration",
+        "rank": 1
+      },
+      {
+        "id": "files-decision",
+        "rank": 1
+      },
+      {
+        "id": "files-implementation",
+        "rank": 1
+      },
+      {
+        "id": "files-configuration",
+        "rank": 1
+      },
+      {
+        "id": "reports-decision",
+        "rank": 1
+      },
+      {
+        "id": "reports-implementation",
+        "rank": 1
+      },
+      {
+        "id": "reports-configuration",
+        "rank": 1
+      }
+    ],
+    "policy_tests": 36,
+    "negative_cases": [
+      "unknown query",
+      "wrong namespace",
+      "wrong source",
+      "historical policy"
+    ],
+    "guarded_socket_apis": [
+      "socket.create_connection",
+      "socket.socket.connect",
+      "socket.socket.connect_ex",
+      "socket.socket.sendto"
+    ],
+    "checks": [
+      "fresh CLI process",
+      "update and reindex",
+      "custom memory",
+      "child socket guard",
+      "source integrity",
+      "cleanup"
+    ]
+  },
+  "source_notebooks": [
+    {
+      "notebook": "00_start_here.ipynb",
+      "checks": "Run All assertions",
+      "status": "PASS",
+      "network_blocked": [
+        "socket.socket.connect",
+        "socket.socket.connect_ex",
+        "socket.socket.sendto",
+        "socket.create_connection"
+      ],
+      "same_kernel_runs": 1,
+      "elapsed_seconds": 21.63
+    },
+    {
+      "notebook": "05_langgraph_memory_basics.ipynb",
+      "checks": 6,
+      "status": "PASS",
+      "network_blocked": [
+        "socket.socket.connect",
+        "socket.socket.connect_ex",
+        "socket.socket.sendto",
+        "socket.create_connection"
+      ],
+      "same_kernel_runs": 1,
+      "elapsed_seconds": 0.96
+    },
+    {
+      "notebook": "06_langgraph_retrieval_memory.ipynb",
+      "checks": 6,
+      "status": "PASS",
+      "network_blocked": [
+        "socket.socket.connect",
+        "socket.socket.connect_ex",
+        "socket.socket.sendto",
+        "socket.create_connection"
+      ],
+      "same_kernel_runs": 1,
+      "elapsed_seconds": 0.84
+    }
+  ],
+  "extracted_bundle_repeat": [
+    {
+      "notebook": "00_start_here.ipynb",
+      "checks": "Run All assertions",
+      "status": "PASS",
+      "network_blocked": [
+        "socket.socket.connect",
+        "socket.socket.connect_ex",
+        "socket.socket.sendto",
+        "socket.create_connection"
+      ],
+      "same_kernel_runs": 2,
+      "elapsed_seconds": 41.45
+    }
+  ],
+  "pytest": {
+    "passed": 131,
+    "files": [
+      "test_notebooks.py",
+      "test_docs_guards.py"
+    ]
+  },
+  "bundle_allowlist_probe": "PASS: unlisted JSON was excluded",
+  "html_structure": {
+    "tables": 1,
+    "code_blocks": 28,
+    "notebook_relative_links_checked": 5,
+    "python_and_json_highlighted": true
+  },
+  "guard_mutations": {
+    "evaluation.json emptied / one case dropped / duplicate id": "all three fail",
+    "18 correct ids carrying one domain's payload": "fails",
+    "case whose expected_source contradicts its id's domain or kind": "fails",
+    "unittest discover collects 0 tests": "fails",
+    "a domain whose tests all skip or all expected-fail": "fails",
+    "two run summaries in one domain's output": "fails",
+    "stored body containing a complete header + Source pair": "rendered whole; context() reads bodies by chunk_id and parses no rendered text",
+    "socket patch dropped: connect / connect_ex / sendto": "each probe turns red",
+    "socket patch dropped: create_connection": "probe stays red - it reaches the still-patched socket.connect underneath, so that one line is redundantly covered, not independently witnessed"
+  },
+  "not_run": [
+    "browser visual QA: no browser available",
+    "actual AI-client fresh-session calls",
+    "Windows execution",
+    "remote CI",
+    "external publication"
+  ],
+  "bundle_determinism": "two consecutive builds produced identical bytes",
+  "source_filter_ordering_0_5_0": {
+    "query": "legacy callback",
+    "source_filter": "production.json",
+    "hits_by_top_k": {
+      "1": 0,
+      "3": 0,
+      "5": 1,
+      "100": 1
+    },
+    "surviving_rank_at_top_k_5": 5,
+    "note": "the filter runs after the cutoff, so overfetch is required"
+  },
+  "environment_probes": {
+    "non-ASCII bundle path containing a space": "PASS",
+    "LC_ALL=C / LANG=C": "PASS",
+    "populated real ~/.memtomem with an unusable sqlite_path": "PASS - 150 files / 1032 chunks; 0 files written into the parent HOME"
+  },
+  "corpus_narrative": {
+    "historical records": "state their own value, the observation that broke it, and what replaced it",
+    "incident reviews": "threshold change recorded as immediate containment, explicitly not a claim that the cause is gone, pointing at the adopted decision for the settled contract; the follow-up line is labelled 후속 작업 because next_work is usually an improvement, not the root-cause repair. No code defect is asserted where the scenario describes none.",
+    "scenarios realigned": [
+      "auth/recovery_codes",
+      "auth/login_attempts",
+      "billing/seat_floor",
+      "reports/query_seconds"
+    ]
+  },
+  "versions_exercised": "published PyPI 0.5.0 and 0.6.0 both pass, plus the editable checkout; the >=0.5.0 floor is measured against both releases, not assumed",
+  "corpus_name": "Slateharbor - invented for this example. The earlier name collided with real companies in software; this one has no software-market namesake.",
+  "ci_environments": {
+    "[langgraph] only": "05/06 pass; 00 correctly fails (tree_sitter absent) - measured",
+    "[code] only": "00 plus generate/build --check and validate.py pass - measured"
+  },
+  "published_0_6_compatibility": {
+    "status": "PASS",
+    "python": "3.13.2",
+    "memtomem": "0.6.0",
+    "inventory": {
+      "formats": {
+        ".json": {
+          "files": 30,
+          "chunks": 180,
+          "min_chunks": 6
+        },
+        ".md": {
+          "files": 60,
+          "chunks": 480,
+          "min_chunks": 8
+        },
+        ".yaml": {
+          "files": 12,
+          "chunks": 72,
+          "min_chunks": 6
+        },
+        ".toml": {
+          "files": 6,
+          "chunks": 36,
+          "min_chunks": 6
+        },
+        ".py": {
+          "files": 42,
+          "chunks": 264,
+          "min_chunks": 2
+        }
+      },
+      "files": 150,
+      "chunks": 1032,
+      "index_seconds": 1.91
+    },
+    "retrieval_cases": [
+      {
+        "id": "auth-decision",
+        "rank": 1
+      },
+      {
+        "id": "auth-implementation",
+        "rank": 1
+      },
+      {
+        "id": "auth-configuration",
+        "rank": 1
+      },
+      {
+        "id": "billing-decision",
+        "rank": 1
+      },
+      {
+        "id": "billing-implementation",
+        "rank": 1
+      },
+      {
+        "id": "billing-configuration",
+        "rank": 1
+      },
+      {
+        "id": "notifications-decision",
+        "rank": 1
+      },
+      {
+        "id": "notifications-implementation",
+        "rank": 1
+      },
+      {
+        "id": "notifications-configuration",
+        "rank": 1
+      },
+      {
+        "id": "jobs-decision",
+        "rank": 1
+      },
+      {
+        "id": "jobs-implementation",
+        "rank": 1
+      },
+      {
+        "id": "jobs-configuration",
+        "rank": 1
+      },
+      {
+        "id": "files-decision",
+        "rank": 1
+      },
+      {
+        "id": "files-implementation",
+        "rank": 1
+      },
+      {
+        "id": "files-configuration",
+        "rank": 1
+      },
+      {
+        "id": "reports-decision",
+        "rank": 1
+      },
+      {
+        "id": "reports-implementation",
+        "rank": 1
+      },
+      {
+        "id": "reports-configuration",
+        "rank": 1
+      }
+    ],
+    "policy_tests": 36,
+    "negative_cases": [
+      "unknown query",
+      "wrong namespace",
+      "wrong source",
+      "historical policy"
+    ],
+    "guarded_socket_apis": [
+      "socket.create_connection",
+      "socket.socket.connect",
+      "socket.socket.connect_ex",
+      "socket.socket.sendto"
+    ],
+    "checks": [
+      "fresh CLI process",
+      "update and reindex",
+      "custom memory",
+      "child socket guard",
+      "source integrity",
+      "cleanup"
+    ]
+  },
+  "published_0_6_notebook": [
+    {
+      "notebook": "00_start_here.ipynb",
+      "checks": "Run All assertions",
+      "status": "PASS",
+      "network_blocked": [
+        "socket.socket.connect",
+        "socket.socket.connect_ex",
+        "socket.socket.sendto",
+        "socket.create_connection"
+      ],
+      "same_kernel_runs": 1,
+      "elapsed_seconds": 28.23
+    }
+  ]
+}

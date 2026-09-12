@@ -344,8 +344,8 @@ handling honors ADR-0011's explicit-choice rule for the git-tracked
 tier: the **preview** may run with an inferred scope, but an `--apply`
 whose destination is `project_shared` requires the **explicit**
 `--scope project_shared` (plus Gate B confirmation — originally via `--yes`
-or the prompt; `--confirm-project-shared` is the spelling from 0.5.x and the
-only one from 0.6.0, #2318 below) — a new command does not inherit `init`'s
+or the prompt; `--confirm-project-shared` is the spelling from 0.6.0 and the
+only one from 0.7.0, #2318 below) — a new command does not inherit `init`'s
 legacy implicit default into a git-tracked write. `mm context sync` gains an additive `--runtime` filter (default: all
 detected runtimes, unchanged).
 
@@ -363,10 +363,10 @@ detected runtimes, unchanged).
 
 > **2026-09 (#2318):** That change, staged. `pull` now takes
 > `--confirm-project-shared`, so the CLI, the `mem_context_pull` tool and the
-> web pull route ask for the same thing — though only from 0.6.0 do they
+> web pull route ask for the same thing — though only from 0.7.0 do they
 > *refuse* the same things. The `--yes` invocations the note
-> above worried about are not broken: through 0.5.x `--yes` still carries
-> Gate B here and prints a yellow stderr notice naming the 0.6.0 flip, after
+> above worried about are not broken: through 0.6.x `--yes` still carries
+> Gate B here and prints a yellow stderr notice naming the 0.7.0 flip, after
 > which it gets the standard "`--yes` alone is not sufficient" refusal. The
 > consent line reports `flag='--yes'` while the deprecated spelling is in
 > use, so an operator can see which scripts still need migrating before the

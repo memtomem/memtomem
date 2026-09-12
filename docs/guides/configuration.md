@@ -3,7 +3,10 @@
 memtomem resolves supported user settings from built-in defaults,
 `config.d/` fragments, `config.json`, and environment variables. Environment
 variables use the `MEMTOMEM_` prefix with nested sections separated by `__`
-(double underscore). Unprefixed names are never read, with one documented
+(double underscore). A whole section can also be given as one JSON object —
+`MEMTOMEM_EMBEDDING='{"onnx_batch_size": 7}'` sets the same field as
+`MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=7` — and both shapes rank the same way
+against the file layers. Unprefixed names are never read, with one documented
 exception: the Langfuse SDK credentials described in
 [Session Trace](#session-trace).
 
@@ -64,8 +67,21 @@ of increasing priority:
    `mm init` writes to. Every key here replaces whatever earlier layers
    produced for that field (REPLACE semantics across the board).
 4. **`MEMTOMEM_*` environment variables** — highest priority. If an
-   env var is set, the corresponding entries in `config.d/` and
-   `config.json` are skipped.
+   env var supplies a field, the corresponding entries in `config.d/` and
+   `config.json` are skipped for that field — the rest of the section still
+   comes from the file layers. Both binding shapes count: a
+   `MEMTOMEM_<SECTION>__<FIELD>` variable, and a `MEMTOMEM_<SECTION>`
+   variable whose JSON object carries the field. Export both for one field
+   and the `__` spelling normally wins it, while the JSON object still
+   supplies the other fields it names. The `__` value is merged into the JSON
+   object under the field's lower-case name — replacing that key where the
+   object already uses it, appended after the object's keys where it does not
+   — and the object's keys are then matched case-insensitively, last one
+   standing. So an object that spells one field twice wins only when its
+   *other* spelling comes after the lower-case one. Clearing whichever
+   variable is in force hands the field to the other rather than to the file;
+   `mm config set` names both when both bind. Name matching is case-insensitive, so
+   `memtomem_search__default_top_k` binds as well as the uppercase spelling.
 
 ### List field merge strategies
 
@@ -138,6 +154,9 @@ rather than leaving you to discover the divergence later (issue #2108):
   `config.json` and warns that the variable "is set and takes
   precedence", naming the effective value that remains in force. The
   write is not wasted — it applies the moment the variable is unset.
+  A whole-section variable gets its own wording, because the remedy is
+  wider than the key being reported: it "carries" the field in its JSON
+  payload, and unsetting it releases every other field that payload names.
 - **Setting the value the comparand already supplies removes the pin.**
   If `config.json` pinned `33` and you set the value an env var, a
   fragment, or the default already provides, the delta is empty, so the
@@ -150,7 +169,8 @@ its trailing note reads `(persisted to config.json)` only when the key
 is actually in the file, and otherwise names why it was pruned — and
 when an env var owns the key it says so even then, because `persist`
 promises the value survives a restart and the variable is what the
-next start reads. What the file holds comes from the save's own
+next start reads. It draws the same line between the two shapes that
+`mm config set` does. What the file holds comes from the save's own
 before/after receipt, captured inside the write lock, so a concurrent
 write cannot be mistaken for this one. (The *effective* value quoted
 by `mm config set` is a fresh read taken after the lock is released,
@@ -219,9 +239,21 @@ mm init --fresh
 `mm config unset <key>` drops a single pinned entry from
 `~/.memtomem/config.json`. Each key is `section.field` form and the
 command is idempotent — running it on a key that isn't pinned exits 0
-with an `(already at default)` note so scripts can re-run safely.
-Unknown keys exit 1 with a typo suggestion when one is nearby. When
-every override is removed the config file itself is deleted.
+so scripts can re-run safely. Unknown keys exit 1 with a typo
+suggestion when one is nearby. When every override is removed the
+config file itself is deleted.
+
+For a key the file does not pin, the note is measured rather than
+assumed, and measured through the same load path the server uses:
+`(already at default)` only when that load actually resolves to the
+default, otherwise the value that is in effect, masked for
+credentials. A `MEMTOMEM_*` variable is named when one owns the
+field, because that is resolvable exactly and it outranks the file
+either way. No other layer is named — a non-default value does not
+prove a `config.d` fragment wrote it, since the embedding profile
+derives some fields and a deprecated key in `config.json` migrates
+into its replacement. The reading is taken after the write, so a config
+the loaders cannot build costs the detail and nothing else.
 
 ```bash
 mm config unset mmr.enabled                    # drop one key
@@ -503,6 +535,58 @@ candidate) refuse with a configuration error naming
 | `MEMTOMEM_INDEXING__SUMMARY_LANGUAGE` | `en` | Language for auto-generated per-source summaries |
 | `MEMTOMEM_INDEXING__SUMMARY_MAX_INPUT_CHARS` | `3000` | Clamp the leading source body to this many characters before generating the per-source summary |
 | `MEMTOMEM_INDEXING__SUMMARY_MAX_TOKENS` | `256` | Output token cap for each per-source summary |
+
+### Lock sidecars (`.<name>.lock`)
+
+Indexing and editing a file take a **cross-process lock**, and that lock is
+held on an empty sibling file named `.<name>.lock` rather than on the file
+itself — `notes.md` is locked through `.notes.md.lock` beside it. Locking the
+data file directly does not work: a writer that replaces the file swaps its
+inode mid-operation, and every lock held on the old inode goes stale. The
+sidecar is never replaced, so its inode is stable.
+
+The sidecar sits beside the **resolved** file, so a symlinked source is locked
+next to its target — which may be outside the tree you indexed. That is also
+what makes a symlink and its target share one lock instead of two.
+
+These files are created with mode `0600`, stay empty, and are **left in place
+on purpose**. memtomem never deletes them: removing a sidecar while any
+memtomem process might take it re-introduces exactly the race the lock exists
+to prevent, since two processes would then lock two different files under one
+path and both believe they hold it.
+
+You will see them in any tree you index — a registered `memory_dirs` folder,
+a `mm index <path>` run, or a Reindex from the Web UI — including your own
+source repositories. A directory scan leaves one next to each file it selects
+for indexing, which is the overlap between `indexing.supported_extensions` and
+the extensions a chunker is registered for. With the default settings that
+overlap is `.md`, `.json`, `.yaml`, `.yml` and `.toml`; configuring a hard
+chunk budget (`indexing.hard_max_chunk_tokens`) registers the code chunkers as
+well, and an indexed code repository then picks up sidecars next to its `.py`,
+`.js`, `.ts`, `.jsx` and `.tsx` files too. Naming a single file directly
+(`mm index <file>`) locks it before that check, so it leaves a sidecar even for
+an extension no chunker handles. Sidecars are never indexed themselves:
+`.lock` is not a supported extension.
+
+**Keep them out of version control.** Add the pattern to the repository's
+`.gitignore`, or to your global excludes file
+(`git config --global core.excludesFile`):
+
+```gitignore
+# memtomem cross-process lock sidecars
+.*.lock
+```
+
+The leading dot is required and is what makes the rule safe: it matches
+`.notes.md.lock` but not a tracked `uv.lock` or `package-lock.json`.
+
+**Deleting them.** Do not mass-delete sidecars while an MCP server, `mm web`,
+or any `mm` command may be running — that is the one situation the never-unlink
+rule protects. With every memtomem process stopped they are safe to remove,
+and the next indexing run recreates the ones it needs. There is no `mm`
+command that sweeps them; see
+[issue #2387](https://github.com/memtomem/memtomem/issues/2387) for why a safe
+online sweep is still an open design question.
 
 ### Exclude patterns
 

@@ -7,6 +7,7 @@ import json
 
 import click
 
+from memtomem._runtime_paths import scrub_text
 from memtomem.config import (
     FIELD_CONSTRAINTS,
     MUTABLE_FIELDS,
@@ -21,6 +22,27 @@ from memtomem.secret_masking import is_secret_key, mask_secrets
 # ---------------------------------------------------------------------------
 # CLI commands
 # ---------------------------------------------------------------------------
+
+
+def _one_line(value: object) -> str:
+    """Render an untrusted string as one printable terminal line.
+
+    Config-load diagnostics carry a filesystem path and a validation message
+    assembled from the user's own file, so either can contain a newline (a
+    forged second warning line) or an ANSI escape (cursor or screen control).
+    :func:`~memtomem._runtime_paths.scrub_text` replaces every non-printable
+    character with an escape that keeps the value readable and diagnosable
+    without letting it act.
+
+    Delegating rather than spelling it again (#2410): ``mm status`` renders
+    the same diagnostic, and now neutralises it too, so both surfaces have to
+    spell one ``config.d`` filename the same way — an operator pastes both.
+    Keeping a second implementation would not have: this one escaped code
+    points where ``scrub_text`` escapes filesystem bytes, which agree only
+    below ``U+0080`` (``U+0085`` would have been ``\\x85`` here against
+    ``\\xc2\\x85`` there).
+    """
+    return scrub_text(str(value))
 
 
 @click.group()
@@ -45,6 +67,27 @@ def config_show(fmt: str, *, as_json: bool = False) -> None:
     load_config_d(cfg)
     load_config_overrides(cfg)
     data = mask_secrets(cfg.model_dump())
+
+    # A section the loaders rejected is gone from this view with no trace —
+    # what prints is whatever layer was accepted instead (#2385 item 3). Say
+    # so on stderr: stdout stays the config document, so ``--json | jq`` and
+    # the ``--json`` / ``--format json`` parity contract are untouched.
+    for diagnostic in cfg.load_diagnostics:
+        # The path is a filename off disk and the reason is a pydantic
+        # message built from the file's own values, so both can carry a
+        # newline or an escape sequence that would forge a second warning
+        # line or reprogram the terminal. Neutralise them for this text
+        # surface only; the JSON/status payloads keep the real bytes.
+        click.echo(
+            click.style(
+                f"warning: config section [{_one_line(diagnostic.section)}] "
+                f"in {_one_line(diagnostic.path)} "
+                f"was rejected — {_one_line(diagnostic.error)}; "
+                "that file's values for the section were ignored",
+                fg="yellow",
+            ),
+            err=True,
+        )
 
     if fmt == "json":
         click.echo(json.dumps(data, indent=2, default=str))
@@ -268,21 +311,52 @@ def _effect_lines(
     supplied it. It is passed in rather than measured here so the caller's FTS
     rebuild acts on the same reading this report describes.
     """
-    from memtomem.config import MISSING, env_var_owning
+    from memtomem.config import MISSING, env_bindings_for
 
-    env_var = env_var_owning(section_name, field_name)
+    bindings = env_bindings_for(section_name, field_name)
+    binding = bindings[0] if bindings else None
+    env_var = binding.name if binding is not None else None
     pruned = receipt.pruned(section_name, field_name)
     pinned_before = receipt.pinned_before(section_name, field_name)
 
     lines: list[str] = []
-    if effective != coerced and env_var is not None:
+    if effective != coerced and binding is not None:
         # Name the variable, never read it: the actionable part is which knob
         # to unset. Quoted values go through the same mask as `old -> new`.
+        # The remedy is the whole reason this line exists, so it has to name
+        # every binding standing between the file and the reader (issue
+        # #2390). Both shapes can bind one field at once, and clearing only
+        # the winner hands the field to the other one rather than to
+        # config.json — advice that looks like it worked.
+        if len(bindings) > 1:
+            # "in any case spelling" is load-bearing here for the same reason
+            # it is in the single-binding branches: each shape can be exported
+            # under several spellings, and this line names one per shape.
+            remedy = (
+                f"it applies once neither {bindings[0].name} nor {bindings[1].name} "
+                f"supplies {field_name}, in any case spelling — clearing one of them "
+                "hands the field to the other, not to the file."
+            )
+        elif binding.whole_section:
+            # One variable, several fields: say so, because unsetting it is
+            # wider than the key being reported.
+            remedy = (
+                "it applies once no case spelling of that name carries the field — drop "
+                f"{field_name} from that JSON, or unset the variable to release every "
+                "field it carries."
+            )
+        else:
+            remedy = "it applies once no case spelling of that name is set."
+        supplies = (
+            f"carries {key} in its JSON payload and takes precedence"
+            if binding.whole_section
+            else "is set and takes precedence"
+        )
         lines.append(
             click.style(
-                f"warning: {env_var} is set and takes precedence — the effective value is "
+                f"warning: {binding.name} {supplies} — the effective value is "
                 f"still {_masked(field_name, effective)}. config.json holds your value and "
-                f"it applies once no case spelling of that name is set.",
+                f"{remedy}",
                 fg="yellow",
             )
         )
@@ -323,6 +397,86 @@ def _effect_lines(
 
 def _masked(field_name: str, value: object) -> object:
     return ("***" if value else "") if is_secret_key(field_name) else value
+
+
+def _unpinned_sources(keys: list[str]) -> dict[str, str]:
+    """What actually supplies each key, now that ``config.json`` does not pin it.
+
+    ``unset`` used to answer "already at default" for every key the file had no
+    entry for. That is a claim about the *effective* value, and ``config.json``
+    is only one of the layers that can set it: a ``config.d`` fragment or a
+    ``MEMTOMEM_*`` variable supplies the field just as well, and the command
+    then reported a default the stack was not using. Measure instead of
+    assuming, the way ``mm config set`` already does (issue #2108).
+
+    What is reported is bounded by what can be shown. An environment binding is
+    named because :func:`memtomem.config.env_bindings_for` resolves it exactly
+    and it outranks the file either way. Everything else gets the value and no
+    provenance: a non-default value does not prove a fragment wrote it. Two
+    measured counterexamples, in neither of which a ``config.d`` directory even
+    existed — the E5 embedding profile derives ``indexing.max_chunk_tokens``,
+    and a legacy ``rerank.top_k`` in ``config.json`` migrates into
+    ``rerank.min_pool``, so there the file *is* the source of a key it holds no
+    entry for. Naming a fragment in either case sends the reader to a file that
+    is not there.
+
+    One load answers every key, and the whole diagnosis is optional: it runs
+    after the write, so a config the loaders cannot build must not turn a
+    completed unset into a failure. Keys it cannot speak to are left out and
+    the caller falls back to naming only what it saw itself.
+    """
+    from pydantic import ValidationError as PydanticValidationError
+
+    from memtomem.config import env_bindings_for
+    from memtomem.config_signature import build_fresh_config
+
+    out: dict[str, str] = {}
+    try:
+        # The canonical load, not a hand-built stack: it ends with
+        # ``apply_e5_defaults``, which fires on the *file* layers selecting an
+        # E5 model. Rebuilding the steps by hand skipped it, and a config.json
+        # naming ``intfloat/multilingual-e5-small`` then read
+        # ``indexing.max_chunk_tokens`` as 512 while the app used 384 — so the
+        # note said "already at default" about a value nothing resolves to,
+        # which is the very bug this helper exists to end.
+        #
+        # ``strict_overrides=False`` is belt-and-braces rather than load
+        # bearing: ``config_unset`` refuses a non-object ``config.json`` before
+        # it ever gets here, so flipping the flag changes no observable output.
+        # It stays off because this is a reporting path -- see below.
+        cfg = build_fresh_config(migrate=False, strict_overrides=False)
+    except Exception:  # noqa: BLE001 - reporting only; see the docstring
+        return out
+
+    for key in keys:
+        section_name, _, field_name = key.partition(".")
+        try:
+            section = getattr(cfg, section_name)
+            effective = getattr(section, field_name)
+            # Compared against a newly constructed section's declared defaults.
+            # The class is read off the live object rather than looked up by
+            # name, so the two sides cannot be different models; the
+            # construction itself reruns the field factories and validators.
+            default = getattr(type(section)(), field_name)
+        except (AttributeError, TypeError, PydanticValidationError):
+            continue
+
+        bindings = env_bindings_for(section_name, field_name)
+        if bindings:
+            carries = "carries it in its JSON payload" if bindings[0].whole_section else "is set"
+            out[key] = (
+                f"nothing to remove — {bindings[0].name} {carries} and supplies "
+                f"{_masked(field_name, effective)}"
+            )
+        elif effective == default:
+            out[key] = "already at default"
+        else:
+            # The value, not a layer: that it differs from the default does not
+            # establish where it came from. See the docstring.
+            out[key] = (
+                f"nothing to remove — a fresh load puts it at {_masked(field_name, effective)}"
+            )
+    return out
 
 
 def _canonical_unset_keys() -> set[str]:
@@ -528,6 +682,7 @@ def config_unset(keys: tuple[str, ...]) -> None:
     path = _override_path()
 
     lines: list[str] = []
+    unpinned: list[tuple[int, str]] = []
     removed_extra_mutation = False
     any_skip = False
 
@@ -584,7 +739,11 @@ def config_unset(keys: tuple[str, ...]) -> None:
                     if field in _EXTRA_MUTATION_FIELDS.get(section, set()):
                         removed_extra_mutation = True
                 else:
-                    lines.append(f"Unset: {key} (already at default)")
+                    # Diagnosed after the lock: saying which layer supplies the
+                    # value needs a config load, and that must not happen while
+                    # holding the write lock.
+                    unpinned.append((len(lines), key))
+                    lines.append("")
 
             if existing:
                 _relativize_config_paths_in_place(existing)
@@ -600,6 +759,11 @@ def config_unset(keys: tuple[str, ...]) -> None:
             )
         )
         raise SystemExit(1) from None
+
+    if unpinned:
+        sources = _unpinned_sources([key for _, key in unpinned])
+        for index, key in unpinned:
+            lines[index] = f"Unset: {key} ({sources.get(key, 'nothing to remove')})"
 
     for line in lines:
         click.echo(line)

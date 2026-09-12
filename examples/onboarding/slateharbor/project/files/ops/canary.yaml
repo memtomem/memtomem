@@ -1,0 +1,55 @@
+# Synthetic Slateharbor operational definitions; not deployed infrastructure.
+
+upload_mb:
+  description: "file upload limit"
+  policy_value: 25
+  environment: "production"
+  observe: "content length와 실제 수신량을 비교하고 multipart upload 상태를 조회한다."
+  failure: "INC-FILES-12에서 동시 대형 업로드가 작은 첨부 요청까지 OOM으로 실패시켰다."
+  runbook: "files/docs/runbooks/recovery.md"
+  promotion: "Review observations before expanding beyond the pilot cohort"
+
+signed_url_minutes:
+  description: "signed URL lifetime"
+  policy_value: 10
+  environment: "production"
+  observe: "링크 발급 시각과 공유 해제 시각을 비교하고 신규 URL 발급을 중단한다."
+  failure: "외부로 전달된 링크가 공유 해제 뒤에도 오래 동작했다."
+  runbook: "files/docs/runbooks/recovery.md"
+  promotion: "Review observations before expanding beyond the pilot cohort"
+
+retention_days:
+  description: "trash retention"
+  policy_value: 30
+  environment: "production"
+  observe: "삭제 표시와 실제 blob 존재를 확인하고 hold 여부부터 조회한다."
+  failure: "실수 삭제를 일주일 뒤 발견해 복구 기간을 놓친 조직이 있었다."
+  runbook: "files/docs/runbooks/recovery.md"
+  promotion: "Review observations before expanding beyond the pilot cohort"
+
+scan_seconds:
+  description: "malware scan timeout"
+  policy_value: 120
+  environment: "production"
+  observe: "scan 상태가 pending인지 확인하고 재검사 큐로 보낸다."
+  failure: "timeout을 clean으로 취급한 경로 때문에 검사가 끝나지 않은 파일이 공개됐다."
+  runbook: "files/docs/runbooks/recovery.md"
+  promotion: "Review observations before expanding beyond the pilot cohort"
+
+preview_pages:
+  description: "document preview"
+  policy_value: 20
+  environment: "production"
+  observe: "쪽 수와 preview job 종류를 확인하고 대형 변환을 별도 큐로 보낸다."
+  failure: "긴 PDF 한 개가 preview worker를 점유해 이미지 썸네일까지 지연됐다."
+  runbook: "files/docs/runbooks/recovery.md"
+  promotion: "Review observations before expanding beyond the pilot cohort"
+
+chunk_mb:
+  description: "multipart chunk"
+  policy_value: 8
+  environment: "production"
+  observe: "실패한 part 번호와 checksum을 확인하고 해당 조각만 재전송한다."
+  failure: "큰 조각 재전송이 느린 네트워크에서 계속 timeout됐다."
+  runbook: "files/docs/runbooks/recovery.md"
+  promotion: "Review observations before expanding beyond the pilot cohort"

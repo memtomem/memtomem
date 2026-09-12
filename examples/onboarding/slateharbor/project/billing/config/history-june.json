@@ -1,0 +1,74 @@
+{
+  "webhook_attempts": {
+    "description": "billing webhook retry",
+    "value": 7,
+    "environment": "history-june",
+    "revision": "2026-06-01",
+    "status": "superseded",
+    "reason": "2026-06-01 기준으로 `7`를 사용했습니다. 가정이 깨진 관찰: INC-BILL-09에서 공급자 timeout 뒤 재전송을 신규 청구로 처리해 중복 원장이 생겼다. 2026-08-24에 `3`로 대체됐습니다.",
+    "decision": "billing/docs/history/decisions-june.md",
+    "implementation": "billing/src/policy.py",
+    "observability": "provider event ID로 중복 수신을 확인하고 settlement 상태가 불명확하면 조회부터 한다.",
+    "superseded_by": "billing/config/production.json"
+  },
+  "invoice_days": {
+    "description": "invoice grace period",
+    "value": 7,
+    "environment": "history-june",
+    "revision": "2026-06-01",
+    "status": "superseded",
+    "reason": "2026-06-01 기준으로 `7`를 사용했습니다. 가정이 깨진 관찰: 휴일에 청구서가 승인되지 않아 정상 조직이 읽기조차 못 했다. 2026-08-24에 `14`로 대체됐습니다.",
+    "decision": "billing/docs/history/decisions-june.md",
+    "implementation": "billing/src/policy.py",
+    "observability": "계약상 유예 일수와 invoice 발행일을 대조하고 읽기 접근은 유지한다.",
+    "superseded_by": "billing/config/production.json"
+  },
+  "refund_days": {
+    "description": "refund eligibility",
+    "value": 60,
+    "environment": "history-june",
+    "revision": "2026-06-01",
+    "status": "superseded",
+    "reason": "2026-06-01 기준으로 `60`를 사용했습니다. 가정이 깨진 관찰: 정산 종료 뒤 자동 환불이 실행돼 보고서 잔액과 공급자 잔액이 달라졌다. 2026-08-24에 `30`로 대체됐습니다.",
+    "decision": "billing/docs/history/decisions-june.md",
+    "implementation": "billing/src/policy.py",
+    "observability": "구매 시점과 정산 배치를 확인하고 수동 조정 번호를 남긴다.",
+    "superseded_by": "billing/config/production.json"
+  },
+  "seat_floor": {
+    "description": "minimum seats",
+    "value": 1,
+    "environment": "history-june",
+    "revision": "2026-06-01",
+    "status": "superseded",
+    "reason": "2026-06-01 기준으로 `1`를 사용했습니다. 가정이 깨진 관찰: 팀 요금제 계정이 좌석 1석까지 내려간 채 팀 기능을 계속 쓰면서 개인 요금제 기준 견적을 받았다. 2026-08-24에 `3`로 대체됐습니다.",
+    "decision": "billing/docs/history/decisions-june.md",
+    "implementation": "billing/src/policy.py",
+    "observability": "요금제 유형을 먼저 확인하고 견적과 실제 청구에 같은 좌석 기준을 사용한다.",
+    "superseded_by": "billing/config/production.json"
+  },
+  "reconcile_minutes": {
+    "description": "settlement lag",
+    "value": 5,
+    "environment": "history-june",
+    "revision": "2026-06-01",
+    "status": "superseded",
+    "reason": "2026-06-01 기준으로 `5`를 사용했습니다. 가정이 깨진 관찰: 짧은 경보 창으로 정상 지연 건마다 재정산 요청이 생성됐다. 2026-08-24에 `20`로 대체됐습니다.",
+    "decision": "billing/docs/history/decisions-june.md",
+    "implementation": "billing/src/policy.py",
+    "observability": "공급자 event 시각과 수신 시각을 비교하고 지연 건은 다음 배치에서 재조회한다.",
+    "superseded_by": "billing/config/production.json"
+  },
+  "currency_scale": {
+    "description": "currency precision",
+    "value": 4,
+    "environment": "history-june",
+    "revision": "2026-06-01",
+    "status": "superseded",
+    "reason": "2026-06-01 기준으로 `4`를 사용했습니다. 가정이 깨진 관찰: 부동소수점 변환 후 공급자 요청과 로컬 원장 합계가 달라졌다. 2026-08-24에 `2`로 대체됐습니다.",
+    "decision": "billing/docs/history/decisions-june.md",
+    "implementation": "billing/src/policy.py",
+    "observability": "최소 통화 단위의 정수로 대조하고 입력 precision 초과를 거절한다.",
+    "superseded_by": "billing/config/production.json"
+  }
+}

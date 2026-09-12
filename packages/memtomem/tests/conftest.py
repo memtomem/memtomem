@@ -24,6 +24,7 @@ from memtomem.server.component_factory import Components, create_components, clo
 # per-file imports. Keeping the definitions in ``_wiki_fixtures.py`` avoids
 # bloating this already-heavy conftest with unrelated git-env plumbing.
 from _wiki_fixtures import git_identity, unborn_wiki, wiki_root  # noqa: F401
+from helpers import ambient_memtomem_config_env
 import _home_guard as _home_guard
 
 
@@ -152,6 +153,44 @@ def pytest_terminal_summary(terminalreporter) -> None:
 # ``_real_home_write_guard``.  That ordering makes the guard set up before the
 # shared ``monkeypatch`` fixture and tear down after it, so a test that patches
 # ``os.open``/``os.read`` cannot distort the real-settings comparison.
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _scrub_ambient_memtomem_env() -> Iterator[None]:
+    """Keep the developer's shell ``MEMTOMEM_*`` config env out of the session.
+
+    ``Mem2MemConfig`` binds both shapes described below, and every loader
+    yields to the environment: ``load_config_overrides`` skips a ``config.json``
+    entry whose field an env var owns (``env_var_owning``). So a test can
+    redirect the whole ``~/.memtomem`` config layer at a temp dir and still be
+    handed the developer's value — ``MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=4``
+    reproduces #2386's failure with the file isolation fully in place. This
+    repo's own ``scripts/setup-worktree.sh`` writes an ``.envrc`` exporting
+    ``MEMTOMEM_*``, so the shell that this suite runs in is a realistic source.
+
+    Session-scoped so it lands before any function fixture: the scrub must not
+    undo a value a fixture set deliberately, and both
+    ``_csrf_observe_only_default`` and the ``components`` fixture put
+    ``MEMTOMEM_*`` names into the environment on purpose. A function-scoped
+    prefix sweep would race them; a session-scoped one is guaranteed to run
+    first and then leave them alone.
+
+    What is scrubbed is the two shapes that bind config — a delimiter-bearing
+    ``MEMTOMEM_<SECTION>__<FIELD>`` and a bare ``MEMTOMEM_<SECTION>`` carrying
+    the section as JSON. The other flat ``MEMTOMEM_*`` names this package reads
+    straight from the environment (``MEMTOMEM_UPDATE_WIRE_GOLDENS``,
+    ``MEMTOMEM_TOOL_MODE``, ``MEMTOMEM_TEST_*`` and the rest) are a developer
+    steering the run they are starting, and an earlier revision of this fixture
+    scrubbed them — which silently disabled the documented golden-file
+    regeneration workflow. See :func:`helpers.ambient_memtomem_config_env`.
+
+    Anything read at import time, before this fixture is set up, is outside its
+    reach — ``server/__init__.py`` captures ``MEMTOMEM_TOOL_MODE`` that early.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        for key in ambient_memtomem_config_env(os.environ):
+            mp.delenv(key, raising=False)
+        yield
 
 
 @pytest.fixture(autouse=True)

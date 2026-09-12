@@ -1,0 +1,62 @@
+{
+  "lease_seconds": {
+    "description": "worker lease recovery",
+    "inputs": [
+      40,
+      120
+    ],
+    "purpose": "INC-JOBS-22에서 GC pause로 heartbeat가 늦자 살아 있는 worker의 작업을 다른 worker가 다시 수행했다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-JOBS-88: worker 재시작 뒤 완료 checkpoint를 읽는 경로부터 확인한다. 신규 작업 제출은 보류한다."
+  },
+  "max_parallel": {
+    "description": "worker concurrency",
+    "inputs": [
+      2,
+      8
+    ],
+    "purpose": "과도한 병렬 압축이 이벤트 루프를 막아 lease가 연달아 만료됐다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-JOBS-89: 부하 테스트에 heartbeat deadline을 기록한다."
+  },
+  "checkpoint_seconds": {
+    "description": "checkpoint interval",
+    "inputs": [
+      30,
+      10
+    ],
+    "purpose": "메모리상의 진행률만 저장해 재시작 후 누락된 출력 구간이 생겼다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-JOBS-90: 강제 종료 지점을 바꿔 재개 테스트를 반복한다."
+  },
+  "retry_budget": {
+    "description": "job retry budget",
+    "inputs": [
+      1,
+      4
+    ],
+    "purpose": "손상된 파일 하나가 worker 시간을 반복 소비하며 정상 작업을 밀어냈다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-JOBS-91: permanent 오류 분류를 검토한다."
+  },
+  "shutdown_seconds": {
+    "description": "worker shutdown grace",
+    "inputs": [
+      20,
+      60
+    ],
+    "purpose": "즉시 종료 때문에 결과는 썼지만 완료 표시가 없어 작업이 다시 실행됐다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-JOBS-92: 배포 스크립트의 grace 값과 맞춘다."
+  },
+  "backlog_limit": {
+    "description": "job admission",
+    "inputs": [
+      100,
+      300
+    ],
+    "purpose": "대량 업로드가 오래된 작업의 처리 약속을 깨뜨렸다.",
+    "environment": "synthetic-local",
+    "next_work": "TASK-JOBS-93: 응답의 retry-after 안내를 추가한다."
+  }
+}

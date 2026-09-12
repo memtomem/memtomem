@@ -1,0 +1,74 @@
+{
+  "freshness_minutes": {
+    "description": "report freshness",
+    "value": 60,
+    "environment": "history-june",
+    "revision": "2026-06-01",
+    "status": "superseded",
+    "reason": "2026-06-01 기준으로 `60`를 사용했습니다. 가정이 깨진 관찰: INC-REPORT-08에서 어제 생성된 캐시가 최신 매출처럼 표시돼 운영자가 정산을 다시 요청했다. 2026-08-24에 `15`로 대체됐습니다.",
+    "decision": "reports/docs/history/decisions-june.md",
+    "implementation": "reports/src/policy.py",
+    "observability": "materialized_at과 원장 event watermark를 비교한다. 갱신 실패 시 이전 값과 지연 상태를 함께 보여준다.",
+    "superseded_by": "reports/config/production.json"
+  },
+  "export_rows": {
+    "description": "CSV export rows",
+    "value": 50000,
+    "environment": "history-june",
+    "revision": "2026-06-01",
+    "status": "superseded",
+    "reason": "2026-06-01 기준으로 `50000`를 사용했습니다. 가정이 깨진 관찰: 동기 요청 timeout 뒤 사용자가 다시 눌러 같은 export가 여러 번 만들어졌다. 2026-08-24에 `10000`로 대체됐습니다.",
+    "decision": "reports/docs/history/decisions-june.md",
+    "implementation": "reports/src/policy.py",
+    "observability": "export 요청 ID로 기존 job을 조회하고 중복 클릭에는 같은 ID를 반환한다.",
+    "superseded_by": "reports/config/production.json"
+  },
+  "window_days": {
+    "description": "report window",
+    "value": 365,
+    "environment": "history-june",
+    "revision": "2026-06-01",
+    "status": "superseded",
+    "reason": "2026-06-01 기준으로 `365`를 사용했습니다. 가정이 깨진 관찰: 1년 범위의 조인 쿼리가 운영 DB의 온라인 트래픽을 밀어냈다. 2026-08-24에 `90`로 대체됐습니다.",
+    "decision": "reports/docs/history/decisions-june.md",
+    "implementation": "reports/src/policy.py",
+    "observability": "요청 기간을 확인하고 읽기 전용 분석 경로로 우회한다.",
+    "superseded_by": "reports/config/production.json"
+  },
+  "cache_seconds": {
+    "description": "report cache ttl",
+    "value": 1800,
+    "environment": "history-june",
+    "revision": "2026-06-01",
+    "status": "superseded",
+    "reason": "2026-06-01 기준으로 `1800`를 사용했습니다. 가정이 깨진 관찰: 권한 변경 뒤에도 오래된 cache가 보였고 조직 구분이 빠진 key가 발견됐다. 2026-08-24에 `300`로 대체됐습니다.",
+    "decision": "reports/docs/history/decisions-june.md",
+    "implementation": "reports/src/policy.py",
+    "observability": "cache key의 tenant와 permission revision을 확인하고 영향을 받은 key만 무효화한다.",
+    "superseded_by": "reports/config/production.json"
+  },
+  "minimum_group": {
+    "description": "aggregate group privacy",
+    "value": 1,
+    "environment": "history-june",
+    "revision": "2026-06-01",
+    "status": "superseded",
+    "reason": "2026-06-01 기준으로 `1`를 사용했습니다. 가정이 깨진 관찰: 한 명뿐인 팀의 통계가 개인 활동 내역처럼 표시됐다. 2026-08-24에 `5`로 대체됐습니다.",
+    "decision": "reports/docs/history/decisions-june.md",
+    "implementation": "reports/src/policy.py",
+    "observability": "그룹 크기를 확인하고 작은 그룹은 상위 집계로 합친다.",
+    "superseded_by": "reports/config/production.json"
+  },
+  "query_seconds": {
+    "description": "report query timeout",
+    "value": 30,
+    "environment": "history-june",
+    "revision": "2026-06-01",
+    "status": "superseded",
+    "reason": "2026-06-01 기준으로 `30`를 사용했습니다. 가정이 깨진 관찰: 30초까지 실행되는 조회가 운영 DB 커넥션을 오래 점유해 같은 시각의 다른 리포트 요청까지 함께 느려졌다. 2026-08-24에 `8`로 대체됐습니다.",
+    "decision": "reports/docs/history/decisions-june.md",
+    "implementation": "reports/src/policy.py",
+    "observability": "query 상태와 오류 코드를 확인하고 마지막 정상 결과와 구분해서 표시한다.",
+    "superseded_by": "reports/config/production.json"
+  }
+}

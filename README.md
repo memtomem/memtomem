@@ -137,7 +137,7 @@ uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 
 **No install** (uvx on demand):
 ```bash
-claude mcp add memtomem -s user -- uvx --isolated --from "memtomem[all]==0.5.0" memtomem-server
+claude mcp add memtomem -s user -- uvx --isolated --from "memtomem[all]==0.6.0" memtomem-server
 ```
 
 See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor / Windsurf / Claude Desktop / Gemini CLI / Kimi Code.
@@ -183,7 +183,7 @@ Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdow
 |-------|-------------|
 | [Getting Started](docs/guides/getting-started.md) | Install, configure, save and find your first memory |
 | [한국어 바이브코딩 빠른 시작](docs/guides/vibe-coding-getting-started-ko.md) | Claude Code·Codex CLI에서 10~15분 안에 기억 저장·검색 |
-| [Example notebooks](examples/notebooks/) | Start with 05–06 for free, model-free LangGraph labs (Korean); 01–04 cover local ONNX APIs |
+| [Example notebooks](examples/notebooks/) | Start with 00: recover decisions, code, and settings across 150 synthetic files without a model (Korean); 01–04 teach APIs, 05–06 teach LangGraph |
 | [Coding-agent sample](examples/onboarding/retry-policy/) | Recover a decision and its ADR source across sessions; isolated CLI proof and copyable prompts |
 | [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
 | [Cross-runtime handoff](docs/guides/integrations/cross-runtime-handoff.md) | Claude Code·Codex CLI·Kimi Code 순차 공동 개발 |

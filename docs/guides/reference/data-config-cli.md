@@ -239,7 +239,7 @@ mm embedding-reset --mode revert-to-stored  # switch runtime to match DB
 
 ## CLI Reference
 
-The complete v0.5.0 top-level command catalog is grouped below. Run `mm
+The complete v0.6.0 top-level command catalog is grouped below. Run `mm
 <command> --help` for its subcommands and flags.
 
 | Area | Top-level commands |
@@ -289,7 +289,7 @@ mm reset --backup                      # snapshot the DB to <db>.pre-reset-<ts>.
 mm reset --force                       # bypass only the stale pid/web/DB-lock heuristics (not registry or barrier evidence)
 mm reset --json                        # emit a machine-readable ack instead of prose (also on mm add / mm purge)
 mm upgrade                             # uv-tool installs: on POSIX stop every MCP server and Web UI, reinstall, then recycle respawns
-mm upgrade --version 0.5.0 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
+mm upgrade --version 0.6.0 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
 # upgrade --json: dry runs add inventory_complete/warnings; a post-install partial failure adds cleanup_complete:false
 # warnings is additive on Windows, where processes are never killed automatically; db_lock_warning still requests a manual restart
 
@@ -390,7 +390,7 @@ mm context sync --all-projects --yes   # batch over every enrolled on-disk proje
 mm context sync --runtime claude --include=skills   # fan out to ONE runtime only (repeatable; default all; skills/agents/commands only)
 mm context pull agents my-agent        # PREVIEW what a Pull would land in the Store, per runtime candidate (read-only, source-selectable)
 mm context pull agents my-agent --diff # preview + unified diff of the would-land content vs the current Store
-mm context pull agents my-agent --from gemini --apply --scope project_shared --confirm-project-shared # pull ONE runtime's copy; --from disambiguates divergent candidates (ADR-0030 §5). Gate B: --yes alone is deprecated here and refused from 0.6.0 (#2318)
+mm context pull agents my-agent --from gemini --apply --scope project_shared --confirm-project-shared # pull ONE runtime's copy; --from disambiguates divergent candidates (ADR-0030 §5). Gate B: --yes alone is deprecated here and refused from 0.7.0 (#2318)
 mm context pull skills my-skill --overwrite --apply  # replace a Store-owned skill; the current tree is snapshotted into versions/ first (ADR-0030 §10)
 mm context generate --include=settings # merge hooks → ~/.claude/settings.json
 mm context diff --include=settings     # check hook sync status

@@ -1149,3 +1149,235 @@ class TestConcurrentWriters:
         data = json.loads(result.output)
         assert data["warnings"] == []
         assert data["index"]["total_chunks"] == 1
+
+
+class TestStatusReportNeutralisesControlCharacters:
+    """#2410 — no report value can forge a row or reach the terminal intact.
+
+    Every value in the report is text the code did not write: a ``config.d``
+    fragment name and a pydantic message in the ``config_section_rejected``
+    warning, provider/model names off the store and the config, resolved
+    ``memory_dirs`` entries. ``StatusLine`` scrubs the three rendered parts,
+    so these pins cover the warning block *and* the rows around it; the
+    structured surface keeps the real bytes (last test).
+    """
+
+    # A fragment name that really is creatable on POSIX — the reproduction in
+    # ``test_cli_config_load_diagnostics.py`` writes this exact filename — and
+    # a reason built from the file's own values.
+    FORGED_PATH = "/x/10-a\nforged\x1b[2J.json"
+    FORGED_ERROR = "bad\x1b[31m"
+
+    @staticmethod
+    def _data(
+        *,
+        warnings: list[dict] | None = None,
+        project_memory_dirs: list[str] | None = None,
+        model: str = "bge-m3",
+    ) -> dict:
+        """A minimal ``collect_status_report``-shaped dict.
+
+        Built by hand rather than collected: the hostile values have to sit in
+        a specific field, and ``collect_status_report`` would need a rejected
+        config layer and a store to produce them.
+        """
+        return {
+            "config": {
+                "storage_backend": "sqlite",
+                "db_path": "/opt/mm/memtomem.db",
+                "embedding": {"provider": "onnx", "model": model, "dimension": 1024},
+                "top_k": 10,
+                "rrf_k": 60,
+                "rrf_weights": [1.0, 1.0],
+                "bm25_candidates": 50,
+                "dense_candidates": 50,
+                "watcher_backend": "native",
+                "memory_dirs": [],
+                "project_memory_dirs": list(project_memory_dirs or []),
+                "tokenizer": "simple",
+            },
+            "runtime": {"cwd": "/work", "project_context_root": None},
+            "index": {
+                "total_chunks": 1,
+                "total_sources": 1,
+                "orphaned_sources": 0,
+                "dense_coverage": None,
+            },
+            "immutable": {"embedding.model": model},
+            "warnings": list(warnings or []),
+        }
+
+    def _rejected_section_warning(self) -> dict:
+        return {
+            "kind": "config_section_rejected",
+            "section": "embedding",
+            "path": self.FORGED_PATH,
+            "error": self.FORGED_ERROR,
+            "fix": "fix it",
+        }
+
+    @staticmethod
+    def _warnings_block(text: str) -> str:
+        return text[text.index("Warnings") :]
+
+    def test_a_warning_value_cannot_forge_a_row_or_break_the_columns(self) -> None:
+        """The whole block, compared literally.
+
+        A substring assertion would pass while the newline still split the
+        ``path`` row in two — the forged half contains the searched text just
+        as well. The literal pins the physical row count and the ``ljust``
+        columns at once.
+        """
+        data = self._data(warnings=[self._rejected_section_warning()])
+
+        block = self._warnings_block(render_status_report(data))
+
+        assert block == (
+            "Warnings\n"
+            "--------\n"
+            "- kind:       config_section_rejected\n"
+            "  section:    embedding\n"
+            "  path:       /x/10-a\\x0aforged\\x1b[2J.json\n"
+            "  error:      bad\\x1b[31m\n"
+            "  fix:        fix it"
+        )
+
+    def test_the_embedding_mismatch_subdict_is_escaped_too(self) -> None:
+        """The ``dict`` arm composes its own string — it needs the same cover.
+
+        ``stored``/``configured`` render as ``provider/model (Nd)`` through a
+        separate branch, and both names come from outside the code (the store
+        and the config). A fix applied only to the ``str(value)`` arm would
+        leave this one raw.
+        """
+        warning = {
+            "kind": "embedding_dim_mismatch",
+            "stored": {"provider": "onnx", "model": "bge\x1b[31m", "dimension": 1024},
+            "configured": {"provider": "ollama\nforged", "model": "e5", "dimension": 384},
+            "fix": "uv run mm embedding-reset --mode apply-current",
+        }
+
+        block = self._warnings_block(render_status_report(self._data(warnings=[warning])))
+
+        assert block == (
+            "Warnings\n"
+            "--------\n"
+            "- kind:       embedding_dim_mismatch\n"
+            "  stored:     onnx/bge\\x1b[31m (1024d)\n"
+            "  configured: ollama\\x0aforged/e5 (384d)\n"
+            "  fix:        uv run mm embedding-reset --mode apply-current"
+        )
+
+    def test_the_styled_surface_is_covered_and_not_only_the_plain_one(self) -> None:
+        """The default ``mm status`` path styles the parts, not the joined text.
+
+        ``_style_status_lines`` reads ``key``/``value``/``suffix`` for the
+        ``kv`` and ``immutable_kv`` rows, so a scrub applied in
+        ``StatusLine.text`` would leave the coloured output — what a terminal
+        without ``NO_COLOR`` actually gets — carrying the escape. Hence the
+        hostile ``model``, which lands on two ``kv``/``immutable_kv`` rows: a
+        warning row alone could not see that mutation, because warning rows
+        are the plain ``else`` branch and *are* rendered from ``text``.
+
+        The parity assertion is what detects it: ``click.unstyle`` strips a
+        complete CSI sequence, so it would delete ``ESC[2J`` from the styled
+        side only and the two renderings would stop agreeing.
+        """
+        data = self._data(
+            warnings=[self._rejected_section_warning()],
+            model="bge\x1b[2Jm3",
+        )
+
+        styled = _style_status_lines(iter_status_lines(data))
+
+        assert "\x1b[2J" not in click.unstyle(styled)
+        assert "\\x1b[2J" in click.unstyle(styled)
+        assert click.unstyle(styled) == render_status_report(data)
+
+    def test_a_source_row_outside_the_warning_block_is_covered(self) -> None:
+        """The rows around the block carry outside text as well.
+
+        ``project_memory_dirs`` is a resolved path list; a POSIX directory
+        name may contain a newline. One entry, so no grouping or truncation
+        stands between the value and the rendered row.
+        """
+        hostile = "/work/p/.memtomem/a\nforged\x1b[2Jnotes"
+        data = self._data(project_memory_dirs=[hostile])
+
+        rendered = [line.text for line in iter_status_lines(data)]
+        header = rendered.index("Project sources: 1")
+
+        assert rendered[header + 1] == "  - /work/p/.memtomem/a\\x0aforged\\x1b[2Jnotes"
+        assert not any("\x1b" in line or "\n" in line for line in rendered)
+
+    def test_a_lone_surrogate_model_renders_rather_than_raising(self) -> None:
+        """A value with no filesystem-byte spelling must still render.
+
+        ``json.loads('"\\ud800"')`` yields a lone surrogate, ``EmbeddingConfig``
+        accepts it as ``model``, and it reaches two rows. On POSIX, escaping it
+        by filesystem bytes raises ``UnicodeEncodeError``, which would take the
+        whole report down rather than one value with it.
+
+        What the escape *spells* is a filesystem-encoding question and is
+        pinned in ``test_runtime_paths.py``; asserting a spelling here would
+        only assert POSIX. What this owes is that the report renders, that no
+        row carries the raw surrogate, and that both rows carrying the model
+        still show it — escaped, not quietly dropped, which "printable and no
+        surrogate" would accept on its own. Which escape token appears is the
+        platform's business, so either is allowed.
+        """
+        data = self._data(model="e5-\ud800")
+
+        rendered = [line.text for line in iter_status_lines(data)]
+        model_rows = [
+            row for row in rendered if row.startswith(("Embedding: ", "embedding.model:"))
+        ]
+
+        assert len(model_rows) == 2
+        assert all(row.isprintable() for row in model_rows)
+        assert all("e5-" in row for row in model_rows)
+        assert all(("\\x" in row or "\\u" in row) for row in model_rows)
+        assert not any("\ud800" in row for row in rendered)
+
+    def test_every_rendered_part_is_covered_not_only_the_value(self) -> None:
+        """All three parts, at the dataclass, because all three are rendered.
+
+        No report row puts outside text in ``key`` or ``suffix`` today — the
+        column-padded keys and the composed suffixes are this module's own
+        literals — so nothing above would notice if the scrub narrowed to
+        ``value``. The choke point is the promise; pin it where it is made.
+        """
+        line = StatusLine("kv", key="k\x1b[2J: ", value="v\nforged", suffix=" (x\x07)")
+
+        assert (line.key, line.value, line.suffix) == (
+            "k\\x1b[2J: ",
+            "v\\x0aforged",
+            " (x\\x07)",
+        )
+
+    def test_the_json_surface_keeps_the_real_bytes(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--json`` is a data contract, so it must NOT be scrubbed.
+
+        This one passes with or without the text-side escaping — that is the
+        point of it. It goes red if the neutralisation is ever moved down into
+        ``collect_status_report``, which would corrupt every structured
+        consumer to fix a terminal.
+        """
+        comp = _mock_components(
+            total_chunks=1,
+            total_sources=1,
+            embedding_mismatch={
+                "stored": {"provider": "onnx", "model": "bge\x1b[31m", "dimension": 1024},
+                "configured": {"provider": "ollama\nforged", "model": "e5", "dimension": 384},
+            },
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code == 0, result.output
+        warning = json.loads(result.stdout)["warnings"][0]
+        assert warning["stored"]["model"] == "bge\x1b[31m"
+        assert warning["configured"]["provider"] == "ollama\nforged"

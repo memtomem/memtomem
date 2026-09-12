@@ -316,9 +316,9 @@ requests, neither of which has a terminal to prompt at. On every surface
 that takes `--confirm-project-shared`, `--yes` alone does **not** satisfy
 Gate B — it is a generic "skip prompts" flag users alias for unrelated
 reasons. One surface is mid-migration rather than compliant: `mm context
-pull` now *takes* `--confirm-project-shared` like the rest, but through 0.5.x
+pull` now *takes* `--confirm-project-shared` like the rest, but through 0.6.x
 it also still accepts `--yes`, behind a deprecation notice, and only refuses
-it from 0.6.0 (#2318, below). Until that release the rule above describes
+it from 0.7.0 (#2318, below). Until that release the rule above describes
 every CLI write surface's vocabulary and every one but `pull`'s behaviour.
 Every one of those consents produces a
 `project_shared.confirmed_via=<surface>` audit line.
@@ -480,8 +480,8 @@ instead.
 > being closed in two stages, and only the first has landed. The command now
 > *takes* `--confirm-project-shared` like every other CLI write surface, so
 > the vocabulary matches its own `mem_context_pull` tool and web route today;
-> the behaviour matches them in 0.6.0, when `--yes` stops being accepted.
-> Read the paragraph above as describing that end state, not 0.5.x.
+> the behaviour matches them in 0.7.0, when `--yes` stops being accepted.
+> Read the paragraph above as describing that end state, not 0.6.x.
 >
 > Unlike the #2317 edit change, this one gets an accept-and-warn window,
 > because the two situations are not alike. There, a missing argument meant
@@ -491,8 +491,8 @@ instead.
 > already named the flag. What was wrong was the vocabulary, not the record,
 > so nothing leaks by spending a release fixing it in a way that does not
 > break `mm context pull … --scope project_shared --yes` in every existing
-> script. Through 0.5.x that invocation still works and prints a yellow
-> stderr notice naming the flip; from 0.6.0 it gets the standard refusal
+> script. Through 0.6.x that invocation still works and prints a yellow
+> stderr notice naming the flip; from 0.7.0 it gets the standard refusal
 > ("`--yes` alone is not sufficient"). Until then the consent line keeps
 > reporting `flag='--yes'` on that path, which is what tells an operator the
 > deprecated spelling is still in use.
@@ -511,6 +511,18 @@ instead.
 > *absence* of a gate rather than a different spelling of one: #2321 closed
 > that way a day earlier, and #2322's four derived-target writers are still
 > open, with nothing for a scan keyed on the flag to find in them.
+>
+> **Window retargeted 0.6.0 → 0.7.0 (2026-09-10).** The versions above were
+> first written as "through 0.5.x, refused from 0.6.0" on the assumption that
+> stage 1 would reach users in a 0.5.x patch. It did not: 0.5.0 had already
+> shipped when stage 1 landed, and no 0.5.x release followed, so released
+> 0.5.0 has no `--confirm-project-shared` on `pull` at all. Cutting the
+> refusal in 0.6.0 would have made this rider's own argument false — it
+> justifies the window by "spending a release" on it, and the release being
+> spent would have been one nobody could install. Stage 1 therefore ships in
+> 0.6.0, which is the release the window spends, and stage 2 refuses from
+> 0.7.0. The rule this records: a deprecation window is counted in
+> *published releases*, not in merges to `main`.
 
 > **2026-09 (#2322):** the derived-destination half above is closed —
 > which corrects the last sentence of the #2318 note, written while it was

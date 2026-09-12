@@ -16,6 +16,7 @@ import pytest
 
 NOTEBOOKS_DIR = Path(__file__).resolve().parents[3] / "examples" / "notebooks"
 EXPECTED_NOTEBOOKS = (
+    "00_start_here.ipynb",
     "01_hello_memory.ipynb",
     "02_index_and_filter.ipynb",
     "03_agent_memory_patterns.ipynb",
@@ -90,6 +91,15 @@ def test_beginner_notebooks_ship_without_outputs(name: str) -> None:
         if cell["cell_type"] == "code":
             assert cell["execution_count"] is None
             assert cell["outputs"] == []
+
+
+def test_first_user_notebook_contract() -> None:
+    data = json.loads((NOTEBOOKS_DIR / "00_start_here.ipynb").read_text(encoding="utf-8"))
+    assert data["metadata"]["memtomem"]["profile"] == "minimal-code"
+    for cell in data["cells"]:
+        if cell["cell_type"] == "code":
+            assert cell["outputs"] == [] and cell["execution_count"] is None
+            assert "evaluation.json" not in "".join(cell["source"])
 
 
 def test_optional_llm_is_explicit_unsaved_preview() -> None:
@@ -176,6 +186,10 @@ def test_notebook_starts_with_embedding_backend_preflight(notebook: Path) -> Non
     first_code = next((cell for cell in data["cells"] if cell["cell_type"] == "code"), None)
     assert first_code is not None, f"{notebook.name} has no code cell"
     source = "".join(first_code["source"])
+    if notebook.name == "00_start_here.ipynb":
+        modules = _preflight_modules(source, "memtomem[code]")
+        assert {"memtomem", "tree_sitter", "tree_sitter_python"} <= modules
+        return
     if notebook.name in BEGINNER_NOTEBOOKS:
         modules = _preflight_modules(source, "memtomem[langgraph]")
         assert {"langgraph", "memtomem"} <= modules
