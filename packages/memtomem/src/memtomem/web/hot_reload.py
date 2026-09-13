@@ -259,6 +259,9 @@ async def reload_if_stale(
     config, records :class:`ReloadError` on ``app.state.last_reload_error``,
     and returns ``False``.
 
+    Re-reading never persists the legacy auto-discover migration, including
+    when called before an explicit save. Startup retains that migration.
+
     ``storage`` / ``search_pipeline`` are optional; when provided, the
     runtime fanout (tokenizer FTS rebuild + cache invalidation) runs against
     them. Callers that already hold these (write handlers via ``Depends``)
@@ -292,15 +295,12 @@ async def reload_if_stale(
     attempted_mtime_ns = get_config_mtime_ns()
     attempted_sig = sig
     try:
-        new_cfg = _build_fresh_config()
+        new_cfg = _build_fresh_config(migrate=False)
         # Re-read both axes once the config exists, and before the awaited
-        # validation. The build itself can write ``config.json`` (the legacy
-        # ``auto_discover`` migration), and the await lets someone correct the
-        # file while this attempt is on the worker — an error carrying either
-        # of those later states is released the moment it is recorded, or
-        # never. ``sig`` stays as observed at entry: the CAS below is about
-        # what *this reader* saw, while the error must describe the layer set
-        # that was actually validated.
+        # validation. The await lets someone correct the file while this
+        # attempt is on the worker; its error must not be bound to that later
+        # correction. ``sig`` stays as observed at entry for the CAS below,
+        # while the error captures the disk state before validation starts.
         attempted_mtime_ns = get_config_mtime_ns()
         attempted_sig = current_signature()
         from memtomem.chunking.bounded import validate_budget_configuration
