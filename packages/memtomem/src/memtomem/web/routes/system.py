@@ -38,6 +38,7 @@ from memtomem.config import (
     coerce_and_validate,
     memory_dir_kind,
     save_config_overrides,
+    saved_embedding_identity,
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.errors import NamespaceResolutionError, RetryableError
@@ -573,7 +574,7 @@ async def get_config_endpoint(
 
 
 @router.get("/config/defaults", response_model=ConfigResponse)
-async def get_config_defaults(request: Request) -> ConfigResponse:
+async def get_config_defaults() -> ConfigResponse:
     """Return the comparand config (defaults + env + ``config.d/`` fragments).
 
     Powers the Web UI per-field reset-to-default button: the client fetches
@@ -586,34 +587,13 @@ async def get_config_defaults(request: Request) -> ConfigResponse:
 
     Retain the selected embedding profile, including a model selected in
     config.json, but never copy its editable pins into the reset values.
-    The profile comes from the live runtime config — the same object Save
-    passes to ``save_config_overrides`` — so ↺ offers exactly the value that
-    Save prunes. Save reloads a stale config before selecting it, and the
-    settings page fetches this alongside ``GET /config``, so read through the
-    same reload first; a failed reload keeps the live config, as Save does.
-    The disk is read only when no runtime config is loaded. Components are
-    optional here: the endpoint stays available before startup completes.
+    ``saved_embedding_identity`` is the same identity ``save_config_overrides``
+    prunes against, resolved from the files rather than the runtime, so ↺
+    offers exactly the value Save drops even when the runtime is stale.
+    Read-only; no reload interaction needed.
     """
-    app = request.app
-    try:
-        await _hot_reload.reload_if_stale(
-            app,
-            storage=getattr(app.state, "storage", None),
-            search_pipeline=getattr(app.state, "search_pipeline", None),
-        )
-    except Exception:
-        logger.warning(
-            "reload_if_stale raised unexpectedly during GET /config/defaults", exc_info=True
-        )
-
-    live = getattr(app.state, "config", None)
-    if live is None:
-        from memtomem.config_signature import build_fresh_config
-
-        live = build_fresh_config(
-            migrate=False, strict_overrides=False, quiet=True, validate_profile=False
-        )
-    return _build_config_response(build_comparand(quiet=True, embedding_context=live.embedding))
+    identity = saved_embedding_identity(quiet=True)
+    return _build_config_response(build_comparand(quiet=True, embedding_context=identity))
 
 
 @router.get(

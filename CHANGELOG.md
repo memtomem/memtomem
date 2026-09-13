@@ -11,13 +11,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   when an E5 model is selected in `config.json` (#2399).** `mm config set
   indexing.max_chunk_tokens 512` was dropped as "already 512" while the stack
   resolved 384, and `384` was stored as a redundant pin that outlived a model
-  change. `mm config set`, `mm config show`, Web save and reset-to-default,
-  and MCP `mem_config(persist=True)` now compare against the selected
-  profile's generated defaults without treating editable pins as their own
-  baseline; a save from a config that skipped profile normalization no longer
-  pins non-E5 budgets. `mm config set` validates the proposed edit before
-  migrating or writing, so it can repair an invalid file profile and leaves
-  the file unchanged when it rejects one.
+  change. `mm config set`, Web save and reset-to-default, and MCP
+  `mem_config(persist=True)` now compare against the generated defaults of the
+  profile the files select, without treating editable pins as their own
+  baseline, and `mm config show` displays those defaults. The comparison
+  follows the files, not the running process, so a save after a runtime-only
+  model switch (`mem_embedding_reset(mode="revert_to_stored")`) or from a
+  config that skipped profile normalization neither drops the requested value
+  nor pins another profile's budgets. `mm config set` validates the proposed
+  edit before migrating or writing, so it can repair an invalid file profile
+  and leaves the file unchanged when it rejects one.
 
 - **`mem_embedding_reset(mode="revert_to_stored")` no longer leaves the live
   configuration pointing at a stored identity the embedder factory rejects

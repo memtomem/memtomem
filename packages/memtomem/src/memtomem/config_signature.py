@@ -155,6 +155,26 @@ def build_fresh_config(
     )
 
 
+def rebase_embedding(identity: EmbeddingConfig, pins: EmbeddingConfig) -> EmbeddingConfig:
+    """Rebuild an embedding section on *identity*, keeping *pins*' editable fields.
+
+    Non-mutable inputs (provider, model, variant, …) come from *identity*; only
+    the explicitly set ``MUTABLE_FIELDS["embedding"]`` values come from *pins*.
+    Revalidating from explicit inputs regenerates identity-derived defaults
+    (E5's ``onnx_batch_size``) instead of carrying another identity's.
+    """
+    mutable = MUTABLE_FIELDS["embedding"]
+    inputs = {
+        key: value
+        for key, value in identity.model_dump(exclude_unset=True).items()
+        if key not in mutable
+    }
+    inputs.update(
+        {key: value for key, value in pins.model_dump(exclude_unset=True).items() if key in mutable}
+    )
+    return EmbeddingConfig.model_validate(inputs)
+
+
 def _build_config(
     *,
     migrate: bool = False,
@@ -184,20 +204,7 @@ def _build_config(
     if include_overrides:
         load_config_overrides(cfg, migrate=migrate, strict=strict_overrides)
     if embedding_context is not None:
-        mutable = MUTABLE_FIELDS["embedding"]
-        inputs = {
-            key: value
-            for key, value in embedding_context.model_dump(exclude_unset=True).items()
-            if key not in mutable
-        }
-        inputs.update(
-            {
-                key: value
-                for key, value in cfg.embedding.model_dump(exclude_unset=True).items()
-                if key in mutable
-            }
-        )
-        cfg.embedding = EmbeddingConfig.model_validate(inputs)
+        cfg.embedding = rebase_embedding(embedding_context, cfg.embedding)
     from memtomem.embedding.profiles import apply_e5_defaults, fill_e5_defaults
 
     if include_overrides and validate_profile:

@@ -386,12 +386,9 @@ def test_set_reports_profile_error_without_a_traceback(invalid_profile) -> None:
 
 
 async def test_web_defaults_stay_available_for_invalid_profile(
-    app, client, home: Path, invalid_profile_data
+    client, home: Path, invalid_profile_data
 ) -> None:
-    # Start from a valid E5 runtime, then break the file underneath it.
-    write_config(home, {"embedding": E5})
-    app.state.config = build_fresh_config(migrate=False)
-    hot_reload.initialize_reload_state(app)
+    # Write after the app/client fixtures have started with a valid config.
     field, value = invalid_profile_data
     path = write_config(home, {"embedding": E5, "indexing": {field: value}})
     before = (path.read_bytes(), path.stat().st_mtime_ns)
@@ -489,37 +486,78 @@ async def test_mcp_persist_rollback_keeps_profile_budgets(
     assert build_fresh_config(migrate=False).indexing.max_chunk_tokens == 384
 
 
-async def test_web_defaults_follow_an_accepted_reload_through_save(home: Path, app, client) -> None:
-    """↺ must offer what Save prunes. Save reloads a stale config before
-    comparing, so the defaults read through the same reload (#2399 review)."""
-    from memtomem.embedding.profiles import E5_TOKENIZER
+def _revert_runtime_identity(cfg, embedding: dict) -> None:
+    """Switch the live identity the way ``_revert_to_stored_locked`` does:
+    plain field assignment, no profile normalization, file untouched."""
+    cfg.embedding.provider = embedding["provider"]
+    cfg.embedding.model = embedding["model"]
 
-    # Pin the reload-guarded fields to E5's values so a hot reload may switch
-    # models; the unguarded budgets still follow the selected profile.
-    guarded = {
-        "chunk_input_prefix": "passage: ",
-        "hard_max_chunk_tokens": 384,
-        "chunk_tokenizer_path": E5_TOKENIZER,
-        "chunk_context_tokens": 96,
-        "chunk_model_tokens": 512,
+
+# (file identity, runtime identity after the revert, file's resolved budget)
+DIVERGED = [(BGE, E5, 512), (E5, BGE, 384)]
+
+
+@pytest.mark.parametrize("file_model,runtime_model,file_budget", DIVERGED, ids=["to-e5", "to-bge"])
+def test_diverged_runtime_identity_keeps_a_requested_budget(
+    home: Path, file_model: dict, runtime_model: dict, file_budget: int
+) -> None:
+    """Saves judge pins on the identity the file reloads, not the runtime's
+    (#2399 review). The requested value survives, and nothing else is pinned."""
+    from memtomem.config import assign_section_fields
+
+    path = write_config(home, {"embedding": file_model, "indexing": {"auto_discover": False}})
+    cfg = build_fresh_config(migrate=False)
+    _revert_runtime_identity(cfg, runtime_model)
+    requested = 448
+    assign_section_fields(cfg.indexing, {"max_chunk_tokens": requested})
+    save_config_overrides(cfg)
+    data = json.loads(path.read_text())
+    assert data == {
+        "embedding": file_model,
+        "indexing": {"auto_discover": False, "max_chunk_tokens": requested},
     }
-    previous = write_config(home, {"embedding": E5, "indexing": guarded})
+    assert build_fresh_config(migrate=False).indexing.max_chunk_tokens == requested
+    # Asking for the file's own budget is a no-op pin, whatever the runtime holds.
+    assign_section_fields(cfg.indexing, {"max_chunk_tokens": file_budget})
+    save_config_overrides(cfg)
+    assert json.loads(path.read_text())["indexing"] == {"auto_discover": False}
+    assert build_fresh_config(migrate=False).indexing.max_chunk_tokens == file_budget
+
+
+@pytest.mark.parametrize("file_model,runtime_model,file_budget", DIVERGED, ids=["to-e5", "to-bge"])
+def test_diverged_runtime_identity_unrelated_save_pins_nothing(
+    home: Path, file_model: dict, runtime_model: dict, file_budget: int
+) -> None:
+    path = write_config(home, {"embedding": file_model, "indexing": {"auto_discover": False}})
+    cfg = build_fresh_config(migrate=False)
+    _revert_runtime_identity(cfg, runtime_model)
+    cfg.mmr.enabled = True
+    save_config_overrides(cfg)
+    assert json.loads(path.read_text()) == {
+        "embedding": file_model,
+        "indexing": {"auto_discover": False},
+        "mmr": {"enabled": True},
+    }
+    fresh = build_fresh_config(migrate=False)
+    assert (fresh.indexing.max_chunk_tokens, fresh.mmr.enabled) == (file_budget, True)
+
+
+@pytest.mark.parametrize("file_model,runtime_model,file_budget", DIVERGED, ids=["to-e5", "to-bge"])
+async def test_web_reset_value_is_what_save_prunes_on_a_diverged_runtime(
+    home: Path, app, client, file_model: dict, runtime_model: dict, file_budget: int
+) -> None:
+    """↺ and Save share one baseline, so a stale runtime cannot split them."""
+    from memtomem.config import assign_section_fields
+
+    path = write_config(home, {"embedding": file_model, "indexing": {"max_chunk_tokens": 448}})
     app.state.config = build_fresh_config(migrate=False)
     hot_reload.initialize_reload_state(app)
-    assert app.state.config.indexing.max_chunk_tokens == 384
-    previous_mtime = previous.stat().st_mtime_ns
-    path = write_config(home, {"embedding": BGE, "indexing": guarded})
-    # The reload signature is mtime-only; advance it from the sampled revision
-    # so a coarse filesystem clock cannot hide the edit.
-    newer_mtime = previous_mtime + 1_000_000_000
-    os.utime(path, ns=(newer_mtime, newer_mtime))
+    _revert_runtime_identity(app.state.config, runtime_model)
     response = await client.get("/api/config/defaults")
     assert response.status_code == 200, response.text
     reset_value = response.json()["indexing"]["max_chunk_tokens"]
-    assert reset_value == 512
-    response = await client.patch(
-        "/api/config?persist=true", json={"indexing": {"max_chunk_tokens": reset_value}}
-    )
-    assert response.status_code == 200, response.text
-    assert json.loads(path.read_text())["indexing"] == guarded
-    assert build_fresh_config(migrate=False).indexing.max_chunk_tokens == 512
+    assert reset_value == file_budget
+    assign_section_fields(app.state.config.indexing, {"max_chunk_tokens": reset_value})
+    receipt = save_config_overrides(app.state.config)
+    assert receipt.pruned("indexing", "max_chunk_tokens")
+    assert "indexing" not in json.loads(path.read_text())

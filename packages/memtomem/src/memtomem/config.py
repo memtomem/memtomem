@@ -3067,10 +3067,11 @@ def build_comparand(
     apply to a field if ``~/.memtomem/config.json`` did not pin it.
 
     ``embedding_context`` retains the selected model's non-mutable inputs,
-    even when config.json selected it. Saves and Web resets pass this context
-    so E5's generated defaults are the fallback, while editable pins still
-    come only from the lower layers. Without it, config.json is excluded
-    completely (also used by project memory-directory registration).
+    even when config.json selected it, so E5's generated defaults are the
+    fallback while editable pins still come only from the lower layers. Saves
+    and Web resets pass :func:`saved_embedding_identity`. Without it,
+    config.json is excluded completely (also used by project memory-directory
+    registration).
 
     Two settings consumers:
 
@@ -3093,6 +3094,25 @@ def build_comparand(
     from memtomem.config_signature import _build_config
 
     return _build_config(include_overrides=False, quiet=quiet, embedding_context=embedding_context)
+
+
+def saved_embedding_identity(*, quiet: bool = True) -> EmbeddingConfig:
+    """Resolve the embedding identity the saved config stack will load.
+
+    The ``embedding_context`` behind delta-only saves and Web reset-to-default,
+    so ↺ offers exactly the value Save prunes. It comes from the file layers,
+    never from a live config: embedding identity is not a mutable field, so a
+    save never writes it and the next load uses the file's. A runtime that
+    diverged from the file (``revert_to_stored``, a file edited under a
+    running server) would otherwise judge pins against a profile nothing
+    reloads (#2399 review). Validation is skipped: this is a comparison input,
+    and the complete load still rejects an invalid profile.
+    """
+    from memtomem.config_signature import build_fresh_config
+
+    return build_fresh_config(
+        migrate=False, strict_overrides=False, quiet=quiet, validate_profile=False
+    ).embedding
 
 
 def save_config_overrides(
@@ -3137,15 +3157,19 @@ def save_config_overrides(
     base_fields: dict[str, set[str]] = mutable_fields or MUTABLE_FIELDS
     # build_comparand is a slow, read-only rebuild — keep it OUTSIDE the lock so
     # the serialized critical section stays as narrow as read→merge→write.
-    comparand = build_comparand(quiet=True, embedding_context=config.embedding)
-    # The comparand carries the selected profile's generated budgets, so the
-    # live side must too. A config assembled without profile normalization
-    # still holds the non-E5 values in its unset fields; comparing those would
-    # pin them as if the user had chosen them (#2399 review). Fill a copy so
-    # the caller's object and its explicit-field tracking stay untouched.
+    identity = saved_embedding_identity(quiet=True)
+    comparand = build_comparand(quiet=True, embedding_context=identity)
+    # Compare on the same identity from the live side: rebase a copy onto it
+    # and regenerate its unset profile values. A live config whose identity or
+    # normalization differs from the file's (a hand-assembled stack, a runtime
+    # revert) otherwise holds another profile's values in unset fields, and
+    # comparing those pins or prunes values the user never chose (#2399
+    # review). The caller's object and its explicit-field tracking stay as is.
+    from memtomem.config_signature import rebase_embedding
     from memtomem.embedding.profiles import fill_e5_defaults
 
     live_view = config.model_copy(deep=True)
+    live_view.embedding = rebase_embedding(identity, config.embedding)
     fill_e5_defaults(live_view)
 
     path = _override_path()
