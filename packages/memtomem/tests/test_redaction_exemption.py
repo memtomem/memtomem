@@ -365,6 +365,20 @@ class TestFailClosed:
         content = "---\nredaction: documents-patterns\n---\n"
         assert declared_exemption(Path("note.md"), content) is None
 
+    @pytest.mark.parametrize("value", ["redaction", "documents-patterns"])
+    @pytest.mark.parametrize("mark", ["start_mark", "end_mark"])
+    def test_missing_source_position_fails_closed(self, monkeypatch, value, mark) -> None:
+        from memtomem.indexing import redaction_exemption as mod
+
+        block = "redaction: documents-patterns\n"
+        events = list(mod.yaml.parse(block, Loader=mod.yaml.SafeLoader))
+        for event in events:
+            if isinstance(event, mod.yaml.ScalarEvent) and event.value == value:
+                setattr(event, mark, None)
+        monkeypatch.setattr(mod.yaml, "parse", lambda *args, **kwargs: iter(events))
+
+        assert declared_exemption(Path("note.md"), f"---\n{block}---\n") is None
+
     def test_a_parser_stack_overflow_fails_closed(self, monkeypatch, caplog) -> None:
         # The composing parser blew the stack past ~500 nesting levels. The
         # event parser is iterative, so this is unreachable through input

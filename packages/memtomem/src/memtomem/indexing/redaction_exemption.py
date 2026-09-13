@@ -267,6 +267,10 @@ def _top_level_declaration_values(block: str) -> list[tuple[object, int]] | None
             continue  # document/stream markers
         if depth != 1:
             continue
+        if event.start_mark is None or event.end_mark is None:
+            # Source positions are required to verify the literal declaration.
+            # A parser event without them cannot safely grant an exemption.
+            return None
         if expect_key:
             pending_is_declaration = (
                 _is_bare_plain_scalar(event, _KEY) and event.start_mark.column == 0
