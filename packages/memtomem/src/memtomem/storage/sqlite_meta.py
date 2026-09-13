@@ -98,14 +98,15 @@ class MetaManager:
         stored_max = self.get_meta("embedding_max_sequence_tokens")
         stored_provider = self.get_meta("embedding_provider")
         stored_model = self.get_meta("embedding_model")
-        if (stored_provider or "").lower() == "none":
-            # A ``none`` stamp has no model (its row is absent or empty); the
-            # configured model is not what it was stamped with (#2416).
-            model = ""
+        if stored_provider is not None or stored_model is not None:
+            # Once either row exists, config cannot supply the other half
+            # (#2422). Empty rows are recorded unknowns too, not defaults.
+            provider = stored_provider or ""
+            model = stored_model or ""
         return {
             "dimension": dimension,
-            "provider": stored_provider or provider,
-            "model": stored_model or model,
+            "provider": provider,
+            "model": model,
             "policy_fingerprint": self.get_meta("embedding_policy_fingerprint")
             or policy_fingerprint,
             "max_sequence_tokens": int(stored_max)

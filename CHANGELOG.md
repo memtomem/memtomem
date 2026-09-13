@@ -29,6 +29,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   leaves invalid by switching models now fails the complete load instead of
   running with the inconsistent combination.
 
+- **A failed `mem_embedding_reset(mode="revert_to_stored")` no longer leaves a
+  half-swapped runtime (#2428).** The revert published the new embedder and
+  its generation, then built the search pipeline, the index engine and the
+  dedup scanner one after another, publishing each. A constructor that raised
+  part-way left some of the runtime on the new generation and some on the old,
+  with the configuration naming the stored identity, the mismatch still
+  reported, and the old generation never retired. A namespace rule whose glob
+  the index engine cannot compile — accepted at runtime by `mem_config`, see
+  #2432 — was enough: the embedder, generation and pipeline moved to the new
+  generation while the index engine stayed on the old one. Every constructor
+  now runs before anything is swapped, and a failure restores the
+  configuration and storage fields #2421 already covered.
+
+- **Partial embedding identities stay unknown (#2422).** Opening a database
+  no longer fills a missing provider/model from config or overwrites the
+  recorded half. Missing and empty fields trigger a mismatch, including in
+  empty stores; CLI and MCP revert refuse before changing runtime state.
+  Explicit reset and forced re-indexing remain available. Valid `none`
+  stamps and databases with neither identity row retain their initialization
+  behavior.
+
 - **`mem_embedding_reset(mode="revert_to_stored")` no longer leaves the live
   configuration pointing at a stored identity the embedder factory rejects
   (#2421).** The stored provider, model, dimension and (when recorded) token
@@ -37,8 +58,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   named a provider this release cannot build — one from a newer release, or
   hand-edited meta — the call raised with those fields already rewritten while
   the old embedder, pipeline and index engine stayed in service. They are now
-  restored before the error propagates, and no component is swapped. A failure
-  in the later pipeline or index-engine construction is not covered (#2428).
+  restored before the error propagates, and no component is swapped. #2428
+  extends the same guarantee to the constructors that run after the embedder.
 
 - **Quality replay now reports complete, partial, unavailable, or empty evaluation
   coverage (#2406).** All-excluded replays emit their report before CLI exit 2;

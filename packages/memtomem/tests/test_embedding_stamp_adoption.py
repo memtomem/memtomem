@@ -10,7 +10,7 @@ observing the stamp as recorded.
 
 Also pins the provider/model backfill: a stored provider ``none`` whose model
 row is absent or empty is reported as ``none``/``""``, not completed with the
-configured model and provider. Other partial stamps keep the legacy backfill.
+configured model and provider. Partial real-provider stamps remain unknown (#2422).
 """
 
 from __future__ import annotations
@@ -393,27 +393,79 @@ class TestRecordedIdentityIsNotCompleted:
         finally:
             await storage.close()
 
-    async def test_other_partial_stamps_keep_the_legacy_backfill(self, tmp_path: Path) -> None:
-        """Only the ``none`` stamp is read as complete. A missing half beside
-        a real identity no writer produces keeps being filled from the config:
-        reporting it as ``""`` would hand revert-to-stored an identity
-        ``create_embedder`` rejects after the live config was already changed."""
+    @pytest.mark.parametrize("adopt", [False, True])
+    @pytest.mark.parametrize(
+        ("provider", "model"),
+        [
+            ("onnx", None),
+            ("ollama", None),
+            ("onnx", ""),
+            ("ollama", ""),
+            (None, _E5),
+            (None, "old-model"),
+            ("", _E5),
+            ("", "old-model"),
+            ("", None),
+            (None, ""),
+            ("", ""),
+        ],
+    )
+    async def test_partial_stamps_preserve_identity_and_data(
+        self, tmp_path: Path, provider: str | None, model: str | None, adopt: bool
+    ) -> None:
         db_path = tmp_path / "m.db"
         storage = _onnx_backend(db_path, adopt=False)
         await storage.initialize()
+        vector = [1.0] + [0.0] * 383
+        await storage.upsert_chunks([make_chunk("preserved evidence", embedding=vector)])
         await storage.close()
-        db = sqlite3.connect(str(db_path))
-        db.execute("DELETE FROM _memtomem_meta WHERE key='embedding_provider'")
-        db.commit()
-        db.close()
+        with sqlite3.connect(db_path) as db:
+            db.execute(
+                "DELETE FROM _memtomem_meta WHERE key IN ('embedding_provider', 'embedding_model')"
+            )
+            for key, value in (("embedding_provider", provider), ("embedding_model", model)):
+                if value is not None:
+                    db.execute("INSERT INTO _memtomem_meta VALUES (?, ?)", (key, value))
+            info = MetaManager(lambda: db).stored_embedding_info(384, "onnx", _E5)
+            assert (info["provider"], info["model"]) == (provider or "", model or "")
+        before = _meta(db_path)
 
-        storage = _onnx_backend(db_path, adopt=False)
+        for _ in range(2):
+            storage = _onnx_backend(db_path, adopt=adopt)
+            await storage.initialize()
+            try:
+                info = storage.stored_embedding_info
+                mismatch = storage.embedding_mismatch
+                assert mismatch is not None and mismatch["model_mismatch"]
+                assert (info["provider"], info["model"]) == (provider or "", model or "")
+                assert mismatch["stored"]["provider"] == info["provider"]
+                assert mismatch["stored"]["model"] == info["model"]
+                assert await storage.get_dense_coverage() == {"total": 1, "with_dense": 1}
+                hits = await storage.bm25_search("preserved")
+                assert [hit.chunk.content for hit in hits] == ["preserved evidence"]
+                # Read the vector directly: search pipelines intentionally suppress dense retrieval.
+                hits = await storage.dense_search(vector, top_k=1)
+                assert [hit.chunk.content for hit in hits] == ["preserved evidence"]
+            finally:
+                await storage.close()
+            assert _meta(db_path) == before
+
+        storage = _onnx_backend(db_path, adopt=adopt)
+        await storage.initialize()
+        try:
+            await storage.reset_embedding_meta(384, "onnx", _E5, _POLICY, 512)
+            assert storage.embedding_mismatch is None
+            assert await storage.get_dense_coverage() == {"total": 1, "with_dense": 0}
+        finally:
+            await storage.close()
+        storage = _onnx_backend(db_path, adopt=adopt)
         await storage.initialize()
         try:
             assert storage.embedding_mismatch is None
+            assert storage.stored_embedding_info["provider"] == "onnx"
+            assert storage.stored_embedding_info["model"] == _E5
         finally:
             await storage.close()
-        assert _meta(db_path)["embedding_provider"] == "onnx"
 
     async def test_a_store_with_neither_key_is_still_backfilled(self, tmp_path: Path) -> None:
         db_path = tmp_path / "m.db"
@@ -435,6 +487,75 @@ class TestRecordedIdentityIsNotCompleted:
             await storage.close()
         meta = _meta(db_path)
         assert (meta["embedding_provider"], meta["embedding_model"]) == ("onnx", _E5)
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [("onnx", None), (None, _E5), ("onnx", ""), ("", _E5), ("", "")],
+)
+async def test_empty_partial_stamp_is_not_adopted(tmp_path, provider, model):
+    db_path = tmp_path / "m.db"
+    await _stamp_dim0(db_path)
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "DELETE FROM _memtomem_meta WHERE key IN ('embedding_provider', 'embedding_model')"
+        )
+        for key, value in (("embedding_provider", provider), ("embedding_model", model)):
+            if value is not None:
+                db.execute("INSERT INTO _memtomem_meta VALUES (?, ?)", (key, value))
+    before = _meta(db_path)
+    storage = _onnx_backend(db_path, adopt=True)
+    with pytest.raises(EmbeddingDimensionMismatchError):
+        await storage.initialize()
+    assert _meta(db_path) == before
+    assert "chunks_vec" not in _tables(db_path)
+    storage = _onnx_backend(db_path, adopt=True)
+    storage._strict_dim_check = False
+    await storage.initialize()
+    try:
+        assert storage.embedding_mismatch["model_mismatch"]
+        assert storage.stored_embedding_info["dimension"] == 0
+    finally:
+        await storage.close()
+    assert _meta(db_path) == before
+    assert "chunks_vec" not in _tables(db_path)
+
+
+async def test_empty_store_without_identity_rows_still_adopts(tmp_path):
+    db_path = tmp_path / "m.db"
+    await _stamp_dim0(db_path)
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "DELETE FROM _memtomem_meta WHERE key IN ('embedding_provider', 'embedding_model')"
+        )
+    storage = _onnx_backend(db_path, adopt=True)
+    await storage.initialize()
+    try:
+        assert storage.embedding_mismatch is None
+        assert storage.stored_embedding_info["dimension"] == 384
+    finally:
+        await storage.close()
+
+
+@pytest.mark.parametrize(("provider", "model"), [("", ""), ("none", "")])
+async def test_partial_stamp_mismatches_even_without_configured_model(tmp_path, provider, model):
+    db_path = tmp_path / "m.db"
+    await _stamp_dim0(db_path)
+    with sqlite3.connect(db_path) as db:
+        db.execute("UPDATE _memtomem_meta SET value='ollama' WHERE key='embedding_provider'")
+    storage = SqliteBackend(
+        StorageConfig(sqlite_path=db_path),
+        dimension=0,
+        embedding_provider=provider,
+        embedding_model=model,
+    )
+    await storage.initialize()
+    try:
+        assert storage.embedding_mismatch["model_mismatch"]
+        assert storage.embedding_mismatch["stored"]["provider"] == "ollama"
+        assert storage.embedding_mismatch["stored"]["model"] == ""
+    finally:
+        await storage.close()
 
 
 def test_embedding_reset_status_does_not_adopt(tmp_path: Path, monkeypatch) -> None:

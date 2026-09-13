@@ -1057,6 +1057,8 @@ async def _revert_to_stored(app: AppContext) -> str:
 async def _revert_to_stored_locked(
     app: AppContext, create_embedder, IndexEngine, DedupScanner, SearchPipeline
 ) -> str:
+    from memtomem.embedding.identity import require_complete_embedding_identity
+
     storage = app.storage
     config = app.config
     mismatch = storage.embedding_mismatch
@@ -1069,6 +1071,7 @@ async def _revert_to_stored_locked(
         return "No mismatch detected — nothing to revert."
 
     stored = mismatch["stored"]
+    require_complete_embedding_identity(stored["provider"], stored["model"])
 
     # ``app.embedder`` / ``app.search_pipeline`` / ``app.index_engine`` are
     # read-only properties that proxy to ``app._components.<name>`` (#399
@@ -1094,15 +1097,25 @@ async def _revert_to_stored_locked(
     assert old_generation is not None, "Components.__post_init__ always sets a generation"
     new_generation = ComponentGeneration()
 
-    # The stored identity is applied to the live config before the embedder
-    # is built because the network providers hold that ``EmbeddingConfig`` by
-    # reference and read runtime-mutable fields from it per call (OpenAI's
-    # ``batch_size`` / ``max_concurrent_batches``) — an embedder built from a
-    # copy would detach from later config edits. So validation is
-    # ``create_embedder`` itself, and a rejected stamp (a provider from a
-    # newer release, hand-edited meta) rolls the fields back before anything
-    # is published (#2421). No ``await`` sits between the writes and the
-    # rollback, so no other task on this event loop observes them.
+    # Build, then publish. The stored identity is applied to the live config
+    # before the embedder is built because the network providers hold that
+    # ``EmbeddingConfig`` by reference and read runtime-mutable fields from it
+    # per call (OpenAI's ``batch_size`` / ``max_concurrent_batches``) — an
+    # embedder built from a copy would detach from later config edits. Every
+    # fallible constructor of the new generation then runs into locals, and a
+    # failure in any of them rolls the fields back before anything is
+    # published: a rejected stamp in ``create_embedder`` (#2421), or a namespace
+    # rule glob ``IndexEngine`` cannot compile (#2428). Publishing each part as
+    # it was built left a mixed generation when a later constructor raised —
+    # with that glob, the engine stayed on the old embedder and generation
+    # while the config, embedder and pipeline had moved on.
+    #
+    # The unpublished objects are simply dropped, not closed: every embedder
+    # the built-in factory returns is lazy in ``__init__`` (the ONNX executor
+    # starts workers on first submit, HTTP clients and models load on first
+    # use), so there is nothing to release, and keeping this path free of
+    # ``await`` means no other task on this event loop observes the transient
+    # fields.
     embedding = config.embedding
     prior_embedding = embedding.model_dump(
         include={"provider", "model", "dimension", "max_sequence_tokens"}
@@ -1117,60 +1130,67 @@ async def _revert_to_stored_locked(
     storage._embedding_max_sequence_tokens = stored.get("max_sequence_tokens")
     try:
         new_embedder = create_embedder(embedding)
+        new_pipeline = SearchPipeline(
+            storage=storage,
+            embedder=new_embedder,
+            config=config.search,
+            decay_config=config.decay,
+            mmr_config=config.mmr,
+            access_config=config.access,
+            # Kept in step with the full wiring in ``component_factory`` for the
+            # scoring stages: omitting a boost config here silently disables that
+            # stage until restart (``importance_config`` was missing here).
+            importance_config=config.importance,
+            entity_boost_config=config.entity_boost,
+            context_window_config=config.context_window,
+            llm_provider=app.llm_provider,
+            session_summary_config=config.session_summary,
+            generation=new_generation,
+        )
+        new_engine = IndexEngine(
+            storage=storage,
+            embedder=new_embedder,
+            config=config.indexing,
+            namespace_config=config.namespace,
+            progress_threshold=config.embedding.progress_threshold,
+            # Preserve the LLM provider on rebuild — the engine consumes it
+            # for the per-source AI summary path (``maybe_update_ai_summary``
+            # in ``_index_file``), and dropping it here would silently
+            # disable summary generation after every embedding-reset /
+            # revert-to-stored until the server restart re-runs
+            # ``component_factory.create_components``.
+            llm=app.llm_provider,
+            generation=new_generation,
+        )
+        new_dedup_scanner = (
+            DedupScanner(
+                storage=storage,
+                embedder=new_embedder,
+                # The freshly published generation, not the retired one: this
+                # scanner's scans must count into what the *next* revert retires.
+                generation=new_generation,
+            )
+            if runtime_app.dedup_scanner is not None
+            else None
+        )
     except BaseException:
         for field, value in prior_embedding.items():
             setattr(embedding, field, value)
         storage._embedding_policy_fingerprint, storage._embedding_max_sequence_tokens = prior_policy
         raise
+
     comp.embedder = new_embedder
     comp.generation = new_generation
-    comp.search_pipeline = SearchPipeline(
-        storage=storage,
-        embedder=new_embedder,
-        config=config.search,
-        decay_config=config.decay,
-        mmr_config=config.mmr,
-        access_config=config.access,
-        # Kept in step with the full wiring in ``component_factory`` for the
-        # scoring stages: omitting a boost config here silently disables that
-        # stage until restart (``importance_config`` was missing here).
-        importance_config=config.importance,
-        entity_boost_config=config.entity_boost,
-        context_window_config=config.context_window,
-        llm_provider=app.llm_provider,
-        session_summary_config=config.session_summary,
-        generation=new_generation,
-    )
-    comp.index_engine = IndexEngine(
-        storage=storage,
-        embedder=new_embedder,
-        config=config.indexing,
-        namespace_config=config.namespace,
-        progress_threshold=config.embedding.progress_threshold,
-        # Preserve the LLM provider on rebuild — the engine consumes it
-        # for the per-source AI summary path (``maybe_update_ai_summary``
-        # in ``_index_file``), and dropping it here would silently
-        # disable summary generation after every embedding-reset /
-        # revert-to-stored until the server restart re-runs
-        # ``component_factory.create_components``.
-        llm=app.llm_provider,
-        generation=new_generation,
-    )
-
+    comp.search_pipeline = new_pipeline
+    comp.index_engine = new_engine
     # The watcher and the dedup scanner captured the old engine/embedder at
     # init (server/context.py); without a rebind they keep the retired
     # generation alive and doing work after this swap.
     watcher = runtime_app._watcher
     if watcher is not None:
-        watcher.rebind(comp.index_engine, comp.search_pipeline)
-    if runtime_app.dedup_scanner is not None:
-        runtime_app._dedup_scanner = DedupScanner(
-            storage=storage,
-            embedder=new_embedder,
-            # The freshly published generation, not the retired one: this
-            # scanner's scans must count into what the *next* revert retires.
-            generation=new_generation,
-        )
+        watcher.rebind(new_engine, new_pipeline)
+    if new_dedup_scanner is not None:
+        runtime_app._dedup_scanner = new_dedup_scanner
 
     # Publication is complete: clear the mismatch in the same synchronous
     # phase, before the first retirement ``await``, so a concurrent caller
@@ -1269,6 +1289,8 @@ async def mem_embedding_reset(
             - "apply_current": Reset DB to current config. DESTRUCTIVE — deletes all vectors, re-index required.
             - "revert_to_stored": Switch runtime embedder to match DB stored values. Non-destructive.
     """
+    from memtomem.embedding.identity import embedding_identity_complete, embedding_identity_label
+
     app = await _get_app_initialized(ctx)
 
     if mode not in ("status", "apply_current", "revert_to_stored"):
@@ -1283,7 +1305,10 @@ async def mem_embedding_reset(
         if stored:
             lines.append(
                 "  DB stored:  "
-                + scrub_text(f"{stored['provider']}/{stored['model']} ({stored['dimension']}d)")
+                + scrub_text(
+                    f"{embedding_identity_label(stored['provider'], stored['model'])} "
+                    f"({stored['dimension']}d)"
+                )
             )
             if stored.get("max_sequence_tokens") is not None:
                 lines.append(f"  DB max sequence tokens: {stored['max_sequence_tokens']}")
@@ -1300,7 +1325,14 @@ async def mem_embedding_reset(
         else:
             lines.append("\nWarning: Mismatch detected!")
             lines.append('  -> "apply_current": reset DB to config (destructive, re-index needed)')
-            lines.append('  -> "revert_to_stored": switch embedder to match DB (non-destructive)')
+            if stored and not embedding_identity_complete(stored["provider"], stored["model"]):
+                lines.append(
+                    "  Revert-to-stored is unavailable: the stored identity is incomplete."
+                )
+            else:
+                lines.append(
+                    '  -> "revert_to_stored": switch embedder to match DB (non-destructive)'
+                )
         return "\n".join(lines)
 
     if mode == "apply_current":

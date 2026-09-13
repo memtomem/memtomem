@@ -20,6 +20,7 @@ from uuid import UUID
 
 import sqlite_vec
 
+from memtomem.embedding.identity import embedding_identity_complete
 from memtomem.config import StorageConfig
 from memtomem.errors import (
     ExhaustiveDenseSearchLimitError,
@@ -955,6 +956,14 @@ class SqliteBackend(
                 and db.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is None
             )
             if not eligible:
+                db.rollback()
+                return False
+            provider = self._meta.get_meta("embedding_provider")
+            model = self._meta.get_meta("embedding_model")
+            if (provider is not None or model is not None) and not embedding_identity_complete(
+                provider, model
+            ):
+                # Even an empty store keeps a partial identity unknown (#2422).
                 db.rollback()
                 return False
             db.execute("DROP TABLE IF EXISTS chunks_vec_info")

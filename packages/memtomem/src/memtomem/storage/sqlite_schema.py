@@ -8,6 +8,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 
+from memtomem.embedding.identity import embedding_identity_complete
 from memtomem.errors import EmbeddingDimensionMismatchError, SchemaDowngradeError
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
 from memtomem.storage.sqlite_helpers import utc_stamp
@@ -354,35 +355,34 @@ def create_tables(
     stored_provider = meta.get_meta("embedding_provider")
     stored_model = meta.get_meta("embedding_model")
 
-    if stored_model is None and (stored_provider or "").lower() == "none":
-        # Writers skip an empty model, so a store stamped under ``none`` has
-        # no model row. Backfilling one from the config would put the
-        # configured model — and, below, the configured provider — over an
-        # identity the store never had, and the mismatch report would show
-        # it (#2416).
-        stored_model = ""
-
-    if stored_provider is not None and stored_model is not None:
-        # DB has recorded provider/model — check against config
-        if embedding_provider and embedding_model:
-            if stored_provider != embedding_provider or stored_model != embedding_model:
-                logger.warning(
-                    "Stored embedding model %s/%s differs from configured %s/%s. "
-                    "Search quality may be degraded. "
-                    "Run 'mm embedding-reset' (CLI) or mem_embedding_reset (MCP) to resolve.",
-                    stored_provider,
-                    stored_model,
-                    embedding_provider,
-                    embedding_model,
-                )
-                model_mismatch = (
-                    stored_provider,
-                    stored_model,
-                    embedding_provider,
-                    embedding_model,
-                )
+    if stored_provider is not None or stored_model is not None:
+        # A partial stamp is unknown even when its recorded half matches
+        # config. Never bless existing vectors with an inferred identity.
+        incomplete = not embedding_identity_complete(stored_provider, stored_model)
+        stored_provider = stored_provider or ""
+        stored_model = stored_model or ""
+        if incomplete or (
+            embedding_provider
+            and embedding_model
+            and (stored_provider != embedding_provider or stored_model != embedding_model)
+        ):
+            logger.warning(
+                "Stored embedding model %s/%s is incomplete or differs from configured %s/%s. "
+                "Search quality may be degraded. "
+                "Run 'mm embedding-reset' (CLI) or mem_embedding_reset (MCP) to resolve.",
+                stored_provider or "unknown",
+                stored_model or ("" if stored_provider.lower() == "none" else "unknown"),
+                embedding_provider,
+                embedding_model,
+            )
+            model_mismatch = (
+                stored_provider,
+                stored_model,
+                embedding_provider,
+                embedding_model,
+            )
     else:
-        # New or legacy DB — backfill provider/model from current config
+        # Neither row exists: retain new/legacy DB initialization.
         if embedding_provider:
             meta.set_meta("embedding_provider", embedding_provider)
         if embedding_model:

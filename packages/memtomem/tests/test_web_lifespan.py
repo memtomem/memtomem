@@ -150,6 +150,19 @@ async def test_auto_sync_skipped_when_degraded():
     comp.storage.clear_embedding_mismatch.assert_not_called()
 
 
+@pytest.mark.parametrize(("provider", "model"), [("onnx", ""), ("", "bge-m3")])
+async def test_partial_identity_keeps_config_and_mismatch(provider, model):
+    stored = {"provider": provider, "model": model, "dimension": 1024}
+    comp = _make_components(
+        embedding_broken={"model_mismatch": True, "stored": stored},
+        stored_info=stored,
+    )
+    await _run_lifespan(comp)
+    assert comp.config.embedding.provider == "onnx"
+    assert comp.config.embedding.model == "bge-m3"
+    comp.storage.clear_embedding_mismatch.assert_not_called()
+
+
 async def test_auto_sync_runs_when_not_degraded():
     """Non-degraded model drift keeps the pre-#349 soft-sync behavior —
     config follows DB and the mismatch flag is cleared so the banner does

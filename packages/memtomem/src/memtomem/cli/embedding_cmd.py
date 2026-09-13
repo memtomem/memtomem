@@ -3,8 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 import click
+
+from memtomem.embedding.identity import (
+    embedding_identity_complete,
+    embedding_identity_label,
+    require_complete_embedding_identity,
+)
+
+if TYPE_CHECKING:
+    from memtomem.config import Mem2MemConfig
+    from memtomem.storage.sqlite_backend import SqliteBackend
 
 
 @click.command("embedding-reset")
@@ -71,6 +82,16 @@ async def _run(mode: str, *, assume_yes: bool = False) -> None:
         strict_dim_check=False,
     )
     await storage.initialize()
+    try:
+        await _run_initialized(storage, cfg, mode, assume_yes=assume_yes)
+    finally:
+        await storage.close()
+
+
+async def _run_initialized(
+    storage: SqliteBackend, cfg: Mem2MemConfig, mode: str, *, assume_yes: bool
+) -> None:
+    from memtomem.config import embedding_policy_fingerprint
 
     mismatch = getattr(storage, "embedding_mismatch", None)
     stored = getattr(storage, "stored_embedding_info", None)
@@ -79,7 +100,8 @@ async def _run(mode: str, *, assume_yes: bool = False) -> None:
         click.echo(click.style("Embedding Status", bold=True))
         if stored:
             click.echo(
-                f"  DB stored:  {stored['provider']}/{stored['model']} ({stored['dimension']}d)"
+                f"  DB stored:  {embedding_identity_label(stored['provider'], stored['model'])} "
+                f"({stored['dimension']}d)"
             )
             if stored.get("max_sequence_tokens") is not None:
                 click.echo(f"  DB max sequence tokens: {stored['max_sequence_tokens']}")
@@ -95,10 +117,12 @@ async def _run(mode: str, *, assume_yes: bool = False) -> None:
             click.echo(
                 "  mm embedding-reset --mode apply-current    # reset DB (destructive, re-index needed)"
             )
-            click.echo(
-                "  mm embedding-reset --mode revert-to-stored # match DB settings (non-destructive)"
-            )
-        await storage.close()
+            if stored and not embedding_identity_complete(stored["provider"], stored["model"]):
+                click.echo("  Revert-to-stored is unavailable: the stored identity is incomplete.")
+            else:
+                click.echo(
+                    "  mm embedding-reset --mode revert-to-stored # match DB settings (non-destructive)"
+                )
         return
 
     # Convert CLI kebab-case to internal snake_case
@@ -112,7 +136,6 @@ async def _run(mode: str, *, assume_yes: bool = False) -> None:
             default=False,
         ):
             click.echo("Cancelled.")
-            await storage.close()
             return
 
         await storage.reset_embedding_meta(
@@ -136,6 +159,10 @@ async def _run(mode: str, *, assume_yes: bool = False) -> None:
             click.echo("No mismatch — nothing to revert.")
         else:
             s = mismatch["stored"]
+            try:
+                require_complete_embedding_identity(s["provider"], s["model"])
+            except ValueError as exc:
+                raise click.ClickException(str(exc)) from exc
             click.echo(
                 click.style(
                     f"Reverted runtime to DB settings: "
@@ -144,5 +171,3 @@ async def _run(mode: str, *, assume_yes: bool = False) -> None:
                 )
             )
             click.echo("Note: update your config to match if you want this to persist.")
-
-    await storage.close()

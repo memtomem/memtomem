@@ -374,6 +374,19 @@ Resolving it is a two-step process — pick **one** of:
   stays untouched; the server swaps its embedder to match what the DB
   already contains.
 
+  Revert requires a complete stored identity. If a real provider's model or
+  the provider itself is missing or empty, status reports that field as
+  `unknown` and revert refuses without changing the runtime. The JSON status
+  retains the existing string fields, using `""` for unknown values and
+  `model_mismatch: true`. A stored `none` provider with no model is valid.
+
+  Partial identities are never filled from configuration, even when the
+  recorded half matches it or the database is empty. Restore the identity
+  from a known-good backup, or explicitly use `apply-current`, then run
+  `mm index --force <memory_dir>`. New/legacy databases with neither identity row still
+  initialize from configuration; valid empty `none` stores still adopt the
+  configured provider when ordinary components are built.
+
 > **Stop other `mm` processes first.** Run `embedding-reset` against an
 > idle DB — shut down `mm web`, the MCP server, and any background `mm
 > index` runs before invoking it. If two processes briefly co-exist with

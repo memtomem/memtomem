@@ -17,6 +17,8 @@ contract here is the flag's *shape*, not the wipe itself
 from __future__ import annotations
 
 import os
+import sqlite3
+from unittest.mock import AsyncMock
 
 import pytest
 from click.testing import CliRunner
@@ -129,3 +131,47 @@ def test_help_documents_the_non_interactive_form(runner: CliRunner) -> None:
     assert result.exit_code == 0
     assert "--yes" in result.output
     assert "-y" in result.output
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [("ollama", None), (None, "legacy-model"), ("ollama", ""), ("", "legacy-model")],
+)
+def test_partial_stamp_status_and_refused_revert_close_storage(
+    home, runner, monkeypatch, provider, model
+) -> None:
+    from memtomem.storage.sqlite_backend import SqliteBackend
+
+    _install(home, runner)
+    assert runner.invoke(cli, ["embedding-reset"]).exit_code == 0
+    db_path = home / ".memtomem" / "memtomem.db"
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "DELETE FROM _memtomem_meta WHERE key IN ('embedding_provider', 'embedding_model')"
+        )
+        for key, value in (("embedding_provider", provider), ("embedding_model", model)):
+            if value is not None:
+                db.execute("INSERT INTO _memtomem_meta VALUES (?, ?)", (key, value))
+        before = db.execute("SELECT * FROM _memtomem_meta ORDER BY key").fetchall()
+    closed = []
+    real_close = SqliteBackend.close
+
+    async def close(storage):
+        await real_close(storage)
+        closed.append(storage)
+
+    monkeypatch.setattr(SqliteBackend, "close", close)
+    reset = AsyncMock(side_effect=AssertionError("refused revert must not reset"))
+    monkeypatch.setattr(SqliteBackend, "reset_embedding_meta", reset)
+    result = runner.invoke(cli, ["embedding-reset"])
+    assert result.exit_code == 0, result.output
+    assert "unknown" in result.output and "unavailable" in result.output
+    result = runner.invoke(cli, ["embedding-reset", "--mode", "revert-to-stored"])
+    assert result.exit_code == 1, result.output
+    assert "Cannot revert" in result.output and "unknown" in result.output
+    assert "apply-current" in result.output
+    assert "Reverted runtime" not in result.output
+    assert len(closed) == 2 and all(storage._db is None for storage in closed)
+    reset.assert_not_awaited()
+    with sqlite3.connect(db_path) as db:
+        assert db.execute("SELECT * FROM _memtomem_meta ORDER BY key").fetchall() == before

@@ -4489,6 +4489,23 @@ class TestIndexingActive:
 
 
 class TestEmbeddingStatus:
+    @pytest.mark.parametrize(("provider", "model"), [("onnx", ""), ("", "bge-m3")])
+    async def test_partial_identity_is_reported_as_unknown(self, app, client, provider, model):
+        stored = {"provider": provider, "model": model, "dimension": 1024}
+        app.state.storage.stored_embedding_info = stored
+        app.state.storage.embedding_mismatch = {
+            "model_mismatch": True,
+            "dimension_mismatch": False,
+            "stored": stored,
+            "configured": {"provider": "onnx", "model": "bge-m3", "dimension": 1024},
+        }
+        resp = await client.get("/api/embedding-status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["has_mismatch"] and data["model_mismatch"]
+        assert data["stored"]["provider"] == provider
+        assert data["stored"]["model"] == model
+
     async def test_no_mismatch(self, client: AsyncClient):
         resp = await client.get("/api/embedding-status")
         assert resp.status_code == 200
