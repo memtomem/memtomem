@@ -401,8 +401,8 @@ class SqliteBackend(
         # entry points keep the default strict behavior so startup fails
         # fast with a remediation message. See issue #298.
         self._strict_dim_check = strict_dim_check
-        # Ordinary component builds let a store that was stamped dim=0 but
-        # never received a chunk take the configured embedding identity
+        # Ordinary component builds let a store that is stamped dim=0 and
+        # currently holds no chunks take the configured embedding identity
         # instead of reporting a mismatch whose reset would destroy nothing
         # (#2416). Recovery and probe opens keep the default so they observe
         # the stamp as recorded.
@@ -902,14 +902,16 @@ class SqliteBackend(
         self._policy_mismatch = None
 
     def _adopt_unpopulated_embedding_stamp_if_eligible(self) -> bool:
-        """Stamp the configured embedding identity over a never-populated dim=0 store.
+        """Stamp the configured embedding identity over an empty dim=0 store.
 
         A store opened while ``embedding`` was rejected — or under
         ``provider="none"`` — is stamped dim=0. Once the config names a real
         provider, ``create_tables`` reports that as a mismatch whose only
         remedy is ``embedding-reset --mode apply-current``. When the store has
         no ``chunks_vec`` and no chunk rows that reset has nothing to destroy
-        and nothing to re-index, so it is done here instead (#2416).
+        and nothing to re-index, so it is done here instead (#2416). The check
+        is current emptiness, not history: a dim=0 store whose chunks were all
+        deleted qualifies too, since it holds no vectors or chunks now.
 
         Eligibility is read under ``BEGIN IMMEDIATE``: a chunk written or a
         second adopter's stamp committed after an unlocked check would

@@ -1,4 +1,4 @@
-"""A never-populated dim=0 store adopts the configured embedding identity (#2416).
+"""An empty dim=0 store adopts the configured embedding identity (#2416).
 
 A store opened while the ``embedding`` config section was rejected — or under
 ``provider="none"`` — is stamped dimension 0. After the config names a real
@@ -160,6 +160,33 @@ class TestAdoption:
             await _onnx_backend(db_path, adopt=True).initialize()
         assert _meta(db_path) == before
         assert "chunks_vec" not in _tables(db_path)
+
+    async def test_a_store_emptied_after_indexing_is_adopted(self, tmp_path: Path) -> None:
+        """Eligibility is current emptiness, not history. Once a dim=0 store's
+        chunks are deleted it holds no vectors or chunks, so the reset still
+        has nothing to destroy or re-index."""
+        db_path = tmp_path / "m.db"
+        await _stamp_dim0(db_path, chunks=2)
+        storage = SqliteBackend(
+            StorageConfig(sqlite_path=db_path),
+            dimension=0,
+            embedding_provider="none",
+            embedding_model="",
+            embedding_policy_fingerprint="none:v1",
+        )
+        await storage.initialize()
+        try:
+            assert await storage.delete_by_source(Path("/tmp/test.md")) == 2
+        finally:
+            await storage.close()
+
+        storage = _onnx_backend(db_path, adopt=True)
+        await storage.initialize()
+        try:
+            assert storage.embedding_mismatch is None
+            assert _meta(db_path)["embedding_dimension"] == "384"
+        finally:
+            await storage.close()
 
     async def test_an_existing_vector_table_blocks_adoption(self, tmp_path: Path) -> None:
         db_path = tmp_path / "m.db"
