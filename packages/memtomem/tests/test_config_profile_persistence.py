@@ -452,8 +452,8 @@ def test_unnormalized_config_save_does_not_pin_profile_budgets(home: Path) -> No
 async def test_mcp_persist_rollback_keeps_profile_budgets(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed ``mem_config`` persist restores the runtime through the canonical
-    load, so the next persist does not pin non-E5 budgets (#2399 review)."""
+    """A failed ``mem_config`` persist keeps the profile's budgets in the restored
+    runtime, so the next persist does not pin non-E5 budgets (#2399 review)."""
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, MagicMock
 

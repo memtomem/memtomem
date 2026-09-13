@@ -886,6 +886,10 @@ class TestConfigSaveValidationAndRollback:
         set_home(monkeypatch, tmp_path)
         app_mock = MagicMock()
         app_mock.config = Mem2MemConfig()
+        config = app_mock.config
+        config.search.default_top_k = 7
+        search = config.search
+        fields_set = search.model_fields_set.copy()
         app_mock.search_pipeline.invalidate_cache = MagicMock()
 
         from memtomem.server.tools import status_config
@@ -904,8 +908,11 @@ class TestConfigSaveValidationAndRollback:
 
         assert "another process is writing" in res.lower()
         assert "rolled back" in res.lower()
-        # Config reverted to disk state (isolated empty HOME → default), not 20.
-        assert app_mock.config.search.default_top_k != 20
+        # Preserve the pre-edit runtime, including the component-held section.
+        assert app_mock.config is config
+        assert app_mock.config.search is search
+        assert search.default_top_k == 7
+        assert search.model_fields_set == fields_set
         # Fanout skipped: persist failed before invalidate_cache could run.
         app_mock.search_pipeline.invalidate_cache.assert_not_called()
 

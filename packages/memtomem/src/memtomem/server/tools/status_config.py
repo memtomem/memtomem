@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import importlib.util
 from importlib.metadata import PackageNotFoundError, version as distribution_version
@@ -11,6 +12,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from pydantic import BaseModel
 
 from memtomem import __version__
 from memtomem._runtime_paths import scrub_text
@@ -29,7 +32,7 @@ from memtomem.server.helpers import _set_config_key
 from memtomem.secret_masking import is_secret_key, mask_secrets
 
 if TYPE_CHECKING:
-    from memtomem.config import SaveReceipt, SearchConfig
+    from memtomem.config import Mem2MemConfig, SaveReceipt, SearchConfig
     from memtomem.server.context import AppContext
 
 logger = logging.getLogger(__name__)
@@ -870,6 +873,46 @@ async def mem_status(
     return await format_status_report(app)
 
 
+class _ConfigSectionSnapshot:
+    """Restore an MCP edit without replacing objects retained by components."""
+
+    def __init__(self, section: BaseModel) -> None:
+        self._section = section
+        self._fields_set = section.model_fields_set.copy()
+        self._values = {
+            name: (value, copy.deepcopy(value))
+            for name in type(section).model_fields
+            for value in (getattr(section, name),)
+        }
+
+    @classmethod
+    def capture(cls, config: Mem2MemConfig, key: str) -> _ConfigSectionSnapshot | None:
+        from memtomem.config import MUTABLE_FIELDS
+
+        section_name, _, field_name = key.partition(".")
+        if section_name not in type(config).model_fields:
+            return None
+        if field_name not in MUTABLE_FIELDS.get(section_name, set()):
+            return None
+        section = getattr(config, section_name)
+        if not isinstance(section, BaseModel) or field_name not in type(section).model_fields:
+            return None
+        return cls(section)
+
+    def restore(self) -> None:
+        # No disk access, validation, or await: even an invalid file must not
+        # replace the pre-edit runtime or mask the original save exception.
+        for name, (original, saved) in self._values.items():
+            if isinstance(original, list):
+                original[:] = saved
+            elif isinstance(original, dict):
+                original.clear()
+                original.update(saved)
+            setattr(self._section, name, original)
+        self._section.__pydantic_fields_set__.clear()
+        self._section.__pydantic_fields_set__.update(self._fields_set)
+
+
 @mcp.tool()
 @tool_handler
 @register("advanced")
@@ -891,6 +934,7 @@ async def mem_config(
     app = await _get_app_initialized(ctx)
 
     if key and value is not None:
+        snapshot = _ConfigSectionSnapshot.capture(app.config, key) if persist else None
         result = _set_config_key(app.config, key, value)
         # Side effects for specific field changes
         if result.startswith("Set "):
@@ -908,26 +952,17 @@ async def mem_config(
 
                 try:
                     receipt = save_config_overrides(app.config)
-                except (ValueError, TimeoutError) as e:
-                    # Rollback the runtime mutation by reloading the configuration
-                    # from disk. TimeoutError means another process holds the
-                    # config write lock — nothing was written, so reverting
-                    # runtime keeps memory and disk consistent.
-                    # Canonical replay so the restored runtime keeps the
-                    # selected embedding profile's budgets. Tolerant like the
-                    # loaders it replaces: a rollback must not raise over a
-                    # file profile that only a complete load would reject.
-                    from memtomem.config_signature import build_fresh_config
-
-                    app.config = build_fresh_config(
-                        strict_overrides=False, quiet=True, validate_profile=False
-                    )
+                except Exception as e:
+                    if snapshot is not None:
+                        snapshot.restore()
                     if isinstance(e, TimeoutError):
                         return (
                             "Could not persist config: another process is writing "
                             "config.json. Runtime change rolled back; retry in a moment."
                         )
-                    return f"Failed to persist config: {e}. Runtime change rolled back."
+                    if isinstance(e, ValueError):
+                        return f"Failed to persist config: {e}. Runtime change rolled back."
+                    raise
 
             # Invalidate search cache so changes take effect immediately.
             app.search_pipeline.invalidate_cache()
