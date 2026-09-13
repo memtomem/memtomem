@@ -320,6 +320,10 @@ def test_claude_host_tool_grants_are_subcommand_scoped() -> None:
 
 def test_core_version_is_single_sourced_across_automation_assets() -> None:
     version = _contract()["core"]["version"]
+    # The contract pins plugins to a core that must be the one this checkout
+    # releases; the renderer and preflight each check only their own side.
+    with (_ROOT / "packages/memtomem/pyproject.toml").open("rb") as handle:
+        assert tomllib.load(handle)["project"]["version"] == version
     dispatcher = _DISPATCHER.read_text(encoding="utf-8")
     match = re.search(r'^CORE_VERSION = "([^"]+)"$', dispatcher, re.MULTILINE)
     assert match and match.group(1) == version
@@ -342,7 +346,7 @@ from pathlib import Path
 with Path(os.environ["FAKE_MM_LOG"]).open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(sys.argv[1:]) + "\\n")
 if sys.argv[1:] == ["--version"]:
-    print(os.environ.get("FAKE_MM_VERSION", "mm, version 0.6.0"))
+    print(os.environ.get("FAKE_MM_VERSION", "mm, version 0.6.1"))
 elif sys.argv[1:2] == ["search"]:
     if os.environ.get("FAKE_MM_SEARCH_FAIL"):
         print(sys.argv[2], file=sys.stderr)
@@ -459,7 +463,7 @@ def test_automation_reports_incompatible_dependency(fake_mm: tuple[dict[str, str
     result = _dispatch("SessionStart", {"hook_event_name": "SessionStart"}, env)
     assert result.returncode == 0
     output = json.loads(result.stdout)
-    assert "requires mm 0.6.0" in output["hookSpecificOutput"]["additionalContext"]
+    assert "requires mm 0.6.1" in output["hookSpecificOutput"]["additionalContext"]
     _dispatch(
         "UserPromptSubmit",
         {"hook_event_name": "UserPromptSubmit", "prompt": "A sufficiently long prompt"},

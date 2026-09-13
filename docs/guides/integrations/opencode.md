@@ -14,12 +14,12 @@ Native Windows has not yet been verified.
 
 ## Install
 
-The npm release for this core version is `opencode-memtomem@0.3.1`, bundling
-core `0.6.0`. Add it through OpenCode's singular `plugin` configuration key
+The npm release for this core version is `opencode-memtomem@0.3.2`, bundling
+core `0.6.1`. Add it through OpenCode's singular `plugin` configuration key
 (there is no `opencode plugin add` command):
 
 ```json
-{"plugin": ["opencode-memtomem@0.3.1"]}
+{"plugin": ["opencode-memtomem@0.3.2"]}
 ```
 
 Upgrade if your `plugin` array still pins `0.1.3` or older: those releases
@@ -48,7 +48,7 @@ instead:
   "mcp": {
     "memtomem": {
       "type": "local",
-      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.6.0", "memtomem-server"],
+      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.6.1", "memtomem-server"],
       "enabled": true,
       "timeout": 60000,
       "environment": {"MEMTOMEM_TOOL_MODE": "core"}
@@ -63,7 +63,7 @@ Restart OpenCode and call `memtomem_mem_status` to verify this path.
 
 | Surface | Included behavior |
 |---|---|
-| MCP | Exact-pinned `memtomem==0.6.0`, core tool mode (plugin); `[all]` no-install runtime (manual MCP) |
+| MCP | Exact-pinned `memtomem==0.6.1`, core tool mode (plugin); `[all]` no-install runtime (manual MCP) |
 | Commands | `memtomem-search`, `recall`, `status`, `remember`, `index`, `setup`, `handoff` |
 | Skills | Read-only `search`, `recall`, and `status` |
 

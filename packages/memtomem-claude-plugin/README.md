@@ -20,7 +20,7 @@ Before installing, inspect existing servers with `/mcp` in Claude Code, then
 run the read-only diagnostic from the project you want to inspect:
 
 ```bash
-uvx --from "memtomem[all]==0.6.0" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.1" mm doctor --claude-mcp
 ```
 
 The pin is there because installing the plugin does not put `mm` on your PATH —
@@ -42,8 +42,8 @@ check before installing. The check does not intercept `/plugin install`.
 On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```bash
-uvx --from 'memtomem==0.6.0' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem==0.6.0' mm status
+uvx --from 'memtomem==0.6.1' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem==0.6.1' mm status
 ```
 
 The plugin intentionally cannot perform this trust-establishing step over MCP.
@@ -54,7 +54,7 @@ gitignored local tier explicitly:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem==0.6.0' mm mem init --scope project_local
+uvx --from 'memtomem==0.6.1' mm mem init --scope project_local
 ```
 
 After that, `/memtomem:setup /path/to/notes` performs a one-shot index and

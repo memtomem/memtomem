@@ -26,7 +26,7 @@ Python 3.12 이상과 uv가 필요합니다. 최초 패키지 설치만 인터�
 
 ```bash
 uv venv .venv
-uv pip install --python .venv/bin/python "memtomem==0.6.0"
+uv pip install --python .venv/bin/python "memtomem==0.6.1"
 uv run --python .venv/bin/python --no-project python demo.py
 ```
 
