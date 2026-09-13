@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Delta-only config saves respect the embedding profile's chunk budgets
+  when an E5 model is selected in `config.json` (#2399).** `mm config set
+  indexing.max_chunk_tokens 512` was dropped as "already 512" while the stack
+  resolved 384, and `384` was stored as a redundant pin that outlived a model
+  change. `mm config set`, `mm config show`, Web save and reset-to-default,
+  and MCP `mem_config(persist=True)` now compare against the selected
+  profile's generated defaults without treating editable pins as their own
+  baseline; a save from a config that skipped profile normalization no longer
+  pins non-E5 budgets. `mm config set` validates the proposed edit before
+  migrating or writing, so it can repair an invalid file profile and leaves
+  the file unchanged when it rejects one.
+
 - **Quality replay now reports complete, partial, unavailable, or empty evaluation
   coverage (#2406).** All-excluded replays emit their report before CLI exit 2;
   Web shows unavailable aggregates as n/a and explains exhaustive dense limits.

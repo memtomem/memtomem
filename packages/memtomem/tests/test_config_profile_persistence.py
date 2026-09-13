@@ -69,7 +69,7 @@ def test_cli_set_persists_only_the_profile_delta(profile: Path, requested: int) 
         else {"auto_discover": False}
     )
     if requested == 384:
-        assert "effective fallback" in result.output
+        assert "a lower layer (default, embedding profile, or config.d)" in result.output
 
 
 def test_show_and_comparand_are_read_only(profile: Path) -> None:
@@ -386,9 +386,12 @@ def test_set_reports_profile_error_without_a_traceback(invalid_profile) -> None:
 
 
 async def test_web_defaults_stay_available_for_invalid_profile(
-    client, home: Path, invalid_profile_data
+    app, client, home: Path, invalid_profile_data
 ) -> None:
-    # Write after the app/client fixtures have started with a valid config.
+    # Start from a valid E5 runtime, then break the file underneath it.
+    write_config(home, {"embedding": E5})
+    app.state.config = build_fresh_config(migrate=False)
+    hot_reload.initialize_reload_state(app)
     field, value = invalid_profile_data
     path = write_config(home, {"embedding": E5, "indexing": {field: value}})
     before = (path.read_bytes(), path.stat().st_mtime_ns)
@@ -428,3 +431,95 @@ def test_unrelated_set_cannot_leave_a_repairable_profile_invalid(home: Path) -> 
     assert "validation error" not in result.output
     assert "https://errors.pydantic.dev" not in result.output
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+def test_unnormalized_config_save_does_not_pin_profile_budgets(home: Path) -> None:
+    """A config assembled without profile normalization still holds non-E5
+    budgets in its unset fields; saving it must not write them (#2399 review)."""
+    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+
+    path = write_config(home, {"embedding": E5, "indexing": {"auto_discover": False}})
+    cfg = Mem2MemConfig()
+    load_config_d(cfg, quiet=True)
+    load_config_overrides(cfg, migrate=False)
+    assert cfg.indexing.max_chunk_tokens == 512
+    before = (cfg.indexing.model_dump(), cfg.indexing.model_fields_set.copy())
+    cfg.search.default_top_k = 17
+    save_config_overrides(cfg)
+    assert json.loads(path.read_text())["indexing"] == {"auto_discover": False}
+    assert (cfg.indexing.model_dump(), cfg.indexing.model_fields_set) == before
+    fresh = build_fresh_config(migrate=False)
+    assert (fresh.indexing.max_chunk_tokens, fresh.search.default_top_k) == (384, 17)
+
+
+async def test_mcp_persist_rollback_keeps_profile_budgets(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed ``mem_config`` persist restores the runtime through the canonical
+    load, so the next persist does not pin non-E5 budgets (#2399 review)."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from memtomem import config as config_mod
+    from memtomem.server.tools import status_config
+
+    path = write_config(home, {"embedding": E5, "indexing": {"auto_discover": False}})
+    app = SimpleNamespace(
+        config=build_fresh_config(migrate=False),
+        search_pipeline=MagicMock(),
+        embedder=MagicMock(),
+        storage=AsyncMock(),
+    )
+    monkeypatch.setattr(status_config, "_get_app_initialized", AsyncMock(return_value=app))
+    real_save = config_mod.save_config_overrides
+
+    def locked(_config):
+        raise TimeoutError
+
+    monkeypatch.setattr(config_mod, "save_config_overrides", locked)
+    out = await status_config.mem_config(key="search.default_top_k", value="17", persist=True)
+    assert "rolled back" in out
+    assert app.config.indexing.max_chunk_tokens == 384
+    assert app.config.search.default_top_k != 17
+
+    monkeypatch.setattr(config_mod, "save_config_overrides", real_save)
+    out = await status_config.mem_config(key="mmr.enabled", value="true", persist=True)
+    assert "persisted to config.json" in out, out
+    assert json.loads(path.read_text())["indexing"] == {"auto_discover": False}
+    assert build_fresh_config(migrate=False).indexing.max_chunk_tokens == 384
+
+
+async def test_web_defaults_follow_an_accepted_reload_through_save(home: Path, app, client) -> None:
+    """↺ must offer what Save prunes. Save reloads a stale config before
+    comparing, so the defaults read through the same reload (#2399 review)."""
+    from memtomem.embedding.profiles import E5_TOKENIZER
+
+    # Pin the reload-guarded fields to E5's values so a hot reload may switch
+    # models; the unguarded budgets still follow the selected profile.
+    guarded = {
+        "chunk_input_prefix": "passage: ",
+        "hard_max_chunk_tokens": 384,
+        "chunk_tokenizer_path": E5_TOKENIZER,
+        "chunk_context_tokens": 96,
+        "chunk_model_tokens": 512,
+    }
+    previous = write_config(home, {"embedding": E5, "indexing": guarded})
+    app.state.config = build_fresh_config(migrate=False)
+    hot_reload.initialize_reload_state(app)
+    assert app.state.config.indexing.max_chunk_tokens == 384
+    previous_mtime = previous.stat().st_mtime_ns
+    path = write_config(home, {"embedding": BGE, "indexing": guarded})
+    # The reload signature is mtime-only; advance it from the sampled revision
+    # so a coarse filesystem clock cannot hide the edit.
+    newer_mtime = previous_mtime + 1_000_000_000
+    os.utime(path, ns=(newer_mtime, newer_mtime))
+    response = await client.get("/api/config/defaults")
+    assert response.status_code == 200, response.text
+    reset_value = response.json()["indexing"]["max_chunk_tokens"]
+    assert reset_value == 512
+    response = await client.patch(
+        "/api/config?persist=true", json={"indexing": {"max_chunk_tokens": reset_value}}
+    )
+    assert response.status_code == 200, response.text
+    assert json.loads(path.read_text())["indexing"] == guarded
+    assert build_fresh_config(migrate=False).indexing.max_chunk_tokens == 512

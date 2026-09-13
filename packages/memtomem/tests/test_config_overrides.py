@@ -1895,7 +1895,7 @@ class TestMcpPersistenceSuffix:
 
         suffix = _persistence_suffix("search.default_top_k", SaveReceipt(before={}, after={}))
         assert "not written to config.json" in suffix
-        assert "a lower layer (default or config.d)" in suffix
+        assert "a lower layer (default, embedding profile, or config.d)" in suffix
         assert "MEMTOMEM_" not in suffix
 
 

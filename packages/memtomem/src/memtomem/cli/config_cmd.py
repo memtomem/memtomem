@@ -380,7 +380,8 @@ def _effect_lines(
         # Nothing was stored. Whether or not a pin was displaced, the caller's
         # value now rests on a layer they did not set, and unsetting that layer
         # takes it away — so say it even on a clean file.
-        where = f"{env_var} or the effective fallback" if env_var else "the effective fallback"
+        lower = "a lower layer (default, embedding profile, or config.d)"
+        where = f"{env_var} or {lower}" if env_var else lower
         displaced = (
             f" (it held {_masked(field_name, pinned_before)})"
             if pruned

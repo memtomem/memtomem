@@ -3138,6 +3138,15 @@ def save_config_overrides(
     # build_comparand is a slow, read-only rebuild — keep it OUTSIDE the lock so
     # the serialized critical section stays as narrow as read→merge→write.
     comparand = build_comparand(quiet=True, embedding_context=config.embedding)
+    # The comparand carries the selected profile's generated budgets, so the
+    # live side must too. A config assembled without profile normalization
+    # still holds the non-E5 values in its unset fields; comparing those would
+    # pin them as if the user had chosen them (#2399 review). Fill a copy so
+    # the caller's object and its explicit-field tracking stay untouched.
+    from memtomem.embedding.profiles import fill_e5_defaults
+
+    live_view = config.model_copy(deep=True)
+    fill_e5_defaults(live_view)
 
     path = _override_path()
 
@@ -3161,7 +3170,7 @@ def save_config_overrides(
         # "current == factory" still drops cleanly.
         sections = {*base_fields, *_EXTRA_MUTATION_FIELDS}
         for section_name in sections:
-            live_section = getattr(config, section_name, None)
+            live_section = getattr(live_view, section_name, None)
             comp_section = getattr(comparand, section_name, None)
             if live_section is None or comp_section is None:
                 continue

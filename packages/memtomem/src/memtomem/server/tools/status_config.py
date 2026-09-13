@@ -913,12 +913,15 @@ async def mem_config(
                     # from disk. TimeoutError means another process holds the
                     # config write lock — nothing was written, so reverting
                     # runtime keeps memory and disk consistent.
-                    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+                    # Canonical replay so the restored runtime keeps the
+                    # selected embedding profile's budgets. Tolerant like the
+                    # loaders it replaces: a rollback must not raise over a
+                    # file profile that only a complete load would reject.
+                    from memtomem.config_signature import build_fresh_config
 
-                    fresh = Mem2MemConfig()
-                    load_config_d(fresh, quiet=True)
-                    load_config_overrides(fresh)
-                    app.config = fresh
+                    app.config = build_fresh_config(
+                        strict_overrides=False, quiet=True, validate_profile=False
+                    )
                     if isinstance(e, TimeoutError):
                         return (
                             "Could not persist config: another process is writing "
@@ -1008,7 +1011,7 @@ def _persistence_suffix(key: str, receipt: "SaveReceipt | None") -> str:
     reason = (
         takes_precedence
         if binding is not None
-        else "the value already comes from a lower layer (default or config.d)"
+        else "the value already comes from a lower layer (default, embedding profile, or config.d)"
     )
     return f" (runtime only — not written to config.json: {reason})"
 

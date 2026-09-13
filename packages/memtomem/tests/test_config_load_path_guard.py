@@ -40,7 +40,6 @@ DEFERRED = {
     "server/__init__.py:_resolve_store_db_path": (1, 1),
     "server/tools/context.py:_resolve_mcp_scope": (1, 1),
     "server/tools/status_config.py:collect_runtime_profile": (1, 1),
-    "server/tools/status_config.py:mem_config": (1, 1),
 }
 
 
