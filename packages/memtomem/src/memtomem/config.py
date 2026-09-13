@@ -3049,7 +3049,9 @@ def _atomic_write_json(path: Path, data: dict) -> None:
         raise
 
 
-def build_comparand(*, quiet: bool = True) -> "Mem2MemConfig":
+def build_comparand(
+    *, quiet: bool = True, embedding_context: EmbeddingConfig | None = None
+) -> "Mem2MemConfig":
     """Build a fresh config reflecting everything *except* user overrides.
 
     Comparand = built-in defaults + ``MEMTOMEM_*`` env vars + ``config.d/``
@@ -3057,7 +3059,13 @@ def build_comparand(*, quiet: bool = True) -> "Mem2MemConfig":
     **not** "pristine code default" — it represents the value that would
     apply to a field if ``~/.memtomem/config.json`` did not pin it.
 
-    Two consumers:
+    ``embedding_context`` retains the selected model's non-mutable inputs,
+    even when config.json selected it. Saves and Web resets pass this context
+    so E5's generated defaults are the fallback, while editable pins still
+    come only from the lower layers. Without it, config.json is excluded
+    completely (also used by project memory-directory registration).
+
+    Two settings consumers:
 
     - ``save_config_overrides`` persists only fields where the live config
       differs from this comparand — closing fragment/env/factory drag-in at
@@ -3075,15 +3083,9 @@ def build_comparand(*, quiet: bool = True) -> "Mem2MemConfig":
     Safe to call concurrently: only reads env/filesystem, no mutation.
     Factory functions (e.g. ``_default_memory_dirs``) must remain pure.
     """
-    comparand = Mem2MemConfig()
-    load_config_d(comparand, quiet=quiet)
-    # Provider memory dirs are now explicit ``memory_dirs`` entries (added by
-    # the ``mm init`` wizard or migrated once from legacy ``auto_discover``),
-    # not env-dependent factory output — so the comparand no longer needs a
-    # discovery step here. Runtime and comparand both reflect the same
-    # explicit list, and delta-only save still drops anything that matches
-    # defaults + env + fragments.
-    return comparand
+    from memtomem.config_signature import _build_config
+
+    return _build_config(include_overrides=False, quiet=quiet, embedding_context=embedding_context)
 
 
 def save_config_overrides(
@@ -3128,7 +3130,7 @@ def save_config_overrides(
     base_fields: dict[str, set[str]] = mutable_fields or MUTABLE_FIELDS
     # build_comparand is a slow, read-only rebuild — keep it OUTSIDE the lock so
     # the serialized critical section stays as narrow as read→merge→write.
-    comparand = build_comparand(quiet=True)
+    comparand = build_comparand(quiet=True, embedding_context=config.embedding)
 
     path = _override_path()
 

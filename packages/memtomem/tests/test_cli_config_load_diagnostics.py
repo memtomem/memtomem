@@ -115,7 +115,7 @@ class TestConfigShowReportsRejectedSections:
                 )
             )
 
-        monkeypatch.setattr(_cfg, "load_config_overrides", _inject)
+        monkeypatch.setattr("memtomem.config_signature.load_config_overrides", _inject)
 
         result = runner.invoke(cli, ["config", "show", "--json"])
 

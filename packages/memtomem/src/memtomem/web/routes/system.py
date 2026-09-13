@@ -584,9 +584,14 @@ async def get_config_defaults() -> ConfigResponse:
     After the user clicks Save, ``save_config_overrides`` drops the entry
     (now equal to comparand) and env/fragment values continue to flow.
 
+    Retain the selected embedding profile, including a model selected in
+    config.json, but never copy its editable pins into the reset values.
     Read-only; no reload interaction needed.
     """
-    return _build_config_response(build_comparand(quiet=True))
+    from memtomem.config_signature import build_fresh_config
+
+    current = build_fresh_config(migrate=False, strict_overrides=False, quiet=True)
+    return _build_config_response(build_comparand(quiet=True, embedding_context=current.embedding))
 
 
 @router.get(

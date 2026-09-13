@@ -17,6 +17,8 @@ import logging
 from pathlib import Path
 
 from memtomem.config import (
+    MUTABLE_FIELDS,
+    EmbeddingConfig,
     Mem2MemConfig,
     _config_d_path,
     _override_path,
@@ -91,6 +93,7 @@ def build_fresh_config(
     migrate: bool = True,
     strict_fragments: bool = False,
     strict_overrides: bool = True,
+    quiet: bool = False,
 ) -> Mem2MemConfig:
     """Replay the canonical config load path.
 
@@ -135,17 +138,59 @@ def build_fresh_config(
     whose ``memory_dirs`` is a string, say — and does it on the same read the
     config is built from, leaving no window for a write to land between a
     validation pass and the real one.
+    ``quiet=True`` suppresses fragment warnings, matching ``load_config_d``;
+    validation failures and override diagnostics keep their existing behavior.
+    """
+    return _build_config(
+        migrate=migrate,
+        strict_fragments=strict_fragments,
+        strict_overrides=strict_overrides,
+        quiet=quiet,
+    )
+
+
+def _build_config(
+    *,
+    migrate: bool = False,
+    strict_fragments: bool = False,
+    strict_overrides: bool = False,
+    quiet: bool = False,
+    include_overrides: bool = True,
+    embedding_context: EmbeddingConfig | None = None,
+) -> Mem2MemConfig:
+    """Shared layer replay, with normalization after the final profile selection.
+
+    Comparands omit config.json but can retain the caller's selected model.
+    Only non-mutable embedding inputs come from that context: copying its
+    batch size would make a user pin compare equal to itself. Revalidate from
+    explicit inputs so generated E5 defaults remain unpinned.
     """
     override = _override_path()
-    if strict_overrides and override.exists():
+    if include_overrides and strict_overrides and override.exists():
         # Strict pre-parse — raises on malformed JSON / OS errors.
         parsed = json.loads(override.read_text(encoding="utf-8"))
         if not isinstance(parsed, dict):
             raise ValueError(f"config overrides in {override} must be a JSON object")
 
     cfg = Mem2MemConfig()
-    load_config_d(cfg, strict=strict_fragments)
-    load_config_overrides(cfg, migrate=migrate, strict=strict_overrides)
+    load_config_d(cfg, quiet=quiet, strict=strict_fragments)
+    if include_overrides:
+        load_config_overrides(cfg, migrate=migrate, strict=strict_overrides)
+    if embedding_context is not None:
+        mutable = MUTABLE_FIELDS["embedding"]
+        inputs = {
+            key: value
+            for key, value in embedding_context.model_dump(exclude_unset=True).items()
+            if key not in mutable
+        }
+        inputs.update(
+            {
+                key: value
+                for key, value in cfg.embedding.model_dump(exclude_unset=True).items()
+                if key in mutable
+            }
+        )
+        cfg.embedding = EmbeddingConfig.model_validate(inputs)
     from memtomem.embedding.profiles import apply_e5_defaults
 
     apply_e5_defaults(cfg)

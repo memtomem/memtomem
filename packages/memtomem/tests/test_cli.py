@@ -235,15 +235,14 @@ class TestConfigCLI:
         assert "KEY" in result.output
         assert "VALUE" in result.output
 
-    @patch("memtomem.config.load_config_overrides")
-    @patch("memtomem.config.Mem2MemConfig")
-    def test_config_show_table(self, mock_cfg_cls, mock_load, runner: CliRunner) -> None:
+    @patch("memtomem.config_signature.build_fresh_config")
+    def test_config_show_table(self, mock_build, runner: CliRunner) -> None:
         mock_cfg = MagicMock()
         mock_cfg.model_dump.return_value = {
             "search": {"default_top_k": 10},
             "embedding": {"provider": "ollama", "api_key": "sk-secret"},
         }
-        mock_cfg_cls.return_value = mock_cfg
+        mock_build.return_value = mock_cfg
 
         result = runner.invoke(cli, ["config", "show"])
         assert result.exit_code == 0
@@ -253,28 +252,24 @@ class TestConfigCLI:
         assert "***" in result.output
         assert "sk-secret" not in result.output
 
-    @patch("memtomem.config.load_config_overrides")
-    @patch("memtomem.config.Mem2MemConfig")
-    def test_config_show_json(self, mock_cfg_cls, mock_load, runner: CliRunner) -> None:
+    @patch("memtomem.config_signature.build_fresh_config")
+    def test_config_show_json(self, mock_build, runner: CliRunner) -> None:
         mock_cfg = MagicMock()
         mock_cfg.model_dump.return_value = {"search": {"default_top_k": 10}}
-        mock_cfg_cls.return_value = mock_cfg
+        mock_build.return_value = mock_cfg
 
         result = runner.invoke(cli, ["config", "show", "--format", "json"])
         assert result.exit_code == 0
         assert '"default_top_k": 10' in result.output
 
-    @patch("memtomem.config.load_config_overrides")
-    @patch("memtomem.config.Mem2MemConfig")
-    def test_config_show_json_flag_matches_format_json(
-        self, mock_cfg_cls, mock_load, runner: CliRunner
-    ) -> None:
+    @patch("memtomem.config_signature.build_fresh_config")
+    def test_config_show_json_flag_matches_format_json(self, mock_build, runner: CliRunner) -> None:
         """--json is a documented alias for --format json (CONTRIBUTING "CLI
         output convention"). Both paths must emit identical output so the
         alias can't quietly diverge."""
         mock_cfg = MagicMock()
         mock_cfg.model_dump.return_value = {"search": {"default_top_k": 10}}
-        mock_cfg_cls.return_value = mock_cfg
+        mock_build.return_value = mock_cfg
 
         flag = runner.invoke(cli, ["config", "show", "--json"])
         fmt = runner.invoke(cli, ["config", "show", "--format", "json"])

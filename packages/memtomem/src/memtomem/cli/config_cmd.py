@@ -55,7 +55,7 @@ def config() -> None:
 @click.option("--json", "as_json", is_flag=True, help="Shortcut for --format json.")
 def config_show(fmt: str, *, as_json: bool = False) -> None:
     """Show current configuration (API keys masked)."""
-    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+    from memtomem.config_signature import build_fresh_config
 
     # --json is an alias for --format json (CONTRIBUTING "CLI output
     # convention"); if both are passed, --json wins since it's the more
@@ -63,13 +63,11 @@ def config_show(fmt: str, *, as_json: bool = False) -> None:
     if as_json:
         fmt = "json"
 
-    cfg = Mem2MemConfig()
-    load_config_d(cfg)
     # migrate=False: showing a file must not rewrite it. The legacy
     # auto_discover migration persists to config.json, so a file with no
     # ``indexing.auto_discover: false`` changed under the user who ran this
     # to look at it before editing (#2417).
-    load_config_overrides(cfg, migrate=False)
+    cfg = build_fresh_config(migrate=False, strict_overrides=False)
     data = mask_secrets(cfg.model_dump())
 
     # A section the loaders rejected is gone from this view with no trace —
@@ -111,12 +109,10 @@ def config_show(fmt: str, *, as_json: bool = False) -> None:
 def config_set(key: str, value: str) -> None:
     """Set a config field (e.g., 'search.default_top_k 20'). Persists to ~/.memtomem/config.json."""
     from memtomem.config import (
-        Mem2MemConfig,
         assign_section_fields,
-        load_config_d,
-        load_config_overrides,
         save_config_overrides,
     )
+    from memtomem.config_signature import build_fresh_config
 
     parts = key.split(".", 1)
     if len(parts) != 2:
@@ -137,9 +133,7 @@ def config_set(key: str, value: str) -> None:
         click.echo(click.style(f"{key}: {e}", fg="red"))
         raise SystemExit(1)
 
-    cfg = Mem2MemConfig()
-    load_config_d(cfg, quiet=True)
-    load_config_overrides(cfg)
+    cfg = build_fresh_config(migrate=True, strict_overrides=False, quiet=True)
 
     section_obj = getattr(cfg, section_name)
     # ``assign_section_fields`` re-runs the section's cross-field
@@ -280,11 +274,9 @@ def _effective_value(section_name: str, field_name: str) -> object:
     ``auto_discover`` migration writes to disk — a reporting call must not
     mutate the file it is reporting on.
     """
-    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+    from memtomem.config_signature import build_fresh_config
 
-    cfg = Mem2MemConfig()
-    load_config_d(cfg, quiet=True)
-    load_config_overrides(cfg, migrate=False)
+    cfg = build_fresh_config(migrate=False, strict_overrides=False, quiet=True)
     return getattr(getattr(cfg, section_name), field_name)
 
 
@@ -376,7 +368,7 @@ def _effect_lines(
         # Nothing was stored. Whether or not a pin was displaced, the caller's
         # value now rests on a layer they did not set, and unsetting that layer
         # takes it away — so say it even on a clean file.
-        where = f"{env_var} or a lower layer" if env_var else "a lower layer (default or config.d)"
+        where = f"{env_var} or the effective fallback" if env_var else "the effective fallback"
         displaced = (
             f" (it held {_masked(field_name, pinned_before)})"
             if pruned
