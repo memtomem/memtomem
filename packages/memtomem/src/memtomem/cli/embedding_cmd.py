@@ -23,7 +23,8 @@ if TYPE_CHECKING:
     "--mode",
     type=click.Choice(["status", "apply-current", "revert-to-stored"]),
     default="status",
-    help="status: show mismatch info, apply-current: reset DB (destructive), revert-to-stored: match DB",
+    help="status: show mismatch info, apply-current: reset DB (destructive), "
+    "revert-to-stored: show stored settings and recovery instructions",
 )
 @click.option(
     "--yes",
@@ -39,7 +40,10 @@ def embedding_reset(mode: str, assume_yes: bool) -> None:
     Modes:
       status          Show DB stored values vs current config (default)
       apply-current   Reset DB to current config — deletes all vectors, re-index required
-      revert-to-stored  Switch runtime embedder to match DB stored values (non-destructive)
+      revert-to-stored  Show stored settings and recovery instructions
+
+    Status and revert-to-stored do not write config.json. All modes initialize
+    storage and may create or initialize the database.
 
     ``--mode apply-current --yes`` is the non-interactive form.
     """
@@ -64,9 +68,9 @@ async def _run(mode: str, *, assume_yes: bool = False) -> None:
 
     cfg = Mem2MemConfig()
     load_config_d(cfg)
-    # Status reports configuration without rewriting it. Recovery modes keep
-    # their existing migration behavior; storage initialization is unchanged.
-    load_config_overrides(cfg, migrate=(mode != "status"))
+    # Reporting modes must not migrate config.json just to show guidance.
+    # Storage initialization is retained; these are not read-only DB queries.
+    load_config_overrides(cfg, migrate=(mode == "apply-current"))
 
     # Relaxed mode: this CLI is explicitly the recovery tool for the
     # dim=0 / real-provider mismatch that ``create_tables`` fails-fast on.
@@ -121,7 +125,8 @@ async def _run_initialized(
                 click.echo("  Revert-to-stored is unavailable: the stored identity is incomplete.")
             else:
                 click.echo(
-                    "  mm embedding-reset --mode revert-to-stored # match DB settings (non-destructive)"
+                    "  mm embedding-reset --mode revert-to-stored # show stored settings "
+                    "and recovery instructions"
                 )
         return
 
@@ -155,19 +160,44 @@ async def _run_initialized(
         click.echo("All vectors deleted — run 'mm index --force <path>' to re-index.")
 
     elif internal_mode == "revert_to_stored":
+        click.echo(
+            "Guidance only: this command does not change embedding settings or a running server."
+        )
+        click.echo("Storage initialization is retained and may create or initialize the database.")
         if mismatch is None:
             click.echo("No mismatch — nothing to revert.")
         else:
-            s = mismatch["stored"]
+            # Read the recorded identity directly. The mismatch summary can
+            # carry configured fields when that individual check was skipped
+            # (for example a configured ``none`` provider with an empty model).
+            s = storage.stored_embedding_info
             try:
                 require_complete_embedding_identity(s["provider"], s["model"])
             except ValueError as exc:
                 raise click.ClickException(str(exc)) from exc
             click.echo(
-                click.style(
-                    f"Reverted runtime to DB settings: "
-                    f"{s['provider']}/{s['model']} ({s['dimension']}d).",
-                    fg="green",
-                )
+                f"DB stored: {embedding_identity_label(s['provider'], s['model'])} "
+                f"({s['dimension']}d)."
             )
-            click.echo("Note: update your config to match if you want this to persist.")
+            if s.get("policy_fingerprint"):
+                click.echo(f"  DB policy fingerprint: {s['policy_fingerprint']}")
+            click.echo("Mismatch remains. Choose a recovery method:")
+            click.echo("  1. Update the embedding section in ~/.memtomem/config.json:")
+            for key in ("provider", "model", "dimension", "max_sequence_tokens"):
+                if s.get(key) is not None:
+                    click.echo(f"       embedding.{key} = {s[key]!r}")
+            click.echo(
+                "     Check overriding MEMTOMEM_* environment variables and embedding policy "
+                "settings; identity fields alone may not resolve a policy mismatch."
+            )
+            click.echo(
+                "     Restart affected servers with the corrected settings, then run "
+                "'mm embedding-reset --mode status' to verify."
+            )
+            click.echo(
+                '  2. On the running MCP server, call mem_embedding_reset(mode="revert_to_stored").'
+            )
+            click.echo(
+                "     This switches only the server handling the call; "
+                "it does not persist settings to config.json."
+            )

@@ -39,6 +39,7 @@ def legacy_config(request, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> P
         ["mem", "rescan-files", "--json"],
         ["embedding-reset"],
         ["embedding-reset", "--mode", "status"],
+        ["embedding-reset", "--mode", "revert-to-stored"],
     ],
 )
 def test_readers_leave_legacy_config_untouched(legacy_config: Path, args: list[str]) -> None:
@@ -52,7 +53,10 @@ def test_readers_leave_legacy_config_untouched(legacy_config: Path, args: list[s
     assert legacy_config.stat().st_mtime_ns == mtime
     assert not legacy_config.with_name(".config.json.lock").exists()
     if args[0] == "embedding-reset":
-        assert "Embedding Status" in result.output
+        if "revert-to-stored" in args:
+            assert "Guidance only" in result.output
+        else:
+            assert "Embedding Status" in result.output
         assert "No mismatch" in result.output
         # This fix protects configuration; storage initialization is retained.
         assert legacy_config.with_name("memtomem.db").exists()
@@ -62,17 +66,12 @@ def test_readers_leave_legacy_config_untouched(legacy_config: Path, args: list[s
         assert "1 file(s) scanned" in result.output
 
 
-@pytest.mark.parametrize("mode", ["apply-current", "revert-to-stored"])
-def test_recovery_modes_still_migrate_legacy_config(legacy_config: Path, mode: str) -> None:
-    args = ["embedding-reset", "--mode", mode]
-    if mode == "apply-current":
-        args.append("--yes")
-
-    result = CliRunner().invoke(cli, args)
+def test_apply_current_still_migrates_legacy_config(legacy_config: Path) -> None:
+    result = CliRunner().invoke(cli, ["embedding-reset", "--mode", "apply-current", "--yes"])
 
     assert result.exit_code == 0, result.output
     assert (
         json.loads(legacy_config.read_text(encoding="utf-8"))["indexing"]["auto_discover"] is False
     )
     assert legacy_config.with_name(".config.json.lock").exists()
-    assert ("DB reset to" if mode == "apply-current" else "nothing to revert") in result.output
+    assert "DB reset to" in result.output

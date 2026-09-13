@@ -56,3 +56,41 @@ async def test_factory_cleanup_attempts_every_resource_and_preserves_init_error(
         await _factory.create_components(config, load_ambient_config=False)
 
     assert closed == ["embedder", "storage"]
+
+
+@pytest.mark.parametrize("failing", ["IndexEngine", "SearchPipeline", "Components"])
+async def test_factory_shared_pipeline_failure_closes_each_resource_once(monkeypatch, failing):
+    from unittest.mock import AsyncMock, MagicMock
+
+    import memtomem.config as config_module
+    import memtomem.runtime.components as factory
+
+    config = config_module.Mem2MemConfig()
+    config.rerank.enabled = True
+    config.llm.enabled = True
+    storage = MagicMock(embedding_mismatch=None)
+    storage.initialize = AsyncMock()
+    storage.close = AsyncMock()
+    embedder = MagicMock()
+    embedder.close = AsyncMock()
+    llm = MagicMock()
+    llm.close = AsyncMock()
+    reranker = MagicMock()
+    # Whether owned by the caller or a completed pipeline, a failing close
+    # must still release the remaining resources and retain the root cause.
+    reranker.close = AsyncMock(side_effect=RuntimeError("reranker cleanup failed"))
+    monkeypatch.setattr(factory, "create_storage", lambda _config: storage)
+    monkeypatch.setattr(factory, "create_embedder", lambda _config: embedder)
+    monkeypatch.setattr("memtomem.llm.factory.create_llm", lambda _config: llm)
+    monkeypatch.setattr(
+        "memtomem.search.reranker.factory.create_reranker", lambda _config: reranker
+    )
+    error = RuntimeError("construction failed")
+    monkeypatch.setattr(factory, failing, MagicMock(side_effect=error))
+
+    with pytest.raises(RuntimeError) as caught:
+        await factory.create_components(config, load_ambient_config=False, entity_backfill=False)
+
+    assert caught.value is error
+    for resource in (reranker, llm, embedder, storage):
+        resource.close.assert_awaited_once()

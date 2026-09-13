@@ -232,8 +232,18 @@ mem_embedding_reset(mode="revert_to_stored") # switch runtime to match DB
 ```bash
 mm embedding-reset                          # check status (default)
 mm embedding-reset --mode apply-current     # reset DB to current model (needs `mm index --force`)
-mm embedding-reset --mode revert-to-stored  # switch runtime to match DB
+mm embedding-reset --mode revert-to-stored  # show stored settings and recovery instructions
 ```
+
+CLI `revert-to-stored` is guidance only: it does not change embedding settings
+or a running server. For a persistent correction, update
+`embedding.provider/model/dimension` in `~/.memtomem/config.json` and the
+reported `embedding.max_sequence_tokens`, check environment overrides and
+policy settings, restart affected servers, and verify with CLI `status`.
+The MCP call changes only the runtime of the server handling it and does not
+persist settings. See [the reset flow](../configuration.md#reset-flow).
+CLI `status` and `revert-to-stored` do not write or migrate `config.json`, but
+all modes initialize storage and may create or initialize the database.
 
 ---
 

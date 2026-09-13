@@ -502,7 +502,7 @@ class TestDenseDegradedHint:
 
     def test_names_no_destructive_command(self):
         """``apply-current`` deletes every vector. Bare ``mm embedding-reset``
-        prints it alongside the non-destructive ``revert-to-stored``, so the
+        prints it alongside ``revert-to-stored`` recovery guidance, so the
         hint routes through that instead of naming the destructive mode."""
         hint = dense_degraded_hint(self._MISMATCH)
 
