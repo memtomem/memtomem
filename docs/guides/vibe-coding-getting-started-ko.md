@@ -71,8 +71,8 @@ Claude Code와 Codex CLI 중 어느 쪽을 쓰더라도 완전히 새 환경에�
 다음 두 명령을 한 번 실행합니다.
 
 ```bash
-uvx --from 'memtomem==0.6.0' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem==0.6.0' mm status
+uvx --from 'memtomem==0.6.1' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem==0.6.1' mm status
 ```
 
 `--mcp skip`은 다음 단계의 플러그인이 MCP 연결을 제공하므로 다른
@@ -94,7 +94,7 @@ Claude Code 세션에서 실행합니다.
 등록 상태는 아래 진단 명령으로 점검합니다.
 
 ```bash
-uvx --from "memtomem[all]==0.6.0" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.1" mm doctor --claude-mcp
 ```
 
 핀을 쓰는 이유는 플러그인 설치가 MCP 서버를 등록할 뿐 `mm` 을 PATH에 올리지
@@ -227,7 +227,7 @@ $memtomem-setup 스킬로 /path/to/project/docs를 인덱싱하고 검색까지 
 해당하는 기억은 실제 Git 저장소 루트에서 별도 초기화합니다.
 
 ```bash
-uvx --from 'memtomem==0.6.0' mm mem init --scope project_local
+uvx --from 'memtomem==0.6.1' mm mem init --scope project_local
 ```
 
 이 명령은 Git에 올라가지 않는 로컬 기억 계층을 만들고 등록합니다. 실행

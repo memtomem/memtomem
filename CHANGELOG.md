@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-09-13
+
 ### Added
 
 - **A first-run lab that searches a whole synthetic project, not a single note

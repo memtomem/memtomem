@@ -12,7 +12,7 @@ registers an MCP server, not the CLI. So offer the pinned form, which works
 either way:
 
 ```bash
-uvx --from "memtomem[all]==0.6.0" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.1" mm doctor --claude-mcp
 ```
 
 If the user says they already have the CLI installed, `mm doctor --claude-mcp`

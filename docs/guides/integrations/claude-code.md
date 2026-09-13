@@ -55,7 +55,7 @@ Before `/plugin install`, review existing registrations in `/mcp`, then run
 the diagnostic from the project you want to inspect:
 
 ```bash
-uvx --from "memtomem[all]==0.6.0" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.1" mm doctor --claude-mcp
 ```
 
 The pin is there because installing the plugin registers an MCP server; it does
@@ -81,7 +81,7 @@ optional.
 
 > **Already registered via `claude mcp add`?** What happens depends on
 > whether your manual entry launches the server with the **same command and
-> arguments** as the plugin — `uvx --from memtomem==0.6.0 memtomem-server`
+> arguments** as the plugin — `uvx --from memtomem==0.6.1 memtomem-server`
 > (environment variables are not compared; measured on Claude Code 2.1.218):
 >
 > - **Same command** — Claude Code suppresses the plugin-managed copy, your
@@ -90,7 +90,7 @@ optional.
 >   the manual entry wins, including its environment.
 > - **Different command** — and the manual registrations this guide and
 >   [mcp-clients.md](../mcp-clients.md) teach (`memtomem-server` from your
->   environment, or `uvx --isolated --from "memtomem[all]==0.6.0"
+>   environment, or `uvx --isolated --from "memtomem[all]==0.6.1"
 >   memtomem-server`) *are* different — **duplicate registrations are possible**,
 >   exposing tools under
 >   `mcp__memtomem__mem_*` plus `mcp__plugin_memtomem_memtomem__mem_*`.
@@ -178,7 +178,7 @@ that file by hand.
 
 The direct command preserves the extras in the persistent environment used by
 `mm`. For a no-install setup, use `uvx --isolated --from
-"memtomem[all]==0.6.0" memtomem-server`. If an older user-scope registration
+"memtomem[all]==0.6.1" memtomem-server`. If an older user-scope registration
 already exists, replace it explicitly:
 
 ```bash
@@ -304,7 +304,7 @@ only when those side effects are wanted:
 Install the exact CLI version expected by the automation bundle:
 
 ```bash
-uv tool install 'memtomem==0.6.0'
+uv tool install 'memtomem==0.6.1'
 ```
 
 The bundled dispatcher reads Claude's hook JSON from stdin; it never expands
