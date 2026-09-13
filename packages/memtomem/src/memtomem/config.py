@@ -1913,12 +1913,19 @@ def assign_section_fields(section_obj: object, updates: Mapping[str, object]) ->
     *combinations*, so partial retention isn't meaningful.
     """
     old_values = {key: getattr(section_obj, key) for key in updates}
+    fields_set = section_obj.model_fields_set if isinstance(section_obj, BaseModel) else None
+    old_fields_set = fields_set.copy() if fields_set is not None else None
     for key, value in updates.items():
         setattr(section_obj, key, value)
     invalid = section_invariant_error(section_obj, updates.keys())
     if invalid is not None:
         for key, old in old_values.items():
             setattr(section_obj, key, old)
+        # Restoring values through setattr otherwise leaves generated defaults
+        # marked explicit, so subsequent profile normalization cannot replace them.
+        if fields_set is not None and old_fields_set is not None:
+            fields_set.clear()
+            fields_set.update(old_fields_set)
         raise ValueError(invalid)
     return old_values
 

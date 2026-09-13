@@ -590,7 +590,9 @@ async def get_config_defaults() -> ConfigResponse:
     """
     from memtomem.config_signature import build_fresh_config
 
-    current = build_fresh_config(migrate=False, strict_overrides=False, quiet=True)
+    current = build_fresh_config(
+        migrate=False, strict_overrides=False, quiet=True, validate_profile=False
+    )
     return _build_config_response(build_comparand(quiet=True, embedding_context=current.embedding))
 
 

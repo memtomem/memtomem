@@ -67,7 +67,7 @@ def config_show(fmt: str, *, as_json: bool = False) -> None:
     # auto_discover migration persists to config.json, so a file with no
     # ``indexing.auto_discover: false`` changed under the user who ran this
     # to look at it before editing (#2417).
-    cfg = build_fresh_config(migrate=False, strict_overrides=False)
+    cfg = build_fresh_config(migrate=False, strict_overrides=False, validate_profile=False)
     data = mask_secrets(cfg.model_dump())
 
     # A section the loaders rejected is gone from this view with no trace —
@@ -108,11 +108,16 @@ def config_show(fmt: str, *, as_json: bool = False) -> None:
 @click.argument("value")
 def config_set(key: str, value: str) -> None:
     """Set a config field (e.g., 'search.default_top_k 20'). Persists to ~/.memtomem/config.json."""
+    from pydantic import ValidationError as PydanticValidationError
+
     from memtomem.config import (
+        _migrate_auto_discover_once,
         assign_section_fields,
         save_config_overrides,
+        validation_error_message,
     )
     from memtomem.config_signature import build_fresh_config
+    from memtomem.embedding.profiles import apply_e5_defaults
 
     parts = key.split(".", 1)
     if len(parts) != 2:
@@ -133,24 +138,29 @@ def config_set(key: str, value: str) -> None:
         click.echo(click.style(f"{key}: {e}", fg="red"))
         raise SystemExit(1)
 
-    cfg = build_fresh_config(migrate=True, strict_overrides=False, quiet=True)
-
-    section_obj = getattr(cfg, section_name)
-    # ``assign_section_fields`` re-runs the section's cross-field
-    # ``@model_validator(mode="after")``, which the bare ``setattr`` path skips
-    # (sub-configs don't set ``validate_assignment``). Without it an invalid
-    # combination (e.g. max_chunk_tokens below min_chunk_tokens) is written to
-    # config.json and then silently reverted by every subsequent load — a pin
-    # that never takes effect and never explains itself (#2108).
+    # Inspect without writes or final profile validation: the requested edit
+    # may be precisely what repairs an invalid late-selected profile.
     try:
-        old_val = assign_section_fields(section_obj, {field_name: coerced})[field_name]
-    except ValueError as e:
-        click.echo(click.style(f"{key}: {e}", fg="red"))
-        # Not "nothing written": loading the file above may have run the
-        # legacy auto_discover migration, which writes. Only the requested
-        # value is guaranteed absent.
+        cfg = build_fresh_config(
+            migrate=False, strict_overrides=False, quiet=True, validate_profile=False
+        )
+        proposal = cfg.model_copy(deep=True)
+        assign_section_fields(getattr(proposal, section_name), {field_name: coerced})
+        apply_e5_defaults(proposal)
+    except ValueError as exc:
+        message = (
+            validation_error_message(exc) if isinstance(exc, PydanticValidationError) else str(exc)
+        )
+        click.echo(click.style(f"{key}: {message}", fg="red"))
         click.echo(f"{key} was not saved.")
         raise SystemExit(1) from None
+
+    # Only an accepted proposal may trigger the legacy migration. Apply it to
+    # the pre-edit config, preserving the old ordering (including an explicit
+    # auto_discover edit), then apply the already-validated requested value.
+    _migrate_auto_discover_once(cfg)
+    section_obj = getattr(cfg, section_name)
+    old_val = assign_section_fields(section_obj, {field_name: coerced})[field_name]
 
     try:
         receipt = save_config_overrides(cfg)
@@ -276,7 +286,9 @@ def _effective_value(section_name: str, field_name: str) -> object:
     """
     from memtomem.config_signature import build_fresh_config
 
-    cfg = build_fresh_config(migrate=False, strict_overrides=False, quiet=True)
+    cfg = build_fresh_config(
+        migrate=False, strict_overrides=False, quiet=True, validate_profile=False
+    )
     return getattr(getattr(cfg, section_name), field_name)
 
 

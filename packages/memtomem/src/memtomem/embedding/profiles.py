@@ -77,8 +77,21 @@ def e5_snapshot() -> Path:
     return snapshot
 
 
-def apply_e5_defaults(config: Mem2MemConfig) -> None:
-    """Only fill unspecified fields; explicit existing budgets need migration."""
+def _e5_tokenizer_path(config: Mem2MemConfig) -> str:
+    if config.embedding.onnx_variant == "fp32":
+        return E5_TOKENIZER
+    return str(
+        (Path(config.embedding.onnx_artifact_path).expanduser() / "tokenizer.json").resolve()
+    )
+
+
+def fill_e5_defaults(config: Mem2MemConfig) -> None:
+    """Fill generated values without requiring a runnable configuration.
+
+    A comparison baseline omits config.json, including overrides that repair
+    incompatible lower-layer budgets. Preserve those explicit values for
+    comparison; only a complete runtime load should validate their combination.
+    """
     if config.embedding.provider.lower() != "onnx" or not is_e5(config.embedding.model):
         # A later precedence layer may replace an automatically selected E5.
         # Remove only generated values; explicit budgets remain untouched.
@@ -110,11 +123,7 @@ def apply_e5_defaults(config: Mem2MemConfig) -> None:
             if key not in config.indexing.model_fields_set:
                 object.__setattr__(config.indexing, key, getattr(baseline, key))
         return
-    tokenizer_path = E5_TOKENIZER
-    if config.embedding.onnx_variant != "fp32":
-        tokenizer_path = str(
-            (Path(config.embedding.onnx_artifact_path).expanduser() / "tokenizer.json").resolve()
-        )
+    tokenizer_path = _e5_tokenizer_path(config)
     defaults = {
         "hard_max_chunk_tokens": 384,
         "chunk_context_tokens": 96,
@@ -129,6 +138,14 @@ def apply_e5_defaults(config: Mem2MemConfig) -> None:
     for key, value in defaults.items():
         if key not in config.indexing.model_fields_set:
             object.__setattr__(config.indexing, key, value)
+
+
+def apply_e5_defaults(config: Mem2MemConfig) -> None:
+    """Fill unspecified profile values and validate the complete configuration."""
+    fill_e5_defaults(config)
+    if config.embedding.provider.lower() != "onnx" or not is_e5(config.embedding.model):
+        return
+    tokenizer_path = _e5_tokenizer_path(config)
     if config.indexing.chunk_input_prefix != "passage: ":
         raise ValueError("E5 chunk_input_prefix must be 'passage: '")
     if config.indexing.chunk_model_tokens > 512 or not config.indexing.hard_max_chunk_tokens:

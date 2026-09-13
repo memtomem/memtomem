@@ -16,7 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1] / "src" / "memtomem"
 LOADERS = {"load_config_d", "load_config_overrides"}
 
-# Counts are (fragment loads, override loads). Only this helper owns the
+# Counts are (fragment-loader references, override-loader references). This helper owns the
 # complete canonical sequence, including final profile normalization.
 CANONICAL = {"config_signature.py:_build_config": (1, 1)}
 DEFERRED = {
@@ -44,12 +44,19 @@ DEFERRED = {
 }
 
 
-def loader_calls(source: str) -> dict[str, tuple[int, int]]:
-    """Count direct and import-aliased loaders in their nearest lexical owner."""
+def loader_references(source: str) -> dict[str, tuple[int, int]]:
+    """Count loader references, including escape through an alias binding.
+
+    Catch ``loader = load_config_d`` at the binding, rather than trying to
+    trace later calls or emulate Python's scope and assignment rules. Imported
+    spellings are matched conservatively regardless of module (including
+    relative imports and re-exports). Comments and import declarations alone
+    are not counted; a reference in executable code is required.
+    """
     tree = ast.parse(source)
-    aliases: dict[str, str] = {}
+    aliases = {name: name for name in LOADERS}
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "memtomem.config":
+        if isinstance(node, ast.ImportFrom):
             for item in node.names:
                 if item.name in LOADERS:
                     aliases[item.asname or item.name] = item.name
@@ -57,7 +64,7 @@ def loader_calls(source: str) -> dict[str, tuple[int, int]]:
     class Visitor(ast.NodeVisitor):
         def __init__(self) -> None:
             self.scope: list[str] = []
-            self.calls: dict[str, Counter[str]] = {}
+            self.references: dict[str, Counter[str]] = {}
 
         def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             self.scope.append(node.name)
@@ -67,22 +74,25 @@ def loader_calls(source: str) -> dict[str, tuple[int, int]]:
         visit_AsyncFunctionDef = visit_FunctionDef
         visit_ClassDef = visit_FunctionDef
 
-        def visit_Call(self, node: ast.Call):
-            name = ""
-            if isinstance(node.func, ast.Name):
-                name = aliases.get(node.func.id, node.func.id)
-            elif isinstance(node.func, ast.Attribute):
-                name = node.func.attr
+        def record(self, name: str) -> None:
             if name in LOADERS:
                 owner = ".".join(self.scope) or "<module>"
-                self.calls.setdefault(owner, Counter())[name] += 1
+                self.references.setdefault(owner, Counter())[name] += 1
+
+        def visit_Name(self, node: ast.Name):
+            if isinstance(node.ctx, ast.Load):
+                self.record(aliases.get(node.id, ""))
+
+        def visit_Attribute(self, node: ast.Attribute):
+            if isinstance(node.ctx, ast.Load):
+                self.record(node.attr)
             self.generic_visit(node)
 
     visitor = Visitor()
     visitor.visit(tree)
     return {
-        owner: (calls["load_config_d"], calls["load_config_overrides"])
-        for owner, calls in visitor.calls.items()
+        owner: (references["load_config_d"], references["load_config_overrides"])
+        for owner, references in visitor.references.items()
     }
 
 
@@ -90,7 +100,7 @@ def test_no_new_manual_config_loaders() -> None:
     actual = {
         f"{path.relative_to(ROOT).as_posix()}:{owner}": counts
         for path in sorted(ROOT.rglob("*.py"))
-        for owner, counts in loader_calls(path.read_text(encoding="utf-8")).items()
+        for owner, counts in loader_references(path.read_text(encoding="utf-8")).items()
     }
     assert actual == CANONICAL | DEFERRED, (
         "Use build_fresh_config/build_comparand for new loads; remove stale exemptions. "
@@ -110,11 +120,49 @@ def test_guard_detects_new_loader_spellings(call: str) -> None:
         "    def inner():\n"
         f"        {call}\n"
     )
-    assert loader_calls(source) == {"outer.inner": (1, 0)}
+    assert loader_references(source) == {"outer.inner": (1, 0)}
 
 
 def test_guard_counts_repeated_loads_and_ignores_comments() -> None:
-    assert loader_calls(
+    assert loader_references(
         "# load_config_d(cfg)\ndef reader():\n"
         "    load_config_overrides(cfg)\n    load_config_overrides(cfg)\n"
     ) == {"reader": (0, 2)}
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "loader = load_config_d",
+        "first = fragments; loader = first",
+        "loader: object = config.load_config_d",
+        "first = loader = load_config_d",
+    ],
+)
+def test_guard_detects_local_loader_aliases(binding: str) -> None:
+    assert loader_references(
+        "from memtomem.config import load_config_d as fragments\n"
+        f"def reader():\n    {binding}\n    loader(cfg)\n"
+    ) == {"reader": (1, 0)}
+
+
+def test_guard_catches_binding_without_tracing_its_uses() -> None:
+    assert loader_references(
+        "def first():\n    loader = load_config_d\n    loader(cfg)\n"
+        "    loader = unrelated\n    loader(cfg)\n"
+        "def second():\n    loader(cfg)\n"
+    ) == {"first": (1, 0)}
+
+
+@pytest.mark.parametrize("module", ["memtomem.config", "memtomem.config_signature", ".config"])
+@pytest.mark.parametrize("alias", ["load_config_d", "fragment_loader"])
+def test_guard_covers_relative_and_reexported_imports(module: str, alias: str) -> None:
+    assert loader_references(
+        f"from {module} import load_config_d as {alias}\ndef reader():\n    {alias}(cfg)\n"
+    ) == {"reader": (1, 0)}
+
+
+def test_guard_catches_escaping_loader_even_without_a_local_call() -> None:
+    assert loader_references("def reader():\n    return load_config_overrides\n") == {
+        "reader": (0, 1)
+    }

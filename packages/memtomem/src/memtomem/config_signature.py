@@ -94,6 +94,7 @@ def build_fresh_config(
     strict_fragments: bool = False,
     strict_overrides: bool = True,
     quiet: bool = False,
+    validate_profile: bool = True,
 ) -> Mem2MemConfig:
     """Replay the canonical config load path.
 
@@ -140,12 +141,17 @@ def build_fresh_config(
     validation pass and the real one.
     ``quiet=True`` suppresses fragment warnings, matching ``load_config_d``;
     validation failures and override diagnostics keep their existing behavior.
+
+    ``validate_profile=False`` skips final profile validation after the file
+    layers, so diagnostics can display invalid file settings. Construction-time
+    environment validation is unchanged. Runtime readers must retain the default.
     """
     return _build_config(
         migrate=migrate,
         strict_fragments=strict_fragments,
         strict_overrides=strict_overrides,
         quiet=quiet,
+        validate_profile=validate_profile,
     )
 
 
@@ -156,6 +162,7 @@ def _build_config(
     strict_overrides: bool = False,
     quiet: bool = False,
     include_overrides: bool = True,
+    validate_profile: bool = True,
     embedding_context: EmbeddingConfig | None = None,
 ) -> Mem2MemConfig:
     """Shared layer replay, with normalization after the final profile selection.
@@ -191,7 +198,13 @@ def _build_config(
             }
         )
         cfg.embedding = EmbeddingConfig.model_validate(inputs)
-    from memtomem.embedding.profiles import apply_e5_defaults
+    from memtomem.embedding.profiles import apply_e5_defaults, fill_e5_defaults
 
-    apply_e5_defaults(cfg)
+    if include_overrides and validate_profile:
+        apply_e5_defaults(cfg)
+    else:
+        # Omitted overrides may be what makes the runtime config valid;
+        # diagnostic views also need to display invalid file settings.
+        # These values are inspection/comparison inputs, not a runnable stack.
+        fill_e5_defaults(cfg)
     return cfg
