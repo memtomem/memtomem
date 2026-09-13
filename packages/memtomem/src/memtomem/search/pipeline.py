@@ -84,7 +84,7 @@ from memtomem.config import (
     SessionSummaryConfig,
 )
 from memtomem.constants import SearchOrigin, normalize_search_origin
-from memtomem.errors import TransactionOwnedError
+from memtomem.errors import ExhaustiveDenseSearchLimitError, TransactionOwnedError
 from memtomem.generation import ComponentGeneration
 from memtomem.models import (
     Chunk,
@@ -403,6 +403,8 @@ class RetrievalStats:
     final_total: int = 0
     bm25_error: str | None = None
     dense_error: str | None = None
+    # Stable, path-free classification for evaluation reports.
+    dense_error_code: str | None = None
     # Chunks that live in namespaces matching ``system_namespace_prefixes``
     # (e.g. ``archive:*``) and were therefore excluded from the default,
     # namespace=None search. Non-zero only when the caller did not pick an
@@ -1778,6 +1780,7 @@ class SearchPipeline:
                     )
                 )
             dense_error: str | None = None
+            dense_error_code: str | None = None
             if use_dense:
                 try:
                     query_embedding = await self._embedder.embed_query(query)
@@ -1795,6 +1798,8 @@ class SearchPipeline:
                     logger.warning("Dense search unavailable: %s", exc)
                     dense_results = []
                     dense_error = str(exc)
+                    if isinstance(exc, ExhaustiveDenseSearchLimitError):
+                        dense_error_code = "dense_exhaustive_limit"
             if use_bm25:
                 try:
                     bm25_results = await bm25_task
@@ -1814,6 +1819,7 @@ class SearchPipeline:
                 dense_candidates=len(dense_results),
                 bm25_error=bm25_error,
                 dense_error=dense_error,
+                dense_error_code=dense_error_code,
                 hidden_system_ns=hidden_system_ns,
                 hidden_by_prefix=hidden_by_prefix,
                 rerank_applied=apply_rerank,

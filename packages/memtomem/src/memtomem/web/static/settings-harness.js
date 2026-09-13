@@ -483,6 +483,22 @@ function renderQualityReport(rep) {
   const report = qs('quality-report');
   const counts = rep.counts || {};
   const agg = rep.aggregate || {};
+  // Version-1 reports predating evaluation metadata remain displayable.
+  const total = counts.replayed ?? (rep.cases || []).length;
+  const evaluated = agg.evaluated_cases ?? (rep.cases || []).filter(c => c.included_in_aggregate).length;
+  const evaluation = rep.evaluation || {
+    status: !total ? 'empty' : !evaluated ? 'unavailable' : evaluated === total ? 'complete' : 'partial',
+    reasons: [],
+  };
+  const status = ['complete', 'partial', 'unavailable', 'empty'].includes(evaluation.status)
+    ? evaluation.status : 'unavailable';
+  const reasons = (evaluation.reasons || []).map(r =>
+    `${escapeHtml(r.code)}: ${Number(r.count) || 0}`
+  ).join(' · ');
+  const cap = (evaluation.reasons || []).some(r => r.code === 'dense_exhaustive_limit');
+  const evaluationNotice = `<div role="status">${escapeHtml(t('settings.quality.evaluation_' + status))}` +
+    (reasons ? `<div class="muted-sm">${reasons}</div>` : '') +
+    (cap ? `<div class="muted-sm">${escapeHtml(t('settings.quality.dense_limit'))}</div>` : '') + '</div>';
   const header = [
     `replayed=${Number(counts.replayed) || 0}`,
     `archived_skipped=${Number(counts.archived_skipped) || 0}`,
@@ -494,6 +510,7 @@ function renderQualityReport(rep) {
     ? `<div class="muted-sm">⚠ ${escapeHtml(t('settings.quality.nondeterministic', { stages: (rep.nondeterministic_stages || []).join(', ') }))}</div>`
     : '';
   const fmt = (v) => (v == null ? 'n/a' : Number(v).toFixed(3));
+  const aggregateFmt = (v) => ['unavailable', 'empty'].includes(status) ? 'n/a' : fmt(v);
   const rows = (rep.cases || []).map(c => {
     const m = c.metrics || {};
     const label = c.name || (c.case_id || '').slice(0, 8);
@@ -510,13 +527,14 @@ function renderQualityReport(rep) {
   }).join('');
   report.innerHTML = `
     <div class="muted-sm mono">${escapeHtml(header)}</div>
+    ${evaluationNotice}
     ${warn}
     <table class="harness-table"><thead><tr>
       <th>Case</th><th>hit</th><th>rr</th><th>recall</th><th>ndcg</th><th>p</th><th>Flags</th>
     </tr></thead><tbody>${rows}</tbody></table>
     <div class="muted-sm">${escapeHtml(t('settings.quality.aggregate'))}: ` +
-    `hit_rate=${fmt(agg.mean_hit_rate)} · mrr=${fmt(agg.mrr)} · ` +
-    `recall=${fmt(agg.mean_recall_labeled)} · ndcg=${fmt(agg.mean_ndcg)} ` +
+    `hit_rate=${aggregateFmt(agg.mean_hit_rate)} · mrr=${aggregateFmt(agg.mrr)} · ` +
+    `recall=${aggregateFmt(agg.mean_recall_labeled)} · ndcg=${aggregateFmt(agg.mean_ndcg)} ` +
     `(${Number(agg.evaluated_cases) || 0})</div>`;
 }
 

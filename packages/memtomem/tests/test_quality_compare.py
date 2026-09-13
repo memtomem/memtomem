@@ -353,3 +353,15 @@ class TestValidation:
         case["included_in_aggregate"] = True
         with pytest.raises(EvalCaseError):
             compare_reports(base, tampered)
+
+
+def test_additive_evaluation_metadata_preserves_v1_comparison():
+    from memtomem.quality.replay import evaluation_summary
+
+    old = _report([_case("c1", retrieved=[], relevant=["r"])])
+    new = copy.deepcopy(old)
+    new["evaluation"] = evaluation_summary(new["cases"])
+    assert compare_reports(old, new) == compare_reports(old, old)
+    # Advisory summaries must never override case evidence in compare/gate.
+    new["evaluation"] = {"status": "unavailable", "reasons": []}
+    assert compare_reports(old, new) == compare_reports(old, old)

@@ -268,3 +268,18 @@ class TestDevOnlyPin:
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.request(method, path, json={"run_id": RUN_ID})
         assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("status", ["partial", "unavailable", "empty"])
+async def test_replay_evaluation_keeps_http_200(app, client, monkeypatch, status):
+    report = {
+        **REPORT,
+        "evaluation": {
+            "status": status,
+            "reasons": [{"code": "dense_exhaustive_limit", "count": 1}],
+        },
+    }
+    monkeypatch.setattr("memtomem.web.routes.quality.replay_cases", AsyncMock(return_value=report))
+    response = await client.post("/api/quality/replay", json={})
+    assert response.status_code == 200
+    assert response.json() == report

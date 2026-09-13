@@ -14,6 +14,8 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from click.testing import CliRunner
 
 from memtomem.cli.quality_cmd import quality
@@ -765,3 +767,47 @@ class TestExperiment:
         )
         assert result.exit_code == 2
         assert "profile #2 rejected" in result.output
+
+
+@pytest.mark.parametrize("fmt", ["json", "table"])
+@pytest.mark.parametrize(
+    "status,exit_code", [("complete", 0), ("partial", 0), ("unavailable", 2), ("empty", 0)]
+)
+def test_replay_evaluation_exit_and_artifact(monkeypatch, tmp_path, fmt, status, exit_code):
+    from memtomem.quality.replay import serialize_report
+
+    report = _one_case_report("c1", [], ["r"], profile="p")
+    report["evaluation"] = {"status": status, "reasons": []}
+    if status == "unavailable":
+        report["evaluation"]["reasons"] = [{"code": "dense_exhaustive_limit", "count": 1}]
+        report["cases"][0]["included_in_aggregate"] = False
+    elif status == "empty":
+        report["cases"] = []
+    report["counts"] = {
+        "replayed": len(report["cases"]),
+        "archived_skipped": 0,
+        "degraded": 0,
+        "excluded_from_aggregate": 0,
+    }
+    report["aggregate"] = {
+        "mean_hit_rate": 0,
+        "mrr": 0,
+        "mean_recall_labeled": 0,
+        "mean_ndcg": 0,
+        "evaluated_cases": 1,
+    }
+    monkeypatch.setattr("memtomem.quality.replay.replay_cases", AsyncMock(return_value=report))
+    _patch_components(monkeypatch, SimpleNamespace(storage=None, search_pipeline=None, config=None))
+    out = tmp_path / "replay.json"
+    result = CliRunner().invoke(quality, ["replay", "--format", fmt, "--out", str(out)])
+    assert result.exit_code == exit_code, result.output
+    assert out.read_text() == serialize_report(report)
+    if fmt == "json":
+        assert json.loads(result.stdout) == report
+    else:
+        assert status in result.stdout
+        if status in {"unavailable", "empty"}:
+            assert "aggregate: n/a" in result.stdout
+    if status == "unavailable":
+        assert "dense_exhaustive_limit" in result.output
+        assert "shared by all selected cases" in result.output

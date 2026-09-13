@@ -503,6 +503,21 @@ mm web                                 # launch Web UI (prod surface)
 mm web --dev                           # Web UI with opt-in maintainer pages
 ```
 
+Quality replay reports include additive `evaluation.status` and sorted
+`evaluation.reasons` (stable reason codes with affected-case counts). Reasons
+can overlap. `complete` includes genuine zero-score misses; `partial` excludes
+some cases and warns; `unavailable` means all selected cases were excluded;
+`empty` means no cases were selected. Partial and empty replays exit 0. An
+unavailable replay writes the full JSON/`--out` artifact before exiting 2.
+Table and Web aggregates show n/a when nothing was evaluated. Numeric JSON
+aggregates and schema version 1 remain compatible. MCP returns the same report,
+and Web keeps HTTP 200 so per-case diagnostics remain accessible.
+
+`dense_exhaustive_limit` identifies the deterministic SQLite dense scan limit
+(currently 4,096 vectors). Use a smaller evaluation store within the limit.
+Ordinary non-exhaustive search is not equivalent evaluation evidence. This
+reporting change does not alter experiment command output or exit policy.
+
 Install the CLI: `uv tool install 'memtomem[all]'` (PyPI) or `uv run mm ...` (source).
 All commands support `-h` and `--help`.
 

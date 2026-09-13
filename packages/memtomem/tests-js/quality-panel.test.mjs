@@ -134,3 +134,27 @@ describe('quality lab panel', () => {
     expect(btn.dataset.id).toBe(RUN_ID);
   });
 });
+
+it.each(['complete', 'partial', 'unavailable', 'empty'])('shows evaluation %s with safe reasons', async (status) => {
+  const { window } = await boot();
+  window.renderQualityReport({
+    counts: { replayed: status === 'empty' ? 0 : 1 },
+    aggregate: { mean_hit_rate: 0, mrr: 0, mean_recall_labeled: 0, mean_ndcg: 0, evaluated_cases: 0 },
+    cases: [],
+    evaluation: { status, reasons: [{ code: XSS, count: 1 }, { code: 'dense_exhaustive_limit', count: 1 }] },
+  });
+  const report = window.document.getElementById('quality-report');
+  expect(report.querySelector('img')).toBeNull();
+  expect(report.textContent).toContain('<img src=x');
+  expect(report.textContent).toContain('KNN');
+  expect(report.querySelector('[role="status"]').textContent).toBeTruthy();
+  expect(report.textContent).toContain(['empty', 'unavailable'].includes(status) ? 'hit_rate=n/a' : 'hit_rate=0.000');
+});
+
+it.each([[0, 0, 'empty'], [2, 0, 'unavailable'], [2, 1, 'partial'], [2, 2, 'complete']])('derives legacy status for %s selected and %s evaluated', async (selected, evaluated, status) => {
+  const { window } = await boot();
+  window.renderQualityReport({ counts: { replayed: selected }, aggregate: { evaluated_cases: evaluated, mean_hit_rate: 0 } });
+  const report = window.document.getElementById('quality-report');
+  expect(report.querySelector('[role="status"]').textContent).toBe(window.t('settings.quality.evaluation_' + status));
+  expect(report.textContent).toContain(evaluated ? 'hit_rate=0.000' : 'hit_rate=n/a');
+});

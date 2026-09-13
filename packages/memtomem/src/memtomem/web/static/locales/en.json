@@ -1215,6 +1215,11 @@
   "settings.quality.report_title": "Replay Report",
   "settings.quality.report_close": "Close",
   "settings.quality.nondeterministic": "Profile is nondeterministic ({stages}); replays may not be byte-reproducible.",
+  "settings.quality.evaluation_complete": "Evaluation complete.",
+  "settings.quality.evaluation_partial": "Partial evaluation: some selected cases were excluded.",
+  "settings.quality.evaluation_unavailable": "Evaluation unavailable: all selected cases were excluded. Zero aggregates are not measured misses.",
+  "settings.quality.evaluation_empty": "No cases selected for evaluation.",
+  "settings.quality.dense_limit": "Deterministic dense replay exceeds the backend KNN limit. Use a smaller evaluation store within that limit; ordinary search is not equivalent replay evidence.",
   "settings.quality.aggregate": "Aggregate",
 
   "settings.scratch.desc": "Ephemeral key-value scratch pad with optional TTL, promotable to long-term memory.",

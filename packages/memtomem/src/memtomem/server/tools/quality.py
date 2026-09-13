@@ -26,6 +26,10 @@ async def mem_quality_replay(
     promotion, and defensively redacted at emit if a legacy row carries a secret
     or path) and its raw query text, which is NOT sanitized: a report is only as
     sensitive as the queries promoted into it, so treat it accordingly.
+    Check ``evaluation.status`` before interpreting aggregates: unavailable
+    means all selected cases were excluded, and empty means none were selected.
+    Both retain the report and per-case diagnostics. Partial coverage includes
+    stable reason codes and counts in ``evaluation.reasons``.
     Also reachable as ``mem_do(action="quality_replay")``.
 
     Args:

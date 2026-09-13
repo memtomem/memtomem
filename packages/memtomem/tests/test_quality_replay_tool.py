@@ -160,3 +160,36 @@ async def test_empty_registry_returns_valid_report(bm25_only_components):
     report = json.loads(await mem_quality_replay(ctx=ctx))  # type: ignore[arg-type]
     assert report["kind"] == "replay_report"
     assert report["counts"]["replayed"] == 0
+    assert report["evaluation"] == {"status": "empty", "reasons": []}
+
+
+async def test_unavailable_report_preserves_diagnostics_without_exception_text(
+    bm25_only_components, monkeypatch
+):
+    from memtomem.search.pipeline import RetrievalStats
+
+    components, _ = bm25_only_components
+    await _seed_one_case(components)
+    ctx = StubCtx(AppContext.from_components(components))
+
+    async def failed_search(*args, **kwargs):
+        return [], RetrievalStats(
+            dense_error="/private/secret.db volatile failure",
+            dense_error_code="dense_exhaustive_limit",
+        )
+
+    monkeypatch.setattr(components.search_pipeline, "search", failed_search)
+    out = await mem_quality_replay(as_of_unix=_PINNED, ctx=ctx)
+    report = json.loads(out)
+    assert report["evaluation"] == {
+        "status": "unavailable",
+        "reasons": [{"code": "dense_exhaustive_limit", "count": 1}],
+    }
+    assert report["cases"][0]["stage_outcomes"]["dense_error"]
+    assert "/private/secret.db" not in out
+    assert "volatile failure" not in out
+    assert out == serialize_report(
+        await replay_cases(
+            components.storage, components.search_pipeline, components.config, as_of_unix=_PINNED
+        )
+    )

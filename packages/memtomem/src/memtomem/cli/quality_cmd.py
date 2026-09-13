@@ -178,7 +178,11 @@ async def _import(file: str, replace: bool) -> None:
 @click.option("--out", type=click.Path(dir_okay=False), default=None, help="Write report to file.")
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
 def replay(case_selectors: tuple[str, ...], as_of: int | None, out: str | None, fmt: str) -> None:
-    """Replay evaluation cases into a deterministic report."""
+    """Replay evaluation cases into a deterministic report.
+
+    Exit 2 if selected cases are all excluded; the report is still emitted.
+    Partial evaluations and an empty case selection exit 0.
+    """
     _run(_replay(case_selectors, as_of, out, fmt))
 
 
@@ -186,7 +190,7 @@ async def _replay(
     case_selectors: tuple[str, ...], as_of: int | None, out: str | None, fmt: str
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.quality.replay import replay_cases, serialize_report
+    from memtomem.quality.replay import evaluation_summary, replay_cases, serialize_report
 
     async with cli_components() as comp:
         report = await replay_cases(
@@ -196,6 +200,7 @@ async def _replay(
             case_ids=list(case_selectors) or None,
             as_of_unix=as_of,
         )
+    evaluation = report.get("evaluation") or evaluation_summary(report["cases"])
     canonical = serialize_report(report)
     if not report["deterministic"]:
         click.echo(
@@ -210,9 +215,37 @@ async def _replay(
         click.echo(canonical, nl=False)
     else:
         _render_replay_table(report)
+    if fmt == "json" and evaluation["status"] != "complete":
+        _render_evaluation_notice(evaluation, len(report["cases"]), err=True)
+    if evaluation["status"] == "unavailable":
+        raise SystemExit(2)
+
+
+def _render_evaluation_notice(evaluation: dict, total: int, *, err: bool = False) -> None:
+    messages = {
+        "complete": "all selected cases evaluated",
+        "partial": "some cases excluded; aggregate covers only evaluated cases",
+        "unavailable": "no selected cases could be evaluated; aggregate is not a quality score",
+        "empty": "no evaluation cases selected",
+    }
+    click.echo(f"evaluation: {evaluation['status']} — {messages[evaluation['status']]}", err=err)
+    for reason in evaluation["reasons"]:
+        common = " (shared by all selected cases)" if reason["count"] == total else ""
+        click.echo(f"  {reason['code']}: {reason['count']} case(s){common}", err=err)
+        if reason["code"] == "dense_exhaustive_limit":
+            click.echo(
+                "  Deterministic dense replay exceeds the backend KNN limit. "
+                "Use a smaller evaluation store within that limit; ordinary search "
+                "is not equivalent replay evidence.",
+                err=err,
+            )
 
 
 def _render_replay_table(report: dict) -> None:
+    from memtomem.quality.replay import evaluation_summary
+
+    evaluation = report.get("evaluation") or evaluation_summary(report["cases"])
+    _render_evaluation_notice(evaluation, len(report["cases"]))
     agg = report["aggregate"]
     counts = report["counts"]
     click.echo(
@@ -228,6 +261,9 @@ def _render_replay_table(report: dict) -> None:
             f"  {c['case_id'][:8]}  hit={m['hit_rate']:.0f}  rr={m['reciprocal_rank']:.3f}  "
             f"recall={m['recall_labeled']:.3f}  ndcg={m['ndcg']:.3f}  p={precision}{flags}"
         )
+    if evaluation["status"] in {"unavailable", "empty"}:
+        click.echo("aggregate: n/a (no evaluated cases)")
+        return
     click.echo(
         f"aggregate: hit_rate={agg['mean_hit_rate']:.3f}  mrr={agg['mrr']:.3f}  "
         f"recall={agg['mean_recall_labeled']:.3f}  ndcg={agg['mean_ndcg']:.3f}  "

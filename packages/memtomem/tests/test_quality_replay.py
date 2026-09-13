@@ -532,3 +532,128 @@ class TestTagExpansionDeterminism:
         # value ASC tie-break: 'aaa' before 'zzz' among equal counts.
         names = [t for t, _ in first]
         assert names.index("aaa") < names.index("zzz")
+
+
+class TestEvaluationCoverage:
+    @pytest.mark.parametrize("size,status", [(2, "complete"), (3, "complete"), (4, "unavailable")])
+    async def test_real_dense_limit_preserves_bm25_diagnostics(
+        self, components, monkeypatch, size, status
+    ):
+        from memtomem.storage import sqlite_backend
+
+        class Embedder:
+            dimension = 1024
+            model_name = "fake"
+
+            async def embed_query(self, query):
+                return [0.1] * 1024
+
+        comp = components
+        pipeline, storage = comp.search_pipeline, comp.storage
+        pipeline._embedder = Embedder()
+        monkeypatch.setattr(sqlite_backend, "VEC_MAX_KNN_K", 3)
+        chunks = [
+            _make_chunk(f"alpha marker {i}", source=f"a{i}.md", embedding=[0.1] * 1024)
+            for i in range(size)
+        ]
+        await storage.upsert_chunks(chunks)
+        await storage.import_eval_cases(
+            _envelope([_case("c-limit", "alpha", [(chunks[0].content_hash, "relevant")])])
+        )
+        report = await replay_cases(storage, pipeline, comp.config, as_of_unix=1)
+        assert report["evaluation"]["status"] == status
+        assert report["cases"][0]["retrieved"]
+        if status == "unavailable":
+            assert report["evaluation"]["reasons"] == [
+                {"code": "dense_exhaustive_limit", "count": 1}
+            ]
+            assert report["aggregate"]["evaluated_cases"] == 0
+            assert report["cases"][0]["stage_outcomes"]["dense_error"]
+            assert all(r["source"] == "bm25" for r in report["cases"][0]["retrieved"])
+            assert "exceeds" not in serialize_report(report)
+        else:
+            assert report["evaluation"]["reasons"] == []
+        assert serialize_report(report) == serialize_report(
+            await replay_cases(storage, pipeline, comp.config, as_of_unix=1)
+        )
+
+    async def test_empty_and_true_miss(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        empty = await replay_cases(comp.storage, comp.search_pipeline, comp.config, as_of_unix=1)
+        assert empty["evaluation"] == {"status": "empty", "reasons": []}
+        hashes = await _seed(comp.storage, [("alpha", "a.md")])
+        await comp.storage.import_eval_cases(
+            _envelope([_case("c-miss", "nonexistentword", [(hashes[0], "relevant")])])
+        )
+        report = await replay_cases(comp.storage, comp.search_pipeline, comp.config, as_of_unix=1)
+        assert report["evaluation"] == {"status": "complete", "reasons": []}
+        assert report["aggregate"]["evaluated_cases"] == 1
+        assert report["aggregate"]["mean_hit_rate"] == 0
+
+    @pytest.mark.parametrize("include_good", [False, True])
+    def test_mixed_overlapping_reasons(self, include_good):
+        from memtomem.quality.replay import evaluation_summary
+
+        cases = [
+            {
+                "case_id": "a",
+                "included_in_aggregate": False,
+                "stage_outcomes": {"dense_error": True, "bm25_error": True},
+                "flags": ["degraded", "invalid_filters", "invalid_filters"],
+            },
+            {
+                "case_id": "b",
+                "included_in_aggregate": False,
+                "stage_outcomes": {"dense_error": True},
+                "flags": ["degraded"],
+            },
+        ]
+        if include_good:
+            cases.append({"case_id": "c", "included_in_aggregate": True})
+        summary = evaluation_summary(
+            cases, {"a": "dense_exhaustive_limit", "b": "/private/secret error"}
+        )
+        assert summary == {
+            "status": "partial" if include_good else "unavailable",
+            "reasons": [
+                {"code": "bm25_error", "count": 1},
+                {"code": "dense_error", "count": 1},
+                {"code": "dense_exhaustive_limit", "count": 1},
+                {"code": "invalid_filters", "count": 1},
+            ],
+        }
+
+
+@pytest.mark.parametrize("fail_all", [False, True])
+async def test_shared_failure_counts_across_selected_cases(
+    bm25_only_components, monkeypatch, fail_all
+):
+    from memtomem.search.pipeline import RetrievalStats
+
+    comp, _ = bm25_only_components
+    hashes = await _seed(comp.storage, [("alpha", "a.md")])
+    await comp.storage.import_eval_cases(
+        _envelope(
+            [
+                _case("c1", "alpha", [(hashes[0], "relevant")]),
+                _case("c2", "beta", [(hashes[0], "relevant")]),
+            ]
+        )
+    )
+    original = comp.search_pipeline.search
+
+    async def search(query, **kwargs):
+        if query == "alpha" or fail_all:
+            return [], RetrievalStats(
+                dense_error="transient /private/secret", dense_error_code="dense_exhaustive_limit"
+            )
+        return await original(query, **kwargs)
+
+    monkeypatch.setattr(comp.search_pipeline, "search", search)
+    report = await replay_cases(comp.storage, comp.search_pipeline, comp.config, as_of_unix=1)
+    assert report["evaluation"] == {
+        "status": "unavailable" if fail_all else "partial",
+        "reasons": [{"code": "dense_exhaustive_limit", "count": 2 if fail_all else 1}],
+    }
+    assert report["aggregate"]["evaluated_cases"] == (0 if fail_all else 1)
+    assert "/private/secret" not in serialize_report(report)
