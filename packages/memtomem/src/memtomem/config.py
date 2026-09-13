@@ -10,7 +10,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal, cast, get_args
+from typing import Annotated, Any, Literal, cast, get_args
 
 from pydantic import (
     BaseModel,
@@ -1888,6 +1888,59 @@ def section_invariant_error(section_obj: object, touched: Iterable[str]) -> str 
     return None
 
 
+def _embedding_first(sections: Mapping[str, object]) -> list[tuple[str, object]]:
+    """Order one file's sections so ``embedding`` applies before the rest.
+
+    Section validation reads the selected embedding profile, and a file may
+    list ``indexing`` before the ``embedding`` that selects it. Otherwise the
+    file's key order is kept.
+    """
+    return sorted(sections.items(), key=lambda item: item[0] != "embedding")
+
+
+def _validate_loaded_section(
+    config: "Mem2MemConfig",
+    section_name: str,
+    section_cls: Any,
+    payload: dict[str, Any],
+    assembled: dict[str, Any],
+) -> Any:
+    """Validate a loader's assembled section payload into a typed section.
+
+    The payload holds only explicit keys. For ``indexing`` under a profile
+    that generates values (E5), judging them against the generic defaults
+    alone rejects budgets that are valid for the profile (#2399 review:
+    ``max_chunk_tokens=320``, whose E5 target is 320 but generic target 384).
+    So the section is accepted when its explicit keys are valid on top of the
+    profile's generated values *or* on the generic defaults, and rejected
+    only when invalid on both. The generic arm keeps a file profile that
+    a later layer repairs loadable (the complete load's
+    ``apply_e5_defaults`` is the authority on the final combination).
+
+    Generated values are a validation input only: the committed section keeps
+    the values it had assembled for those keys, unset, so profile
+    normalization still owns them and a loader that stops before it keeps its
+    old view.
+    """
+    generated: dict[str, object] = {}
+    if section_name == "indexing":
+        from memtomem.embedding.profiles import e5_indexing_defaults
+
+        generated = {
+            key: value for key, value in e5_indexing_defaults(config).items() if key not in payload
+        }
+    if not generated:
+        return section_cls.model_validate(payload)
+    try:
+        validated = section_cls.model_validate({**generated, **payload})
+    except ValidationError:
+        return section_cls.model_validate(payload)
+    for key in generated:
+        object.__setattr__(validated, key, assembled[key])
+    validated.model_fields_set.difference_update(generated)
+    return validated
+
+
 def assign_section_fields(section_obj: object, updates: Mapping[str, object]) -> dict[str, object]:
     """Assign already-coerced values to one config section, invariants enforced.
 
@@ -1984,7 +2037,7 @@ def load_config_overrides(
         _log.warning("Config overrides in %s are not a JSON object (ignored)", path)
         return
     declared_sections = type(config).model_fields
-    for section_name, updates in data.items():
+    for section_name, updates in _embedding_first(data):
         # Resolve sections through the declared fields, not ``getattr``:
         # otherwise any attribute name is a "section", so ``model_dump`` or
         # ``load_diagnostics`` in the file resolves to a method/tuple and
@@ -2075,7 +2128,9 @@ def load_config_overrides(
             try:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
-                    validated_section = type(section_obj).model_validate(payload)
+                    validated_section = _validate_loaded_section(
+                        config, section_name, type(section_obj), payload, dumped
+                    )
             except ValidationError as exc:
                 # Restore before reporting, so a caller that catches the
                 # strict error is never left holding the half-mutated
@@ -2257,7 +2312,7 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
         if not isinstance(data, dict):
             _warn("Config fragment %s is not a JSON object (ignored)", path, fragment_path=path)
             continue
-        for section_name, updates in data.items():
+        for section_name, updates in _embedding_first(data):
             # Declared fields only — see the same gate in
             # ``load_config_overrides`` for why ``getattr`` alone is unsafe.
             section_obj = (
@@ -2394,7 +2449,9 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False, strict: bool = 
             )
             payload.update({key: dumped[key] for key in touched if key in dumped})
             try:
-                validated_section = section_cls.model_validate(payload)
+                validated_section = _validate_loaded_section(
+                    config, section_name, section_cls, payload, dumped
+                )
             except (TypeError, ValueError, ValidationError) as exc:
                 setattr(config, section_name, section_before)
                 # ``validation_error_message`` reads ``.errors()``, which only

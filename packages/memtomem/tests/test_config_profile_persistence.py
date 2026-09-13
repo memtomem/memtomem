@@ -561,3 +561,91 @@ async def test_web_reset_value_is_what_save_prunes_on_a_diverged_runtime(
     receipt = save_config_overrides(app.state.config)
     assert receipt.pruned("indexing", "max_chunk_tokens")
     assert "indexing" not in json.loads(path.read_text())
+
+
+def _select_e5(home: Path, monkeypatch: pytest.MonkeyPatch, source: str, config: dict) -> Path:
+    if source == "env":
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING", json.dumps(E5))
+    elif source == "fragment":
+        (home / ".memtomem" / "config.d" / "10-model.json").write_text(
+            json.dumps({"embedding": E5}), encoding="utf-8"
+        )
+    elif source == "override-after-indexing":
+        # The file lists indexing before the embedding that selects E5.
+        config = {**config, "embedding": E5}
+    else:
+        config = {"embedding": E5, **config}
+    return write_config(home, config)
+
+
+SOURCES = ["env", "fragment", "override", "override-after-indexing"]
+
+
+@pytest.mark.parametrize("source", SOURCES)
+def test_loader_accepts_a_budget_valid_only_under_the_profile(
+    home: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    """``max_chunk_tokens=320`` is valid under E5 (generated target 320) and
+    invalid under the generic target 384; the loader must judge it on E5."""
+    _select_e5(
+        home, monkeypatch, source, {"indexing": {"auto_discover": False, "max_chunk_tokens": 320}}
+    )
+    cfg = build_fresh_config(migrate=False)
+    assert cfg.load_diagnostics == ()
+    assert (cfg.indexing.max_chunk_tokens, cfg.indexing.target_chunk_tokens) == (320, 320)
+    assert cfg.indexing.auto_discover is False
+    assert "target_chunk_tokens" not in cfg.indexing.model_fields_set
+
+
+@pytest.mark.parametrize("source", ["env", "fragment", "override"])
+def test_fragment_budget_is_judged_on_the_selected_profile(
+    home: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    _select_e5(home, monkeypatch, source, {"indexing": {"auto_discover": False}})
+    (home / ".memtomem" / "config.d" / "20-budget.json").write_text(
+        json.dumps({"indexing": {"max_chunk_tokens": 320}}), encoding="utf-8"
+    )
+    cfg = build_fresh_config(migrate=False)
+    if source == "override":
+        # config.d loads before config.json selects E5, so the fragment is
+        # judged on the generic profile — and the complete load reports it.
+        # Known limitation, same as main (tracked separately).
+        assert [d.section for d in cfg.load_diagnostics] == ["indexing"]
+        return
+    assert cfg.load_diagnostics == ()
+    assert (cfg.indexing.max_chunk_tokens, cfg.indexing.target_chunk_tokens) == (320, 320)
+
+
+def test_cli_set_below_the_generic_target_round_trips(home: Path) -> None:
+    path = write_config(home, {"embedding": E5, "indexing": {"auto_discover": False}})
+    result = CliRunner().invoke(cli, ["config", "set", "indexing.max_chunk_tokens", "320"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(path.read_text())["indexing"] == {
+        "auto_discover": False,
+        "max_chunk_tokens": 320,
+    }
+    cfg = build_fresh_config(migrate=False)
+    assert cfg.load_diagnostics == ()
+    assert (cfg.indexing.max_chunk_tokens, cfg.indexing.target_chunk_tokens) == (320, 320)
+
+
+def test_generic_profile_still_rejects_the_budget(home: Path) -> None:
+    write_config(
+        home, {"embedding": BGE, "indexing": {"auto_discover": False, "max_chunk_tokens": 320}}
+    )
+    cfg = build_fresh_config(migrate=False, strict_overrides=False)
+    assert [d.section for d in cfg.load_diagnostics] == ["indexing"]
+    assert cfg.indexing.max_chunk_tokens == 512
+
+
+def test_budget_accepted_under_e5_fails_loudly_when_a_later_layer_leaves_e5(home: Path) -> None:
+    """A fragment budget validated under E5 must not survive silently as an
+    invalid combination once config.json switches the model away."""
+    (home / ".memtomem" / "config.d" / "10-e5.json").write_text(
+        json.dumps({"embedding": E5, "indexing": {"max_chunk_tokens": 320}}), encoding="utf-8"
+    )
+    write_config(home, {"embedding": BGE})
+    with pytest.raises(ValueError, match="target_chunk_tokens"):
+        build_fresh_config(migrate=False)
+    view = build_fresh_config(migrate=False, strict_overrides=False, validate_profile=False)
+    assert view.indexing.max_chunk_tokens == 320

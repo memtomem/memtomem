@@ -20,7 +20,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   config that skipped profile normalization neither drops the requested value
   nor pins another profile's budgets. `mm config set` validates the proposed
   edit before migrating or writing, so it can repair an invalid file profile
-  and leaves the file unchanged when it rejects one.
+  and leaves the file unchanged when it rejects one. Loading no longer discards
+  an `indexing` section whose budgets are valid only for the selected profile
+  (for example `max_chunk_tokens: 320` under E5, whose generated target is
+  320), whether E5 is selected by the environment, `config.d`, or the same
+  file; such a section used to be judged against the generic target of 384
+  and ignored with a warning. A budget accepted under E5 that a later layer
+  leaves invalid by switching models now fails the complete load instead of
+  running with the inconsistent combination.
 
 - **`mem_embedding_reset(mode="revert_to_stored")` no longer leaves the live
   configuration pointing at a stored identity the embedder factory rejects
