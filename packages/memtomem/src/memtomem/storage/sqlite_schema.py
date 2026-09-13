@@ -354,6 +354,14 @@ def create_tables(
     stored_provider = meta.get_meta("embedding_provider")
     stored_model = meta.get_meta("embedding_model")
 
+    if stored_model is None and (stored_provider or "").lower() == "none":
+        # Writers skip an empty model, so a store stamped under ``none`` has
+        # no model row. Backfilling one from the config would put the
+        # configured model — and, below, the configured provider — over an
+        # identity the store never had, and the mismatch report would show
+        # it (#2416).
+        stored_model = ""
+
     if stored_provider is not None and stored_model is not None:
         # DB has recorded provider/model — check against config
         if embedding_provider and embedding_model:

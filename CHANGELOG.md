@@ -30,6 +30,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   directories the migration would append. The migration itself is unchanged
   and still runs from the commands that build components, such as the server,
   `mm status` and `mm index`.
+- **Fixing a rejected `embedding` section no longer leaves a dimension
+  mismatch behind (#2416).** A command that builds components while the
+  section is rejected — `mm status`, the server — creates the store stamped
+  for `provider="none"` (dimension 0). After the section was fixed, that stamp
+  was reported as `embedding_dim_mismatch` and vector-dependent tools refused
+  to run until `mm embedding-reset --mode apply-current`, even though the store
+  held nothing to reset. The same happened to any store created under
+  `provider="none"` and switched to a real provider before indexing anything.
+  A store stamped dimension 0 that has no vector table and no chunks now takes
+  the configured embedding when components are built; a store that holds
+  chunks is still reported and still needs the reset. `mm embedding-reset`
+  itself, including `--mode status`, reports the stamp as recorded rather than
+  adopting it. The mismatch report also stopped showing the configured
+  provider and model as what a `none` store was stamped with.
 
 ## [0.6.1] — 2026-09-13
 

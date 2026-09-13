@@ -385,6 +385,7 @@ class SqliteBackend(
         embedding_policy_fingerprint: str = "",
         embedding_max_sequence_tokens: int | None = None,
         strict_dim_check: bool = True,
+        adopt_unpopulated_embedding_stamp: bool = False,
         chunk_budget_config: "IndexingConfig | None" = None,
     ) -> None:
         self._config = config
@@ -400,6 +401,12 @@ class SqliteBackend(
         # entry points keep the default strict behavior so startup fails
         # fast with a remediation message. See issue #298.
         self._strict_dim_check = strict_dim_check
+        # Ordinary component builds let a store that was stamped dim=0 but
+        # never received a chunk take the configured embedding identity
+        # instead of reporting a mismatch whose reset would destroy nothing
+        # (#2416). Recovery and probe opens keep the default so they observe
+        # the stamp as recorded.
+        self._adopt_unpopulated_embedding_stamp = adopt_unpopulated_embedding_stamp
         self._db: sqlite3.Connection | None = None
         self._dim_mismatch: tuple[int, int] | None = None  # (stored, configured)
         self._model_mismatch: tuple[str, str, str, str] | None = (
@@ -512,6 +519,8 @@ class SqliteBackend(
                 self._get_read_db,
             )
 
+            if self._adopt_unpopulated_embedding_stamp:
+                self._adopt_unpopulated_embedding_stamp_if_eligible()
             self._dimension, self._dim_mismatch, self._model_mismatch = create_tables(
                 self._db,
                 self._meta,
@@ -891,6 +900,96 @@ class SqliteBackend(
         self._dim_mismatch = None
         self._model_mismatch = None
         self._policy_mismatch = None
+
+    def _adopt_unpopulated_embedding_stamp_if_eligible(self) -> bool:
+        """Stamp the configured embedding identity over a never-populated dim=0 store.
+
+        A store opened while ``embedding`` was rejected — or under
+        ``provider="none"`` — is stamped dim=0. Once the config names a real
+        provider, ``create_tables`` reports that as a mismatch whose only
+        remedy is ``embedding-reset --mode apply-current``. When the store has
+        no ``chunks_vec`` and no chunk rows that reset has nothing to destroy
+        and nothing to re-index, so it is done here instead (#2416).
+
+        Eligibility is read under ``BEGIN IMMEDIATE``: a chunk written or a
+        second adopter's stamp committed after an unlocked check would
+        otherwise be overwritten or left disagreeing with ``chunks_vec``. Meta
+        rows and the vector table commit together. A missing ``chunks`` or
+        meta table is not eligible — a fresh DB is stamped by ``create_tables``
+        itself, and anything else stays reported. Returns whether it adopted.
+        """
+        assert self._meta is not None
+        if self._dimension <= 0 or (self._embedding_provider or "").lower() in ("", "none"):
+            return False
+        self._require_transaction_idle("adopt_unpopulated_embedding_stamp")
+        task = self._current_task()
+        if task is None:
+            raise StorageError("adopt_unpopulated_embedding_stamp requires a running asyncio task")
+        db = self._get_db()
+        if db.in_transaction:
+            raise StorageError(
+                "adopt_unpopulated_embedding_stamp refused: the connection already has "
+                "an open transaction this task does not own"
+            )
+        try:
+            db.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error as exc:
+            raise StorageError(
+                f"adopt_unpopulated_embedding_stamp could not take the write lock: {exc}"
+            ) from exc
+        self._transaction_owner = task
+        try:
+            tables = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('_memtomem_meta', 'chunks', 'chunks_vec')"
+                )
+            }
+            eligible = (
+                tables == {"_memtomem_meta", "chunks"}
+                and self._meta.get_meta("embedding_dimension") == "0"
+                and db.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is None
+            )
+            if not eligible:
+                db.rollback()
+                return False
+            db.execute("DROP TABLE IF EXISTS chunks_vec_info")
+            self._meta.reset_embedding_meta(
+                self._dimension,
+                self._embedding_provider,
+                self._embedding_model,
+                self._embedding_policy_fingerprint,
+                self._embedding_max_sequence_tokens,
+            )
+            db.execute(f"""
+                CREATE VIRTUAL TABLE chunks_vec
+                USING vec0(embedding float[{self._dimension}])
+            """)
+            db.commit()
+        except BaseException:
+            if db.in_transaction:
+                try:
+                    db.rollback()
+                except Exception:
+                    # Same contract as reset_embedding_meta: preserve the
+                    # adoption's own failure rather than the rollback's.
+                    logger.error(
+                        "rollback after a failed embedding-stamp adoption raised; the "
+                        "transaction may still be open on the shared connection (#2167)",
+                        exc_info=True,
+                    )
+            raise
+        finally:
+            self._transaction_owner = None
+        logger.info(
+            "Adopted configured embedding %s/%s (dimension %d) for a store stamped "
+            "dimension 0 that holds no chunks.",
+            self._embedding_provider,
+            self._embedding_model,
+            self._dimension,
+        )
+        return True
 
     async def reset_embedding_meta(
         self,

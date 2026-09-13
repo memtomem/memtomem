@@ -96,10 +96,16 @@ class MetaManager:
     ) -> dict:
         """Return the embedding config actually stored in the DB."""
         stored_max = self.get_meta("embedding_max_sequence_tokens")
+        stored_provider = self.get_meta("embedding_provider")
+        stored_model = self.get_meta("embedding_model")
+        if (stored_provider or "").lower() == "none":
+            # A ``none`` stamp has no model (its row is absent or empty); the
+            # configured model is not what it was stamped with (#2416).
+            model = ""
         return {
             "dimension": dimension,
-            "provider": self.get_meta("embedding_provider") or provider,
-            "model": self.get_meta("embedding_model") or model,
+            "provider": stored_provider or provider,
+            "model": stored_model or model,
             "policy_fingerprint": self.get_meta("embedding_policy_fingerprint")
             or policy_fingerprint,
             "max_sequence_tokens": int(stored_max)

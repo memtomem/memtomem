@@ -16,4 +16,7 @@ def create_storage(config: Mem2MemConfig) -> SqliteBackend:
         embedding_model=config.embedding.model,
         embedding_policy_fingerprint=embedding_policy_fingerprint(config.embedding),
         embedding_max_sequence_tokens=config.embedding.max_sequence_tokens,
+        # Ordinary builds only; recovery and probe opens construct their own
+        # backend so they observe a dim=0 stamp instead of adopting it (#2416).
+        adopt_unpopulated_embedding_stamp=True,
     )
