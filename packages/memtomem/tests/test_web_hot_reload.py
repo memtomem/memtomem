@@ -193,9 +193,11 @@ async def test_patch_reload_does_not_migrate_legacy_config(
         # Neither the effective flag nor the roots may be migrated.
         indexing = saved.get("indexing", {})
         assert indexing.get("auto_discover", True) is True
-        assert indexing.get("memory_dirs") == json.loads(before).get("indexing", {}).get(
-            "memory_dirs"
-        )
+        expected_dirs = json.loads(before).get("indexing", {}).get("memory_dirs")
+        # Config serialization uses native Path separators on Windows.
+        if expected_dirs is not None:
+            expected_dirs = [str(Path(root)) for root in expected_dirs]
+        assert indexing.get("memory_dirs") == expected_dirs
     else:
         assert cfg.read_bytes() == before
         assert cfg.stat().st_mtime_ns == mtime
