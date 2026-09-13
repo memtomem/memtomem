@@ -53,7 +53,9 @@ async def _run(mode: str, *, assume_yes: bool = False) -> None:
 
     cfg = Mem2MemConfig()
     load_config_d(cfg)
-    load_config_overrides(cfg)
+    # Status reports configuration without rewriting it. Recovery modes keep
+    # their existing migration behavior; storage initialization is unchanged.
+    load_config_overrides(cfg, migrate=(mode != "status"))
 
     # Relaxed mode: this CLI is explicitly the recovery tool for the
     # dim=0 / real-provider mismatch that ``create_tables`` fails-fast on.

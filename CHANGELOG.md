@@ -7,6 +7,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Configuration reads no longer persist the legacy `auto_discover`
+  migration in `mm mem rescan-files`, `mm embedding-reset --mode status`
+  (also the default mode), or Web hot reload (#2419).** This prevents surprise
+  `config.json` rewrites and `.config.json.lock` creation during those reads,
+  including reloads before Web saves. Explicit Web saves still persist the
+  requested changes. These readers use the merged configuration before the
+  legacy migration: `auto_discover` can remain `true`, and provider memory
+  directories are not automatically appended. Server startup and the two
+  embedding recovery modes retain their migration behavior. Embedding status
+  still initializes storage and can create `memtomem.db`.
+
 - **`mm config show` no longer rewrites the `config.json` it reports
   (#2417).** It loaded configuration with the legacy `auto_discover`
   migration enabled, so whenever that flag was still effectively `true` — a

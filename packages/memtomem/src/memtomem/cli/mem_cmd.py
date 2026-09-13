@@ -344,7 +344,8 @@ def rescan_files_cmd(as_json: bool) -> None:
 
     cfg = Mem2MemConfig()
     load_config_d(cfg, quiet=True)
-    load_config_overrides(cfg)
+    # A privacy audit must not persist the legacy auto-discover migration.
+    load_config_overrides(cfg, migrate=False)
 
     scanned = 0
     violations: list[dict[str, object]] = []

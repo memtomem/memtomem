@@ -119,6 +119,91 @@ async def client(app):
         yield c
 
 
+@pytest.fixture(params=[False, True], ids=["no-indexing", "explicit-auto-discover"])
+def legacy_external_edit(request, home: Path, app) -> Path:
+    """Replace a loaded file with legacy JSON after startup (#2419)."""
+    cfg = _write_config(home, {"indexing": {"auto_discover": False}})
+    app.state.config = _hot_reload._build_fresh_config()
+    _hot_reload.initialize_reload_state(app)
+    previous_mtime = cfg.stat().st_mtime_ns
+    # A real provider dir makes accidental discovery observable in memory too.
+    (home / ".codex" / "memories").mkdir(parents=True)
+    data = {"embedding": {"provider": "none"}, "search": {"default_top_k": 17}}
+    if request.param:
+        data["indexing"] = {"auto_discover": True, "memory_dirs": ["~/notes"]}
+    cfg.write_text(json.dumps(data), encoding="utf-8")
+    # Derive from the sampled old revision, not the post-write clock tick.
+    newer_mtime = previous_mtime + 1_000_000_000
+    os.utime(cfg, ns=(newer_mtime, newer_mtime))
+    return cfg
+
+
+async def test_get_reload_does_not_migrate_legacy_config(
+    legacy_external_edit: Path, app, client: AsyncClient
+):
+    cfg = legacy_external_edit
+    before = cfg.read_bytes()
+    mtime = cfg.stat().st_mtime_ns
+
+    response = await client.get("/api/config")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["search"]["default_top_k"] == 17
+    assert response.json()["config_reload_error"] is None
+    assert cfg.read_bytes() == before
+    assert cfg.stat().st_mtime_ns == mtime
+    assert not cfg.with_name(".config.json.lock").exists()
+    assert app.state.config.indexing.auto_discover is True
+    provider = cfg.parent.parent / ".codex" / "memories"
+    assert provider not in [p.expanduser() for p in app.state.config.indexing.all_index_roots()]
+    assert app.state.index_engine._config is app.state.config.indexing
+    assert app.state.config_signature == _hot_reload.current_signature()
+    loaded = app.state.config
+    # Identical disk state must not trigger another build, validation or swap.
+    with patch.object(
+        _hot_reload, "_build_fresh_config", wraps=_hot_reload._build_fresh_config
+    ) as build:
+        response = await client.get("/api/config")
+    assert response.status_code == 200
+    build.assert_not_called()
+    assert app.state.config is loaded
+
+
+@pytest.mark.parametrize("persist", [False, True], ids=["runtime-only", "persist"])
+async def test_patch_reload_does_not_migrate_legacy_config(
+    legacy_external_edit: Path, app, client: AsyncClient, persist: bool
+):
+    cfg = legacy_external_edit
+    before = cfg.read_bytes()
+    mtime = cfg.stat().st_mtime_ns
+
+    response = await client.patch(
+        "/api/config",
+        params={"persist": str(persist).lower()},
+        json={"search": {"default_top_k": 23}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert app.state.config.search.default_top_k == 23
+    assert app.state.config.indexing.auto_discover is True
+    if persist:
+        saved = json.loads(cfg.read_text(encoding="utf-8"))
+        assert saved["search"]["default_top_k"] == 23
+        # Saves omit values equal to defaults, including auto_discover=True.
+        # Neither the effective flag nor the roots may be migrated.
+        indexing = saved.get("indexing", {})
+        assert indexing.get("auto_discover", True) is True
+        expected_dirs = json.loads(before).get("indexing", {}).get("memory_dirs")
+        # Config serialization uses native Path separators on Windows.
+        if expected_dirs is not None:
+            expected_dirs = [str(Path(root)) for root in expected_dirs]
+        assert indexing.get("memory_dirs") == expected_dirs
+    else:
+        assert cfg.read_bytes() == before
+        assert cfg.stat().st_mtime_ns == mtime
+        assert not cfg.with_name(".config.json.lock").exists()
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — read-through reload on stale GET
 # ---------------------------------------------------------------------------
@@ -727,14 +812,15 @@ async def test_reload_if_stale_cas_yields_to_concurrent_writer_bump(
     real_build = _hot_reload._build_fresh_config
     writer_sig = None
 
-    def build_and_interleave_writer():
+    def build_and_interleave_writer(*, migrate: bool):
         nonlocal writer_sig
+        assert migrate is False
         # Do one more disk touch so commit_writer_signature picks up a
         # signature strictly newer than anything the reader saw.
         _write_config(home, {"mmr": {"enabled": True}, "search": {"default_top_k": 99}})
         _hot_reload.commit_writer_signature(app)
         writer_sig = app.state.config_signature
-        return real_build()
+        return real_build(migrate=migrate)
 
     monkeypatch.setattr(_hot_reload, "_build_fresh_config", build_and_interleave_writer)
 
@@ -795,8 +881,9 @@ async def test_reload_if_stale_error_branch_cas_yields_to_concurrent_writer_bump
     # _build_fresh_config" — then raise so we land in the error branch.
     writer_sig: _hot_reload.Signature | None = None
 
-    def build_and_interleave_writer_then_raise() -> Any:
+    def build_and_interleave_writer_then_raise(*, migrate: bool) -> Any:
         nonlocal writer_sig
+        assert migrate is False
         _write_config(home, {"mmr": {"enabled": True}, "search": {"default_top_k": 99}})
         _hot_reload.commit_writer_signature(app)
         writer_sig = app.state.config_signature
@@ -1067,12 +1154,9 @@ class TestOffloadedValidationSupersession:
         assert err is not None
         assert err.at_mtime_ns != _hot_reload.get_config_mtime_ns()
 
-        # So the next read releases it and B's config stays in place. Whether
-        # that read re-swaps is not the claim — A's own rebuild may have
-        # rewritten the file via the legacy migration and moved the signature
-        # again; what must hold is that the stale banner is gone and the
-        # configuration on disk is the one in effect.
-        await _hot_reload.reload_if_stale(app)
+        # The next read releases the stale banner without reloading B's
+        # already-applied configuration: a reload no longer migrates disk.
+        assert await _hot_reload.reload_if_stale(app) is False
         assert _hot_reload.get_reload_error(app) is None
         assert app.state.config.search.default_top_k == 7
 

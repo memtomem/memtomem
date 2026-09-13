@@ -152,12 +152,11 @@ def _isolated_config_paths(monkeypatch, tmp_path_factory) -> Path:
     ``embedding.onnx_batch_size == 8`` and read whatever the developer had
     pinned instead (#2386 — E5 profiles ship ``4``).
 
-    Reading it is only the visible half. ``_build_fresh_config()`` defaults to
-    ``migrate=True``, so the same reload can *write* the real file to migrate
-    ``auto_discover`` into an explicit ``memory_dirs`` list. Redirecting both
-    module constants — the ``config.d`` directory as well, or fragments would
-    still be read out of the real home — keeps this file's mocked app off the
-    real config in both directions.
+    Hot reload skips the legacy migration (#2419), but explicit save handlers
+    still write configuration. Redirecting both module constants — the
+    ``config.d`` directory as well, or fragments would still be read out of
+    the real home — keeps this file's mocked app off the real config in both
+    directions.
 
     Patch the constants rather than ``HOME``: ``Path("~/...").expanduser()``
     resolves at access time, so either works, but the constants are the

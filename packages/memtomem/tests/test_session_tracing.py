@@ -798,7 +798,8 @@ class TestConfigSaveValidationAndRollback:
 
         req = ConfigPatchRequest(session_trace={"langfuse_enabled": True})
 
-        def mock_build_fresh():
+        def mock_build_fresh(*, migrate: bool):
+            assert migrate is False
             cfg = Mem2MemConfig()
             cfg.session_trace.enabled = True
             cfg.session_trace.langfuse_enabled = False
