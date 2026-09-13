@@ -1070,14 +1070,6 @@ async def _revert_to_stored_locked(
 
     stored = mismatch["stored"]
 
-    config.embedding.provider = stored["provider"]
-    config.embedding.model = stored["model"]
-    config.embedding.dimension = stored["dimension"]
-    if stored.get("max_sequence_tokens") is not None:
-        config.embedding.max_sequence_tokens = stored["max_sequence_tokens"]
-    storage._embedding_policy_fingerprint = stored.get("policy_fingerprint", "")
-    storage._embedding_max_sequence_tokens = stored.get("max_sequence_tokens")
-
     # ``app.embedder`` / ``app.search_pipeline`` / ``app.index_engine`` are
     # read-only properties that proxy to ``app._components.<name>`` (#399
     # Phase 1). Direct assignment would raise ``AttributeError``. The
@@ -1101,7 +1093,35 @@ async def _revert_to_stored_locked(
     old_generation = comp.generation
     assert old_generation is not None, "Components.__post_init__ always sets a generation"
     new_generation = ComponentGeneration()
-    new_embedder = create_embedder(config.embedding)
+
+    # The stored identity is applied to the live config before the embedder
+    # is built because the network providers hold that ``EmbeddingConfig`` by
+    # reference and read runtime-mutable fields from it per call (OpenAI's
+    # ``batch_size`` / ``max_concurrent_batches``) — an embedder built from a
+    # copy would detach from later config edits. So validation is
+    # ``create_embedder`` itself, and a rejected stamp (a provider from a
+    # newer release, hand-edited meta) rolls the fields back before anything
+    # is published (#2421). No ``await`` sits between the writes and the
+    # rollback, so no other task on this event loop observes them.
+    embedding = config.embedding
+    prior_embedding = embedding.model_dump(
+        include={"provider", "model", "dimension", "max_sequence_tokens"}
+    )
+    prior_policy = (storage._embedding_policy_fingerprint, storage._embedding_max_sequence_tokens)
+    embedding.provider = stored["provider"]
+    embedding.model = stored["model"]
+    embedding.dimension = stored["dimension"]
+    if stored.get("max_sequence_tokens") is not None:
+        embedding.max_sequence_tokens = stored["max_sequence_tokens"]
+    storage._embedding_policy_fingerprint = stored.get("policy_fingerprint", "")
+    storage._embedding_max_sequence_tokens = stored.get("max_sequence_tokens")
+    try:
+        new_embedder = create_embedder(embedding)
+    except BaseException:
+        for field, value in prior_embedding.items():
+            setattr(embedding, field, value)
+        storage._embedding_policy_fingerprint, storage._embedding_max_sequence_tokens = prior_policy
+        raise
     comp.embedder = new_embedder
     comp.generation = new_generation
     comp.search_pipeline = SearchPipeline(

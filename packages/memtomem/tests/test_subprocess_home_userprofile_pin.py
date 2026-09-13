@@ -42,18 +42,22 @@ import pytest
 
 _TESTS_ROOT = Path(__file__).resolve().parent
 
-#: ``(path relative to tests/, enclosing function)`` pairs allowed to set ``HOME``
-#: without ``USERPROFILE``. Two kinds of entry, and the inline why must say which:
-#: (a) a real Windows sandbox hole, deliberately accepted — none today, and adding
-#: one is a policy decision, not a style preference; (b) a dict literal the sweep
-#: over-approximates into: it carries a ``HOME`` key but never reaches a child
-#: process or ``os.environ`` (#2391). Mirrors the DEFERRED registry convention in
+#: ``(path relative to tests/, enclosing function, mapping)`` triples allowed
+#: to set ``HOME`` without ``USERPROFILE``. Two kinds of entry, and the inline
+#: why must say which: (a) a real Windows sandbox hole, deliberately accepted —
+#: none today, and adding one is a policy decision, not a style preference
+#: (mapping names the child env variable, e.g. "env"); (b) a dict literal the
+#: sweep over-approximates into: it carries a ``HOME`` key but never reaches a child
+#: process or ``os.environ`` (#2391), with mapping ``"<dict>"``. Mirrors the
+#: DEFERRED registry convention in
 #: ``test_validate_namespace_architectural_guard.py``.
 #:
-#: Granularity is ``(file, function)``: an entry silences *every* hit in that
-#: function, including a genuine child env added to it later. Tracked separately
-#: in #2394.
-ALLOWED_UNPAIRED_HOME: frozenset[tuple[str, str]] = frozenset()
+#: Granularity is ``(file, function, mapping)``: keying to the shape stops an
+#: exemption for a pure-data dict literal (``"<dict>"``) from silently suppressing
+#: a real child-env subscript assignment (e.g. ``"env"``) added to the same
+#: function (#2394). Note this separates syntax shapes; two dict literals in the
+#: same function still share the ``"<dict>"`` entry.
+ALLOWED_UNPAIRED_HOME: frozenset[tuple[str, str, str]] = frozenset()
 
 
 def _mapping_key(node: ast.AST) -> tuple[str, str] | None:
@@ -183,14 +187,14 @@ def _offender_detail(mapping: str) -> str:
             "<dict> has a 'HOME' key and no matching 'USERPROFILE' key. "
             "If this mapping is passed as env= (or copied into os.environ / "
             "a child process), pair USERPROFILE to the same value. If it "
-            "never reaches a subprocess, add (this file, this function) to "
+            "never reaches a subprocess, add (this file, this function, '<dict>') to "
             "ALLOWED_UNPAIRED_HOME with an inline why."
         )
     return (
         f"{mapping}['HOME'] with no {mapping}['USERPROFILE'] on the same "
         "mapping — if this dict is a child env, pair USERPROFILE "
         "unconditionally; if it never reaches a subprocess, use "
-        "ALLOWED_UNPAIRED_HOME."
+        f"ALLOWED_UNPAIRED_HOME with (this file, this function, {mapping!r})."
     )
 
 
@@ -198,12 +202,12 @@ def _format_offenders(
     tree: ast.AST,
     *,
     rel: str,
-    allowlist: frozenset[tuple[str, str]] = ALLOWED_UNPAIRED_HOME,
+    allowlist: frozenset[tuple[str, str, str]] = ALLOWED_UNPAIRED_HOME,
 ) -> list[str]:
     """Allowlist-filter-and-format path used by the suite assertion."""
     lines: list[str] = []
     for mapping, lineno, func in unpaired_home_overrides(tree):
-        if (rel, func) in allowlist:
+        if (rel, func, mapping) in allowlist:
             continue
         lines.append(f"{rel}:{lineno} ({func}) — {_offender_detail(mapping)}")
     return lines
@@ -245,20 +249,20 @@ def test_every_subprocess_home_override_pairs_userprofile() -> None:
 
 def test_stale_allowlist_entries_fail() -> None:
     """A stale exemption is a hole — it silently licenses reintroduction."""
-    live: set[tuple[str, str]] = set()
+    live: set[tuple[str, str, str]] = set()
     for path in _test_files():
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:  # pragma: no cover
             continue
         rel = str(path.relative_to(_TESTS_ROOT))
-        for _, _, func in unpaired_home_overrides(tree):
-            live.add((rel, func))
+        for mapping, _, func in unpaired_home_overrides(tree):
+            live.add((rel, func, mapping))
 
     stale = sorted(ALLOWED_UNPAIRED_HOME - live)
     assert not stale, (
         "ALLOWED_UNPAIRED_HOME entries no longer match anything (renamed or fixed) — "
-        "remove them:\n  " + "\n  ".join(f"{f} ({fn})" for f, fn in stale)
+        "remove them:\n  " + "\n  ".join(f"{f} ({fn}, {m})" for f, fn, m in stale)
     )
 
 
@@ -343,17 +347,55 @@ def test_rendered_messages_pin_both_shapes() -> None:
         "pin.py:2 (f) — env['HOME'] with no env['USERPROFILE'] on the same "
         "mapping — if this dict is a child env, pair USERPROFILE "
         "unconditionally; if it never reaches a subprocess, use "
-        "ALLOWED_UNPAIRED_HOME."
+        "ALLOWED_UNPAIRED_HOME with (this file, this function, 'env')."
     ]
     assert dict_hit == [
         "pin.py:2 (f) — <dict> has a 'HOME' key and no matching 'USERPROFILE' key. "
         "If this mapping is passed as env= (or copied into os.environ / "
         "a child process), pair USERPROFILE to the same value. If it "
-        "never reaches a subprocess, add (this file, this function) to "
+        "never reaches a subprocess, add (this file, this function, '<dict>') to "
         "ALLOWED_UNPAIRED_HOME with an inline why."
     ]
     assert "ALLOWED_UNPAIRED_HOME" in dict_hit[0]
     assert subscript[0] != dict_hit[0]
+
+
+def test_allowlist_granularity_isolates_shapes() -> None:
+    """An exemption for one shape does not silence a different shape in the same function.
+
+    Closes #2394: a function-wide key (file, function) let a pure-data dict
+    literal exemption (<dict>) silence a genuine subprocess env hole (env)
+    introduced later into the same function.
+    """
+    # 1. Positive pins: matched shapes are exempted
+    dict_src = ast.parse("def f():\n    payload = {'HOME': h}\n")
+    subscript_src = ast.parse("def f():\n    env['HOME'] = h\n")
+
+    dict_exempt: frozenset[tuple[str, str, str]] = frozenset({("pin.py", "f", "<dict>")})
+    env_exempt: frozenset[tuple[str, str, str]] = frozenset({("pin.py", "f", "env")})
+
+    assert _format_offenders(dict_src, rel="pin.py", allowlist=dict_exempt) == []
+    assert _format_offenders(subscript_src, rel="pin.py", allowlist=env_exempt) == []
+
+    # 2. Hazard pins: cross-contamination within the same function
+    mixed_src = ast.parse("def f():\n    payload = {'HOME': h}\n    env['HOME'] = h\n")
+
+    # Allowlisting <dict> must still report the env subscript
+    dict_only_result = _format_offenders(mixed_src, rel="pin.py", allowlist=dict_exempt)
+    assert len(dict_only_result) == 1
+    assert "env['HOME'] with no env['USERPROFILE']" in dict_only_result[0]
+
+    # Allowlisting env must still report the <dict> literal
+    env_only_result = _format_offenders(mixed_src, rel="pin.py", allowlist=env_exempt)
+    assert len(env_only_result) == 1
+    assert "<dict> has a 'HOME' key" in env_only_result[0]
+
+    # Allowlisting env1 must still report env2 subscript in the same function
+    multi_env_src = ast.parse("def f():\n    env1['HOME'] = h\n    env2['HOME'] = h\n")
+    env1_exempt: frozenset[tuple[str, str, str]] = frozenset({("pin.py", "f", "env1")})
+    multi_result = _format_offenders(multi_env_src, rel="pin.py", allowlist=env1_exempt)
+    assert len(multi_result) == 1
+    assert "env2['HOME'] with no env2['USERPROFILE']" in multi_result[0]
 
 
 def test_attribution_uses_containment_not_latest_def() -> None:

@@ -482,6 +482,77 @@ async def test_revert_to_stored_survives_a_failing_close(degraded_components):
     assert app.storage.embedding_mismatch is None
 
 
+async def test_a_stored_provider_the_factory_rejects_leaves_the_runtime_untouched(
+    tmp_path, monkeypatch
+):
+    """#2421: the stored identity used to be copied into the live config and
+    the storage's policy fields before ``create_embedder`` saw it. A stamp this
+    binary cannot build — here a provider from a newer release — then raised
+    with ``app.config`` naming that provider while the old embedder, pipeline
+    and engine stayed published, and the mismatch was still reported."""
+    from memtomem.errors import ConfigError
+    from memtomem.server.tools.status_config import _revert_to_stored
+
+    config = _degraded_config(tmp_path, monkeypatch)
+    db = sqlite3.connect(str(config.storage.sqlite_path))
+    try:
+        db.executemany(
+            "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+            [
+                ("embedding_provider", "provider-from-a-newer-release"),
+                ("embedding_model", "future-model"),
+                ("embedding_policy_fingerprint", "stored-policy"),
+                ("embedding_max_sequence_tokens", "77"),
+            ],
+        )
+        db.commit()
+    finally:
+        db.close()
+    comp = await create_components(config)
+    try:
+        app = _make_app(comp)
+        mismatch = app.storage.embedding_mismatch
+        assert mismatch is not None
+        assert mismatch["stored"]["provider"] == "provider-from-a-newer-release"
+        assert mismatch["stored"]["max_sequence_tokens"] == 77
+
+        # Identity too: providers hold this object by reference, so restoring
+        # the values onto a replacement object would strand them.
+        embedding_object = app.config.embedding
+        embedding_before = embedding_object.model_dump()
+        storage = app.storage
+        policy_before = (
+            storage._embedding_policy_fingerprint,
+            storage._embedding_max_sequence_tokens,
+        )
+        assert policy_before != ("stored-policy", 77), "fixture must make a rollback observable"
+        published_before = (
+            comp.embedder,
+            comp.search_pipeline,
+            comp.index_engine,
+            comp.generation,
+        )
+
+        with pytest.raises(ConfigError, match="provider-from-a-newer-release"):
+            await _revert_to_stored(app)
+
+        assert app.config.embedding is embedding_object
+        assert app.config.embedding.model_dump() == embedding_before
+        assert (
+            storage._embedding_policy_fingerprint,
+            storage._embedding_max_sequence_tokens,
+        ) == policy_before
+        assert (
+            comp.embedder,
+            comp.search_pipeline,
+            comp.index_engine,
+            comp.generation,
+        ) == published_before
+        assert app.storage.embedding_mismatch == mismatch
+    finally:
+        await close_components(comp)
+
+
 async def test_revert_to_stored_rebinds_watcher_and_dedup(degraded_components):
     """The watcher and dedup scanner captured the old engine/embedder at
     init; without a rebind, post-revert auto-reindexes run through the
