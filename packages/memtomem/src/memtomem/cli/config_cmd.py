@@ -65,7 +65,11 @@ def config_show(fmt: str, *, as_json: bool = False) -> None:
 
     cfg = Mem2MemConfig()
     load_config_d(cfg)
-    load_config_overrides(cfg)
+    # migrate=False: showing a file must not rewrite it. The legacy
+    # auto_discover migration persists to config.json, so a file with no
+    # ``indexing.auto_discover: false`` changed under the user who ran this
+    # to look at it before editing (#2417).
+    load_config_overrides(cfg, migrate=False)
     data = mask_secrets(cfg.model_dump())
 
     # A section the loaders rejected is gone from this view with no trace —
