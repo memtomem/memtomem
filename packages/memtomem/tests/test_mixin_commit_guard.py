@@ -136,6 +136,12 @@ OWNED_TRANSACTION_WRITERS: dict[tuple[str, str], tuple[str, str]] = {
         BORROWS,
         "Borrow-or-own, as end_session.",
     ),
+    ("sqlite_backend.py", "SqliteBackend._adopt_unpopulated_embedding_stamp_if_eligible"): (
+        REFUSES,
+        "Runs during initialize under its own BEGIN IMMEDIATE so its eligibility "
+        "reads, meta rewrite and chunks_vec creation commit or roll back together; "
+        "joining a caller's transaction would split them (#2416).",
+    ),
     ("sqlite_backend.py", "SqliteBackend.reset_embedding_meta"): (
         REFUSES,
         "Rewrites schema and in-memory embedding state together under its own "
