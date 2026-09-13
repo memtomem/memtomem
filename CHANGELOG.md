@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mm config show` no longer rewrites the `config.json` it reports
+  (#2417).** It loaded configuration with the legacy `auto_discover`
+  migration enabled, so whenever that flag was still effectively `true` — a
+  hand-written `config.json` that only sets `embedding`, for instance — the
+  file gained an `indexing` section and a `.config.json.lock` the first time
+  someone ran `config show` to look at it. It now loads with `migrate=False`,
+  as `mm memory doctor` and `mm reset` already did. What it prints is the
+  merged configuration before that migration: `indexing.auto_discover` can
+  still read `true`, and `memory_dirs` does not include the provider
+  directories the migration would append. The migration itself is unchanged
+  and still runs from the commands that build components, such as the server,
+  `mm status` and `mm index`.
+
 ## [0.6.1] — 2026-09-13
 
 ### Added
