@@ -1215,6 +1215,11 @@
   "settings.quality.report_title": "리플레이 리포트",
   "settings.quality.report_close": "닫기",
   "settings.quality.nondeterministic": "프로파일이 비결정적입니다 ({stages}); 리플레이가 바이트 단위로 재현되지 않을 수 있습니다.",
+  "settings.quality.evaluation_complete": "평가 완료.",
+  "settings.quality.evaluation_partial": "일부 평가: 선택한 케이스 중 일부가 제외되었습니다.",
+  "settings.quality.evaluation_unavailable": "평가 불가: 선택한 모든 케이스가 제외되었습니다. 집계값 0은 검색 실패를 측정한 결과가 아닙니다.",
+  "settings.quality.evaluation_empty": "평가할 케이스가 없습니다.",
+  "settings.quality.dense_limit": "결정적 dense replay가 백엔드 KNN 제한을 초과했습니다. 제한 이내의 작은 평가 저장소를 사용하세요. 일반 검색은 동등한 replay 근거가 아닙니다.",
   "settings.quality.aggregate": "집계",
 
   "settings.scratch.desc": "TTL 지원 스크래치 키-값 저장소. 장기 기억으로 승격할 수 있습니다.",

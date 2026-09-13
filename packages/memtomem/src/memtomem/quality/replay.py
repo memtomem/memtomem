@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from typing import TYPE_CHECKING, Any
 
 from memtomem.errors import EvalCaseError
@@ -38,6 +39,7 @@ __all__ = [
     "STAGE_OUTCOME_KEYS",
     "resolve_case_ids",
     "replay_cases",
+    "evaluation_summary",
     "serialize_report",
     "report_case_to_fingerprint_input",
 ]
@@ -86,6 +88,43 @@ STAGE_OUTCOME_KEYS = (
     "rerank_fallback",
     "rescue_failed",
 )
+
+
+def evaluation_summary(
+    cases: list[dict[str, Any]], dense_error_codes: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """Summarize evaluation coverage using only fixed, path-free reason codes.
+
+    Reasons overlap: a case can fail multiple stages, but counts once per code.
+    This additive metadata does not participate in ranking fingerprints or
+    override the per-case inclusion evidence used by compare/gate.
+    """
+    evaluated = sum(bool(c["included_in_aggregate"]) for c in cases)
+    if not cases:
+        status = "empty"
+    elif not evaluated:
+        status = "unavailable"
+    elif evaluated == len(cases):
+        status = "complete"
+    else:
+        status = "partial"
+    counts: Counter[str] = Counter()
+    for case in cases:
+        if case["included_in_aggregate"]:
+            continue
+        reasons = {key for key in STAGE_OUTCOME_KEYS if case["stage_outcomes"].get(key)}
+        if (
+            "dense_error" in reasons
+            and (dense_error_codes or {}).get(case["case_id"]) == "dense_exhaustive_limit"
+        ):
+            reasons.remove("dense_error")
+            reasons.add("dense_exhaustive_limit")
+        reasons.update(set(case["flags"]) & {"unreplayable_filters", "invalid_filters"})
+        counts.update(reasons)
+    return {
+        "status": status,
+        "reasons": [{"code": code, "count": counts[code]} for code in sorted(counts)],
+    }
 
 
 def serialize_report(report: dict[str, Any]) -> str:
@@ -269,6 +308,7 @@ async def replay_cases(
     ordered_ids, explicit_ids, archived_skipped = await resolve_case_ids(storage, case_ids)
 
     case_reports: list[dict[str, Any]] = []
+    dense_error_codes: dict[str, str] = {}
     for cid in ordered_ids:
         case = await storage.get_eval_case(cid)
 
@@ -298,6 +338,9 @@ async def replay_cases(
             as_of_unix=pinned_as_of,
             record=False,
         )
+
+        if stats.dense_error_code == "dense_exhaustive_limit":
+            dense_error_codes[cid] = stats.dense_error_code
 
         # Deduplicate by content_hash, keeping first (best-ranked) occurrence —
         # several chunks can share a hash, and the metrics credit each distinct
@@ -392,6 +435,7 @@ async def replay_cases(
             "case_set": case_set_fp,
         },
         "profile_knobs": knobs,
+        "evaluation": evaluation_summary(case_reports, dense_error_codes),
         "counts": counts,
         "aggregate": aggregate,
         "cases": case_reports,

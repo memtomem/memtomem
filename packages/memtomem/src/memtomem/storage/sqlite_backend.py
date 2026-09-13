@@ -22,6 +22,7 @@ import sqlite_vec
 
 from memtomem.config import StorageConfig
 from memtomem.errors import (
+    ExhaustiveDenseSearchLimitError,
     EmbeddingDimensionMismatchError,
     QueryEmbeddingDimensionError,
     SchemaDowngradeError,
@@ -2744,7 +2745,7 @@ class SqliteBackend(
         # replay diff would compare against a silently partial scan. Refuse
         # instead — fail-closed beats a result that lies about its own shape.
         if exhaustive and total_vec_rows > VEC_MAX_KNN_K:
-            raise StorageError(
+            raise ExhaustiveDenseSearchLimitError(
                 f"Exhaustive dense search needs to scan all {total_vec_rows} embeddings, "
                 f"but sqlite-vec caps a KNN query at {VEC_MAX_KNN_K}. Deterministic "
                 f"replay/evaluation is unavailable on a store this large — run it "

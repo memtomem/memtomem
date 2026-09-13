@@ -7,6 +7,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Quality replay now reports complete, partial, unavailable, or empty evaluation
+  coverage (#2406).** All-excluded replays emit their report before CLI exit 2;
+  Web shows unavailable aggregates as n/a and explains exhaustive dense limits.
+
 - **Configuration reads no longer persist the legacy `auto_discover`
   migration in `mm mem rescan-files`, `mm embedding-reset --mode status`
   (also the default mode), or Web hot reload (#2419).** This prevents surprise

@@ -9,6 +9,10 @@ class StorageError(Mem2MemError):
     """Storage backend error."""
 
 
+class ExhaustiveDenseSearchLimitError(StorageError):
+    """The backend cannot scan every vector for deterministic evaluation."""
+
+
 class NamespaceConflictError(StorageError):
     """A namespace operation was refused because it would collide.
 
