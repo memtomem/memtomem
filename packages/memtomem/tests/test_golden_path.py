@@ -32,7 +32,7 @@ pytest.importorskip(
 
 
 class TestOnnxGoldenPath:
-    """End-to-end add -> search -> recall flow with ONNX bge-m3."""
+    """End-to-end add -> search -> recall flow with the ONNX MiniLM-L12 embedder."""
 
     async def test_english_roundtrip_top_1(self, onnx_components):
         """English query returns the matching chunk at rank 1."""

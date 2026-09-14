@@ -508,8 +508,9 @@ async def test_onnx_numerical_parity_with_and_without_progress():
     drift if a future refactor reorders the per-yield iteration or
     introduces an inadvertent transformation in the callback wrap.
 
-    Skipped without fastembed; runs in the ``golden-path (ONNX bge-m3)``
-    CI job and any local env with fastembed installed.
+    Collected by the regular CI test jobs (only ``test_golden_path.py`` is
+    excluded there), not by the dedicated golden-path job; skips without
+    fastembed or NumPy and needs the model cached or downloadable.
     """
     pytest.importorskip("fastembed")
     pytest.importorskip("numpy")

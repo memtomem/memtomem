@@ -152,7 +152,7 @@ jobs:
       - run: uv run pytest packages/memtomem/tests/web -m browser --tb=short -q
 
   test-golden-path:
-    name: golden-path (ONNX bge-m3)
+    name: golden-path (ONNX)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
