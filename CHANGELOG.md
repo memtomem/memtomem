@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [0.6.2] — 2026-09-14
 
+### Upgrading
+
+- **Claude automation plugin users: upgrade the CLI too.** `memtomem-automation`
+  0.3.3 runs prompt search, write-time indexing and stop-time flushing only
+  when the `mm` on your `PATH` reports exactly 0.6.2; updating the plugins
+  does not upgrade that CLI. Run `uv tool install 'memtomem==0.6.2'`, confirm
+  with `mm --version`, then start a new Claude Code session — the
+  compatibility check is refreshed at session start, and until then those
+  hooks are skipped.
+
 ### Added
 
 - **Embedding mismatch warnings say what the reset costs (#2424).** The
