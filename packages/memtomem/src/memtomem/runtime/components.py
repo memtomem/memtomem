@@ -30,6 +30,7 @@ from memtomem.storage.sqlite_backend import SqliteBackend
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
     from memtomem.llm.base import LLMProvider
+    from memtomem.storage.base import StorageBackend
 
 _log = logging.getLogger(__name__)
 
@@ -125,6 +126,41 @@ class Components:
             self.index_engine._generation = self.generation
         if pipeline_generation is not None and pipeline_generation is not self.generation:
             self.search_pipeline._generation = self.generation
+
+
+def create_search_pipeline(
+    config: Mem2MemConfig,
+    *,
+    storage: StorageBackend,
+    embedder: EmbeddingProvider,
+    reranker: object | None,
+    llm_provider: LLMProvider | None,
+    generation: ComponentGeneration,
+) -> SearchPipeline:
+    """Wire startup and replacement pipelines from the same complete config.
+
+    Construction is synchronous so recovery can build before publication without
+    exposing transient config to other tasks. The caller owns the supplied
+    resources on failure; on success the pipeline owns its fresh reranker.
+    Storage, embedder and LLM lifetimes remain with the component owner.
+    """
+    return SearchPipeline(
+        storage=storage,
+        embedder=embedder,
+        config=config.search,
+        decay_config=config.decay,
+        mmr_config=config.mmr,
+        access_config=config.access,
+        reranker=reranker,
+        rerank_config=config.rerank,
+        expansion_config=config.query_expansion,
+        importance_config=config.importance,
+        entity_boost_config=config.entity_boost,
+        context_window_config=config.context_window,
+        llm_provider=llm_provider,
+        session_summary_config=config.session_summary,
+        generation=generation,
+    )
 
 
 async def create_components(
@@ -299,21 +335,12 @@ async def create_components(
             generation=generation,
         )
 
-        search_pipeline = SearchPipeline(
+        search_pipeline = create_search_pipeline(
+            config,
             storage=storage,
             embedder=embedder,
-            config=config.search,
-            decay_config=config.decay,
-            mmr_config=config.mmr,
-            access_config=config.access,
             reranker=reranker,
-            rerank_config=config.rerank,
-            expansion_config=config.query_expansion,
-            importance_config=config.importance,
-            entity_boost_config=config.entity_boost,
-            context_window_config=config.context_window,
             llm_provider=llm,
-            session_summary_config=config.session_summary,
             generation=generation,
         )
 

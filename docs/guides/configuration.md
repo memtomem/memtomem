@@ -330,7 +330,7 @@ tool surface advertises the fix via a `fix` hint, and `mem_status` reports the
 mismatch under `warnings[]` (see below). Pre-fingerprint ONNX databases are
 treated as using the native model limit (`max_sequence_tokens=0`).
 
-Resolving it is a two-step process — pick **one** of:
+To resolve it, pick **one** of:
 
 - **Re-index from scratch (destructive, recommended when you really are
   switching models):**
@@ -363,16 +363,30 @@ Resolving it is a two-step process — pick **one** of:
   plain `--force` run reports how many files kept a namespace the current
   rules would assign differently.
 
-- **Revert the runtime to the stored model (non-destructive, useful if the
-  config drift was accidental):**
+- **Restore the stored embedding settings (useful if config drift was accidental):**
 
   ```bash
   uv run mm embedding-reset --mode revert-to-stored
   ```
 
-  MCP equivalent: `mem_embedding_reset(mode="revert_to_stored")`. The DB
-  stays untouched; the server swaps its embedder to match what the DB
-  already contains.
+  This CLI mode **only reports stored settings and recovery instructions**.
+  It does not repair the mismatch, save embedding settings, or contact a
+  running server. Choose one of the methods it describes:
+
+  - For a persistent correction, set `embedding.provider`, `embedding.model`,
+    and `embedding.dimension` in `~/.memtomem/config.json` to the reported
+    values, along with `embedding.max_sequence_tokens` when reported. Check
+    overriding `MEMTOMEM_*` environment variables and embedding policy settings:
+    matching the identity alone may not resolve a policy mismatch. Restart
+    affected servers and run `mm embedding-reset --mode status` to verify.
+  - For a runtime correction, call
+    `mem_embedding_reset(mode="revert_to_stored")` on the running MCP server.
+    That server swaps its embedder to match the DB. This affects only the
+    server handling the call and does not persist settings to `config.json`.
+
+  CLI `status` and `revert-to-stored` do not migrate or write `config.json`.
+  They still initialize storage and may create or initialize the database;
+  they are not fully read-only database queries.
 
   Revert requires a complete stored identity. If a real provider's model or
   the provider itself is missing or empty, status reports that field as
@@ -389,7 +403,8 @@ Resolving it is a two-step process — pick **one** of:
 
 > **Stop other `mm` processes first.** Run `embedding-reset` against an
 > idle DB — shut down `mm web`, the MCP server, and any background `mm
-> index` runs before invoking it. If two processes briefly co-exist with
+> index` runs before invoking the CLI. The MCP runtime correction above is
+> called on the server that remains running. If two processes briefly co-exist with
 > different embedding models pointing at the same SQLite file, race-loser
 > chunk inserts are silently dropped at the storage layer (the unique key
 > is content-only, so different-model embeddings for the same content are

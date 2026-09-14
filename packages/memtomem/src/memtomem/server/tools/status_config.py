@@ -1081,18 +1081,20 @@ async def _revert_to_stored(app: AppContext) -> str:
     from memtomem.embedding.factory import create_embedder
     from memtomem.indexing.engine import IndexEngine
     from memtomem.search.dedup import DedupScanner
-    from memtomem.search.pipeline import SearchPipeline
+    from memtomem.runtime.components import create_search_pipeline
 
     async with app._config_lock:
         return await _revert_to_stored_locked(
-            app, create_embedder, IndexEngine, DedupScanner, SearchPipeline
+            app, create_embedder, IndexEngine, DedupScanner, create_search_pipeline
         )
 
 
 async def _revert_to_stored_locked(
-    app: AppContext, create_embedder, IndexEngine, DedupScanner, SearchPipeline
+    app: AppContext, create_embedder, IndexEngine, DedupScanner, create_search_pipeline
 ) -> str:
     from memtomem.embedding.identity import require_complete_embedding_identity
+    from memtomem.runtime.components import _close_resource
+    from memtomem.search.reranker.factory import create_reranker
 
     storage = app.storage
     config = app.config
@@ -1145,12 +1147,11 @@ async def _revert_to_stored_locked(
     # with that glob, the engine stayed on the old embedder and generation
     # while the config, embedder and pipeline had moved on.
     #
-    # The unpublished objects are simply dropped, not closed: every embedder
-    # the built-in factory returns is lazy in ``__init__`` (the ONNX executor
-    # starts workers on first submit, HTTP clients and models load on first
-    # use), so there is nothing to release, and keeping this path free of
-    # ``await`` means no other task on this event loop observes the transient
-    # fields.
+    # No await may expose the transient fields: publish on success, or
+    # restore them before closing unpublished resources on failure (#2433).
+    new_embedder = None
+    new_reranker = None
+    new_pipeline = None
     embedding = config.embedding
     prior_embedding = embedding.model_dump(
         include={"provider", "model", "dimension", "max_sequence_tokens"}
@@ -1165,21 +1166,14 @@ async def _revert_to_stored_locked(
     storage._embedding_max_sequence_tokens = stored.get("max_sequence_tokens")
     try:
         new_embedder = create_embedder(embedding)
-        new_pipeline = SearchPipeline(
+        if config.rerank.enabled:
+            new_reranker = create_reranker(config.rerank)
+        new_pipeline = create_search_pipeline(
+            config,
             storage=storage,
             embedder=new_embedder,
-            config=config.search,
-            decay_config=config.decay,
-            mmr_config=config.mmr,
-            access_config=config.access,
-            # Kept in step with the full wiring in ``component_factory`` for the
-            # scoring stages: omitting a boost config here silently disables that
-            # stage until restart (``importance_config`` was missing here).
-            importance_config=config.importance,
-            entity_boost_config=config.entity_boost,
-            context_window_config=config.context_window,
+            reranker=new_reranker,
             llm_provider=app.llm_provider,
-            session_summary_config=config.session_summary,
             generation=new_generation,
         )
         new_engine = IndexEngine(
@@ -1212,6 +1206,14 @@ async def _revert_to_stored_locked(
         for field, value in prior_embedding.items():
             setattr(embedding, field, value)
         storage._embedding_policy_fingerprint, storage._embedding_max_sequence_tokens = prior_policy
+        # Only unpublished resources belong to this rollback. The pipeline
+        # owns its reranker once built; closing both would double-close it.
+        # Match startup cleanup: attempt every close and retain the original
+        # construction exception, including cancellation.
+        await _close_resource(new_pipeline, "unpublished search pipeline")
+        if new_pipeline is None:
+            await _close_resource(new_reranker, "unpublished reranker")
+        await _close_resource(new_embedder, "unpublished embedder")
         raise
 
     comp.embedder = new_embedder

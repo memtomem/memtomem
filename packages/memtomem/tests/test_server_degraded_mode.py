@@ -584,16 +584,16 @@ def _assert_revert_state_unchanged(app: AppContext, before: dict[str, object]) -
         assert after[key] == before[key], f"{key} changed after a failed revert"
 
 
-async def test_a_namespace_glob_the_engine_rejects_leaves_the_runtime_untouched(
+async def test_an_unvalidated_namespace_glob_leaves_the_runtime_untouched(
     degraded_components,
 ):
-    """#2428, through the public tools: ``namespace.rules`` accepts a glob that
-    ``IndexEngine`` cannot compile, and the running engine compiled its rules
-    at startup so nothing notices. The revert built the engine after the
-    embedder, generation and pipeline were already published, so the failure
-    left the engine on the old embedder and generation, the config on the
-    stored identity, and the mismatch still reported."""
-    from memtomem.server.tools.status_config import mem_config
+    """#2428: even an unvalidated rule must not cause a partial revert.
+
+    #2432 rejects invalid globs at the config boundary. Bypass validation
+    deliberately to keep exercising a real engine-construction failure
+    through the public recovery tool.
+    """
+    from memtomem.config import NamespacePolicyRule
 
     app = _make_app(degraded_components)
     ctx = _StubCtx(app)
@@ -601,12 +601,9 @@ async def test_a_namespace_glob_the_engine_rejects_leaves_the_runtime_untouched(
     app._watcher = watcher
     assert app.dedup_scanner is not None, "fixture must make the dedup rebind observable"
 
-    set_out = await mem_config(
-        key="namespace.rules",
-        value='[{"path_glob": "[z-a]", "namespace": "probe"}]',
-        ctx=ctx,  # type: ignore[arg-type]
-    )
-    assert set_out.startswith("Set namespace.rules"), set_out
+    app.config.namespace.rules = [
+        NamespacePolicyRule.model_construct(path_glob="[z-a]", namespace="probe")
+    ]
     before = _revert_visible_state(app)
     assert before["mismatch"] is not None
 
@@ -630,7 +627,7 @@ async def test_every_generation_constructor_fails_before_anything_is_published(
     from memtomem.embedding.factory import create_embedder
     from memtomem.indexing.engine import IndexEngine
     from memtomem.search.dedup import DedupScanner
-    from memtomem.search.pipeline import SearchPipeline
+    from memtomem.runtime.components import create_search_pipeline
     from memtomem.server.tools.status_config import _revert_to_stored_locked
 
     app = _make_app(degraded_components)
@@ -639,7 +636,7 @@ async def test_every_generation_constructor_fails_before_anything_is_published(
     assert app.dedup_scanner is not None, "fixture must reach the dedup constructor"
 
     constructors: dict[str, object] = {
-        "SearchPipeline": SearchPipeline,
+        "SearchPipeline": create_search_pipeline,
         "IndexEngine": IndexEngine,
         "DedupScanner": DedupScanner,
     }
@@ -1232,3 +1229,217 @@ async def test_components_aligns_the_generation_across_the_triple(degraded_compo
 
     with comp.search_pipeline._generation.hold():
         assert comp.generation.leases == 1
+
+
+# #2433: startup and revert must preserve the same search features and ownership.
+class _RevertReranker:
+    def __init__(self):
+        self.calls = []
+        self.close_calls = 0
+
+    async def rerank(self, query, results, top_k):
+        from dataclasses import replace
+
+        assert self.close_calls == 0, "search reached a closed reranker"
+        self.calls.append(query)
+        return [
+            replace(result, rank=rank, score=1.0 / rank, source="reranked")
+            for rank, result in enumerate(reversed(results), 1)
+        ][:top_k]
+
+    async def close(self):
+        self.close_calls += 1
+
+
+async def _search_feature_components(tmp_path, monkeypatch, *, rerank=True, expansion="tags"):
+    from memtomem.models import Chunk, ChunkMetadata, SearchResult
+
+    config = _degraded_config(tmp_path, monkeypatch)
+    config.search.enable_dense = False
+    config.rerank.enabled = rerank
+    config.query_expansion.enabled = expansion != "disabled"
+    config.query_expansion.strategy = "tags" if expansion == "disabled" else expansion
+    config.llm.enabled = True
+    config.decay.enabled = False
+    config.access.enabled = False
+    rerankers = []
+
+    def _reranker(_config):
+        instance = _RevertReranker()
+        rerankers.append(instance)
+        return instance
+
+    llm = MagicMock(name="shared_llm")
+    llm.generate = AsyncMock(return_value="databases")
+    llm.close = AsyncMock()
+    monkeypatch.setattr("memtomem.search.reranker.factory.create_reranker", _reranker)
+    monkeypatch.setattr("memtomem.llm.factory.create_llm", lambda _config: llm)
+    comp = await create_components(config)
+    results = [
+        SearchResult(
+            chunk=Chunk(content=name, metadata=ChunkMetadata(source_file=tmp_path / f"{name}.md")),
+            score=1.0 / rank,
+            rank=rank,
+            source="bm25",
+        )
+        for rank, name in enumerate(("first", "second"), 1)
+    ]
+    monkeypatch.setattr(comp.storage, "bm25_search", AsyncMock(return_value=results))
+    monkeypatch.setattr(comp.storage, "get_tag_counts", AsyncMock(return_value=[("databases", 1)]))
+    return comp, rerankers, llm
+
+
+def _assert_search_config_wiring(comp):
+    pipeline = comp.search_pipeline
+    for attribute, section in {
+        "_config": "search",
+        "_decay_config": "decay",
+        "_mmr_config": "mmr",
+        "_access_config": "access",
+        "_rerank_config": "rerank",
+        "_expansion_config": "query_expansion",
+        "_importance_config": "importance",
+        "_entity_boost_config": "entity_boost",
+        "_context_window_config": "context_window",
+        "_session_summary_config": "session_summary",
+    }.items():
+        assert getattr(pipeline, attribute) is getattr(comp.config, section), attribute
+    assert pipeline.storage is comp.storage
+    assert pipeline._embedder is comp.embedder
+    assert pipeline.llm_provider is comp.llm
+    assert pipeline._generation is comp.generation is comp.index_engine._generation
+
+
+@pytest.mark.parametrize("rerank", [False, True])
+@pytest.mark.parametrize("expansion", ["disabled", "tags", "llm"])
+async def test_revert_preserves_search_features(tmp_path, monkeypatch, rerank, expansion):
+    comp, rerankers, llm = await _search_feature_components(
+        tmp_path, monkeypatch, rerank=rerank, expansion=expansion
+    )
+    app = _make_app(comp)
+    try:
+        for phase in ("startup", "reverted"):
+            _assert_search_config_wiring(comp)
+            results, stats = await app.search_pipeline.search(
+                "database memory", top_k=2, record=False
+            )
+            assert [r.chunk.content for r in results] == (
+                ["second", "first"] if rerank else ["first", "second"]
+            ), phase
+            assert stats.rerank_applied is rerank
+            assert stats.score_scale == ("rerank" if rerank else "bm25")
+            expected = "database memory" + (" databases" if expansion != "disabled" else "")
+            assert comp.storage.bm25_search.await_args.args[0] == expected
+            if rerank:
+                assert rerankers[-1].calls == [expected]
+            if phase == "startup":
+                out = await mem_embedding_reset(mode="revert_to_stored", ctx=_StubCtx(app))
+                assert "Reverted to stored DB settings" in out
+                assert len(rerankers) == (2 if rerank else 0)
+                if rerank:
+                    assert rerankers[0] is not rerankers[1]
+                    assert rerankers[0].close_calls == 1
+                    assert rerankers[1].close_calls == 0
+        assert llm.generate.await_count == (2 if expansion == "llm" else 0)
+        assert comp.storage.get_tag_counts.await_count == (2 if expansion == "tags" else 0)
+        llm.close.assert_not_awaited()
+    finally:
+        await close_components(comp)
+    assert all(r.close_calls == 1 for r in rerankers)
+
+
+async def test_inflight_search_retains_its_own_reranker_across_revert(tmp_path, monkeypatch):
+    comp, rerankers, _llm = await _search_feature_components(tmp_path, monkeypatch)
+    app = _make_app(comp)
+    old_generation = comp.generation
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    retrieve = comp.storage.bm25_search
+
+    async def _blocked_first_search(*args, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await retrieve(*args, **kwargs)
+
+    monkeypatch.setattr(comp.storage, "bm25_search", _blocked_first_search)
+    task = asyncio.create_task(app.search_pipeline.search("database memory", record=False))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        out = await mem_embedding_reset(mode="revert_to_stored", ctx=_StubCtx(app))
+        assert "Reverted to stored DB settings" in out
+        assert len(rerankers) == 2
+        assert [r.close_calls for r in rerankers] == [0, 0]
+        results, stats = await app.search_pipeline.search("database memory", record=False)
+        assert stats.rerank_applied and results[0].chunk.content == "second"
+        assert len(rerankers[1].calls) == 1
+        assert rerankers[0].calls == []
+        release.set()
+        results, stats = await task
+        assert stats.rerank_applied and results[0].chunk.content == "second"
+        await old_generation.drain()
+        assert len(rerankers[0].calls) == 1
+        assert [r.close_calls for r in rerankers] == [1, 0]
+    finally:
+        release.set()
+        await task
+        await close_components(comp)
+    assert [r.close_calls for r in rerankers] == [1, 1]
+
+
+@pytest.mark.parametrize("failing", ["reranker", "pipeline", "engine", "dedup"])
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+@pytest.mark.parametrize("cleanup_type", [None, RuntimeError, asyncio.CancelledError])
+async def test_revert_cleans_only_unpublished_search_resources(
+    tmp_path, monkeypatch, failing, failure_type, cleanup_type
+):
+    import memtomem.runtime.components as factory
+    from memtomem.embedding import factory as embedding_factory
+    from memtomem.indexing import engine as engine_module
+    from memtomem.search import dedup as dedup_module
+    from memtomem.search.reranker import factory as reranker_factory
+    from memtomem.server.tools.status_config import _revert_to_stored
+
+    comp, rerankers, llm = await _search_feature_components(tmp_path, monkeypatch)
+    app = _make_app(comp)
+    watcher = MagicMock(name="watcher")
+    app._watcher = watcher
+    before = _revert_visible_state(app)
+    closed = []
+    original_error = failure_type("construction failed")
+
+    def _fail(*_args, **_kwargs):
+        raise original_error
+
+    async def _close(label):
+        _assert_revert_state_unchanged(app, before)
+        closed.append(label)
+        if cleanup_type is not None:
+            raise cleanup_type("cleanup failed")
+
+    new_embedder = _FakeEmbedder()
+    new_embedder.close = lambda: _close("embedder")
+    new_reranker = _RevertReranker()
+    new_reranker.close = lambda: _close("reranker")
+    monkeypatch.setattr(embedding_factory, "create_embedder", lambda _config: new_embedder)
+    monkeypatch.setattr(reranker_factory, "create_reranker", lambda _config: new_reranker)
+    module, name = {
+        "reranker": (reranker_factory, "create_reranker"),
+        "pipeline": (factory, "SearchPipeline"),
+        "engine": (engine_module, "IndexEngine"),
+        "dedup": (dedup_module, "DedupScanner"),
+    }[failing]
+    monkeypatch.setattr(module, name, _fail)
+    try:
+        with pytest.raises(failure_type) as caught:
+            await _revert_to_stored(app)
+        assert caught.value is original_error
+        _assert_revert_state_unchanged(app, before)
+        watcher.rebind.assert_not_called()
+        assert closed == (["embedder"] if failing == "reranker" else ["reranker", "embedder"])
+        assert rerankers[0].close_calls == 0
+        llm.close.assert_not_awaited()
+        results, stats = await app.search_pipeline.search("database memory", record=False)
+        assert stats.rerank_applied and results[0].chunk.content == "second"
+    finally:
+        await close_components(comp)
