@@ -9,7 +9,7 @@ Markdown-first long-term memory infrastructure for AI agents. Core usage is hook
 **Built for:**
 - AI agents (Claude Code, Cursor, Windsurf, Claude Desktop, Kimi CLI) that need to *remember* between sessions
 - Developers who want a searchable knowledge base built from their existing markdown notes — no proprietary database, no vendor lock-in
-- Multilingual content (English, Korean, Japanese, Chinese) via `bge-m3` embeddings
+- Multilingual content (English, Korean, Japanese, Chinese) via local `multilingual-e5-small` embeddings, the ONNX default (`bge-m3` remains available)
 
 ## Quick Start
 

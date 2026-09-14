@@ -362,16 +362,23 @@ memtomem supports searching across languages (e.g., querying in English to find 
 | `nomic-embed-text` (768d) | Weak (often misses) | Good (#2) | Moderate |
 | `bge-m3` (1024d) | **Good (#2)** | **Good (#2)** | **High (#1)** |
 
-**Recommendation**: Use `bge-m3` if you work with Korean or other non-English content. Switch with:
-```
-mm embedding-reset --mode apply-current   # after updating config
-mm index ~/notes --force                  # re-embed all files
-```
+This comparison predates `multilingual-e5-small`, which is now the ONNX default and the model both the English and Korean-optimized `mm init` presets use; it is not measured in the table above.
 
-Or in `~/.memtomem/config.json`:
-```json
-{"embedding": {"model": "bge-m3", "dimension": 1024}}
-```
+**Recommendation**: Use `bge-m3` if you want the larger multilingual model for Korean or other non-English content. To switch:
+
+1. Merge these fields into the existing `embedding` section of `~/.memtomem/config.json` (keep `provider` and your other settings):
+   ```json
+   {"embedding": {"model": "bge-m3", "dimension": 1024}}
+   ```
+   Defaults the E5 profile generated are released on the switch; E5 budgets or a `chunk_input_prefix` you set explicitly stay until you remove them.
+2. **Stop any running `mm web` / MCP server / `mm index` first** — resetting a live DB can leave old- and new-model vectors mixed (see [Switching Models on an Existing Index](../embeddings.md#switching-models-on-an-existing-index)).
+3. Drop the old vectors and re-embed:
+   ```
+   mm embedding-reset --mode apply-current   # deletes all vectors
+   mm index ~/notes --force                  # re-embed (repeat per memory_dir)
+   ```
+
+See [Reset Flow](../configuration.md#reset-flow) for the MCP equivalent and recovery options.
 
 #### BM25 and language
 

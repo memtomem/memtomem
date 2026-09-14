@@ -38,6 +38,7 @@ import pydantic
 import pytest
 
 from memtomem.cli import cli as _CLI
+from memtomem.cli.init_presets import PRESETS
 from memtomem.config import Mem2MemConfig
 from memtomem.server import _ALL_REGISTERED_TOOLS, _CORE_TOOLS, _STANDARD_PACKS
 from memtomem.server.tool_registry import ACTIONS
@@ -1991,3 +1992,101 @@ def test_security_policy_supports_the_shipped_minor() -> None:
     assert unsupported == [f"< {major}.{minor}"], (
         f"SECURITY.md marks {unsupported} unsupported; package version is {version}"
     )
+
+
+class TestInitPresetDocsMatchPresetSpecs:
+    """The README preset sentence and the getting-started preset table name the
+    embedding model each ``mm init`` preset writes.
+
+    Both drifted when the presets moved to ``multilingual-e5-small``: README kept
+    advertising ``bge-small-en-v1.5`` / ``bge-m3`` while the source wrote E5. The
+    check reads each preset's *own* clause or row, by label — English and Korean
+    share one model string, so a file-wide membership test would pass on a single
+    correct mention while the other preset stayed wrong.
+    """
+
+    @staticmethod
+    def _named_models(text: str) -> set[str]:
+        """Every known ONNX model *text* names, as its short alias.
+
+        Matched on identifier boundaries rather than inside backticks, so a
+        model named in plain prose still counts, and a full fastembed id
+        (``intfloat/multilingual-e5-small``) is reported as its alias. Link
+        destinations are dropped first (only the visible text is a claim), and a
+        period ends a name unless another identifier character follows it, so a
+        sentence-final ``bge-m3.`` still counts.
+        """
+        from memtomem.embedding.aliases import ONNX_EMBEDDER_MODELS
+
+        text = re.sub(r"\]\([^)]*\)", "]", text)
+        names = {alias: alias for alias in ONNX_EMBEDDER_MODELS}
+        names.update({full_id: alias for alias, (full_id, *_) in ONNX_EMBEDDER_MODELS.items()})
+        return {
+            alias
+            for name, alias in names.items()
+            if re.search(rf"(?<![\w./-]){re.escape(name)}(?![\w/-]|\.\w)", text)
+        }
+
+    @staticmethod
+    def _readme_clause(label: str) -> str:
+        """The ``**label** (…)`` clause in README's preset picker paragraph.
+
+        The picker paragraph is found by structure — the one paragraph holding a
+        clause for every preset label — not by its wording, and paragraphs are
+        whitespace-normalized first, so rewording or re-wrapping cannot hide it.
+        The install section's ``**Minimal** (BM25-only, ~40 MB)`` size note
+        names only one preset and stays out.
+        """
+
+        def clauses(paragraph: str, name: str) -> list[str]:
+            return re.findall(rf"\*\*{re.escape(name)}\*\* \(([^)]*)\)", paragraph)
+
+        pickers = [
+            paragraph
+            for paragraph in map(_unwrapped, _read(_README).split("\n\n"))
+            if all(clauses(paragraph, spec.label) for spec in PRESETS.values())
+        ]
+        assert len(pickers) == 1, f"README has {len(pickers)} preset picker paragraphs"
+        found = clauses(pickers[0], label)
+        assert len(found) == 1, f"README picker has {len(found)} clauses for {label!r}"
+        return found[0]
+
+    @staticmethod
+    def _guide_row(label: str) -> str:
+        cells = _table_row(_read(_GUIDES / "getting-started.md"), label)
+        return " | ".join(cells[1:])
+
+    @pytest.mark.parametrize("surface", ["readme", "getting-started"])
+    @pytest.mark.parametrize("preset", sorted(PRESETS))
+    def test_preset_description_names_the_preset_model(self, preset: str, surface: str) -> None:
+        spec = PRESETS[preset]  # type: ignore[index]
+        text = (
+            self._readme_clause(spec.label) if surface == "readme" else self._guide_row(spec.label)
+        )
+
+        named = self._named_models(text)
+        if spec.provider == "none":
+            assert named == set(), f"{surface}: {spec.label} names {sorted(named)}"
+            assert "BM25" in text, f"{surface}: {spec.label} does not say BM25"
+            assert re.search(r"no (model )?downloads?", text), (
+                f"{surface}: {spec.label} does not say it needs no download"
+            )
+        else:
+            assert named == {spec.model}, (
+                f"{surface}: {spec.label} names {sorted(named)}; the preset writes {spec.model!r}"
+            )
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("ONNX `multilingual-e5-small` + reranker", {"multilingual-e5-small"}),
+            ("multilingual-e5-small + bge-m3.", {"multilingual-e5-small", "bge-m3"}),
+            ("[multilingual-e5-small](#bge-m3)", {"multilingual-e5-small"}),
+            ("intfloat/multilingual-e5-small", {"multilingual-e5-small"}),
+            ("multilingual-e5-small.onnx", set()),
+        ],
+    )
+    def test_named_models_reads_visible_names_on_boundaries(
+        self, text: str, expected: set[str]
+    ) -> None:
+        assert self._named_models(text) == expected

@@ -298,11 +298,11 @@ in-memory cache doesn't re-pin the dropped values on the next save.
 | `MEMTOMEM_EMBEDDING__BASE_URL` | _(empty)_ | API endpoint URL (Ollama defaults to `http://localhost:11434` when unset) |
 | `MEMTOMEM_EMBEDDING__API_KEY` | _(empty)_ | API key (required for OpenAI) |
 | `MEMTOMEM_EMBEDDING__BATCH_SIZE` | `64` | Texts per embedding API call |
-| `MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE` | `8` | Texts per local FastEmbed/ONNX inference batch (runtime-mutable) |
-| `MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS` | `1024` | Actual-token cap per local ONNX input; `0` restores the model limit (restart required) |
+| `MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE` | `8` (`4` for `multilingual-e5-small` when unset) | Texts per local FastEmbed/ONNX inference batch (runtime-mutable) |
+| `MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS` | `1024` (`multilingual-e5-small` requires `512`) | Actual-token cap per local ONNX input; `0` restores the model limit, except for `multilingual-e5-small`, which rejects it (restart required) |
 | `MEMTOMEM_EMBEDDING__ONNX_CPU_MEM_ARENA` | `false` | Cache CPU allocations for reuse; disabled by default to release peak RSS after local ONNX indexing (restart required) |
 | `MEMTOMEM_EMBEDDING__MAX_CONCURRENT_BATCHES` | `4` | Max parallel embedding requests |
-| `MEMTOMEM_EMBEDDING__THREADS` | `4` | ONNX intra-op thread cap for the local `fastembed` provider |
+| `MEMTOMEM_EMBEDDING__THREADS` | `4` (`2` for `multilingual-e5-small` when unset) | ONNX intra-op thread cap for the local `fastembed` provider |
 | `MEMTOMEM_EMBEDDING__PROGRESS_THRESHOLD` | `32` | Emit per-file `chunk_progress` updates when one file produces more than this many chunks (`0` = always emit) |
 
 See [Embedding Providers](embeddings.md) for the supported model list and the dimension values you must use with each one.
@@ -312,7 +312,9 @@ chunk content and BM25 indexing remain complete. If an existing ONNX index was
 created before this cap was enabled, force-reindex every memory directory so
 old and new vectors use the same prefix policy. Set
 `MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS=0` before restart to retain the
-model's previous maximum context instead.
+model's previous maximum context instead. This paragraph describes models other
+than `multilingual-e5-small`, which does not truncate passages (see
+[CPU ONNX profiles](#cpu-onnx-profiles)).
 
 The ONNX CPU memory arena changes allocator reuse only, so toggling it does not
 change the embedding policy fingerprint and does not require re-indexing. It is
@@ -1336,7 +1338,8 @@ New ONNX configurations default to `multilingual-e5-small` (384 dimensions,
 512 input tokens). Explicit existing models, including `bge-m3`, stay selected.
 E5 uses mean pooling, L2 normalization, `query: ` for queries and `passage: `
 for documents. Its pinned tokenizer counts the complete rendered input;
-oversized direct inputs are refused instead of silently truncated.
+embedding an oversized passage fails instead of silently truncating it, while
+oversized query-side input, such as a search query, is truncated with a warning.
 The E5 defaults are 384 body tokens, 96 description tokens, soft target 320,
 minimum 96, overlap 0, two inference threads, batch four, and CPU arena off.
 Changing from BGE-M3 requires a separate 384-dimensional index and reindexing.
