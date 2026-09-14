@@ -192,9 +192,12 @@ uptime probes and dashboards can pattern-match on the keys:
 | Key | Description |
 |-----|-------------|
 | `kind` | Open enum; current values include `embedding_dim_mismatch` (consumers must tolerate unknown kinds). |
+| `stored` / `configured` | Present for embedding-mismatch entries; echoes the DB vs runtime provider/model/dimension. |
+| `chunks` | Present for embedding-mismatch entries; chunk rows in the store. |
+| `vectors` | Present for embedding-mismatch entries; raw `chunks_vec` rows the reset drops, orphans included (`0` when the table is absent, `null` when the count is unavailable). |
+| `detail` | Optional human-readable context; for embedding-mismatch entries, what the reset destroys and whether `mm index --force <path>` must follow. |
 | `fix` | Canonical CLI command to resolve the warning (e.g. `mm embedding-reset --mode apply-current`). |
 | `doc` | Relative path into `docs/guides/` with the full remediation flow (see [`configuration.md#reset-flow`](../configuration.md#reset-flow)). |
-| `stored` / `configured` | Present for embedding-mismatch entries; echoes the DB vs runtime provider/model/dimension. |
 
 ### `mem_config` — View and modify settings
 

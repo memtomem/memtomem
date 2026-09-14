@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **Embedding mismatch warnings say what the reset costs (#2424).** The
+  `embedding_dim_mismatch` / `embedding_policy_mismatch` entries in `mm status`
+  and `mem_status` now carry `chunks`, `vectors` (raw vector rows the reset
+  drops, orphans included; `null` when the count is unavailable) and a `detail`
+  line stating whether `mm index --force <path>` must follow. `fix` is
+  unchanged and still holds only the reset command.
+
 ### Fixed
 
 - **Plugin servers include the ONNX dependencies needed by existing E5

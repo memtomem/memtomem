@@ -37,6 +37,7 @@ def _mock_components(
     stored_embedding_info: dict | None = None,
     embedding_mismatch: dict | None = None,
     dense_coverage: dict | None = None,
+    vector_count: int | None = None,
     config: Mem2MemConfig | None = None,
 ) -> SimpleNamespace:
     """Build a minimal ``Components``-shaped mock for ``mm status`` tests.
@@ -53,6 +54,7 @@ def _mock_components(
     report's coverage line is exercised. Leaving it ``None`` keeps the
     attribute off the namespace — ``hasattr`` returns False and the
     formatter skips the line, matching older storage doubles.
+    ``vector_count`` does the same for ``get_vector_count``.
     """
     storage = SimpleNamespace(
         get_stats=AsyncMock(
@@ -64,6 +66,8 @@ def _mock_components(
     )
     if dense_coverage is not None:
         storage.get_dense_coverage = AsyncMock(return_value=dense_coverage)
+    if vector_count is not None:
+        storage.get_vector_count = AsyncMock(return_value=vector_count)
     return SimpleNamespace(
         config=config or Mem2MemConfig(),
         storage=storage,
@@ -725,6 +729,7 @@ class TestStatusTextPin:
                 "configured": {"provider": "ollama", "model": "nomic", "dimension": 768},
             },
             dense_coverage={"total": 53, "with_dense": 21},
+            vector_count=21,
             config=Mem2MemConfig(
                 storage={"sqlite_path": "/opt/mm/memtomem.db"},
                 scheduler={"enabled": True},
@@ -784,6 +789,9 @@ Warnings
 - kind:       embedding_dim_mismatch
   stored:     ollama/bge-m3 (1024d)
   configured: ollama/nomic (768d)
+  chunks:     53
+  vectors:    21
+  detail:     Reset drops 21 vector row(s); 53 chunk(s) stay but need `mm index --force <path>` to re-embed.
   fix:        uv run mm embedding-reset --mode apply-current
   doc:        docs/guides/configuration.md#reset-flow"""
         assert text == expected
@@ -830,6 +838,88 @@ class TestStatusJson:
         assert warning["configured"] == {"provider": "ollama", "model": "nomic", "dimension": 768}
         assert warning["fix"] == "uv run mm embedding-reset --mode apply-current"
         assert warning["doc"] == "docs/guides/configuration.md#reset-flow"
+        # #2424: the mocked store has no ``get_vector_count``, so the
+        # vector count is unknown rather than a fabricated 0.
+        assert warning["chunks"] == 42
+        assert warning["vectors"] is None
+        assert warning["detail"] == (
+            "Reset drops all vector rows; 42 chunk(s) stay but need "
+            "`mm index --force <path>` to re-embed."
+        )
+
+    @pytest.mark.parametrize(
+        ("total_chunks", "vector_count", "with_dense", "detail"),
+        [
+            # Orphan vectors: the reset drops raw ``chunks_vec`` rows, so the
+            # count must not collapse to ``dense_coverage["with_dense"]``.
+            (
+                10,
+                12,
+                10,
+                "Reset drops 12 vector row(s); 10 chunk(s) stay but need "
+                "`mm index --force <path>` to re-embed.",
+            ),
+            # BM25-only content: nothing destroyed, but chunks still need embedding.
+            (
+                5,
+                0,
+                0,
+                "Reset drops 0 vector row(s); 5 chunk(s) stay but need "
+                "`mm index --force <path>` to re-embed.",
+            ),
+            (0, 0, 0, "Reset drops 0 vector row(s); no chunks to re-index."),
+            # Zero chunks does not mean zero vectors: orphans are still dropped.
+            (0, 3, 0, "Reset drops 3 vector row(s); no chunks to re-index."),
+            # Unknown count on an empty store must not claim nothing is dropped.
+            (0, None, 0, "Reset drops all vector rows; no chunks to re-index."),
+        ],
+    )
+    def test_mismatch_warning_reports_reset_cost(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        total_chunks: int,
+        vector_count: int | None,
+        with_dense: int,
+        detail: str,
+    ) -> None:
+        comp = _mock_components(
+            total_chunks=total_chunks,
+            embedding_mismatch={
+                "stored": {"provider": "ollama", "model": "bge-m3", "dimension": 1024},
+                "configured": {"provider": "ollama", "model": "nomic", "dimension": 768},
+            },
+            dense_coverage={"total": total_chunks, "with_dense": with_dense},
+            vector_count=vector_count,
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        (warning,) = json.loads(result.stdout)["warnings"]
+        assert (warning["chunks"], warning["vectors"], warning["detail"]) == (
+            total_chunks,
+            vector_count,
+            detail,
+        )
+        assert warning["fix"] == "uv run mm embedding-reset --mode apply-current"
+
+    def test_mismatch_warning_vector_count_failure_is_unknown(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp = _mock_components(
+            total_chunks=3,
+            embedding_mismatch={
+                "stored": {"provider": "ollama", "model": "bge-m3", "dimension": 1024},
+                "configured": {"provider": "ollama", "model": "nomic", "dimension": 768},
+            },
+        )
+        comp.storage.get_vector_count = AsyncMock(side_effect=RuntimeError("no chunks_vec"))
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "  vectors:    (unknown)\n" in result.output
 
     def test_json_flag_matches_format_json(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch

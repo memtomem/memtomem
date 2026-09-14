@@ -422,6 +422,9 @@ mismatch is detected:
              "policy_fingerprint": "...", "max_sequence_tokens": 0},
  "configured": {"provider": "...", "model": "...", "dimension": M,
                 "policy_fingerprint": "...", "max_sequence_tokens": 1024},
+ "chunks": 42,
+ "vectors": 21,
+ "detail": "Reset drops 21 vector row(s); 42 chunk(s) stay but need `mm index --force <path>` to re-embed.",
  "fix": "uv run mm embedding-reset --mode apply-current",
  "doc": "docs/guides/configuration.md#reset-flow"}
 ```

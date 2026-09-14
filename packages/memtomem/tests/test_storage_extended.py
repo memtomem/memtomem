@@ -360,6 +360,13 @@ class TestStorageExtended:
         # ``with_dense`` — otherwise a real BM25-only chunk would be
         # masked by an orphan row.
         assert cov["with_dense"] == 1
+        # But get_vector_count() counts ALL raw rows in chunks_vec, including
+        # the orphan vector, reflecting what reset_embedding_meta will destroy.
+        assert await storage.get_vector_count() == 2
+
+    async def test_get_vector_count_empty_db(self, components):
+        storage = components.storage
+        assert await storage.get_vector_count() == 0
 
     async def test_dense_coverage_zero_when_vec_table_dropped(self, components):
         # ``reset_embedding_meta`` drops and recreates ``chunks_vec`` but

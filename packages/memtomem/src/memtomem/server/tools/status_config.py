@@ -340,11 +340,32 @@ async def collect_status_report(app: AppContext) -> dict:
             and not mismatch.get("model_mismatch")
             else "embedding_dim_mismatch"
         )
+        # #2424: say what the reset costs. ``vectors`` is the raw
+        # ``chunks_vec`` row count — what ``reset_embedding_meta`` drops,
+        # orphans included — not ``dense_coverage["with_dense"]``.
+        vectors: int | None = None
+        if hasattr(app.storage, "get_vector_count"):
+            try:
+                vectors = await app.storage.get_vector_count()
+            except Exception:
+                logger.debug("vector count query failed", exc_info=True)
+        chunks = stats["total_chunks"]
+        # Orphan vectors survive with zero chunks, so the two clauses are
+        # independent: what is dropped, and whether a re-index follows.
+        dropped = "all vector rows" if vectors is None else f"{vectors} vector row(s)"
+        if chunks == 0:
+            reindex = "no chunks to re-index."
+        else:
+            reindex = f"{chunks} chunk(s) stay but need `mm index --force <path>` to re-embed."
+        detail = f"Reset drops {dropped}; {reindex}"
         warnings.append(
             {
                 "kind": warning_kind,
                 "stored": dict(mismatch["stored"]),
                 "configured": dict(mismatch["configured"]),
+                "chunks": chunks,
+                "vectors": vectors,
+                "detail": detail,
                 "fix": "uv run mm embedding-reset --mode apply-current",
                 "doc": "docs/guides/configuration.md#reset-flow",
             }
@@ -820,6 +841,8 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
                 if isinstance(value, dict):
                     # stored/configured embedding sub-blocks
                     text = f"{value['provider']}/{value['model']} ({value['dimension']}d)"
+                elif value is None:
+                    text = "(unknown)"
                 else:
                     text = str(value)
                 prefix = "- " if i == 0 else "  "
