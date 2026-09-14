@@ -13,14 +13,15 @@ plugin does not put `mm` on the user's PATH — it registers an MCP server, not
 the CLI. So offer the pinned form, which works either way:
 
 ```bash
-uvx --from "memtomem[all]==0.6.1" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.2" mm doctor --claude-mcp
 ```
 
 This diagnostic runs in its own environment. It does not install dependencies
 into, or repair, the plugin server environment.
-Published Core 0.6.1 predicts the older base-only launch when the plugin is not
-yet installed. After installation, doctor reads the actual plugin manifest.
-Use `/mcp` to verify the session, and repeat the diagnostic after installation.
+Before installation, doctor compares manual registrations with the launch this
+release's plugin bundles (`memtomem[onnx]==0.6.2`). After installation, it reads
+the actual plugin manifest. Use `/mcp` to verify the session, and repeat the
+diagnostic after installation.
 
 If the user says they already have the CLI installed, `mm doctor --claude-mcp`
 is the same check. Run it from the project being inspected. Neither is required

@@ -22,8 +22,8 @@ Model artifacts are fetched only when the configured workflow needs them.
 On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```sh
-uvx --from 'memtomem[onnx]==0.6.1' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.6.1' mm status
+uvx --from 'memtomem[onnx]==0.6.2' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem[onnx]==0.6.2' mm status
 ```
 
 `--mcp skip` keeps the bootstrap from adding a second MCP registration because
@@ -41,7 +41,7 @@ the gitignored local tier explicitly:
 
 ```sh
 cd /path/to/project
-uvx --from 'memtomem[onnx]==0.6.1' mm mem init --scope project_local
+uvx --from 'memtomem[onnx]==0.6.2' mm mem init --scope project_local
 ```
 
 The plugin does not self-authorize these trust steps. After initialization,

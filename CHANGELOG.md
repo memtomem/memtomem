@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-09-14
+
 ### Added
 
 - **Embedding mismatch warnings say what the reset costs (#2424).** The
@@ -17,12 +19,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ### Fixed
 
 - **Plugin servers include the ONNX dependencies needed by existing E5
-  configurations (#2449).** Claude plugin 0.5.3 and Codex plugin 0.3.3 launch
-  `memtomem[onnx]==0.6.1`, while fresh configurations remain BM25-only.
-  The next Core release also reports actionable missing-tokenizer dependency
-  errors. After upgrading the Claude plugin, re-check `/mcp`: an older manual
+  configurations (#2449).** The Claude plugin (0.5.4) and Codex plugin (0.3.4)
+  launch `memtomem[onnx]==0.6.2`, while fresh configurations remain BM25-only.
+  Core now declares its direct Hugging Face Hub dependency, and a missing Hub or
+  `tokenizers` package is reported with instructions to repair the environment
+  the server actually runs in and restart it. After upgrading the Claude plugin, re-check `/mcp`: an older manual
   base-only launch no longer matches the plugin for deduplication. Confirm its
   name and scope before updating or removing the redundant manual registration.
+
+- **`mm embedding-reset --mode revert-to-stored` no longer claims a revert it
+  does not perform (#2429).** It printed a green "Reverted runtime to DB
+  settings" although a one-shot CLI has no runtime to revert: it neither
+  switched a running server nor persisted the stored embedding settings. It
+  now prints the recorded identity and the two real recovery paths — correct
+  the `embedding` section in `config.json`, or call
+  `mem_embedding_reset(mode="revert_to_stored")` on the running server —
+  and it no longer applies the legacy `config.json` migration. Storage is still
+  initialized. The recorded identity is read from the database directly, so a
+  configured `none` provider cannot mask it.
+
+- **A failed `mem_config(persist=True)` restores the runtime it changed
+  (#2436).** When the save raised (`ValueError`, or the config-lock timeout),
+  the configuration was rebuilt from disk and reported as "rolled back", which
+  installed whatever the file held at that moment — newer values from another
+  writer, or a file a complete load rejects — and discarded earlier
+  runtime-only edits. The edited section is now snapshotted before the change
+  and restored in place, including object references and which fields count as
+  explicitly set. Failed saves do not invalidate caches, rebuild FTS or publish
+  batch-size changes. Web saves already behaved this way (#2409).
+
+- **Config saves judge overrides against the file they write (#2437).** The
+  save resolved the embedding identity that selects its comparison baseline
+  (#2399) before taking the config write lock. If another writer switched the
+  model in between, an explicit value could be compared with the wrong
+  profile's defaults and dropped — for example an E5-to-BGE switch pruning
+  `max_chunk_tokens: 384`, which then reloaded as 512. The identity and
+  baseline are now built under the lock from the same `config.json` and
+  `config.d` reads the save uses. Edits that bypass the lock, and atomic
+  changes spanning several fragment files, remain outside this guarantee.
 
 - **Reverting to stored embedding settings preserves reranking and query
   expansion (#2433).** Startup and revert now share complete search-pipeline
@@ -74,8 +108,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   part-way left some of the runtime on the new generation and some on the old,
   with the configuration naming the stored identity, the mismatch still
   reported, and the old generation never retired. A namespace rule whose glob
-  the index engine cannot compile — accepted at runtime by `mem_config`, see
-  #2432 — was enough: the embedder, generation and pipeline moved to the new
+  the index engine cannot compile — which `mem_config` accepted at runtime
+  before #2432 — was enough: the embedder, generation and pipeline moved to the new
   generation while the index engine stayed on the old one. Every constructor
   now runs before anything is swapped, and a failure restores the
   configuration and storage fields #2421 already covered.
@@ -110,8 +144,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   including reloads before Web saves. Explicit Web saves still persist the
   requested changes. These readers use the merged configuration before the
   legacy migration: `auto_discover` can remain `true`, and provider memory
-  directories are not automatically appended. Server startup and the two
-  embedding recovery modes retain their migration behavior. Embedding status
+  directories are not automatically appended. Server startup and
+  `mm embedding-reset --mode apply-current` retain their migration behavior;
+  `--mode revert-to-stored` no longer migrates (#2429). Embedding status
   still initializes storage and can create `memtomem.db`.
 
 - **`mm config show` no longer rewrites the `config.json` it reports
@@ -126,6 +161,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   directories the migration would append. The migration itself is unchanged
   and still runs from the commands that build components, such as the server,
   `mm status` and `mm index`.
+
 - **Fixing a rejected `embedding` section no longer leaves a dimension
   mismatch behind (#2416).** A command that builds components while the
   section is rejected — `mm status`, the server — creates the store stamped
