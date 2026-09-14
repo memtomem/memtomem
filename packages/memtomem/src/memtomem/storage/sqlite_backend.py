@@ -2993,8 +2993,7 @@ class SqliteBackend(
         """
         if not self._has_vec_table:
             return 0
-        db = self._get_read_db()
-        return int(db.execute("SELECT count(*) FROM chunks_vec").fetchone()[0] or 0)
+        return int(self._cached_vec_row_count(self._get_read_db()))
 
     async def count_chunks_missing_vectors(self, chunk_ids: Sequence[str]) -> int:
         """Count how many of ``chunk_ids`` currently have no dense vector.
