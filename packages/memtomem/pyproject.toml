@@ -89,8 +89,13 @@ onnx = [
     "huggingface-hub>=0.20,<2",
     "urllib3>=2.7.0",
 ]
-ollama = ["ollama>=0.4"]
-openai = ["openai>=1.60"]
+# The Ollama and OpenAI providers call their HTTP APIs through httpx, a base
+# dependency, and nothing imports the vendor SDKs (#2353). The names stay so
+# existing `memtomem[ollama]` / `memtomem[openai]` installs keep working
+# without the unknown-extra warning uv and pip print (the install itself
+# still succeeds for an undeclared extra).
+ollama = []
+openai = []
 korean = ["kiwipiepy>=0.18"]
 code = [
     "tree-sitter>=0.25",

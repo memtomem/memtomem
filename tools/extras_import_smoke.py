@@ -49,8 +49,9 @@ EXTRA_PROBES: dict[str, dict[str, str]] = {
         "tokenizers": "tokenizers",
         "huggingface-hub": "huggingface_hub",
     },
-    "ollama": {"ollama": "ollama"},
-    "openai": {"openai": "openai"},
+    # Compatibility names that install nothing (#2353).
+    "ollama": {},
+    "openai": {},
     "korean": {"kiwipiepy": "kiwipiepy"},
     "code": {
         "tree-sitter": "tree_sitter",

@@ -16,8 +16,6 @@ _ALL_ANCHORS = {
     "fastembed",
     "kiwipiepy",
     "langfuse",
-    "ollama",
-    "openai",
     "tree-sitter",
     "urllib3",
 }

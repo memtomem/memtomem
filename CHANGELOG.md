@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **The `ollama` and `openai` extras no longer install the vendor SDKs
+  (#2353).** Both providers call their HTTP APIs through `httpx`, a base
+  dependency, and memtomem never imported the `ollama` or `openai` packages, so
+  `memtomem[all]` downloaded them for nothing. The two extra names still
+  resolve and now add no dependencies. If your own code imports either SDK,
+  declare it as your own dependency.
+
 ## [0.6.2] — 2026-09-14
 
 ### Upgrading

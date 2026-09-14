@@ -394,3 +394,52 @@ class TestDistributionLevelCoverage:
             },
         )
         assert smoke.check_coverage(root) == 0
+
+
+class TestCompatibilityExtras:
+    """``ollama`` / ``openai`` are names that install nothing (#2353).
+
+    Both providers talk HTTP through ``httpx``; the vendor SDKs were declared
+    but never imported. The names stay so ``memtomem[openai]`` keeps
+    resolving, which makes a silent re-add of the SDKs the regression to pin.
+    """
+
+    NAMES = ("ollama", "openai")
+
+    def test_extras_are_declared_empty_and_stay_in_all(self) -> None:
+        optional = smoke._optional_dependencies(_ROOT)
+        for name in self.NAMES:
+            assert name in optional, f"extra {name!r} must keep resolving"
+            assert optional[name] == [], f"extra {name!r} must install nothing"
+        (umbrella,) = optional["all"]
+        from packaging.requirements import Requirement
+
+        assert set(self.NAMES) <= Requirement(umbrella).extras
+
+    def test_nothing_imports_the_vendor_sdks(self) -> None:
+        import ast
+
+        offenders: list[str] = []
+        for path in sorted((_ROOT / "packages" / "memtomem" / "src").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    roots = [alias.name.split(".")[0] for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    roots = [node.module.split(".")[0]]
+                else:
+                    continue
+                offenders += [f"{path}:{node.lineno}" for root in roots if root in self.NAMES]
+        assert offenders == [], (
+            "an SDK import needs the extra to declare it again (#2353): " + ", ".join(offenders)
+        )
+
+    def test_empty_extra_with_empty_probes_passes_coverage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(smoke, "EXTRA_PROBES", {"web": {"fastapi": "fastapi"}, "openai": {}})
+        root = _fixture(
+            tmp_path,
+            {"web": ["fastapi>=0.115"], "openai": [], "all": ["memtomem[web,openai]"]},
+        )
+        assert smoke.check_coverage(root) == 0

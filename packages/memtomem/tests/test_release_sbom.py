@@ -17,8 +17,6 @@ _EXTRAS = {
     "fastembed",
     "kiwipiepy",
     "langfuse",
-    "ollama",
-    "openai",
     "tree-sitter",
     "urllib3",
 }
