@@ -581,6 +581,9 @@ class NamespacePolicyRule(ConfigModel):
     @field_validator("path_glob")
     @classmethod
     def _expand_and_validate_glob(cls, v: str) -> str:
+        import pathspec
+        from pathspec.patterns.gitwildmatch import GitWildMatchPatternError
+
         v = v.strip()
         if not v:
             raise ValueError("path_glob must be non-empty")
@@ -599,6 +602,12 @@ class NamespacePolicyRule(ConfigModel):
             # on POSIX but not on Windows, since ``_dedup_key`` hashes the raw
             # post-validator string.
             v = Path(v).as_posix()
+        try:
+            # Match engine.py:_build_exclude_spec, including case folding,
+            # so accepted rules cannot fail later during engine construction.
+            pathspec.GitIgnoreSpec.from_lines([v.lower()])
+        except (GitWildMatchPatternError, re.error) as exc:
+            raise ValueError(f"path_glob: {exc}") from exc
         return v
 
     @field_validator("namespace")
@@ -3236,8 +3245,9 @@ def build_comparand(
 
     ``embedding_context`` retains the selected model's non-mutable inputs,
     even when config.json selected it, so E5's generated defaults are the
-    fallback while editable pins still come only from the lower layers. Saves
-    and Web resets pass :func:`saved_embedding_identity`. Without it,
+    fallback while editable pins still come only from the lower layers. Web
+    resets pass :func:`saved_embedding_identity`; saves replay the same layers
+    from snapshots captured under the write lock. Without this context,
     config.json is excluded completely (also used by project memory-directory
     registration).
 
@@ -3307,6 +3317,11 @@ def save_config_overrides(
     Uses **read-merge-write** so non-mutable keys (init-only settings like
     ``embedding.provider``, ``storage.sqlite_path``) carry across saves.
 
+    The saved identity and comparison baseline share file snapshots captured
+    under the write lock. This serializes them with cooperating config.json
+    writers; config.d and manual edits that bypass the lock are not an atomic
+    multi-file transaction.
+
     Returns a :class:`SaveReceipt` describing what the file held before and
     after, captured **inside** the write lock. Callers that want to report on
     a specific key must use the receipt rather than re-reading the file: a
@@ -3323,22 +3338,8 @@ def save_config_overrides(
 
     _log = logging.getLogger(__name__)
     base_fields: dict[str, set[str]] = mutable_fields or MUTABLE_FIELDS
-    # build_comparand is a slow, read-only rebuild — keep it OUTSIDE the lock so
-    # the serialized critical section stays as narrow as read→merge→write.
-    identity = saved_embedding_identity(quiet=True)
-    comparand = build_comparand(quiet=True, embedding_context=identity)
-    # Compare on the same identity from the live side: rebase a copy onto it
-    # and regenerate its unset profile values. A live config whose identity or
-    # normalization differs from the file's (a hand-assembled stack, a runtime
-    # revert) otherwise holds another profile's values in unset fields, and
-    # comparing those pins or prunes values the user never chose (#2399
-    # review). The caller's object and its explicit-field tracking stay as is.
-    from memtomem.config_signature import rebase_embedding
+    from memtomem.config_signature import _build_config, rebase_embedding
     from memtomem.embedding.profiles import fill_e5_defaults
-
-    live_view = config.model_copy(deep=True)
-    live_view.embedding = rebase_embedding(identity, config.embedding)
-    fill_e5_defaults(live_view)
 
     path = _override_path()
 
@@ -3356,6 +3357,31 @@ def save_config_overrides(
                 _log.warning("Cannot read existing config at %s: %s — overwriting", path, exc)
 
         before = copy.deepcopy(existing)
+
+        # Resolve both comparison inputs from this locked file generation.
+        # Building them before acquiring the lock can prune an explicit value
+        # against a model the file no longer selects (#2437). Reuse fragments
+        # as well so the two builds cannot observe different lower layers.
+        fragments = tuple(_read_config_fragments(_config_d_path()))
+        identity = _build_config(
+            migrate=False,
+            quiet=True,
+            validate_profile=False,
+            _override_snapshot=_ConfigFileSnapshot(path, data=existing),
+            _fragment_snapshots=fragments,
+        ).embedding
+        comparand = _build_config(
+            include_overrides=False,
+            quiet=True,
+            embedding_context=identity,
+            _fragment_snapshots=fragments,
+        )
+        # Rebase a copy of the live config onto the same saved identity and
+        # regenerate only unset profile values. Preserve the caller's object
+        # and explicit-field tracking even when its runtime identity diverges.
+        live_view = config.model_copy(deep=True)
+        live_view.embedding = rebase_embedding(identity, config.embedding)
+        fill_e5_defaults(live_view)
 
         # Union with dedicated-endpoint fields (memory_dirs). No exemption —
         # env-dependent factory output is already part of the comparand, so

@@ -16,6 +16,8 @@ contract here is the flag's *shape*, not the wipe itself
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import sqlite3
 from unittest.mock import AsyncMock
@@ -25,7 +27,7 @@ from click.testing import CliRunner
 
 from memtomem.cli import cli
 
-from .helpers import set_home
+from .helpers import make_chunk, set_home
 
 
 @pytest.fixture
@@ -131,6 +133,120 @@ def test_help_documents_the_non_interactive_form(runner: CliRunner) -> None:
     assert result.exit_code == 0
     assert "--yes" in result.output
     assert "-y" in result.output
+
+
+def test_help_describes_guidance_and_storage_initialization(runner: CliRunner) -> None:
+    result = runner.invoke(cli, ["embedding-reset", "--help"])
+
+    assert result.exit_code == 0
+    output = " ".join(result.output.split())
+    assert "Show stored settings and recovery instructions" in output
+    assert "do not write config.json" in output
+    assert "may create or initialize the database" in output
+    assert "Switch runtime embedder" not in output
+
+
+@pytest.mark.parametrize("scenario", ["model", "policy", "none"])
+def test_revert_guidance_preserves_mismatch_config_and_data(home, runner, scenario) -> None:
+    from memtomem.config import EmbeddingConfig, StorageConfig, embedding_policy_fingerprint
+    from memtomem.storage.sqlite_backend import SqliteBackend
+
+    stored = EmbeddingConfig(
+        provider="onnx", model="bge-small-en-v1.5", dimension=384, max_sequence_tokens=1024
+    )
+    configured = stored.model_copy(deep=True)
+    if scenario == "model":
+        configured = EmbeddingConfig(provider="none", model="", dimension=0)
+    elif scenario == "policy":
+        configured.max_sequence_tokens = 128
+    else:
+        stored = EmbeddingConfig(provider="none", model="", dimension=0)
+
+    config_path = home / ".memtomem" / "config.json"
+    config_path.parent.mkdir()
+    # Deliberately legacy: an accidental migration would change bytes and mtime.
+    config_path.write_text(json.dumps({"embedding": configured.model_dump()}), encoding="utf-8")
+    config_before = config_path.read_bytes()
+    mtime_before = config_path.stat().st_mtime_ns
+    db_path = config_path.with_name("memtomem.db")
+    vector = [1.0] + [0.0] * (stored.dimension - 1) if stored.dimension else []
+
+    def backend(embedding):
+        return SqliteBackend(
+            StorageConfig(sqlite_path=db_path),
+            dimension=embedding.dimension,
+            embedding_provider=embedding.provider,
+            embedding_model=embedding.model,
+            embedding_policy_fingerprint=embedding_policy_fingerprint(embedding),
+            embedding_max_sequence_tokens=embedding.max_sequence_tokens,
+            strict_dim_check=False,
+        )
+
+    async def seed():
+        storage = backend(stored)
+        await storage.initialize()
+        try:
+            await storage.upsert_chunks(
+                [make_chunk("preserved guidance evidence", embedding=vector)]
+            )
+        finally:
+            await storage.close()
+
+    asyncio.run(seed())
+    with sqlite3.connect(db_path) as db:
+        meta_before = db.execute("SELECT * FROM _memtomem_meta ORDER BY key").fetchall()
+
+    result = runner.invoke(cli, ["embedding-reset", "--mode", "revert-to-stored"], color=True)
+
+    assert result.exit_code == 0, result.output
+    assert "Guidance only" in result.output
+    assert "does not change embedding settings or a running server" in result.output
+    assert "may create or initialize the database" in result.output
+    assert "Mismatch remains" in result.output
+    assert f"DB stored: {stored.provider}/{stored.model} ({stored.dimension}d)" in result.output
+    for key in ("provider", "model", "dimension", "max_sequence_tokens"):
+        assert f"embedding.{key} = {getattr(stored, key)!r}" in result.output
+    assert embedding_policy_fingerprint(stored) in result.output
+    assert "~/.memtomem/config.json" in result.output
+    assert "MEMTOMEM_*" in result.output
+    assert "policy mismatch" in result.output
+    assert "Restart affected servers" in result.output
+    assert 'mem_embedding_reset(mode="revert_to_stored")' in result.output
+    assert "does not persist settings to config.json" in result.output
+    assert "Reverted" not in result.output
+    assert "\x1b[32m" not in result.output
+    assert config_path.read_bytes() == config_before
+    assert config_path.stat().st_mtime_ns == mtime_before
+    assert not config_path.with_name(".config.json.lock").exists()
+
+    status = runner.invoke(cli, ["embedding-reset", "--mode", "status"])
+    assert status.exit_code == 0, status.output
+    assert "Mismatch detected" in status.output
+    assert "# show stored settings and recovery instructions" in status.output
+    assert "# match DB settings" not in status.output
+
+    async def verify():
+        storage = backend(configured)
+        await storage.initialize()
+        try:
+            assert storage.embedding_mismatch is not None
+            if scenario == "policy":
+                assert storage.embedding_mismatch["policy_mismatch"]
+            assert await storage.get_dense_coverage() == {
+                "total": 1,
+                "with_dense": int(bool(vector)),
+            }
+            hits = await storage.bm25_search("preserved")
+            assert [hit.chunk.content for hit in hits] == ["preserved guidance evidence"]
+            if vector:
+                hits = await storage.dense_search(vector, top_k=1)
+                assert [hit.chunk.content for hit in hits] == ["preserved guidance evidence"]
+        finally:
+            await storage.close()
+
+    asyncio.run(verify())
+    with sqlite3.connect(db_path) as db:
+        assert db.execute("SELECT * FROM _memtomem_meta ORDER BY key").fetchall() == meta_before
 
 
 @pytest.mark.parametrize(

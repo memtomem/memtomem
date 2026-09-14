@@ -274,7 +274,7 @@ def dense_degraded_hint(mismatch: dict[str, Any] | None) -> str:
     BM25 can be disabled or zero-weighted independently, in which case the
     query had no retrieval leg at all. It points at bare ``mm embedding-reset``
     (status mode, non-destructive), which prints both the destructive
-    ``apply-current`` path and the ``revert-to-stored`` alternative, rather
+    ``apply-current`` path and the ``revert-to-stored`` guidance, rather
     than naming the vector-deleting command directly.
     """
     detail = ""
