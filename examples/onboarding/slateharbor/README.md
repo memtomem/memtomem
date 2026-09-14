@@ -12,10 +12,14 @@
 노트북과 `examples/onboarding/slateharbor/`의 상대 경로를 유지해야 합니다.
 이 노트북은 파일 하나만 다운로드해서 실행하는 형식이 아닙니다.
 
-묶음 루트에서 Python 3.12 이상으로 실행합니다:
+완전한 ZIP에는 루트의 `START_HERE.md`, `LICENSE`, `tools/`와 샘플을 담은 `examples/`가 있습니다.
+일부 examples 파일만 복사한 폴더에서 검증 도구를 찾지 못하면 전체 묶음을 다시 받으세요.
+
+묶음 루트에서 Python 3.12 이상으로 실행합니다. 기존 `.venv`가 있다면 생성 명령은
+건너뛰고 기존 Python 버전을 확인하세요:
 
 ```bash
-uv venv .venv
+uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python "memtomem[code]>=0.5.0" jupyterlab ipykernel
 uv run --python .venv/bin/python --no-project jupyter lab examples/notebooks/00_start_here.ipynb
 ```
@@ -116,3 +120,11 @@ python tools/build_slateharbor_bundle.py --output /tmp/slateharbor-first-user.zi
 
 ZIP에는 노트북, 샘플, 생성·검증 도구, 라이선스만 들어갑니다. 개인 설정·실행 출력·실습 DB는 포함하지 않습니다.
 실행 증거와 미검증 항목은 [VALIDATION.md](VALIDATION.md)에 기록합니다.
+
+## 실제 Claude로 이어가기
+
+노트북의 임시 DB는 9번 셀에서 정리됩니다. 기존 Claude의 기억 저장소로 자동 이전되지 않습니다.
+10번 셀에 표시되는 **원본 샘플 절대 경로**를 사용하고, 연결 절차는
+[한국어 첫 설정 가이드](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md#3-경로-a-claude-code-플러그인-설치)를 따르세요.
+설치는 현재 프로젝트 범위로 하고, 실제 활성화·MCP 연결·출처 검색까지 확인합니다.
+다른 프로젝트에서도 사용하는 수동 user 등록은 삭제하지 않습니다.

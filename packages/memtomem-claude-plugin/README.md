@@ -44,6 +44,10 @@ diagnostic after installation.
 /plugin install memtomem@memtomem
 ```
 
+For project-scoped onboarding, run `claude plugin install memtomem@memtomem --scope project`
+from that project directory instead. The [Korean onboarding guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md#3-경로-a-claude-code-플러그인-설치)
+explains effective enablement and disabling a manual server only in that project.
+
 The bundled server includes the ONNX dependencies so existing ONNX/E5 configurations
 work without a separate Python installation step. The default remains
 `provider=none` (BM25-only); installing the plugin does not enable embeddings.

@@ -74,6 +74,10 @@ It does not intercept Claude's installation command.
 /plugin install memtomem@memtomem
 ```
 
+For project-scoped onboarding, run `claude plugin install memtomem@memtomem --scope project`
+from that project directory instead. The [Korean onboarding guide](../vibe-coding-getting-started-ko.md#3-경로-a-claude-code-플러그인-설치)
+explains effective enablement and disabling a manual server only in that project.
+
 The plugin launches the server via an exact reviewed `uvx --from
 memtomem[onnx]==<version>` pin, so [uv](https://docs.astral.sh/uv/) must be on your
 PATH. BM25 works with the default `embedding.provider=none`; embeddings are

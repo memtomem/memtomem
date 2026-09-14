@@ -31,12 +31,23 @@ cli()
 
 
 def verify_sources(root=ROOT):
-    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    root = Path(root)
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file() or not (root / "project").is_dir():
+        raise FileNotFoundError(
+            "Slateharbor 묶음이 불완전합니다: manifest.json과 project/가 필요합니다. "
+            "START_HERE.md가 있는 전체 ZIP을 다시 풀고 폴더 구조를 유지하세요."
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     for name, digest in manifest["files"].items():
         path = root / "project" / name
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"샘플 파일이 없습니다: {name}. 전체 ZIP을 다시 풀어 원본을 복구하세요."
+            )
         if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise ValueError(
-                f"Sample changed: {name}; restore the bundle before starting a new lab"
+                f"샘플 파일이 변경됐습니다: {name}. 새 실습 전에 전체 ZIP에서 원본을 복구하세요."
             )
     return manifest
 

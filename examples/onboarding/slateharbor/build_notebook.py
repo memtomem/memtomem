@@ -47,7 +47,7 @@ Python **3.12 이상**, 설치할 때만 인터넷이 필요합니다. API 키·
 터미널에서 묶음의 루트로 이동한 뒤:
 
 ```bash
-uv venv .venv
+uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python "memtomem[code]>=0.5.0" jupyterlab ipykernel
 uv run --python .venv/bin/python --no-project jupyter lab examples/notebooks/00_start_here.ipynb
 ```
@@ -56,6 +56,7 @@ uv run --python .venv/bin/python --no-project jupyter lab examples/notebooks/00_
 `uv pip install --python .venv/bin/python -e "packages/memtomem[code]" jupyterlab ipykernel`로
 소스에서 설치해도 같습니다. 실제로 검증한 버전은 [VALIDATION.md](../onboarding/slateharbor/VALIDATION.md)에 적혀 있습니다.
 
+이미 `.venv`가 있다면 생성 명령은 건너뛰고 기존 Python 버전을 확인하세요.
 Windows는 `.venv/bin/python`을 `.venv/Scripts/python.exe`로 바꿉니다.
 Jupyter에서 위 환경의 Python 커널을 선택하고 **Run All**을 실행하세요.
 `[code]`는 Python 함수 단위 분석을 위한 패키지이며 LLM이나 임베딩 모델이 아닙니다.
@@ -65,6 +66,14 @@ cell(
     "code",
     """
 try:
+    import sys
+    if sys.version_info < (3, 12):
+        raise RuntimeError(
+            f"Python 3.12 이상이 필요합니다. 현재 커널: {sys.executable} ({sys.version.split()[0]}). "
+            "기존 .venv는 보존하세요. Python 3.12 이상인 커널을 선택하거나, "
+            "준비 절의 명령에서 .venv를 사용하지 않은 새 경로로 바꿔 환경을 만든 뒤 커널을 바꾸세요."
+        )
+
     import memtomem
     import tree_sitter
     import tree_sitter_python
@@ -107,7 +116,10 @@ candidates = [Path.cwd(), *list(Path.cwd().parents)[:3]]
 sample = next((p / 'examples/onboarding/slateharbor' for p in candidates
                if (p / 'examples/onboarding/slateharbor/lab.py').is_file()), None)
 if sample is None:
-    raise FileNotFoundError('노트북과 Slateharbor 폴더가 함께 필요합니다. 묶음 루트에서 Jupyter를 다시 여세요.')
+    raise FileNotFoundError(
+        'Slateharbor 도우미 lab.py를 찾지 못했습니다. START_HERE.md가 있는 완전한 묶음을 풀고 '
+        '그 루트에서 Jupyter를 다시 여세요. 노트북 파일만 복사하면 실행되지 않습니다.'
+    )
 spec = importlib.util.spec_from_file_location('slateharbor_lab', sample / 'lab.py')
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -212,7 +224,8 @@ cell(
 “삭제 가능 여부를 검토해줘”라는 요청에 결정·코드·설정의 근거를 붙일 수 있게 됐습니다.
 검색 순위만으로 삭제를 승인하지 않고, 원본 상태와 근거를 읽어 판단합니다.
 
-**여기까지가 첫 체험입니다.** 아래부터는 기록이 복잡해졌을 때의 활용입니다.
+**여기까지가 첫 체험입니다.** 여기서 마치려면 9번 정리 셀을 실행하세요.
+Claude에서 이어가려면 10번으로 이동하세요. 아래 5~8번은 선택 실습입니다.
 """,
 )
 cell(
@@ -341,9 +354,25 @@ cell(
 
 이제는 **본인이 선택한 저장소에 샘플 파일을 색인하는 별도 작업**입니다.
 [한국어 첫 설정 가이드](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md)에서 도구 하나만 연결하세요.
-그 뒤 번들의 실제 `examples/onboarding/slateharbor/project` 절대 경로를 사용합니다.
+노트북에서 만든 임시 저장소는 정리됐으며 Claude의 실제 저장소에 자동으로 복사되지 않습니다.
+기존 기억이 있다면 초기화를 반복하지 말고 상태부터 확인하세요.
+Claude 설치는 이 프로젝트 범위로 하고, 설치 목록의 활성화와 실제 MCP 연결을 모두 확인합니다.
+수동 등록이 함께 보이면 다른 프로젝트에서 쓰는 user 등록을 삭제하지 않고 현재 프로젝트에서만 끕니다.
+자세한 명령과 복구 순서는 위 가이드의 **경로 A**를 따릅니다.
 
+커널을 재시작했다면 1번 준비 셀을 먼저 실행하세요.
+아래 셀은 원본 샘플의 절대 경로만 표시합니다. 색인은 직접 요청하기 전에는 실행하지 않습니다.
+
+""",
+)
+cell("code", "print('Claude에 색인을 요청할 원본 샘플 경로:', (sample / 'project').resolve())")
+cell(
+    "markdown",
+    """
 ### Claude Code
+
+아래 경로를 위에 출력된 실제 경로로 바꿉니다. 이미 색인했다면 검색부터 확인하세요.
+임시 폴더가 아니라 이 배포 샘플 폴더만 선택하세요.
 
 ```text
 /memtomem:index /절대/경로/examples/onboarding/slateharbor/project
@@ -363,6 +392,7 @@ $memtomem-search 스킬로 "legacy callback"을 검색해줘.
 Slateharbor의 legacy callback 삭제 가능성을 검토하려고 합니다. 아직 코드를 수정하지 마세요.
 memtomem 검색 도구로 "legacy callback"을 찾고,
 현재 결정·Python 구현·production JSON을 구분해 원본 경로와 근거를 보여주세요.
+이 온보딩 폴더의 examples/onboarding/slateharbor/project 아래 출처인지도 확인하세요.
 과거 기록이나 검토 중 제안을 현재 결정으로 취급하지 마세요.
 근거가 부족하면 부족하다고 말하고, 확인한 내용으로 다음 작업만 제안하세요.
 ```

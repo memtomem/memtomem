@@ -70,6 +70,9 @@ codex --version   # Codex CLI를 쓸 때
 Claude Code와 Codex CLI 중 어느 쪽을 쓰더라도 완전히 새 환경에서는
 다음 두 명령을 한 번 실행합니다.
 
+**이미 저장된 기억이나 설정이 있다면 초기화 명령은 건너뛰고 아래 상태 명령만 실행하세요.**
+기존 ONNX/E5 설정이 보이는 것은 정상입니다. 이 체험을 위해 기존 모델이나 DB를 바꾸지 않습니다.
+
 ```bash
 uvx --from 'memtomem[onnx]==0.6.2' mm init --preset minimal --non-interactive --mcp skip
 uvx --from 'memtomem[onnx]==0.6.2' mm status
@@ -90,43 +93,76 @@ database path는 나중에 두 도구가 같은 저장소를 보는지 확인할
 
 ## 3. 경로 A: Claude Code 플러그인 설치
 
-Claude Code 세션에서 실행합니다.
+### 설치 전: 이 프로젝트에서 사용할 연결 하나 고르기
 
-기존에 Claude MCP를 등록했다면 Claude Code의 `/mcp`에서 먼저 확인합니다.
-등록 상태는 아래 진단 명령으로 점검합니다.
+터미널을 **온보딩 프로젝트 루트**에서 엽니다. 다음 진단도 같은 폴더에서 실행합니다.
 
 ```bash
 uvx --from "memtomem[all]==0.6.2" mm doctor --claude-mcp
 ```
 
-핀을 쓰는 이유는 플러그인 설치가 MCP 서버를 등록할 뿐 `mm` 을 PATH에 올리지
-않기 때문입니다. CLI 를 이미 설치했다면 `mm doctor --claude-mcp` 도 같은
-점검입니다.
+플러그인은 `mm`을 PATH에 설치하지 않으므로 위의 고정 버전 명령을 사용합니다.
+CLI를 별도로 설치했다면 `mm doctor --claude-mcp`도 같은 진단입니다.
 
-`/path/to/memtomem`을 소스 체크아웃 경로로 바꾸고, 검사할 프로젝트의
-루트에서 실행하세요. `--project`는 현재 작업 디렉터리를 유지합니다.
-작업 디렉터리를 바꾸는 `--directory`로 대체하면 다른 프로젝트를 검사하게 됩니다.
-소스 체크아웃이 없다면 `/mcp`에서 기존 등록을 확인하면 됩니다.
+이 명령은 MCP **등록 충돌**을 확인합니다. 종료 코드 `0`은 감지된 충돌 없음,
+`1`은 중복 위험, `2`는 확인 불완전입니다. `0`이 실제 MCP 연결 성공을 뜻하지는 않습니다.
+별도 `[all]` 환경에서 진단해도 플러그인 서버의 패키지를 설치하거나 고치지는 않습니다.
 
-종료 코드 `0`은 감지된 충돌 없음, `1`은 중복 위험, `2`는 확인 불완전입니다.
-설정은 자동 삭제하지 않습니다. 안내된 등록 이름과 범위로 기존 연결을
-정리한 뒤 플러그인을 설치하세요. uv 설치와 저장된 메모리는 유지합니다.
-검사와 별개로 `/plugin install`을 바로 실행하면 설치 자체를 막지는 않습니다.
+기존 수동 등록이 있으면 Claude Code의 `/mcp`에서 이름·범위와 플러그인 서버를 구분합니다.
+플러그인을 사용할 프로젝트에서는 **수동 서버만 이 프로젝트에서 비활성화**합니다.
+다른 프로젝트에서도 쓰는 user 등록을 전역 삭제하지 마세요. 서버 프로세스가 여럿이라는
+사실만으로 중복 등록이라고 판단하지 않습니다. 다른 에디터 세션일 수도 있습니다.
 
-```text
-/plugin marketplace add memtomem/memtomem
-/plugin install memtomem@memtomem
-/reload-plugins
+### 프로젝트 범위를 명시해 설치하기
+
+같은 프로젝트 루트의 터미널에서 실행합니다. 이 설치는 다른 프로젝트의 연결을 대체하지 않습니다.
+
+```bash
+claude plugin marketplace add memtomem/memtomem
+claude plugin install memtomem@memtomem --scope project
+claude plugin list --json
+claude plugin details memtomem@memtomem
 ```
 
-`/reload-plugins`가 없다면 Claude Code를 종료하고 새 세션을 엽니다.
-플러그인이 로드되면 다음 명령으로 연결을 확인합니다.
+이미 설치되어 있다면 marketplace를 갱신한 뒤 설치된 버전을 업데이트합니다.
+
+```bash
+claude plugin marketplace update memtomem
+claude plugin update memtomem@memtomem --scope project
+```
+
+설치 목록에서 해당 프로젝트의 `memtomem@memtomem` 항목을 확인하세요.
+`version`과 `projectPath`가 맞고 **`enabled: true`**여야 합니다.
+컴포넌트 목록에는 `status`를 포함한 스킬 7개와 MCP 서버 `memtomem` 1개가 있어야 합니다.
+
+### 설치됐는데 명령이 안 보일 때
+
+프로젝트 설정이 true여도 `.claude/settings.local.json`의 false가 우선할 수 있습니다.
+설치 목록에서 비활성 상태를 확인했고 이 프로젝트에서 사용하려면 다음을 실행합니다.
+
+```bash
+claude plugin enable memtomem@memtomem --scope local
+claude plugin list --json
+```
+
+이 명령은 현재 프로젝트의 로컬 활성화 설정을 바꿉니다. 목록 조회가 실패하거나 관리 정책이
+보고되면 원인을 확인하고, 성공했다고 추정하지 마세요.
+
+### 실제 연결 확인하기
+
+Claude Code에서 `/reload-plugins`를 실행합니다. 명령이 없거나 이전 도구 목록이 남아 있으면
+Claude Code를 종료하고 **같은 프로젝트에서 새 세션**을 엽니다.
+`/mcp`에서 플러그인 서버가 연결됐는지, 수동 서버와 도구가 두 묶음으로 노출되지 않는지 확인합니다.
+플러그인 자체가 활성 상태여도 `/mcp`에서 해당 서버만 꺼져 있을 수 있습니다.
 
 ```text
 /memtomem:status
 ```
 
-앞에서 본 것과 같은 storage와 database path가 표시되면 준비가 끝났습니다.
+실제 MCP 도구 호출이 보이고 앞서 본 storage와 database path가 일치하면 연결 확인을 마칩니다.
+설치 메시지·도구 이름만 보이는 상태나 내부 오류를 성공으로 처리하지 않습니다.
+오류가 있으면 플러그인의 실제 실행 명령과 의존성을 확인하세요. 기본 서버 핀은
+`memtomem[onnx]==0.6.2`입니다. 활성화 확인과 데이터 조회 성공은 서로 다른 단계입니다.
 
 Codex CLI를 쓴다면 이 절은 건너뛰고 경로 B만 진행하세요.
 

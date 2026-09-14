@@ -1301,8 +1301,8 @@ class TestVibeCodingQuickstart:
     def test_plugin_install_commands_match_supported_public_flow(self) -> None:
         guide = _read(_VIBE_GUIDE)
         commands = (
-            "/plugin marketplace add memtomem/memtomem",
-            "/plugin install memtomem@memtomem",
+            "claude plugin marketplace add memtomem/memtomem",
+            "claude plugin install memtomem@memtomem --scope project",
             "codex plugin marketplace add memtomem/memtomem",
             "codex plugin add memtomem@memtomem",
         )
@@ -1335,8 +1335,8 @@ class TestVibeCodingQuickstart:
         claude_flow = (
             bootstrap,
             status,
-            "/plugin marketplace add memtomem/memtomem",
-            "/plugin install memtomem@memtomem",
+            "claude plugin marketplace add memtomem/memtomem",
+            "claude plugin install memtomem@memtomem --scope project",
             "/memtomem:status",
             "/memtomem:remember",
             "/memtomem:search",
