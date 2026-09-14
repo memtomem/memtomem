@@ -199,6 +199,7 @@ def _build_config(
     validate_profile: bool = True,
     embedding_context: EmbeddingConfig | None = None,
     _override_snapshot: _ConfigFileSnapshot | None = None,
+    _fragment_snapshots: tuple[_ConfigFileSnapshot, ...] | None = None,
 ) -> Mem2MemConfig:
     """Shared layer replay, with normalization after the final profile selection.
 
@@ -207,7 +208,7 @@ def _build_config(
     batch size would make a user pin compare equal to itself. Revalidate from
     explicit inputs so generated E5 defaults remain unpinned.
     """
-    # Registration supplies the target file already read under its write lock.
+    # Writers supply the target file already read under its write lock.
     # This also avoids consulting the default file for an explicit config_path.
     override = None
     if include_overrides:
@@ -223,7 +224,13 @@ def _build_config(
             raise ValueError(f"config overrides in {override.path} must be a JSON object")
 
     cfg = Mem2MemConfig()
-    fragments = tuple(_read_config_fragments(_config_d_path()))
+    # A save shares these reads between identity resolution and its comparand.
+    # An explicitly empty snapshot must not pick up newly created fragments.
+    fragments = (
+        _fragment_snapshots
+        if _fragment_snapshots is not None
+        else tuple(_read_config_fragments(_config_d_path()))
+    )
     profile_context = _resolve_embedding_context(cfg, fragments, override, embedding_context)
     load_config_d(
         cfg,

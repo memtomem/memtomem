@@ -2059,17 +2059,34 @@ class TestConfigPatch:
         assert rules[0].namespace == "docs"
         assert rules[1].namespace == "work"
 
-    async def test_patch_namespace_rules_validation_error(self, client: AsyncClient):
-        """Invalid rule (empty path_glob) is reported in rejected list, not applied."""
-        with patch("memtomem.web.routes.system.save_config_overrides"):
+    @pytest.mark.parametrize("pattern", ["", "!", "foo\\", "[z-a]", "[Z-a]"])
+    async def test_patch_namespace_rules_validation_error(
+        self, app, client: AsyncClient, _isolated_config_paths: Path, pattern
+    ):
+        """Invalid globs are rejected before mutation or persistence (#2432)."""
+        path = _isolated_config_paths / "config.json"
+        path.write_text(
+            json.dumps({"namespace": {"rules": [{"path_glob": "docs/**", "namespace": "docs"}]}}),
+            encoding="utf-8",
+        )
+        before = path.read_bytes()
+        # Let the initial hot reload install the persisted baseline first.
+        assert (await client.get("/api/config")).status_code == 200
+        prior = app.state.config.namespace.rules
+        assert prior[0].namespace == "docs"
+        with patch("memtomem.web.routes.system.save_config_overrides") as save:
             resp = await client.patch(
                 "/api/config",
-                json={"namespace": {"rules": [{"path_glob": "", "namespace": "x"}]}},
+                json={"namespace": {"rules": [{"path_glob": pattern, "namespace": "x"}]}},
             )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["applied"]) == 0
         assert any("namespace.rules" in r for r in data["rejected"])
+        assert any("path_glob" in r for r in data["rejected"])
+        assert app.state.config.namespace.rules is prior
+        assert path.read_bytes() == before
+        save.assert_not_called()
 
     async def test_patch_supported_extensions(self, app, client: AsyncClient):
         """PATCH /api/config accepts indexing.supported_extensions as list[str].
