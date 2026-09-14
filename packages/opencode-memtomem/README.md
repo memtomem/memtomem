@@ -6,23 +6,29 @@ and three read-only skills. It does not add event hooks or automatic indexing.
 
 ## Install
 
-The npm release for this core version is `opencode-memtomem@0.3.3`, bundling
+The npm release for this core version is `opencode-memtomem@0.3.4`, bundling
 core `0.6.2`.
 
 Do not use an `opencode plugin add` command; OpenCode loads npm plugins from
 the singular `plugin` array in `opencode.json`:
 
 ```json
-{"plugin": ["opencode-memtomem@0.3.3"]}
+{"plugin": ["opencode-memtomem@0.3.4"]}
 ```
 
 Upgrade if your pin is still `0.1.3` or older: those bundle pre-`0.3.14`
 cores, whose `mcp` dependency has no `<2` upper bound, so a fresh resolve
 picks up `mcp` 2.x and fails at import (#1978).
 
+Upgrade if your pin is `0.3.3` or older and your memtomem configuration selects
+an ONNX embedding provider, such as the E5 CPU profile: those releases start the
+server without the ONNX dependencies (#2453). The plugin never replaces an
+`mcp.memtomem` entry you already define, so a hand-written entry keeps its own
+launch command — update or remove it to use the plugin's.
+
 Restart OpenCode, then run `/memtomem-status` or `/memtomem-search topic`.
 `uvx` must be available on `PATH`; the plugin starts the exact-pinned
-`memtomem==0.6.2` runtime on demand. For development from this repository,
+`memtomem[onnx]==0.6.2` runtime on demand. For development from this repository,
 point the same `plugin` array at `packages/opencode-memtomem/dist/server.js`.
 
 If you only need the MCP tools — without the bundled commands and skills —

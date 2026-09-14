@@ -190,10 +190,41 @@ def test_opencode_plugin_matches_contract() -> None:
         assert f"opencode plugin add {package['name']}" not in text
         assert plugin_spec in text
         assert mcp_spec in text
+        # Every npm pin, not just one: a stale pin beside a current one passes `in`.
+        pins = re.findall(rf"{re.escape(package['name'])}@(\d+\.\d+\.\d+)", text)
+        assert pins, path
+        assert set(pins) == {plugin_version}, path
 
     compatibility = f"compatibility: OpenCode {contract['opencode']['version_range']}"
     for skill in (_ROOT / "packages/opencode-memtomem/skills").glob("*/SKILL.md"):
         assert compatibility in skill.read_text(encoding="utf-8")
+
+
+def test_opencode_plugin_launches_the_contract_requirement() -> None:
+    # #2453: the OpenCode server once built `memtomem==<core>` itself, so the
+    # contract's `mcp_extras` reached the Claude and Codex launches but not this one.
+    core = _contract()["core"]
+    expected = f"memtomem[{','.join(core['mcp_extras'])}]=={core['version']}"
+    package = _ROOT / "packages/opencode-memtomem"
+
+    generated = (package / "src/generated.ts").read_text(encoding="utf-8")
+    rendered = re.findall(r'^export const MCP_REQUIREMENT = "([^"]*)";$', generated, re.MULTILINE)
+    assert rendered == [expected]
+
+    server = (package / "src/server.ts").read_text(encoding="utf-8")
+    # Tokens, not layout: test/server.test.mjs pins the built command itself.
+    launches = [
+        [token.strip() for token in body.split(",") if token.strip()]
+        for body in re.findall(r"command:\s*\[([^\]]*)\]", server)
+    ]
+    assert launches == [['"uvx"', '"--from"', "MCP_REQUIREMENT", '"memtomem-server"']]
+
+    readme = " ".join((package / "README.md").read_text(encoding="utf-8").split())
+    assert re.findall(r"the plugin starts the exact-pinned `([^`]*)` runtime", readme) == [expected]
+    guide = (_ROOT / "docs/guides/integrations/opencode.md").read_text(encoding="utf-8")
+    rows = [line for line in guide.splitlines() if line.startswith("| MCP |")]
+    assert len(rows) == 1
+    assert re.findall(r"Exact-pinned `([^`]*)`", rows[0]) == [expected]
 
 
 def test_opencode_package_lock_matches_contract() -> None:

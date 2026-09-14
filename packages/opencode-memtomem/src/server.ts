@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { Config, PluginInput, PluginModule } from "@opencode-ai/plugin";
 
 import {
-  CORE_VERSION,
+  MCP_REQUIREMENT,
   MCP_TIMEOUT_MS,
   OPENCODE_COMMANDS,
   OPENCODE_READ_SKILLS,
@@ -115,7 +115,7 @@ async function configure(config: RuntimeConfig, input: ServerInput): Promise<voi
   if (!("memtomem" in config.mcp)) {
     config.mcp.memtomem = {
       type: "local",
-      command: ["uvx", "--from", `memtomem==${CORE_VERSION}`, "memtomem-server"],
+      command: ["uvx", "--from", MCP_REQUIREMENT, "memtomem-server"],
       enabled: true,
       timeout: MCP_TIMEOUT_MS,
       environment: { MEMTOMEM_TOOL_MODE: TOOL_MODE },

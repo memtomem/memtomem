@@ -14,6 +14,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   resolve and now add no dependencies. If your own code imports either SDK,
   declare it as your own dependency.
 
+### Fixed
+
+- **The OpenCode plugin includes the ONNX dependencies needed by existing E5
+  configurations (#2453).** `opencode-memtomem` 0.3.4 launches
+  `memtomem[onnx]==0.6.2`, the same requirement as the Claude and Codex plugins
+  (#2449), now rendered from the shared plugin contract instead of built in the
+  plugin. The default embedding provider is still `none` (BM25-only). The plugin
+  never replaces an `mcp.memtomem` entry you already define in `opencode.json`,
+  so update or remove a hand-written base-only entry.
+
 ## [0.6.2] — 2026-09-14
 
 ### Upgrading
