@@ -343,6 +343,13 @@ class TestStorageExtended:
         storage = components.storage
         chunk = make_chunk(content="real", embedding=_varied_embedding(0.1))
         await storage.upsert_chunks([chunk])
+        # get_vector_count() is memoized per read connection and round-robins
+        # the pool: warm every reader first so a stale memo cannot hide behind
+        # a cold connection below.
+        readers = len(storage._read_pool)
+        assert readers > 0  # otherwise the writer fallback bypasses the memo
+        for _ in range(readers):
+            assert await storage.get_vector_count() == 1
 
         # Inject a stale vec sidecar at a rowid that no ``chunks`` row
         # owns (production source: a partial commit between the chunks
@@ -362,11 +369,30 @@ class TestStorageExtended:
         assert cov["with_dense"] == 1
         # But get_vector_count() counts ALL raw rows in chunks_vec, including
         # the orphan vector, reflecting what reset_embedding_meta will destroy.
-        assert await storage.get_vector_count() == 2
+        for _ in range(readers):
+            assert await storage.get_vector_count() == 2
 
     async def test_get_vector_count_empty_db(self, components):
         storage = components.storage
         assert await storage.get_vector_count() == 0
+
+    async def test_get_vector_count_drops_to_zero_after_reset_with_warm_readers(self, components):
+        # The mismatch warning reads this count right after a reset; a memo
+        # warmed before the DROP/CREATE must not keep reporting old rows.
+        storage = components.storage
+        await storage.upsert_chunks(
+            [make_chunk(content="before reset", embedding=_varied_embedding(0.1))]
+        )
+        readers = len(storage._read_pool)
+        assert readers > 0
+        for _ in range(readers):
+            assert await storage.get_vector_count() == 1
+
+        await storage.reset_embedding_meta(dimension=1024, provider="onnx", model="bge-m3")
+
+        for _ in range(readers):
+            assert await storage.get_vector_count() == 0
+        assert (await storage.get_stats())["total_chunks"] == 1
 
     async def test_dense_coverage_zero_when_vec_table_dropped(self, components):
         # ``reset_embedding_meta`` drops and recreates ``chunks_vec`` but
