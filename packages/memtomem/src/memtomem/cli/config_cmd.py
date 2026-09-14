@@ -555,7 +555,9 @@ _RESET_AFTER_CHANGE = {
 }
 
 # A hand edit that moves only one of these lands a half-configured embedder
-# (``provider=onnx`` with ``model=""``/``dimension=0``) that no gate calls a
+# (``provider=ollama`` with ``model=""``/``dimension=0``, or an ONNX model
+# other than multilingual-e5-small with ``dimension=0`` — an ONNX config with
+# no model now resolves to E5 and its 384 dimensions) that no gate calls a
 # mismatch — ``mm embedding-reset`` compares DB against config and reports
 # "in sync" because both are the broken tuple. The wizard sets all three from
 # one model choice, which is why it stays the first remedy.

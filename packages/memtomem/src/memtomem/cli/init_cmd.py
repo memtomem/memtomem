@@ -503,6 +503,7 @@ def _step_embedding(state: dict) -> None:
         _all_minilm_size = format_size(ONNX_EMBEDDER_MODELS["all-MiniLM-L6-v2"][2])
         _bge_small_size = format_size(ONNX_EMBEDDER_MODELS["bge-small-en-v1.5"][2])
         _bge_m3_size = format_size(ONNX_EMBEDDER_MODELS["bge-m3"][2])
+        _e5_small_size = format_size(ONNX_EMBEDDER_MODELS["multilingual-e5-small"][2])
 
         click.echo("  Available models:")
         click.echo(f"    [1] all-MiniLM-L6-v2 — English, fast, tiny (~{_all_minilm_size}, 384d)")
@@ -510,7 +511,9 @@ def _step_embedding(state: dict) -> None:
             f"    [2] bge-small-en-v1.5 — English, better accuracy (~{_bge_small_size}, 384d)"
         )
         click.echo(f"    [3] bge-m3 — multilingual KR/EN/JP/CN (~{_bge_m3_size}, 1024d)")
-        click.echo("    [4] multilingual-e5-small — multilingual CPU default (~490 MB, 384d)")
+        click.echo(
+            f"    [4] multilingual-e5-small — multilingual CPU default (~{_e5_small_size}, 384d)"
+        )
         model_choice = nav_prompt("  Select", type=click.IntRange(1, 4), default=4)
 
         models = {
@@ -1571,11 +1574,12 @@ _PROBE_EXTRAS_CODE: str = (
 # of a mis-sized auto-seed is the PR #295 failure mode (CPU-bound embedder
 # blocks the wizard for minutes on first invocation, user thinks it hung).
 #
-# Baseline 64 KB derives from bge-m3 (1024d ONNX) on CPU: ~1 byte/0.3 tokens
+# Baseline 64 KB was derived from bge-m3 (1024d ONNX) on CPU: ~1 byte/0.3 tokens
 # × ~1 ms/token ≈ 20 seconds worst case, well under the 30 s wizard attention
-# budget. 10 files / 64 KB also matches a "fresh ~/memories with a few seed
-# memos" shape — the dominant wizard workflow — without catching "moved my
-# Obsidian vault" installs.
+# budget. It stays as the ceiling for the smaller 384d multilingual-e5-small
+# default rather than being re-derived. 10 files / 64 KB also matches a
+# "fresh ~/memories with a few seed memos" shape — the dominant wizard
+# workflow — without catching "moved my Obsidian vault" installs.
 _SEED_MAX_FILES: int = 10
 _SEED_MAX_BYTES: int = 64 * 1024
 
@@ -1786,9 +1790,11 @@ def _provider_seed_hint(provider: str) -> str | None:
     generic "watch the progress bar" message rather than making up a
     number. The magnitudes below come from rough bge-m3 CPU benchmarking
     (~1 ms/token) and network-latency-bound cloud calls — precise enough
-    to set expectations, not so precise users will hold us to them."""
+    to set expectations, not so precise users will hold us to them. The
+    ONNX line names no model: the default is multilingual-e5-small, and an
+    explicit bge-m3 config is still possible."""
     if provider == "onnx":
-        return "bge-m3 / CPU embedder → may take several minutes"
+        return "Local ONNX / CPU embedder → may take several minutes"
     if provider == "ollama":
         return "Ollama embedder → time varies by model; watch the progress bar"
     if provider == "openai":

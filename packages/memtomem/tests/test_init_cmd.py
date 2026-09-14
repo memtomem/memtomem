@@ -5116,7 +5116,13 @@ class TestInitialSeedThreshold:
         progress-bar message rather than fabricating a number."""
         from memtomem.cli.init_cmd import _provider_seed_hint
 
-        assert "bge-m3" in (_provider_seed_hint("onnx") or "")
+        from memtomem.embedding.aliases import ONNX_EMBEDDER_MODELS
+
+        onnx_hint = _provider_seed_hint("onnx") or ""
+        assert "ONNX" in onnx_hint
+        # The ONNX default is multilingual-e5-small and bge-m3 stays selectable,
+        # so the advisory must not name one model as if it were the embedder.
+        assert not [model for model in ONNX_EMBEDDER_MODELS if model in onnx_hint]
         assert "Ollama" in (_provider_seed_hint("ollama") or "")
         assert "OpenAI" in (_provider_seed_hint("openai") or "")
         assert "BM25" in (_provider_seed_hint("none") or "")
@@ -5152,7 +5158,7 @@ class TestInitialSeedThreshold:
         assert confirm_fired["yes"] is True  # prompt DID fire this time
         out = capsys.readouterr().out
         assert "11 file(s)" in out
-        assert "bge-m3" in out  # provider-specific advisory
+        assert "Local ONNX" in out  # provider-specific advisory
         assert "Ctrl-C" in out
 
     def test_maybe_seed_large_by_bytes_also_prompts(
