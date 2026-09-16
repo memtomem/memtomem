@@ -344,6 +344,13 @@ def _classify_leg(
     # reason is built, so every consumer of it agrees; escaping is left to the
     # display, because this reason also reaches ``--json`` (#2477/#2478).
     label = redact_signature_label(sig)
+    # Producers redact and leave escaping to the display, with one exception
+    # that predates #2477: a command preview is ``repr()``-quoted so several
+    # commands stay delimited. ``repr`` also spells control characters as
+    # ``\xNN`` text, so this preview — and only this preview, plus the two
+    # selector-error listings in ``plan_hook_copy`` — reaches ``--json``
+    # already escaped. It is kept for byte-for-byte continuity of these
+    # messages; a new producer does not get the same latitude.
     colliding = _rule_inner_commands(same_matcher)
     preview = (
         "; ".join(repr(redact_secret_value(c)) for c in colliding[:3])
@@ -534,6 +541,8 @@ def plan_hook_copy(
         if not narrowed:
             # Candidates are canonical entries, not what the caller typed, so
             # a credential in an unrelated hook command must not be listed.
+            # ``repr`` is the pre-#2477 command-preview exception documented
+            # in ``_classify_leg``: it quotes, and so escapes, each candidate.
             previews = ", ".join(repr(redact_secret_value(s.command_shape)) for s, _ in candidates)
             raise HookNotFoundError(
                 f"--hook-command {hook_command!r} matches none of the entries "
@@ -541,6 +550,7 @@ def plan_hook_copy(
             )
         candidates = narrowed
     if len(candidates) > 1:
+        # Same redaction, and the same pre-#2477 ``repr`` exception, as above.
         previews = ", ".join(repr(redact_secret_value(s.command_shape)) for s, _ in candidates)
         raise AmbiguousHookSelectorError(
             f"{len(candidates)} entries match '{event}:{matcher_norm}'; "

@@ -51,12 +51,14 @@ from click.testing import CliRunner
 from memtomem.cli import context_cmd
 from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.context.settings import MalformedHookMatcher
+from memtomem.context.settings_copy import HookCopyPlan, HookCopyResult, _sync_followup_command
 from memtomem.context.settings_doctor import (
     DuplicateTier,
     HookSignature,
     UnportableHookCommand,
     UnscannedSettingsFile,
 )
+from memtomem.context.settings_migrate import MigrateMove, MigratePlan, MigrateResult
 
 CLI_SOURCE = Path(context_cmd.__file__)
 
@@ -336,28 +338,30 @@ def _doctor(monkeypatch, tmp_path):
 # ── settings-migrate ──────────────────────────────────────────────
 
 
-def _move(prefix: str, *, conflict: bool = False, already: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(
+# Real planner and result types, not look-alikes: ``applicable_moves`` and
+# ``is_noop`` are then computed by the code that production runs, so a scenario
+# cannot reach a branch through a combination the planner never produces.
+
+
+def _move(prefix: str, *, conflict: bool = False, already: bool = False) -> MigrateMove:
+    return MigrateMove(
         signature=sig(prefix),
-        conflict_at_target=conflict,
+        rule_to_write_at_target={},
         already_at_target=already,
+        conflict_at_target=conflict,
         conflict_reason=poison(f"{prefix}_conflict") if conflict else "",
     )
 
 
 def _migrate_plan(
     *, source_scope: str = "user", target_scope: str = "project_local", moves=()
-) -> SimpleNamespace:
-    moves = tuple(moves)
-    applicable = tuple(m for m in moves if not m.conflict_at_target)
-    return SimpleNamespace(
+) -> MigratePlan:
+    return MigratePlan(
         source_scope=source_scope,
         target_scope=target_scope,
         source_path=ppath("mig_source_path"),
         target_path=ppath("mig_target_path"),
-        moves=moves,
-        applicable_moves=applicable,
-        is_noop=not applicable,
+        moves=tuple(moves),
         project_root=Path("/poisoned"),
     )
 
@@ -462,15 +466,22 @@ def _migrate_host_writes(monkeypatch, tmp_path):
     "mig_source_path",
     "mig_target_path",
     "mig_apply_warning",
+    # Both paths are also printed by the preview, so only these prove the
+    # success lines themselves ran.
+    branch=("✓ wrote target", "✓ cleaned source"),
 )
 def _migrate_apply(monkeypatch, tmp_path):
-    _patch_migrate(monkeypatch, tmp_path, _migrate_plan(moves=[_move("a")]))
+    plan = _migrate_plan(moves=[_move("a")])
+    _patch_migrate(monkeypatch, tmp_path, plan)
     monkeypatch.setattr(context_cmd, "_is_within", lambda *a, **k: True)
     monkeypatch.setattr(
         context_cmd,
         "apply_migration",
-        lambda *a, **k: SimpleNamespace(
-            target_written=True, source_written=True, warnings=[poison("mig_apply_warning")]
+        lambda *a, **k: MigrateResult(
+            plan=plan,
+            target_written=True,
+            source_written=True,
+            warnings=[poison("mig_apply_warning")],
         ),
     )
     return invoke(
@@ -497,30 +508,25 @@ def _migrate_gate_a(monkeypatch, tmp_path):
 # ── settings-copy ─────────────────────────────────────────────────
 
 
-def _copy_plan(
-    *,
-    canonical_state: str = "missing",
-    target_state: str = "missing",
-    pending_canonical: bool = True,
-    pending_target: bool = True,
-) -> SimpleNamespace:
+def _copy_plan(*, canonical_state: str = "missing", target_state: str = "missing") -> HookCopyPlan:
+    """A real plan: ``label``, ``pending_*_write`` and ``is_noop`` come from its
+    own properties, so the leg states alone decide which gates a scenario hits."""
     signature = sig("cp")
-    return SimpleNamespace(
-        label=f"{signature.event}:{signature.matcher}",
-        signature=signature,
-        src_canonical_path=ppath("cp_src_canonical"),
+    return HookCopyPlan(
+        src_project_root=Path("/poisoned/src"),
         dst_project_root=Path(f"/poisoned/{poison('cp_dst_root')}"),
         dst_scope="user",
+        src_canonical_path=ppath("cp_src_canonical"),
         dst_canonical_path=ppath("cp_dst_canonical"),
         dst_target_path=ppath("cp_dst_target"),
+        signature=signature,
+        canonical_inner={},
+        rule_for_canonical={},
+        rule_for_target={},
         canonical_state=canonical_state,
         canonical_reason=poison("cp_canonical_reason") if canonical_state == "conflict" else "",
         target_state=target_state,
         target_reason=poison("cp_target_reason") if target_state == "conflict" else "",
-        pending_canonical_write=pending_canonical,
-        pending_target_write=pending_target,
-        is_noop=not (pending_canonical or pending_target),
-        has_conflict="conflict" in (canonical_state, target_state),
     )
 
 
@@ -547,10 +553,8 @@ def _copy_preview_target_conflict(monkeypatch, tmp_path):
     return capture(lambda: context_cmd._print_hook_copy_plan(plan))
 
 
-def _follow_up(plan: SimpleNamespace) -> str:
+def _follow_up(plan: HookCopyPlan) -> str:
     """The real follow-up command, built from the plan's poisoned destination."""
-    from memtomem.context.settings_copy import _sync_followup_command
-
     return _sync_followup_command(plan.dst_project_root, plan.dst_scope)
 
 
@@ -565,7 +569,7 @@ def _follow_up(plan: SimpleNamespace) -> str:
 )
 def _copy_result_a(monkeypatch, tmp_path):
     plan = _copy_plan()
-    result = SimpleNamespace(
+    result = HookCopyResult(
         plan=plan,
         canonical_written=True,
         canonical_already=False,
@@ -582,7 +586,7 @@ def _copy_result_a(monkeypatch, tmp_path):
 )
 def _copy_result_b(monkeypatch, tmp_path):
     plan = _copy_plan()
-    result = SimpleNamespace(
+    result = HookCopyResult(
         plan=plan,
         canonical_written=False,
         canonical_already=True,
@@ -659,7 +663,7 @@ def _copy_storeless(monkeypatch, tmp_path):
     branch=("tracked canonical settings",),
 )
 def _copy_gate_b(monkeypatch, tmp_path):
-    args = _patch_copy(monkeypatch, tmp_path, _copy_plan(pending_target=False))
+    args = _patch_copy(monkeypatch, tmp_path, _copy_plan(target_state="exact"))
     return invoke(context_cmd.settings_copy_cmd, [*args, "--apply"], input="n\n")
 
 
@@ -670,7 +674,7 @@ def _copy_gate_b(monkeypatch, tmp_path):
     branch=("outside the destination project", "(user tier)"),
 )
 def _copy_host_writes(monkeypatch, tmp_path):
-    args = _patch_copy(monkeypatch, tmp_path, _copy_plan(pending_canonical=False))
+    args = _patch_copy(monkeypatch, tmp_path, _copy_plan(canonical_state="exact"))
     return invoke(context_cmd.settings_copy_cmd, [*args, "--apply"], input="n\n")
 
 

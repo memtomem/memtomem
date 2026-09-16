@@ -446,6 +446,10 @@ class TestProducersDoNotEscape:
     consumer a string it cannot turn back into the original, and a display that
     escapes again sees ``\\\\x1b`` it cannot tell from real text. The producer
     removes the secret shape; the display escapes.
+
+    One exception predates #2477 and is pinned in
+    :class:`TestReprCommandPreviewException`: settings-copy's command previews
+    are ``repr()``-quoted, which escapes as a side effect.
     """
 
     def test_migrate_conflict_reason_keeps_control_characters(self):
@@ -471,3 +475,164 @@ class TestProducersDoNotEscape:
         )
         assert state == "conflict"
         assert f"PostToolUse:Edit{ESC_RAW}" in reason
+
+
+# ── The one producer-side escape: repr'd command previews ──────────
+#
+# Goldens were produced by running these exact inputs through settings_copy.py
+# at d9ed6976 (before this PR) and at this PR's head: both gave identical
+# strings for every secret-free input. They are written out as literals, not
+# rebuilt with repr() here, so a change in formatting cannot pass by changing
+# the expectation along with the code.
+
+_BEL_COMMAND = "hook.sh \x07ring"
+_LITERAL_ESCAPE_COMMAND = "hook.sh \\x07literal"
+_QUOTED_COMMAND = "hook.sh 'a' \"b\" c\\d"
+
+_GOLDEN_CONFLICT_REASON = (
+    r"""destination canonical settings already has a rule under 'PostToolUse:Edit' whose inner hooks differ """
+    r"""from the copied entry (existing: 'hook.sh \x07ring'; 'hook.sh \\x07literal'; """
+    r"""'hook.sh \'a\' "b" c\\d'). Resolve manually, then re-run the copy — a """
+    r"""same-matcher duplicate would fire twice."""
+)
+_GOLDEN_NO_MATCH = (
+    r"""--hook-command 'no-such-substring' matches none of the entries under """
+    r"""'PostToolUse:Edit' (candidates: 'hook.sh \x07ring', 'hook.sh \'a\' "b" c\\d')."""
+)
+_GOLDEN_AMBIGUOUS = (
+    r"""2 entries match 'PostToolUse:Edit'; disambiguate with --hook-command <substring> """
+    r"""(candidates: 'hook.sh \x07ring', 'hook.sh \'a\' "b" c\\d')."""
+)
+_GOLDEN_NO_MATCH_SECRET = (
+    "--hook-command 'no-such-substring' matches none of the entries under "
+    "'PostToolUse:Edit' (candidates: '<redacted: secret-shape>', 'mm session start')."
+)
+_GOLDEN_AMBIGUOUS_SECRET = (
+    "2 entries match 'PostToolUse:Edit'; disambiguate with --hook-command <substring> "
+    "(candidates: '<redacted: secret-shape>', 'mm session start')."
+)
+
+
+def _hook_rule(matcher: str, *commands: str) -> dict:
+    return {"matcher": matcher, "hooks": [{"type": "command", "command": c} for c in commands]}
+
+
+@pytest.fixture
+def copy_projects(tmp_path, fake_home, monkeypatch):
+    """A source project and a registered-by-path destination for settings-copy."""
+    from memtomem.cli import context_cmd
+
+    src = tmp_path / "src-proj"
+    (src / ".git").mkdir(parents=True)
+    dst = tmp_path / "dst-proj"
+    (dst / ".memtomem").mkdir(parents=True)
+    monkeypatch.chdir(src)
+    monkeypatch.setattr(context_cmd, "_projects_gateway_cfg", lambda: None)
+    monkeypatch.setattr(context_cmd, "_projects_discover", lambda *a, **k: [])
+    return src, dst
+
+
+class TestReprCommandPreviewException:
+    """Command previews in settings-copy stay ``repr()``-quoted, exactly as before.
+
+    The PR's rule is that producers redact and displays escape. These previews
+    predate it: ``repr`` quotes each command so several stay delimited, and it
+    spells control characters as ``\\\\xNN`` text as a side effect. They are kept
+    for continuity of the messages. The exception is pinned to exactly these
+    three strings — the conflict reason and the two selector errors — by their
+    delivery path: parsed ``--json`` for the reason, stderr and exit code for the
+    errors, which never have a JSON form.
+    """
+
+    def test_conflict_reason_in_json_matches_the_pre_pr_bytes(self, copy_projects):
+        from memtomem.cli.context_cmd import settings_copy_cmd
+
+        src, dst = copy_projects
+        _write_settings(
+            src / CANONICAL_SETTINGS_FILE, {"PostToolUse": [_hook_rule("Edit", "mm session start")]}
+        )
+        _write_settings(
+            dst / CANONICAL_SETTINGS_FILE,
+            {
+                "PostToolUse": [
+                    _hook_rule("Edit", _BEL_COMMAND, _LITERAL_ESCAPE_COMMAND, _QUOTED_COMMAND)
+                ]
+            },
+        )
+        result = CliRunner().invoke(
+            settings_copy_cmd,
+            [
+                "--event",
+                "PostToolUse",
+                "--matcher",
+                "Edit",
+                "--to-project",
+                str(dst),
+                "--to",
+                "project_local",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["canonical"]["state"] == "conflict"
+        assert payload["canonical"]["reason"] == _GOLDEN_CONFLICT_REASON
+        # The structured identification fields are still the raw source values.
+        assert payload["command_preview"] == "mm session start"
+
+    @pytest.mark.parametrize(
+        ("hook_command", "commands", "golden"),
+        [
+            pytest.param(
+                "no-such-substring",
+                (_BEL_COMMAND, _QUOTED_COMMAND),
+                _GOLDEN_NO_MATCH,
+                id="no-match",
+            ),
+            pytest.param(None, (_BEL_COMMAND, _QUOTED_COMMAND), _GOLDEN_AMBIGUOUS, id="ambiguous"),
+            pytest.param(
+                "no-such-substring",
+                (_secret_command(), "mm session start"),
+                _GOLDEN_NO_MATCH_SECRET,
+                id="no-match-secret",
+            ),
+            pytest.param(
+                None,
+                (_secret_command(), "mm session start"),
+                _GOLDEN_AMBIGUOUS_SECRET,
+                id="ambiguous-secret",
+            ),
+        ],
+    )
+    def test_selector_error_on_stderr_matches_its_golden(
+        self, copy_projects, hook_command, commands, golden
+    ):
+        from memtomem.cli.context_cmd import settings_copy_cmd
+
+        src, dst = copy_projects
+        _write_settings(
+            src / CANONICAL_SETTINGS_FILE, {"PostToolUse": [_hook_rule("Edit", *commands)]}
+        )
+        args = ["--event", "PostToolUse", "--matcher", "Edit", "--to-project", str(dst)]
+        if hook_command is not None:
+            args += ["--hook-command", hook_command]
+        result = CliRunner().invoke(settings_copy_cmd, args)
+        assert result.exit_code == 1, result.output
+        assert result.stdout == ""
+        assert result.stderr == f"Error: {golden}\n"
+        assert SECRET not in result.stderr
+        assert not [ch for ch in result.stderr if not ch.isprintable() and ch != "\n"]
+
+    def test_the_exception_covers_the_command_preview_only(self):
+        """The label beside the preview in the same reason is NOT escaped."""
+        from memtomem.context.settings_copy import _classify_leg
+
+        sig = HookSignature(event="PostToolUse", matcher=f"Edit{BEL_RAW}", command_shape="x")
+        doc = {"hooks": {"PostToolUse": [_hook_rule(sig.matcher, _BEL_COMMAND)]}}
+        state, reason = _classify_leg(
+            doc, sig, {"type": "command", "command": "x"}, leg="canonical"
+        )
+        assert state == "conflict"
+        assert reason.count(BEL_RAW) == 1  # the label keeps its raw character
+        assert f"'PostToolUse:Edit{BEL_RAW}'" in reason
+        assert r"'hook.sh \x07ring'" in reason  # the repr'd preview is escaped
