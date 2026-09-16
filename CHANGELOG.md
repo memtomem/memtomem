@@ -23,11 +23,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   331 files, with 197 of 203 near-duplicate pairs being a file and its worktree
   copy. A worktree is now recognised by its `.git` file's backlink rather than
   by any directory name, so bare-repository and `--relative-paths` layouts are
-  covered; submodules and ordinary nested clones are not affected. Register the
-  worktree as its own memory dir to index it deliberately. Rows indexed before
-  this release stay until you remove them with `mm purge --matching-excluded
-  --apply`. The web Sources file count and the `mm init` seed threshold also
-  leave out unregistered nested worktrees.
+  covered; submodules and ordinary nested clones are not affected. A worktree
+  whose `gitdir` names a `.git/worktrees/<name>` directory that does not exist
+  on this machine — one created in a container or remote sandbox — counts too
+  (#2487). The skip also applies outside every configured root (#2486): `mm
+  index <repo>`, `mem_index` and the web index routes skip worktrees below the
+  directory they walk, and a single file, a hook-driven edit or `mm purge`
+  skips a worktree nested inside its enclosing repository. That is where the
+  measured copies lived, and why `mm purge` previously matched none of them.
+  Walking a worktree itself still indexes it for that run, but indexing one of
+  its files alone now skips it; register the worktree as its own memory dir to
+  index it deliberately. Rows indexed before this release stay until you remove
+  them with `mm purge --matching-excluded --apply`. The web Sources file count
+  and the `mm init` seed threshold also leave out unregistered nested
+  worktrees.
+
+- **Editing or deleting a chunk of an excluded source is refused instead of
+  leaving stale chunks behind (#2488).** `mem_edit`, `mem_delete` by chunk, and
+  the web chunk edit and delete wrote the file and then re-indexed it, and the
+  re-index of a source that indexing now skips — an exclude pattern, a built-in
+  rule, a nested worktree — returned without error, so search kept serving the
+  old text. These now answer with a `source_excluded` error (HTTP 409 on the
+  web) before anything is written.
 
 - **The OpenCode plugin includes the ONNX dependencies needed by existing E5
   configurations (#2453).** `opencode-memtomem` 0.3.4 launches

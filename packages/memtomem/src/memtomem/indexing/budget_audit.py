@@ -15,7 +15,12 @@ from typing import Any
 
 from memtomem.chunking.bounded import TokenBudget
 from memtomem.config import IndexingConfig
-from memtomem.indexing.engine import IndexEngine, _build_exclude_spec, _path_is_excluded
+from memtomem.indexing.engine import (
+    IndexEngine,
+    WorktreeMemo,
+    _build_exclude_spec,
+    _path_is_excluded,
+)
 from memtomem.indexing.redaction_exemption import declared_exemption, indexer_text
 
 CODE_SUFFIXES = {".py", ".js", ".ts", ".jsx", ".tsx", ".mjs"}
@@ -60,7 +65,9 @@ def audit(db_path: Path, config: IndexingConfig, omitted: set[str]) -> dict[str,
     candidates.update(r["source"] for r in invalid_inputs)
     candidates.update(s for s in sources if Path(s).suffix.lower() in CODE_SUFFIXES | {".json"})
     spec = _build_exclude_spec(config.exclude_patterns)
-    excluded = {s for s in sources if _path_is_excluded(Path(s), config.all_index_roots(), spec)}
+    roots = config.all_index_roots()
+    memo: WorktreeMemo = {}
+    excluded = {s for s in sources if _path_is_excluded(Path(s), roots, spec, worktree_cache=memo)}
     # Discovery mode never touches these dependencies; see chunk_content's contract.
     engine = IndexEngine(None, None, config)  # type: ignore[arg-type]
     preview: list[dict[str, Any]] = []

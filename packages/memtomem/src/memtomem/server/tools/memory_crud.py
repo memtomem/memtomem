@@ -28,6 +28,7 @@ from memtomem.server.tools._provenance import (
 )
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
 from memtomem.source_provenance import (
+    EXCLUDED_SOURCE_DETAIL,
     SOURCE_READ_ONLY_DETAIL,
     STALE_SOURCE_PROVENANCE_DETAIL,
     StaleSourceProvenanceError,
@@ -391,6 +392,10 @@ async def _mutate_file_and_reindex(
     Returns ``(stats, None)`` on success or ``(None, error_message)`` after
     a rollback; ``op`` ("edit"/"delete") only shapes the messages.
     """
+    # Before any write: a source indexing now skips would take the mutation and
+    # then re-index to zeroed stats, leaving the old chunks searchable (#2488).
+    if app.index_engine.is_excluded(source_file):
+        return None, f"Error: {EXCLUDED_SOURCE_DETAIL}"
     # Before the awaits below, not after: a session that ends during the
     # re-index would otherwise lose the flag, and one that starts would
     # inherit a mutation that happened in its predecessor.

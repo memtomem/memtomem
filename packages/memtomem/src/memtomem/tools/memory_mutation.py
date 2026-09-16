@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from memtomem.context import _atomic
 from memtomem.context._atomic import async_memory_file_lock
 from memtomem.search.visibility import chunk_in_scope_boundary
-from memtomem.source_provenance import StaleSourceProvenanceError
+from memtomem.source_provenance import ExcludedSourceError, StaleSourceProvenanceError
 from memtomem.tools.memory_writer import (
     RestoreOutcome,
     SourceChangedError,
@@ -157,7 +157,13 @@ async def mutate_source_and_reindex(
     same identity the rollback would check (#2367); a mutation that refuses says
     so with a ``SourceChangedError`` and is not rolled back, since it wrote
     nothing to roll back.
+
+    A source indexing now skips raises :class:`ExcludedSourceError` before
+    anything is read or written: its re-index would return zeroed stats and
+    leave the old chunks searchable beside the new bytes (#2488).
     """
+    if index_engine.is_excluded(source_file):
+        raise ExcludedSourceError(str(source_file))
     pre_image = await asyncio.to_thread(read_pre_image, source_file)
     mutation_completed = False
     try:

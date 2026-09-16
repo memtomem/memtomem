@@ -265,6 +265,9 @@ def app(_isolated_config_paths: Path):
 
     # -- index engine mock --
     index_engine = AsyncMock()
+    # Synchronous on the real engine; an ``AsyncMock`` attribute would return a
+    # coroutine, which is truthy and would refuse every chunk edit (#2488).
+    index_engine.is_excluded = MagicMock(return_value=False)
     # ``mutated=True`` mirrors what an engine that indexed chunks really
     # returns; the index routes gate their cache invalidation on it (#2141).
     index_engine.index_path = AsyncMock(

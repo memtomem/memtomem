@@ -17,8 +17,25 @@ STALE_SOURCE_PROVENANCE_DETAIL = (
 )
 
 
+EXCLUDED_SOURCE_DETAIL = (
+    "source_excluded: indexing now skips this source (an exclude pattern, a built-in rule, "
+    "or a nested git worktree), so an edit would not reach the index. Nothing was written. "
+    "Register a nested worktree as its own memory directory or remove the matching pattern "
+    "to edit it here, or run `mm purge --matching-excluded` to remove its stored chunks."
+)
+
+
 class StaleSourceProvenanceError(ValueError):
     """A rewrite refused before writing: its indexed source span cannot be verified."""
+
+
+class ExcludedSourceError(ValueError):
+    """A rewrite refused before writing: indexing skips the source, so the edit would not land.
+
+    Writing the file and then re-indexing it would return zeroed stats without
+    raising, and the old chunks would stay searchable beside the new bytes
+    (#2488). Refusing first keeps the file and the index in agreement.
+    """
 
 
 def source_span_hash(lines: Sequence[str], start_line: int, end_line: int) -> str | None:

@@ -276,50 +276,141 @@ def _is_linked_worktree(directory: Path) -> bool:
         return False
 
 
+def _dangling_worktree_shape(directory: Path) -> bool:
+    """True when ``directory``'s ``gitdir:`` target is absent and shaped like a worktree's.
+
+    A worktree created in another filesystem namespace — a container or remote
+    sandbox that mounted the repository elsewhere, or a checkout moved without
+    ``git worktree repair`` — points at an administration directory that does
+    not exist here, so :func:`_is_linked_worktree` has no backlink to read
+    (#2487). Its contents are still a copy of a checkout.
+
+    "Absent" is only ``FileNotFoundError`` / ``NotADirectoryError`` from
+    ``lstat``. A permission error, an embedded NUL, a symlink loop or any other
+    failure is not evidence of absence, so it keeps the fail-closed answer. The
+    shape is ``…/.git/worktrees/<name>``: the grandparent must be ``.git``, which
+    keeps a submodule whose path starts with ``worktrees`` —
+    ``.git/modules/worktrees/<x>`` — indexed. A bare repository's worktree whose
+    administration directory is gone is not recognised; that fails closed too.
+    """
+    admin = _gitdir_target(directory)
+    if admin is None:
+        return False
+    try:
+        os.lstat(admin)
+    except (FileNotFoundError, NotADirectoryError):
+        return admin.parent.name == "worktrees" and admin.parent.parent.name == ".git"
+    except (OSError, ValueError):
+        return False
+    return False
+
+
+def _is_worktree_checkout(directory: Path) -> bool:
+    """The one worktree test every bound uses: a verified backlink or a dangling worktree shape."""
+    return _is_linked_worktree(directory) or _dangling_worktree_shape(directory)
+
+
+def _is_main_checkout(directory: Path) -> bool:
+    """True when ``directory/.git`` is a directory — a repository's own checkout.
+
+    A linked worktree's ``.git`` is a file, so it never answers True here.
+    Follows symlinks, as git does. Any failure answers False.
+    """
+    try:
+        return stat_module.S_ISDIR(os.stat(directory / ".git").st_mode)
+    except (OSError, ValueError):
+        return False
+
+
+#: Memo for one walk, purge or audit. Keys are ``(fact, directory)`` and hold
+#: only facts about a directory that do not depend on which bound asked, so one
+#: memo is safe across every bound :func:`_under_nested_worktree` uses.
+WorktreeMemo = dict[tuple[str, Path], bool]
+
+
+def _memo_fact(
+    cache: WorktreeMemo | None, fact: str, directory: Path, probe: Callable[[Path], bool]
+) -> bool:
+    if cache is None:
+        return probe(directory)
+    key = (fact, directory)
+    known = cache.get(key)
+    if known is None:
+        known = probe(directory)
+        cache[key] = known
+    return known
+
+
 def _under_nested_worktree(
     file_path: Path,
     memory_dirs: Iterable[str | Path],
-    cache: dict[Path, bool] | None = None,
+    cache: WorktreeMemo | None = None,
+    *,
+    walk_root: Path | None = None,
 ) -> bool:
-    """True when a directory *between* the owning root and ``file_path`` is a worktree.
+    """True when a git worktree sits between ``file_path`` and its bound.
 
-    A git worktree nested inside an indexed root is a near-copy of the main
-    checkout, so every source file would be stored twice (#2474). The owning
-    root itself is never tested, which is what makes the skip overridable:
-    registering the worktree as its own memory dir makes it the owning root —
-    ``resolve_owning_memory_dir`` takes the longest prefix — and it is indexed
-    again. A file with no owning root is not checked at all; without a root
-    there is no bounded place to stop walking up.
+    A git worktree nested inside something indexed is a near-copy of a checkout,
+    so every source file would be stored twice (#2474). The bound is, in order:
 
-    ``cache`` memoises one entry per directory for the duration of a single
-    walk. It is deliberately not process-wide: a long-running server would
-    otherwise never notice a worktree added after startup, and would keep
-    skipping one that was removed.
+    1. **The owning configured root** — ``resolve_owning_memory_dir``, longest
+       prefix. Registering a worktree as its own memory dir makes it the owning
+       root, and a bound is never tested itself, so it is indexed again. This is
+       the durable override.
+    2. **The walk root** — the directory an explicit walk (``mm index <dir>``,
+       ``mem_index``, the web index routes) started from, when the file is under
+       it and no configured root owns it. Walking an unowned worktree itself
+       indexes it for that run.
+    3. **The enclosing repository** — otherwise: a single file, the debounce
+       drain a hook feeds, budget migration, purge, the CRUD guard. The bound is
+       the nearest ancestor whose ``.git`` is a directory; with none, nothing is
+       excluded (#2486).
+
+    Every bound uses the same worktree test, :func:`_is_worktree_checkout`, and
+    none checks which repository a worktree belongs to — proving membership
+    either guessed from names or left a dangling worktree indexed through a
+    hook edit and unclaimed by purge. So a worktree of an unrelated repository
+    placed inside a checkout is skipped too, as it always was under a root.
+
+    Paths are resolved before any ancestry is computed, so a symlinked ancestor
+    gives the same answer whichever caller asks. Resolution failure excludes
+    nothing.
+
+    ``cache`` memoises directory facts for one walk, purge or audit (see
+    :data:`WorktreeMemo`). It is deliberately not process-wide: a long-running
+    server would otherwise never notice a worktree added after startup, and
+    would keep skipping one that was removed.
     """
     owning = resolve_owning_memory_dir(file_path, memory_dirs)
-    if owning is None:
-        return False
     try:
-        root = Path(owning).expanduser().resolve()
-        rel = Path(file_path).expanduser().resolve().relative_to(root)
-    except (OSError, ValueError, RuntimeError):
-        # ``relative_to`` raises ``ValueError`` when resolving symlinks moved
-        # the file out from under the root it was attributed to lexically.
-        return False
-    current = root
-    for part in rel.parts[:-1]:
-        current = current / part
-        if cache is None:
-            found = _is_linked_worktree(current)
+        target = Path(file_path).expanduser().resolve()
+        if owning is not None:
+            bound: Path | None = Path(owning).expanduser().resolve()
+        elif walk_root is not None:
+            bound = Path(walk_root).expanduser().resolve()
+            if not target.is_relative_to(bound):
+                bound = None
         else:
-            cached = cache.get(current)
-            if cached is None:
-                cached = _is_linked_worktree(current)
-                cache[current] = cached
-            found = cached
-        if found:
-            return True
-    return False
+            bound = None
+        if bound is not None:
+            # ``ValueError`` when resolving symlinks moved the file out from
+            # under the root it was attributed to lexically.
+            rel = target.relative_to(bound)
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+    if bound is not None:
+        between = [bound.joinpath(*rel.parts[:depth]) for depth in range(1, len(rel.parts))]
+    else:
+        between = []
+        for parent in target.parents:
+            if _memo_fact(cache, "checkout", parent, _is_main_checkout):
+                break
+            between.append(parent)
+        else:
+            return False
+        between.reverse()
+    return any(_memo_fact(cache, "worktree", d, _is_worktree_checkout) for d in between)
 
 
 def _path_is_excluded(
@@ -327,7 +418,8 @@ def _path_is_excluded(
     memory_dirs: Iterable[str | Path],
     user_spec: pathspec.GitIgnoreSpec,
     *,
-    worktree_cache: dict[Path, bool] | None = None,
+    worktree_cache: WorktreeMemo | None = None,
+    walk_root: Path | None = None,
 ) -> bool:
     """True if ``file_path`` matches any exclude rule.
 
@@ -336,8 +428,9 @@ def _path_is_excluded(
     ``claude-memory`` root's ``MEMORY.md``/``README.md`` is an index/meta
     file, never content; (2) the built-in secret/noise denylist; (3) the
     user's ``indexing.exclude_patterns``; (4) a nested worktree checkout
-    under the owning root, which is a second copy of a tree already indexed
-    (see :func:`_under_nested_worktree`). Layer (1) is the single
+    between the file and its bound — the owning root, ``walk_root`` for an
+    explicit walk, or the enclosing repository — which is a second copy of a
+    tree (see :func:`_under_nested_worktree`). Layer (1) is the single
     enforcement point shared by ``_discover_files`` (dir walk),
     ``_index_file`` (per-file funnel for watcher/CLI/MCP), and
     ``mm purge`` — so the convention can't be honored on one path and
@@ -358,7 +451,7 @@ def _path_is_excluded(
     for key in _exclude_match_keys(file_path, memory_dirs):
         if _BUILTIN_EXCLUDE_SPEC.match_file(key) or user_spec.match_file(key):
             return True
-    return _under_nested_worktree(file_path, memory_dirs, worktree_cache)
+    return _under_nested_worktree(file_path, memory_dirs, worktree_cache, walk_root=walk_root)
 
 
 def _dir_creation_time_iso(p: Path) -> str | None:
@@ -473,7 +566,7 @@ def _count_files_on_disk(
     ``p`` and only loses the ability to see a *separately registered* one as
     its own root.
     """
-    worktree_cache: dict[Path, bool] = {}
+    worktree_cache: WorktreeMemo = {}
     roots = list(memory_dirs) or [p]
     try:
         return sum(
@@ -1107,6 +1200,9 @@ class IndexEngine:
             reassign=reassign_namespaces,
             new_source_namespace=new_source_namespace,
         )
+        # The per-file guard must judge a walked file by the same bound the
+        # walk did, or it would re-exclude what discovery kept (#2486).
+        walk_root = path if path.is_dir() else None
 
         async def _bounded(fp: Path) -> IndexFileResult:
             # ``engine_serialized=False``: take this file's L2 sidecar but not
@@ -1124,6 +1220,7 @@ class IndexEngine:
                 reassign_namespaces=reassign_namespaces,
                 new_source_namespace=new_source_namespace,
                 engine_serialized=False,
+                walk_root=walk_root,
             )
             return result
 
@@ -1482,6 +1579,7 @@ class IndexEngine:
         reassign_namespaces: bool = False,
         new_source_namespace: str | None = None,
         engine_serialized: bool = True,
+        walk_root: Path | None = None,
     ) -> tuple[IndexFileResult, float]:
         """Run ``_index_file`` under the L2 sidecar → L3 ``_index_lock`` pair.
 
@@ -1541,6 +1639,7 @@ class IndexEngine:
                 embed_semaphore=self._embed_semaphore(),
                 reassign_namespaces=reassign_namespaces,
                 new_source_namespace=new_source_namespace,
+                walk_root=walk_root,
             )
             return result, (time.monotonic() - start) * 1000
 
@@ -1633,6 +1732,19 @@ class IndexEngine:
             async with self._index_lock:
                 return await run()
 
+    def is_excluded(self, file_path: Path) -> bool:
+        """True when indexing ``file_path`` on its own would skip it.
+
+        The single-file view of :func:`_path_is_excluded` with this engine's
+        configured roots and exclude patterns — no walk root, so an unowned
+        file is bounded by its enclosing repository. Callers that write a
+        source and then re-index it (the CRUD mutation helpers) ask this first:
+        writing a file whose re-index is skipped would leave the old chunks
+        searchable beside the new bytes (#2488).
+        """
+        user_spec = _build_exclude_spec(self._config.exclude_patterns)
+        return _path_is_excluded(file_path, self._config.all_index_roots(), user_spec)
+
     async def index_file(
         self,
         file_path: Path,
@@ -1715,10 +1827,7 @@ class IndexEngine:
         # but is not indexable, and its old chunks must still be cleaned. (#1566)
         _reject_reassign_with_explicit_ns(namespace, reassign_namespaces, new_source_namespace)
         force = force or reassign_namespaces
-        user_spec = _build_exclude_spec(self._config.exclude_patterns)
-        if _path_is_excluded(file_path, self._config.all_index_roots(), user_spec) and (
-            file_path.is_file()
-        ):
+        if self.is_excluded(file_path) and file_path.is_file():
             logger.debug("Skipping excluded file %s", file_path)
             return IndexingStats(
                 total_files=0,
@@ -2255,6 +2364,7 @@ class IndexEngine:
         embed_semaphore: asyncio.Semaphore | None = None,
         reassign_namespaces: bool = False,
         new_source_namespace: str | None = None,
+        walk_root: Path | None = None,
     ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]), and resolved_namespace (str | None) when
@@ -2309,8 +2419,13 @@ class IndexEngine:
         # ``index_path_stream(file)`` cannot smuggle credentials or noise. Only
         # *indexing* (adding content) is gated here; the missing-file delete
         # above runs regardless.
+        # ``walk_root`` is set only by a directory walk, so a walked file is
+        # judged by the bound discovery used; every other caller gets the
+        # enclosing-repository bound (#2486).
         user_spec = _build_exclude_spec(self._config.exclude_patterns)
-        if _path_is_excluded(file_path, self._config.all_index_roots(), user_spec):
+        if _path_is_excluded(
+            file_path, self._config.all_index_roots(), user_spec, walk_root=walk_root
+        ):
             logger.debug("Skipping excluded file %s", file_path)
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
@@ -3083,10 +3198,13 @@ class IndexEngine:
                 }
                 return
 
+            # Same bound for the per-file guard as for the walk (#2486).
+            stream_walk_root: Path | None = None
             if path.is_file():
                 files = [path]
             elif path.is_dir():
                 files = self._discover_files(path, recursive)
+                stream_walk_root = path
             else:
                 yield {
                     "type": "complete",
@@ -3209,6 +3327,7 @@ class IndexEngine:
                             path_scope=path_scope,
                             reassign_namespaces=reassign_namespaces,
                             new_source_namespace=new_source_namespace,
+                            walk_root=stream_walk_root,
                         )
                         return result
                     finally:
@@ -3486,9 +3605,9 @@ class IndexEngine:
         memory_dirs = self._config.all_index_roots()
 
         # One memo per walk: ``_under_nested_worktree`` probes the filesystem
-        # for each directory between the owning root and the file, and a walk
+        # for each directory between the bound and the file, and a walk
         # visits the same directories once per file in them.
-        worktree_cache: dict[Path, bool] = {}
+        worktree_cache: WorktreeMemo = {}
 
         def is_excluded(fp: Path, rel: Path | None) -> bool:
             # User negation cannot override built-in exclusions.
@@ -3497,7 +3616,11 @@ class IndexEngine:
             # (e.g. ``**/.claude/**/*.meta.json``) effective even when
             # ``directory`` is the auto-discovered ``~/.claude/projects`` root
             # and the rel path no longer contains ``.claude/``.
-            return _path_is_excluded(fp, memory_dirs, user_spec, worktree_cache=worktree_cache)
+            # ``walk_root``: a walk outside every configured root is bounded by
+            # where it started, so a worktree nested below it is skipped (#2486).
+            return _path_is_excluded(
+                fp, memory_dirs, user_spec, worktree_cache=worktree_cache, walk_root=directory
+            )
 
         files: list[Path] = []
         if recursive:

@@ -15,8 +15,10 @@ from memtomem.search.visibility import resolve_visible_chunk
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
 from memtomem.source_provenance import (
+    EXCLUDED_SOURCE_DETAIL,
     SOURCE_READ_ONLY_DETAIL,
     STALE_SOURCE_PROVENANCE_DETAIL,
+    ExcludedSourceError,
     StaleSourceProvenanceError,
 )
 from memtomem.tools.memory_writer import (
@@ -298,6 +300,10 @@ async def edit_chunk(
             # before it must not keep serving the pre-edit body.
             if stats.mutated:
                 search_pipeline.invalidate_cache()
+        except ExcludedSourceError as exc:
+            # Raised before the helper reads or writes anything (#2488), so
+            # there is nothing to invalidate.
+            raise HTTPException(status_code=409, detail=EXCLUDED_SOURCE_DETAIL) from exc
         except StaleSourceProvenanceError as exc:
             # Normally a pure refusal. Invalidate conservatively: if this type
             # came from a later stage, the helper still ran its normal rollback.
@@ -556,6 +562,12 @@ async def delete_chunk(
             if source_exists:
                 if meta.source_read_only or meta.redaction_count:
                     raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+                # This route removes lines itself rather than through
+                # ``mutate_source_and_reindex``, so it needs its own copy of the
+                # guard: the re-index below would skip an excluded source and
+                # leave the deleted chunk searchable (#2488).
+                if index_engine.is_excluded(source):
+                    raise HTTPException(status_code=409, detail=EXCLUDED_SOURCE_DETAIL)
                 if meta.start_line < 1 or meta.end_line < meta.start_line:
                     raise HTTPException(
                         status_code=409,

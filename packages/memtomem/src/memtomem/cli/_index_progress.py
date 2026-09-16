@@ -83,12 +83,12 @@ def _collect_seed_scale(memory_dir: Path, memory_dirs: Sequence[Path] = ()) -> t
     """
     if not memory_dir.exists():
         return 0, 0
-    from memtomem.indexing.engine import _under_nested_worktree
+    from memtomem.indexing.engine import WorktreeMemo, _under_nested_worktree
 
     count = 0
     total = 0
     roots = list(memory_dirs) or [memory_dir]
-    worktree_cache: dict[Path, bool] = {}
+    worktree_cache: WorktreeMemo = {}
     try:
         for f in memory_dir.rglob("*.md"):
             if _under_nested_worktree(f, roots, worktree_cache):

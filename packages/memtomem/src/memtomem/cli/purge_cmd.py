@@ -25,11 +25,18 @@ def find_sources_matching_excluded(
     reclaim chunks that were indexed before a convention/exclude was
     added. Exposed for testing — the CLI calls this with
     ``storage.get_all_source_files()`` and the configured index roots.
+
+    A stored row has no walk root, so a source outside every configured root
+    is judged the way indexing that file on its own would judge it: bounded by
+    its enclosing repository (#2486). One memo serves the whole pass, so sources
+    in the same directories do not re-probe the filesystem.
     """
-    from memtomem.indexing.engine import _build_exclude_spec, _path_is_excluded
+    from memtomem.indexing.engine import WorktreeMemo, _build_exclude_spec, _path_is_excluded
 
     user_spec = _build_exclude_spec(user_patterns)
-    return [sf for sf in sources if _path_is_excluded(sf, memory_dirs, user_spec)]
+    roots = list(memory_dirs)
+    memo: WorktreeMemo = {}
+    return [sf for sf in sources if _path_is_excluded(sf, roots, user_spec, worktree_cache=memo)]
 
 
 @click.command("purge")
@@ -70,8 +77,8 @@ def purge(matching_excluded: bool, apply_: bool, sample_size: int, as_json: bool
     now exclude — built-in secret/noise patterns, ``indexing.exclude_patterns``,
     provider index-file conventions (e.g. a ``claude-memory`` root's
     ``MEMORY.md``/``README.md``), and git worktrees nested under an indexed
-    root. Use it to reclaim chunks indexed before a convention/exclude was
-    added.
+    root or, outside every root, inside their enclosing repository. Use it to
+    reclaim chunks indexed before a convention/exclude was added.
 
     Default is dry-run. Pass ``--apply`` to execute deletion.
     """

@@ -683,7 +683,7 @@ such a pattern verbatim, wrap it in a JSON array of its own:
 
 ### Nested git worktrees
 
-A git worktree checked out *inside* an indexed root — `<repo>/.worktrees/x`,
+A git worktree checked out *inside* something you index — `<repo>/.worktrees/x`,
 `<repo>/.claude/worktrees/x` — is skipped. It is a second checkout of a tree
 that is already indexed, so every source file in it would be stored a second
 time under a different path, crowding search results with the same content and
@@ -693,11 +693,29 @@ recreates whichever copy you delete).
 The test is what git writes, not the directory name: a `.git` **file** whose
 `gitdir:` target holds a `gitdir` backlink pointing back at that same file. A
 **submodule** has no such backlink and keeps being indexed, and so does an
-ordinary nested clone, whose `.git` is a directory.
+ordinary nested clone, whose `.git` is a directory. A worktree created in a
+container or remote sandbox points at a `.git/worktrees/<name>` directory that
+does not exist on this machine, so there is no backlink to read; that shape
+counts as a worktree too. A target that exists but cannot be read does not.
 
-**To index one anyway**, register the worktree as its own root — Sources tab,
-or the `mm init` wizard. The skip only applies to a worktree nested under the
-root that *owns* the file, and a registered root owns itself:
+"Nested inside" is measured from a bound, the first of these that applies:
+
+| Bound | When | Example |
+|---|---|---|
+| The configured root that owns the file | the file is under a memory dir | `~/work/repo` is a memory dir |
+| The directory being walked | `mm index <dir>`, `mem_index`, the web index routes, outside every memory dir | `mm index ~/work/repo` |
+| The nearest enclosing repository (a parent whose `.git` is a directory) | a single file, a hook-driven re-index, `mm purge`, a chunk edit | `mm index ~/work/repo/.worktrees/x/notes.md` |
+
+A worktree strictly between the file and its bound is skipped; the bound itself
+never is. So `mm index ~/work/repo/.worktrees/x` indexes that worktree for the
+run — nothing lies between — but a later edit to one of its files, or `mm
+purge`, judges the file by its enclosing repository and skips or claims it.
+Paths are resolved first, so reaching a file through a symlink gives the same
+answer.
+
+**To index one durably**, register the worktree as its own root — Sources tab,
+or the `mm init` wizard. A registered root owns itself, and an owning root wins
+over the other two bounds:
 
 ```json
 {
@@ -719,7 +737,13 @@ mm purge --matching-excluded --apply    # delete those chunks
 ```
 
 That selector covers *every* exclusion rule, not only worktrees, so read the
-dry-run output before passing `--apply`.
+dry-run output before passing `--apply`. Rows of a worktree directory that has
+since been deleted are not claimed — there is nothing left on disk to recognise;
+remove those with `mem_delete(source_file=...)`.
+
+**Chunk edits and deletes on an excluded source are refused** with a
+`source_excluded` error (HTTP 409 on the web). Writing the file would succeed but
+its re-index would be skipped, leaving the old text searchable.
 
 ### Provider memory folders (opt-in via `mm init`)
 
@@ -802,8 +826,9 @@ canonical `*/memory/` subdirs only. The migration only narrows what gets
 indexed *going forward* — it does not retroactively delete chunks already
 stored from the wider scan. To reclaim those, run `mm purge
 --matching-excluded`: it deletes stored chunks whose source the indexer would
-now exclude (built-in noise/secret denylist, `indexing.exclude_patterns`, and
-provider index-file conventions such as a `claude-memory` root's `MEMORY.md`).
+now exclude (built-in noise/secret denylist, `indexing.exclude_patterns`,
+provider index-file conventions such as a `claude-memory` root's `MEMORY.md`,
+and nested git worktrees — see [Nested git worktrees](#nested-git-worktrees)).
 It prints a dry-run summary by default; re-run with `--apply` to delete. For
 any leftover source the exclude rules don't cover, remove it directly with
 `mem_delete(source_file=...)`.
