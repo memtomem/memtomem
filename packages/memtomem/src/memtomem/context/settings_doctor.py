@@ -424,7 +424,9 @@ def _host_home_re(home: str) -> re.Pattern[str]:
     return re.compile(lead + r"[\\/]+".join(parts) + _HOST_HOME_END, re.IGNORECASE)
 
 
-def _collect_roots(pattern: re.Pattern[str], command: str, found: list[str]) -> None:
+def _collect_roots(
+    pattern: re.Pattern[str], command: str, found: list[tuple[int, int, str]]
+) -> None:
     pos = 0
     while (match := pattern.search(command, pos)) is not None:
         start = match.start()
@@ -436,7 +438,7 @@ def _collect_roots(pattern: re.Pattern[str], command: str, found: list[str]) -> 
             pos = start + 2 if retry else match.end()
             continue
         if match.groupdict().get("user") not in (".", ".."):
-            found.append(match.group(0))
+            found.append((start, match.end(), match.group(0)))
         pos = match.end()
 
 
@@ -456,15 +458,25 @@ def _extract_unportable_literals(command: str, host_homes: tuple[str, ...]) -> l
     such as ``host:/home/bob``. A clean result does not mean a hook is portable.
 
     ``host_homes`` entries that are not already standard roots (``/srv/jenkins``,
-    ``D:\\Profiles\\alice``) are matched too.
+    ``D:\\Profiles\\alice``) are matched too, and win where they overlap a
+    standard root: a Windows home like ``C:\\Users\\bob\\AppData\\Local\\home``
+    contains ``C:\\Users\\bob``, and naming the whole home is the more useful of
+    the two.
     """
-    found: list[str] = []
-    _collect_roots(_HOME_ROOT_RE, command, found)
+    host_hits: list[tuple[int, int, str]] = []
     for home in host_homes:
         home = home.rstrip("/\\")
         if home and not _HOME_ROOT_RE.fullmatch(home):
-            _collect_roots(_host_home_re(home), command, found)
-    return list(dict.fromkeys(found))
+            _collect_roots(_host_home_re(home), command, host_hits)
+
+    standard_hits: list[tuple[int, int, str]] = []
+    _collect_roots(_HOME_ROOT_RE, command, standard_hits)
+    hits = host_hits + [
+        hit
+        for hit in standard_hits
+        if not any(start < hit[1] and hit[0] < end for start, end, _text in host_hits)
+    ]
+    return list(dict.fromkeys(text for _start, _end, text in sorted(hits)))
 
 
 def _get_host_homes() -> tuple[str, ...]:

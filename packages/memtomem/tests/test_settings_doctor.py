@@ -438,6 +438,15 @@ _HOST_HOME_CASES = [
     ("/data/srv/jenkins/hook.sh", "/srv/jenkins", []),
     ("/SRV/JENKINS/x", "/srv/jenkins", []),
     ("/Users/alice/x", "/Users/alice", ["/Users/alice"]),
+    # A host home nested under a standard root reports the home, not both.
+    (
+        r"C:\Users\bob\AppData\Local\home\hook.sh",
+        r"C:\Users\bob\AppData\Local\home",
+        [r"C:\Users\bob\AppData\Local\home"],
+    ),
+    ("/Users/bob/nested/home/hook.sh", "/Users/bob/nested/home", ["/Users/bob/nested/home"]),
+    # An unrelated root beside it is still reported.
+    ("/srv/jenkins/a /home/alice/b", "/srv/jenkins", ["/srv/jenkins", "/home/alice"]),
     (r"D:\Profiles\alice\hook.cmd", r"D:\Profiles\alice", [r"D:\Profiles\alice"]),
     ("D:/Profiles/alice/hook.cmd", r"D:\Profiles\alice", ["D:/Profiles/alice"]),
     (r"d:\profiles\alice\sub\hook.cmd", r"D:\Profiles\alice", [r"d:\profiles\alice"]),
