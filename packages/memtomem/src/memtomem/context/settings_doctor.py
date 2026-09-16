@@ -469,19 +469,22 @@ def _extract_unportable_literals(command: str, host_homes: tuple[str, ...]) -> l
 
 def _get_host_homes() -> tuple[str, ...]:
     """Return local host home directory representations for matching."""
-    homes: list[str] = []
     try:
         home = str(Path.home())
-        if home:
-            homes.append(home)
-            try:
-                resolved = str(Path.home().resolve())
-                if resolved and resolved != home:
-                    homes.append(resolved)
-            except (OSError, RuntimeError):
-                pass
-    except Exception:
-        pass
+    except (OSError, RuntimeError):
+        # No resolvable home on this host: the standard roots still apply.
+        logger.debug("host home unavailable", exc_info=True)
+        return ()
+    if not home:
+        return ()
+    homes = [home]
+    try:
+        resolved = str(Path.home().resolve())
+    except (OSError, RuntimeError):
+        logger.debug("host home does not resolve", exc_info=True)
+        return tuple(homes)
+    if resolved and resolved != home:
+        homes.append(resolved)
     return tuple(homes)
 
 
