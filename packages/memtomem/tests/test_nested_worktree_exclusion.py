@@ -710,9 +710,11 @@ def test_an_unreachable_worktree_target_is_not_absent(repo: Path, tmp_path: Path
 
 
 def test_a_nul_in_a_worktree_shaped_target_is_not_absent(repo: Path) -> None:
-    wt = repo / ".worktrees/nul"
+    # Not ``nul``: that is a reserved device name on Windows, where the
+    # directory cannot be created at all (#2484 CI).
+    wt = repo / ".worktrees/embedded-nul"
     wt.mkdir(parents=True)
-    (wt / ".git").write_text("gitdir: /tmp/a\x00b/.git/worktrees/nul\n", encoding="utf-8")
+    (wt / ".git").write_text("gitdir: /tmp/a\x00b/.git/worktrees/embedded-nul\n", encoding="utf-8")
 
     assert _under_nested_worktree(wt / "a.md", [repo], None) is False
 
@@ -882,9 +884,8 @@ async def test_the_debounce_drain_skips_an_edited_worktree_file(outside_repo) ->
 # ---------------------------------------------------------------------------
 
 
-def test_budget_audit_reports_an_unowned_worktree_row_as_excluded(
-    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _audit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sources: list[Path]) -> dict:
+    """Run ``budget_audit.audit`` over a minimal store holding one chunk per source."""
     import sqlite3
 
     from memtomem.config import IndexingConfig
@@ -896,11 +897,6 @@ def test_budget_audit_reports_an_unowned_worktree_row_as_excluded(
     tokenizer_path = tmp_path / "tokenizer.json"
     tokenizer.save(str(tokenizer_path))
     monkeypatch.setattr(profiles, "resolve_tokenizer", lambda identifier: tokenizer_path)
-
-    wt = repo / ".worktrees/wt"
-    run("worktree", "add", "-q", str(wt), "-b", "wt", cwd=repo)
-    (repo / "m.py").write_text("x = 1\n", encoding="utf-8")
-    (wt / "m.py").write_text("x = 1\n", encoding="utf-8")
     db_path = tmp_path / "audit.db"
     with sqlite3.connect(db_path) as db:
         db.execute(
@@ -908,7 +904,7 @@ def test_budget_audit_reports_an_unowned_worktree_row_as_excluded(
             "chunk_type TEXT, namespace TEXT, scope TEXT, heading_hierarchy TEXT, "
             "retrieval_context TEXT, start_line INTEGER)"
         )
-        for n, source in enumerate((repo / "m.py", wt / "m.py")):
+        for n, source in enumerate(sources):
             db.execute(
                 "INSERT INTO chunks VALUES (?, ?, 'x = 1', 'h', 'code', 'default', 'user', "
                 "'[]', '', 1)",
@@ -921,8 +917,78 @@ def test_budget_audit_reports_an_unowned_worktree_row_as_excluded(
         chunk_model_tokens=512,
         memory_dirs=[],
     )
+    return audit(db_path, config, set())
 
-    report = audit(db_path, config, set())
+
+def test_budget_audit_reports_an_unowned_worktree_row_as_excluded(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt = repo / ".worktrees/wt"
+    run("worktree", "add", "-q", str(wt), "-b", "wt", cwd=repo)
+    (repo / "m.py").write_text("x = 1\n", encoding="utf-8")
+    (wt / "m.py").write_text("x = 1\n", encoding="utf-8")
+
+    report = _audit(tmp_path, monkeypatch, [repo / "m.py", wt / "m.py"])
 
     assert [e["source"] for e in report["excluded"]] == [str(wt / "m.py")]
     assert [e["source"] for e in report["reindex"]] == [str(repo / "m.py")]
+
+
+# ---------------------------------------------------------------------------
+# A stored path that cannot be resolved answers "not excluded" rather than raising
+# ---------------------------------------------------------------------------
+
+UNRESOLVABLE = "unresolvable-source"
+
+
+@pytest.fixture(params=[ValueError, RuntimeError, OSError])
+def unresolvable(request, monkeypatch: pytest.MonkeyPatch) -> type[Exception]:
+    """``Path.resolve`` raises for one path, the way a NUL or a symlink loop does.
+
+    ``norm_path`` in the ownership lookup catches only ``OSError``, so the other
+    two escaped every caller before the lookup moved inside the handler.
+    """
+    real = Path.resolve
+    error = request.param
+
+    def resolve(self, strict=False):
+        if UNRESOLVABLE in str(self):
+            raise error("cannot resolve")
+        return real(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    return error
+
+
+@pytest.mark.parametrize("roots", [[], ["root"]])
+def test_an_unresolvable_path_is_not_excluded_and_does_not_raise(
+    unresolvable, tmp_path: Path, spec, roots
+) -> None:
+    target = tmp_path / UNRESOLVABLE / "a.md"
+    memory_dirs = [tmp_path] if roots else []
+
+    assert _path_is_excluded(target, memory_dirs, spec) is False
+    assert _under_nested_worktree(target, memory_dirs, None) is False
+
+
+def test_purge_passes_over_an_unresolvable_row(unresolvable, repo: Path) -> None:
+    from memtomem.cli.purge_cmd import find_sources_matching_excluded
+
+    wt = repo / ".worktrees/wt"
+    run("worktree", "add", "-q", str(wt), "-b", "wt", cwd=repo)
+    sources = [repo / UNRESOLVABLE / "a.md", wt / "a.md"]
+
+    assert find_sources_matching_excluded(sources, [], [repo]) == [wt / "a.md"]
+
+
+def test_budget_audit_passes_over_an_unresolvable_row(
+    unresolvable, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt = repo / ".worktrees/wt"
+    run("worktree", "add", "-q", str(wt), "-b", "wt", cwd=repo)
+    (wt / "m.py").write_text("x = 1\n", encoding="utf-8")
+    broken = repo / UNRESOLVABLE / "m.py"
+
+    report = _audit(tmp_path, monkeypatch, [broken, wt / "m.py"])
+
+    assert [e["source"] for e in report["excluded"]] == [str(wt / "m.py")]

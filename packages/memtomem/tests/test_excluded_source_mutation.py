@@ -17,6 +17,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from helpers import StubCtx
+from memtomem.indexing.engine import resolve_owning_memory_dir
 from memtomem.server.context import AppContext
 from memtomem.server.tools import memory_crud
 from memtomem.source_provenance import EXCLUDED_SOURCE_DETAIL
@@ -33,13 +34,30 @@ def _git(*args: str, cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True, timeout=60)
 
 
-@pytest.fixture(params=["pattern", "worktree"])
-async def excluded_source(request, bm25_only_components):
+def _repository_with_worktree(root: Path) -> Path:
+    if shutil.which("git") is None:
+        pytest.skip("needs a git binary")
+    root.mkdir(exist_ok=True)
+    _git("init", "-q", ".", cwd=root)
+    _git("config", "user.email", "t@example.invalid", cwd=root)
+    _git("config", "user.name", "t", cwd=root)
+    (root / "keep.md").write_text("# keep\n", encoding="utf-8")
+    _git("add", "keep.md", cwd=root)
+    _git("commit", "-qm", "init", cwd=root)
+    wt = root / ".worktrees/wt"
+    _git("worktree", "add", "-q", str(wt), "-b", "wt", cwd=root)
+    return wt
+
+
+@pytest.fixture(params=["pattern", "owned_worktree", "unowned_worktree"])
+async def excluded_source(request, bm25_only_components, tmp_path):
     """An indexed source that the current configuration then excludes.
 
     ``pattern``: an ``indexing.exclude_patterns`` entry added after indexing.
-    ``worktree``: a git worktree registered as its own root while indexed, then
-    unregistered, so the parent root now owns it and finds a nested worktree.
+    ``owned_worktree``: a worktree registered as its own root while indexed, then
+    unregistered, so the parent root owns it and finds a nested worktree.
+    ``unowned_worktree``: the same inside a repository outside every configured
+    root, so no root owns it and its enclosing repository is the bound (#2486).
     """
     comp, mem_dir = bm25_only_components
     indexing = comp.config.indexing
@@ -49,21 +67,15 @@ async def excluded_source(request, bm25_only_components):
         await _index(comp, source)
         indexing.exclude_patterns = [*indexing.exclude_patterns, "**/note.md"]
     else:
-        if shutil.which("git") is None:
-            pytest.skip("needs a git binary")
-        _git("init", "-q", ".", cwd=mem_dir)
-        _git("config", "user.email", "t@example.invalid", cwd=mem_dir)
-        _git("config", "user.name", "t", cwd=mem_dir)
-        (mem_dir / "keep.md").write_text("# keep\n", encoding="utf-8")
-        _git("add", "keep.md", cwd=mem_dir)
-        _git("commit", "-qm", "init", cwd=mem_dir)
-        wt = mem_dir / ".worktrees/wt"
-        _git("worktree", "add", "-q", str(wt), "-b", "wt", cwd=mem_dir)
+        parent = mem_dir if request.param == "owned_worktree" else tmp_path / "outside"
+        wt = _repository_with_worktree(parent)
         source = wt / "note.md"
         source.write_text(ORIGINAL, encoding="utf-8")
         indexing.memory_dirs = [mem_dir, wt]
         await _index(comp, source)
         indexing.memory_dirs = [mem_dir]
+        owner = resolve_owning_memory_dir(source, indexing.all_index_roots())
+        assert (owner is None) is (request.param == "unowned_worktree")
     assert comp.index_engine.is_excluded(source)
     (chunk,) = await comp.storage.list_chunks_by_source(source)
     assert chunk.metadata.source_span_hash

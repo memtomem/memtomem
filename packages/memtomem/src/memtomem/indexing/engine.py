@@ -381,8 +381,11 @@ def _under_nested_worktree(
     server would otherwise never notice a worktree added after startup, and
     would keep skipping one that was removed.
     """
-    owning = resolve_owning_memory_dir(file_path, memory_dirs)
     try:
+        # Inside the handler: ``norm_path`` catches only ``OSError``, so an
+        # embedded NUL (``ValueError``) or a symlink loop (``RuntimeError`` on
+        # 3.12) would otherwise escape from the ownership lookup.
+        owning = resolve_owning_memory_dir(file_path, memory_dirs)
         target = Path(file_path).expanduser().resolve()
         if owning is not None:
             bound: Path | None = Path(owning).expanduser().resolve()
@@ -443,12 +446,20 @@ def _path_is_excluded(
     ``~/.codex/memories`` keeps its own ``README.md`` rather than
     inheriting Codex's exclude.
     """
-    owning = resolve_owning_memory_dir(file_path, memory_dirs)
+    try:
+        owning = resolve_owning_memory_dir(file_path, memory_dirs)
+        keys = _exclude_match_keys(file_path, memory_dirs)
+    except (OSError, ValueError, RuntimeError):
+        # A path that cannot be resolved — an embedded NUL, a symlink loop —
+        # cannot be opened either, so there is nothing to index or purge.
+        # Answering keeps one bad stored row from aborting a whole purge or
+        # budget audit, which evaluate this outside any per-source handler.
+        return False
     if owning is not None and Path(file_path).name in index_excluded_filenames(
         categorize_memory_dir(owning)
     ):
         return True
-    for key in _exclude_match_keys(file_path, memory_dirs):
+    for key in keys:
         if _BUILTIN_EXCLUDE_SPEC.match_file(key) or user_spec.match_file(key):
             return True
     return _under_nested_worktree(file_path, memory_dirs, worktree_cache, walk_root=walk_root)
