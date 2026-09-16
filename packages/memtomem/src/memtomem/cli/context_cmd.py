@@ -136,11 +136,18 @@ from memtomem.context.settings import (
     generate_all_settings,
     host_write_targets,
 )
+from memtomem._runtime_paths import scrub_text
+from memtomem.context.error_redact import redact_secret_value
 from memtomem.context.settings_doctor import (
     detect_duplicate_tiers,
     find_malformed_matchers,
+    find_unportable_hook_commands,
+    find_unscanned_settings_files,
     format_malformed_warning,
+    format_unportable_command_warning,
+    format_unscanned_settings_warning,
     format_warning,
+    redact_unportable_command_fields,
 )
 from memtomem.context.settings_copy import (
     HookCopyPlan,
@@ -837,6 +844,16 @@ def _print_duplicate_tier_warnings(root: Path, *, scope: str) -> None:
         click.secho(f"  warning: {format_warning(dup, active_scope=scope)}", err=True, fg="yellow")
     for finding in find_malformed_matchers(root):
         click.secho(f"  warning: {format_malformed_warning(finding)}", err=True, fg="yellow")
+    for unportable_finding in find_unportable_hook_commands(root):
+        click.secho(
+            f"  warning: {format_unportable_command_warning(unportable_finding)}",
+            err=True,
+            fg="yellow",
+        )
+    for unscanned in find_unscanned_settings_files(root):
+        click.secho(
+            f"  warning: {format_unscanned_settings_warning(unscanned)}", err=True, fg="yellow"
+        )
 
 
 def _print_settings_generate(root: Path, *, scope: str, allow_host_writes: bool) -> None:
@@ -5079,16 +5096,27 @@ def settings_doctor_cmd(json_out: bool, scope_flag: str | None) -> None:
     signature detection used by the sync-time warning, exposed as a
     standalone subcommand for CI / scripting use.
 
-    Exit codes: ``0`` clean, ``1`` duplicates or malformed matchers found.
+    Exit codes: ``0`` clean (or advisory warnings only), ``1`` duplicates or
+    malformed matchers found.
     """
     root = _find_project_root()
     scope = _resolve_cli_scope(scope_flag)
     duplicates = detect_duplicate_tiers(root, active_scope=scope)
     malformed = find_malformed_matchers(root)
+    unportable = find_unportable_hook_commands(root)
+    unscanned = find_unscanned_settings_files(root)
 
     if json_out:
+        if duplicates:
+            status = "duplicates"
+        elif malformed:
+            status = "malformed"
+        elif unscanned:
+            status = "incomplete"
+        else:
+            status = "clean"
         payload = {
-            "status": "duplicates" if duplicates else ("malformed" if malformed else "clean"),
+            "status": status,
             "active_scope": scope,
             "duplicates": [
                 {
@@ -5116,10 +5144,32 @@ def settings_doctor_cmd(json_out: bool, scope_flag: str | None) -> None:
                 }
                 for finding in malformed
             ],
+            "unportable_commands": [
+                {
+                    "source": finding.source,
+                    "tier": finding.tier,
+                    "path": str(finding.path),
+                    "event": finding.event,
+                    "rule_index": finding.rule_index,
+                    "hook_index": finding.hook_index,
+                    "command": finding.command,
+                    "unportable_literal": finding.unportable_literal,
+                }
+                for finding in unportable
+            ],
+            "unscanned_settings": [
+                {
+                    "source": item.source,
+                    "tier": item.tier,
+                    "path": str(item.path),
+                    "reason": item.reason,
+                }
+                for item in unscanned
+            ],
         }
         click.echo(json.dumps(payload, indent=2))
     else:
-        if not duplicates and not malformed:
+        if not duplicates and not malformed and not unportable and not unscanned:
             click.secho(
                 f"✓ No memtomem-managed hooks duplicated outside the active scope ({scope}).",
                 fg="green",
@@ -5146,12 +5196,47 @@ def settings_doctor_cmd(json_out: bool, scope_flag: str | None) -> None:
             )
             for finding in malformed:
                 location = "canonical" if finding.source == "canonical" else f"{finding.tier} tier"
-                click.secho(f"  • {location} ({finding.path})", fg="yellow")
+                click.secho(f"  • {location} ({scrub_text(str(finding.path))})", fg="yellow")
                 click.echo(
-                    f"      [{finding.event} rule #{finding.rule_index}] "
-                    f"non-string matcher ({finding.matcher_type})"
+                    f"      [{scrub_text(redact_secret_value(finding.event))} rule #{finding.rule_index}] "
+                    f"non-string matcher ({scrub_text(finding.matcher_type)})"
                 )
             click.echo("\n`matcher` must be a string. Omit it for match-all, or quote the value.")
+        if unportable:
+            num_commands = len({(f.path, f.event, f.rule_index, f.hook_index) for f in unportable})
+            click.secho(
+                f"✗ Found {num_commands} hook command(s) with unportable home paths:",
+                fg="yellow",
+            )
+            for unportable_finding in unportable:
+                location = (
+                    "canonical"
+                    if unportable_finding.source == "canonical"
+                    else f"{unportable_finding.tier} tier"
+                )
+                click.secho(
+                    f"  • {location} ({scrub_text(str(unportable_finding.path))})", fg="yellow"
+                )
+                safe_cmd, safe_lit = redact_unportable_command_fields(
+                    unportable_finding.command, unportable_finding.unportable_literal
+                )
+                click.echo(
+                    f"      [{scrub_text(redact_secret_value(unportable_finding.event))} "
+                    f"rule #{unportable_finding.rule_index} "
+                    f"hook #{unportable_finding.hook_index}] "
+                    f"'{safe_lit}' in '{safe_cmd}'"
+                )
+            click.echo("\nRewrite hook commands with $HOME, ~, or repo-relative paths.")
+        if unscanned:
+            click.secho(
+                f"! Could not check {len(unscanned)} settings file(s):",
+                fg="yellow",
+            )
+            for item in unscanned:
+                location = "canonical" if item.source == "canonical" else f"{item.tier} tier"
+                click.secho(f"  • {location} ({scrub_text(str(item.path))})", fg="yellow")
+                click.echo(f"      {item.reason}")
+            click.echo("\nFix or remove these files; nothing in them was verified.")
 
     if duplicates or malformed:
         raise click.exceptions.Exit(1)
