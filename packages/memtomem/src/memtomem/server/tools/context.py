@@ -203,20 +203,53 @@ def _settings_dup_tier_warnings(root: Path, active_scope: str) -> list[str]:
     """
     from dataclasses import replace
 
+    from memtomem.context.error_redact import SECRET_REDACTED_MARKER, redact_secret_value
     from memtomem.context.settings_doctor import (
         detect_duplicate_tiers,
         find_malformed_matchers,
+        find_unportable_hook_commands,
+        find_unscanned_settings_files,
         format_malformed_warning,
+        format_unportable_command_warning,
+        format_unscanned_settings_warning,
         format_warning,
+        redact_unportable_command_fields,
     )
 
     lines: list[str] = []
     for dup in detect_duplicate_tiers(root, active_scope=active_scope):
-        redacted = replace(dup, path=Path(_redact_reason(str(dup.path), root)))
-        lines.append(f"  warning: {format_warning(redacted, active_scope=active_scope)}")
+        redacted_dup = replace(dup, path=Path(_redact_reason(str(dup.path), root)))
+        lines.append(f"  warning: {format_warning(redacted_dup, active_scope=active_scope)}")
     for finding in find_malformed_matchers(root):
-        redacted_finding = replace(finding, path=Path(_redact_reason(str(finding.path), root)))
+        redacted_finding = replace(
+            finding,
+            path=Path(_redact_reason(str(finding.path), root)),
+            event=_redact_reason(finding.event, root),
+        )
         lines.append(f"  warning: {format_malformed_warning(redacted_finding)}")
+    for unportable_finding in find_unportable_hook_commands(root):
+        command_redacted = redact_secret_value(_redact_reason(unportable_finding.command, root))
+        safe_cmd, safe_lit = redact_unportable_command_fields(
+            unportable_finding.command, unportable_finding.unportable_literal
+        )
+        if safe_cmd == SECRET_REDACTED_MARKER:
+            command_redacted = SECRET_REDACTED_MARKER
+            literal_redacted = SECRET_REDACTED_MARKER
+        else:
+            literal_redacted = _redact_reason(safe_lit, root)
+        redacted_unportable = replace(
+            unportable_finding,
+            path=Path(_redact_reason(str(unportable_finding.path), root)),
+            event=_redact_reason(unportable_finding.event, root),
+            unportable_literal=literal_redacted,
+            command=command_redacted,
+        )
+        lines.append(f"  warning: {format_unportable_command_warning(redacted_unportable)}")
+    for unscanned in find_unscanned_settings_files(root):
+        redacted_unscanned = replace(
+            unscanned, path=Path(_redact_reason(str(unscanned.path), root))
+        )
+        lines.append(f"  warning: {format_unscanned_settings_warning(redacted_unscanned)}")
     return lines
 
 
@@ -838,7 +871,7 @@ async def mem_context_generate(
             if sr.status == "ok":
                 results.append(f"\nSettings: {sname} → {_redact_reason(str(sr.target), root)}")
                 for w in sr.warnings:
-                    results.append(f"  warning: {w}")
+                    results.append(f"  warning: {_redact_reason(w, root)}")
             elif sr.status == "skipped":
                 results.append(f"  skipped {sname}: {_redact_reason(sr.reason, root)}")
             elif sr.status == "needs_confirmation":
@@ -977,7 +1010,7 @@ async def mem_context_diff(
                 if sr.status in ("in sync", "out of sync", "missing target"):
                     lines.append(f"  {sname} [{sr.status}]")
                     for w in sr.warnings:
-                        lines.append(f"    warning: {w}")
+                        lines.append(f"    warning: {_redact_reason(w, root)}")
                 elif sr.status == "skipped":
                     lines.append(f"  skipped {sname}: {_redact_reason(sr.reason, root)}")
                 elif sr.status == "error":
@@ -1216,7 +1249,7 @@ async def mem_context_sync(
                     results.append("")
                 results.append(f"Settings: {sname} → {_redact_reason(str(sr.target), root)}")
                 for w in sr.warnings:
-                    results.append(f"  warning: {w}")
+                    results.append(f"  warning: {_redact_reason(w, root)}")
             elif sr.status == "skipped":
                 results.append(f"  skipped {sname}: {_redact_reason(sr.reason, root)}")
             elif sr.status == "needs_confirmation":

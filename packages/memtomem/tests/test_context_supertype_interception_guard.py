@@ -1598,6 +1598,31 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "no_recovery_callee",
         "settings dict read; " + _NONSKILL,
     ),
+    ("context/settings_doctor.py", "_read_settings", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "settings path lstat; " + _NONSKILL,
+    ),
+    ("context/settings_doctor.py", "_read_settings", ("OSError",), 1): (
+        _U,
+        "no_recovery_callee",
+        "settings path stat; " + _NONSKILL,
+    ),
+    ("context/settings_doctor.py", "_read_settings", ("OSError",), 2): (
+        _U,
+        "no_recovery_callee",
+        "settings dict read; " + _NONSKILL,
+    ),
+    ("context/settings_doctor.py", "_get_host_homes", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "host home resolve; " + _RO,
+    ),
+    ("context/settings_doctor.py", "_get_host_homes", ("OSError",), 1): (
+        _U,
+        "no_recovery_callee",
+        "host home resolve; " + _RO,
+    ),
     ("context/settings_doctor.py", "_resolved", ("OSError",), 0): (
         _U,
         "no_recovery_callee",

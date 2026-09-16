@@ -322,3 +322,202 @@ async def test_no_dup_warning_when_only_active_tier(tmp_path, monkeypatch):
 
     out = await mem_context_diff(include="settings", scope="project_shared")
     assert "duplicat" not in out.lower()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool",
+    [mem_context_generate, mem_context_diff, mem_context_sync],
+    ids=["generate", "diff", "sync"],
+)
+async def test_mcp_unportable_command_warning_surfaced(tmp_path, monkeypatch, tool):
+    """Unportable hook commands surface in MCP generate/diff/sync."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    (project / ".claude").mkdir()
+    set_home(monkeypatch, tmp_path / "home")
+    monkeypatch.setattr(error_redact, "_HOME", str(tmp_path))
+
+    _write_settings(
+        project / CANONICAL_SETTINGS_FILE,
+        {
+            "PostToolUse": [
+                {
+                    "matcher": "Edit|Write",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "/Users/alice/hook.sh",
+                            "timeout": 5000,
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    monkeypatch.chdir(project)
+
+    out = await tool(include="settings", scope="project_shared")
+    assert "contains non-portable absolute home path" in out
+    assert "canonical settings" in out
+    assert "rewrite with $HOME, ~, or a repo-relative path" in out
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool",
+    [mem_context_generate, mem_context_diff, mem_context_sync],
+    ids=["generate", "diff", "sync"],
+)
+async def test_mcp_unportable_command_warning_redacted(tmp_path, monkeypatch, tool):
+    """Local home paths and secrets in unportable commands are redacted on MCP wire."""
+    secret = "AKIA1234567890ABCDEF"
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    (project / ".claude").mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setattr(error_redact, "_HOME", str(tmp_path))
+
+    _write_settings(
+        project / CANONICAL_SETTINGS_FILE,
+        {
+            "PostToolUse": [
+                {
+                    "matcher": "Edit|Write",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{home}/bin/hook.sh --token={secret}",
+                            "timeout": 5000,
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    monkeypatch.chdir(project)
+
+    out = await tool(include="settings", scope="project_shared")
+    assert "contains non-portable absolute home path" in out
+    assert secret not in out
+    assert str(home) not in out
+    # Remediation text survives whole
+    assert "rewrite with $HOME, ~, or a repo-relative path so settings can be safely shared" in out
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool",
+    [mem_context_generate, mem_context_diff, mem_context_sync],
+    ids=["generate", "diff", "sync"],
+)
+async def test_mcp_path_bearing_event_sanitized(tmp_path, monkeypatch, tool):
+    """Event names containing home paths are sanitized across MCP wire boundary."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    for runtime_dir in (".claude", ".codex", ".gemini", ".kimi"):
+        (project / runtime_dir).mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setattr(error_redact, "_HOME", str(tmp_path))
+
+    path_event = f"{home}/custom:event"
+    _write_settings(
+        project / CANONICAL_SETTINGS_FILE,
+        {
+            path_event: [
+                {
+                    "matcher": ["Bash"],  # malformed matcher
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{home}/hook.sh",  # unportable command
+                            "timeout": 5000,
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    monkeypatch.chdir(project)
+
+    out = await tool(include="settings", scope="project_shared")
+    # Raw home path must never appear on the MCP wire, even within event name
+    assert str(home) not in out
+    # ... and the warnings it rides on must still be there (absence alone passes vacuously)
+    assert "non-string matcher (list)" in out
+    assert "contains non-portable absolute home path" in out
+    assert "canonical settings" in out
+    assert "rewrite with $HOME, ~, or a repo-relative path" in out
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool",
+    [mem_context_generate, mem_context_diff, mem_context_sync],
+    ids=["generate", "diff", "sync"],
+)
+async def test_mcp_multiline_hook_with_project_root_redaction(tmp_path, monkeypatch, tool):
+    """Multiline hook commands ending in project root do not crash redaction (_ends_token IndexError)."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    for runtime_dir in (".claude", ".codex", ".gemini", ".kimi"):
+        (project / runtime_dir).mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+
+    multiline_cmd = f"{home}/hook.sh\ncd {project}\n"
+    _write_settings(
+        project / CANONICAL_SETTINGS_FILE,
+        {
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": multiline_cmd,
+                            "timeout": 5000,
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+    monkeypatch.chdir(project)
+
+    out = await tool(include="settings", scope="project_shared")
+    assert "contains non-portable absolute home path" in out
+    assert str(home) not in out
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool",
+    [mem_context_generate, mem_context_diff, mem_context_sync],
+    ids=["generate", "diff", "sync"],
+)
+async def test_mcp_unscanned_settings_warning_surfaced_redacted(tmp_path, monkeypatch, tool):
+    """A settings file no check could read is named on MCP, with its home path redacted."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    (project / ".claude").mkdir()
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    set_home(monkeypatch, home)
+    monkeypatch.setattr(error_redact, "_HOME", str(tmp_path))
+    (home / ".claude" / "settings.json").write_text("{broken json", encoding="utf-8")
+    monkeypatch.chdir(project)
+
+    out = await tool(include="settings", scope="project_shared")
+    assert "user tier file (" in out
+    assert "was not checked: invalid JSON." in out
+    assert str(home) not in out
