@@ -50,6 +50,7 @@ _HOME = str(Path.home())
 _ERROR_MESSAGE_LIMIT = 200
 # Fixed display marker emitted after redaction; it is not authentication material.
 _SECRET_REDACTED_MARKER = "<redacted: secret-shape>"  # nosec B105
+SECRET_REDACTED_MARKER = _SECRET_REDACTED_MARKER
 
 # Residual absolute-path backstop, shared with the web (which imports
 # :func:`scrub_absolute_paths` rather than keeping its own copy of this).
@@ -179,6 +180,8 @@ def _strip_project_roots(message: str, *project_roots: Path) -> tuple[str, bool]
         if end == len(source):
             return True
         following = source[end]
+        if following in ("\r", "\n"):
+            return True
         if following in "'\"),]:;" or following.isspace():
             # Preserve diagnostics such as ``<root> is not a directory``.
             # A sibling component containing spaces still has a later path
@@ -186,7 +189,8 @@ def _strip_project_roots(message: str, *project_roots: Path) -> tuple[str, bool]
             # colon-bearing sibling (``<root>:private/team``) absolute. Keep
             # those for the collision scrub instead of treating the delimiter
             # as the end of the path token.
-            line_tail = source[end + 1 :].splitlines()[0]
+            lines = source[end + 1 :].splitlines()
+            line_tail = lines[0] if lines else ""
             return "/" not in line_tail and "\\" not in line_tail
         return False
 

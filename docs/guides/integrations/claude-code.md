@@ -367,10 +367,42 @@ non-active tiers before write and surface a non-blocking warning when
 duplicates exist. For CI / scripting use, run the on-demand check:
 
 ```bash
-mm context settings-doctor               # exits 0 if clean, 1 if duplicates/malformed
+mm context settings-doctor               # exits 0 if clean (or warnings only), 1 if duplicates/malformed
 mm context settings-doctor --json        # structured output for scripting
 mm context settings-doctor --scope=project_local   # one-shot scope override
 ```
+
+The doctor checks three axes:
+1. **Cross-tier duplicates** (exits 1 if found)
+2. **Malformed matchers** (non-string matchers, exits 1 if found)
+3. **Unportable hook commands** (advisory warning, exits 0 on standalone run)
+
+The unportable-command check is a literal text scan, not a shell parser. It
+reports each home root written in a hook command in canonical settings or a
+runtime tier: `/home/<user>`, `/Users/<user>`, `C:\Users\<user>`, or the
+current `$HOME` when it lives elsewhere. A root counts wherever it appears —
+inside quotes, heredocs, `${VAR:-default}` fallbacks, and comments too — unless
+it is part of a longer path such as `/opt/home/x`, `./home/x`, or
+`$HOME/home/x`. Rewrite such commands with `$HOME`, `~`, or a repo-relative
+path. JSON output includes an `unportable_commands` array with the source,
+tier, path, event, rule/hook index, command, and the root as
+`unportable_literal`.
+
+A clean result does not mean the hooks are portable: paths assembled at run
+time, other absolute paths (`/opt/homebrew` vs `/usr/local`), and scripts that
+themselves reference a home directory all pass. Expect occasional false
+positives, such as `"$HOME"/home/...` or a root in a comment.
+
+A settings file that exists but cannot be read (invalid JSON, not a JSON
+object, unreadable, not a file, or a broken symlink) is not silently treated as clean: the doctor
+lists it under `unscanned_settings` with a reason, `--json` reports
+`"status": "incomplete"` when no duplicates or malformed matchers were found,
+and the exit code stays 0.
+The same warning rides the sync and MCP warning surfaces.
+
+> [!NOTE]
+> **Settings vs Artifact Scope Asymmetry**
+> Canonical hook settings are always rooted in the project (`.memtomem/settings.json`) and shared across the workspace, whereas context artifacts are tier-based. This makes absolute home directory literals in canonical settings particularly hazardous when sharing settings across different machines and team members.
 
 The doctor also reports any hook rule whose present `matcher` is not a string.
 JSON output includes a `malformed_matchers` array with the source, tier, path,
@@ -387,6 +419,10 @@ dropped before indexing and reported as `matcher_warnings`.
 Claude Code ignores such a rule for hook matching, so it is invisible to
 duplicate detection and would otherwise go unnoticed until a copy or migrate
 that touches that file refused to run.
+
+Unportable hook commands and unscanned settings files ride the same
+non-blocking warning surface on CLI (`mm context sync|diff --include=settings`)
+and MCP (`mem_context_*` tools).
 
 <details>
 <summary>Fixing duplicates — migrate and copy hooks across tiers and projects</summary>

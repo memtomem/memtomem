@@ -278,7 +278,7 @@ Which doctor to run:
 | server processes, runtime directory | `mm doctor` |
 | a store's disk / index / DB drift | `mm memory doctor` |
 | the private multi-device sync repo | `mm sync-doctor` |
-| client hook settings across tiers | `mm context settings-doctor` |
+| client hook settings across tiers & unportable commands | `mm context settings-doctor` |
 
 The problem it exists for is accumulation. Every MCP client that starts memtomem
 gets its own `memtomem-server`, and that server lives as long as the client

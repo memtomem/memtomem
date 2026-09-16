@@ -13,6 +13,8 @@ Covers four surfaces:
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -23,9 +25,17 @@ from httpx import ASGITransport, AsyncClient
 from memtomem.context.settings import CANONICAL_SETTINGS_FILE
 from memtomem.context.settings_doctor import (
     HookSignature,
+    UnportableHookCommand,
+    UnscannedSettingsFile,
+    _extract_unportable_literals,
     detect_duplicate_tiers,
     find_malformed_matchers,
+    find_unportable_hook_commands,
+    find_unscanned_settings_files,
+    format_unportable_command_warning,
+    format_unscanned_settings_warning,
     load_canonical_signatures,
+    redact_unportable_command_fields,
 )
 from memtomem.web.app import create_app
 from .helpers import set_home
@@ -342,6 +352,351 @@ def test_healthy_duplicate_beside_malformed_rule_is_still_reported(project_root,
     assert finding.rule_index == 1
 
 
+# ── Unportable hook commands unit tests ────────────────────────────
+
+
+_ALICE = "/home/alice"
+
+# The #2407 detection contract as an example table. The scanner is lexical: a home
+# root counts wherever its text appears unless the character before it embeds it in
+# a longer word or path. Reported literals are roots, not full paths.
+_FLAGGED = [
+    ("/home/alice/hook.sh", [_ALICE]),
+    ("/Users/alice/bin/hook.sh", ["/Users/alice"]),
+    ("/users/alice/x", ["/users/alice"]),
+    ('"/home/alice/hook.sh"', [_ALICE]),
+    ('"/home/alice"/hook.sh', [_ALICE]),
+    ("bash /home/alice/hook.sh", [_ALICE]),
+    ("cd /tmp && /home/alice/hook.sh", [_ALICE]),
+    ("true&&/Users/alice/hook.sh", ["/Users/alice"]),
+    ("true;/home/bob/hook.sh", ["/home/bob"]),
+    ("< /home/bob/hook.sh", ["/home/bob"]),
+    ("tool --dir=/home/alice/hooks", [_ALICE]),
+    ('"$(/home/alice/bin)/hook.sh"', [_ALICE]),
+    ("echo `/home/bob/hook.sh`", ["/home/bob"]),
+    ("sh -c 'echo ready; /home/alice/hook.sh'", [_ALICE]),
+    ("bash <<EOF\n'${HOOK:-/home/alice/hook.sh}'\nEOF", [_ALICE]),
+    ("${HOOK-/home/alice/hook.sh}", [_ALICE]),
+    ("${HOOK:=/home/alice/hook.sh}", [_ALICE]),
+    ("${HOOK:+/opt}/home/alice/hook.sh", [_ALICE]),
+    ("eval '/home/alice/hook.sh'", [_ALICE]),
+    ("PATH=/home/alice/bin:/Users/bob/bin", [_ALICE, "/Users/bob"]),
+    ("/home/alice/a&/Users/bob/b", [_ALICE, "/Users/bob"]),
+    ("/home/alice/a /home/alice/b", [_ALICE]),
+    ("ssh-host:/Users/bob/x", ["/Users/bob"]),
+    ("/home/alice+dev/hook.sh", ["/home/alice+dev"]),
+    ("/home/álîce/hook.sh", ["/home/álîce"]),
+    ("file:///home/alice/hook.sh", [_ALICE]),
+    ("/Users/Shared/tool", ["/Users/Shared"]),
+    ("/home/linuxbrew/.linuxbrew/bin/brew", ["/home/linuxbrew"]),
+    (r"C:\Users\alice\hook.cmd", [r"C:\Users\alice"]),
+    (r"C:\Users\Public\tool.exe", [r"C:\Users\Public"]),
+    ('"D:/Users/alice/a=b.cmd"', ["D:/Users/alice"]),
+    (r'tool "--dir=C:\Users\alice\hook.cmd"', [r"C:\Users\alice"]),
+    (r"C:\\Users\\alice\\hook.cmd", [r"C:\\Users\\alice"]),
+]
+
+# Documented false positives: the warning is advisory, and telling these apart
+# would take the shell grammar the scanner deliberately does not implement.
+_ACCEPTED_FALSE_POSITIVES = [
+    ('"$HOME"/home/bob/hook.sh', ["/home/bob"]),
+    ("${HOME}/home/bob/hook.sh", ["/home/bob"]),
+    ("uv run mm session start # formerly /home/alice/hook.sh", [_ALICE]),
+    ("cat <<'EOF'\n/home/alice/data\nEOF", [_ALICE]),
+    ("echo '${HOOK:-/home/alice/hook.sh}'", [_ALICE]),
+]
+
+_NOT_FLAGGED = [
+    "uv run mm session start",
+    "hooks/foo.sh",
+    "./script.sh",
+    "./home/alice/x",
+    "../home/alice/x",
+    "~/home/bob/hook.sh",
+    "$HOME/home/bob/hook.sh",
+    "/opt/home/alice/hook.sh",
+    "/opt//home/alice/hook.sh",
+    "pkg-config/home/alice",
+    "https://example.com/home/alice/repo",
+    "https://example.com//home/alice/repo",
+    "./fixtures/C:/Users/alice/hook.cmd",
+    r"%USERPROFILE%\Users\alice\hook.bat",
+    "/usr/bin/bash",
+    "/opt/homebrew/bin/python3",
+    "/home/$USER/hook.sh",
+    "/home/${USER}/hook.sh",
+    "/home/*/hook.sh",
+    "/home/",
+    "/home/../etc/passwd",
+]
+
+_HOST_HOME_CASES = [
+    ("/srv/jenkins/bin/hook.sh", "/srv/jenkins", ["/srv/jenkins"]),
+    ('"/srv/o\'connor/hook.sh"', "/srv/o'connor", ["/srv/o'connor"]),
+    ("/root", "/root", ["/root"]),
+    ("/srv/jenkins-old/hook.sh", "/srv/jenkins", []),
+    ("/data/srv/jenkins/hook.sh", "/srv/jenkins", []),
+    ("/SRV/JENKINS/x", "/srv/jenkins", []),
+    ("/Users/alice/x", "/Users/alice", ["/Users/alice"]),
+    # A host home nested under a standard root reports the home, not both.
+    (
+        r"C:\Users\bob\AppData\Local\home\hook.sh",
+        r"C:\Users\bob\AppData\Local\home",
+        [r"C:\Users\bob\AppData\Local\home"],
+    ),
+    ("/Users/bob/nested/home/hook.sh", "/Users/bob/nested/home", ["/Users/bob/nested/home"]),
+    # An unrelated root beside it is still reported.
+    ("/srv/jenkins/a /home/alice/b", "/srv/jenkins", ["/srv/jenkins", "/home/alice"]),
+    (r"D:\Profiles\alice\hook.cmd", r"D:\Profiles\alice", [r"D:\Profiles\alice"]),
+    ("D:/Profiles/alice/hook.cmd", r"D:\Profiles\alice", ["D:/Profiles/alice"]),
+    (r"d:\profiles\alice\sub\hook.cmd", r"D:\Profiles\alice", [r"d:\profiles\alice"]),
+    (r'"D:\Profiles\alice\hook.cmd"', r"D:\Profiles\alice", [r"D:\Profiles\alice"]),
+    (r"D:\Profiles\alice2\x", r"D:\Profiles\alice", []),
+    (r"\\server\share\alice\hook.cmd", r"\\server\share\alice", [r"\\server\share\alice"]),
+    ("//server/share/alice/hook.cmd", r"\\server\share\alice", ["//server/share/alice"]),
+]
+
+# No guarantee either way: only termination is pinned, never silence.
+_NON_GOALS = [
+    "DIR=/home; $DIR/alice/hook.sh",
+    "echo /home/\\\nalice/hook.sh",
+    "//home/alice/x",
+    "\\/home/alice/hook.sh",
+]
+
+
+class TestUnportableLiteralContract:
+    """The lexical home-root contract of ``_extract_unportable_literals`` (#2407)."""
+
+    @pytest.mark.parametrize(("command", "expected"), _FLAGGED)
+    def test_flagged(self, command, expected):
+        assert _extract_unportable_literals(command, ()) == expected
+
+    @pytest.mark.parametrize(("command", "expected"), _ACCEPTED_FALSE_POSITIVES)
+    def test_accepted_false_positives(self, command, expected):
+        assert _extract_unportable_literals(command, ()) == expected
+
+    @pytest.mark.parametrize("command", _NOT_FLAGGED)
+    def test_not_flagged(self, command):
+        assert _extract_unportable_literals(command, ()) == []
+
+    @pytest.mark.parametrize(("command", "home", "expected"), _HOST_HOME_CASES)
+    def test_host_homes(self, command, home, expected):
+        assert _extract_unportable_literals(command, (home,)) == expected
+
+    @pytest.mark.parametrize("command", _NON_GOALS)
+    def test_non_goals_terminate(self, command):
+        assert isinstance(_extract_unportable_literals(command, ("/srv/jenkins",)), list)
+
+    def test_pathological_input_scans_linearly(self):
+        command = "/home/" * 50_000 + "C:" * 50_000 + "a:/Users/" * 20_000
+        started = time.perf_counter()
+        _extract_unportable_literals(command, ("/srv/jenkins", r"D:\Profiles\alice"))
+        assert time.perf_counter() - started < 5
+
+
+class TestFindUnportableHookCommands:
+    """find_unportable_hook_commands wiring: files, attribution, rows, host homes."""
+
+    def test_one_finding_per_root_per_hook(self, project_root, fake_home):
+        _write_canonical(
+            project_root,
+            {
+                "SessionStart": [
+                    _rule("", "/home/alice/a.sh && /home/alice/b.sh /Users/bob/c.sh"),
+                    _rule("", "uv run mm session start"),
+                ]
+            },
+        )
+        findings = find_unportable_hook_commands(project_root, host_homes=())
+        assert [(f.rule_index, f.hook_index, f.unportable_literal) for f in findings] == [
+            (0, 0, "/home/alice"),
+            (0, 0, "/Users/bob"),
+        ]
+        assert all(
+            f.command == "/home/alice/a.sh && /home/alice/b.sh /Users/bob/c.sh" for f in findings
+        )
+
+    def test_current_host_home_flagged(self, project_root, fake_home):
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("Edit|Write", f"{fake_home}/bin/hook.sh")]},
+        )
+        findings = find_unportable_hook_commands(project_root, host_homes=(str(fake_home),))
+        assert [f.unportable_literal for f in findings] == [str(fake_home)]
+
+    def test_canonical_and_tier_attribution(self, project_root, fake_home):
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("", "/home/canonical/hook.sh")]},
+        )
+        _write_settings(
+            fake_home / ".claude" / "settings.json",
+            {"PostToolUse": [_rule("", "/home/user/hook.sh")]},
+        )
+        _write_settings(
+            project_root / ".claude" / "settings.json",
+            {"PostToolUse": [_rule("", "/home/shared/hook.sh")]},
+        )
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            {"PostToolUse": [_rule("", "/home/local/hook.sh")]},
+        )
+
+        findings = find_unportable_hook_commands(project_root, host_homes=())
+        by_source = {(f.source, f.tier): f.unportable_literal for f in findings}
+        assert by_source == {
+            ("canonical", None): "/home/canonical",
+            ("tier", "user"): "/home/user",
+            ("tier", "project_shared"): "/home/shared",
+            ("tier", "project_local"): "/home/local",
+        }
+
+    def test_missing_and_malformed_settings_handled_gracefully(self, project_root, fake_home):
+        findings = find_unportable_hook_commands(project_root, host_homes=())
+        assert findings == []
+
+        can_path = project_root / CANONICAL_SETTINGS_FILE
+        can_path.parent.mkdir(parents=True, exist_ok=True)
+        can_path.write_text("{broken json", encoding="utf-8")
+        findings = find_unportable_hook_commands(project_root, host_homes=())
+        assert findings == []
+
+    def test_unscanned_settings_files_reported_by_reason(self, project_root, fake_home):
+        # Absent files are not reported: there is nothing to scan.
+        assert find_unscanned_settings_files(project_root) == []
+
+        can_path = project_root / CANONICAL_SETTINGS_FILE
+        can_path.parent.mkdir(parents=True, exist_ok=True)
+        can_path.write_text("{broken json", encoding="utf-8")
+        user_path = fake_home / ".claude" / "settings.json"
+        user_path.parent.mkdir(parents=True, exist_ok=True)
+        user_path.write_text("[]", encoding="utf-8")
+        (project_root / ".claude" / "settings.json").mkdir()
+        local_path = project_root / ".claude" / "settings.local.json"
+        local_path.write_bytes(b"\xff\xfe{}")
+
+        rows = [
+            (u.source, u.tier, u.path, u.reason)
+            for u in find_unscanned_settings_files(project_root)
+        ]
+        assert rows == [
+            ("canonical", None, can_path, "invalid JSON"),
+            ("tier", "user", user_path, "not a JSON object"),
+            ("tier", "project_shared", project_root / ".claude" / "settings.json", "not a file"),
+            ("tier", "project_local", local_path, "unreadable"),
+        ]
+
+    def test_unscanned_broken_symlink_is_not_absent(self, project_root, fake_home):
+        can_path = project_root / CANONICAL_SETTINGS_FILE
+        can_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            can_path.symlink_to(project_root / "nowhere.json")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        rows = [(u.source, u.reason) for u in find_unscanned_settings_files(project_root)]
+        assert rows == [("canonical", "broken symlink")]
+
+    @pytest.mark.skipif(not hasattr(os, "geteuid"), reason="POSIX permission bits")
+    def test_unscanned_permission_denied_parent_is_unreadable(self, project_root, fake_home):
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses directory permissions")
+        user_dir = fake_home / ".claude"
+        user_dir.mkdir()
+        (user_dir / "settings.json").write_text("{}", encoding="utf-8")
+        user_dir.chmod(0)
+        try:
+            rows = [(u.tier, u.reason) for u in find_unscanned_settings_files(project_root)]
+            findings = find_unportable_hook_commands(project_root, host_homes=())
+        finally:
+            user_dir.chmod(0o755)
+        assert rows == [("user", "unreadable")]
+        assert findings == []
+
+    def test_format_unscanned_settings_warning(self, project_root):
+        unscanned = UnscannedSettingsFile(
+            source="tier",
+            path=project_root / ".claude" / "settings.json\x1b[2J",
+            reason="invalid JSON",
+            tier="project_shared",
+        )
+        warn_str = format_unscanned_settings_warning(unscanned)
+        assert warn_str.startswith("project_shared tier file (")
+        assert "was not checked: invalid JSON." in warn_str
+        assert "\x1b[2J" not in warn_str
+
+    def test_format_unportable_command_warning(self, project_root):
+        finding = UnportableHookCommand(
+            source="canonical",
+            path=project_root / CANONICAL_SETTINGS_FILE,
+            event="PostToolUse",
+            rule_index=0,
+            hook_index=0,
+            command="/home/alice/hook.sh --flag",
+            unportable_literal="/home/alice/hook.sh",
+            tier=None,
+        )
+        warn_str = format_unportable_command_warning(finding)
+        assert "canonical settings" in warn_str
+        assert "PostToolUse" in warn_str
+        assert "rule #0 hook #0" in warn_str
+        assert "'/home/alice/hook.sh'" in warn_str
+        assert "contains non-portable absolute home path" in warn_str
+        assert "rewrite with $HOME, ~, or a repo-relative path" in warn_str
+
+    def test_format_unportable_command_warning_scrubs_control_chars(self, project_root):
+        finding = UnportableHookCommand(
+            source="canonical",
+            path=project_root / CANONICAL_SETTINGS_FILE,
+            event="PostToolUse\x1b[2J",
+            rule_index=0,
+            hook_index=0,
+            command="/home/alice/hook.sh # \x1b[2J\x1b[Hforged",
+            unportable_literal="/home/alice/hook.sh\x1b[K",
+            tier=None,
+        )
+        warn_str = format_unportable_command_warning(finding)
+        assert "\x1b[2J" not in warn_str
+        assert "\\x1b[2J" in warn_str
+
+    def test_format_unportable_command_warning_redacts_secret_assignment(self, project_root):
+        finding = UnportableHookCommand(
+            source="canonical",
+            path=project_root / CANONICAL_SETTINGS_FILE,
+            event="PostToolUse",
+            rule_index=0,
+            hook_index=0,
+            command="API_KEY=/home/alice/private-credential ./hook.sh",
+            unportable_literal="/home/alice/private-credential",
+            tier=None,
+        )
+        warn_str = format_unportable_command_warning(finding)
+        assert "/home/alice/private-credential" not in warn_str
+        assert "<redacted: secret-shape>" in warn_str
+
+    def test_redact_unportable_command_fields(self):
+        cmd, lit = redact_unportable_command_fields(
+            "API_KEY=/home/alice/private-credential ./hook.sh",
+            "/home/alice/private-credential",
+        )
+        assert cmd == "<redacted: secret-shape>"
+        assert lit == "<redacted: secret-shape>"
+
+        cmd2, lit2 = redact_unportable_command_fields(
+            "FOO=/home/alice/safe.sh ./hook.sh",
+            "/home/alice/safe.sh",
+        )
+        assert cmd2 == "FOO=/home/alice/safe.sh ./hook.sh"
+        assert lit2 == "/home/alice/safe.sh"
+
+        cmd3, lit3 = redact_unportable_command_fields(
+            "<redacted: secret-shape>",
+            "/home/alice/private-credential",
+        )
+        assert cmd3 == "<redacted: secret-shape>"
+        assert lit3 == "<redacted: secret-shape>"
+
+
 # ── CLI doctor subcommand ──────────────────────────────────────────
 
 
@@ -426,6 +781,8 @@ class TestSettingsDoctorCli:
             "active_scope": "user",
             "duplicates": [],
             "malformed_matchers": [],
+            "unportable_commands": [],
+            "unscanned_settings": [],
         }
 
     def test_json_duplicates_schema(self, project_root, fake_home, monkeypatch):
@@ -473,6 +830,7 @@ class TestSettingsDoctorCli:
         payload = json.loads(result.output)
         assert payload["status"] == "malformed"
         assert payload["duplicates"] == []
+        assert payload["unportable_commands"] == []
         assert payload["malformed_matchers"] == [
             {
                 "source": "canonical",
@@ -508,6 +866,208 @@ class TestSettingsDoctorCli:
         assert payload["status"] == "duplicates"
         assert len(payload["duplicates"]) == 1
         assert len(payload["malformed_matchers"]) == 1
+
+    def test_settings_doctor_unportable_exits_zero(self, project_root, fake_home, monkeypatch):
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("", "/Users/alice/hook.sh")]},
+        )
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "user")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        result = CliRunner().invoke(settings_doctor_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert "Found 1 hook command(s) with unportable home paths" in result.output
+        assert "/Users/alice/hook.sh" in result.output
+        assert "No memtomem-managed hooks duplicated" not in result.output
+
+    def test_settings_doctor_unportable_with_duplicates_exits_one(
+        self, project_root, fake_home, monkeypatch
+    ):
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("Edit|Write", "/Users/alice/hook.sh")]},
+        )
+        _write_settings(
+            fake_home / ".claude" / "settings.json",
+            {"PostToolUse": [_rule("Edit|Write", "/Users/alice/hook.sh")]},
+        )
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "project_local")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        result = CliRunner().invoke(settings_doctor_cmd, [])
+        assert result.exit_code == 1, result.output
+        assert "Found memtomem-managed hooks in 1 other tier" in result.output
+        assert "Found 2 hook command(s) with unportable home paths" in result.output
+
+    def test_settings_doctor_single_hook_multiple_literals_counts_one_command(
+        self, project_root, fake_home, monkeypatch
+    ):
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("", "cp /Users/alice/a.sh /Users/bob/b.sh")]},
+        )
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "user")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        result = CliRunner().invoke(settings_doctor_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert "Found 1 hook command(s) with unportable home paths" in result.output
+        assert "/Users/alice/a.sh" in result.output
+        assert "/Users/bob/b.sh" in result.output
+
+    def test_settings_doctor_json_unportable_schema(self, project_root, fake_home, monkeypatch):
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("", "/Users/alice/hook.sh")]},
+        )
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "user")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["status"] == "clean"
+        assert len(payload["unportable_commands"]) == 1
+        item = payload["unportable_commands"][0]
+        assert item["source"] == "canonical"
+        assert item["tier"] is None
+        assert item["event"] == "PostToolUse"
+        assert item["rule_index"] == 0
+        assert item["hook_index"] == 0
+        assert item["command"] == "/Users/alice/hook.sh"
+        assert item["unportable_literal"] == "/Users/alice"
+
+    def test_settings_doctor_unportable_secret_redacted(self, project_root, fake_home, monkeypatch):
+        secret = "AKIA1234567890ABCDEF"
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("", f"/home/alice/hook.sh --token={secret}")]},
+        )
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "user")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        # Human-readable output redacts secret-bearing command and derived literal
+        result = CliRunner().invoke(settings_doctor_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert secret not in result.output
+        assert "<redacted: secret-shape>" in result.output
+
+        # JSON output retains raw values for programmatic use
+        json_result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
+        assert json_result.exit_code == 0, json_result.output
+        assert secret in json_result.output
+        assert "/home/alice/hook.sh" in json_result.output
+
+    def test_settings_doctor_unportable_secret_assignment_redacted(
+        self, project_root, fake_home, monkeypatch
+    ):
+        secret_cmd = "API_KEY=/home/alice/private-credential ./hook.sh"
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("", secret_cmd)]},
+        )
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "user")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        # Human-readable output redacts both secret command and the derived literal
+        result = CliRunner().invoke(settings_doctor_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert "/home/alice/private-credential" not in result.output
+        assert "<redacted: secret-shape>" in result.output
+
+        # JSON output retains raw values for programmatic use
+        json_result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
+        assert json_result.exit_code == 0, json_result.output
+        assert "/home/alice/private-credential" in json_result.output
+
+    def test_settings_doctor_unscanned_file_is_incomplete_not_clean(
+        self, project_root, fake_home, monkeypatch
+    ):
+        _write_canonical(project_root, _bundled_hook())
+        user_path = fake_home / ".claude" / "settings.json"
+        user_path.parent.mkdir(parents=True, exist_ok=True)
+        user_path.write_text("{broken json", encoding="utf-8")
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "project_local")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        result = CliRunner().invoke(settings_doctor_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert "Could not check 1 settings file(s)" in result.output
+        assert "invalid JSON" in result.output
+        assert "No memtomem-managed hooks duplicated" not in result.output
+
+        json_result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
+        assert json_result.exit_code == 0, json_result.output
+        payload = json.loads(json_result.stdout)
+        assert payload["status"] == "incomplete"
+        assert payload["unscanned_settings"] == [
+            {"source": "tier", "tier": "user", "path": str(user_path), "reason": "invalid JSON"}
+        ]
+
+    def test_settings_doctor_invalid_utf8_tier_reported_not_raised(
+        self, project_root, fake_home, monkeypatch
+    ):
+        """An undecodable tier must reach the unscanned report, not abort the run.
+
+        The duplicate and matcher checks read the same file first, so a decode
+        error there would end the command before anything is printed.
+        """
+        _write_canonical(project_root, _bundled_hook())
+        user_path = fake_home / ".claude" / "settings.json"
+        user_path.parent.mkdir(parents=True, exist_ok=True)
+        user_path.write_bytes(b"\xff\xfe{}")
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "project_local")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "incomplete"
+        assert payload["unscanned_settings"] == [
+            {"source": "tier", "tier": "user", "path": str(user_path), "reason": "unreadable"}
+        ]
+
+    def test_settings_doctor_unportable_control_characters_scrubbed(
+        self, project_root, fake_home, monkeypatch
+    ):
+        raw_cmd = "/home/alice/hook.sh # \x1b[2J\x1b[Hforged output"
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("", raw_cmd)]},
+        )
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "user")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        # Human-readable output scrubs control characters
+        result = CliRunner().invoke(settings_doctor_cmd, [], color=True)
+        assert result.exit_code == 0, result.output
+        assert "\x1b[2J\x1b[H" not in result.output
+        assert "\\x1b[2J\\x1b[H" in result.output
+
+        # JSON output preserves raw characters byte-for-byte
+        json_result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
+        assert json_result.exit_code == 0, json_result.output
+        payload = json.loads(json_result.output)
+        assert payload["unportable_commands"][0]["command"] == raw_cmd
 
 
 # ── CLI sync warning ───────────────────────────────────────────────
@@ -584,6 +1144,63 @@ class TestSyncWarning:
         # so a malformed rule elsewhere does not block every such operation.
         assert "may cause a related" in result.output
         assert "settings-migrate` to refuse to run" in result.output
+
+    def test_sync_emits_warning_for_unportable_command(self, project_root, fake_home, monkeypatch):
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("", "/Users/alice/hook.sh")]},
+        )
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import sync_cmd
+
+        result = CliRunner().invoke(
+            sync_cmd,
+            ["--include=settings", "--scope=user", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "contains non-portable absolute home path" in result.output
+        assert "/Users/alice/hook.sh" in result.output
+
+    def test_sync_emits_warning_for_unscanned_settings_file(
+        self, project_root, fake_home, monkeypatch
+    ):
+        _write_canonical(project_root, _bundled_hook())
+        user_path = fake_home / ".claude" / "settings.json"
+        user_path.parent.mkdir(parents=True, exist_ok=True)
+        user_path.write_text("{broken json", encoding="utf-8")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import sync_cmd
+
+        result = CliRunner().invoke(
+            sync_cmd,
+            ["--include=settings", "--scope=project_local", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "user tier file (" in result.output
+        assert "was not checked: invalid JSON." in result.output
+
+    def test_sync_emits_warning_for_unportable_command_secret_redacted(
+        self, project_root, fake_home, monkeypatch
+    ):
+        secret = "AKIA1234567890ABCDEF"
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("", f"/Users/alice/hook.sh --token={secret}")]},
+        )
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import sync_cmd
+
+        result = CliRunner().invoke(
+            sync_cmd,
+            ["--include=settings", "--scope=user", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "contains non-portable absolute home path" in result.output
+        assert secret not in result.output
+        assert "<redacted: secret-shape>" in result.output
 
 
 # ── Web route response ─────────────────────────────────────────────
