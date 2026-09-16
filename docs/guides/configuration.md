@@ -741,6 +741,12 @@ dry-run output before passing `--apply`. Rows of a worktree directory that has
 since been deleted are not claimed — there is nothing left on disk to recognise;
 remove those with `mem_delete(source_file=...)`.
 
+If purge cannot classify a stored source — most often because a configured
+memory dir cannot be resolved, for example a symlink loop, which makes every
+source fail — it deletes nothing, even with `--apply`. It lists what could not
+be classified on stderr (`"ok": false, "reason": "unclassifiable_sources"` with
+`--json`), still reports the matches it did classify, and exits 1.
+
 **Chunk edits and deletes on an excluded source are refused** with a
 `source_excluded` error (HTTP 409 on the web). Writing the file would succeed but
 its re-index would be skipped, leaving the old text searchable.

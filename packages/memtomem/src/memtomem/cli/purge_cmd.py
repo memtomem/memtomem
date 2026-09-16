@@ -6,11 +6,66 @@ import asyncio
 import json
 import logging
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import click
 
 logger = logging.getLogger(__name__)
+
+#: Cap on sample paths printed for sources that could not be classified.
+UNCLASSIFIED_SAMPLE = 5
+
+
+@dataclass
+class PurgeClassification:
+    """What a purge scan decided about every stored source.
+
+    ``unclassified`` holds the sources the exclusion predicate raised on. A scan
+    with any of them is incomplete: callers must not report it as a clean result
+    or delete on it.
+    """
+
+    matched: list[Path] = field(default_factory=list)
+    unclassified: list[Path] = field(default_factory=list)
+
+
+class UnclassifiableSourcesError(RuntimeError):
+    """Raised by :func:`find_sources_matching_excluded` when a scan is incomplete."""
+
+    def __init__(self, unclassified: list[Path]):
+        self.unclassified = unclassified
+        super().__init__(f"{len(unclassified)} stored source(s) could not be classified")
+
+
+def classify_sources_for_purge(
+    sources: Iterable[Path],
+    user_patterns: Iterable[str],
+    memory_dirs: Iterable[str | Path],
+) -> PurgeClassification:
+    """Classify every source, collecting those the predicate cannot classify.
+
+    See :func:`find_sources_matching_excluded` for what "excluded" means. A
+    source the predicate raises on — an embedded NUL, a configured root with a
+    symlink loop — goes to ``unclassified`` and the scan continues. The
+    predicate raises rather than answering "not excluded" because that would
+    let the indexer read a denylisted file.
+    """
+    from memtomem.indexing.engine import WorktreeMemo, _build_exclude_spec, _path_is_excluded
+
+    user_spec = _build_exclude_spec(user_patterns)
+    roots = list(memory_dirs)
+    memo: WorktreeMemo = {}
+    result = PurgeClassification()
+    for sf in sources:
+        try:
+            if _path_is_excluded(sf, roots, user_spec, worktree_cache=memo):
+                result.matched.append(sf)
+        except (OSError, ValueError, RuntimeError):
+            result.unclassified.append(sf)
+            logger.warning("purge: could not classify %r", str(sf), exc_info=True)
+    result.unclassified.sort(key=str)
+    return result
 
 
 def find_sources_matching_excluded(
@@ -34,28 +89,14 @@ def find_sources_matching_excluded(
     its enclosing repository (#2486). One memo serves the whole pass, so sources
     in the same directories do not re-probe the filesystem.
 
-    A source the predicate cannot resolve (an embedded NUL, a symlink loop) is
-    left unmatched and logged, so one bad stored row does not abort the pass.
-    The predicate itself raises rather than answering, because "not excluded"
-    there would let the indexer read a denylisted file.
+    Raises :class:`UnclassifiableSourcesError` when any source could not be
+    classified, rather than returning a list that silently omits it. Callers
+    that must report an incomplete scan use :func:`classify_sources_for_purge`.
     """
-    from memtomem.indexing.engine import WorktreeMemo, _build_exclude_spec, _path_is_excluded
-
-    user_spec = _build_exclude_spec(user_patterns)
-    roots = list(memory_dirs)
-    memo: WorktreeMemo = {}
-    matched: list[Path] = []
-    unresolved = 0
-    for sf in sources:
-        try:
-            if _path_is_excluded(sf, roots, user_spec, worktree_cache=memo):
-                matched.append(sf)
-        except (OSError, ValueError, RuntimeError):
-            unresolved += 1
-            logger.warning("purge: could not resolve %r; left unmatched", str(sf), exc_info=True)
-    if unresolved:
-        logger.warning("purge: %d source(s) could not be classified and were skipped", unresolved)
-    return matched
+    result = classify_sources_for_purge(sources, user_patterns, memory_dirs)
+    if result.unclassified:
+        raise UnclassifiableSourcesError(result.unclassified)
+    return result.matched
 
 
 @click.command("purge")
@@ -106,16 +147,75 @@ def purge(matching_excluded: bool, apply_: bool, sample_size: int, as_json: bool
     asyncio.run(_run_matching_excluded(apply_=apply_, sample_size=sample_size, as_json=as_json))
 
 
+async def _report_incomplete_scan(
+    comp, scan: PurgeClassification, apply_: bool, sample_size: int, as_json: bool
+) -> None:
+    """Report a scan with unclassifiable sources. Nothing is deleted, even with ``--apply``.
+
+    Deleting only the matches would announce a finished purge while sources the
+    selector may cover stay stored — with a looping configured root, every
+    source. The refusal is the narrow guarantee "deletion does not start", not a
+    transaction; the classified matches are still listed so the operator sees
+    what a clean run would remove.
+    """
+    matched = scan.matched
+    counts = await comp.storage.count_chunks_by_sources(matched) if matched else {}
+    matched_chunks = sum(counts.values())
+    matched_sample = [str(sf) for sf in sorted(matched)[:sample_size]]
+    unclassified_sample = [str(sf) for sf in scan.unclassified[:UNCLASSIFIED_SAMPLE]]
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "ok": False,
+                    "reason": "unclassifiable_sources",
+                    "apply": apply_,
+                    "files": len(matched),
+                    "chunks": matched_chunks,
+                    "sample": matched_sample,
+                    "deleted_chunks": 0,
+                    "unclassified": len(scan.unclassified),
+                    "unclassified_sample": unclassified_sample,
+                }
+            )
+        )
+        return
+    outcome = "nothing was deleted" if apply_ else "the scan is incomplete"
+    click.secho(
+        f"Could not classify {len(scan.unclassified)} stored source(s); {outcome}.",
+        fg="red",
+        err=True,
+    )
+    for path_text in unclassified_sample:
+        click.echo(f"  {path_text}", err=True)
+    if len(scan.unclassified) > len(unclassified_sample):
+        click.echo(f"  ... and {len(scan.unclassified) - len(unclassified_sample)} more", err=True)
+    click.echo(
+        "Check indexing.memory_dirs for a path that cannot be resolved (for example a "
+        "symlink loop); the log names each source's error.",
+        err=True,
+    )
+    click.echo(
+        f"Classified matches: {matched_chunks} chunks across {len(matched)} files "
+        "(not deleted until every source classifies)."
+    )
+
+
 async def _run_matching_excluded(*, apply_: bool, sample_size: int, as_json: bool = False) -> None:
     from memtomem.cli._bootstrap import cli_components
 
     async with cli_components() as comp:
         sources: set[Path] = await comp.storage.get_all_source_files()
-        matched = find_sources_matching_excluded(
+        scan = classify_sources_for_purge(
             sources,
             comp.config.indexing.exclude_patterns,
             comp.config.indexing.all_index_roots(),
         )
+        matched = scan.matched
+
+        if scan.unclassified:
+            await _report_incomplete_scan(comp, scan, apply_, sample_size, as_json)
+            raise click.exceptions.Exit(1)
 
         if not matched:
             # Write-command JSON ack (CONTRIBUTING "JSON error shape"):

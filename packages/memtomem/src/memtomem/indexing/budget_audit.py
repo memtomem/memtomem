@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import sqlite3
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -139,6 +140,10 @@ def audit(db_path: Path, config: IndexingConfig, omitted: set[str]) -> dict[str,
         "excluded": [
             {"source": s, "chunk_ids": [r[0] for r in sources[s]]} for s in sorted(excluded)
         ],
+        # False when a source could not be classified: ``excluded`` and
+        # ``reindex`` then describe only the sources that could, and are lower
+        # bounds for the store.
+        "complete": not unclassified,
         "unclassified_sources": sorted(unclassified),
         "omitted_sources": sorted(omitted),
         "reindex": preview,
@@ -179,6 +184,7 @@ def main() -> None:
                 "oversized": len(report["oversized_chunks"]),
                 "reindex_sources": len(report["reindex"]),
                 "excluded_sources": len(report["excluded"]),
+                "complete": report["complete"],
                 "unclassified_sources": len(report["unclassified_sources"]),
                 "errors": sum("error" in r for r in report["reindex"]),
                 "new_max_body_tokens": max(
@@ -187,6 +193,14 @@ def main() -> None:
             }
         )
     )
+    if not report["complete"]:
+        print(
+            f"budget_audit: {len(report['unclassified_sources'])} stored source(s) could not "
+            "be classified; excluded and reindex counts are lower bounds (see "
+            "unclassified_sources in the report).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

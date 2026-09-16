@@ -36,7 +36,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   index it deliberately. Rows indexed before this release stay until you remove
   them with `mm purge --matching-excluded --apply`. The web Sources file count
   and the `mm init` seed threshold also leave out unregistered nested
-  worktrees.
+  worktrees. If purge cannot classify a stored source (a configured memory dir
+  with a symlink loop fails every one), it now deletes nothing, reports those
+  sources with `"reason": "unclassifiable_sources"`, and exits 1 instead of
+  announcing that no stored chunks match.
 
 - **Editing or deleting a chunk of an excluded source is refused instead of
   leaving stale chunks behind (#2488).** `mem_edit`, `mem_delete` by chunk, and

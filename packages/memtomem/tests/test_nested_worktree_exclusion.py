@@ -932,6 +932,7 @@ def test_budget_audit_reports_an_unowned_worktree_row_as_excluded(
 
     assert [e["source"] for e in report["excluded"]] == [str(wt / "m.py")]
     assert [e["source"] for e in report["reindex"]] == [str(repo / "m.py")]
+    assert report["complete"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -995,14 +996,17 @@ def test_a_denylisted_file_is_not_indexable_beside_an_unresolvable_root(
     assert answer is True
 
 
-def test_purge_passes_over_an_unresolvable_row(unresolvable, repo: Path) -> None:
-    from memtomem.cli.purge_cmd import find_sources_matching_excluded
+def test_purge_classifies_past_an_unresolvable_row_and_reports_it(unresolvable, repo: Path) -> None:
+    from memtomem.cli.purge_cmd import classify_sources_for_purge
 
     wt = repo / ".worktrees/wt"
     run("worktree", "add", "-q", str(wt), "-b", "wt", cwd=repo)
-    sources = [repo / UNRESOLVABLE / "a.md", wt / "a.md"]
+    broken = repo / UNRESOLVABLE / "a.md"
 
-    assert find_sources_matching_excluded(sources, [], [repo]) == [wt / "a.md"]
+    scan = classify_sources_for_purge([broken, wt / "a.md"], [], [repo])
+
+    assert scan.matched == [wt / "a.md"]
+    assert scan.unclassified == [broken]
 
 
 def test_budget_audit_passes_over_an_unresolvable_row(
@@ -1017,4 +1021,5 @@ def test_budget_audit_passes_over_an_unresolvable_row(
 
     assert [e["source"] for e in report["excluded"]] == [str(wt / "m.py")]
     assert report["unclassified_sources"] == [str(broken)]
+    assert report["complete"] is False
     assert str(broken) not in {e["source"] for e in report["reindex"]}

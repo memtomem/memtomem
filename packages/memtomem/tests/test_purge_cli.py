@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
@@ -201,3 +202,107 @@ class TestPurgeJson:
         data = json.loads(result.output)
         assert data == {"ok": True, "apply": False, "files": 0, "chunks": 0, "sample": []}
         comp.storage.delete_by_source.assert_not_called()
+
+
+class TestIncompleteScan:
+    """A source the exclusion predicate raises on makes the scan incomplete (#2486).
+
+    The predicate raises rather than answering "not excluded" (that bypassed the
+    secret denylist), so purge must neither report a clean result nor delete on
+    a partial selection.
+    """
+
+    SECRET = Path("/home/u/.gemini/oauth_creds.json")
+    PLAIN = Path("/home/u/notes/day.md")
+    BAD = Path("/home/u/notes/unclassifiable.md")
+
+    @staticmethod
+    def _components(sources):
+        comp = _mock_components(sources)
+        # Count only what was asked for: the shared mock answers for every source,
+        # which would hide a count taken over the unclassified rows too.
+        comp.storage.count_chunks_by_sources = AsyncMock(
+            side_effect=lambda asked: {sf: 2 for sf in asked}
+        )
+        return comp
+
+    @staticmethod
+    def _raise_for(monkeypatch, error, predicate=lambda sf: "unclassifiable" in str(sf)):
+        from memtomem.indexing import engine
+
+        real = engine._path_is_excluded
+
+        def fake(file_path, *args, **kwargs):
+            if predicate(file_path):
+                raise error("cannot classify")
+            return real(file_path, *args, **kwargs)
+
+        monkeypatch.setattr(engine, "_path_is_excluded", fake)
+
+    @pytest.mark.parametrize("error", [OSError, ValueError, RuntimeError])
+    @pytest.mark.parametrize("order", ["bad_first", "bad_last"])
+    def test_apply_refuses_and_reports_matches_and_unclassified(self, monkeypatch, error, order):
+        sources = [self.SECRET, self.PLAIN, self.BAD]
+        if order == "bad_first":
+            sources.reverse()
+        comp = self._components(sources)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        self._raise_for(monkeypatch, error)
+
+        result = CliRunner().invoke(cli, ["purge", "--matching-excluded", "--apply", "--json"])
+
+        assert result.exit_code == 1, result.output
+        assert json.loads(result.stdout) == {
+            "ok": False,
+            "reason": "unclassifiable_sources",
+            "apply": True,
+            "files": 1,
+            "chunks": 2,
+            "sample": [str(self.SECRET)],
+            "deleted_chunks": 0,
+            "unclassified": 1,
+            "unclassified_sample": [str(self.BAD)],
+        }
+        comp.storage.delete_by_source.assert_not_called()
+
+    @pytest.mark.parametrize("apply_flag", [[], ["--apply"]])
+    def test_every_source_unclassifiable_is_not_a_clean_no_match(self, monkeypatch, apply_flag):
+        """A looping configured root fails the ownership lookup for every source."""
+        sources = [self.SECRET, self.PLAIN, self.BAD]
+        comp = self._components(sources)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        self._raise_for(monkeypatch, RuntimeError, predicate=lambda sf: True)
+
+        result = CliRunner().invoke(cli, ["purge", "--matching-excluded", "--json", *apply_flag])
+
+        assert result.exit_code == 1, result.output
+        data = json.loads(result.stdout)
+        assert data["ok"] is False
+        assert data["files"] == 0
+        assert data["deleted_chunks"] == 0
+        assert data["unclassified"] == len(sources)
+        assert data["unclassified_sample"] == sorted(str(s) for s in sources)
+        comp.storage.delete_by_source.assert_not_called()
+
+    def test_text_output_warns_on_stderr_and_keeps_the_match_summary(self, monkeypatch):
+        comp = self._components([self.SECRET, self.BAD])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        self._raise_for(monkeypatch, ValueError)
+
+        result = CliRunner().invoke(cli, ["purge", "--matching-excluded"])
+
+        assert result.exit_code == 1, result.output
+        assert "Could not classify 1 stored source(s); the scan is incomplete." in result.stderr
+        assert str(self.BAD) in result.stderr
+        assert "Classified matches: 2 chunks across 1 files" in result.stdout
+        assert "No stored chunks match" not in result.output
+        comp.storage.delete_by_source.assert_not_called()
+
+    def test_find_sources_matching_excluded_raises_rather_than_omitting(self, monkeypatch):
+        from memtomem.cli.purge_cmd import UnclassifiableSourcesError
+
+        self._raise_for(monkeypatch, OSError)
+
+        with pytest.raises(UnclassifiableSourcesError) as caught:
+            find_sources_matching_excluded([self.SECRET, self.BAD], [], [])
+        assert caught.value.unclassified == [self.BAD]
