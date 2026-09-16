@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import ast
 import re
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,8 +101,14 @@ def escaped(field: str) -> str:
 
 
 def unprintable(output: str) -> list[str]:
-    """Every character a terminal would act on rather than show, bar newlines."""
-    return [ch for ch in output if not ch.isprintable() and ch != "\n"]
+    """Every character a terminal would act on rather than show, bar line endings.
+
+    A line ending is ``\\n``, or ``\\r\\n`` where the stream translates newlines
+    (``CliRunner`` output on Windows). Only the ``\\r`` of a ``\\r\\n`` pair is
+    excused: a lone ``\\r`` moves the cursor to the start of the line, which is
+    exactly the kind of overwrite this module exists to catch.
+    """
+    return [ch for ch in output.replace("\r\n", "\n") if not ch.isprintable() and ch != "\n"]
 
 
 def ppath(field: str) -> Path:
@@ -769,10 +776,23 @@ class TestDestinationRefusals:
         assert hint.strip().startswith("Initialize it first: cd $'")
 
     def test_missing_store_hint_is_plain_quoting_for_an_ordinary_path(self):
-        exc = context_cmd._missing_store_error(Path("/home/u/my project"))
-        assert "cd '/home/u/my project' && mm context init" in exc.message
+        # The expectation is computed from the platform's own path spelling:
+        # str(Path) uses backslashes on Windows, and a POSIX literal here would
+        # assert the separator rather than the quoting.
+        dst = Path("/home/u/my project")
+        exc = context_cmd._missing_store_error(dst)
+        assert f"cd {shlex.quote(str(dst))} && mm context init" in exc.message
+        assert "$'" not in exc.message
 
     @pytest.mark.parametrize("wording", ["sync enrollment is disabled", "has no .memtomem/ store"])
     def test_the_cli_has_one_copy_of_each_refusal(self, wording):
         """A fourth hand-written copy would drift the way the first three did."""
         assert CLI_SOURCE.read_text(encoding="utf-8").count(wording) == 1
+
+
+def test_unprintable_excuses_crlf_line_endings_only():
+    """Pins the line-ending rule on every platform, not just on Windows runners."""
+    assert unprintable("a\r\nb\n") == []
+    assert unprintable("a\rb") == ["\r"]
+    assert unprintable("a\r\r\nb") == ["\r"]
+    assert unprintable(f"a{BEL}\r\n") == [BEL]
