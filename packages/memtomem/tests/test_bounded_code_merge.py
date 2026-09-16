@@ -176,32 +176,66 @@ def test_line_ranges_follow_the_merged_content(e5_like_config, tmp_path):
         )
 
 
-def test_whole_line_ownership_is_recomputed_not_inherited(e5_like_config, tmp_path):
-    """Merging outward to line boundaries restores rewrite eligibility."""
+def test_line_aligned_chunks_stay_writable(e5_like_config, tmp_path):
     text = function_source("first", 200) + "drive(scenario())\n" + function_source("second", 200)
     chunks = chunk_code(tmp_path / "sample.py", text, e5_like_config)
 
     assert not any(c.metadata.source_read_only for c in chunks)
 
 
-def test_typescript_path_merges_too(e5_like_config, tmp_path):
-    pytest.importorskip("tree_sitter")
-    text = (
-        "export function first(): string {\n"
-        f"  const value = '{'a' * 200}';\n"
-        "  return value;\n"
-        "}\n"
-        "drive(scenario());\n"
-        "export function second(): string {\n"
-        f"  const value = '{'a' * 200}';\n"
-        "  return value;\n"
-        "}\n"
-    )
-    chunks = chunk_code(tmp_path / "sample.ts", text, e5_like_config)
+def test_a_mid_line_boundary_survives_the_merge(e5_like_config, tmp_path):
+    """Recomputing the flag must not hand out rewrite authority it should not.
+
+    Merging cannot *clear* this flag, and the test does not pretend otherwise: a
+    mid-line boundary only ever comes from a ceiling split, section cuts being
+    line-aligned, and re-merging across one necessarily breaks the ceiling
+    again. Measured over 941 repository files, no chunk is read-only either
+    before or after the change. The recomputation is here so the flag is never
+    wrongly *set*, which is what the blank-section packer's ``or`` could do.
+
+    A 900-character line splits into two full chunks and a 139-token tail. The
+    tail is over the floor, the 18-token header before it is under the floor and
+    cannot merge (18 + 384 > 384), and every piece carved out of the long line
+    keeps its partial-line boundary.
+    """
+    text = "def f():\n    pass\n" + "x = '" + "a" * 900 + "'\n"
+    chunks = chunk_code(tmp_path / "sample.py", text, e5_like_config)
 
     assert_partition(chunks, text)
+    assert [c.metadata.source_read_only for c in chunks] == [False, True, True, True]
+
+
+def test_typescript_path_merges_too(e5_like_config, tmp_path):
+    """The fragments must exist with merging off, or this pins nothing.
+
+    Measured: with both passes disabled the spans are 7/292/8/42/8/42/8/333
+    tokens, five of them under the 96-token floor.
+    """
+    pytest.importorskip("tree_sitter")
+    from memtomem.chunking.bounded import _javascript_structure
+
+    def ts_function(name: str, size: int) -> str:
+        head = f"export function {name}(): string {{\n  return '';\n}}\n"
+        return f"export function {name}(): string {{\n  return '{'a' * max(1, size - len(head))}';\n}}\n"
+
+    text = (
+        ts_function("first", 300)
+        + ts_function("t1", 50)
+        + ts_function("t2", 50)
+        + ts_function("second", 340)
+    )
+    symbols, _ = _javascript_structure(tmp_path / "sample.ts", text)
+    assert [s.name for s in symbols] == ["first", "t1", "t2", "second"]
+
+    budget = TokenBudget(e5_like_config)
+    off = e5_like_config.model_copy(update={"min_chunk_tokens": 0, "target_chunk_tokens": 0})
+    unmerged = [budget.count(c.content) for c in chunk_code(tmp_path / "sample.ts", text, off)]
+    assert min(unmerged) < e5_like_config.min_chunk_tokens
+
+    chunks = chunk_code(tmp_path / "sample.ts", text, e5_like_config)
+    assert_partition(chunks, text)
     assert_budget(chunks, e5_like_config)
-    assert "drive(scenario());\n" not in [c.content for c in chunks]
+    assert all(budget.count(c.content) >= e5_like_config.min_chunk_tokens for c in chunks)
 
 
 def test_a_span_between_two_full_ones_is_left_alone(e5_like_config, tmp_path):
