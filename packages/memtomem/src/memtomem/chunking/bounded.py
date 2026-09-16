@@ -374,6 +374,91 @@ def _javascript_structure(path: Path, text: str) -> tuple[list[_Symbol], set[int
     return symbols, statements
 
 
+def _enclosing_symbols(symbols: list[_Symbol], start: int, end: int) -> tuple[_Symbol, ...]:
+    """Symbols containing the *whole* range, outermost first.
+
+    Containment, not "contains the first character": a merged span can outgrow
+    the symbol it started in, and naming that symbol would label a chunk after a
+    body it only partly holds.
+    """
+    return tuple(
+        sorted(
+            (s for s in symbols if s.start <= start and end <= s.end),
+            key=lambda s: (s.start, -s.end),
+        )
+    )
+
+
+def _pack_code_spans(
+    text: str, spans: list[tuple[int, int]], budget: TokenBudget, target: int, ceiling: int
+) -> list[tuple[int, int]]:
+    """Greedily grow each span towards ``target`` without passing ``ceiling``."""
+    if target <= 0 or len(spans) <= 1:
+        return spans
+    packed: list[tuple[int, int]] = []
+    i = 0
+    while i < len(spans):
+        start, end = spans[i]
+        count = budget.count(text[start:end])
+        while count < target and i + 1 < len(spans):
+            candidate = spans[i + 1][1]
+            total = budget.count(text[start:candidate])
+            if total > ceiling:
+                break
+            end, count = candidate, total
+            i += 1
+        packed.append((start, end))
+        i += 1
+    return packed
+
+
+def _merge_short_code_spans(
+    text: str, spans: list[tuple[int, int]], budget: TokenBudget, floor: int
+) -> list[tuple[int, int]]:
+    """Fold spans under ``floor`` into the smaller adjacent span that still fits.
+
+    Only a *short* span initiates a merge. Letting a long span reach forward for
+    a short neighbour strands the span after it: with floor 96 and ceiling 384,
+    ``[300, 50, 50, 340]`` packs to ``[350, 50, 340]`` that way, and to
+    ``[300, 100, 340]`` when the short span is the one choosing. Ties go left so
+    the partition is deterministic.
+
+    Best effort. A short span between two spans already at the ceiling cannot
+    move, because nothing re-splits the result; removing those would take
+    boundary redistribution, not merging.
+    """
+    if floor <= 0 or len(spans) <= 1:
+        return spans
+    pending = [(span, budget.count(text[span[0] : span[1]])) for span in spans]
+    merged: list[tuple[tuple[int, int], int]] = []
+    i = 0
+    while i < len(pending):
+        (start, end), count = pending[i]
+        if count < floor:
+            left = right = None
+            if merged:
+                span = (merged[-1][0][0], end)
+                total = budget.count(text[span[0] : span[1]])
+                if total <= budget.body:
+                    left = (span, total, merged[-1][1])
+            if i + 1 < len(pending):
+                span = (start, pending[i + 1][0][1])
+                total = budget.count(text[span[0] : span[1]])
+                if total <= budget.body:
+                    right = (span, total, pending[i + 1][1])
+            if left is not None and (right is None or left[2] <= right[2]):
+                merged[-1] = (left[0], left[1])
+                i += 1
+                continue
+            if right is not None:
+                pending[i + 1] = (right[0], right[1])
+                i += 1
+                continue
+        merged.append(((start, end), count))
+        i += 1
+    return [span for span, _ in merged]
+
+
 def chunk_code(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
     if not text.strip():
         return []
@@ -397,38 +482,64 @@ def chunk_code(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
     # Partition every source character exactly once, including decorators,
     # comments, imports and module constants that symbol-only parsers omitted.
     cuts = sorted({0, len(text), *(s.start for s in symbols), *(s.end for s in symbols)})
-    result: list[Chunk] = []
+    spans: list[tuple[int, int]] = []
     for begin, finish in zip(cuts, cuts[1:]):
-        section = text[begin:finish]
         boundaries = tuple(sorted(p - begin for p in statements if begin < p < finish))
-        spans = budget.spans(section, boundaries)
-        enclosing = sorted(
-            (s for s in symbols if s.start <= begin < s.end), key=lambda s: (s.start, -s.end)
+        spans.extend(
+            (begin + left, begin + right)
+            for left, right in budget.spans(text[begin:finish], boundaries)
         )
-        hierarchy = (path.stem, *(s.name for s in enclosing))
-        for index, (left, right) in enumerate(spans):
-            start, end = begin + left, begin + right
-            start_line = bisect.bisect_right(lines, start)
-            end_line = bisect.bisect_right(lines, max(start, end - 1))
-            kind = ChunkType.RAW_TEXT
-            if enclosing:
-                kind = (
-                    (
-                        ChunkType.PYTHON_CLASS
-                        if enclosing[-1].kind == "class"
-                        else ChunkType.PYTHON_FUNCTION
-                    )
-                    if path.suffix == ".py"
-                    else ChunkType.JS_FUNCTION
+    # Keep inter-symbol whitespace without indexing a separate blank result.
+    # Only merge when the exact body budget still fits.
+    packed: list[tuple[int, int]] = []
+    for start, end in spans:
+        if (
+            packed
+            and not text[start:end].strip()
+            and budget.count(text[packed[-1][0] : end]) <= budget.body
+        ):
+            packed[-1] = (packed[-1][0], end)
+        else:
+            packed.append((start, end))
+    # The section partition cuts at every symbol boundary and ``spans`` packs
+    # greedily from the left, so gaps between symbols, the tail of a symbol body
+    # and the head of an inner symbol each become their own chunk — often one or
+    # two lines, identical across files, and dominated by their heading prefix
+    # once embedded. The registry chunker path gets the same treatment from
+    # ``_merge_short_chunks``; this path used to skip it entirely.
+    #
+    # The floor runs before the packing goal, not after: packing is greedy from
+    # the left, so it reproduces exactly the stranding the floor pass exists to
+    # avoid. With floor 96 and ceiling 384, packing ``[300, 50, 50, 340]`` first
+    # gives ``[350, 50, 340]``, and the stranded 50 no longer fits either
+    # neighbour. Floor first gives ``[300, 100, 340]``, which packing leaves
+    # alone. Packing only ever grows spans, so it cannot reintroduce a short one.
+    ceiling = min(config.max_chunk_tokens or budget.body, budget.body)
+    packed = _merge_short_code_spans(text, packed, budget, config.min_chunk_tokens)
+    packed = _pack_code_spans(text, packed, budget, config.target_chunk_tokens, ceiling)
+    result: list[Chunk] = []
+    for start, end in packed:
+        enclosing = _enclosing_symbols(symbols, start, end)
+        kind = ChunkType.RAW_TEXT
+        if enclosing:
+            kind = (
+                (
+                    ChunkType.PYTHON_CLASS
+                    if enclosing[-1].kind == "class"
+                    else ChunkType.PYTHON_FUNCTION
                 )
-            chunk = Chunk(
+                if path.suffix == ".py"
+                else ChunkType.JS_FUNCTION
+            )
+        result.append(
+            Chunk(
                 content=text[start:end],
                 metadata=ChunkMetadata(
                     source_file=path,
-                    heading_hierarchy=hierarchy,
+                    heading_hierarchy=(path.stem, *(s.name for s in enclosing)),
                     chunk_type=kind,
-                    start_line=start_line,
-                    end_line=end_line,
+                    start_line=bisect.bisect_right(lines, start),
+                    end_line=bisect.bisect_right(lines, max(start, end - 1)),
                     source_read_only=(
                         (start > 0 and text[start - 1] != "\n")
                         or (end < len(text) and text[end - 1] != "\n")
@@ -438,43 +549,15 @@ def chunk_code(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
                     else ("typescript" if path.suffix in {".ts", ".tsx"} else "javascript"),
                 ),
             )
-            result.append(chunk)
-    # Keep inter-symbol whitespace without indexing a separate blank result.
-    # Only merge when the exact body budget still fits.
-    packed: list[Chunk] = []
-    for chunk in result:
-        if (
-            packed
-            and not chunk.content.strip()
-            and budget.count(packed[-1].content + chunk.content) <= budget.body
-        ):
-            previous = packed.pop()
-            merged = Chunk(
-                content=previous.content + chunk.content,
-                metadata=replace(
-                    previous.metadata,
-                    end_line=chunk.metadata.end_line,
-                    source_read_only=previous.metadata.source_read_only
-                    or chunk.metadata.source_read_only,
-                ),
-            )
-            packed.append(merged)
-        else:
-            packed.append(chunk)
+        )
     from collections import Counter
 
-    totals = Counter(c.metadata.heading_hierarchy for c in packed)
+    totals = Counter(c.metadata.heading_hierarchy for c in result)
     seen: Counter[tuple[str, ...]] = Counter()
-    cursor = 0
-    for chunk in packed:
-        meta = chunk.metadata
-        hierarchy = meta.heading_hierarchy
+    for (start, end), chunk in zip(packed, result):
+        hierarchy = chunk.metadata.heading_hierarchy
         seen[hierarchy] += 1
-        enclosing = sorted(
-            (s for s in symbols if s.start <= cursor < s.end),
-            key=lambda s: (s.start, -s.end),
-        )
-        nearby = text[max(0, cursor - 2000) : cursor].splitlines()[-6:]
+        nearby = text[max(0, start - 2000) : start].splitlines()[-6:]
         comments = "\n".join(
             line.strip() for line in nearby if line.lstrip().startswith(("#", "//", "/*", "*"))
         )
@@ -489,13 +572,14 @@ def chunk_code(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
         # Identity first; reserve room for local comments and concise symbol docs.
         detail_limit = max(1, budget.context // 4)
         details = [budget.trim(comments, detail_limit)]
-        for symbol in reversed(enclosing):
+        # Same containment rule as the hierarchy above: a merged chunk that
+        # outgrew an inner symbol must not carry that symbol's signature either.
+        for symbol in reversed(_enclosing_symbols(symbols, start, end)):
             details.extend(
                 (budget.trim(symbol.signature, detail_limit), budget.trim(symbol.doc, detail_limit))
             )
         budget.describe(chunk, "\n".join(filter(None, [identity, *details])))
-        cursor += len(chunk.content)
-    return packed
+    return result
 
 
 def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
