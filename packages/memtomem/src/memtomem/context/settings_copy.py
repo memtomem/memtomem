@@ -347,10 +347,11 @@ def _classify_leg(
     # Producers redact and leave escaping to the display, with one exception
     # that predates #2477: a command preview is ``repr()``-quoted so several
     # commands stay delimited. ``repr`` also spells control characters as
-    # ``\xNN`` text, so this preview — and only this preview, plus the two
-    # selector-error listings in ``plan_hook_copy`` — reaches ``--json``
-    # already escaped. It is kept for byte-for-byte continuity of these
-    # messages; a new producer does not get the same latitude.
+    # ``\xNN`` text, so this preview reaches ``--json`` already escaped. The
+    # two selector-error listings in ``plan_hook_copy`` use the same ``repr``
+    # but have no JSON form: the CLI prints them to stderr. Kept for
+    # byte-for-byte continuity of these messages; a new producer does not get
+    # the same latitude.
     colliding = _rule_inner_commands(same_matcher)
     preview = (
         "; ".join(repr(redact_secret_value(c)) for c in colliding[:3])
