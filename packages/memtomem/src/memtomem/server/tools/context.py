@@ -10,6 +10,7 @@ import click
 from pydantic import StrictBool
 
 from memtomem import privacy
+from memtomem._runtime_paths import scrub_text
 from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import remediation, versioning
@@ -50,6 +51,24 @@ def _find_project_root() -> Path:
     return find_project_root()
 
 
+def _redact_reason_unescaped(reason: str | None, *roots: Path) -> str:
+    """Path-redact a raw engine reason, WITHOUT escaping control characters.
+
+    The redaction half of :func:`_redact_reason`, split out because the two
+    halves do not commute. :func:`scrub_text` spells a control character as
+    ``\\xNN``, and the absolute-path regexes treat a backslash as a path
+    separator, so an escaped ``\\x1b[2J\\x1b[H`` reads as a two-segment
+    absolute path: scrubbing first makes the later path scrub swallow the
+    escape *and* the remediation text that follows it (reproduced on
+    ``_redact_pull_reason``, which composes a second scrub on top).
+
+    Every caller that renders text finishes with :func:`scrub_text`; this
+    function exists so a caller that composes another path scrub can do so
+    before that final escape. Do not print its result directly.
+    """
+    return scrub_residual_absolute_paths(redact_engine_reason(reason, *roots) or "")
+
+
 def _redact_reason(reason: str | None, *roots: Path) -> str:
     """Strip absolute host paths from a raw engine diff/skip ``reason``.
 
@@ -70,8 +89,16 @@ def _redact_reason(reason: str | None, *roots: Path) -> str:
     (``blocked foo: privacy hits in .claude/agents/foo.md``) and, in the
     success-path formatters, the intended ``~``-collapsed output. Two postures,
     two scrubs — see :mod:`memtomem.context.error_redact`.
+
+    Finishes with :func:`scrub_text`, the display-safe escape. Engine reasons
+    and warnings quote settings text — hook events, matchers, commands — which
+    is untrusted and can carry terminal control sequences, and this result is
+    rendered in the calling agent's transcript. It is the outermost step
+    because escaping is not reversible and the path redactions above must see
+    the original bytes (#2478); callers that compose a further path scrub take
+    :func:`_redact_reason_unescaped` and apply the escape themselves.
     """
-    return scrub_residual_absolute_paths(redact_engine_reason(reason, *roots) or "")
+    return scrub_text(_redact_reason_unescaped(reason, *roots))
 
 
 def _resolve_mcp_scope(override: str | None = None) -> str:
@@ -193,13 +220,19 @@ def _settings_dup_tier_warnings(root: Path, active_scope: str) -> list[str]:
     here so the MCP and CLI settings surfaces agree. Non-blocking — duplicates
     are informational.
 
-    ``format_warning`` embeds the raw tier path — absolute ``$HOME`` for a
+    ``format_warning`` embeds the tier path — absolute ``$HOME`` for a
     user-tier duplicate — so redact the PATH before formatting (#1550, the
     dup-tier leg the #1539 sweep missed). Redacting the formatted line instead
     would hit the 200-char ``redact_message`` cap and truncate the migrate
     hint; the path-only substitution keeps the CLI-parity wording whole. The
     malformed-matcher leg (#1987) embeds a path the same way and gets the same
     per-finding substitution.
+
+    These substitutions use :func:`_redact_reason_unescaped`, not
+    :func:`_redact_reason`: every formatter below already finishes its own
+    fields with ``scrub_text``, and the secret-shape checks here
+    (``redact_secret_value``, ``redact_unportable_command_fields``) have to
+    read the original text rather than an escaped copy of it (#2477).
     """
     from dataclasses import replace
 
@@ -218,17 +251,19 @@ def _settings_dup_tier_warnings(root: Path, active_scope: str) -> list[str]:
 
     lines: list[str] = []
     for dup in detect_duplicate_tiers(root, active_scope=active_scope):
-        redacted_dup = replace(dup, path=Path(_redact_reason(str(dup.path), root)))
+        redacted_dup = replace(dup, path=Path(_redact_reason_unescaped(str(dup.path), root)))
         lines.append(f"  warning: {format_warning(redacted_dup, active_scope=active_scope)}")
     for finding in find_malformed_matchers(root):
         redacted_finding = replace(
             finding,
-            path=Path(_redact_reason(str(finding.path), root)),
-            event=_redact_reason(finding.event, root),
+            path=Path(_redact_reason_unescaped(str(finding.path), root)),
+            event=_redact_reason_unescaped(finding.event, root),
         )
         lines.append(f"  warning: {format_malformed_warning(redacted_finding)}")
     for unportable_finding in find_unportable_hook_commands(root):
-        command_redacted = redact_secret_value(_redact_reason(unportable_finding.command, root))
+        command_redacted = redact_secret_value(
+            _redact_reason_unescaped(unportable_finding.command, root)
+        )
         safe_cmd, safe_lit = redact_unportable_command_fields(
             unportable_finding.command, unportable_finding.unportable_literal
         )
@@ -236,18 +271,18 @@ def _settings_dup_tier_warnings(root: Path, active_scope: str) -> list[str]:
             command_redacted = SECRET_REDACTED_MARKER
             literal_redacted = SECRET_REDACTED_MARKER
         else:
-            literal_redacted = _redact_reason(safe_lit, root)
+            literal_redacted = _redact_reason_unescaped(safe_lit, root)
         redacted_unportable = replace(
             unportable_finding,
-            path=Path(_redact_reason(str(unportable_finding.path), root)),
-            event=_redact_reason(unportable_finding.event, root),
+            path=Path(_redact_reason_unescaped(str(unportable_finding.path), root)),
+            event=_redact_reason_unescaped(unportable_finding.event, root),
             unportable_literal=literal_redacted,
             command=command_redacted,
         )
         lines.append(f"  warning: {format_unportable_command_warning(redacted_unportable)}")
     for unscanned in find_unscanned_settings_files(root):
         redacted_unscanned = replace(
-            unscanned, path=Path(_redact_reason(str(unscanned.path), root))
+            unscanned, path=Path(_redact_reason_unescaped(str(unscanned.path), root))
         )
         lines.append(f"  warning: {format_unscanned_settings_warning(redacted_unscanned)}")
     return lines
@@ -2914,17 +2949,24 @@ _strict_bool = strict_bool
 def _redact_pull_reason(reason: str | None, *roots: Path) -> str:
     """Redact a Pull engine reason for the MCP wire (defense in depth).
 
-    ``_redact_reason`` strips the roots it is handed plus the import-frozen
-    ``$HOME``; :func:`scrub_absolute_paths` then removes any residual absolute
-    path under neither (mirrors the web ``_redact_pull_reason`` composition).
+    ``_redact_reason_unescaped`` strips the roots it is handed plus the
+    import-frozen ``$HOME``; :func:`scrub_absolute_paths` then removes any
+    residual absolute path under neither (mirrors the web
+    ``_redact_pull_reason`` composition).
 
     Pull opts INTO the scrub while the shared ``_redact_reason`` stays out of
     it — see that function for why the two are not the same decision. Pull
     reasons carry no actionable relative remainder to protect: they name
     runtimes and scopes, and after G4a-3a a swap refusal names two canonical
     trees, which is disclosure rather than remediation.
+
+    Both path scrubs run on the unescaped text and :func:`scrub_text` comes
+    last. Composing on ``_redact_reason`` instead would hand
+    :func:`scrub_absolute_paths` the ``\\xNN`` escapes, whose backslashes it
+    reads as path separators — an escaped control sequence and the remediation
+    text after it would collapse into one path marker (#2478).
     """
-    return scrub_absolute_paths(_redact_reason(reason, *roots))
+    return scrub_text(scrub_absolute_paths(_redact_reason_unescaped(reason, *roots)))
 
 
 def _format_pull_preview(

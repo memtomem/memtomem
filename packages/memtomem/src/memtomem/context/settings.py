@@ -427,6 +427,38 @@ def _find_nonstring_matchers(
     return findings
 
 
+def _redact_tokens(tokens: list[str]) -> str:
+    """Comma-joined matcher tokens for a warning, each one redacted.
+
+    The sibling of :func:`_hook_label` for the drop-with-warning legs. Those
+    warnings name the label AND repeat the offending tokens the matcher was
+    split into, so redacting only the label left the credential in plain sight
+    one clause later (#2477/#2478 round-2 review).
+    """
+    return ", ".join(redact_secret_value(token) for token in tokens)
+
+
+def _hook_label(event: str, matcher: object) -> str:
+    """``event:matcher`` label for an engine warning, both halves redacted.
+
+    Event and matcher are read verbatim out of the caller's settings file, so
+    either can be secret-shaped. The event half has been redacted since #2030;
+    the matcher half was not, which leaked a credential-shaped matcher through
+    every consumer of these warnings — the CLI sync surface, the MCP wire, and
+    the ``/api/settings/sync`` JSON the dashboard renders. Redacting at the one
+    place the label is built keeps all three in agreement instead of asking
+    each display boundary to remember (#2477/#2478 sweep).
+
+    Redaction only. Control characters are escaped at the display boundary
+    (:func:`~memtomem._runtime_paths.scrub_text`), because the structured
+    consumers of these warnings must keep the raw bytes.
+    """
+    shown_event = redact_secret_value(event)
+    if not matcher:
+        return shown_event
+    return f"{shown_event}:{redact_secret_value(str(matcher))}"
+
+
 def _drop_nonstring_matchers(contributions: dict) -> tuple[dict, list[str]]:
     """Drop canonical hook rules whose ``matcher`` is present but not a string.
 
@@ -623,8 +655,7 @@ def _merge_hooks_record(
                 # Already present ignoring our marker — leave the user's copy
                 # untouched rather than rewrite it just to add the marker.
                 continue
-            shown_event = redact_secret_value(event)
-            label = f"{shown_event}:{matcher}" if matcher else shown_event
+            label = _hook_label(event, matcher)
             contrib_commands = _rule_commands(c)
             if contrib_commands and any(contrib_commands & _rule_commands(u) for u in same_user):
                 warnings.append(
@@ -1024,8 +1055,8 @@ def _render_kimi_hooks(contributions: dict) -> tuple[str, list[str]]:
                 mapped_matcher, unmapped = _map_kimi_matcher(matcher)
                 if mapped_matcher is None:
                     warnings.append(
-                        f"Hook '{redact_secret_value(event)}:{matcher}' matcher "
-                        f"token(s) {', '.join(unmapped)} have no Kimi tool "
+                        f"Hook '{_hook_label(event, matcher)}' matcher "
+                        f"token(s) {_redact_tokens(unmapped)} have no Kimi tool "
                         f"equivalent; rule dropped."
                     )
                     continue
@@ -1197,8 +1228,8 @@ def _remap_for_gemini(contributions: dict) -> tuple[dict, list[str]]:
                 mapped_matcher, unmapped = _map_gemini_matcher(matcher)
                 if mapped_matcher is None:
                     warnings.append(
-                        f"Hook '{redact_secret_value(event)}:{matcher}' matcher "
-                        f"token(s) {', '.join(unmapped)} have no Gemini tool "
+                        f"Hook '{_hook_label(event, matcher)}' matcher "
+                        f"token(s) {_redact_tokens(unmapped)} have no Gemini tool "
                         f"equivalent; "
                         f"rule dropped (would never fire). Known tools: "
                         f"{', '.join(sorted(set(_GEMINI_TOOL_MAP.values())))}."

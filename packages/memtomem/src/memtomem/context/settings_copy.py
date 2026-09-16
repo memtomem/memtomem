@@ -77,10 +77,13 @@ from memtomem.context.settings import (
 from memtomem.context.settings import (
     resolve_scope_path as _resolve_tier_path,
 )
+from memtomem.context.error_redact import redact_secret_value
 from memtomem.context.settings_doctor import (
     ALL_SCOPES,
     HookSignature,
     _normalize_command,
+    format_signature_label,
+    redact_command_shape,
 )
 from memtomem.context.settings_migrate import (
     _safe_load_json_dict,
@@ -310,7 +313,12 @@ def _classify_leg(
         return ("conflict", f"{leg} 'hooks' is not a record keyed by event name")
     rules = hooks.get(sig.event, [])
     if not isinstance(rules, list):
-        return ("conflict", f"{leg} 'hooks.{sig.event}' is not a list of rules")
+        # Event names are dict keys read out of the destination's settings
+        # file, so this branch redacts like the collision branch below.
+        return (
+            "conflict",
+            f"{leg} 'hooks.{redact_secret_value(sig.event)}' is not a list of rules",
+        )
     same_matcher: list[dict] = []
     for rule in rules:
         if not isinstance(rule, dict):
@@ -327,9 +335,16 @@ def _classify_leg(
                 {"matcher": sig.matcher, "hooks": [canonical_inner]},
             ):
                 return ("exact", "")
-    label = f"{sig.event}:{sig.matcher}" if sig.matcher else sig.event
+    # The label and the colliding commands both come out of settings files —
+    # the destination's, which this project never wrote. Redact before the
+    # reason is built, so every consumer of it agrees (#2477/#2478).
+    label = format_signature_label(sig)
     colliding = _rule_inner_commands(same_matcher)
-    preview = "; ".join(repr(c) for c in colliding[:3]) if colliding else "no command entries"
+    preview = (
+        "; ".join(repr(redact_command_shape(c)) for c in colliding[:3])
+        if colliding
+        else "no command entries"
+    )
     return (
         "conflict",
         (
@@ -499,7 +514,11 @@ def plan_hook_copy(
         raise ValueError("hook matcher selector must be a string")
     candidates = _iter_canonical_candidates(canonical_hooks, event, matcher_norm)
     if not candidates:
-        labels = _available_labels(canonical_hooks)
+        # The available labels come from the canonical file, not from what
+        # the caller typed, so they are redacted like every other quoted
+        # settings value. ``_available_labels`` itself stays raw: it is a
+        # data helper, and only this listing is a display.
+        labels = [redact_secret_value(label) for label in _available_labels(canonical_hooks)]
         listing = "; available: " + ", ".join(labels) if labels else "; the canonical has no hooks"
         label = f"{event}:{matcher_norm}" if matcher_norm else event
         raise HookNotFoundError(

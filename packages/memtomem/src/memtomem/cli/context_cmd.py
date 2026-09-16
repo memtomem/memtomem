@@ -144,9 +144,11 @@ from memtomem.context.settings_doctor import (
     find_unportable_hook_commands,
     find_unscanned_settings_files,
     format_malformed_warning,
+    format_signature_label,
     format_unportable_command_warning,
     format_unscanned_settings_warning,
     format_warning,
+    redact_command_shape,
     redact_unportable_command_fields,
 )
 from memtomem.context.settings_copy import (
@@ -821,7 +823,7 @@ def _confirm_settings_host_writes(root: Path, *, scope: str, yes: bool) -> bool:
         fg="yellow",
     )
     for p in pending:
-        click.echo(f"  {p}")
+        click.echo(f"  {scrub_text(str(p))}")
     return click.confirm("Continue?", default=False)
 
 
@@ -861,17 +863,17 @@ def _print_settings_generate(root: Path, *, scope: str, allow_host_writes: bool)
     results = generate_all_settings(root, scope=scope, allow_host_writes=allow_host_writes)
     for name, r in results.items():
         if r.status == "ok":
-            click.secho(f"  Settings: {name} → {r.target}", fg="green")
+            click.secho(f"  Settings: {name} → {scrub_text(str(r.target))}", fg="green")
             for w in r.warnings:
-                click.secho(f"    warning: {w}", fg="yellow")
+                click.secho(f"    warning: {scrub_text(w)}", fg="yellow")
         elif r.status == "skipped":
-            click.secho(f"  skipped {name}: {r.reason}", fg="yellow")
+            click.secho(f"  skipped {name}: {scrub_text(r.reason)}", fg="yellow")
         elif r.status == "needs_confirmation":
             # Defense in depth: should not normally reach here because the CLI
             # caller already gated on ``_confirm_settings_host_writes``.
-            click.secho(f"  needs confirmation {name}: {r.reason}", fg="yellow")
+            click.secho(f"  needs confirmation {name}: {scrub_text(r.reason)}", fg="yellow")
         elif r.status in ("error", "aborted"):
-            click.secho(f"  {r.status} {name}: {r.reason}", fg="red")
+            click.secho(f"  {r.status} {name}: {scrub_text(r.reason)}", fg="red")
 
 
 def _print_settings_diff(root: Path, *, scope: str) -> None:
@@ -885,11 +887,11 @@ def _print_settings_diff(root: Path, *, scope: str) -> None:
             color = "green" if r.status == "in sync" else "yellow"
             click.secho(f"  {name:17s}  [{r.status}]", fg=color)
             for w in r.warnings:
-                click.secho(f"    warning: {w}", fg="yellow")
+                click.secho(f"    warning: {scrub_text(w)}", fg="yellow")
         elif r.status == "skipped":
-            click.secho(f"  skipped {name}: {r.reason}", fg="yellow")
+            click.secho(f"  skipped {name}: {scrub_text(r.reason)}", fg="yellow")
         elif r.status == "error":
-            click.secho(f"  error {name}: {r.reason}", fg="red")
+            click.secho(f"  error {name}: {scrub_text(r.reason)}", fg="red")
 
 
 def _print_mcp_servers_generate(root: Path, *, surface: str = "cli_context_sync") -> None:
@@ -5181,10 +5183,12 @@ def settings_doctor_cmd(json_out: bool, scope_flag: str | None) -> None:
                 fg="yellow",
             )
             for dup in duplicates:
-                click.secho(f"  • {dup.tier} ({dup.path})", fg="yellow")
+                click.secho(f"  • {dup.tier} ({scrub_text(str(dup.path))})", fg="yellow")
                 for sig in dup.entries:
-                    label = f"{sig.event}:{sig.matcher}" if sig.matcher else sig.event
-                    click.echo(f"      [{label}] {sig.command_shape}")
+                    click.echo(
+                        f"      [{format_signature_label(sig)}] "
+                        f"{redact_command_shape(sig.command_shape)}"
+                    )
             click.echo(
                 "\nRun `mm context settings-migrate --from=<scope> "
                 "--to=<scope>` to move these into the active scope."
@@ -5235,7 +5239,7 @@ def settings_doctor_cmd(json_out: bool, scope_flag: str | None) -> None:
             for item in unscanned:
                 location = "canonical" if item.source == "canonical" else f"{item.tier} tier"
                 click.secho(f"  • {location} ({scrub_text(str(item.path))})", fg="yellow")
-                click.echo(f"      {item.reason}")
+                click.echo(f"      {scrub_text(item.reason)}")
             click.echo("\nFix or remove these files; nothing in them was verified.")
 
     if duplicates or malformed:
@@ -5264,31 +5268,41 @@ _MIGRATE_SCOPE_TO = click.option(
 
 
 def _print_migrate_plan_human(plan) -> None:
-    """Render the settings-migrate dry-run / pre-apply preview."""
+    """Render the settings-migrate dry-run / pre-apply preview.
+
+    Event, matcher, command and tier paths all come out of the settings files
+    being migrated, so each is redacted and escaped the way the doctor renders
+    the same fields. The ``--json`` branch keeps the raw values (#2477).
+    """
     if not plan.moves:
         click.echo(
             f"  no memtomem-managed hook entries in {plan.source_scope} "
-            f"({plan.source_path}) match the canonical source — nothing to migrate."
+            f"({scrub_text(str(plan.source_path))}) match the canonical source "
+            f"— nothing to migrate."
         )
         return
 
     click.echo(
-        f"\nWill migrate hook entries from {plan.source_scope} ({plan.source_path}) "
-        f"→ {plan.target_scope} ({plan.target_path}):"
+        f"\nWill migrate hook entries from {plan.source_scope} "
+        f"({scrub_text(str(plan.source_path))}) "
+        f"→ {plan.target_scope} ({scrub_text(str(plan.target_path))}):"
     )
     for move in plan.moves:
         sig = move.signature
-        label = f"{sig.event}:{sig.matcher}" if sig.matcher else sig.event
+        label = format_signature_label(sig)
         if move.conflict_at_target:
             glyph, color = "✗", "red"
-            note = f"skip (conflict: {move.conflict_reason})"
+            note = f"skip (conflict: {scrub_text(str(move.conflict_reason))})"
         elif move.already_at_target:
             glyph, color = "·", "cyan"
             note = "already at target — source clean-up only"
         else:
             glyph, color = "→", "green"
             note = "move"
-        click.secho(f"  {glyph}  [{label}]  {sig.command_shape}  ({note})", fg=color)
+        click.secho(
+            f"  {glyph}  [{label}]  {redact_command_shape(sig.command_shape)}  ({note})",
+            fg=color,
+        )
 
 
 @context.command("settings-migrate")
@@ -5372,7 +5386,7 @@ def settings_migrate_cmd(
         if json_out:
             click.echo(json.dumps({"status": "error", "error": str(exc)}, indent=2))
         else:
-            click.secho(f"error: {exc}", fg="red", err=True)
+            click.secho(f"error: {scrub_text(str(exc))}", fg="red", err=True)
         raise click.exceptions.Exit(1)
 
     conflicts = [m for m in plan.moves if m.conflict_at_target]
@@ -5611,16 +5625,18 @@ def settings_migrate_cmd(
     else:
         if result.target_written:
             click.secho(
-                f"  ✓ wrote target {plan.target_path}",
+                f"  ✓ wrote target {scrub_text(str(plan.target_path))}",
                 fg="green",
             )
         if result.source_written:
             click.secho(
-                f"  ✓ cleaned source {plan.source_path}",
+                f"  ✓ cleaned source {scrub_text(str(plan.source_path))}",
                 fg="green",
             )
+        # Apply-time drift warnings quote the target rule the planner could
+        # not see, so they carry settings text like every other warning here.
         for warning in result.warnings:
-            click.secho(f"  ⚠ {warning}", fg="yellow", err=True)
+            click.secho(f"  ⚠ {scrub_text(warning)}", fg="yellow", err=True)
         if not result.target_written and not result.source_written and not result.warnings:
             if conflicts:
                 click.secho(
@@ -5651,10 +5667,20 @@ def _leg_glyph_note(state: str, reason: str, *, already_note: str, add_note: str
 
 
 def _print_hook_copy_plan(plan: HookCopyPlan) -> None:
-    """Render the settings-copy dry-run / pre-apply preview."""
-    click.echo(f"Plan: copy hook [{plan.label}]  {plan.signature.command_shape}")
-    click.echo(f"  from {plan.src_canonical_path}")
-    click.echo(f"  to   {plan.dst_project_root} ({plan.dst_scope} tier)")
+    """Render the settings-copy dry-run / pre-apply preview.
+
+    The command comes out of the source canonical file, so it gets the full
+    :func:`redact_command_shape` treatment. ``label`` is escaped but NOT
+    secret-redacted: it is the ``--event`` / ``--matcher`` selector the caller
+    just typed, and a redacted echo of their own argument would tell them
+    nothing about which hook was copied (#2477).
+    """
+    click.echo(
+        f"Plan: copy hook [{scrub_text(plan.label)}]  "
+        f"{redact_command_shape(plan.signature.command_shape)}"
+    )
+    click.echo(f"  from {scrub_text(str(plan.src_canonical_path))}")
+    click.echo(f"  to   {scrub_text(str(plan.dst_project_root))} ({plan.dst_scope} tier)")
     for leg, path, state, reason, add_note in (
         (
             "canonical",
@@ -5674,7 +5700,7 @@ def _print_hook_copy_plan(plan: HookCopyPlan) -> None:
         glyph, color, note = _leg_glyph_note(
             state, reason, already_note="already present", add_note=add_note
         )
-        click.secho(f"  {glyph}  {leg} {path}  ({note})", fg=color)
+        click.secho(f"  {glyph}  {leg} {scrub_text(str(path))}  ({scrub_text(note)})", fg=color)
 
 
 def _hook_copy_payload(plan: HookCopyPlan, status: str) -> dict[str, Any]:
@@ -5697,18 +5723,32 @@ def _hook_copy_payload(plan: HookCopyPlan, status: str) -> dict[str, Any]:
 
 
 def _print_hook_copy_result(result: HookCopyResult) -> None:
-    """Human-readable apply outcome for one settings-copy."""
+    """Human-readable apply outcome for one settings-copy.
+
+    ``sync_command`` is deliberately left as written: it is a copy-pasteable
+    command, and escaping it would produce something that no longer runs.
+    Display-safe rendering of a *command* needs shell-correct quoting rather
+    than :func:`scrub_text` — see ``_runtime_paths._hint_quote`` — which is a
+    separate change from this one.
+    """
     plan = result.plan
     if result.canonical_written:
-        click.secho(f"  ✓ wrote canonical entry to {plan.dst_canonical_path}", fg="green")
+        click.secho(
+            f"  ✓ wrote canonical entry to {scrub_text(str(plan.dst_canonical_path))}",
+            fg="green",
+        )
     elif result.canonical_already:
-        click.echo(f"  · canonical already carries [{plan.label}] — no change")
+        click.echo(f"  · canonical already carries [{scrub_text(plan.label)}] — no change")
     if result.target_written:
-        click.secho(f"  ✓ wrote stamped rule to {plan.dst_target_path}", fg="green")
+        click.secho(
+            f"  ✓ wrote stamped rule to {scrub_text(str(plan.dst_target_path))}", fg="green"
+        )
     elif result.target_already:
-        click.echo(f"  · {plan.dst_scope} tier already carries [{plan.label}] — no change")
+        click.echo(
+            f"  · {plan.dst_scope} tier already carries [{scrub_text(plan.label)}] — no change"
+        )
     for warning in result.warnings:
-        click.secho(f"  ⚠ {warning}", fg="yellow", err=True)
+        click.secho(f"  ⚠ {scrub_text(warning)}", fg="yellow", err=True)
     if result.canonical_written or result.target_written:
         click.echo(
             f"\nNext: run `{result.sync_command}` to fan the entry out to the "
@@ -5860,7 +5900,10 @@ def settings_copy_cmd(
     except ValueError as exc:
         # HookNotFoundError / AmbiguousHookSelectorError / same-project /
         # unknown tier — all ValueError subclasses with CLI-ready messages.
-        raise click.ClickException(str(exc)) from exc
+        # The not-found and ambiguous messages quote canonical hook labels and
+        # the canonical path, i.e. settings text, so escape before printing
+        # (#2477).
+        raise click.ClickException(scrub_text(str(exc))) from exc
 
     # Pending writes drive the gates (the #1263 contract: no-op requests
     # never prompt). The plan properties encode the cross-leg rule (a
