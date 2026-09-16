@@ -186,12 +186,13 @@ def test_line_aligned_chunks_stay_writable(e5_like_config, tmp_path):
 def test_a_mid_line_boundary_survives_the_merge(e5_like_config, tmp_path):
     """Recomputing the flag must not hand out rewrite authority it should not.
 
-    Merging cannot *clear* this flag, and the test does not pretend otherwise: a
-    mid-line boundary only ever comes from a ceiling split, section cuts being
-    line-aligned, and re-merging across one necessarily breaks the ceiling
-    again. Measured over 941 repository files, no chunk is read-only either
-    before or after the change. The recomputation is here so the flag is never
-    wrongly *set*, which is what the blank-section packer's ``or`` could do.
+    In *Python* a mid-line boundary only ever comes from a ceiling split —
+    ``_python_structure`` keys every symbol to ``offset(lineno - 1)``, so section
+    cuts land on line starts — and re-merging across a ceiling split necessarily
+    breaks the ceiling again. Measured over 941 repository ``.py`` files, no
+    chunk is read-only either before or after the change. That is a fact about
+    this parser, not about merging: see
+    ``test_typescript_merging_can_restore_whole_line_ownership``.
 
     A 900-character line splits into two full chunks and a 139-token tail. The
     tail is over the floor, the 18-token header before it is under the floor and
@@ -203,6 +204,29 @@ def test_a_mid_line_boundary_survives_the_merge(e5_like_config, tmp_path):
 
     assert_partition(chunks, text)
     assert [c.metadata.source_read_only for c in chunks] == [False, True, True, True]
+
+
+def test_typescript_merging_can_restore_whole_line_ownership(e5_like_config, tmp_path):
+    """The other direction, which the Python parser never reaches.
+
+    tree-sitter starts a symbol after ``export ``, so offset 7 is a cut in the
+    middle of line 1 and both pieces own a partial line. Merging them back gives
+    a chunk that owns whole lines, and recomputing the flag — rather than OR-ing
+    the inputs, which could only keep it set — reports that correctly.
+
+    Measured: with both passes off the spans are 7/22 tokens, both read-only;
+    with them on, one 29-token chunk that is not.
+    """
+    pytest.importorskip("tree_sitter")
+    text = "export function f(): void {}\n"
+    off = e5_like_config.model_copy(update={"min_chunk_tokens": 0, "target_chunk_tokens": 0})
+
+    unmerged = chunk_code(tmp_path / "sample.ts", text, off)
+    assert [c.metadata.source_read_only for c in unmerged] == [True, True]
+
+    chunks = chunk_code(tmp_path / "sample.ts", text, e5_like_config)
+    assert_partition(chunks, text)
+    assert [c.metadata.source_read_only for c in chunks] == [False]
 
 
 def test_typescript_path_merges_too(e5_like_config, tmp_path):
