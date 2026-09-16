@@ -64,7 +64,7 @@ _REDACTION_BLOCKED_RE = re.compile(
 )
 
 
-def _collect_seed_scale(memory_dir: Path) -> tuple[int, int]:
+def _collect_seed_scale(memory_dir: Path, memory_dirs: Sequence[Path] = ()) -> tuple[int, int]:
     """Count ``.md`` files and total bytes under ``memory_dir``, recursive.
 
     Decision input for :func:`_maybe_seed_initial_index`'s seed-or-skip
@@ -75,13 +75,26 @@ def _collect_seed_scale(memory_dir: Path) -> tuple[int, int]:
     actual file count it plans to process (issue #743). Silent on
     stat/permission errors: a dir the user can't read is one the index
     can't process either, so return (0, 0) and fall through.
+
+    ``memory_dirs`` is every root the caller is about to offer, not just this
+    one: a worktree that is itself one of them is owned by itself and stays
+    indexable, so counting it out here would understate the seed. Defaults to
+    this dir alone, which is what a single-root caller means.
     """
     if not memory_dir.exists():
         return 0, 0
+    from memtomem.indexing.engine import _under_nested_worktree
+
     count = 0
     total = 0
+    roots = list(memory_dirs) or [memory_dir]
+    worktree_cache: dict[Path, bool] = {}
     try:
         for f in memory_dir.rglob("*.md"):
+            if _under_nested_worktree(f, roots, worktree_cache):
+                # A nested worktree is a copy of a tree already counted; it
+                # would inflate the seed-or-skip threshold (#2474).
+                continue
             try:
                 total += f.stat().st_size
                 count += 1

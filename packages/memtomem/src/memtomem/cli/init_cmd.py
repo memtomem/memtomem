@@ -1994,7 +1994,7 @@ def _maybe_seed_initial_index(paths: list[Path], state: dict) -> bool:
     file_count = 0
     total_bytes = 0
     for p in existing:
-        c, b = _collect_seed_scale(p)
+        c, b = _collect_seed_scale(p, existing)
         file_count += c
         total_bytes += b
     if file_count == 0:

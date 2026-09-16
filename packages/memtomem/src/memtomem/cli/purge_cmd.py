@@ -39,8 +39,8 @@ def find_sources_matching_excluded(
     is_flag=True,
     help=(
         "Target chunks whose source_path matches built-in denylist, "
-        "indexing.exclude_patterns, or a provider index-file convention "
-        "(e.g. claude-memory MEMORY.md/README.md)."
+        "indexing.exclude_patterns, a provider index-file convention "
+        "(e.g. claude-memory MEMORY.md/README.md), or a nested git worktree."
     ),
 )
 @click.option(
@@ -68,9 +68,10 @@ def purge(matching_excluded: bool, apply_: bool, sample_size: int, as_json: bool
     Currently one selector is supported: ``--matching-excluded`` scans every
     source_file in storage and deletes chunks whose path the indexer would
     now exclude — built-in secret/noise patterns, ``indexing.exclude_patterns``,
-    and provider index-file conventions (e.g. a ``claude-memory`` root's
-    ``MEMORY.md``/``README.md``). Use it to reclaim chunks indexed before a
-    convention/exclude was added.
+    provider index-file conventions (e.g. a ``claude-memory`` root's
+    ``MEMORY.md``/``README.md``), and git worktrees nested under an indexed
+    root. Use it to reclaim chunks indexed before a convention/exclude was
+    added.
 
     Default is dry-run. Pass ``--apply`` to execute deletion.
     """

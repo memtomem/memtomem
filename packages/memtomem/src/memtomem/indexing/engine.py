@@ -142,18 +142,202 @@ def _exclude_match_keys(file_path: Path, memory_dirs: Iterable[str | Path]) -> l
     return keys
 
 
+_GITDIR_PREFIX = "gitdir:"
+
+
+_GIT_MARKER_LIMIT = 4096
+
+
+def _read_git_marker(path: Path) -> str | None:
+    """The text of a one-line git metadata file, or ``None`` for anything else.
+
+    One guarded descriptor answers every question this module has about such a
+    file — is it there, may we read it, is it really a file, how big is it —
+    because asking them separately is what kept going wrong. Three review
+    rounds each found a different way for a two-probe version (``Path.is_file``
+    followed by ``open``) to raise or hang, and each was patched with one more
+    ``except`` clause:
+
+    - an embedded NUL raised ``ValueError`` out of ``os.stat``;
+    - ``Path.is_file`` ignores only ``ENOENT``, ``ENOTDIR``, ``EBADF`` and
+      ``ELOOP``, so an unreadable parent directory raised ``PermissionError``
+      (measured — the comment that once called this guard unreachable was
+      wrong);
+    - a backlink replaced by a FIFO blocked the read forever, with no writer.
+
+    ``O_NONBLOCK`` answers the third, ``fstat`` + ``S_ISREG`` rejects fifos,
+    directories and device files by kind rather than by symptom, and the two
+    questions are asked of the *same descriptor*, so there is no window for the
+    entry to change between them. ``O_BINARY`` matters on Windows, where
+    ``os.open`` would otherwise translate line endings; both flags are fetched
+    with ``getattr`` because neither exists on every platform.
+
+    The read is bounded at :data:`_GIT_MARKER_LIMIT` and anything longer is
+    rejected rather than truncated: a truncated target is a different path, and
+    a 40 MB file at a plausible name cost 40 MB of resident memory on every
+    discovery walk, status count and audit (measured).
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except (OSError, ValueError):
+        return None
+    try:
+        if not stat_module.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        raw = os.read(descriptor, _GIT_MARKER_LIMIT + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    if len(raw) > _GIT_MARKER_LIMIT:
+        return None
+    return raw.decode("utf-8", errors="replace")
+
+
+def _gitdir_target(directory: Path) -> Path | None:
+    """The git directory a ``.git`` *file* in ``directory`` points at.
+
+    ``None`` when there is no ``.git`` file (an ordinary checkout has a
+    ``.git`` directory), when it cannot be read, or when it does not carry the
+    ``gitdir:`` line. A relative target resolves against ``directory``, which
+    is what ``git worktree add --relative-paths`` and submodules both write.
+
+    The target is handed to ``Path`` verbatim. Rewriting ``\\`` to ``/`` first
+    looks like Windows tolerance but is wrong on POSIX, where a backslash is an
+    ordinary filename character: a repository in a directory named ``back\\slash``
+    had its worktree go undetected (measured). ``Path`` on Windows is
+    ``WindowsPath``, which already accepts either separator.
+    """
+    # No separate "is it a file?" probe: ``_read_git_marker`` answers that with
+    # the same descriptor it reads from, so an ordinary checkout — whose
+    # ``.git`` is a *directory* — comes back as ``None`` here, and nothing can
+    # change the entry between the two questions.
+    head = _read_git_marker(directory / ".git")
+    if head is None:
+        return None
+    line = next((ln for ln in head.splitlines() if ln.strip()), "")
+    if not line.strip().lower().startswith(_GITDIR_PREFIX):
+        return None
+    target = line.strip()[len(_GITDIR_PREFIX) :].strip()
+    if not target:
+        return None
+    admin = Path(target)
+    return admin if admin.is_absolute() else directory / admin
+
+
+def _is_linked_worktree(directory: Path) -> bool:
+    """True when ``directory`` is a linked git worktree, not a submodule.
+
+    Decided by what git puts in the administration directory rather than by
+    matching directory names, because the name is not stable. Measured with
+    git 2.54, the ``gitdir:`` targets are::
+
+        plain checkout        <repo>/.git/worktrees/<name>
+        worktree of worktree  <repo>/.git/worktrees/<name>   (the common dir)
+        bare repository       <repo>.git/worktrees/<name>    (no ``.git`` segment)
+        --relative-paths      ../../.git/worktrees/<name>
+        submodule             ../../.git/modules/<path>
+
+    A ``.git``-then-``worktrees`` segment test misses the bare-repository
+    layout, and a bare repository need not end in ``.git`` at all. What does
+    hold across all three worktree layouts is that the administration
+    directory carries a ``gitdir`` backlink naming the checkout it belongs to,
+    and that a submodule's carries none. Requiring the backlink to resolve to
+    *this* ``.git`` file is the whole test: it identifies worktrees across the
+    layouts above, excludes submodules, and stops an unrelated directory from
+    borrowing another worktree's administration directory to suppress itself.
+
+    A ``commondir`` check was tried alongside this and removed: every
+    administration directory that has the backlink also has ``commondir``, so
+    it discriminated nothing — dropping it left the submodule case passing for
+    the same reason it passes now.
+
+    Fails closed on anything unexpected — unreadable, malformed, missing —
+    which means "not a worktree", i.e. today's behaviour of indexing it.
+    """
+    admin = _gitdir_target(directory)
+    if admin is None:
+        return False
+    backlink = _read_git_marker(admin / "gitdir")
+    if backlink is None:
+        return False
+    link = next((ln.strip() for ln in backlink.splitlines() if ln.strip()), "")
+    if not link:
+        return False
+    pointed = Path(link)
+    if not pointed.is_absolute():
+        pointed = admin / pointed
+    try:
+        return pointed.resolve() == (directory / ".git").resolve()
+    except (OSError, ValueError, RuntimeError):
+        # ``RuntimeError``: a symlink loop on the way to the target (3.12).
+        # ``ValueError``: an embedded NUL the filesystem never sees.
+        return False
+
+
+def _under_nested_worktree(
+    file_path: Path,
+    memory_dirs: Iterable[str | Path],
+    cache: dict[Path, bool] | None = None,
+) -> bool:
+    """True when a directory *between* the owning root and ``file_path`` is a worktree.
+
+    A git worktree nested inside an indexed root is a near-copy of the main
+    checkout, so every source file would be stored twice (#2474). The owning
+    root itself is never tested, which is what makes the skip overridable:
+    registering the worktree as its own memory dir makes it the owning root —
+    ``resolve_owning_memory_dir`` takes the longest prefix — and it is indexed
+    again. A file with no owning root is not checked at all; without a root
+    there is no bounded place to stop walking up.
+
+    ``cache`` memoises one entry per directory for the duration of a single
+    walk. It is deliberately not process-wide: a long-running server would
+    otherwise never notice a worktree added after startup, and would keep
+    skipping one that was removed.
+    """
+    owning = resolve_owning_memory_dir(file_path, memory_dirs)
+    if owning is None:
+        return False
+    try:
+        root = Path(owning).expanduser().resolve()
+        rel = Path(file_path).expanduser().resolve().relative_to(root)
+    except (OSError, ValueError, RuntimeError):
+        # ``relative_to`` raises ``ValueError`` when resolving symlinks moved
+        # the file out from under the root it was attributed to lexically.
+        return False
+    current = root
+    for part in rel.parts[:-1]:
+        current = current / part
+        if cache is None:
+            found = _is_linked_worktree(current)
+        else:
+            cached = cache.get(current)
+            if cached is None:
+                cached = _is_linked_worktree(current)
+                cache[current] = cached
+            found = cached
+        if found:
+            return True
+    return False
+
+
 def _path_is_excluded(
     file_path: Path,
     memory_dirs: Iterable[str | Path],
     user_spec: pathspec.GitIgnoreSpec,
+    *,
+    worktree_cache: dict[Path, bool] | None = None,
 ) -> bool:
     """True if ``file_path`` matches any exclude rule.
 
-    Three layers, any of which excludes: (1) the provider index-file
+    Four layers, any of which excludes: (1) the provider index-file
     convention for the ``memory_dir`` root that *owns* the file — e.g. a
     ``claude-memory`` root's ``MEMORY.md``/``README.md`` is an index/meta
     file, never content; (2) the built-in secret/noise denylist; (3) the
-    user's ``indexing.exclude_patterns``. Layer (1) is the single
+    user's ``indexing.exclude_patterns``; (4) a nested worktree checkout
+    under the owning root, which is a second copy of a tree already indexed
+    (see :func:`_under_nested_worktree`). Layer (1) is the single
     enforcement point shared by ``_discover_files`` (dir walk),
     ``_index_file`` (per-file funnel for watcher/CLI/MCP), and
     ``mm purge`` — so the convention can't be honored on one path and
@@ -174,7 +358,7 @@ def _path_is_excluded(
     for key in _exclude_match_keys(file_path, memory_dirs):
         if _BUILTIN_EXCLUDE_SPEC.match_file(key) or user_spec.match_file(key):
             return True
-    return False
+    return _under_nested_worktree(file_path, memory_dirs, worktree_cache)
 
 
 def _dir_creation_time_iso(p: Path) -> str | None:
@@ -260,7 +444,11 @@ def resolve_owning_memory_dir(
     return best[1] if best else None
 
 
-def _count_files_on_disk(p: Path, extensions: frozenset[str]) -> int:
+def _count_files_on_disk(
+    p: Path,
+    extensions: frozenset[str],
+    memory_dirs: Iterable[str | Path] = (),
+) -> int:
     """Count regular files under ``p`` whose suffix is in ``extensions``.
 
     Recursive ``rglob`` so the count matches what ``index_path(recursive=True)``
@@ -269,9 +457,32 @@ def _count_files_on_disk(p: Path, extensions: frozenset[str]) -> int:
     Reindex anyway, and the badge is informational). Returns 0 on
     ``OSError`` (permissions, broken symlink, etc.) to keep the badge
     reading "0 files" rather than crashing the panel.
+
+    Nested worktree checkouts *are* excluded, unlike user patterns: the web
+    Sources panel renders a non-zero count with no chunks as
+    "{N} files · not indexed", so a root whose only remaining files are a
+    worktree copy would read as work the indexer refuses to do (#2474).
+
+    ``memory_dirs`` must be *every* configured root, not just ``p``. The skip
+    only applies to a worktree nested under the root that owns the file, so a
+    worktree the user explicitly registered is owned by itself and is indexed.
+    Counting with ``[p]`` alone hides that root from the ownership lookup and
+    subtracts files the engine does index — measured as a parent root
+    reporting ``source_file_count=2`` beside ``file_count=1``. A caller that
+    passes none falls back to ``[p]``, which still skips worktrees nested under
+    ``p`` and only loses the ability to see a *separately registered* one as
+    its own root.
     """
+    worktree_cache: dict[Path, bool] = {}
+    roots = list(memory_dirs) or [p]
     try:
-        return sum(1 for fp in p.rglob("*") if fp.is_file() and fp.suffix in extensions)
+        return sum(
+            1
+            for fp in p.rglob("*")
+            if fp.is_file()
+            and fp.suffix in extensions
+            and not _under_nested_worktree(fp, roots, worktree_cache)
+        )
     except OSError:
         return 0
 
@@ -332,6 +543,7 @@ async def memory_dir_stats(
                     _count_files_on_disk,
                     Path(d).expanduser(),
                     supported_extensions,
+                    dir_list,
                 )
                 if Path(d).expanduser().exists()
                 else _resolved_zero()
@@ -3273,6 +3485,11 @@ class IndexEngine:
         user_spec = _build_exclude_spec(self._config.exclude_patterns)
         memory_dirs = self._config.all_index_roots()
 
+        # One memo per walk: ``_under_nested_worktree`` probes the filesystem
+        # for each directory between the owning root and the file, and a walk
+        # visits the same directories once per file in them.
+        worktree_cache: dict[Path, bool] = {}
+
         def is_excluded(fp: Path, rel: Path | None) -> bool:
             # User negation cannot override built-in exclusions.
             # ``_path_is_excluded`` checks both the absolute path and the rel
@@ -3280,7 +3497,7 @@ class IndexEngine:
             # (e.g. ``**/.claude/**/*.meta.json``) effective even when
             # ``directory`` is the auto-discovered ``~/.claude/projects`` root
             # and the rel path no longer contains ``.claude/``.
-            return _path_is_excluded(fp, memory_dirs, user_spec)
+            return _path_is_excluded(fp, memory_dirs, user_spec, worktree_cache=worktree_cache)
 
         files: list[Path] = []
         if recursive:

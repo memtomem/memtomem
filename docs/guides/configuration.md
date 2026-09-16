@@ -681,6 +681,46 @@ such a pattern verbatim, wrap it in a JSON array of its own:
 >   root. When in doubt, add both root-relative (`oauth_creds.json`) and
 >   `**/X` (`**/oauth_creds.json`) forms.
 
+### Nested git worktrees
+
+A git worktree checked out *inside* an indexed root — `<repo>/.worktrees/x`,
+`<repo>/.claude/worktrees/x` — is skipped. It is a second checkout of a tree
+that is already indexed, so every source file in it would be stored a second
+time under a different path, crowding search results with the same content and
+filling the near-duplicate scan with pairs that cannot be resolved (re-indexing
+recreates whichever copy you delete).
+
+The test is what git writes, not the directory name: a `.git` **file** whose
+`gitdir:` target holds a `gitdir` backlink pointing back at that same file. A
+**submodule** has no such backlink and keeps being indexed, and so does an
+ordinary nested clone, whose `.git` is a directory.
+
+**To index one anyway**, register the worktree as its own root — Sources tab,
+or the `mm init` wizard. The skip only applies to a worktree nested under the
+root that *owns* the file, and a registered root owns itself:
+
+```json
+{
+  "indexing": {
+    "memory_dirs": ["~/work/repo", "~/work/repo/.worktrees/feature"]
+  }
+}
+```
+
+Then `mm index ~/work/repo/.worktrees/feature` to fill it in.
+
+**Rows indexed before this change stay.** The skip runs at indexing time and
+does not delete anything; the files are still on disk, so orphan cleanup will
+not claim them either. To remove them:
+
+```bash
+mm purge --matching-excluded            # dry run: lists what would go
+mm purge --matching-excluded --apply    # delete those chunks
+```
+
+That selector covers *every* exclusion rule, not only worktrees, so read the
+dry-run output before passing `--apply`.
+
 ### Provider memory folders (opt-in via `mm init`)
 
 memtomem can index AI tool memory folders alongside `~/.memtomem/memories`,

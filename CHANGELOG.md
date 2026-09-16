@@ -16,6 +16,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Git worktrees nested inside an indexed root are no longer indexed as a
+  second copy (#2474).** A worktree under `<repo>/.worktrees/` or
+  `<repo>/.claude/worktrees/` is a near-copy of the main checkout, so every
+  source file landed in the store twice — on one real store, 10,165 chunks from
+  331 files, with 197 of 203 near-duplicate pairs being a file and its worktree
+  copy. A worktree is now recognised by its `.git` file's backlink rather than
+  by any directory name, so bare-repository and `--relative-paths` layouts are
+  covered; submodules and ordinary nested clones are not affected. Register the
+  worktree as its own memory dir to index it deliberately. Rows indexed before
+  this release stay until you remove them with `mm purge --matching-excluded
+  --apply`. The web Sources counts and the `mm init` seed threshold count the
+  same files the indexer does.
+
 - **The OpenCode plugin includes the ONNX dependencies needed by existing E5
   configurations (#2453).** `opencode-memtomem` 0.3.4 launches
   `memtomem[onnx]==0.6.2`, the same requirement as the Claude and Codex plugins
