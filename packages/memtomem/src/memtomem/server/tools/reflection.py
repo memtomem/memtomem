@@ -152,20 +152,29 @@ async def mem_reflect_save(
         related_chunks: Optional list of chunk UUIDs that informed this insight
         tags: Additional tags (reflection and insight tags added automatically)
     """
-    from memtomem.server.tools.memory_crud import mem_add
+    from memtomem.server.tools.memory_crud import _mem_add_core
 
     all_tags = list(tags or [])
     for t in ("reflection", "insight"):
         if t not in all_tags:
             all_tags.append(t)
 
-    result = await mem_add(
+    # The core, not ``mem_add``: its ``stats`` is what tells a refusal (an
+    # excluded ``reflections.md`` #2488, a namespace mix, the redaction guard)
+    # apart from a save. On a refusal nothing was written, so there is no
+    # insight to link — ``recent[0]`` below would be some older chunk.
+    result, stats = await _mem_add_core(
         content=insight,
         title="Reflection",
         tags=all_tags,
         file="reflections.md",
+        namespace=None,
+        template=None,
         ctx=ctx,
+        event_type="reflect_save",
     )
+    if stats is None:
+        return result
 
     # Link related chunks to the new insight
     if related_chunks:

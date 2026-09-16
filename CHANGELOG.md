@@ -41,13 +41,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   sources with `"reason": "unclassifiable_sources"`, and exits 1 instead of
   announcing that no stored chunks match.
 
-- **Editing or deleting a chunk of an excluded source is refused instead of
-  leaving stale chunks behind (#2488).** `mem_edit`, `mem_delete` by chunk, and
-  the web chunk edit and delete wrote the file and then re-indexed it, and the
-  re-index of a source that indexing now skips — an exclude pattern, a built-in
-  rule, a nested worktree — returned without error, so search kept serving the
-  old text. These now answer with a `source_excluded` error (HTTP 409 on the
-  web) before anything is written.
+- **Writing to a file that indexing excludes is refused instead of reporting
+  success for content search never sees (#2488).** Every write path wrote the
+  file first and then re-indexed it, and the re-index of a file that indexing
+  skips — an exclude pattern, a built-in rule, a nested worktree — returned
+  without error. An edit left search serving the old text; an add or import
+  saved an entry that never became searchable. Each path now checks before
+  anything is written:
+  - `mem_edit`, `mem_delete` by chunk, and the web chunk edit and delete answer
+    `source_excluded` (HTTP 409 on the web).
+  - `mem_add`, `mem_batch_add` (and the tools that write through them), `mm
+    add`, the `mm shell` `add`, `mm agent share`, `mm review approve`, the
+    LangGraph adapter's `add`, and the web add and scratch promote refuse with a
+    `source_excluded` message (HTTP 409 on the web). `mm review approve` now
+    settles the destination before claiming the candidate, so a refusal or an
+    empty `indexing.memory_dirs` leaves the candidate's history untouched.
+    The tools that write through `mem_add` now return such a refusal as their
+    answer: `mem_agent_share` no longer prefixes it with "Shared to namespace",
+    `mem_scratch_promote` no longer marks the entry promoted, `mem_reflect_save`
+    no longer links the related chunks to whatever chunk is newest, and
+    `mem_consolidate_apply` records the run as an error and keeps the group
+    preview for a retry instead of reporting "Consolidation applied (unlinked)".
+    Because they now call that core directly, `mem_scratch_promote` and
+    `mem_reflect_save` record their session write events as `scratch_promote`
+    and `reflect_save` instead of `add`.
+  - The web upload reports `error: "source_excluded"` for that file and keeps
+    the rest of the batch; a collision-renamed name is checked before it is
+    created, not removed afterwards.
+  - `mem_fetch_url` refuses the destination, and `mem_import_notion` /
+    `mem_import_obsidian` skip each excluded target and report how many they
+    skipped. These three and the `session_end` summary archive also refuse a
+    destination that is a symbolic link: the exclusion check follows the link,
+    but the write replaces the link itself, so the two would judge different
+    files. The session summary is then not archived and the session still ends.
 
 - **The OpenCode plugin includes the ONNX dependencies needed by existing E5
   configurations (#2453).** `opencode-memtomem` 0.3.4 launches

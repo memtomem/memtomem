@@ -69,14 +69,27 @@ async def mem_import_notion(
 
     scope, _ = classify_scope(output_dir, app.config.indexing.project_memory_dirs)
     blocked_paths: list[str] = []
+    excluded_paths: list[str] = []
+    symlink_paths: list[str] = []
     imported = await import_notion(
         export_path,
         output_dir,
         force_unsafe=force_unsafe,
         scope=scope,
         blocked_paths=blocked_paths,
+        is_excluded=app.index_engine.is_excluded,
+        excluded_paths=excluded_paths,
+        symlink_paths=symlink_paths,
     )
 
+    # Refusals first: an import that also hit the redaction guard must still say
+    # that some targets were refused for a different reason (#2488).
+    if not imported and (excluded_paths or symlink_paths):
+        return (
+            f"Notion import wrote nothing: {len(excluded_paths)} target(s) excluded from "
+            f"indexing, {len(symlink_paths)} target(s) are symbolic links, "
+            f"{len(blocked_paths)} file(s) blocked by the redaction guard."
+        )
     if not imported and blocked_paths:
         return f"Notion import blocked by redaction guard: {len(blocked_paths)} file(s)."
     if not imported:
@@ -129,6 +142,8 @@ async def mem_import_notion(
         f"- Files imported: {len(imported)}\n"
         f"- Chunks indexed: {total_chunks}\n"
         f"- Blocked (redaction): {blocked}\n"
+        f"- Skipped (target excluded from indexing): {len(excluded_paths)}\n"
+        f"- Skipped (target is a symlink): {len(symlink_paths)}\n"
         f"- Namespace: {effective_ns}\n"
         f"- Output: {output_dir}"
     )
@@ -187,14 +202,27 @@ async def mem_import_obsidian(
 
     scope, _ = classify_scope(output_dir, app.config.indexing.project_memory_dirs)
     blocked_paths: list[str] = []
+    excluded_paths: list[str] = []
+    symlink_paths: list[str] = []
     imported = await import_obsidian(
         vault,
         output_dir,
         force_unsafe=force_unsafe,
         scope=scope,
         blocked_paths=blocked_paths,
+        is_excluded=app.index_engine.is_excluded,
+        excluded_paths=excluded_paths,
+        symlink_paths=symlink_paths,
     )
 
+    # Refusals first: an import that also hit the redaction guard must still say
+    # that some targets were refused for a different reason (#2488).
+    if not imported and (excluded_paths or symlink_paths):
+        return (
+            f"Obsidian import wrote nothing: {len(excluded_paths)} target(s) excluded from "
+            f"indexing, {len(symlink_paths)} target(s) are symbolic links, "
+            f"{len(blocked_paths)} file(s) blocked by the redaction guard."
+        )
     if not imported and blocked_paths:
         return f"Obsidian import blocked by redaction guard: {len(blocked_paths)} file(s)."
     if not imported:
@@ -247,6 +275,8 @@ async def mem_import_obsidian(
         f"- Files imported: {len(imported)}\n"
         f"- Chunks indexed: {total_chunks}\n"
         f"- Blocked (redaction): {blocked}\n"
+        f"- Skipped (target excluded from indexing): {len(excluded_paths)}\n"
+        f"- Skipped (target is a symlink): {len(symlink_paths)}\n"
         f"- Namespace: {effective_ns}\n"
         f"- Output: {output_dir}"
     )

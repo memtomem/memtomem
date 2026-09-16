@@ -222,6 +222,13 @@ async def _cmd_add(comp, args: list[str]) -> None:
         return
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     target = base / f"{date_str}.md"
+    # #2488: an excluded target would take the append and re-index to zeroed
+    # stats, reporting "0 chunks indexed" for an entry search never sees.
+    if comp.index_engine.is_excluded(target):
+        from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
+
+        click.secho(EXCLUDED_TARGET_DETAIL, fg="red")
+        return
     target.parent.mkdir(parents=True, exist_ok=True)
 
     append_entry(target, content)

@@ -595,6 +595,9 @@ class TestAddPrivacyGate:
         comp.index_engine.index_file = AsyncMock(
             return_value=MagicMock(indexed_chunks=indexed_chunks)
         )
+        # A ``MagicMock`` predicate answers truthy, which the #2488 guard reads
+        # as "excluded"; these tests are about the privacy gate.
+        comp.index_engine.is_excluded = MagicMock(return_value=False)
         # ``add`` classifies its target against this list (ADR-0011 §5, #2321).
         # Named explicitly rather than left as a MagicMock attribute so these
         # tests assert a user-tier write because the config says so, not

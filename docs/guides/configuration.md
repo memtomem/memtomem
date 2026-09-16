@@ -747,9 +747,15 @@ source fail — it deletes nothing, even with `--apply`. It lists what could not
 be classified on stderr (`"ok": false, "reason": "unclassifiable_sources"` with
 `--json`), still reports the matches it did classify, and exits 1.
 
-**Chunk edits and deletes on an excluded source are refused** with a
-`source_excluded` error (HTTP 409 on the web). Writing the file would succeed but
-its re-index would be skipped, leaving the old text searchable.
+**Writes to an excluded file are refused before anything is written.** Chunk
+edits and deletes, adds (`mem_add`, `mm add`, the web add, …) and URL fetches
+answer `source_excluded` (HTTP 409 from the web edit, delete and add). A web
+upload reports `"error": "source_excluded"` for that file and still accepts the
+rest; `mem_import_notion` / `mem_import_obsidian` skip each excluded target and
+report how many they skipped. Writing the file would succeed but its re-index
+would be skipped, so new content would never become searchable and old text would
+stay searchable. Remove the matching pattern, or register a nested worktree as
+its own memory dir, to write there.
 
 ### Provider memory folders (opt-in via `mm init`)
 

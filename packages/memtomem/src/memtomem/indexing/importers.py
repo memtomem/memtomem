@@ -10,6 +10,7 @@ from pathlib import Path
 
 from memtomem.context._atomic import atomic_write_text
 from memtomem.privacy import enforce_write_guard
+from memtomem.source_provenance import refuse_replace_target
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,30 @@ def safe_extract_zip(
             zf.extract(info, dest_root)
 
 
+def _refused_target(
+    target: Path,
+    rel: Path,
+    is_excluded: Callable[[Path], bool] | None,
+    excluded_paths: list[str] | None,
+    symlink_paths: list[str] | None,
+) -> bool:
+    """Record and skip a target the importer must not overwrite (#2488).
+
+    An excluded target would be written and then indexed to zero chunks, and a
+    re-import over one already indexed would leave its old chunks searchable. A
+    symlinked target is refused because the exclusion check and the atomic
+    replace would judge different files (see ``refuse_replace_target``).
+    """
+    if is_excluded is None:
+        return False
+    refusal = refuse_replace_target(target, is_excluded)
+    if refusal == "excluded" and excluded_paths is not None:
+        excluded_paths.append(rel.as_posix())
+    elif refusal == "symlink" and symlink_paths is not None:
+        symlink_paths.append(rel.as_posix())
+    return refusal is not None
+
+
 async def import_notion(
     export_path: Path,
     output_dir: Path,
@@ -117,6 +142,9 @@ async def import_notion(
     force_unsafe: bool = False,
     scope: str = "user",
     blocked_paths: list[str] | None = None,
+    is_excluded: Callable[[Path], bool] | None = None,
+    excluded_paths: list[str] | None = None,
+    symlink_paths: list[str] | None = None,
 ) -> list[Path]:
     """Import a Notion export (ZIP or directory) into markdown files.
 
@@ -126,6 +154,9 @@ async def import_notion(
     Args:
         export_path: Path to Notion export ZIP or extracted directory.
         output_dir: Directory to write cleaned markdown files.
+        is_excluded: The indexer's exclusion predicate. When given, a target it
+            excludes is skipped into ``excluded_paths`` and a symlinked target
+            into ``symlink_paths``, before anything is written for that file.
 
     Returns:
         List of imported file paths.
@@ -200,6 +231,8 @@ async def import_notion(
             if blocked_paths is not None:
                 blocked_paths.append(rel.as_posix())
             continue
+        if _refused_target(target, rel, is_excluded, excluded_paths, symlink_paths):
+            continue
         atomic_write_text(target, final, mode=0o600)
         imported.append(target)
 
@@ -214,6 +247,9 @@ async def import_obsidian(
     force_unsafe: bool = False,
     scope: str = "user",
     blocked_paths: list[str] | None = None,
+    is_excluded: Callable[[Path], bool] | None = None,
+    excluded_paths: list[str] | None = None,
+    symlink_paths: list[str] | None = None,
 ) -> list[Path]:
     """Import an Obsidian vault into memtomem-compatible markdown.
 
@@ -226,6 +262,9 @@ async def import_obsidian(
     Args:
         vault_path: Path to Obsidian vault root directory.
         output_dir: Directory to write converted files.
+        is_excluded: The indexer's exclusion predicate. When given, a target it
+            excludes is skipped into ``excluded_paths`` and a symlinked target
+            into ``symlink_paths``, before anything is written for that file.
 
     Returns:
         List of imported file paths.
@@ -257,6 +296,8 @@ async def import_obsidian(
         if guard.decision.startswith("blocked"):
             if blocked_paths is not None:
                 blocked_paths.append(rel.as_posix())
+            continue
+        if _refused_target(target, rel, is_excluded, excluded_paths, symlink_paths):
             continue
         atomic_write_text(target, final, mode=0o600)
         imported.append(target)

@@ -57,13 +57,28 @@ async def mem_fetch(
     output_dir = memory_dir / "_fetched"
 
     from memtomem.config import classify_scope
-    from memtomem.indexing.url_fetcher import FetchPrivacyError
+    from memtomem.indexing.url_fetcher import FetchPrivacyError, FetchTargetRefusedError
+    from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
 
     scope, _ = classify_scope(output_dir, app.config.indexing.project_memory_dirs)
     try:
-        file_path = await fetch_url(url, output_dir, force_unsafe=force_unsafe, scope=scope)
+        file_path = await fetch_url(
+            url,
+            output_dir,
+            force_unsafe=force_unsafe,
+            scope=scope,
+            is_excluded=app.index_engine.is_excluded,
+        )
     except FetchPrivacyError:
         return "Fetch blocked by the redaction guard; no file was written."
+    except FetchTargetRefusedError as exc:
+        # #2488: refused before the write, so nothing is on disk to clean up.
+        if exc.reason == "excluded":
+            return f"Error: {EXCLUDED_TARGET_DETAIL}"
+        return (
+            f"Error: the fetch destination {exc.path} is a symbolic link; nothing was "
+            "written. Remove the link to fetch this URL."
+        )
     except Exception as exc:
         return f"Error fetching URL: {exc}"
 

@@ -346,6 +346,7 @@ class TestCliMmAddRedactionGuard:
             comp.config.indexing.memory_dirs = [user_dir]
             comp.config.indexing.project_memory_dirs = []
             comp.index_engine = AsyncMock()
+            comp.index_engine.is_excluded = MagicMock(return_value=False)
             comp.storage = AsyncMock()
             comp.index_engine.index_file = AsyncMock(return_value=MagicMock(indexed_chunks=1))
             comp.storage.list_chunks_by_source = AsyncMock(return_value=[])
@@ -502,6 +503,7 @@ class TestLangGraphAddRedactionGuard:
         memory_dir.mkdir()
 
         index_engine = AsyncMock()
+        index_engine.is_excluded = MagicMock(return_value=False)
         mem._ensure_init = AsyncMock(  # type: ignore[attr-defined]
             return_value=MagicMock(
                 config=MagicMock(indexing=MagicMock(memory_dirs=[memory_dir])),

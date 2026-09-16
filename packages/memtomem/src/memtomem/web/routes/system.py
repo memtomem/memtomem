@@ -43,6 +43,7 @@ from memtomem.config import (
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.errors import NamespaceResolutionError, RetryableError
 from memtomem.search.reranker.factory import create_reranker
+from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL, ExcludedSourceError
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.tools.memory_writer import append_entry
 from memtomem.web import hot_reload as _hot_reload
@@ -2202,7 +2203,9 @@ async def upload_files(
                     continue
                 dest: Path | None = None
                 try:
-                    dest = promote_no_overwrite(item.path, upload_dir, fname)
+                    dest = promote_no_overwrite(
+                        item.path, upload_dir, fname, is_excluded=index_engine.is_excluded
+                    )
                     stats = await index_engine.index_file(dest, already_scanned=True)
                     # Per file (#2141): a later file in the batch can raise,
                     # and the files already promoted are already searchable.
@@ -2214,6 +2217,12 @@ async def upload_files(
                             indexed_chunks=stats.indexed_chunks,
                             path=str(dest),
                         )
+                    )
+                except ExcludedSourceError:
+                    # #2488: refused before any candidate name was linked, so the
+                    # file exists only in quarantine, which context cleanup removes.
+                    results.append(
+                        UploadFileResult(filename=fname, indexed_chunks=0, error="source_excluded")
                     )
                 except Exception:
                     logger.exception("Upload processing failed for %s", fname)
@@ -2450,6 +2459,10 @@ async def add_memory(
     # ``lock_held=True`` skips the nested engine acquire.
     try:
         async with async_file_lock(memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+            # #2488: an excluded target would take the append and then re-index
+            # to zeroed stats. Ahead of the overridable mix refusal.
+            if index_engine.is_excluded(target):
+                raise HTTPException(status_code=409, detail=EXCLUDED_TARGET_DETAIL)
             # Issue #2005: refuse before appending when the target already
             # holds another namespace — re-chunking would restamp its chunks
             # with this write's namespace. Inside the lock so the check and

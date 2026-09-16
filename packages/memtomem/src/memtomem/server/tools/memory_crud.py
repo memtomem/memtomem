@@ -29,6 +29,7 @@ from memtomem.server.tools._provenance import (
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
 from memtomem.source_provenance import (
     EXCLUDED_SOURCE_DETAIL,
+    EXCLUDED_TARGET_DETAIL,
     SOURCE_READ_ONLY_DETAIL,
     STALE_SOURCE_PROVENANCE_DETAIL,
     StaleSourceProvenanceError,
@@ -903,6 +904,12 @@ async def _mem_add_core(
                     if retarget is not None:
                         target = retarget
                         continue
+                    # #2488: an excluded target would take the append and then re-index
+                    # to zeroed stats — the entry unindexed, any old chunks still
+                    # served. Ahead of the mix refusal: that one is overridable, this
+                    # one is not, so it must not be masked by it.
+                    if app.index_engine.is_excluded(target):
+                        return (f"Error: {EXCLUDED_TARGET_DETAIL}", None)
                     # Issue #2005: refuse before appending when the file already holds
                     # other namespaces — re-chunking would restamp their chunks with
                     # this write's namespace. Ahead of the claim, not after it: a
@@ -1876,6 +1883,9 @@ async def mem_batch_add(
                     if retarget is not None:
                         target = retarget
                         continue
+                    # #2488 excluded-target refusal, as in ``_mem_add_core``.
+                    if app.index_engine.is_excluded(target):
+                        return f"Error: {EXCLUDED_TARGET_DETAIL}"
                     # Issue #2005 mixed-namespace refusal, same rule and same
                     # before-the-claim placement as ``_mem_add_core``.
                     mix_err = await _namespace_mix_refusal(

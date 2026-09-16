@@ -8,7 +8,8 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 
 from memtomem.storage.sqlite_helpers import norm_path
-from memtomem.web.deps import get_config, get_storage
+from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
+from memtomem.web.deps import get_config, get_index_engine, get_storage
 from memtomem.web.schemas.scratch import (
     ScratchDeleteResponse,
     ScratchEntryOut,
@@ -65,6 +66,7 @@ async def promote_scratch(
     body: ScratchPromoteRequest,
     storage=Depends(get_storage),
     config=Depends(get_config),
+    index_engine=Depends(get_index_engine),
 ) -> ScratchPromoteResponse:
     """Promote a working memory entry to long-term memory."""
     entry = await storage.scratch_get(key)
@@ -112,6 +114,11 @@ async def promote_scratch(
         base = require_user_base(config.indexing.memory_dirs, config.indexing.project_memory_dirs)
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         target = base / f"{date_str}.md"
+
+    # #2488: indexing skips an excluded target, so the promoted entry would never
+    # become searchable while the scratch row is marked promoted. Refuse first.
+    if index_engine.is_excluded(target):
+        raise HTTPException(status_code=409, detail=EXCLUDED_TARGET_DETAIL)
 
     append_entry(target, entry["value"], title=body.title, tags=body.tags)
 

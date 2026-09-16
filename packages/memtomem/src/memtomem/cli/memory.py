@@ -374,6 +374,13 @@ async def _add(
                             # rather than appending to one named for another.
                             target = desired
                             continue
+                    # #2488: refuse an excluded target before appending; its re-index
+                    # would return zeroed stats and leave the entry unindexed. Ahead
+                    # of the overridable mix refusal so that one cannot mask it.
+                    if comp.index_engine.is_excluded(target):
+                        from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
+
+                        raise click.ClickException(EXCLUDED_TARGET_DETAIL)
                     mix_err = (
                         None
                         if allow_namespace_mix

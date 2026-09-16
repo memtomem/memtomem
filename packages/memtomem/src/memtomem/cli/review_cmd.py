@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import click
 
@@ -186,6 +187,25 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
             )
             if guard.decision != "pass":
                 raise click.ClickException("Candidate now fails the privacy gate")
+            # The daily-file target is settled before the claim, not inside the
+            # write: claim and release each record a transition, so a refusal
+            # reached after claiming would leave history for a write that never
+            # started. Computed once and reused below, so a midnight rollover
+            # cannot split the exclusion check from the file it guards.
+            daily_target: Path | None = None
+            if candidate["destination"] != "pinned":
+                from memtomem.memory_scope import require_user_base
+                from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
+
+                base = require_user_base(
+                    comp.config.indexing.memory_dirs,
+                    comp.config.indexing.project_memory_dirs,
+                )
+                daily_target = base / f"{datetime.now(timezone.utc):%Y-%m-%d}.md"
+                # #2488: an excluded target would take the append and re-index to
+                # zeroed stats, leaving the entry unindexed.
+                if comp.index_engine.is_excluded(daily_target):
+                    raise click.ClickException(EXCLUDED_TARGET_DETAIL)
             claimed = await comp.storage.claim_memory_candidate(candidate_id, reviewer, reason)
             if claimed is None:
                 raise click.ClickException("Candidate state changed concurrently")
@@ -207,13 +227,8 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                         async_file_lock,
                     )
 
-                    from memtomem.memory_scope import require_user_base
-
-                    base = require_user_base(
-                        comp.config.indexing.memory_dirs,
-                        comp.config.indexing.project_memory_dirs,
-                    )
-                    target = base / f"{datetime.now(timezone.utc):%Y-%m-%d}.md"
+                    assert daily_target is not None  # settled before the claim
+                    target = daily_target
                     write_location = str(target)
                     async with async_file_lock(
                         memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S

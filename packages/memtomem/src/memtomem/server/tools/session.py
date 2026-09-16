@@ -961,6 +961,16 @@ async def _write_summary_archive(
     first id — Phase B-2's link writer anchors its rows there.
     """
     from memtomem.context._atomic import atomic_write_text
+    from memtomem.source_provenance import refuse_replace_target
+
+    # #2488: an excluded archive path would be written and indexed to zero chunks,
+    # and a symlinked one would be judged through the link but replaced itself.
+    # Either way no chunk results, so answer the "no chunk" contract without
+    # writing.
+    refusal = refuse_replace_target(prepared.target, app.index_engine.is_excluded)
+    if refusal is not None:
+        logger.warning("session_summary_target_refused reason=%s path=%s", refusal, prepared.target)
+        return None, None
 
     await asyncio.to_thread(atomic_write_text, prepared.target, prepared.content, 0o600)
     stats = await app.index_engine.index_file(

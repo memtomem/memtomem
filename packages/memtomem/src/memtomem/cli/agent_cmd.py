@@ -416,6 +416,12 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         # ``lock_held=True`` skips the nested engine acquire.
         try:
             async with async_file_lock(memory_lock_path(path), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+                # #2488: an excluded target would take the append and re-index to
+                # zeroed stats. Ahead of the overridable mix refusal.
+                if comp.index_engine.is_excluded(path):
+                    from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
+
+                    raise click.ClickException(EXCLUDED_TARGET_DETAIL)
                 mix_err = await namespace_mix_refusal(
                     index_engine=comp.index_engine,
                     storage=comp.storage,

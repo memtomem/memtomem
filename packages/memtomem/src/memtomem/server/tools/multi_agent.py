@@ -563,26 +563,29 @@ async def mem_agent_share(
             "skipping chunk_links writer (content_hash collision?)"
         )
 
+    if stats is None:
+        # ``result`` is the core's refusal (an excluded target #2488, a
+        # namespace mix, the redaction guard): nothing durable landed, so it
+        # must not be announced as a share, and the key stays re-runnable.
+        if idempotency_key is not None:
+            await _release_idempotency_claim(app, "mem_agent_share", idempotency_key)
+        return result
+
     final = f"Shared to namespace '{target}'.\n{result}"
 
-    # Complete the claim only on a successful copy. ``stats is None`` ⇒
-    # ``_mem_add_core`` errored and ``result`` is its error string ⇒ nothing
-    # durable landed, so release the claim and keep the key re-runnable. (The
-    # best-effort chunk_links write above does not gate this — the copy is the
-    # durable artifact; see the idempotency_key note in the docstring.)
+    # Complete the claim only on a successful copy; a refusal released it
+    # above. (The best-effort chunk_links write does not gate this — the copy
+    # is the durable artifact; see the idempotency_key note in the docstring.)
     if idempotency_key is not None:
-        if stats is None:
-            await _release_idempotency_claim(app, "mem_agent_share", idempotency_key)
-        else:
-            try:
-                await app.storage.idempotency_complete("mem_agent_share", idempotency_key, final)
-            except Exception:
-                # Leave the row pending on a (rare) complete failure — the copy
-                # is durable, so releasing could let a retry duplicate it.
-                logger.warning(
-                    "idempotency ledger complete failed; mem_agent_share key left "
-                    "pending (retry blocks until TTL)",
-                    exc_info=True,
-                )
+        try:
+            await app.storage.idempotency_complete("mem_agent_share", idempotency_key, final)
+        except Exception:
+            # Leave the row pending on a (rare) complete failure — the copy
+            # is durable, so releasing could let a retry duplicate it.
+            logger.warning(
+                "idempotency ledger complete failed; mem_agent_share key left "
+                "pending (retry blocks until TTL)",
+                exc_info=True,
+            )
 
     return final

@@ -485,7 +485,14 @@ class TestMemAddCoreCallSiteLabels:
                 )
                 labels[kw.value.value] = where
 
-        assert set(labels) == {"add", "agent_share", "candidate_review", "consolidate_apply"}
+        assert set(labels) == {
+            "add",
+            "agent_share",
+            "candidate_review",
+            "consolidate_apply",
+            "reflect_save",
+            "scratch_promote",
+        }
 
 
 class TestMemAddCoreSurfaces:

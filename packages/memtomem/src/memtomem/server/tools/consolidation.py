@@ -334,7 +334,21 @@ async def mem_consolidate_apply(
             confirmation_surface="mem_consolidate_apply",
         )
 
-        if stats is None or not stats.new_chunk_ids:
+        if stats is None:
+            # The core refused before writing anything (an excluded target
+            # #2488, a namespace mix, the redaction guard): nothing was
+            # consolidated, so neither record the run as applied nor drop the
+            # preview a retry needs.
+            await app.storage.maintenance_run_finish(
+                run_id,
+                status="error",
+                namespaces=run_namespaces,
+                summary=run_summary,
+                error=add_result,
+            )
+            return add_result
+
+        if not stats.new_chunk_ids:
             logger.warning(
                 "mem_consolidate_apply: mem_add produced no new chunk ids — "
                 "cannot link originals for group %s",

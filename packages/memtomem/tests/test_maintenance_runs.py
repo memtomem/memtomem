@@ -248,16 +248,22 @@ class TestConsolidateApplyRunRecord:
         assert await components.storage.maintenance_run_latest(kind="consolidate_apply") == []
 
     @pytest.mark.asyncio
-    async def test_unlinked_branch_records_ok_row_with_warning(self, components):
+    async def test_unlinked_branch_records_ok_row_with_warning(self, components, monkeypatch):
+        import memtomem.server.tools.memory_crud as memory_crud
+        from memtomem.models import IndexingStats
         from memtomem.server.tools.consolidation import mem_consolidate_apply
 
         from tests.test_tools_logic import _fake_ctx
 
         await self._stash_group(components.storage, [])
 
-        # Empty content short-circuits _mem_add_core with stats=None, which is
-        # the unlinked branch — no summary chunk id to link originals to.
-        out = await mem_consolidate_apply(group_id=0, summary="", ctx=_fake_ctx(components))
+        # The write landed but produced no new chunk id (e.g. a content-hash
+        # collision), so there is no summary chunk to link originals to.
+        async def landed_without_new_ids(*args, **kwargs):
+            return "Memory added", IndexingStats(0, 1, 0, 1, 0, 0.0)
+
+        monkeypatch.setattr(memory_crud, "_mem_add_core", landed_without_new_ids)
+        out = await mem_consolidate_apply(group_id=0, summary="x", ctx=_fake_ctx(components))
         assert "unlinked" in out
 
         (run,) = await components.storage.maintenance_run_latest(kind="consolidate_apply")
@@ -268,6 +274,27 @@ class TestConsolidateApplyRunRecord:
         assert run["summary"]["warning"] == "unlinked"
         assert run["summary"]["summary_id"] is None
         assert run["summary"]["group_id"] == 0
+
+    @pytest.mark.asyncio
+    async def test_refused_write_records_error_row_and_keeps_the_preview(self, components):
+        """A core refusal wrote nothing, so it is neither "applied" nor "unlinked" (#2488)."""
+        from memtomem.server.tools.consolidation import mem_consolidate_apply
+
+        from tests.test_tools_logic import _fake_ctx
+
+        await self._stash_group(components.storage, [])
+        preview_before = await components.storage.scratch_get("consolidation_groups")
+
+        # Empty content is refused by ``_mem_add_core`` with ``stats=None``.
+        out = await mem_consolidate_apply(group_id=0, summary="", ctx=_fake_ctx(components))
+
+        assert out.startswith("Error:"), out
+        assert "Consolidation applied" not in out
+        (run,) = await components.storage.maintenance_run_latest(kind="consolidate_apply")
+        assert run["status"] == "error"
+        assert run["error"] == out
+        assert run["affected_count"] == 0
+        assert await components.storage.scratch_get("consolidation_groups") == preview_before
 
     @pytest.mark.asyncio
     async def test_failure_records_error_row(self, components, monkeypatch):

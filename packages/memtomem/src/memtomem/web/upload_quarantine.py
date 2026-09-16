@@ -11,7 +11,7 @@ import tempfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from starlette.datastructures import FormData, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
@@ -151,8 +151,22 @@ async def quarantine_uploads(
             shutil.rmtree(quarantine_dir, ignore_errors=True)
 
 
-def promote_no_overwrite(source: Path, upload_dir: Path, filename: str) -> Path:
-    """Atomically promote by hard-linking; never replace an existing path."""
+def promote_no_overwrite(
+    source: Path,
+    upload_dir: Path,
+    filename: str,
+    *,
+    is_excluded: Callable[[Path], bool] | None = None,
+) -> Path:
+    """Atomically promote by hard-linking; never replace an existing path.
+
+    ``is_excluded`` is asked for each candidate name *before* it is linked. An
+    excluded candidate raises :class:`ExcludedSourceError` rather than moving on
+    to the next name: renaming past the user's pattern would bypass their rule,
+    and linking first would publish a file indexing then skips (#2488).
+    """
+    from memtomem.source_provenance import ExcludedSourceError
+
     prepare_upload_dir(upload_dir)
     original = Path(filename or "upload").name
     stem, suffix = Path(original).stem, Path(original).suffix
@@ -160,6 +174,8 @@ def promote_no_overwrite(source: Path, upload_dir: Path, filename: str) -> Path:
     candidates.extend(f"{stem}_{secrets.token_hex(6)}{suffix}" for _ in range(16))
     for candidate in candidates:
         destination = upload_dir / candidate
+        if is_excluded is not None and is_excluded(destination):
+            raise ExcludedSourceError(str(destination))
         try:
             os.link(source, destination)
         except FileExistsError:

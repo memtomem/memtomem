@@ -6,11 +6,13 @@ import ipaddress
 import re
 import socket
 from pathlib import Path
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import ParseResult, urljoin, urlparse, urlunparse
 
 from memtomem.context._atomic import atomic_write_text
 from memtomem.privacy import enforce_write_guard
+from memtomem.source_provenance import refuse_replace_target
 
 if TYPE_CHECKING:
     import httpx
@@ -28,6 +30,21 @@ _REQUEST_TIMEOUT = 30.0
 
 class FetchPrivacyError(ValueError):
     """Fetched content was rejected before persistence."""
+
+
+class FetchTargetRefusedError(ValueError):
+    """The destination file was refused before persistence (#2488).
+
+    ``reason`` is ``"excluded"`` when indexing skips the destination, so the
+    saved page would never be searchable, or ``"symlink"`` when the destination
+    is a symbolic link: the exclusion check follows the link, but the atomic
+    write replaces the link itself, so the two would judge different files.
+    """
+
+    def __init__(self, path: Path, reason: Literal["excluded", "symlink"]) -> None:
+        super().__init__(f"{reason}: {path}")
+        self.path = path
+        self.reason = reason
 
 
 def _is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -326,6 +343,7 @@ async def fetch_url(
     client: httpx.AsyncClient | None = None,
     force_unsafe: bool = False,
     scope: str = "user",
+    is_excluded: Callable[[Path], bool] | None = None,
 ) -> Path:
     """Fetch a URL, convert HTML to markdown, and save to a file.
 
@@ -341,6 +359,9 @@ async def fetch_url(
         client: Optional pre-built `httpx.AsyncClient`, intended for tests
             that inject a `MockTransport`. The caller is responsible for
             closing it; production code should leave this `None`.
+        is_excluded: The indexer's exclusion predicate. When given, a
+            destination it excludes, or any symlinked destination, raises
+            :class:`FetchTargetRefusedError` before anything is written.
 
     Returns:
         Path to the saved markdown file.
@@ -399,6 +420,10 @@ async def fetch_url(
         raise FetchPrivacyError(
             "Fetched content was blocked by the redaction guard before persistence"
         )
+    if is_excluded is not None:
+        refusal = refuse_replace_target(file_path, is_excluded)
+        if refusal is not None:
+            raise FetchTargetRefusedError(file_path, refusal)
     atomic_write_text(file_path, final, mode=0o600)
 
     return file_path

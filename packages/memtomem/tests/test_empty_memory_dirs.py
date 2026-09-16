@@ -227,5 +227,7 @@ def test_review_approve_empty_memory_dirs_is_clean_cli_error(monkeypatch):
     assert result.exit_code != 0
     assert "indexing.memory_dirs is empty" in result.output
     assert "Traceback" not in result.output
-    # The claim was rolled back, not left dangling.
-    storage.release_memory_candidate.assert_awaited_once()
+    # The destination is settled before the claim (#2488), so a config error
+    # takes no claim at all and leaves no transition history to roll back.
+    storage.claim_memory_candidate.assert_not_awaited()
+    storage.release_memory_candidate.assert_not_awaited()

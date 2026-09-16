@@ -604,6 +604,12 @@ class MemtomemStore:
             async with async_file_lock(
                 memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
             ):
+                # #2488: an excluded target would take the append and re-index
+                # to zeroed stats. Ahead of the mix refusal, like the other adds.
+                if comp.index_engine.is_excluded(target):
+                    from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
+
+                    return {"error": "source_excluded", "detail": EXCLUDED_TARGET_DETAIL}
                 mix_err = await namespace_mix_refusal(
                     index_engine=comp.index_engine,
                     storage=comp.storage,

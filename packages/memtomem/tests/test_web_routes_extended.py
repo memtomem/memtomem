@@ -269,6 +269,9 @@ def app(_isolated_config_paths: Path):
 
     # -- index engine mock --
     index_engine = AsyncMock()
+    # Synchronous predicate: an ``AsyncMock`` attribute would return a truthy
+    # coroutine and read as "excluded" to every write guard (#2488).
+    index_engine.is_excluded = MagicMock(return_value=False)
 
     # -- dedup scanner mock --
     dedup_scanner = AsyncMock()

@@ -108,7 +108,7 @@ async def mem_scratch_promote(
         tags: Optional tags
         file: Target file for the entry
     """
-    from memtomem.server.tools.memory_crud import mem_add
+    from memtomem.server.tools.memory_crud import _mem_add_core
 
     app = await _get_app_initialized(ctx)
     entry = await app.storage.scratch_get(key)
@@ -116,14 +116,21 @@ async def mem_scratch_promote(
     if entry is None:
         return f"Key '{key}' not found in working memory."
 
-    # Save to long-term via mem_add
-    result = await mem_add(
+    # Save to long-term through the core ``mem_add`` wraps, so a refusal (an
+    # excluded target #2488, a namespace mix, the redaction guard) is told apart
+    # from a save: nothing was written, so the entry must not be marked promoted.
+    result, stats = await _mem_add_core(
         content=entry["value"],
         title=title or key,
         tags=tags,
         file=file,
+        namespace=None,
+        template=None,
         ctx=ctx,
+        event_type="scratch_promote",
     )
+    if stats is None:
+        return result
 
     # Mark as promoted
     await app.storage.scratch_promote(key)
