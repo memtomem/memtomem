@@ -373,19 +373,18 @@ def _under_nested_worktree(
     placed inside a checkout is skipped too, as it always was under a root.
 
     Paths are resolved before any ancestry is computed, so a symlinked ancestor
-    gives the same answer whichever caller asks. Resolution failure excludes
-    nothing.
+    gives the same answer whichever caller asks. A file or bound that cannot be
+    resolved excludes nothing from this layer; the ownership lookup itself
+    raises on a path it cannot resolve, as the other exclusion layers in
+    :func:`_path_is_excluded` do, so that failure never reads as "not excluded".
 
     ``cache`` memoises directory facts for one walk, purge or audit (see
     :data:`WorktreeMemo`). It is deliberately not process-wide: a long-running
     server would otherwise never notice a worktree added after startup, and
     would keep skipping one that was removed.
     """
+    owning = resolve_owning_memory_dir(file_path, memory_dirs)
     try:
-        # Inside the handler: ``norm_path`` catches only ``OSError``, so an
-        # embedded NUL (``ValueError``) or a symlink loop (``RuntimeError`` on
-        # 3.12) would otherwise escape from the ownership lookup.
-        owning = resolve_owning_memory_dir(file_path, memory_dirs)
         target = Path(file_path).expanduser().resolve()
         if owning is not None:
             bound: Path | None = Path(owning).expanduser().resolve()
@@ -446,20 +445,17 @@ def _path_is_excluded(
     ``~/.codex/memories`` keeps its own ``README.md`` rather than
     inheriting Codex's exclude.
     """
-    try:
-        owning = resolve_owning_memory_dir(file_path, memory_dirs)
-        keys = _exclude_match_keys(file_path, memory_dirs)
-    except (OSError, ValueError, RuntimeError):
-        # A path that cannot be resolved — an embedded NUL, a symlink loop —
-        # cannot be opened either, so there is nothing to index or purge.
-        # Answering keeps one bad stored row from aborting a whole purge or
-        # budget audit, which evaluate this outside any per-source handler.
-        return False
+    # A resolution failure here raises rather than answering. "Not excluded"
+    # would be fail-open for the secret denylist: an unrelated configured root
+    # with a symlink loop made a readable ``id_rsa.md`` indexable (measured).
+    # Batch callers that must survive one bad stored row — purge, budget audit
+    # — catch per source instead.
+    owning = resolve_owning_memory_dir(file_path, memory_dirs)
     if owning is not None and Path(file_path).name in index_excluded_filenames(
         categorize_memory_dir(owning)
     ):
         return True
-    for key in keys:
+    for key in _exclude_match_keys(file_path, memory_dirs):
         if _BUILTIN_EXCLUDE_SPEC.match_file(key) or user_spec.match_file(key):
             return True
     return _under_nested_worktree(file_path, memory_dirs, worktree_cache, walk_root=walk_root)

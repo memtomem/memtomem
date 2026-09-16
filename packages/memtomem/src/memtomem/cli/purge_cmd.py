@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Iterable
 from pathlib import Path
 
 import click
+
+logger = logging.getLogger(__name__)
 
 
 def find_sources_matching_excluded(
@@ -30,13 +33,29 @@ def find_sources_matching_excluded(
     is judged the way indexing that file on its own would judge it: bounded by
     its enclosing repository (#2486). One memo serves the whole pass, so sources
     in the same directories do not re-probe the filesystem.
+
+    A source the predicate cannot resolve (an embedded NUL, a symlink loop) is
+    left unmatched and logged, so one bad stored row does not abort the pass.
+    The predicate itself raises rather than answering, because "not excluded"
+    there would let the indexer read a denylisted file.
     """
     from memtomem.indexing.engine import WorktreeMemo, _build_exclude_spec, _path_is_excluded
 
     user_spec = _build_exclude_spec(user_patterns)
     roots = list(memory_dirs)
     memo: WorktreeMemo = {}
-    return [sf for sf in sources if _path_is_excluded(sf, roots, user_spec, worktree_cache=memo)]
+    matched: list[Path] = []
+    unresolved = 0
+    for sf in sources:
+        try:
+            if _path_is_excluded(sf, roots, user_spec, worktree_cache=memo):
+                matched.append(sf)
+        except (OSError, ValueError, RuntimeError):
+            unresolved += 1
+            logger.warning("purge: could not resolve %r; left unmatched", str(sf), exc_info=True)
+    if unresolved:
+        logger.warning("purge: %d source(s) could not be classified and were skipped", unresolved)
+    return matched
 
 
 @click.command("purge")

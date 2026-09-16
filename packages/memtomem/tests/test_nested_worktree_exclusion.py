@@ -935,7 +935,7 @@ def test_budget_audit_reports_an_unowned_worktree_row_as_excluded(
 
 
 # ---------------------------------------------------------------------------
-# A stored path that cannot be resolved answers "not excluded" rather than raising
+# A path that cannot be resolved: the predicate raises, batch callers skip the row
 # ---------------------------------------------------------------------------
 
 UNRESOLVABLE = "unresolvable-source"
@@ -943,11 +943,7 @@ UNRESOLVABLE = "unresolvable-source"
 
 @pytest.fixture(params=[ValueError, RuntimeError, OSError])
 def unresolvable(request, monkeypatch: pytest.MonkeyPatch) -> type[Exception]:
-    """``Path.resolve`` raises for one path, the way a NUL or a symlink loop does.
-
-    ``norm_path`` in the ownership lookup catches only ``OSError``, so the other
-    two escaped every caller before the lookup moved inside the handler.
-    """
+    """``Path.resolve`` raises for one path, the way a NUL or a symlink loop does."""
     real = Path.resolve
     error = request.param
 
@@ -961,14 +957,42 @@ def unresolvable(request, monkeypatch: pytest.MonkeyPatch) -> type[Exception]:
 
 
 @pytest.mark.parametrize("roots", [[], ["root"]])
-def test_an_unresolvable_path_is_not_excluded_and_does_not_raise(
+def test_the_predicate_raises_rather_than_answering_not_excluded(
     unresolvable, tmp_path: Path, spec, roots
 ) -> None:
+    """ "Not excluded" on failure would be fail-open for the secret denylist."""
     target = tmp_path / UNRESOLVABLE / "a.md"
     memory_dirs = [tmp_path] if roots else []
 
-    assert _path_is_excluded(target, memory_dirs, spec) is False
-    assert _under_nested_worktree(target, memory_dirs, None) is False
+    with pytest.raises(unresolvable):
+        _path_is_excluded(target, memory_dirs, spec)
+
+
+def test_a_denylisted_file_is_not_indexable_beside_an_unresolvable_root(
+    tmp_path: Path, spec
+) -> None:
+    """Review round 2's reproduction: a looping unrelated root flipped ``id_rsa.md`` to indexable.
+
+    Where the interpreter can resolve the loop the file is excluded; where it
+    raises (``RuntimeError`` on 3.12) the predicate raises too. Neither may answer False.
+    """
+    looping = tmp_path / "looping"
+    looping.mkdir()
+    try:
+        (looping / "a").symlink_to(looping / "b", target_is_directory=True)
+        (looping / "b").symlink_to(looping / "a", target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink loop here: {exc}")
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    secret = notes / "id_rsa.md"
+    secret.write_text("-----BEGIN KEY-----\n", encoding="utf-8")
+
+    try:
+        answer = _path_is_excluded(secret, [looping / "a" / "root", notes], spec)
+    except (OSError, ValueError, RuntimeError):
+        return
+    assert answer is True
 
 
 def test_purge_passes_over_an_unresolvable_row(unresolvable, repo: Path) -> None:
@@ -992,3 +1016,5 @@ def test_budget_audit_passes_over_an_unresolvable_row(
     report = _audit(tmp_path, monkeypatch, [broken, wt / "m.py"])
 
     assert [e["source"] for e in report["excluded"]] == [str(wt / "m.py")]
+    assert report["unclassified_sources"] == [str(broken)]
+    assert str(broken) not in {e["source"] for e in report["reindex"]}

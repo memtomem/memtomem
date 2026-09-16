@@ -67,11 +67,21 @@ def audit(db_path: Path, config: IndexingConfig, omitted: set[str]) -> dict[str,
     spec = _build_exclude_spec(config.exclude_patterns)
     roots = config.all_index_roots()
     memo: WorktreeMemo = {}
-    excluded = {s for s in sources if _path_is_excluded(Path(s), roots, spec, worktree_cache=memo)}
+    excluded: set[str] = set()
+    # A source the predicate cannot resolve is reported, not guessed: counting
+    # it as excluded would hide it and counting it as indexable would preview a
+    # file the denylist may cover. One bad row must not abort the audit either.
+    unclassified: set[str] = set()
+    for s in sources:
+        try:
+            if _path_is_excluded(Path(s), roots, spec, worktree_cache=memo):
+                excluded.add(s)
+        except (OSError, ValueError, RuntimeError):
+            unclassified.add(s)
     # Discovery mode never touches these dependencies; see chunk_content's contract.
     engine = IndexEngine(None, None, config)  # type: ignore[arg-type]
     preview: list[dict[str, Any]] = []
-    for source in sorted(candidates - excluded - omitted):
+    for source in sorted(candidates - excluded - unclassified - omitted):
         path = Path(source)
         entry: dict[str, Any] = {
             "source": source,
@@ -129,6 +139,7 @@ def audit(db_path: Path, config: IndexingConfig, omitted: set[str]) -> dict[str,
         "excluded": [
             {"source": s, "chunk_ids": [r[0] for r in sources[s]]} for s in sorted(excluded)
         ],
+        "unclassified_sources": sorted(unclassified),
         "omitted_sources": sorted(omitted),
         "reindex": preview,
         "tokenizer_sha256": budget.fingerprint,
@@ -168,6 +179,7 @@ def main() -> None:
                 "oversized": len(report["oversized_chunks"]),
                 "reindex_sources": len(report["reindex"]),
                 "excluded_sources": len(report["excluded"]),
+                "unclassified_sources": len(report["unclassified_sources"]),
                 "errors": sum("error" in r for r in report["reindex"]),
                 "new_max_body_tokens": max(
                     (r.get("max_body_tokens", 0) for r in report["reindex"]), default=0
