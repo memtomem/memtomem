@@ -48,6 +48,12 @@ from .helpers import set_home
 ESC_RAW = "\x1b[2J\x1b[H"
 ESC_ESCAPED = "\\x1b[2J\\x1b[H"
 
+#: For anything read back through ``CliRunner``: with colour off Click strips
+#: CSI sequences like ``ESC_RAW`` from echoed text, so an unescaped leak of
+#: those would vanish before an assertion could see it. BEL is not stripped.
+BEL_RAW = "\x07"
+BEL_ESCAPED = "\\x07"
+
 #: Assembled at runtime on purpose: a literal AWS-shaped key in the source
 #: trips GitHub push protection on this repository.
 SECRET = "AKIA" + "1234567890ABCDEF"
@@ -65,7 +71,7 @@ def _forged_command() -> str:
     redaction marker, which would hide whether the control characters were
     escaped or merely swallowed.
     """
-    return f"/home/alice/hook.sh # {ESC_RAW}forged"
+    return f"/home/alice/hook.sh # {ESC_RAW}{BEL_RAW}forged"
 
 
 def _rule(matcher: str, command: str) -> dict:
@@ -126,8 +132,8 @@ class TestDoctorDuplicateAxis:
         assert "other tier(s)" in result.output
         assert SECRET not in result.output
         assert "<redacted: secret-shape>" in result.output
-        assert ESC_RAW not in result.output
-        assert ESC_ESCAPED in result.output
+        assert BEL_RAW not in result.output
+        assert BEL_ESCAPED in result.output
 
     def test_json_surface_keeps_raw_values(self, forged_duplicate):
         """The identification path, deliberately unescaped and unredacted."""
@@ -359,6 +365,58 @@ class TestCopySelectorErrors:
         assert SECRET_MATCHER not in message
         assert "<redacted: secret-shape>" in message
 
+    @pytest.mark.parametrize(
+        ("hook_command", "error_name"),
+        [
+            pytest.param("no-such-substring", "HookNotFoundError", id="hook-command-matches-none"),
+            pytest.param(None, "AmbiguousHookSelectorError", id="ambiguous-selector"),
+        ],
+    )
+    def test_candidate_listing_redacts_commands(self, tmp_path, hook_command, error_name):
+        """Both selector failures list every candidate command in the canonical.
+
+        The caller asked about one hook; the listing shows all of them, so an
+        inline credential in an unrelated entry was printed for the asking.
+        """
+        from memtomem.context.settings import CANONICAL_SETTINGS_FILE as CANON
+        from memtomem.context.settings_copy import plan_hook_copy
+
+        src = tmp_path / "src-proj"
+        _write_settings(
+            src / CANON,
+            {
+                "PostToolUse": [
+                    {
+                        "matcher": "Edit|Write",
+                        "hooks": [
+                            {"type": "command", "command": _secret_command()},
+                            {"type": "command", "command": "mm session start"},
+                        ],
+                    }
+                ]
+            },
+        )
+        dst = tmp_path / "dst-proj"
+        (dst / ".memtomem").mkdir(parents=True)
+
+        with pytest.raises(ValueError) as excinfo:
+            plan_hook_copy(
+                src,
+                event="PostToolUse",
+                matcher="Edit|Write",
+                hook_command=hook_command,
+                dst_project_root=dst,
+                dst_scope="project_shared",
+            )
+        assert type(excinfo.value).__name__ == error_name
+        message = str(excinfo.value)
+        assert "candidates:" in message, message
+        assert SECRET not in message
+        assert "<redacted: secret-shape>" in message
+        # the unrelated, non-secret candidate is still listed, so the error
+        # keeps telling the caller what they could have selected
+        assert "mm session start" in message
+
     def test_non_list_rules_conflict_redacts_the_event(self):
         from memtomem.context.settings_copy import _classify_leg
 
@@ -376,3 +434,40 @@ class TestCopySelectorErrors:
         assert state == "conflict"
         assert sig.event not in reason
         assert "<redacted: secret-shape>" in reason
+
+
+# ── Producers redact, displays escape (fresh-eyes review) ───────────
+
+
+class TestProducersDoNotEscape:
+    """A reason built by a producer also reaches ``--json``.
+
+    Escaping is irreversible, so a producer that escapes hands every structured
+    consumer a string it cannot turn back into the original, and a display that
+    escapes again sees ``\\\\x1b`` it cannot tell from real text. The producer
+    removes the secret shape; the display escapes.
+    """
+
+    def test_migrate_conflict_reason_keeps_control_characters(self):
+        from memtomem.context.settings_migrate import _classify_target
+
+        sig = HookSignature(event="PostToolUse", matcher=f"Edit{ESC_RAW}", command_shape="x")
+        state, reason = _classify_target(
+            {(sig.event, sig.matcher): [{"matcher": sig.matcher, "hooks": [{"command": "y"}]}]},
+            sig,
+            {"type": "command", "command": "x"},
+        )
+        assert state == "conflict"
+        assert ESC_RAW in reason
+        assert ESC_ESCAPED not in reason
+
+    def test_copy_conflict_reason_keeps_control_characters_in_the_label(self):
+        from memtomem.context.settings_copy import _classify_leg
+
+        sig = HookSignature(event="PostToolUse", matcher=f"Edit{ESC_RAW}", command_shape="x")
+        doc = {"hooks": {"PostToolUse": [{"matcher": sig.matcher, "hooks": [{"command": "y"}]}]}}
+        state, reason = _classify_leg(
+            doc, sig, {"type": "command", "command": "x"}, leg="canonical"
+        )
+        assert state == "conflict"
+        assert f"PostToolUse:Edit{ESC_RAW}" in reason

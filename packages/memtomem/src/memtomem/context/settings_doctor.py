@@ -37,7 +37,6 @@ from pathlib import Path
 
 from memtomem._runtime_paths import scrub_text
 from memtomem.context.error_redact import SECRET_REDACTED_MARKER, redact_secret_value
-from memtomem.privacy import scan as _privacy_scan
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     MalformedHookMatcher,
@@ -633,37 +632,53 @@ def format_unscanned_settings_warning(unscanned: UnscannedSettingsFile) -> str:
     )
 
 
+def redact_signature_label(signature: HookSignature) -> str:
+    """``event:matcher`` label for one hook signature, secret-redacted only.
+
+    The producer half of :func:`format_signature_label`. A label embedded in a
+    string that is built here and handed on — a conflict reason, a selector
+    error — reaches the CLI, the MCP wire, the dashboard and ``--json`` alike,
+    so the secret shape is removed where the string is built and every consumer
+    agrees.
+
+    Escaping is deliberately NOT done here. It is irreversible, so it belongs
+    to the display boundary: a structured consumer keeps the original
+    characters, and a display that escapes a second time would be handed
+    escapes it cannot tell from the real text. The same split applies to a
+    command, whose producer half is plain :func:`redact_secret_value` — a
+    whole-value substitution, so there is nothing to add to it.
+
+    An empty matcher means match-all and is omitted, which is the label shape
+    every hook surface already renders.
+    """
+    shown_event = redact_secret_value(signature.event)
+    if not signature.matcher:
+        return shown_event
+    return f"{shown_event}:{redact_secret_value(signature.matcher)}"
+
+
 def redact_command_shape(command: str) -> str:
-    """Display-safe rendering of one hook command read out of a settings file.
+    """Display-safe rendering of one hook command: redacted, then escaped.
 
-    A hook command is untrusted text: it can carry a credential (an inline
-    ``--token=`` / ``API_KEY=`` argument) and terminal control sequences. Both
-    axes are handled here — secret shape first, control characters second,
-    because the secret-shape check has to read the original text — so every
-    surface that echoes a command gets the same treatment.
-
-    Before #2477 only the portability finding used this pair, and the duplicate
+    For a surface that prints the command itself. Before #2477 the duplicate
     listing, the migrate preview and the copy preview each echoed the command
     verbatim; one ``mm context settings-doctor`` run could print the same
     command redacted under one heading and in full under another.
+
+    A string that is *built* from a command and then handed on — a reason, an
+    error — takes :func:`redact_secret_value` alone, and is escaped where it is
+    finally printed.
     """
-    safe_command = scrub_text(redact_secret_value(command))
-    if safe_command == SECRET_REDACTED_MARKER or _privacy_scan(command):
-        return SECRET_REDACTED_MARKER
-    return safe_command
+    return scrub_text(redact_secret_value(command))
 
 
 def format_signature_label(signature: HookSignature) -> str:
-    """``event:matcher`` label for one hook signature, display-safe.
+    """``event:matcher`` label for a surface that prints it: redacted, escaped.
 
-    Both halves are dict keys / values read verbatim from a settings file, so
-    both are redacted and scrubbed. An empty matcher means match-all and is
-    omitted, which is the label shape every hook surface already renders.
+    A label embedded in a string that is handed on takes
+    :func:`redact_signature_label` instead.
     """
-    safe_event = scrub_text(redact_secret_value(signature.event))
-    if not signature.matcher:
-        return safe_event
-    return f"{safe_event}:{scrub_text(redact_secret_value(signature.matcher))}"
+    return scrub_text(redact_signature_label(signature))
 
 
 def redact_unportable_command_fields(command: str, literal: str) -> tuple[str, str]:

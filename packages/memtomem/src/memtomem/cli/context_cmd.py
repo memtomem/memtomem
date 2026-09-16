@@ -136,7 +136,7 @@ from memtomem.context.settings import (
     generate_all_settings,
     host_write_targets,
 )
-from memtomem._runtime_paths import scrub_text
+from memtomem._runtime_paths import _hint_quote, scrub_text
 from memtomem.context.error_redact import redact_secret_value
 from memtomem.context.settings_doctor import (
     detect_duplicate_tiers,
@@ -797,7 +797,7 @@ def _print_settings_detect(root: Path, scope: str) -> None:
     click.secho(f"  {len(files)} settings file(s):", fg="cyan")
     for f in files:
         status = f"({f.size} bytes)" if f.size else "(not yet created)"
-        click.echo(f"    {f.agent:17s}  {f.path}  {status}")
+        click.echo(f"    {f.agent:17s}  {scrub_text(str(f.path))}  {status}")
 
 
 def _confirm_settings_host_writes(root: Path, *, scope: str, yes: bool) -> bool:
@@ -4492,12 +4492,8 @@ def _transfer_dispatch(
         # still refuses — pausing said "stop syncing this project", and a
         # transferred canonical would sit there without fan-out.
         if dst_scope_rec is not None and not dst_scope_rec.enabled:
-            raise click.ClickException(
-                f"destination project {dst_scope_rec.scope_id} ({dst_root}) is "
-                f"paused — sync enrollment is disabled, so the transferred "
-                f"artifact would not fan out there. Run `mm context projects "
-                f"resume {dst_scope_rec.scope_id}` first, or pick another "
-                f"destination."
+            raise _paused_destination_error(
+                dst_scope_rec.scope_id, dst_root, "transferred artifact"
             )
     else:
         dst_root = src_root
@@ -4529,10 +4525,7 @@ def _transfer_dispatch(
     # store is implicitly created) — this gate is about not seeding a
     # half-initialized `.memtomem/` into an arbitrary directory.
     if to_project is not None and to_scope_t != "user" and not (dst_root / ".memtomem").is_dir():
-        raise click.ClickException(
-            f"destination project has no .memtomem/ store: {dst_root}\n"
-            f"  Initialize it first: cd {dst_root} && mm context init"
-        )
+        raise _missing_store_error(dst_root)
 
     # Pre-flight Gate B (project_shared opt-in) — same contract and
     # wording as `mm context migrate --to project_shared`. Apply only:
@@ -4979,17 +4972,9 @@ def import_cmd(
         except UnknownProjectSelectorError as exc:
             raise click.ClickException(str(exc)) from exc
         if dst_scope_rec is not None and not dst_scope_rec.enabled:
-            raise click.ClickException(
-                f"destination project {dst_scope_rec.scope_id} ({dst_root}) is "
-                f"paused — sync enrollment is disabled, so the imported artifact "
-                f"would not fan out there. Run `mm context projects resume "
-                f"{dst_scope_rec.scope_id}` first, or pick another destination."
-            )
+            raise _paused_destination_error(dst_scope_rec.scope_id, dst_root, "imported artifact")
         if to_scope_t != "user" and not (dst_root / ".memtomem").is_dir():
-            raise click.ClickException(
-                f"destination project has no .memtomem/ store: {dst_root}\n"
-                f"  Initialize it first: cd {dst_root} && mm context init"
-            )
+            raise _missing_store_error(dst_root)
     else:
         dst_root = src_root
 
@@ -5502,13 +5487,13 @@ def settings_migrate_cmd(
         if shared_leg == "target":
             question = (
                 f"\nThis will write {count} hook {entries} into the "
-                f"project_shared tier ({plan.target_path}), which this "
+                f"project_shared tier ({scrub_text(str(plan.target_path))}), which this "
                 f"repository tracks. Continue?"
             )
         else:
             question = (
                 f"\nThis will remove {count} hook {entries} from the "
-                f"project_shared tier ({plan.source_path}), which this "
+                f"project_shared tier ({scrub_text(str(plan.source_path))}), which this "
                 f"repository tracks. Continue?"
             )
         if not click.confirm(question, default=False):
@@ -5547,9 +5532,9 @@ def settings_migrate_cmd(
                 fg="yellow",
             )
             if target_outside:
-                click.echo(f"  {plan.target_path}  (target)")
+                click.echo(f"  {scrub_text(str(plan.target_path))}  (target)")
             if source_outside:
-                click.echo(f"  {plan.source_path}  (source)")
+                click.echo(f"  {scrub_text(str(plan.source_path))}  (source)")
             if not click.confirm("Continue?", default=False):
                 click.echo("Aborted.")
                 raise click.exceptions.Exit(1)
@@ -5608,7 +5593,8 @@ def settings_migrate_cmd(
                 )
             )
             raise click.exceptions.Exit(1) from exc
-        raise click.ClickException(exc.message) from exc
+        # The Gate A message names the canonical and target tier paths.
+        raise click.ClickException(scrub_text(exc.message)) from exc
     # Drift the planner could not see — the target changed between plan and
     # apply — surfaces as apply-time warnings (#1123 B4-3). Treat it like a
     # plan-time conflict for reporting and the exit code.
@@ -5872,19 +5858,11 @@ def settings_copy_cmd(
     if dst_scope_rec is not None and not dst_scope_rec.enabled:
         # Same refusal as `mm context copy` — a paused destination would
         # hold a canonical entry that never fans out there.
-        raise click.ClickException(
-            f"destination project {dst_scope_rec.scope_id} ({dst_root}) is "
-            f"paused — sync enrollment is disabled, so the copied hook would "
-            f"not fan out there. Run `mm context projects resume "
-            f"{dst_scope_rec.scope_id}` first, or pick another destination."
-        )
+        raise _paused_destination_error(dst_scope_rec.scope_id, dst_root, "copied hook")
     # Unconditional (unlike artifact transfer's user-tier exemption): the
     # canonical leg lands in the destination PROJECT for every tier.
     if not (dst_root / ".memtomem").is_dir():
-        raise click.ClickException(
-            f"destination project has no .memtomem/ store: {dst_root}\n"
-            f"  Initialize it first: cd {dst_root} && mm context init"
-        )
+        raise _missing_store_error(dst_root)
 
     dst_scope = to_scope if to_scope is not None else _resolve_cli_scope(None)
 
@@ -5956,7 +5934,7 @@ def settings_copy_cmd(
             click.echo(json.dumps(payload, indent=2))
             raise click.exceptions.Exit(1)
         if not click.confirm(
-            f"\nThis will copy the hook into {plan.dst_project_root}'s "
+            f"\nThis will copy the hook into {scrub_text(str(plan.dst_project_root))}'s "
             f"git-tracked canonical settings (.memtomem/settings.json)"
             + (" and its project_shared tier file" if dst_scope == "project_shared" else "")
             + ". Continue?",
@@ -5990,7 +5968,7 @@ def settings_copy_cmd(
             "settings-copy will modify the following file outside the destination project:",
             fg="yellow",
         )
-        click.echo(f"  {plan.dst_target_path}  (user tier)")
+        click.echo(f"  {scrub_text(str(plan.dst_target_path))}  (user tier)")
         if not click.confirm("Continue?", default=False):
             click.echo("Aborted.")
             raise click.exceptions.Exit(1)
@@ -5998,7 +5976,8 @@ def settings_copy_cmd(
     try:
         result = apply_hook_copy(plan, surface="cli_context_settings_copy")
     except PrivacyScanError as exc:
-        raise click.ClickException(exc.message) from exc
+        # The Gate A message names the source and destination canonical paths.
+        raise click.ClickException(scrub_text(exc.message)) from exc
 
     if json_out:
         payload["applied"] = True
@@ -6019,6 +5998,36 @@ def settings_copy_cmd(
         # Conflicts or apply-time drift left unresolved — match the
         # settings-migrate exit-1 contract.
         raise click.exceptions.Exit(1)
+
+
+def _paused_destination_error(scope_id: str, dst_root: Path, landing: str) -> click.ClickException:
+    """Refusal for a destination whose sync enrollment is paused.
+
+    One wording for every cross-project writer (transfer, import, settings
+    copy); ``landing`` names what would have been written. The path is escaped
+    because a directory name can carry terminal control characters — the three
+    copies this replaced had drifted, and only one of them escaped it (#2477).
+    """
+    return click.ClickException(
+        f"destination project {scope_id} ({scrub_text(str(dst_root))}) is "
+        f"paused — sync enrollment is disabled, so the {landing} would not fan "
+        f"out there. Run `mm context projects resume {scope_id}` first, or pick "
+        f"another destination."
+    )
+
+
+def _missing_store_error(dst_root: Path) -> click.ClickException:
+    """Refusal for a destination directory that was never ``mm context init``-ed.
+
+    The prose escapes the path; the ``cd`` hint quotes it with
+    :func:`~memtomem._runtime_paths._hint_quote`, so it both displays safely and
+    still names the same directory when pasted. The copies this replaced left
+    the hint unquoted entirely, which also broke on a path with a space.
+    """
+    return click.ClickException(
+        f"destination project has no .memtomem/ store: {scrub_text(str(dst_root))}\n"
+        f"  Initialize it first: cd {_hint_quote(dst_root)} && mm context init"
+    )
 
 
 def _is_within(path: Path, project_root: Path) -> bool:
