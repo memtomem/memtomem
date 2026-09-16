@@ -209,7 +209,9 @@ def test_an_embedded_nul_in_the_target_does_not_raise(repo: Path, spec) -> None:
     evaluates exclusions outside its per-source handler, so a raise there aborts
     the whole audit.
     """
-    odd = repo / "vendor/nul"
+    # Not ``nul``: that is a reserved device name on Windows, where
+    # ``vendor/nul/.git`` cannot be created at all (CI, #2484).
+    odd = repo / "vendor/embedded-nul"
     odd.mkdir(parents=True)
     (odd / ".git").write_text("gitdir: /tmp/a\x00b\n", encoding="utf-8")
     (odd / "a.md").write_text("# odd\n", encoding="utf-8")
@@ -233,12 +235,14 @@ def test_gitdir_target_answers_rather_than_raises_for_an_unstattable_path() -> N
     reason="POSIX directory permissions, and root ignores the mode bits",
 )
 def test_an_unreadable_parent_does_not_raise(repo: Path, spec) -> None:
-    """``Path.is_file`` ignores only ENOENT, ENOTDIR, EBADF and ELOOP (measured).
+    """A directory the process cannot enter must not raise out of the gate.
 
-    An earlier revision dropped the guard here as unreachable; a directory the
-    process cannot enter raised ``PermissionError`` straight through
-    ``_path_is_excluded``, which ``budget_audit`` evaluates outside its
-    per-source handler.
+    On Python 3.12 ``Path.is_file`` ignores only ENOENT, ENOTDIR, EBADF and
+    ELOOP, so an earlier two-probe revision let ``PermissionError`` escape
+    ``_path_is_excluded`` — which ``budget_audit`` evaluates outside its
+    per-source handler. Newer interpreters answer differently (3.14 on the
+    macOS CI runner did not raise), so this asserts the helper's contract only,
+    not the interpreter behaviour that made the bug reachable.
     """
     locked = repo / "vendor/locked"
     inner = locked / "inner"
@@ -247,8 +251,6 @@ def test_an_unreadable_parent_does_not_raise(repo: Path, spec) -> None:
     (inner / "a.md").write_text("# inner\n", encoding="utf-8")
     locked.chmod(0o000)
     try:
-        with pytest.raises(PermissionError):
-            (inner / ".git").is_file()
         assert _gitdir_target(inner) is None
         assert _path_is_excluded(inner / "a.md", [repo], spec) is False
     finally:
@@ -298,11 +300,17 @@ def test_a_directory_named_git_is_not_read_as_a_marker(repo: Path) -> None:
 
 @pytest.mark.requires_symlinks
 def test_a_symlink_loop_behind_the_backlink_does_not_raise(repo: Path, spec) -> None:
-    """``Path.resolve`` raises ``RuntimeError`` on a loop under Python 3.12.
+    """A symlink loop behind the backlink must not raise out of the gate.
+
+    ``Path.resolve`` raises ``RuntimeError`` on a loop under Python 3.12 and
+    returns a path under 3.13 and 3.14 (measured locally and on the macOS CI
+    runner), so the guard only fires on 3.12. The test asserts the helper's
+    answer, which is ``False`` either way, and not which interpreter path got
+    it there.
 
     The loop is placed in the backlink's *contents*, not in the ``gitdir:``
     target: a loop in the target makes the read itself fail with ``OSError``
-    and never reaches the comparison this pins.
+    and never reaches the comparison.
     """
     loop = repo / "vendor/loop"
     loop.mkdir(parents=True)
@@ -317,8 +325,6 @@ def test_a_symlink_loop_behind_the_backlink_does_not_raise(repo: Path, spec) -> 
     (marked / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
     (marked / "a.md").write_text("# marked\n", encoding="utf-8")
 
-    with pytest.raises(RuntimeError):
-        first.resolve()
     assert _is_linked_worktree(marked) is False
     assert _path_is_excluded(marked / "a.md", [repo], spec) is False
 
@@ -442,3 +448,66 @@ def test_the_disk_count_does_not_contradict_the_walk_for_a_registered_worktree(
     assert _count_files_on_disk(repo, frozenset({".md"}), [repo, worktree]) == 2
     # With the parent alone it is a nested worktree and does not.
     assert _count_files_on_disk(repo, frozenset({".md"}), [repo]) == 1
+
+
+async def test_web_sources_count_keeps_a_registered_worktree_in_its_parent(
+    repo: Path, tmp_path: Path
+) -> None:
+    """Pins the call site, not just the helper: ``memory_dir_stats`` must pass the root list.
+
+    ``_count_files_on_disk`` counts correctly when handed every root; a call
+    site that hands it only its own root still passes every helper test, and
+    the Sources tab then reads ``source_file_count=2`` beside ``file_count=1``.
+    """
+    from memtomem.indexing.engine import memory_dir_stats
+
+    worktree = repo / ".worktrees/wt"
+    run("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=repo)
+    storage, _engine = build_engine(tmp_path, [repo, worktree])
+    await storage.initialize()
+    try:
+        rows = await memory_dir_stats(
+            storage, [repo, worktree], supported_extensions=frozenset({".md"})
+        )
+    finally:
+        await storage.close()
+
+    by_path = {Path(str(r["path"])).resolve(): r["file_count"] for r in rows}
+    assert by_path[repo.resolve()] == 2
+    assert by_path[worktree.resolve()] == 1
+
+
+def test_seed_scale_counts_a_worktree_offered_as_its_own_root(repo: Path) -> None:
+    """The helper half of the wizard wiring: every offered root is in view.
+
+    The seed total sums per-root walks, so a nested root offered alongside its
+    parent is counted under both — true of any nested root, not only worktrees.
+    This pins that a registered worktree follows that rule instead of vanishing.
+    """
+    from memtomem.cli._index_progress import _collect_seed_scale
+
+    worktree = repo / ".worktrees/wt"
+    run("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=repo)
+
+    assert _collect_seed_scale(repo, [repo, worktree])[0] == 2
+    assert _collect_seed_scale(repo)[0] == 1
+
+
+def test_mm_init_hands_every_offered_root_to_the_seed_counter(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins the ``mm init`` call site: it must pass ``existing``, not count each root alone."""
+    from memtomem.cli import init_cmd
+
+    worktree = repo / ".worktrees/wt"
+    run("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=repo)
+    seen: list[tuple[Path, tuple[Path, ...]]] = []
+
+    def record(memory_dir: Path, memory_dirs=()):
+        seen.append((memory_dir, tuple(memory_dirs)))
+        return 0, 0
+
+    monkeypatch.setattr(init_cmd, "_collect_seed_scale", record)
+    init_cmd._maybe_seed_initial_index([repo, worktree], {})
+
+    assert seen == [(repo, (repo, worktree)), (worktree, (repo, worktree))]

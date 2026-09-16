@@ -26,8 +26,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   covered; submodules and ordinary nested clones are not affected. Register the
   worktree as its own memory dir to index it deliberately. Rows indexed before
   this release stay until you remove them with `mm purge --matching-excluded
-  --apply`. The web Sources counts and the `mm init` seed threshold count the
-  same files the indexer does.
+  --apply`. The web Sources file count and the `mm init` seed threshold also
+  leave out unregistered nested worktrees.
 
 - **The OpenCode plugin includes the ONNX dependencies needed by existing E5
   configurations (#2453).** `opencode-memtomem` 0.3.4 launches
