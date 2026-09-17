@@ -449,6 +449,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         comp = await create_components()
 
         from memtomem.context.scope_resolver import find_project_root
+        from memtomem.embedding.identity import same_embedding_model
         from memtomem.search.dedup import DedupScanner
 
         project_root = find_project_root()
@@ -463,7 +464,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         stored_info = getattr(comp.storage, "stored_embedding_info", None)
         if stored_info and comp.embedding_broken is None:
             cfg = comp.config.embedding
-            if cfg.model != stored_info["model"] or cfg.dimension != stored_info["dimension"]:
+            if (
+                not same_embedding_model(
+                    cfg.provider, cfg.model, stored_info.get("provider"), stored_info["model"]
+                )
+                or cfg.dimension != stored_info["dimension"]
+            ):
                 logger.info(
                     "Syncing config to DB embedding: %s/%s (%dd)",
                     stored_info["provider"],

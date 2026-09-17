@@ -8,7 +8,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 
-from memtomem.embedding.identity import embedding_identity_complete
+from memtomem.embedding.identity import embedding_identity_complete, same_embedding_model
 from memtomem.errors import EmbeddingDimensionMismatchError, SchemaDowngradeError
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
 from memtomem.storage.sqlite_helpers import utc_stamp
@@ -364,7 +364,12 @@ def create_tables(
         if incomplete or (
             embedding_provider
             and embedding_model
-            and (stored_provider != embedding_provider or stored_model != embedding_model)
+            and (
+                stored_provider != embedding_provider
+                or not same_embedding_model(
+                    stored_provider, stored_model, embedding_provider, embedding_model
+                )
+            )
         ):
             logger.warning(
                 "Stored embedding model %s/%s is incomplete or differs from configured %s/%s. "

@@ -2,6 +2,42 @@
 
 from __future__ import annotations
 
+from memtomem.embedding.aliases import resolve_embedder_id
+
+
+def _is_onnx(provider: str | None) -> bool:
+    return (provider or "").strip().lower() == "onnx"
+
+
+def canonical_embedding_model(provider: str | None, model: str | None) -> str:
+    """Spell an ONNX model as the fastembed id it loads (#2463).
+
+    ONNX short aliases (``multilingual-e5-small``, ``bge-m3``) load the same
+    model as their full ids, so both spellings name one identity. Other
+    providers send the name to their API verbatim, where a short and a full
+    name can be different models, so their spelling is kept as written.
+    """
+    model = model or ""
+    return resolve_embedder_id(model) if _is_onnx(provider) else model
+
+
+def same_embedding_model(
+    provider_a: str | None, model_a: str | None, provider_b: str | None, model_b: str | None
+) -> bool:
+    """Whether two recorded models are one identity, ignoring ONNX alias spelling.
+
+    Alias equivalence applies only when both sides are ONNX; any other pair
+    compares the spelling exactly, as before.
+    """
+    if (model_a or "") == (model_b or ""):
+        return True
+    return (
+        _is_onnx(provider_a)
+        and _is_onnx(provider_b)
+        and canonical_embedding_model(provider_a, model_a)
+        == canonical_embedding_model(provider_b, model_b)
+    )
+
 
 def embedding_identity_complete(provider: str | None, model: str | None) -> bool:
     """A real provider needs a model; ``none`` deliberately needs none."""

@@ -163,6 +163,46 @@ async def test_partial_identity_keeps_config_and_mismatch(provider, model):
     comp.storage.clear_embedding_mismatch.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("cfg_model", "stored_model"),
+    [
+        ("multilingual-e5-small", "intfloat/multilingual-e5-small"),
+        ("intfloat/multilingual-e5-small", "multilingual-e5-small"),
+    ],
+)
+async def test_auto_sync_ignores_onnx_alias_spelling(cfg_model, stored_model):
+    """An ONNX short alias and its full id are one identity (#2463), so the
+    soft sync must neither rewrite the configured spelling nor clear flags."""
+    comp = _make_components(
+        embedding_broken=None,
+        stored_info={"dimension": 384, "provider": "onnx", "model": stored_model},
+        cfg_provider="onnx",
+        cfg_model=cfg_model,
+        cfg_dim=384,
+    )
+
+    await _run_lifespan(comp)
+
+    assert comp.config.embedding.model == cfg_model
+    comp.storage.clear_embedding_mismatch.assert_not_called()
+
+
+async def test_auto_sync_keeps_non_onnx_spelling_exact():
+    """Ollama names are sent verbatim, so a short vs full name is still drift."""
+    comp = _make_components(
+        embedding_broken=None,
+        stored_info={"dimension": 1024, "provider": "ollama", "model": "BAAI/bge-m3"},
+        cfg_provider="ollama",
+        cfg_model="bge-m3",
+        cfg_dim=1024,
+    )
+
+    await _run_lifespan(comp)
+
+    assert comp.config.embedding.model == "BAAI/bge-m3"
+    comp.storage.clear_embedding_mismatch.assert_called_once()
+
+
 async def test_auto_sync_runs_when_not_degraded():
     """Non-degraded model drift keeps the pre-#349 soft-sync behavior —
     config follows DB and the mismatch flag is cleared so the banner does

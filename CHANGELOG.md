@@ -16,6 +16,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Switching an ONNX model between its short alias and its full id no longer
+  reports a model mismatch (#2463).** `multilingual-e5-small` and
+  `intfloat/multilingual-e5-small` — likewise `bge-m3` and `BAAI/bge-m3` — load
+  the same model, but the stored identity was compared as a raw string, so
+  changing only the spelling blocked index writes until the mismatch was
+  resolved, and resolving it with `apply-current` deleted every vector. Both
+  spellings now name one identity for the `onnx` provider, including stores
+  stamped before this release, and the store keeps the spelling it recorded. Ollama
+  and OpenAI names are still compared exactly, because those providers send
+  the name as written and a short and a full name can be different models.
+
 - **Git worktrees nested inside an indexed root are no longer indexed as a
   second copy (#2474).** A worktree under `<repo>/.worktrees/` or
   `<repo>/.claude/worktrees/` is a near-copy of the main checkout, so every
