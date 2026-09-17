@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-09-17
+
+### Upgrading
+
+- **Claude automation plugin users: upgrade the CLI too.** `memtomem-automation`
+  0.3.4 runs prompt search, write-time indexing and stop-time flushing only
+  when the `mm` on your `PATH` reports exactly 0.6.3; updating the plugins
+  does not upgrade that CLI. Run `uv tool install 'memtomem==0.6.3'`, confirm
+  with `mm --version`, then start a new Claude Code session — the
+  compatibility check is refreshed at session start, and until then those
+  hooks are skipped.
+
 ### Added
 
 - **`mm context settings-doctor` warns about hook commands that hard-code a
@@ -174,10 +186,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
     files. The session summary is then not archived and the session still ends.
 
 - **The OpenCode plugin includes the ONNX dependencies needed by existing E5
-  configurations (#2453).** `opencode-memtomem` 0.3.4 launches
-  `memtomem[onnx]==0.6.2`, the same requirement as the Claude and Codex plugins
-  (#2449), now rendered from the shared plugin contract instead of built in the
-  plugin. The default embedding provider is still `none` (BM25-only). The plugin
+  configurations (#2453).** Since `opencode-memtomem` 0.3.4 the plugin launches
+  `memtomem[onnx]` at its pinned core version (`opencode-memtomem` 0.3.5 pins
+  0.6.3), the same requirement as the Claude and Codex plugins (#2449), rendered
+  from the shared plugin contract instead of built in the plugin. The default embedding provider is still `none` (BM25-only). The plugin
   never replaces an `mcp.memtomem` entry you already define in `opencode.json`,
   so update or remove a hand-written base-only entry.
 

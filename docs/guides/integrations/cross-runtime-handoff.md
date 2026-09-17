@@ -11,19 +11,19 @@ approves every agent's next action, see the
 
 ## 1. Prepare one store
 
-Use memtomem `0.6.2` for every runtime. On a fresh machine, initialize the
+Use memtomem `0.6.3` for every runtime. On a fresh machine, initialize the
 user-owned store once without adding an extra MCP registration:
 
 ```bash
-uvx --from 'memtomem==0.6.2' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem==0.6.2' mm status
+uvx --from 'memtomem==0.6.3' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem==0.6.3' mm status
 ```
 
 From the project root, initialize the Git-ignored project tier:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem==0.6.2' mm mem init --scope project_local
+uvx --from 'memtomem==0.6.3' mm mem init --scope project_local
 ```
 
 Keep `.memtomem/memories.local` untracked. Do not use `mm context sync` for

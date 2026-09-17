@@ -74,8 +74,8 @@ Claude Code와 Codex CLI 중 어느 쪽을 쓰더라도 완전히 새 환경에�
 기존 ONNX/E5 설정이 보이는 것은 정상입니다. 이 체험을 위해 기존 모델이나 DB를 바꾸지 않습니다.
 
 ```bash
-uvx --from 'memtomem[onnx]==0.6.2' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.6.2' mm status
+uvx --from 'memtomem[onnx]==0.6.3' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem[onnx]==0.6.3' mm status
 ```
 
 `--mcp skip`은 다음 단계의 플러그인이 MCP 연결을 제공하므로 다른
@@ -98,7 +98,7 @@ database path는 나중에 두 도구가 같은 저장소를 보는지 확인할
 터미널을 **온보딩 프로젝트 루트**에서 엽니다. 다음 진단도 같은 폴더에서 실행합니다.
 
 ```bash
-uvx --from "memtomem[all]==0.6.2" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.3" mm doctor --claude-mcp
 ```
 
 플러그인은 `mm`을 PATH에 설치하지 않으므로 위의 고정 버전 명령을 사용합니다.
@@ -162,7 +162,7 @@ Claude Code를 종료하고 **같은 프로젝트에서 새 세션**을 엽니�
 실제 MCP 도구 호출이 보이고 앞서 본 storage와 database path가 일치하면 연결 확인을 마칩니다.
 설치 메시지·도구 이름만 보이는 상태나 내부 오류를 성공으로 처리하지 않습니다.
 오류가 있으면 플러그인의 실제 실행 명령과 의존성을 확인하세요. 기본 서버 핀은
-`memtomem[onnx]==0.6.2`입니다. 활성화 확인과 데이터 조회 성공은 서로 다른 단계입니다.
+`memtomem[onnx]==0.6.3`입니다. 활성화 확인과 데이터 조회 성공은 서로 다른 단계입니다.
 
 Codex CLI를 쓴다면 이 절은 건너뛰고 경로 B만 진행하세요.
 
@@ -265,7 +265,7 @@ $memtomem-setup 스킬로 /path/to/project/docs를 인덱싱하고 검색까지 
 해당하는 기억은 실제 Git 저장소 루트에서 별도 초기화합니다.
 
 ```bash
-uvx --from 'memtomem[onnx]==0.6.2' mm mem init --scope project_local
+uvx --from 'memtomem[onnx]==0.6.3' mm mem init --scope project_local
 ```
 
 이 명령은 Git에 올라가지 않는 로컬 기억 계층을 만들고 등록합니다. 실행
