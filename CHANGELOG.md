@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mm context settings-doctor` warns about hook commands that hard-code a
+  home directory (#2407).** A hook command that spells out `/home/<user>`,
+  `/Users/<user>`, `C:\Users\<user>` or this machine's own non-standard home
+  path is likely to break on another machine that shares the settings file.
+  The doctor now lists those commands, and settings files it could not read, as
+  advisory warnings (exit code unchanged; `--json` adds `unportable_commands`
+  and `unscanned_settings`). The check is a text scan, not a shell parse: it
+  also flags a path in a comment or a remote `host:/home/<user>` spec, and a
+  clean result does not prove a hook is portable. The same warnings appear when `mm context generate`,
+  `sync` or `diff` handles settings, and in the `mem_context_*` tools.
+
 ### Changed
 
 - **The `ollama` and `openai` extras no longer install the vendor SDKs
@@ -13,6 +26,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `memtomem[all]` downloaded them for nothing. The two extra names still
   resolve and now add no dependencies. If your own code imports either SDK,
   declare it as your own dependency.
+
+- **Web settings help and `mm init` no longer describe pre-E5 ONNX defaults
+  (#2459).** The embedding guide and env examples showed batch size 8, 1,024
+  tokens and 4 threads; they now match the E5 profile (4, 512 and 2), and the
+  large-seed advisory no longer names `bge-m3`. No configuration or behaviour
+  changes.
+
+- **The Slateharbor first-run lab explains what went wrong instead of failing
+  deep in the notebook.** A kernel older than Python 3.12 is refused before any
+  dependency import, with the interpreter path and how to switch kernels; a
+  partially extracted bundle names the missing or modified sample file; sample
+  files are read as UTF-8 regardless of the system encoding. The bundle adds a
+  Korean guide and documents a project-scoped Claude Code handoff.
 
 ### Fixed
 
@@ -23,9 +49,70 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   changing only the spelling blocked index writes until the mismatch was
   resolved, and resolving it with `apply-current` deleted every vector. Both
   spellings now name one identity for the `onnx` provider, including stores
-  stamped before this release, and the store keeps the spelling it recorded. Ollama
-  and OpenAI names are still compared exactly, because those providers send
-  the name as written and a short and a full name can be different models.
+  stamped before this release, and the store keeps the spelling it recorded.
+  Ollama and OpenAI names are still compared exactly, because those providers
+  send the name as written and a short and a full name can be different models.
+
+- **Conflict checks, similar chunks and near-duplicate scans work on
+  `multilingual-e5-small` stores (#2461).** Each of these embedded its probe a
+  different way than the stored vectors were embedded. On E5 that difference is
+  large enough to change the result:
+  - `mem_conflict_check` and candidate formation evidence embedded the probe
+    in E5's query role while stored chunks use the passage role. Even
+    identical text scored 0.716, below the 0.75 conflict threshold, so no
+    sampled pair was ever reported as a conflict. The probe now uses the
+    passage role; new evidence records `neighbour-v2`.
+  - The web similar-chunks panel (`GET /api/chunks/{id}/similar`) re-embedded
+    the chunk's bare text. It now searches with the chunk's stored vector. On
+    a 21,470-vector E5 store the two agreed on the top neighbour for 17 of 40
+    sampled chunks.
+  - The near-duplicate phase of `mem_dedup_scan` and
+    `GET /api/dedup/candidates` also re-embedded bare text; on that store it
+    found candidates for 2 of the 62 chunks whose stored nearest neighbour
+    scores ≥ 0.92, and now finds them for all 62. Chunks without a stored
+    vector are counted, not searched, and the scan reports that coverage: MCP
+    output ends with a coverage line, the web response adds `probed_chunks`,
+    `chunks_without_vector` and `near_search_enabled`, and `scanned_chunks`
+    now reports the pool actually scanned rather than echoing `max_scan`.
+    `max_scan` below 1 is rejected.
+
+  The 0.75 and 0.92 thresholds are unchanged and not yet calibrated for E5
+  (#2468). A review of the near-duplicate pairs on the same store, grown to
+  37,046 vectors, found 200 of 203 pairs were near-identical text; 197 of those
+  were a file and its worktree copy (#2472). The worktree exclusion below stops
+  new copies; existing ones stay until `mm purge --matching-excluded --apply`
+  removes them.
+
+- **Scheduled jobs record what they did (#2471).** A job that skipped its work
+  — the dedup job with no scanner, the compaction job refusing what looks like
+  a mass orphan deletion — was recorded as `ok`. Such runs now record
+  `skipped`, and a run that completes stores the summary its job returned in
+  `last_run_result` (`mm schedule list --json`,
+  `mem_schedule_list`); `mm schedule list` prints the reason. The dedup job's
+  result includes its near-duplicate coverage. Runs recorded before upgrading
+  keep their old status and have no result.
+
+- **Code files indexed with the E5 profile no longer split into many tiny
+  chunks (#2475).** `.py`, `.js`, `.jsx`, `.ts`, `.tsx` and `.mjs` spans below
+  the profile's minimum chunk size now merge into a neighbour when the merged
+  span still fits the chunk size limit. Indexing this
+  repository's 941 Python files produced 38.7% fewer chunks, 94.3% fewer
+  chunks below the minimum, and 98.1% fewer chunks sharing a content hash.
+  Configurations without a hard chunk cap (the default for non-E5 models) are
+  unaffected. Already-indexed files are re-chunked the next time they are
+  indexed after upgrading; `--force` is not needed.
+
+- **Text from Claude settings files is redacted and escaped in the settings
+  commands and MCP tools that print it (#2477, #2478).** `mm context settings-doctor` printed hook commands
+  verbatim in its duplicate findings, and the MCP tools passed control
+  characters from settings text straight through. Hook commands,
+  event names, matchers, tier paths and engine warnings now have secret shapes
+  removed where the message is built and control characters escaped (for
+  example `\x1b`) where it is displayed, across the settings doctor,
+  generate/diff, settings-migrate and settings-copy previews, prompts and the
+  MCP tools. `--json` and the dashboard keep raw characters in fields that
+  identify an entry. Destination refusals on the MCP and web surfaces are not
+  yet covered (#2489).
 
 - **Git worktrees nested inside an indexed root are no longer indexed as a
   second copy (#2474).** A worktree under `<repo>/.worktrees/` or
@@ -41,7 +128,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   index <repo>`, `mem_index` and the web index routes skip worktrees below the
   directory they walk, and a single file, a hook-driven edit or `mm purge`
   skips a worktree nested inside its enclosing repository. That is where the
-  measured copies lived, and why `mm purge` previously matched none of them.
+  measured copies lived.
   Walking a worktree itself still indexes it for that run, but indexing one of
   its files alone now skips it; register the worktree as its own memory dir to
   index it deliberately. Rows indexed before this release stay until you remove
