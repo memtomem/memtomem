@@ -227,7 +227,10 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                         async_file_lock,
                     )
 
-                    assert daily_target is not None  # settled before the claim
+                    # Settled before the claim for every non-pinned destination;
+                    # an explicit raise rather than ``assert``, which ``-O`` strips.
+                    if daily_target is None:
+                        raise RuntimeError("daily target was not resolved before the claim")
                     target = daily_target
                     write_location = str(target)
                     async with async_file_lock(
