@@ -5,19 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
-### Security
-
-- Update the CI/development lockfile from anyio 4.13.0 to 4.14.2 to resolve
-  GHSA-5p39-cfhj-2xmp and GHSA-82r6-8w77-94w6, reported by the blocking OSV
-  dependency scan. This changes only the repository's locked resolution;
-  published dependency constraints are unchanged and the lockfile is not
-  included in the wheel. It does not upgrade existing user environments.
-
 ### Added
 
 - Korean workflow starter packages for developer handoff, product decision
   records, and project onboarding: shared synthetic sources, reusable templates,
   model-free retrieval validation, and a two-week pilot scorecard.
+
+### Security
+
+- Update locked anyio 4.13.0 to 4.14.2 (#2497), fixing
+  [GHSA-82r6-8w77-94w6](https://osv.dev/GHSA-82r6-8w77-94w6) (potential TLS
+  certificate spoofing for internationalized hostnames when a connection is
+  hijacked) and [GHSA-5p39-cfhj-2xmp](https://osv.dev/GHSA-5p39-cfhj-2xmp)
+  (process-pool workers blocking on undrained stderr). Anyio is a transitive
+  runtime dependency, not exclusively a development dependency. Published
+  dependency constraints are unchanged, and this repository lockfile is not
+  shipped in the wheel: existing installations are not upgraded by this change.
+  Refresh anyio to at least 4.14.2 with the environment's package manager;
+  for an active virtual environment, use
+  `uv pip install --upgrade 'anyio>=4.14.2,<5'`.
 
 ## [0.6.3] — 2026-09-17
 
