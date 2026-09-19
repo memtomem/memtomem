@@ -9,7 +9,6 @@ import hashlib
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from collections.abc import Iterable
-from functools import lru_cache
 from pathlib import Path
 
 from memtomem.models import NamespaceFilter
@@ -86,7 +85,39 @@ def _swap_case_component(name: str) -> str | None:
     return swapped if swapped != name else None
 
 
-@lru_cache(maxsize=256)
+_CASE_PROBE_CACHE: dict[str, bool] = {}
+
+
+def _probe_case_insensitive(root: str) -> bool | None:
+    """Ask the filesystem holding ``root``, or ``None`` when it cannot answer.
+
+    The probe re-spells one path component with its case flipped and asks
+    whether it is the same directory. It walks up to find a component that
+    **exists** and has a case to flip: a root like ``/srv/2024`` has no case of
+    its own, and a root that has not been created yet cannot be asked at all —
+    its nearest existing ancestor sits on the same mount and can.
+
+    ``samefile`` raising :class:`FileNotFoundError` once ``probe`` is known to
+    exist means the re-spelled sibling does not: a conclusive *case-sensitive*.
+    Any other ``OSError``, and running out of cased components, are
+    inconclusive and answer ``None``.
+    """
+    probe = Path(root)
+    while True:
+        swapped_name = _swap_case_component(probe.name)
+        if swapped_name is not None and probe.exists():
+            try:
+                return probe.samefile(probe.parent / swapped_name)
+            except FileNotFoundError:
+                return False
+            except OSError:
+                return None
+        parent = probe.parent
+        if parent == probe:
+            return None
+        probe = parent
+
+
 def _root_is_case_insensitive(root: str) -> bool:
     """Whether the filesystem holding ``root`` treats case as insignificant.
 
@@ -95,27 +126,27 @@ def _root_is_case_insensitive(root: str) -> bool:
     case-sensitive directories, and Linux can mount either. Asking the
     filesystem is the only answer that is right on all of them.
 
-    The probe re-spells one path component with its case flipped and asks
-    whether it is the same directory. It walks up to find a component that has
-    a case to flip: a root like ``/srv/2024`` has none of its own. Anything
-    unanswerable — no cased component anywhere, or an OS error — is reported as
-    case-*sensitive*, the answer that adds no refusals.
+    Anything unanswerable is reported as case-*sensitive*, the answer that adds
+    no refusals — but that answer is **not** remembered. A conclusive probe
+    describes a mount and is cached, because this runs on every write-target
+    check; an inconclusive one describes only the moment it ran. Caching it
+    would leave a read-only root that is configured before it is created
+    unprotected against differently cased spellings for the life of the
+    process, which is precisely the window in which a provider directory is
+    declared and then synced into place.
 
-    Cached per root string: this runs on every write-target check, and the
-    answer is a property of a mount, not of a request.
+    The cache still assumes a given path keeps its case semantics once the
+    answer is conclusive; a volume remounted with the opposite semantics over
+    the same path mid-process is not tracked.
     """
-    probe = Path(root)
-    while True:
-        swapped_name = _swap_case_component(probe.name)
-        if swapped_name is not None:
-            try:
-                return probe.samefile(probe.parent / swapped_name)
-            except OSError:
-                return False
-        parent = probe.parent
-        if parent == probe:
-            return False
-        probe = parent
+    cached = _CASE_PROBE_CACHE.get(root)
+    if cached is not None:
+        return cached
+    answer = _probe_case_insensitive(root)
+    if answer is None:
+        return False
+    _CASE_PROBE_CACHE[root] = answer
+    return answer
 
 
 def is_under_any_root(target: str | Path, roots: Iterable[str | Path]) -> bool:

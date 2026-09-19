@@ -297,6 +297,37 @@ def test_a_case_alias_of_a_protected_root_is_protected_when_the_fs_folds_case(tm
     assert not is_under_any_root(tmp_path / "Vault2" / "note.md", [vault])
 
 
+def test_a_root_configured_before_it_exists_still_folds_case(tmp_path):
+    """A read-only root may be declared before the directory is synced in.
+
+    The case-sensitivity probe cannot ask a path that does not exist, and
+    answering "case-sensitive" for it left every differently cased spelling of
+    the root unprotected — for the life of the process, because that non-answer
+    was cached. The probe now asks the nearest *existing* ancestor, which sits
+    on the same mount, so the protection rule holds across the window in which
+    the root is configured and then created.
+    """
+    from memtomem.storage.sqlite_helpers import is_under_any_root
+
+    # Asked of the filesystem directly, not of the function under test: the bug
+    # being pinned makes that function answer "case-sensitive" here, which would
+    # turn this test's failure into a skip.
+    (tmp_path / "CaseProbe").mkdir()
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("filesystem is case-sensitive; the alias is a different directory")
+
+    vault = tmp_path / "Vault"
+    alias = tmp_path / "VAULT" / "note.md"
+
+    assert is_under_any_root(alias, [vault]), (
+        "a root that does not exist yet answered case-sensitive; the alias bypassed protection"
+    )
+    vault.mkdir()
+    assert is_under_any_root(alias, [vault]), (
+        "the pre-creation non-answer was cached; the alias bypassed protection"
+    )
+
+
 def test_an_ordinary_path_outside_every_root_is_not_protected(tmp_path):
     """The control for both halves: checking two spellings must not start
     refusing paths that are simply elsewhere."""
