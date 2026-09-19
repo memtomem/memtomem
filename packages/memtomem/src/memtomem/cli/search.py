@@ -26,6 +26,29 @@ from memtomem.server.tools.search import (
 )
 
 
+# What the ``Score`` column actually means, per ``RetrievalStats.score_scale``
+# (#1767 exposed the scale in the JSON payload; the table left the number bare).
+# A fused score is a rank sum — ``weight / (k + rank)`` summed over the legs that
+# fired, so a single-leg top hit reads ``0.0164`` (``1/61``). Without a caption
+# that reads as "1.6% match", which is the misreading this maps away.
+_SCORE_SCALE_NOTES: dict[str, str] = {
+    "rrf": "RRF fusion score, not a similarity or a percentage",
+    "rerank": "cross-encoder score; the range is model-dependent",
+    "bm25": "BM25 keyword score, not a similarity or a percentage",
+    "dense": "cosine similarity",
+    # "none" is deliberately absent: that scale means the result set was not
+    # ranked for relevance at all, so any caption would overstate it.
+}
+
+# ``score_scale`` names the *base* scale. The decay and access / importance /
+# entity-match boosts (Stages 4/6/7/7b) multiply on top when enabled, and
+# ``RetrievalStats`` carries no per-call flag saying whether they did — so the
+# caption qualifies the number rather than claiming a bare cosine or fusion
+# value. Naming a scale the run may have scaled away from would be a more
+# confident lie than the bare number this replaces.
+_SCORE_MODIFIER_CAVEAT = "decay/boost stages, when enabled, scale it"
+
+
 @dataclass(frozen=True)
 class SearchPayload:
     """One search's results and everything derived from them that needs the
@@ -440,3 +463,6 @@ def render_search_results(query: str, fmt: str, payload: SearchPayload) -> None:
             f"\n{stats.bm25_candidates} BM25 + {stats.dense_candidates} dense{dense_note}"
             f" → {stats.final_total} results"
         )
+        scale_note = _SCORE_SCALE_NOTES.get(stats.score_scale or "")
+        if scale_note is not None:
+            click.echo(f"Score: {scale_note} ({_SCORE_MODIFIER_CAVEAT})")
