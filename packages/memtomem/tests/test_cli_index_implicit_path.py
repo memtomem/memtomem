@@ -9,13 +9,15 @@ it must not fire on the queue modes, which never index ``.`` at all.
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 from unittest.mock import patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
-from memtomem.cli import cli
+from memtomem.cli import cli, indexing
 
 _NOTICE = "no PATH given"
 
@@ -152,3 +154,80 @@ class TestQueueModesAreUntouched:
             assert result.exit_code == 0
             assert debounce.called
             assert _NOTICE not in result.stderr
+
+
+class TestTheDeclaredClickFloorStillRuns:
+    """``pyproject.toml`` declares ``click>=8.1``; the lockfile installs 8.5.
+
+    Reaching for ``ParameterSource`` through the ``click`` package raises
+    ``AttributeError`` on most of that declared range: measured absent on
+    8.1.8, 8.2.1, 8.3.0, 8.3.1 and 8.3.2, and present from 8.3.3. An earlier
+    version of this docstring said 8.4, which came of sampling 8.3.0 and 8.4.0
+    and interpolating between them.
+
+    Which release introduced it is not the point, though — that a supported
+    one lacks it is. The access sits in the comparison, ahead of the DEFAULT
+    branch, so the failure is not confined to the bare form: it takes down
+    every direct ``mm index``. Nothing in the suite can see it, because the
+    installed Click has the alias.
+    """
+
+    def test_the_notice_does_not_reach_through_the_click_package(
+        self, indexed, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Behavioural half: with the 8.4 alias gone, the command still runs."""
+        monkeypatch.delattr(click, "ParameterSource", raising=False)
+        runner = CliRunner()
+
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(cli, ["index"])
+
+        assert result.exit_code == 0, result.exception
+        assert _NOTICE in result.stderr
+
+    def test_an_explicit_path_survives_the_floor_too(
+        self, indexed, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The lookup precedes the branch, so the explicit form is not a refuge."""
+        monkeypatch.delattr(click, "ParameterSource", raising=False)
+        target = tmp_path / "notes"
+        target.mkdir()
+
+        result = CliRunner().invoke(cli, ["index", str(target)])
+
+        assert result.exit_code == 0, result.exception
+        assert _NOTICE not in result.stderr
+
+    def test_the_module_still_imports_without_the_top_level_alias(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Import half: execute the module's source with the alias gone.
+
+        ``monkeypatch.delattr`` cannot reach a *module-level* alias such as
+        ``ParameterSource = click.ParameterSource``, which is evaluated once at
+        import time and would reintroduce the identical AttributeError. An
+        earlier version of this test scanned the AST for that one spelling;
+        review pointed out that ``getattr(click, "ParameterSource")``, an
+        aliased package import, or a from-import out of ``click`` all walk
+        straight past such a matcher. Executing the module tests the property
+        instead of enumerating its spellings.
+
+        Under a throwaway name, and never ``importlib.reload``. Reloading the
+        real module rebinds the classes defined in it, so every module that
+        had already imported ``_IndexingStatsError`` by name keeps the old
+        object and stops recognising the new one — measured: four unrelated
+        tests in ``test_indexing_cli.py`` failed their ``pytest.raises``, and
+        only in a full-suite run, because running this file alone never
+        reaches them.
+        """
+        monkeypatch.delattr(click, "ParameterSource", raising=False)
+
+        spec = importlib.util.spec_from_file_location("_click_floor_probe", indexing.__file__)
+        assert spec and spec.loader
+        probe = importlib.util.module_from_spec(spec)
+
+        # Not registered in ``sys.modules``: nothing else can pick it up, and
+        # the canonical module keeps its identity.
+        spec.loader.exec_module(probe)
+
+        assert probe.ParameterSource is not None

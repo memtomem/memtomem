@@ -9,6 +9,13 @@ from pathlib import Path
 
 import click
 
+# ``click.ParameterSource`` does not exist on the floor this package declares
+# (``click>=8.1``): measured absent on 8.1.8 through 8.3.2 and present from
+# 8.3.3. The lockfile pins a version that has the alias, so the suite cannot
+# see the difference — import from the module that has always held it. Pinned
+# by TestTheDeclaredClickFloorStillRuns.
+from click.core import ParameterSource
+
 from memtomem.cli._errors import raise_cli_error
 
 
@@ -209,7 +216,7 @@ def _warn_on_implicit_path(path: str) -> None:
     ``--status`` / ``--flush`` / ``--debounce-window`` all return earlier.
     """
     source = click.get_current_context().get_parameter_source("path")
-    if source is not click.ParameterSource.DEFAULT:
+    if source is not ParameterSource.DEFAULT:
         return
     resolved = Path(path).resolve()
     click.echo(f"Indexing {resolved} (no PATH given, so the current directory).", err=True)
