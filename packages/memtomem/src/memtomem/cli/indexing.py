@@ -172,6 +172,8 @@ def index(
             raise click.exceptions.Exit(1) from exc
         raise click.ClickException(f"{exc}\n{remedy}") from exc
 
+    _warn_on_implicit_path(path)
+
     try:
         asyncio.run(
             _index(
@@ -187,6 +189,35 @@ def index(
         raise
     except Exception as e:
         raise_cli_error(e)
+
+
+def _warn_on_implicit_path(path: str) -> None:
+    """Say which directory a bare ``mm index`` is about to walk.
+
+    ``PATH`` defaults to ``.``, so running ``mm index`` inside a code
+    repository indexes the repository — not the configured memory directory,
+    which is what someone following a setup guide means. The walk then pulls
+    in test fixtures and tooling files, the redaction gate blocks the ones
+    carrying secret-class patterns, and the command exits 1 with a refusal
+    that reads as a broken install rather than a mis-aimed command.
+
+    The agent-facing surface already refuses to lean on the default (the
+    OpenCode workflow template tells the model to require an explicit path);
+    this gives the CLI the same explicitness without breaking the scripts
+    that legitimately pass no path. It goes to stderr so ``--json`` and every
+    other stdout contract is untouched, and it fires only for a direct index:
+    ``--status`` / ``--flush`` / ``--debounce-window`` all return earlier.
+    """
+    source = click.get_current_context().get_parameter_source("path")
+    if source is not click.ParameterSource.DEFAULT:
+        return
+    resolved = Path(path).resolve()
+    click.echo(f"Indexing {resolved} (no PATH given, so the current directory).", err=True)
+    click.echo(
+        "  → to index your memory directory instead, name it: mm index <path>"
+        "  (mm status lists the configured ones)",
+        err=True,
+    )
 
 
 async def _index(
