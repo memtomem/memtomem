@@ -262,11 +262,16 @@ The complete v0.6.3 top-level command catalog is grouped below. Run `mm
 | Organization and automation | `tags`, `agent`, `session`, `activity`, `schedule`, `watchdog` |
 | Retrieval quality | `quality` |
 | Import and synchronization | `ingest`, `context`, `wiki`, `sync-doctor` |
-| Interfaces and utilities | `web`, `shell` |
+| Interfaces and utilities | `web`, `shell`, `serve` |
 
 For CI, `mm status --json` always produces JSON. Check that the payload has no
 top-level `error` field; an initialization error is reported in the payload and
 does not by itself make the process exit non-zero.
+
+`mm serve` runs the MCP server over stdio, for clients that launch the
+distribution's console script rather than a dedicated one. `memtomem-server` is
+the dedicated entry point and stays supported — it is the one to use for network
+transports, whose flags live only there.
 
 `mm` is a shorthand alias for `memtomem`. All commands support `-h` and `--help`.
 

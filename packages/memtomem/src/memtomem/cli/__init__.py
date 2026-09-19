@@ -59,6 +59,7 @@ def _register() -> None:
     from memtomem.cli.reset_cmd import reset
     from memtomem.cli.schedule_cmd import schedule
     from memtomem.cli.search import search
+    from memtomem.cli.serve_cmd import serve
     from memtomem.cli.init_cmd import init
     from memtomem.cli.session_cmd import activity, session
     from memtomem.cli.shell import shell
@@ -90,6 +91,7 @@ def _register() -> None:
     cli.add_command(gc)
     cli.add_command(purge)
     cli.add_command(reset)
+    cli.add_command(serve)
     cli.add_command(session)
     cli.add_command(activity)
     cli.add_command(status)
