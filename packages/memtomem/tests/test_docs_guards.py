@@ -23,6 +23,7 @@ These guards protect invariants that code cannot enforce directly:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import shlex
@@ -48,6 +49,26 @@ _GUIDES = _REPO_ROOT / "docs" / "guides"
 _INTEGRATIONS = _GUIDES / "integrations"
 _README = _REPO_ROOT / "README.md"
 _PYPI_README = _REPO_ROOT / "packages" / "memtomem" / "README.md"
+_SERVER_JSON = _REPO_ROOT / "server.json"
+
+
+def _load_release_preflight() -> types.ModuleType:
+    """The release gate's own validator, loaded by path.
+
+    ``tools/`` is not an importable package and the release workflow runs the
+    script with ``--no-project``, so it cannot import from the test suite and
+    the test suite cannot import it by name. Loading it here is what keeps one
+    definition of a well-formed registry record instead of two — the same
+    ``importlib`` pattern ``test_release_preflight.py`` already uses.
+    """
+    path = _REPO_ROOT / "tools" / "release_preflight.py"
+    spec = importlib.util.spec_from_file_location("release_preflight", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 _PLUGIN_README = _REPO_ROOT / "packages" / "memtomem-claude-plugin" / "README.md"
 _CODEX_PLUGIN_README = _REPO_ROOT / "plugins" / "memtomem" / "README.md"
 _NOTEBOOKS_README = _REPO_ROOT / "examples" / "notebooks" / "README.md"
@@ -2090,3 +2111,138 @@ class TestInitPresetDocsMatchPresetSpecs:
         self, text: str, expected: set[str]
     ) -> None:
         assert self._named_models(text) == expected
+
+
+class TestRegistryManifest:
+    """Pin the MCP registry record to the package it claims to publish.
+
+    Every failure mode here is invisible until ``mcp-publisher publish``
+    rejects the record — which happens *after* a release has already gone to
+    PyPI, because the ownership marker is read from the released package
+    description. These assertions move that feedback to CI.
+    """
+
+    _MARKER = "<!-- mcp-name: io.github.memtomem/memtomem -->"
+    _SCHEMA_PREFIX = "https://static.modelcontextprotocol.io/schemas/"
+    # ServerDetail.description in the published schema.
+    _DESCRIPTION_MAX = 100
+    # ServerDetail.name in the published schema.
+    _NAME_PATTERN = re.compile(r"^[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+$")
+
+    @staticmethod
+    @pytest.fixture(scope="class")
+    def manifest() -> dict[str, typing.Any]:
+        path = _REPO_ROOT / "server.json"
+        assert path.is_file(), "server.json is the registry record; publishing needs it in-repo"
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        assert isinstance(loaded, dict)
+        return loaded
+
+    def test_pypi_readme_carries_the_ownership_marker_verbatim(self) -> None:
+        """PyPI namespace ownership is proven by this exact comment."""
+        assert self._MARKER in _PYPI_README.read_text(encoding="utf-8")
+
+    def test_manifest_name_matches_the_readme_marker(self, manifest: dict[str, typing.Any]) -> None:
+        """A mismatch here is the documented cause of an ownership rejection."""
+        assert (
+            manifest["name"]
+            == self._MARKER.removeprefix("<!-- mcp-name:").removesuffix("-->").strip()
+        )
+
+    def test_manifest_name_matches_the_schema_pattern(
+        self, manifest: dict[str, typing.Any]
+    ) -> None:
+        assert self._NAME_PATTERN.match(manifest["name"])
+
+    def test_description_fits_the_schema_limit(self, manifest: dict[str, typing.Any]) -> None:
+        """``description`` is capped at 100 characters; prose edits overrun it."""
+        description = manifest["description"]
+        # ``len()`` alone would accept a list or dict of 1-100 entries, so a
+        # schema-invalid description could clear every guard here.
+        assert isinstance(description, str), f"description is {type(description).__name__}"
+        assert 0 < len(description) <= self._DESCRIPTION_MAX, (
+            f"server.json description is {len(description)} chars, "
+            f"over the schema's {self._DESCRIPTION_MAX}"
+        )
+
+    def test_schema_is_pinned_to_a_dated_revision(self, manifest: dict[str, typing.Any]) -> None:
+        """The registry is in preview; an unpinned schema silently shifts."""
+        schema = manifest["$schema"]
+        assert schema.startswith(self._SCHEMA_PREFIX)
+        assert re.search(r"/\d{4}-\d{2}-\d{2}/server\.schema\.json$", schema), schema
+
+    @classmethod
+    def _pypi_package(cls, manifest: dict[str, typing.Any]) -> dict[str, typing.Any]:
+        """The one record for our own distribution, selected the same way everywhere."""
+        packages = [
+            row
+            for row in manifest["packages"]
+            if isinstance(row, dict)
+            and row.get("registryType") == "pypi"
+            and row.get("identifier") == "memtomem"
+        ]
+        assert len(packages) == 1, f"expected one pypi memtomem package, found {len(packages)}"
+        return packages[0]
+
+    def test_manifest_publishes_the_pypi_distribution_over_stdio(
+        self, manifest: dict[str, typing.Any]
+    ) -> None:
+        """The record must point at the distribution a client can actually run."""
+        assert self._pypi_package(manifest)["transport"]["type"] == "stdio"
+
+    def test_every_package_entry_passes_the_release_shape_check(
+        self, manifest: dict[str, typing.Any]
+    ) -> None:
+        """Shape-check every entry, through the release path's own validator.
+
+        ``_pypi_package`` selects by ``registryType`` and ``identifier``, so a
+        malformed sibling is not rejected — it simply fails to be selected and
+        is never looked at again. ``{}`` is the cheap demonstration: it is a
+        dict, it clears every ``isinstance`` sweep in this class, and it left
+        the positional projection below still equal to ``["serve"]``.
+
+        This calls ``tools/release_preflight.py`` rather than restating its
+        rules. A transcribed copy had already drifted inside one change: it
+        read only the selected pypi package, and let ``runtimeArguments: {}``
+        through an ``or []`` that the release path refuses. Running the same
+        function here means the release gate and this guard cannot disagree
+        about what a well-formed record is — the property worth having, since
+        this one fails on a PR and that one fails at tag time.
+        """
+        preflight = _load_release_preflight()
+        for position, row in enumerate(manifest["packages"]):
+            assert isinstance(row, dict), f"packages[{position}] is {row!r}"
+            preflight._check_package_shape(row, f"packages[{position}]", _SERVER_JSON)
+
+    def test_the_record_launches_the_server_not_the_cli(
+        self, manifest: dict[str, typing.Any]
+    ) -> None:
+        """A client runs ``uvx memtomem`` plus these arguments.
+
+        The distribution's console script is the CLI, so without the ``serve``
+        subcommand the record starts a process that prints help and exits — a
+        dead server for every registry-driven install. ``packageArguments``
+        entries are objects, not bare strings: a string list is schema-invalid
+        and is rejected at publish time, long after the release has shipped.
+
+        The two tests above hold the shape this one then reads; keeping them
+        separate means a malformed entry names itself instead of surfacing
+        here as a confusing projection mismatch.
+        """
+        arguments = self._pypi_package(manifest)["packageArguments"]
+        assert [a for a in arguments if not isinstance(a, dict)] == [], arguments
+        positional = [a.get("value") for a in arguments if a.get("type") == "positional"]
+        assert positional == ["serve"], positional
+
+    def test_manifest_version_tracks_the_package_version(
+        self, manifest: dict[str, typing.Any]
+    ) -> None:
+        """Release preflight enforces this at tag time; this catches it earlier."""
+        pyproject = tomllib.loads(
+            (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        expected = pyproject["project"]["version"]
+        assert manifest["version"] == expected
+        # Select by identifier too: picking "the first pypi row" would read a
+        # stale memtomem version the moment a second pypi package is listed.
+        assert self._pypi_package(manifest)["version"] == expected
