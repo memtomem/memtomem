@@ -90,6 +90,90 @@ def lock_version(repo_root: Path) -> str:
     return value
 
 
+# Transcribed from the pinned schema, read rather than assumed:
+#
+#   Package.required = [registryType, identifier, transport], with no
+#   ``if``/``then``/``allOf``/``dependentRequired`` anywhere in the definition
+#   — the requirement does not vary by registryType, so pypi, oci and mcpb
+#   records are all held to the same three keys. ``registryType`` itself has
+#   no enum, so it is deliberately not checked against a list.
+#
+#   Every argument is a PositionalArgument or a NamedArgument. Both require
+#   ``type``; NamedArgument also requires ``name``; PositionalArgument
+#   requires ``value`` or ``valueHint`` (an ``anyOf``).
+_PACKAGE_REQUIRED_KEYS = ("registryType", "identifier", "transport")
+_ARGUMENT_TYPES = frozenset({"positional", "named"})
+
+
+def _check_package_shape(package: dict, where: str, manifest_path: Path) -> None:
+    """Reject a package entry the registry would reject at publish time.
+
+    An ``isinstance(row, dict)`` sweep is not a shape check: ``{}`` clears it,
+    then fails the ``registryType`` / ``identifier`` selection below and is
+    never looked at again, leaving the count of real pypi entries at 1. A
+    manifest carrying a malformed sibling therefore passed a check whose whole
+    job is to fail closed — measured, ``('0.6.3', '0.6.3')``, accepted. So
+    validate the shape of *every* entry, not only of the one we go on to read.
+
+    The alternative is validating the document against the pinned schema with
+    ``jsonschema``. That is strictly better coverage and was deliberately not
+    taken: it adds a dependency to the release path, which runs
+    ``--no-project`` on a bare interpreter. These checks are the subset that
+    matters here, and the schema URL in ``server.json`` stays the source they
+    are transcribed from.
+    """
+    missing = [key for key in _PACKAGE_REQUIRED_KEYS if key not in package]
+    if missing:
+        raise ReleaseCheckError(
+            f"{where} in {manifest_path} is missing required key(s): {', '.join(missing)}"
+        )
+    for field in ("packageArguments", "runtimeArguments"):
+        # ``field not in package``, not ``get(field) is None``: an explicit
+        # ``"runtimeArguments": null`` is a present field carrying an invalid
+        # value, and conflating it with an absent one let it skip every check
+        # below. Absent is fine; null is a malformed record.
+        if field not in package:
+            continue
+        arguments = package[field]
+        if not isinstance(arguments, list):
+            raise ReleaseCheckError(f"{where}.{field} in {manifest_path} is not an array")
+        for position, argument in enumerate(arguments):
+            at = f"{where}.{field}[{position}]"
+            if not isinstance(argument, dict):
+                raise ReleaseCheckError(f"{at} in {manifest_path} is not an object: {argument!r}")
+            kind = argument.get("type")
+            # ``isinstance`` before membership, not for tidiness: ``{"type": []}``
+            # is unhashable and turns the ``in`` test into an uncaught TypeError
+            # — a crash where the contract is supposed to produce a refusal.
+            if not isinstance(kind, str) or kind not in _ARGUMENT_TYPES:
+                raise ReleaseCheckError(
+                    f"{at} in {manifest_path} has type {kind!r}, "
+                    f"not one of {sorted(_ARGUMENT_TYPES)}"
+                )
+            if kind == "named":
+                if "name" not in argument:
+                    raise ReleaseCheckError(f"{at} in {manifest_path} is named but has no name")
+                if not isinstance(argument["name"], str):
+                    raise ReleaseCheckError(
+                        f"{at} in {manifest_path} has a non-string name: {argument['name']!r}"
+                    )
+                # Stricter than the schema on purpose. ``NamedArgument.name``
+                # is a plain ``string`` with no ``minLength`` or ``pattern``,
+                # so ``""`` validates — and produces a flag that is not a
+                # flag. This validator only ever runs against our own record,
+                # where that is a defect to catch at tag time, not a foreign
+                # record we would be wrong to reject.
+                if not argument["name"]:
+                    raise ReleaseCheckError(f"{at} in {manifest_path} has an empty name")
+            # PositionalArgument is an ``anyOf`` over these two: one of them
+            # has to be there or the entry contributes nothing to the command
+            # line and is schema-invalid besides.
+            if kind == "positional" and "value" not in argument and "valueHint" not in argument:
+                raise ReleaseCheckError(
+                    f"{at} in {manifest_path} is positional but has neither value nor valueHint"
+                )
+
+
 def registry_manifest_versions(repo_root: Path) -> tuple[str, str]:
     """Return (server version, pypi package version) from ``server.json``.
 
@@ -121,6 +205,7 @@ def registry_manifest_versions(repo_root: Path) -> tuple[str, str]:
             raise ReleaseCheckError(
                 f"packages[{position}] in {manifest_path} is not an object: {row!r}"
             )
+        _check_package_shape(row, f"packages[{position}]", manifest_path)
     pypi = [
         row
         for row in packages
@@ -408,7 +493,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    contract = subparsers.add_parser("contract")
+    # ``allow_abbrev=False`` because ``--require-registry-manifest`` is a
+    # safety gate whose presence is audited by reading the workflow, and
+    # argparse accepts any unambiguous prefix — ``--require`` alone enables
+    # it. An audit that scans for the full spelling would miss every
+    # abbreviation, so the parser is narrowed until the spelling is the only
+    # one that works, rather than the audit being taught to enumerate them.
+    contract = subparsers.add_parser("contract", allow_abbrev=False)
     contract.add_argument("--tag", required=True)
     contract.add_argument("--repo-root", type=Path, default=Path.cwd())
     contract.add_argument("--github-output")

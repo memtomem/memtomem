@@ -23,6 +23,7 @@ These guards protect invariants that code cannot enforce directly:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import shlex
@@ -48,6 +49,26 @@ _GUIDES = _REPO_ROOT / "docs" / "guides"
 _INTEGRATIONS = _GUIDES / "integrations"
 _README = _REPO_ROOT / "README.md"
 _PYPI_README = _REPO_ROOT / "packages" / "memtomem" / "README.md"
+_SERVER_JSON = _REPO_ROOT / "server.json"
+
+
+def _load_release_preflight() -> types.ModuleType:
+    """The release gate's own validator, loaded by path.
+
+    ``tools/`` is not an importable package and the release workflow runs the
+    script with ``--no-project``, so it cannot import from the test suite and
+    the test suite cannot import it by name. Loading it here is what keeps one
+    definition of a well-formed registry record instead of two — the same
+    ``importlib`` pattern ``test_release_preflight.py`` already uses.
+    """
+    path = _REPO_ROOT / "tools" / "release_preflight.py"
+    spec = importlib.util.spec_from_file_location("release_preflight", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 _PLUGIN_README = _REPO_ROOT / "packages" / "memtomem-claude-plugin" / "README.md"
 _CODEX_PLUGIN_README = _REPO_ROOT / "plugins" / "memtomem" / "README.md"
 _NOTEBOOKS_README = _REPO_ROOT / "examples" / "notebooks" / "README.md"
@@ -2169,6 +2190,30 @@ class TestRegistryManifest:
         """The record must point at the distribution a client can actually run."""
         assert self._pypi_package(manifest)["transport"]["type"] == "stdio"
 
+    def test_every_package_entry_passes_the_release_shape_check(
+        self, manifest: dict[str, typing.Any]
+    ) -> None:
+        """Shape-check every entry, through the release path's own validator.
+
+        ``_pypi_package`` selects by ``registryType`` and ``identifier``, so a
+        malformed sibling is not rejected — it simply fails to be selected and
+        is never looked at again. ``{}`` is the cheap demonstration: it is a
+        dict, it clears every ``isinstance`` sweep in this class, and it left
+        the positional projection below still equal to ``["serve"]``.
+
+        This calls ``tools/release_preflight.py`` rather than restating its
+        rules. A transcribed copy had already drifted inside one change: it
+        read only the selected pypi package, and let ``runtimeArguments: {}``
+        through an ``or []`` that the release path refuses. Running the same
+        function here means the release gate and this guard cannot disagree
+        about what a well-formed record is — the property worth having, since
+        this one fails on a PR and that one fails at tag time.
+        """
+        preflight = _load_release_preflight()
+        for position, row in enumerate(manifest["packages"]):
+            assert isinstance(row, dict), f"packages[{position}] is {row!r}"
+            preflight._check_package_shape(row, f"packages[{position}]", _SERVER_JSON)
+
     def test_the_record_launches_the_server_not_the_cli(
         self, manifest: dict[str, typing.Any]
     ) -> None:
@@ -2179,6 +2224,10 @@ class TestRegistryManifest:
         dead server for every registry-driven install. ``packageArguments``
         entries are objects, not bare strings: a string list is schema-invalid
         and is rejected at publish time, long after the release has shipped.
+
+        The two tests above hold the shape this one then reads; keeping them
+        separate means a malformed entry names itself instead of surfacing
+        here as a confusing projection mismatch.
         """
         arguments = self._pypi_package(manifest)["packageArguments"]
         assert [a for a in arguments if not isinstance(a, dict)] == [], arguments
