@@ -52,8 +52,8 @@ jobs:
       # `uv sync --frozen` (which neither checks nor regenerates the lock).
       - run: uv lock --check
       - run: uv sync --frozen
-      - run: uv run ruff check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py
-      - run: uv run ruff format --check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py
+      - run: uv run ruff check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
+      - run: uv run ruff format --check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
 
   typecheck:
     runs-on: ubuntu-latest
@@ -322,7 +322,7 @@ jobs:
 
   notebooks:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -350,6 +350,9 @@ jobs:
           /tmp/first-user-notebook/bin/python examples/onboarding/slateharbor/generate.py --check
           /tmp/first-user-notebook/bin/python examples/onboarding/slateharbor/build_notebook.py --check
           /tmp/first-user-notebook/bin/python examples/onboarding/slateharbor/validate.py --json
+      - name: Validate model-free workflow packages
+        # Reuse the previous step's [code] venv. Two stores exercise isolation.
+        run: /tmp/first-user-notebook/bin/python examples/workflows/demo.py --validate
 
   test-js:
     name: js-unit (vitest + jsdom)

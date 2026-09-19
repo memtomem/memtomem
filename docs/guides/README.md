@@ -23,6 +23,8 @@ guides are organized by outcome rather than by feature name.
    - [사용자 주도 멀티 코딩 에이전트 Handoff 운영 가이드](integrations/user-controlled-handoff-ko.md)
 3. **[Use cases](use-cases.md)** — nine runnable scenarios for multi-tool
    developers, individual knowledge bases, and teams.
+4. **[프로젝트 업무별 체험](workflow-packages-ko.md)** — 개발 작업 인계·제품 의사결정·
+   온보딩을 합성 자료로 체험하고 자기 자료로 반복 사용합니다.
 
 ## Work with memories
 

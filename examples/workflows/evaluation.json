@@ -1,0 +1,534 @@
+{
+  "description": "검색 평가 및 사람용 해석 기준. 이 파일과 양식은 색인하지 않는다.",
+  "cases": [
+    {
+      "id": "handoff-01",
+      "workflow": "handoff",
+      "query": "worker lease recovery",
+      "question": "worker lease recovery: 다음 작업과 보류 사항은?",
+      "expected": [
+        {
+          "source": "jobs/docs/handoffs/handoff-current.md",
+          "text": [
+            "TASK-JOBS-88",
+            "`worker lease recovery` = `90`",
+            "완료면 결과를 재사용하고 만료·미완료일 때만 다시 claim한다."
+          ]
+        }
+      ],
+      "human_expectation": "해당 주제의 다음 작업과 보류 사항을 인용한다. 인계 문구를 실제 검사 실행 증거로 취급하지 않는다.",
+      "source_filter": "handoff-current.md"
+    },
+    {
+      "id": "handoff-02",
+      "workflow": "handoff",
+      "query": "worker concurrency",
+      "question": "worker concurrency: 다음 작업과 보류 사항은?",
+      "expected": [
+        {
+          "source": "jobs/docs/handoffs/handoff-current.md",
+          "text": [
+            "TASK-JOBS-89",
+            "`worker concurrency` = `4`",
+            "CPU와 heartbeat 지연을 함께 보고 동시 작업 수를 낮춘다."
+          ]
+        }
+      ],
+      "human_expectation": "해당 주제의 다음 작업과 보류 사항을 인용한다. 인계 문구를 실제 검사 실행 증거로 취급하지 않는다.",
+      "source_filter": "handoff-current.md"
+    },
+    {
+      "id": "handoff-03",
+      "workflow": "handoff",
+      "query": "checkpoint interval",
+      "question": "checkpoint interval: 다음 작업과 보류 사항은?",
+      "expected": [
+        {
+          "source": "jobs/docs/handoffs/handoff-current.md",
+          "text": [
+            "TASK-JOBS-90",
+            "`checkpoint interval` = `20`",
+            "출력 flush와 checkpoint 순서를 확인하고 마지막 durable offset부터 재개한다."
+          ]
+        }
+      ],
+      "human_expectation": "해당 주제의 다음 작업과 보류 사항을 인용한다. 인계 문구를 실제 검사 실행 증거로 취급하지 않는다.",
+      "source_filter": "handoff-current.md"
+    },
+    {
+      "id": "handoff-04",
+      "workflow": "handoff",
+      "query": "job retry budget",
+      "question": "job retry budget: 다음 작업과 보류 사항은?",
+      "expected": [
+        {
+          "source": "jobs/docs/handoffs/handoff-current.md",
+          "text": [
+            "TASK-JOBS-91",
+            "`job retry budget` = `2`",
+            "입력 checksum과 실패 원인이 같은지 확인하고 재현 자료를 격리한다."
+          ]
+        }
+      ],
+      "human_expectation": "해당 주제의 다음 작업과 보류 사항을 인용한다. 인계 문구를 실제 검사 실행 증거로 취급하지 않는다.",
+      "source_filter": "handoff-current.md"
+    },
+    {
+      "id": "handoff-05",
+      "workflow": "handoff",
+      "query": "billing webhook retry",
+      "question": "billing webhook retry: 다음 작업과 보류 사항은?",
+      "expected": [
+        {
+          "source": "billing/docs/handoffs/handoff-current.md",
+          "text": [
+            "TASK-BILL-21",
+            "`billing webhook retry` = `3`",
+            "provider event ID로 중복 수신을 확인하고 settlement 상태가 불명확하면 조회부터 한다."
+          ]
+        }
+      ],
+      "human_expectation": "해당 주제의 다음 작업과 보류 사항을 인용한다. 인계 문구를 실제 검사 실행 증거로 취급하지 않는다.",
+      "source_filter": "handoff-current.md"
+    },
+    {
+      "id": "handoff-06",
+      "workflow": "handoff",
+      "query": "notification retry policy",
+      "question": "notification retry policy: 다음 작업과 보류 사항은?",
+      "expected": [
+        {
+          "source": "notifications/docs/handoffs/handoff-current.md",
+          "text": [
+            "TASK-NOTIFY-57",
+            "`notification retry policy` = `5`",
+            "전송은 잠시 늦추되 delivery key를 새로 만들지 않는다."
+          ]
+        }
+      ],
+      "human_expectation": "해당 주제의 다음 작업과 보류 사항을 인용한다. 인계 문구를 실제 검사 실행 증거로 취급하지 않는다.",
+      "source_filter": "handoff-current.md"
+    },
+    {
+      "id": "handoff-07",
+      "workflow": "handoff",
+      "query": "legacy callback",
+      "question": "legacy callback: 다음 작업과 보류 사항은?",
+      "expected": [
+        {
+          "source": "auth/docs/handoffs/handoff-current.md",
+          "text": [
+            "TASK-AUTH-42",
+            "`legacy callback` = `True`",
+            "구형 클라이언트 cohort의 callback 404를 확인하고 legacy route를 유지한다."
+          ]
+        }
+      ],
+      "human_expectation": "해당 주제의 다음 작업과 보류 사항을 인용한다. 인계 문구를 실제 검사 실행 증거로 취급하지 않는다.",
+      "source_filter": "handoff-current.md"
+    },
+    {
+      "id": "handoff-08",
+      "workflow": "handoff",
+      "query": "file upload limit",
+      "question": "file upload limit: 다음 작업과 보류 사항은?",
+      "expected": [
+        {
+          "source": "files/docs/handoffs/handoff-current.md",
+          "text": [
+            "TASK-FILES-33",
+            "`file upload limit` = `25`",
+            "content length와 실제 수신량을 비교하고 multipart upload 상태를 조회한다."
+          ]
+        }
+      ],
+      "human_expectation": "해당 주제의 다음 작업과 보류 사항을 인용한다. 인계 문구를 실제 검사 실행 증거로 취급하지 않는다.",
+      "source_filter": "handoff-current.md"
+    },
+    {
+      "id": "handoff-09",
+      "workflow": "handoff",
+      "query": "report freshness",
+      "question": "report freshness: 다음 작업과 보류 사항은?",
+      "expected": [
+        {
+          "source": "reports/docs/handoffs/handoff-current.md",
+          "text": [
+            "TASK-REPORT-19",
+            "`report freshness` = `15`",
+            "materialized_at과 원장 event watermark를 비교한다."
+          ]
+        }
+      ],
+      "human_expectation": "해당 주제의 다음 작업과 보류 사항을 인용한다. 인계 문구를 실제 검사 실행 증거로 취급하지 않는다.",
+      "source_filter": "handoff-current.md"
+    },
+    {
+      "id": "handoff-10",
+      "workflow": "handoff",
+      "query": "job admission",
+      "question": "job admission: 다음 작업과 보류 사항은?",
+      "expected": [
+        {
+          "source": "jobs/docs/handoffs/handoff-current.md",
+          "text": [
+            "TASK-JOBS-93",
+            "`job admission` = `200`",
+            "tenant별 입장 제한을 확인하고 예약 작업의 backpressure를 켠다."
+          ]
+        }
+      ],
+      "human_expectation": "해당 주제의 다음 작업과 보류 사항을 인용한다. 인계 문구를 실제 검사 실행 증거로 취급하지 않는다.",
+      "source_filter": "handoff-current.md"
+    },
+    {
+      "id": "decisions-01",
+      "workflow": "decisions",
+      "query": "free_trial",
+      "question": "현재 무료 체험 기간과 변경 이유는?",
+      "expected": [
+        {
+          "source": "product/trial-002.md",
+          "text": [
+            "상태: 채택",
+            "무료 체험은 14일"
+          ]
+        }
+      ],
+      "human_expectation": "TRIAL-002의 14일과 두 번의 업무 주기를 인용한다. 전환율 개선은 미측정이다.",
+      "source_filter": "product/"
+    },
+    {
+      "id": "decisions-02",
+      "workflow": "decisions",
+      "query": "free_trial",
+      "question": "이전 7일 정책을 지금 적용해도 되는가?",
+      "expected": [
+        {
+          "source": "product/trial-001.md",
+          "text": [
+            "상태: 대체됨",
+            "7일"
+          ]
+        }
+      ],
+      "human_expectation": "TRIAL-001은 대체되었으며 TRIAL-002를 확인한다.",
+      "source_filter": "product/"
+    },
+    {
+      "id": "decisions-03",
+      "workflow": "decisions",
+      "query": "free_trial",
+      "question": "가장 최근 문서의 30일이 채택되었는가?",
+      "expected": [
+        {
+          "source": "product/trial-003.md",
+          "text": [
+            "상태: 제안",
+            "30일"
+          ]
+        }
+      ],
+      "human_expectation": "더 최근인 TRIAL-003도 제안이며 채택이 아니다.",
+      "source_filter": "product/"
+    },
+    {
+      "id": "decisions-04",
+      "workflow": "decisions",
+      "query": "free_trial",
+      "question": "변경으로 전환율이 개선됐다는 근거는?",
+      "expected": [
+        {
+          "source": "product/trial-evidence.md",
+          "text": [
+            "실제 인터뷰·실험·분석 결과가 아니다",
+            "미측정"
+          ]
+        }
+      ],
+      "human_expectation": "가상 관찰 기록만 있으며 실제 개선 수치는 미확인이다.",
+      "source_filter": "product/"
+    },
+    {
+      "id": "decisions-05",
+      "workflow": "decisions",
+      "query": "mobile_offline",
+      "question": "오프라인 기능 출시 일정이 확정됐는가?",
+      "expected": [
+        {
+          "source": "product/offline-proposal.md",
+          "text": [
+            "상태: 제안",
+            "미확정"
+          ]
+        }
+      ],
+      "human_expectation": "제안만 있으므로 출시 일정과 개발 승인을 확정하지 않는다.",
+      "source_filter": "product/"
+    },
+    {
+      "id": "decisions-06",
+      "workflow": "decisions",
+      "query": "csv_export",
+      "question": "CSV 결과를 자동 이메일 발송해도 되는가?",
+      "expected": [
+        {
+          "source": "product/export-withdrawn.md",
+          "text": [
+            "상태: 철회됨",
+            "자동 이메일 발송만"
+          ]
+        }
+      ],
+      "human_expectation": "자동 발송은 철회됐다. 기존 수동 다운로드 폐지로 확대 해석하지 않는다.",
+      "source_filter": "product/"
+    },
+    {
+      "id": "decisions-07",
+      "workflow": "decisions",
+      "query": "audit_retention",
+      "question": "현재 보관 기간은 90일인가 180일인가?",
+      "expected": [
+        {
+          "source": "product/retention-001.md",
+          "text": [
+            "90일",
+            "충돌"
+          ]
+        },
+        {
+          "source": "product/retention-002.md",
+          "text": [
+            "180일",
+            "충돌"
+          ]
+        }
+      ],
+      "human_expectation": "같은 범위의 채택 기록이 충돌하므로 양쪽을 인용하고 담당자 확인 전 미확인으로 남긴다.",
+      "source_filter": "product/"
+    },
+    {
+      "id": "decisions-08",
+      "workflow": "decisions",
+      "query": "enterprise_refund_basis",
+      "question": "기업 환불 정책의 채택 근거는?",
+      "expected": [],
+      "human_expectation": "자료 범위와 식별어를 점검하고 근거 미확인으로 남긴다. 검색 0건만으로 현실의 정책 부재를 단정하지 않는다.",
+      "source_filter": "product/"
+    },
+    {
+      "id": "decisions-09",
+      "workflow": "decisions",
+      "query": "free_trial",
+      "question": "기존 유료 계약에도 14일 정책을 적용하는가?",
+      "expected": [
+        {
+          "source": "product/trial-002.md",
+          "text": [
+            "신규 셀프서비스 조직",
+            "기존 계약·유료 고객의 조건은 바꾸지 않는다"
+          ]
+        }
+      ],
+      "human_expectation": "적용 범위는 신규 셀프서비스 조직이다. 기존 유료 계약으로 확장하지 않는다.",
+      "source_filter": "product/"
+    },
+    {
+      "id": "decisions-10",
+      "workflow": "decisions",
+      "query": "free_trial",
+      "question": "TRIAL-001에서 TRIAL-002로의 대체 관계는?",
+      "expected": [
+        {
+          "source": "product/trial-001.md",
+          "text": [
+            "TRIAL-002",
+            "대체됨"
+          ]
+        },
+        {
+          "source": "product/trial-002.md",
+          "text": [
+            "TRIAL-001",
+            "대체한 후속 결정: 없음"
+          ]
+        }
+      ],
+      "human_expectation": "양방향 근거를 확인한다. 제안을 후속 채택 결정으로 취급하지 않는다.",
+      "source_filter": "product/"
+    },
+    {
+      "id": "onboarding-01",
+      "workflow": "onboarding",
+      "query": "billing webhook retry",
+      "question": "billing webhook retry: decision-current.md에서 무엇을 확인하는가?",
+      "expected": [
+        {
+          "source": "billing/docs/decisions/decision-current.md",
+          "text": [
+            "현재 값은 `3`입니다.",
+            "idempotency key로 중복 청구를 막는다."
+          ]
+        }
+      ],
+      "human_expectation": "현재 정책과 채택 이유를 이전 정책·제안과 구분한다.",
+      "source_filter": "decision-current.md"
+    },
+    {
+      "id": "onboarding-02",
+      "workflow": "onboarding",
+      "query": "billing webhook retry",
+      "question": "billing webhook retry: policy.py에서 무엇을 확인하는가?",
+      "expected": [
+        {
+          "source": "billing/src/policy.py",
+          "text": [
+            "return attempts < config['webhook_attempts']['value']",
+            "idempotency key로 중복 청구를 막는다."
+          ]
+        }
+      ],
+      "human_expectation": "관련 정책 구현을 찾는다. 실제 서버 전체 구현으로 확대 해석하지 않는다.",
+      "source_filter": "policy.py"
+    },
+    {
+      "id": "onboarding-03",
+      "workflow": "onboarding",
+      "query": "billing webhook retry",
+      "question": "billing webhook retry: production.json에서 무엇을 확인하는가?",
+      "expected": [
+        {
+          "source": "billing/config/production.json",
+          "text": [
+            "\"value\": 3,",
+            "\"environment\": \"production\"",
+            "\"implementation\": \"billing/src/policy.py\""
+          ]
+        }
+      ],
+      "human_expectation": "해당 도메인의 운영 설정을 확인한다. 다른 도메인의 설정을 섞지 않는다.",
+      "source_filter": "production.json"
+    },
+    {
+      "id": "onboarding-04",
+      "workflow": "onboarding",
+      "query": "worker lease recovery",
+      "question": "worker lease recovery: decision-current.md에서 무엇을 확인하는가?",
+      "expected": [
+        {
+          "source": "jobs/docs/decisions/decision-current.md",
+          "text": [
+            "현재 값은 `90`입니다.",
+            "완료 체크포인트를 먼저 확인한 후 재할당한다."
+          ]
+        }
+      ],
+      "human_expectation": "현재 정책과 채택 이유를 이전 정책·제안과 구분한다.",
+      "source_filter": "decision-current.md"
+    },
+    {
+      "id": "onboarding-05",
+      "workflow": "onboarding",
+      "query": "worker lease recovery",
+      "question": "worker lease recovery: policy.py에서 무엇을 확인하는가?",
+      "expected": [
+        {
+          "source": "jobs/src/policy.py",
+          "text": [
+            "return heartbeat_age < config['lease_seconds']['value']",
+            "완료 체크포인트를 먼저 확인한 후 재할당한다."
+          ]
+        }
+      ],
+      "human_expectation": "관련 정책 구현을 찾는다. 실제 서버 전체 구현으로 확대 해석하지 않는다.",
+      "source_filter": "policy.py"
+    },
+    {
+      "id": "onboarding-06",
+      "workflow": "onboarding",
+      "query": "worker lease recovery",
+      "question": "worker lease recovery: production.json에서 무엇을 확인하는가?",
+      "expected": [
+        {
+          "source": "jobs/config/production.json",
+          "text": [
+            "\"value\": 90,",
+            "\"environment\": \"production\"",
+            "\"implementation\": \"jobs/src/policy.py\""
+          ]
+        }
+      ],
+      "human_expectation": "해당 도메인의 운영 설정을 확인한다. 다른 도메인의 설정을 섞지 않는다.",
+      "source_filter": "production.json"
+    },
+    {
+      "id": "onboarding-07",
+      "workflow": "onboarding",
+      "query": "legacy callback",
+      "question": "legacy callback: decision-current.md에서 무엇을 확인하는가?",
+      "expected": [
+        {
+          "source": "auth/docs/decisions/decision-current.md",
+          "text": [
+            "현재 값은 `True`입니다.",
+            "구형 경로를 제거하면 재로그인이 불가능하다."
+          ]
+        }
+      ],
+      "human_expectation": "현재 정책과 채택 이유를 이전 정책·제안과 구분한다.",
+      "source_filter": "decision-current.md"
+    },
+    {
+      "id": "onboarding-08",
+      "workflow": "onboarding",
+      "query": "legacy callback",
+      "question": "legacy callback: policy.py에서 무엇을 확인하는가?",
+      "expected": [
+        {
+          "source": "auth/src/policy.py",
+          "text": [
+            "return legacy_client and config['legacy_callback']['value']",
+            "구형 경로를 제거하면 재로그인이 불가능하다."
+          ]
+        }
+      ],
+      "human_expectation": "관련 정책 구현을 찾는다. 실제 서버 전체 구현으로 확대 해석하지 않는다.",
+      "source_filter": "policy.py"
+    },
+    {
+      "id": "onboarding-09",
+      "workflow": "onboarding",
+      "query": "legacy callback",
+      "question": "legacy callback: production.json에서 무엇을 확인하는가?",
+      "expected": [
+        {
+          "source": "auth/config/production.json",
+          "text": [
+            "\"value\": true,",
+            "\"environment\": \"production\"",
+            "\"implementation\": \"auth/src/policy.py\""
+          ]
+        }
+      ],
+      "human_expectation": "해당 도메인의 운영 설정을 확인한다. 다른 도메인의 설정을 섞지 않는다.",
+      "source_filter": "production.json"
+    },
+    {
+      "id": "onboarding-10",
+      "workflow": "onboarding",
+      "query": "webhook_attempts",
+      "question": "결제 재시도 정책을 확인할 테스트는?",
+      "expected": [
+        {
+          "source": "billing/src/test_policy.py",
+          "text": [
+            "self.assertTrue(policy.webhook_attempts(1, CONFIG))",
+            "self.assertFalse(policy.webhook_attempts(5, CONFIG))"
+          ]
+        }
+      ],
+      "human_expectation": "테스트 위치를 찾은 것과 실행해 통과한 것을 구분한다. 실제 서비스 변경 안전성으로 확대 해석하지 않는다.",
+      "source_filter": "test_policy.py"
+    }
+  ]
+}

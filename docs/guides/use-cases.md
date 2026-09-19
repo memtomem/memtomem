@@ -3,6 +3,11 @@
 These runnable scenarios show where the current release is useful. Start with
 `mm init` and `mm status`, and use personal or synthetic data for evaluation.
 
+For task-oriented Korean starter packages, see [프로젝트 업무별 체험](workflow-packages-ko.md):
+developer handoff, product decision records, and project onboarding. Each includes
+synthetic sources, a reusable template, prompts, retrieval checks, and a two-week
+pilot scorecard. These are local workflow examples, not measured customer outcomes.
+
 ## Multi-tool developers
 
 ### 1. Carry a decision from Claude Code to Codex

@@ -12,18 +12,19 @@ Requires Python 3.12+ and `uv` (workspace-managed monorepo).
 ```bash
 uv pip install -e "packages/memtomem[all]"             # install deps
 uv run pytest -m "not ollama"                          # tests (CI filter)
-uv run ruff check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py && \
+uv run ruff check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py examples/workflows/*.py && \
     uv run ruff format --check \
-    packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py   # lint (required)
+    packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py examples/workflows/*.py   # lint (required)
 uv run mypy packages/memtomem/src                         # typecheck (advisory)
 ```
 
 The `ollama` marker auto-skips when Ollama isn't running; CI always uses
 `-m "not ollama"`. `ruff` and tests must pass to merge; `mypy` is advisory.
-Lint covers `tests/`, `tools/` and the Slateharbor sample's own tooling
-(`examples/onboarding/slateharbor/*.py` — the glob deliberately stops at that
-directory, so the 150 generated corpus files under `project/` stay out), not
-just `src/` — a narrower invocation passes locally and still fails CI
+Lint covers `tests/`, `tools/`, the Slateharbor sample's tooling and the workflow
+runner (`examples/onboarding/slateharbor/*.py` and `examples/workflows/*.py`).
+Both globs stop at their tooling directories, excluding Slateharbor's 150 generated
+corpus files and the workflow package's hand-authored sample documents.
+Linting only `src/` can pass locally and still fail CI
 (`.github/workflows/ci.yml`). `test_docs_guards.py` pins these paths to the
 workflow, so changing one means changing `CLAUDE.md` and `CONTRIBUTING.md` too.
 CLI entry points live in `packages/memtomem/pyproject.toml` — `mm` is an alias

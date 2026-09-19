@@ -7,6 +7,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- Korean workflow starter packages for developer handoff, product decision
+  records, and project onboarding: shared synthetic sources, reusable templates,
+  model-free retrieval validation, and a two-week pilot scorecard.
+
 - **`indexing.read_only_memory_dirs`: index a directory without ever rewriting
   it.** Roots listed here — an Obsidian vault, a docs checkout, anything whose
   files another tool owns — are discovered, watched, indexed and searched like
@@ -35,6 +39,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   cannot be indexed at all (#2501). And the `mm context` artifact Store and the
   `mm wiki` are separate stores with their own roots: listing one here does not
   stop them. See [Configuration](docs/guides/configuration.md).
+### Security
+
+- Update locked anyio 4.13.0 to 4.14.2 (#2497) for
+  [GHSA-82r6-8w77-94w6](https://osv.dev/vulnerability/GHSA-82r6-8w77-94w6)
+  (CVE-2026-63374; TLS certificate spoofing with internationalized hostnames
+  and a hijacked connection) and
+  [GHSA-5p39-cfhj-2xmp](https://osv.dev/vulnerability/GHSA-5p39-cfhj-2xmp)
+  (CVE-2026-64847; process-pool stderr deadlock). The TLS API is used by async
+  HTTPS requests; local-only workflows do not exercise that path. No
+  AnyIO process-pool call was found in memtomem or inspected server dependencies.
+  Published constraints are unchanged; this lockfile is not shipped in the
+  wheel and does not upgrade existing environments. See the
+  [runtime update guide](docs/guides/anyio-security-update.md) for installed
+  tools, cached uvx/plugin launchers, and virtual environments.
 
 ## [0.6.3] — 2026-09-17
 

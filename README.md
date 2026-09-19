@@ -192,6 +192,7 @@ Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdow
 | [한국어 바이브코딩 빠른 시작](docs/guides/vibe-coding-getting-started-ko.md) | Claude Code·Codex CLI에서 10~15분 안에 기억 저장·검색 |
 | [Example notebooks](examples/notebooks/) | Start with 00: recover decisions, code, and settings across 150 synthetic files without a model (Korean); 01–04 teach APIs, 05–06 teach LangGraph |
 | [Coding-agent sample](examples/onboarding/retry-policy/) | Recover a decision and its ADR source across sessions; isolated CLI proof and copyable prompts |
+| [프로젝트 업무별 체험](docs/guides/workflow-packages-ko.md) | 개발 작업 인계·제품 의사결정·온보딩: 모델 없는 체험, 기록 양식, 2주 파일럿 |
 | [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
 | [Cross-runtime handoff](docs/guides/integrations/cross-runtime-handoff.md) | Claude Code·Codex CLI·Kimi Code 순차 공동 개발 |
 | [Core memory tools](docs/guides/reference/core-memory-tools.md) | Index existing notes, search, and manage memories |
