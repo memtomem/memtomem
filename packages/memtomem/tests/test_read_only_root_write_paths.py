@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -300,18 +301,17 @@ def test_a_case_alias_of_a_protected_root_is_protected_when_the_fs_folds_case(tm
 def test_a_root_configured_before_it_exists_still_folds_case(tmp_path):
     """A read-only root may be declared before the directory is synced in.
 
-    The case-sensitivity probe cannot ask a path that does not exist, and
-    answering "case-sensitive" for it left every differently cased spelling of
-    the root unprotected — for the life of the process, because that non-answer
-    was cached. The probe now asks the nearest *existing* ancestor, which sits
-    on the same mount, so the protection rule holds across the window in which
-    the root is configured and then created.
+    The probe cannot ask a path that does not exist, and answering
+    "case-sensitive" for it left every differently cased spelling of the root
+    unprotected — for the life of the process, because that non-answer was
+    cached. The question now goes to the nearest existing directory, which is
+    the one the root will be created inside.
     """
     from memtomem.storage.sqlite_helpers import is_under_any_root
 
-    # Asked of the filesystem directly, not of the function under test: the bug
-    # being pinned makes that function answer "case-sensitive" here, which would
-    # turn this test's failure into a skip.
+    # Asked of the filesystem directly, not of the code under test: the bug being
+    # pinned makes that code answer "case-sensitive" here, which would turn this
+    # test's failure into a skip.
     (tmp_path / "CaseProbe").mkdir()
     if not (tmp_path / "caseprobe").exists():
         pytest.skip("filesystem is case-sensitive; the alias is a different directory")
@@ -325,6 +325,341 @@ def test_a_root_configured_before_it_exists_still_folds_case(tmp_path):
     vault.mkdir()
     assert is_under_any_root(alias, [vault]), (
         "the pre-creation non-answer was cached; the alias bypassed protection"
+    )
+
+
+def test_a_root_whose_name_carries_no_case_is_still_protected(tmp_path):
+    """The probe must not depend on the root's own name having a case.
+
+    Re-spelling the root's name meant `Vault/2024` — a perfectly ordinary
+    year-named directory — had nothing to flip, so the probe gave up and the
+    root went unprotected against `vAULT/2024`. The probe now writes a name it
+    chooses itself, so the root's spelling stops mattering.
+    """
+    from memtomem.storage.sqlite_helpers import is_under_any_root
+
+    (tmp_path / "CaseProbe").mkdir()
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("filesystem is case-sensitive; the alias is a different directory")
+
+    vault = tmp_path / "Vault" / "2024"
+    vault.mkdir(parents=True)
+    alias = tmp_path / "vAULT" / "2024" / "note.md"
+
+    assert is_under_any_root(alias, [vault]), (
+        "a root with no cased component of its own went unprotected"
+    )
+
+
+def test_the_probe_does_not_need_the_directorys_name_to_carry_a_case(tmp_path):
+    """Pinned on the helper, because the walk above would mask it.
+
+    `_probe_case_insensitive` climbs when a directory cannot answer, so deriving
+    the probe name from the directory still produces the right answer for
+    `Vault/2024` — the parent rescues it. That makes the end-to-end test above
+    silent about *why* it works. Asked of `_probe_by_writing` directly, a
+    directory whose own name has no case must still answer without help.
+    """
+    from memtomem.storage.sqlite_helpers import _probe_by_writing
+
+    numeric = tmp_path / "2024"
+    numeric.mkdir()
+
+    assert _probe_by_writing(numeric) is not None, (
+        "the probe name was derived from the directory, which has no case to flip"
+    )
+
+
+def test_the_probe_ignores_what_the_directory_already_contains(tmp_path):
+    """Pre-existing entries are not evidence, however they are spelled.
+
+    Re-spelling an entry that was already there cannot tell case folding from
+    two names that merely resolve to one file: a hard link, or two symlinks to
+    one target, make `Note.md` and `nOTE.MD` the same file on a case-sensitive
+    filesystem while the directory still keeps the names apart. Answering from a
+    freshly created name makes the trap unreachable — so the answer must not
+    move when such entries are present.
+    """
+    from memtomem.storage.sqlite_helpers import _probe_case_insensitive
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    baseline = _probe_case_insensitive(str(plain))
+    assert baseline is not None, "an empty directory could not be asked"
+
+    trapped = tmp_path / "trapped"
+    trapped.mkdir()
+    target = trapped / "Note.md"
+    target.write_text("x\n", encoding="utf-8")
+    alias = trapped / "nOTE.MD"
+    try:
+        os.link(target, alias)
+    except FileExistsError:
+        # This filesystem folds case, so the two spellings are already one entry
+        # and the trap cannot be built. That is the consistent answer, not a gap:
+        # the misreading being pinned only exists where the names stay distinct,
+        # which is where this assertion's `else` branch runs (Linux CI).
+        assert baseline is True
+        return
+    except (OSError, NotImplementedError):
+        alias.symlink_to(target)
+
+    assert _probe_case_insensitive(str(trapped)) is baseline, (
+        "a link pair in the directory changed the filesystem's reported case semantics"
+    )
+
+
+def test_a_symlink_cannot_forge_directory_identity(tmp_path):
+    """The read-only arm compares directories, which is why it is sound — and
+    the one way that identity can still be forged.
+
+    A directory cannot be hard-linked (measured: `EPERM`), so two directory
+    names resolving to one inode really are one entry. A *symlink* is the
+    exception: it resolves to its target while remaining a separate name, so
+    `samefile` would report a fold that the directory does not perform.
+    """
+    from memtomem.storage.sqlite_helpers import _same_directory
+
+    real = tmp_path / "Real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    assert _same_directory(real, link) is None, "a symlink was accepted as evidence of folding"
+    assert _same_directory(link, real) is None, "a symlink base was accepted as evidence"
+
+
+def test_a_base_that_is_gone_is_inconclusive_not_case_sensitive(tmp_path):
+    """`samefile` raises the same error for both halves of the question.
+
+    `FileNotFoundError` means "the re-spelled alias is absent" — conclusive
+    case-sensitive — or "the directory I was asking about has gone", which
+    answers nothing. The caller caches what it is told, so reporting the second
+    as a filesystem property would leave a root unprotected against alias
+    spellings for the life of the process.
+    """
+    from memtomem.storage.sqlite_helpers import _same_directory
+
+    present = tmp_path / "Present"
+    present.mkdir()
+    assert _same_directory(present, tmp_path / "definitely-absent") is False
+
+    assert _same_directory(tmp_path / "Vanished", tmp_path / "vANISHED") is None, (
+        "a base that does not exist was reported as a filesystem property"
+    )
+
+
+def test_the_probe_never_reads_the_directory_listing(tmp_path):
+    """The platform-independent half of the rule above.
+
+    The link trap can only be built on a case-sensitive filesystem — on a
+    folding one the two spellings are already one entry — so the test above has
+    no witness on macOS or Windows and only bites on Linux CI. This one holds
+    everywhere by pinning the mechanism instead of the symptom: if the answer
+    never consults the listing, no arrangement of entries can move it.
+    """
+    from memtomem.storage.sqlite_helpers import _probe_by_writing
+
+    directory = tmp_path / "root"
+    directory.mkdir()
+    (directory / "Note.md").write_text("x\n", encoding="utf-8")
+
+    def refuse_listing(self, *args, **kwargs):
+        raise AssertionError(f"the probe read the directory listing of {self}")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "iterdir", refuse_listing)
+        assert _probe_by_writing(directory) is not None
+
+
+def test_the_probe_writes_nothing_that_outlives_it(tmp_path):
+    """The answer costs one file, and only for the moment it is asked.
+
+    Worth pinning because the directory being probed may be an indexed memory
+    root: a leftover would be picked up as content, and a leftover in a
+    *protected* root would be the exact thing this feature exists to prevent.
+    """
+    from memtomem.storage.sqlite_helpers import _probe_by_writing
+
+    directory = tmp_path / "root"
+    directory.mkdir()
+    before = sorted(p.name for p in directory.iterdir())
+
+    # Asked of the writing arm directly: through `_probe_case_insensitive` the
+    # read-only arm answers first and nothing is ever created, so the check
+    # would pass without the cleanup it is pinning.
+    assert _probe_by_writing(directory) is not None
+    assert sorted(p.name for p in directory.iterdir()) == before, (
+        f"the probe left a file behind: {sorted(p.name for p in directory.iterdir())}"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_a_read_only_directory_is_climbed_past_not_written_to(tmp_path):
+    """The root itself is the one place the probe must not write.
+
+    A read-only root is the normal case for this feature, so refusing the write
+    cannot mean refusing the answer: the walk continues to a writable directory
+    on the same filesystem. Pinned together because "does not write there" and
+    "still answers" are the two halves of the same requirement.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("running as root; mode bits do not deny")
+
+    from memtomem.storage.sqlite_helpers import _probe_case_insensitive
+
+    vault = tmp_path / "Vault"
+    vault.mkdir()
+    os.chmod(vault, 0o555)
+    try:
+        assert _probe_case_insensitive(str(vault)) is not None, (
+            "a read-only root could not be answered by climbing to a writable parent"
+        )
+        assert sorted(p.name for p in vault.iterdir()) == [], (
+            "the probe wrote into the read-only root"
+        )
+    finally:
+        os.chmod(vault, 0o755)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_an_unreadable_root_does_not_break_checks_for_other_targets(tmp_path):
+    """`Path.is_dir()` propagates `PermissionError`; only ENOENT-ish is swallowed.
+
+    Measured on CPython 3.12: a stat under a mode-000 parent raises errno 13.
+    With the walk's existence check outside the handler, one unreadable
+    protected root made every write-target check raise — including checks about
+    unrelated writable paths, which is a protection feature taking down
+    ordinary writes.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("running as root; mode bits do not deny")
+
+    locked = tmp_path / "Locked"
+    locked.mkdir()
+    unreadable_root = locked / "Vault"
+    writable = tmp_path / "w"
+    writable.mkdir()
+    plain = writable / "note.md"
+    plain.write_text("ours\n", encoding="utf-8")
+
+    os.chmod(locked, 0o000)
+    try:
+        from memtomem.storage.sqlite_helpers import _root_is_case_insensitive, is_under_any_root
+
+        assert _root_is_case_insensitive(str(unreadable_root)) is False
+        assert not is_under_any_root(plain, [unreadable_root])
+    finally:
+        os.chmod(locked, 0o755)
+
+
+def test_nothing_is_created_inside_a_protected_root_that_the_os_would_allow(tmp_path):
+    """The promise is memtomem's, not the mode bits'.
+
+    A read-only root is normally OS-writable — it is protected by this
+    application refusing to write, not by the filesystem. So a containment check
+    about an unrelated target must not create anything inside it: that would
+    change its mtime and raise filesystem events in a directory another tool
+    owns, which is the whole thing the setting exists to prevent.
+    """
+    from memtomem.storage import sqlite_helpers as helpers
+
+    vault = (tmp_path / "Vault").resolve()
+    vault.mkdir()
+    os.chmod(vault, 0o755)
+
+    created: list[str] = []
+    real_open = os.open
+
+    def spy_open(path, flags, *args, **kwargs):
+        if flags & os.O_CREAT:
+            created.append(str(Path(path).parent.resolve()))
+        return real_open(path, flags, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        # Every directory a tmp_path test builds has a name with a case, so the
+        # read-only arm would answer and the writing arm — the one this pin is
+        # about — would never run. Silencing it is what reaches the code.
+        patch.setattr(helpers, "_probe_by_spelling", lambda directory: None)
+        patch.setattr(os, "open", spy_open)
+        helpers._CASE_PROBE_CACHE.clear()
+        try:
+            helpers.is_under_any_root(tmp_path / "elsewhere" / "note.md", [vault])
+        finally:
+            helpers._CASE_PROBE_CACHE.clear()
+
+    assert created, "the writing arm never ran; this pin proved nothing"
+    assert str(vault) not in created, f"the probe wrote inside the protected root: {created}"
+    assert sorted(p.name for p in vault.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_a_root_that_accepts_no_new_entries_is_still_answered(tmp_path):
+    """Refusing to write cannot mean refusing to protect.
+
+    When no directory on the filesystem will accept a new entry the writing arm
+    has nothing to offer, and treating that silence as "case-sensitive" drops
+    folding — so a differently cased spelling of the protected root passes the
+    guard. Measured before the read-only arm existed: `folds=False` and the
+    alias went unprotected while the control answered `True`. The name-spelling
+    arm answers here without creating anything.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("running as root; mode bits do not deny")
+
+    from memtomem.storage.sqlite_helpers import _probe_case_insensitive
+
+    from memtomem.storage import sqlite_helpers as helpers
+
+    sealed = tmp_path / "Sealed"
+    sealed.mkdir()
+    os.chmod(sealed, 0o555)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            # The measured case was a protected root on its own mount with no
+            # writable directory reachable on that device. Here the writing arm
+            # is simply given nothing to offer, which is the same question:
+            # can the answer come without creating anything?
+            patch.setattr(helpers, "_probe_by_writing", lambda directory: None)
+            assert _probe_case_insensitive(str(sealed)) is not None, (
+                "a root that accepts no new entries could not be answered at all"
+            )
+    finally:
+        os.chmod(sealed, 0o755)
+
+
+def test_a_mount_boundary_stops_the_climb_for_a_writable_directory(tmp_path, monkeypatch):
+    """Climbing past a read-only root must not leave the filesystem being asked.
+
+    A case-sensitive volume mounted inside a case-insensitive parent would
+    otherwise answer "folds case" for the volume, and writes to a genuinely
+    distinct `VAULT` would be refused — a wrong answer, not a cautious one.
+    """
+    from memtomem.storage import sqlite_helpers as helpers
+
+    # A name with no case to flip, so the read-only arm cannot answer here and
+    # both walks are forced to consider the parent — which is where the boundary
+    # is. With a flippable name the first arm answers and neither walk runs.
+    vault = tmp_path / "2024"
+    vault.mkdir()
+
+    real_stat = Path.stat
+
+    def stat_across_a_boundary(self, *args, **kwargs):
+        result = real_stat(self, *args, **kwargs)
+        if self != vault:
+            return SimpleNamespace(st_dev=result.st_dev + 1, st_mode=result.st_mode)
+        return result
+
+    # The parent *would* answer. Without that asymmetry the guarded and unguarded
+    # versions both return `None` and the pin proves nothing.
+    monkeypatch.setattr(
+        helpers, "_probe_by_writing", lambda directory: None if directory == vault else True
+    )
+    monkeypatch.setattr(Path, "stat", stat_across_a_boundary)
+
+    assert helpers._probe_case_insensitive(str(vault)) is None, (
+        "the climb crossed a mount boundary and adopted another filesystem's answer"
     )
 
 
