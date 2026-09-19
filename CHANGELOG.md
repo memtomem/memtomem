@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Security
+
+- Update the CI/development lockfile from anyio 4.13.0 to 4.14.2 to resolve
+  GHSA-5p39-cfhj-2xmp and GHSA-82r6-8w77-94w6, reported by the blocking OSV
+  dependency scan. This changes only the repository's locked resolution;
+  published dependency constraints are unchanged and the lockfile is not
+  included in the wheel. It does not upgrade existing user environments.
+
 ### Added
 
 - Korean workflow starter packages for developer handoff, product decision
