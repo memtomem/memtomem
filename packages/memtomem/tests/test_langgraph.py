@@ -916,6 +916,8 @@ class TestGetDelete:
             )
         )
         comp.storage.delete_chunks = AsyncMock(return_value=deleted_rows)
+        # Sync predicate on the real engine; a bare MagicMock answers truthy.
+        comp.index_engine.is_read_only_source = MagicMock(return_value=False)
         store = MemtomemStore()
         store._components = comp
 
@@ -2230,6 +2232,9 @@ class TestDeleteGateBUnderTheLock:
         comp = MagicMock()
         comp.storage.get_chunk = AsyncMock(side_effect=list(chunks))
         comp.storage.delete_chunks = AsyncMock(return_value=deleted_rows)
+        # Sync predicate on the real engine: a bare MagicMock returns a truthy
+        # Mock, which would make the lock helper refuse every chunk here.
+        comp.index_engine.is_read_only_source = MagicMock(return_value=False)
         store = MemtomemStore()
         store._components = comp
         return store, comp

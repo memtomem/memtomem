@@ -155,7 +155,9 @@ async def edit_chunk(
     # it, so a concurrent MCP CRUD / CLI write / memory-migrate cannot splice us
     # with a stale line range or lose this edit. ``mm web`` has no AppContext L1
     # lock; L2's in-process guard serializes concurrent web handlers too.
-    async with locked_source_chunk(storage, chunk_id, project_context_root=_boundary(config)) as (
+    async with locked_source_chunk(
+        storage, chunk_id, project_context_root=_boundary(config), index_guard=index_engine
+    ) as (
         fresh,
         reason,
         cross_process_held,
@@ -166,6 +168,10 @@ async def edit_chunk(
             raise HTTPException(
                 status_code=409, detail="Chunk moved by a concurrent migration; retry."
             )
+        if reason == "read_only":
+            # The helper refused before acquiring, so nothing was created beside
+            # the source. Same 409 and same vocabulary as this route's own gates.
+            raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
         if reason == "locked":
             raise HTTPException(
                 status_code=503, detail="Memory file is locked by another writer; try again."
@@ -433,7 +439,9 @@ async def delete_chunk(
     # remove-lines + reindex span (and the Gate-B probe, re-checked on the fresh
     # chunk under the lock) so a concurrent write cannot resurrect or corrupt the
     # rows we remove. ``mm web`` has no AppContext L1 lock; L2 covers it.
-    async with locked_source_chunk(storage, chunk_id, project_context_root=_boundary(config)) as (
+    async with locked_source_chunk(
+        storage, chunk_id, project_context_root=_boundary(config), index_guard=index_engine
+    ) as (
         fresh,
         reason,
         cross_process_held,
@@ -444,6 +452,10 @@ async def delete_chunk(
             raise HTTPException(
                 status_code=409, detail="Chunk moved by a concurrent migration; retry."
             )
+        if reason == "read_only":
+            # The helper refused before acquiring, so nothing was created beside
+            # the source. Same 409 and same vocabulary as this route's own gates.
+            raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
         if reason == "locked":
             raise HTTPException(
                 status_code=503, detail="Memory file is locked by another writer; try again."

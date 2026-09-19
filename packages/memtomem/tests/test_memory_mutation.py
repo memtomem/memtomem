@@ -47,7 +47,9 @@ def _stats() -> IndexingStats:
 async def test_locked_source_chunk_not_found():
     storage = AsyncMock()
     storage.get_chunk = AsyncMock(return_value=None)
-    async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+    async with locked_source_chunk(
+        storage, uuid4(), project_context_root=None, index_guard=None
+    ) as (
         chunk,
         reason,
         _held,
@@ -69,7 +71,9 @@ async def test_locked_source_chunk_times_out(tmp_path, monkeypatch):
     monkeypatch.setattr(_atomic, "_CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
 
     async with async_file_lock(_lock_path_for(src.resolve()), timeout=5.0):
-        async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+        async with locked_source_chunk(
+            storage, uuid4(), project_context_root=None, index_guard=None
+        ) as (
             fresh,
             reason,
             _held,
@@ -92,7 +96,9 @@ async def test_locked_source_chunk_propagates_body_timeout(tmp_path):
     storage.get_chunk = AsyncMock(return_value=chunk)
 
     with pytest.raises(TimeoutError, match="from body"):
-        async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+        async with locked_source_chunk(
+            storage, uuid4(), project_context_root=None, index_guard=None
+        ) as (
             fresh,
             reason,
             _held,
@@ -119,7 +125,9 @@ async def test_locked_source_chunk_does_not_resurrect_a_removed_parent(tmp_path)
     storage = AsyncMock()
     storage.get_chunk = AsyncMock(return_value=chunk)
 
-    async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+    async with locked_source_chunk(
+        storage, uuid4(), project_context_root=None, index_guard=None
+    ) as (
         fresh,
         reason,
         _held,
@@ -152,7 +160,9 @@ async def test_locked_source_chunk_serializes_a_degraded_span(tmp_path, monkeypa
     monkeypatch.setattr(_atomic, "_CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
 
     async with async_memory_file_lock(src, timeout=5.0):
-        async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+        async with locked_source_chunk(
+            storage, uuid4(), project_context_root=None, index_guard=None
+        ) as (
             fresh,
             reason,
             _held,
@@ -182,7 +192,9 @@ async def test_locked_source_chunk_reports_that_it_holds_no_cross_process_lock(t
     storage = AsyncMock()
     storage.get_chunk = AsyncMock(return_value=chunk)
 
-    async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+    async with locked_source_chunk(
+        storage, uuid4(), project_context_root=None, index_guard=None
+    ) as (
         fresh,
         reason,
         cross_process_held,
@@ -199,7 +211,9 @@ async def test_locked_source_chunk_reports_that_it_holds_no_cross_process_lock(t
     )
     storage.get_chunk = AsyncMock(return_value=chunk)
 
-    async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+    async with locked_source_chunk(
+        storage, uuid4(), project_context_root=None, index_guard=None
+    ) as (
         fresh,
         reason,
         cross_process_held,
@@ -220,7 +234,9 @@ async def test_locked_source_chunk_reports_no_lock_on_every_refusal(tmp_path, mo
 
     storage = AsyncMock()
     storage.get_chunk = AsyncMock(return_value=None)
-    async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+    async with locked_source_chunk(
+        storage, uuid4(), project_context_root=None, index_guard=None
+    ) as (
         _chunk,
         reason,
         cross_process_held,
@@ -235,7 +251,9 @@ async def test_locked_source_chunk_reports_no_lock_on_every_refusal(tmp_path, mo
     monkeypatch.setattr(_atomic, "_CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
 
     async with async_file_lock(_lock_path_for(src.resolve()), timeout=5.0):
-        async with locked_source_chunk(storage, uuid4(), project_context_root=None) as (
+        async with locked_source_chunk(
+            storage, uuid4(), project_context_root=None, index_guard=None
+        ) as (
             _chunk,
             reason,
             cross_process_held,

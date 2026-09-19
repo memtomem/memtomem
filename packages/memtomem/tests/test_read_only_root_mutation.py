@@ -210,6 +210,10 @@ async def test_a_chunk_re_scoped_into_a_protected_root_under_the_lock_is_refused
     result = await _request(comp, surface, chunk.id)
 
     assert calls["n"] >= 2, "the re-fetch under the lock did not happen; the race was not exercised"
+    assert sorted(p.name for p in vault.iterdir()) == ["note.md"], (
+        "the move left a lock sidecar in the protected directory: "
+        f"{sorted(p.name for p in vault.iterdir())}"
+    )
     if isinstance(result, str):
         assert "read_only" in result or "not found" in result, result
     else:

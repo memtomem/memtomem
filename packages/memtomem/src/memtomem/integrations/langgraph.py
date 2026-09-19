@@ -751,7 +751,12 @@ class MemtomemStore:
             # row-only branch and the web DELETE's index-only branch do. The
             # worst case is the same one that already applies to every delete
             # on this surface: a later re-index re-adds the row.
-            async with locked_source_chunk(comp.storage, uid, project_context_root=boundary) as (
+            async with locked_source_chunk(
+                comp.storage,
+                uid,
+                project_context_root=boundary,
+                index_guard=comp.index_engine,
+            ) as (
                 fresh,
                 reason,
                 _cross_process_held,
@@ -765,6 +770,13 @@ class MemtomemStore:
                         f"chunk {chunk_id} source file is locked by another writer "
                         "(migration in flight?); retry."
                     )
+                if reason == "read_only":
+                    # Refused before the acquire, so nothing was written beside
+                    # the source. Not retryable: re-keying would meet the same
+                    # protected path.
+                    from memtomem.source_provenance import READ_ONLY_TARGET_DETAIL
+
+                    raise PermissionError(READ_ONLY_TARGET_DETAIL)
                 if reason == "moved":
                     # The file we held was not this row's any more, so nothing
                     # it said is authoritative. Re-key onto the new one.

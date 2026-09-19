@@ -54,6 +54,7 @@ async def locked_source_chunk(
     chunk_id: UUID,
     *,
     project_context_root: Path | None,
+    index_guard,
     budget: float | None = None,
 ) -> AsyncIterator[tuple[Chunk | None, str | None, bool]]:
     """Yield ``(chunk, None, cross_process_held)`` with the chunk's source-file
@@ -106,6 +107,15 @@ async def locked_source_chunk(
         yield None, "not_found", False
         return
     resolved = chunk.metadata.source_file.expanduser().resolve()
+    # Here, not in the caller: this is the path the acquire below will lock, and
+    # only this function knows it. A caller's own gate judges an *earlier* fetch,
+    # so a ``memory-migrate`` landing between the two makes us lock the protected
+    # source — and the post-lock fetch then agrees with ``resolved``, so the
+    # ``"moved"`` refusal does not fire either. Acquiring creates
+    # ``.<name>.lock`` beside the source with ``O_RDWR | O_CREAT``.
+    if index_guard is not None and index_guard.is_read_only_source(resolved):
+        yield None, "read_only", False
+        return
     # ``acquired`` distinguishes a timeout from the sidecar *acquire* (→ report
     # "locked") from a ``TimeoutError`` raised by the caller's own body after we
     # yielded — that must propagate, not be masked as a lock timeout or trigger

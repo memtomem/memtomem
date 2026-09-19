@@ -436,7 +436,9 @@ class TestMutationLock:
         foreign = _foreign()
         storage = SimpleNamespace(get_chunk=AsyncMock(return_value=foreign))
 
-        async with locked_source_chunk(storage, foreign.id, project_context_root=MINE) as (
+        async with locked_source_chunk(
+            storage, foreign.id, project_context_root=MINE, index_guard=None
+        ) as (
             chunk,
             reason,
             _held,
@@ -472,7 +474,9 @@ class TestMutationLock:
         )
         storage = SimpleNamespace(get_chunk=AsyncMock(side_effect=[in_boundary, migrated]))
 
-        async with locked_source_chunk(storage, in_boundary.id, project_context_root=MINE) as (
+        async with locked_source_chunk(
+            storage, in_boundary.id, project_context_root=MINE, index_guard=None
+        ) as (
             chunk,
             reason,
             _held,
