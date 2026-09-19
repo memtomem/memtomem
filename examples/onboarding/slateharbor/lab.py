@@ -171,6 +171,7 @@ class Lab:
 
     def _chunk_bodies(self, chunk_ids):
         """Full stored content per chunk id. A missing id is an error, not a gap."""
+        # Also used by examples/workflows/demo.py to avoid parsing rendered context.
         with self._index() as connection:
             placeholders = ",".join("?" * len(chunk_ids))
             rows = connection.execute(

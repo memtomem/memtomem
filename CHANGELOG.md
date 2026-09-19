@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- Korean workflow starter packages for developer handoff, product decision
+  records, and project onboarding: shared synthetic sources, reusable templates,
+  model-free retrieval validation, and a two-week pilot scorecard.
+
 ## [0.6.3] — 2026-09-17
 
 ### Upgrading
