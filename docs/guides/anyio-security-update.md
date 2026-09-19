@@ -7,9 +7,7 @@ A lockfile update does not change an already-installed runtime.
 
 The TLS advisory concerns internationalized (non-ASCII) hostnames when a
 connection has also been hijacked. This is a preventive dependency update,
-not a claim that every memtomem installation is exploitable. HTTPX normally
-supplies IDNA 2008 host labels. URL indexing has separate application-level
-hostname/SNI handling that this dependency update does not change. No AnyIO
+not a claim that every memtomem installation is exploitable. No AnyIO
 process-pool call was found in memtomem or the inspected server dependencies.
 
 Before updating any installation, close MCP clients and stop all memtomem
@@ -18,10 +16,10 @@ changing packages on disk does not update code already loaded in a process.
 
 ## Installed with uv tool
 
-Use the supported reinstall workflow, preserving the current release here:
+Use the supported upgrade workflow:
 
 ```bash
-mm upgrade --version 0.6.3
+mm upgrade
 ```
 
 It detects the original extras and manages server/Web UI process cleanup on

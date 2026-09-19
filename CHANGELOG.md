@@ -19,7 +19,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   and a hijacked connection) and
   [GHSA-5p39-cfhj-2xmp](https://osv.dev/vulnerability/GHSA-5p39-cfhj-2xmp)
   (CVE-2026-64847; process-pool stderr deadlock). The TLS API is used by async
-  HTTPS integrations; local-only workflows do not exercise that path. No
+  HTTPS requests; local-only workflows do not exercise that path. No
   AnyIO process-pool call was found in memtomem or inspected server dependencies.
   Published constraints are unchanged; this lockfile is not shipped in the
   wheel and does not upgrade existing environments. See the
