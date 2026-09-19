@@ -13,17 +13,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
-- Update locked anyio 4.13.0 to 4.14.2 (#2497), fixing
-  [GHSA-82r6-8w77-94w6](https://osv.dev/GHSA-82r6-8w77-94w6) (potential TLS
-  certificate spoofing for internationalized hostnames when a connection is
-  hijacked) and [GHSA-5p39-cfhj-2xmp](https://osv.dev/GHSA-5p39-cfhj-2xmp)
-  (process-pool workers blocking on undrained stderr). Anyio is a transitive
-  runtime dependency, not exclusively a development dependency. Published
-  dependency constraints are unchanged, and this repository lockfile is not
-  shipped in the wheel: existing installations are not upgraded by this change.
-  Refresh anyio to at least 4.14.2 with the environment's package manager;
-  for an active virtual environment, use
-  `uv pip install --upgrade 'anyio>=4.14.2,<5'`.
+- Update locked anyio 4.13.0 to 4.14.2 (#2497) for
+  [GHSA-82r6-8w77-94w6](https://osv.dev/vulnerability/GHSA-82r6-8w77-94w6)
+  (CVE-2026-63374; TLS certificate spoofing with internationalized hostnames
+  and a hijacked connection) and
+  [GHSA-5p39-cfhj-2xmp](https://osv.dev/vulnerability/GHSA-5p39-cfhj-2xmp)
+  (CVE-2026-64847; process-pool stderr deadlock). The TLS API is used by async
+  HTTPS integrations; local-only workflows do not exercise that path. No
+  AnyIO process-pool call was found in memtomem or inspected server dependencies.
+  Published constraints are unchanged; this lockfile is not shipped in the
+  wheel and does not upgrade existing environments. See the
+  [runtime update guide](docs/guides/anyio-security-update.md) for installed
+  tools, cached uvx/plugin launchers, and virtual environments.
 
 ## [0.6.3] — 2026-09-17
 
