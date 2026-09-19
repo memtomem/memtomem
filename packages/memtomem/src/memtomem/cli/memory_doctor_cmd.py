@@ -119,6 +119,7 @@ import json
 import re
 import sqlite3
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -2200,16 +2201,28 @@ def _apply_fix(
     return sorted(removed), sorted(skipped)
 
 
-def _collect_fixable(inspect_dirs: list[Path]) -> list[tuple[Path, Path, str]]:
-    """Find inspected dirs with a readable index file. Returns ``(dir, index_path, name)``.
+def _collect_fixable(
+    inspect_dirs: list[Path], read_only_roots: Sequence[Path] = ()
+) -> tuple[list[tuple[Path, Path, str]], list[Path]]:
+    """Split inspected dirs into fixable ``(dir, index_path, name)`` and refused.
 
     Only providers with a TOC convention (``provider_index_file``) and an index
     file actually on disk are fixable; everything else is skipped silently
     (there is nothing for a subtractive fix to act on).
+
+    A dir under ``indexing.read_only_memory_dirs`` is refused instead, and
+    returned rather than dropped: ``--fix`` rewrites the provider's index file
+    (``atomic_write_text`` in :func:`_apply_fix`), which is exactly the write
+    those roots exist to prevent. They stay *inspectable* — the read-only
+    contract is about writes — so the refusal belongs here, where fixing is
+    decided, and not in the report gathering. Returned rather than skipped
+    silently because the user asked for a repair that will not happen.
     """
     from memtomem.config import categorize_memory_dir, provider_index_file
+    from memtomem.storage.sqlite_helpers import is_under_any_root
 
     out: list[tuple[Path, Path, str]] = []
+    refused: list[Path] = []
     for d in inspect_dirs:
         resolved = d.expanduser().resolve()
         index_file_name = provider_index_file(categorize_memory_dir(d))
@@ -2218,11 +2231,20 @@ def _collect_fixable(inspect_dirs: list[Path]) -> list[tuple[Path, Path, str]]:
         index_path = resolved / index_file_name
         if not index_path.is_file():
             continue
+        if is_under_any_root(index_path, read_only_roots):
+            refused.append(resolved)
+            continue
         out.append((resolved, index_path, index_file_name))
-    return out
+    return out, refused
 
 
-def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
+def _run_fix(
+    *,
+    inspect_dirs: list[Path],
+    apply: bool,
+    json_out: bool,
+    read_only_roots: Sequence[Path] = (),
+) -> None:
     """Drive ``--fix`` over every inspected dir's index file (preview or apply).
 
     Per file the analysis-time read (T1) collects the ``missing_target``
@@ -2237,7 +2259,8 @@ def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
     non-conforming line no longer blocks fixing the rest of the file.
     """
     results: list[FixFileResult] = []
-    for resolved, index_path, index_file_name in _collect_fixable(inspect_dirs):
+    fixable, read_only_refused = _collect_fixable(inspect_dirs, read_only_roots)
+    for resolved, index_path, index_file_name in fixable:
         try:
             # T1 (analysis snapshot). Terminator-stripped ``raw`` is CRLF-agnostic,
             # so this read need not be newline-preserving — only the apply splice is.
@@ -2304,23 +2327,48 @@ def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
         )
 
     if json_out:
-        _emit_fix_json(results, applied=apply)
+        _emit_fix_json(results, applied=apply, read_only_refused=read_only_refused)
     else:
-        _emit_fix_human(results, applied=apply)
+        _emit_fix_human(results, applied=apply, read_only_refused=read_only_refused)
 
     # A dead pointer left behind is not success, and neither is an index this
     # run could not read. Exit non-zero so a script cannot read a
     # partially-fixed — or unread — index as a clean one (ADR-0020 §1, #1769).
-    if any(r.skipped for r in results) or any(r.error is not None for r in results):
+    # A read-only root counts the same way: its dead pointers are still there,
+    # and a caller that asked to fix them did not get that.
+    if (
+        any(r.skipped for r in results)
+        or any(r.error is not None for r in results)
+        or read_only_refused
+    ):
         raise click.exceptions.Exit(1)
 
 
-def _emit_fix_human(results: list[FixFileResult], *, applied: bool) -> None:
+def _emit_fix_human(
+    results: list[FixFileResult],
+    *,
+    applied: bool,
+    read_only_refused: Sequence[Path] = (),
+) -> None:
     total = sum(len(r.removed) for r in results)
     skipped_total = sum(len(r.skipped) for r in results)
     error_total = sum(1 for r in results if r.error is not None)
+    for root in read_only_refused:
+        # Named before the results: the user asked to repair this dir and it was
+        # not repaired, which a summary line alone would bury.
+        click.secho(
+            f"\n■ {root} · skipped: under a read-only index root (indexing.read_only_memory_dirs)",
+            fg="yellow",
+            bold=True,
+        )
+        click.echo(
+            "  --fix rewrites the provider index file. Remove the root from "
+            "read_only_memory_dirs to repair it here, or edit the file with the "
+            "tool that owns it."
+        )
     if total == 0 and skipped_total == 0 and error_total == 0:
-        click.secho("No missing_target links to remove.", fg="green")
+        if not read_only_refused:
+            click.secho("No missing_target links to remove.", fg="green")
         return
     verb = "Removed" if applied else "Would remove"
     for r in results:
@@ -2369,7 +2417,12 @@ def _emit_fix_human(results: list[FixFileResult], *, applied: bool) -> None:
         click.echo(summary)
 
 
-def _emit_fix_json(results: list[FixFileResult], *, applied: bool) -> None:
+def _emit_fix_json(
+    results: list[FixFileResult],
+    *,
+    applied: bool,
+    read_only_refused: Sequence[Path] = (),
+) -> None:
     total = sum(len(r.removed) for r in results)
     skipped_total = sum(len(r.skipped) for r in results)
     error_total = sum(1 for r in results if r.error is not None)
@@ -2384,6 +2437,11 @@ def _emit_fix_json(results: list[FixFileResult], *, applied: bool) -> None:
     if error_total:
         status = "error"
     elif skipped_total:
+        status = "partial" if applied else "would-partial"
+    elif read_only_refused:
+        # Ranked with "skipped", not with "clean": a refused root's dead
+        # pointers are still on disk, so the run is an incomplete account of
+        # what was asked for.
         status = "partial" if applied else "would-partial"
     elif total == 0:
         status = "clean"
@@ -2402,7 +2460,9 @@ def _emit_fix_json(results: list[FixFileResult], *, applied: bool) -> None:
             "lines": total,
             "skipped": skipped_total,
             "errors": error_total,
+            "read_only_refused": len(read_only_refused),
         },
+        "read_only_refused": [str(r) for r in read_only_refused],
     }
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
@@ -2485,7 +2545,12 @@ def memory_doctor(path: str | None, json_out: bool, fix: bool, apply_: bool) -> 
         return
 
     if fix:
-        _run_fix(inspect_dirs=inspect_dirs, apply=apply_, json_out=json_out)
+        _run_fix(
+            inspect_dirs=inspect_dirs,
+            apply=apply_,
+            json_out=json_out,
+            read_only_roots=config.indexing.read_only_memory_dirs,
+        )
         return
 
     reports = _gather_reports(config=config, inspect_dirs=inspect_dirs)

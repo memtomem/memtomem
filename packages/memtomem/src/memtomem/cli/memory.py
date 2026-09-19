@@ -355,6 +355,11 @@ async def _add(
         # resolved inside the lock. Nothing durable happens before the
         # append, so an aborted attempt leaves no trace.
         for _attempt in range(NS_RETARGET_ATTEMPTS):
+            # Before the sidecar acquire: ``memory_lock_path`` RESOLVES the target, so a day file that is a symlink into a protected root gets its ``.lock`` created inside that root — a write into the directory we are about to refuse to write. The in-lock gate stays authoritative for the final target.
+            if comp.index_engine.is_read_only_source(target):
+                from memtomem.source_provenance import READ_ONLY_TARGET_DETAIL
+
+                raise click.ClickException(READ_ONLY_TARGET_DETAIL)
             try:
                 async with async_file_lock(
                     memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
@@ -381,6 +386,10 @@ async def _add(
                         from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
 
                         raise click.ClickException(EXCLUDED_TARGET_DETAIL)
+                    if comp.index_engine.is_read_only_source(target):
+                        from memtomem.source_provenance import READ_ONLY_TARGET_DETAIL
+
+                        raise click.ClickException(READ_ONLY_TARGET_DETAIL)
                     mix_err = (
                         None
                         if allow_namespace_mix

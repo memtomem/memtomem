@@ -5,6 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`indexing.read_only_memory_dirs`: index a directory without ever rewriting
+  it.** Roots listed here — an Obsidian vault, a docs checkout, anything whose
+  files another tool owns — are discovered, watched, indexed and searched like
+  any other root, but every memory mutation surface refuses to write them:
+  `mem_edit` / `mem_delete` return a `source_read_only` error and the Web UI's
+  chunk edit and delete answer HTTP 409. Empty by default, so nothing changes
+  for existing installs.
+
+  Two properties are worth knowing. The gate asks the *configuration*, not the
+  `source_read_only` flag stored on each chunk, so a directory that was indexed
+  while writable is protected as soon as the process reloads its config rather
+  than only after a re-index. And a configuration that *asks* for protection and
+  fails validation now refuses to load instead of being ignored: tolerating it
+  would restore an empty read-only list and leave the writable roots live, which
+  is the one failure direction that matters here.
+
+  Protection begins when each writer picks up the new configuration. Restart a
+  running MCP server (and any scheduler) after declaring an already-indexed
+  directory read-only; `mm web` reloads on config-related requests, **not** on
+  the chunk edit/delete routes, so restart it or load the Configuration page
+  once before relying on the change. See
+  [Configuration](docs/guides/configuration.md).
+
 ## [0.6.3] — 2026-09-17
 
 ### Upgrading

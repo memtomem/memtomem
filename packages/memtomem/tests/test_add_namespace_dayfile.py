@@ -613,6 +613,7 @@ class TestCliSurface:
                 index_file=AsyncMock(return_value=SimpleNamespace(indexed_chunks=1)),
                 effective_namespace_for=AsyncMock(side_effect=lambda p, ns=None, **k: ns),
                 is_excluded=lambda path: False,
+                is_read_only_source=lambda path: False,
             ),
             storage=SimpleNamespace(
                 list_chunks_by_source=AsyncMock(return_value=[]),

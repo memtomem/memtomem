@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 
 from memtomem.storage.sqlite_helpers import norm_path
-from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
+from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL, READ_ONLY_TARGET_DETAIL
 from memtomem.web.deps import get_config, get_index_engine, get_storage
 from memtomem.web.schemas.scratch import (
     ScratchDeleteResponse,
@@ -119,6 +119,8 @@ async def promote_scratch(
     # become searchable while the scratch row is marked promoted. Refuse first.
     if index_engine.is_excluded(target):
         raise HTTPException(status_code=409, detail=EXCLUDED_TARGET_DETAIL)
+    if index_engine.is_read_only_source(target):
+        raise HTTPException(status_code=409, detail=READ_ONLY_TARGET_DETAIL)
 
     append_entry(target, entry["value"], title=body.title, tags=body.tags)
 

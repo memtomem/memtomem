@@ -11,8 +11,9 @@ import tempfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Callable
+from typing import AsyncIterator
 
+from memtomem.source_provenance import WriteTargetGuard
 from starlette.datastructures import FormData, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import Request
@@ -156,16 +157,19 @@ def promote_no_overwrite(
     upload_dir: Path,
     filename: str,
     *,
-    is_excluded: Callable[[Path], bool] | None = None,
+    index_guard: WriteTargetGuard | None = None,
 ) -> Path:
     """Atomically promote by hard-linking; never replace an existing path.
 
-    ``is_excluded`` is asked for each candidate name *before* it is linked. An
+    ``index_guard`` is asked about each candidate name *before* it is linked. An
     excluded candidate raises :class:`ExcludedSourceError` rather than moving on
     to the next name: renaming past the user's pattern would bypass their rule,
-    and linking first would publish a file indexing then skips (#2488).
+    and linking first would publish a file indexing then skips (#2488). A
+    candidate under a read-only index root raises
+    :class:`ReadOnlySourceError` for the same reason — trying the next name
+    would keep probing a directory whose bytes belong to another tool.
     """
-    from memtomem.source_provenance import ExcludedSourceError
+    from memtomem.source_provenance import ExcludedSourceError, ReadOnlySourceError
 
     prepare_upload_dir(upload_dir)
     original = Path(filename or "upload").name
@@ -174,8 +178,11 @@ def promote_no_overwrite(
     candidates.extend(f"{stem}_{secrets.token_hex(6)}{suffix}" for _ in range(16))
     for candidate in candidates:
         destination = upload_dir / candidate
-        if is_excluded is not None and is_excluded(destination):
-            raise ExcludedSourceError(str(destination))
+        if index_guard is not None:
+            if index_guard.is_excluded(destination):
+                raise ExcludedSourceError(str(destination))
+            if index_guard.is_read_only_source(destination):
+                raise ReadOnlySourceError(str(destination))
         try:
             os.link(source, destination)
         except FileExistsError:

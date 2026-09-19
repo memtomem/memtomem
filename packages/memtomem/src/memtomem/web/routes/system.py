@@ -43,7 +43,12 @@ from memtomem.config import (
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.errors import NamespaceResolutionError, RetryableError
 from memtomem.search.reranker.factory import create_reranker
-from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL, ExcludedSourceError
+from memtomem.source_provenance import (
+    EXCLUDED_TARGET_DETAIL,
+    READ_ONLY_TARGET_DETAIL,
+    ExcludedSourceError,
+    ReadOnlySourceError,
+)
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.tools.memory_writer import append_entry
 from memtomem.web import hot_reload as _hot_reload
@@ -2157,6 +2162,14 @@ async def upload_files(
     )
 
     upload_dir = Path("~/.memtomem/uploads").expanduser()
+    # Before ``quarantine_uploads``, not inside it: that context manager calls
+    # ``prepare_upload_dir`` (which chmods the directory to 0700) and then
+    # creates a ``.quarantine-*`` subdirectory and writes the uploaded bytes
+    # into it. All three are writes into the destination, so refusing only at
+    # promotion time would already have modified a protected directory before
+    # deciding not to write to it.
+    if index_engine.is_read_only_source(upload_dir):
+        raise HTTPException(status_code=409, detail=READ_ONLY_TARGET_DETAIL)
 
     try:
         async with quarantine_uploads(request, upload_dir) as quarantined:
@@ -2204,7 +2217,7 @@ async def upload_files(
                 dest: Path | None = None
                 try:
                     dest = promote_no_overwrite(
-                        item.path, upload_dir, fname, is_excluded=index_engine.is_excluded
+                        item.path, upload_dir, fname, index_guard=index_engine
                     )
                     stats = await index_engine.index_file(dest, already_scanned=True)
                     # Per file (#2141): a later file in the batch can raise,
@@ -2223,6 +2236,15 @@ async def upload_files(
                     # file exists only in quarantine, which context cleanup removes.
                     results.append(
                         UploadFileResult(filename=fname, indexed_chunks=0, error="source_excluded")
+                    )
+                except ReadOnlySourceError:
+                    # Same shape as the refusal above, and ahead of the generic
+                    # handler on purpose: falling through would log a traceback
+                    # and answer "Upload processing failed", telling the user to
+                    # report a bug about a rule they configured themselves.
+                    # Nothing was linked, so quarantine cleanup is the only undo.
+                    results.append(
+                        UploadFileResult(filename=fname, indexed_chunks=0, error="source_read_only")
                     )
                 except Exception:
                     logger.exception("Upload processing failed for %s", fname)
@@ -2452,6 +2474,12 @@ async def add_memory(
     )
 
     tags = req.tags or []
+    # Before the sidecar acquire below, which creates ``.<name>.lock`` next to
+    # the target — a write into the very directory a read-only root exists to
+    # keep memtomem out of. The in-lock gate stays as the authority on the
+    # final target; this one keeps the refusal from leaving a file behind.
+    if index_engine.is_read_only_source(target):
+        raise HTTPException(status_code=409, detail=READ_ONLY_TARGET_DETAIL)
     # #1587: hold the target file's cross-process sidecar (L2) across append +
     # reindex + tag-merge so a concurrent MCP mem_edit/mem_delete rollback — in
     # this process or another — cannot erase this appended entry. ``mm web`` has
@@ -2463,6 +2491,8 @@ async def add_memory(
             # to zeroed stats. Ahead of the overridable mix refusal.
             if index_engine.is_excluded(target):
                 raise HTTPException(status_code=409, detail=EXCLUDED_TARGET_DETAIL)
+            if index_engine.is_read_only_source(target):
+                raise HTTPException(status_code=409, detail=READ_ONLY_TARGET_DETAIL)
             # Issue #2005: refuse before appending when the target already
             # holds another namespace — re-chunking would restamp its chunks
             # with this write's namespace. Inside the lock so the check and

@@ -92,6 +92,7 @@ top of the default:
 | Field | Strategy | Notes |
 |-------|----------|-------|
 | `indexing.memory_dirs` | APPEND | Each fragment contributes more roots, dedup by path string |
+| `indexing.read_only_memory_dirs` | APPEND | Same, for roots that are indexed but never rewritten; must stay disjoint from the writable roots |
 | `indexing.exclude_patterns` | APPEND | Multiple denylists merge cleanly |
 | `search.system_namespace_prefixes` | APPEND | Integrations can add further hidden namespaces on top of the `archive:` / `agent-runtime:` defaults |
 | `webhook.events` | APPEND | Fragments can subscribe to additional event types |
@@ -544,9 +545,104 @@ without a project scope, `mem_pinned_set`, approving a review
 candidate) refuse with a configuration error naming
 `indexing.memory_dirs` instead of writing anywhere else.
 
+### `read_only_memory_dirs` — index it, never write it
+
+`indexing.read_only_memory_dirs` holds index roots memtomem reads but
+never writes: an Obsidian vault, a docs checkout, any directory whose
+files another tool owns. They are discovered, watched, indexed and
+searched exactly like `memory_dirs` — read-only constrains who may
+*rewrite* the files, not whether they are findable.
+
+What refuses, and what does not:
+
+- **Chunk edit and delete** — `mem_edit` / `mem_delete` return a
+  `source_read_only` error; the Web UI's chunk edit and delete answer
+  HTTP 409.
+- **Every write that adds a memory entry** — `mem_add` and batch add,
+  `mm add`, the memory shell, `mm agent share`, review approval, the web
+  `POST /api/add` and scratch promotion, and the LangGraph integration all
+  refuse a destination under a read-only root, the same way they already
+  refuse one that indexing would skip.
+- **Writers that replace a whole file** — Notion and Obsidian imports,
+  `mem_fetch_url`, uploads and session archives refuse the target and
+  report it (the import tools count it as *"under a read-only index
+  root"*, separately from an excluded or symlinked target, because the
+  remedy differs).
+- **Pinned context** — `mem_pinned_set` and its delete refuse a protected
+  destination. Reads are unaffected, so context composition keeps working.
+- **A symlink does not get around it.** The check resolves the whole path,
+  so a link inside a writable directory that points into a protected root
+  is refused. Disjointness between the configured roots is not what the
+  protection rests on.
+- **`mm memory doctor --fix`** skips a protected root and exits non-zero,
+  since repairing a provider index means rewriting it. The root is still
+  *inspected* and reported.
+- **Not covered**, deliberately: anything where you name the destination
+  yourself, such as the path you hand `mem_export`; the canonical artifact
+  Store that `mm context` manages; and the host-global wiki
+  (`~/.memtomem-wiki`). Those are separate stores with their own roots and
+  their own commands — read-only governs memtomem's *memory* writes, not
+  every path you can point it at. Protecting one of them by listing it in
+  `read_only_memory_dirs` will not stop `mm context` or `mm wiki` from
+  writing it.
+
+The remedy is the one the error names — edit the file in whatever tool
+owns it, then reindex.
+
+```json
+{
+  "indexing": {
+    "memory_dirs": ["~/.memtomem/memories"],
+    "read_only_memory_dirs": ["~/Documents/ObsidianVault"]
+  }
+}
+```
+
+Two rules are worth knowing before you set it:
+
+- **A read-only root may not overlap a writable one.** Startup refuses a
+  configuration where a `read_only_memory_dirs` entry is the same as, is
+  inside, or contains an entry in `memory_dirs` or
+  `project_memory_dirs` — listing a directory as both writable and
+  protected is a contradiction, and hearing about it once at startup
+  beats a stream of refused writes. This is a configuration check, not
+  the enforcement: every write destination is checked directly, which is
+  what covers the cases disjointness cannot see (a symlink in a writable
+  directory pointing into a protected one, or a path derived without
+  being registered at all). Sibling directories that merely share a
+  prefix (`~/vault` and `~/vault2`) are disjoint and both allowed.
+- **A configuration that asks for protection and fails to load is
+  fatal.** An invalid `[indexing]` section is normally warned about and
+  ignored, but ignoring one that set `read_only_memory_dirs` would leave
+  the process running with no protection at all — so that case refuses
+  to start instead. A malformed value (anything other than a list) is
+  refused the same way; an explicit `[]` is fine and means "none".
+- **Protection begins when each writer picks up the config.** If you are
+  turning an already-indexed directory read-only, restart every running
+  writer after editing the config — the MCP server, `mm web`, and any
+  scheduler. A process holding the old configuration keeps answering from
+  it. Two details worth being precise about, because "it reloads
+  eventually" is not the same as "it is protected now":
+  - The MCP server re-reads the file on its next tool call and installs
+    all three root lists together, so protection arrives one tool call
+    after the edit.
+  - `mm web` reloads on config-related requests (for example
+    `GET /api/config`), **not** on the chunk edit/delete routes. Editing
+    the config on disk and immediately deleting a chunk can still use the
+    old policy. Restart `mm web`, or load the Configuration page once,
+    before relying on the change.
+
+  Chunks indexed before the change are protected as soon as the writer
+  reloads — the gate asks the configuration, not the `source_read_only`
+  flag stored on the chunk.
+
+To move a vault to a different path, change the entry and reindex; there
+is no in-place retarget.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` (+ provider folders selected in `mm init`) | Directories watched for reactive re-index (see above) |
+| `MEMTOMEM_INDEXING__READ_ONLY_MEMORY_DIRS` | `[]` | Index roots memtomem indexes and searches but never rewrites (see above); must be disjoint from the writable roots |
 | `MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS` | `[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]` | File types accepted by the indexer and file watcher |
 | `MEMTOMEM_INDEXING__WATCHER_BACKEND` | `auto` | Watch backend: `auto` uses polling on macOS and native events elsewhere; set `native` or `polling` to override |
 | `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Approximate packing preference; use the hard limit for an exact ceiling |

@@ -6,13 +6,12 @@ import ipaddress
 import re
 import socket
 from pathlib import Path
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import ParseResult, urljoin, urlparse, urlunparse
 
 from memtomem.context._atomic import atomic_write_text
 from memtomem.privacy import enforce_write_guard
-from memtomem.source_provenance import refuse_replace_target
+from memtomem.source_provenance import WriteTargetGuard, refuse_replace_target
 
 if TYPE_CHECKING:
     import httpx
@@ -36,12 +35,15 @@ class FetchTargetRefusedError(ValueError):
     """The destination file was refused before persistence (#2488).
 
     ``reason`` is ``"excluded"`` when indexing skips the destination, so the
-    saved page would never be searchable, or ``"symlink"`` when the destination
-    is a symbolic link: the exclusion check follows the link, but the atomic
-    write replaces the link itself, so the two would judge different files.
+    saved page would never be searchable, ``"symlink"`` when the destination
+    is a symbolic link (the exclusion check follows the link, but the atomic
+    write replaces the link itself, so the two would judge different files), or
+    ``"read_only"`` when it lies under a read-only index root. The three need
+    different remedies, so callers must branch on all of them rather than
+    treating one as the fallback.
     """
 
-    def __init__(self, path: Path, reason: Literal["excluded", "symlink"]) -> None:
+    def __init__(self, path: Path, reason: Literal["excluded", "symlink", "read_only"]) -> None:
         super().__init__(f"{reason}: {path}")
         self.path = path
         self.reason = reason
@@ -343,7 +345,7 @@ async def fetch_url(
     client: httpx.AsyncClient | None = None,
     force_unsafe: bool = False,
     scope: str = "user",
-    is_excluded: Callable[[Path], bool] | None = None,
+    index_guard: WriteTargetGuard | None = None,
 ) -> Path:
     """Fetch a URL, convert HTML to markdown, and save to a file.
 
@@ -420,8 +422,8 @@ async def fetch_url(
         raise FetchPrivacyError(
             "Fetched content was blocked by the redaction guard before persistence"
         )
-    if is_excluded is not None:
-        refusal = refuse_replace_target(file_path, is_excluded)
+    if index_guard is not None:
+        refusal = refuse_replace_target(file_path, index_guard)
         if refusal is not None:
             raise FetchTargetRefusedError(file_path, refusal)
     atomic_write_text(file_path, final, mode=0o600)

@@ -19,6 +19,7 @@ from memtomem.source_provenance import (
     SOURCE_READ_ONLY_DETAIL,
     STALE_SOURCE_PROVENANCE_DETAIL,
     ExcludedSourceError,
+    ReadOnlySourceError,
     StaleSourceProvenanceError,
 )
 from memtomem.tools.memory_writer import (
@@ -188,6 +189,12 @@ async def edit_chunk(
             raise HTTPException(status_code=409, detail="masked_projection_read_only")
         if meta.source_read_only:
             raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+        # Config, not the stored flag: a source indexed before its root was
+        # declared read-only still carries ``source_read_only=0``, and waiting
+        # for a re-index to stamp it would leave exactly the files the user just
+        # asked us to stop writing editable in the meantime.
+        if index_engine.is_read_only_source(meta.source_file):
+            raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
 
         inferred_scope = meta.scope or "user"
 
@@ -304,6 +311,12 @@ async def edit_chunk(
             # Raised before the helper reads or writes anything (#2488), so
             # there is nothing to invalidate.
             raise HTTPException(status_code=409, detail=EXCLUDED_SOURCE_DETAIL) from exc
+        except ReadOnlySourceError as exc:
+            # The gate above this ``try`` normally refuses first; this covers the
+            # narrow window where the config was reloaded between the two (the
+            # web runtime hot-reloads it, ``web/hot_reload.py``). Also a pure
+            # refusal — nothing read, nothing written, nothing to invalidate.
+            raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL) from exc
         except StaleSourceProvenanceError as exc:
             # Normally a pure refusal. Invalidate conservatively: if this type
             # came from a later stage, the helper still ran its normal rollback.
@@ -568,6 +581,13 @@ async def delete_chunk(
                 # leave the deleted chunk searchable (#2488).
                 if index_engine.is_excluded(source):
                     raise HTTPException(status_code=409, detail=EXCLUDED_SOURCE_DETAIL)
+                # Same reason this route copies the guard above, and the same
+                # config-over-stored-flag argument as the edit route's: the
+                # helper that would otherwise refuse is not on this path, and a
+                # source indexed before its root became read-only still has the
+                # flag unset. ``remove_lines`` below writes the file.
+                if index_engine.is_read_only_source(source):
+                    raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
                 if meta.start_line < 1 or meta.end_line < meta.start_line:
                     raise HTTPException(
                         status_code=409,

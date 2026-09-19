@@ -992,16 +992,30 @@ class AppContext:
             # (``IndexEngine._resolve_scope`` → ``classify_scope``), so a
             # missed reclassification keeps writing project-shared content
             # under user-tier rules.
-            if _same_tier(fresh.indexing.memory_dirs, indexing.memory_dirs) and _same_tier(
-                fresh.indexing.project_memory_dirs, indexing.project_memory_dirs
+            # All three tiers, and all three together. ``read_only_memory_dirs``
+            # is part of the comparison because a change that touches only it
+            # would otherwise bank the signature and never install the
+            # protection the user just asked for. It is part of the *install*
+            # because the three lists carry one invariant
+            # (``check_read_only_roots_disjoint``): ``fresh`` satisfies it, this
+            # config satisfies it, but a mix of fresh writable roots and a stale
+            # read-only list need not — a directory moved from protected to
+            # writable would sit in both, refused by the chunk-mutation gates
+            # while ingress writes it.
+            if (
+                _same_tier(fresh.indexing.memory_dirs, indexing.memory_dirs)
+                and _same_tier(fresh.indexing.project_memory_dirs, indexing.project_memory_dirs)
+                and _same_tier(fresh.indexing.read_only_memory_dirs, indexing.read_only_memory_dirs)
             ):
                 self._config_signature = signature
                 return
 
             previous_memory_dirs = list(indexing.memory_dirs)
             previous_project_dirs = list(indexing.project_memory_dirs)
+            previous_read_only_dirs = list(indexing.read_only_memory_dirs)
             indexing.memory_dirs = list(fresh.indexing.memory_dirs)
             indexing.project_memory_dirs = list(fresh.indexing.project_memory_dirs)
+            indexing.read_only_memory_dirs = list(fresh.indexing.read_only_memory_dirs)
             try:
                 await watcher.reconfigure(indexing)
             except Exception:
@@ -1013,6 +1027,7 @@ class AppContext:
                 # watch set until the user edits the file a second time.
                 indexing.memory_dirs = previous_memory_dirs
                 indexing.project_memory_dirs = previous_project_dirs
+                indexing.read_only_memory_dirs = previous_read_only_dirs
                 logger.warning(
                     "Failed to reconcile watched roots after a config change — "
                     "still watching the previous set",

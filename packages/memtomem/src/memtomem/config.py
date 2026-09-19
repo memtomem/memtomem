@@ -332,6 +332,25 @@ class IndexingConfig(ConfigModel):
     # Sibling of ``memory_dirs`` so the wizard / Sources tab / auto-discover
     # migration stay scope-unaware.
     project_memory_dirs: Annotated[list[Path], APPEND] = Field(default_factory=list)
+    # Index roots memtomem reads but never writes: an Obsidian vault, a docs
+    # checkout, any directory whose files another tool owns. Files under these
+    # roots are indexed and searchable like any other source, but every memory
+    # mutation surface refuses to rewrite them (``source_read_only``), so a
+    # chunk edit or delete cannot rewrite bytes the user did not hand us.
+    #
+    # Deliberately *not* a write-scope tier: the read-only promise covers the
+    # memory ingress/mutation surfaces, not every file write in the process —
+    # ``mem_export``, the ``mm context`` artifact Store and the ``mm wiki`` all
+    # write wherever their own roots point.
+    #
+    # Enforcement lives at those surfaces (every write target is checked with
+    # ``IndexEngine.is_read_only_source``; the pairing is enforced by
+    # ``test_read_only_target_gate_parity.py``). ``check_read_only_roots_disjoint``
+    # below is configuration validation, NOT the enforcement mechanism: it was
+    # once argued to be sufficient on its own, which was wrong — a writable root
+    # can hold a symlink into a protected one, so neither configured root
+    # contains the other and the write still lands in the protected tree.
+    read_only_memory_dirs: Annotated[list[Path], APPEND] = Field(default_factory=list)
     supported_extensions: frozenset[str] = frozenset(
         {
             ".md",
@@ -477,6 +496,48 @@ class IndexingConfig(ConfigModel):
             raise ValueError("enrich_chunk_context requires a hard chunk budget")
         return self
 
+    @model_validator(mode="after")
+    def check_read_only_roots_disjoint(self) -> "IndexingConfig":
+        """Refuse a ``read_only_memory_dirs`` entry that overlaps a writable root.
+
+        This is a configuration check, not the enforcement mechanism — the
+        distinction matters, because it was once the whole argument for
+        guarding only the chunk-mutation surfaces and that argument was wrong:
+        a writable root can hold a symlink into a protected one, so neither
+        configured root contains the other and the write still lands in the
+        protected tree. Every write target is checked directly now.
+
+        What this still buys is a clear answer at load time. A directory listed
+        as both writable and protected is a contradiction the user should hear
+        about once, at startup, rather than as a stream of refused writes into
+        a directory they also told memtomem to use.
+
+        Nesting is rejected in *both* directions: a read-only root inside a
+        writable one would be written through the parent, and a writable root
+        inside a read-only one would punch a hole in the protected subtree.
+        Comparison goes through :func:`norm_dir_prefix` so ``~`` expansion,
+        symlink aliases, Unicode NFC/NFD and the trailing-separator rule (so
+        ``/vault`` does not claim ``/vault2``) are the same ones the engine's
+        own predicate uses — a second spelling of this rule would be free to
+        drift from the one that enforces it.
+        """
+        from memtomem.storage.sqlite_helpers import norm_dir_prefix
+
+        if not self.read_only_memory_dirs:
+            return self
+        writable = [(d, norm_dir_prefix(d)) for d in (*self.memory_dirs, *self.project_memory_dirs)]
+        for ro in self.read_only_memory_dirs:
+            ro_prefix = norm_dir_prefix(ro)
+            for w, w_prefix in writable:
+                if ro_prefix.startswith(w_prefix) or w_prefix.startswith(ro_prefix):
+                    raise ValueError(
+                        f"read_only_memory_dirs entry {ro} overlaps the writable index root "
+                        f"{w}. A read-only root must be disjoint from every entry in "
+                        "memory_dirs and project_memory_dirs — otherwise a write routed "
+                        "through the writable root would land under the read-only one."
+                    )
+        return self
+
     def all_index_roots(self) -> list[Path]:
         """Return every directory the indexer should treat as a root (ADR-0011).
 
@@ -488,13 +549,22 @@ class IndexingConfig(ConfigModel):
         to act on every indexable file go through this helper instead so
         a future scope addition does not fork the consumers.
 
+        Includes ``read_only_memory_dirs``: those roots are indexed, watched
+        and re-indexed exactly like writable ones — read-only constrains who
+        may *rewrite* their files, not whether they are searchable. Consumers
+        that care about the difference ask
+        :meth:`~memtomem.indexing.engine.IndexEngine.is_read_only_source`.
+
         Entries are coerced to ``Path`` to honour the declared return
         type even when raw ``str`` values slipped past Pydantic via the
         non-validating ``setattr`` path in ``load_config_overrides`` —
         otherwise ``reindex_all`` blew up calling ``.expanduser()`` on
         the unwrapped JSON strings.
         """
-        return [Path(d) for d in (*self.memory_dirs, *self.project_memory_dirs)]
+        return [
+            Path(d)
+            for d in (*self.memory_dirs, *self.project_memory_dirs, *self.read_only_memory_dirs)
+        ]
 
 
 class DecayConfig(ConfigModel):
@@ -1951,6 +2021,44 @@ def _embedding_first(sections: Mapping[str, object]) -> list[tuple[str, object]]
     return sorted(sections.items(), key=lambda item: item[0] != "embedding")
 
 
+_PROTECTION_FIELD = "read_only_memory_dirs"
+
+
+def _rejects_a_protection_request(
+    section_name: str, payload: Mapping[str, Any], layer_keys: Iterable[str]
+) -> bool:
+    """True when dropping this rejected section would silently remove protection.
+
+    The section loaders are deliberately tolerant: an invalid section is warned
+    about and its file's values ignored, so one bad key in one fragment cannot
+    stop the server. For ``indexing.read_only_memory_dirs`` that tolerance
+    inverts the user's intent. Ignoring the section restores the previous value
+    — often an empty list — so a configuration that *asked* for roots to be
+    protected yields a running process with no protection at all and the
+    writable roots intact. The failure is silent in the one direction that
+    matters, and the log line arrives after the writers already hold the old
+    policy. So this one request is fail-closed: refusing to start is
+    recoverable, writing to a vault the user believed was protected is not.
+
+    ``layer_keys`` is what keeps that from overreaching, and it is the whole
+    reason this takes three arguments. ``payload`` is the *accumulated* section,
+    so it still carries protection an earlier layer legitimately installed;
+    deciding on it alone turned an unrelated typo in a later fragment into a
+    refused startup — the fragment never mentioned the field, and rolling it
+    back would have preserved the protection already in place. Only a layer that
+    itself set the field can lose a request by being dropped.
+    """
+    if section_name != "indexing" or _PROTECTION_FIELD not in set(layer_keys):
+        return False
+    # Not ``bool(...)``: ``null``, ``false``, ``""`` and ``{}`` are all falsey
+    # and all *malformed* here, and treating them as "asked for nothing" let
+    # them through with protection silently empty — the very outcome this
+    # exists to prevent. An empty list is the one falsey value that genuinely
+    # means "no read-only roots", so it alone stays tolerable.
+    value = payload.get(_PROTECTION_FIELD)
+    return value != []
+
+
 def _validate_loaded_section(
     config: "Mem2MemConfig",
     section_name: str,
@@ -2237,7 +2345,7 @@ def _apply_override_snapshot(
                         error=message,
                         layer="config.json",
                     )
-                if strict:
+                if strict or _rejects_a_protection_request(section_name, payload, applied_keys):
                     raise ConfigError(
                         f"Invalid config section [{section_name}] in {path}: {message}"
                     ) from exc
@@ -2474,6 +2582,20 @@ def _apply_config_fragments(
                 strategy = _merge_strategy_for(section_cls, key)
                 if strategy is not None and strategy.mode == "append":
                     if not isinstance(value, list):
+                        if section_name == "indexing" and key == _PROTECTION_FIELD:
+                            # Fail closed here too, for the same reason the
+                            # section-level arm below does: skipping a malformed
+                            # protection request leaves the process running with
+                            # no protection, which is the outcome the operator
+                            # was trying to prevent. This skip happens *before*
+                            # section validation, so that arm never sees it.
+                            from memtomem.errors import ConfigError
+
+                            raise ConfigError(
+                                f"Invalid config section [{section_name}] in {path}: "
+                                f"{key} must be a list of directories, got "
+                                f"{type(value).__name__}"
+                            )
                         _warn(
                             "Expected list for %s.%s in %s (got %s); skipping",
                             section_name,
@@ -2587,6 +2709,12 @@ def _apply_config_fragments(
                         error=message,
                         layer="config.d",
                     )
+                if _rejects_a_protection_request(section_name, payload, touched):
+                    from memtomem.errors import ConfigError
+
+                    raise ConfigError(
+                        f"Invalid config section [{section_name}] in {path}: {message}"
+                    ) from exc
                 _warn(
                     "Invalid config section [%s] in %s: %s",
                     section_name,

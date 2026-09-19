@@ -30,6 +30,7 @@ from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_L
 from memtomem.source_provenance import (
     EXCLUDED_SOURCE_DETAIL,
     EXCLUDED_TARGET_DETAIL,
+    READ_ONLY_TARGET_DETAIL,
     SOURCE_READ_ONLY_DETAIL,
     STALE_SOURCE_PROVENANCE_DETAIL,
     StaleSourceProvenanceError,
@@ -397,6 +398,12 @@ async def _mutate_file_and_reindex(
     # then re-index to zeroed stats, leaving the old chunks searchable (#2488).
     if app.index_engine.is_excluded(source_file):
         return None, f"Error: {EXCLUDED_SOURCE_DETAIL}"
+    # Likewise before any write, and asked of the config rather than the stored
+    # ``source_read_only``: the per-chunk gates in ``mem_edit`` / ``mem_delete``
+    # cannot speak for a file indexed before its root was declared read-only,
+    # whose chunks still carry the flag unset.
+    if app.index_engine.is_read_only_source(source_file):
+        return None, f"Error: {SOURCE_READ_ONLY_DETAIL}"
     # Before the awaits below, not after: a session that ends during the
     # re-index would otherwise lose the flag, and one that starts would
     # inherit a mutation that happened in its predecessor.
@@ -874,6 +881,11 @@ async def _mem_add_core(
         # idempotency claim is taken *after* the re-target check, so an aborted
         # attempt leaves no trace — not on disk, and not in the ledger.
         for _attempt in range(NS_RETARGET_ATTEMPTS):
+            # Re-asked each attempt, not only before the loop: a retarget moves
+            # ``target`` to a different day file, and the next acquire resolves
+            # and locks *that* one.
+            if app.index_engine.is_read_only_source(target):
+                return (f"Error: {READ_ONLY_TARGET_DETAIL}", None)
             try:
                 async with (
                     app.get_memory_file_lock(target),
@@ -910,6 +922,8 @@ async def _mem_add_core(
                     # one is not, so it must not be masked by it.
                     if app.index_engine.is_excluded(target):
                         return (f"Error: {EXCLUDED_TARGET_DETAIL}", None)
+                    if app.index_engine.is_read_only_source(target):
+                        return (f"Error: {READ_ONLY_TARGET_DETAIL}", None)
                     # Issue #2005: refuse before appending when the file already holds
                     # other namespaces — re-chunking would restamp their chunks with
                     # this write's namespace. Ahead of the claim, not after it: a
@@ -1857,6 +1871,9 @@ async def mem_batch_add(
         # (issue #2005): the day file's name depends on the namespace, which
         # is only authoritative once resolved inside the lock.
         for _attempt in range(NS_RETARGET_ATTEMPTS):
+            # Before the sidecar acquire: ``memory_lock_path`` RESOLVES the target, so a day file that is a symlink into a protected root gets its ``.lock`` created inside that root — a write into the directory we are about to refuse to write. The in-lock gate stays authoritative for the final target.
+            if app.index_engine.is_read_only_source(target):
+                return f"Error: {READ_ONLY_TARGET_DETAIL}"
             try:
                 async with (
                     app.get_memory_file_lock(target),
@@ -1886,6 +1903,8 @@ async def mem_batch_add(
                     # #2488 excluded-target refusal, as in ``_mem_add_core``.
                     if app.index_engine.is_excluded(target):
                         return f"Error: {EXCLUDED_TARGET_DETAIL}"
+                    if app.index_engine.is_read_only_source(target):
+                        return f"Error: {READ_ONLY_TARGET_DETAIL}"
                     # Issue #2005 mixed-namespace refusal, same rule and same
                     # before-the-claim placement as ``_mem_add_core``.
                     mix_err = await _namespace_mix_refusal(

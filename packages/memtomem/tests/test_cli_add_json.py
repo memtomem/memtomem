@@ -65,6 +65,7 @@ def _components(tmp_path: Path, *, index_error: Exception | None = None) -> Simp
             index_file=index_file,
             effective_namespace_for=AsyncMock(side_effect=lambda p, ns=None, **k: ns),
             is_excluded=lambda path: False,
+            is_read_only_source=lambda path: False,
         ),
         storage=SimpleNamespace(
             list_chunks_by_source=AsyncMock(return_value=[]),
