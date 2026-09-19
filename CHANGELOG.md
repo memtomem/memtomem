@@ -27,8 +27,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   running MCP server (and any scheduler) after declaring an already-indexed
   directory read-only; `mm web` reloads on config-related requests, **not** on
   the chunk edit/delete routes, so restart it or load the Configuration page
-  once before relying on the change. See
-  [Configuration](docs/guides/configuration.md).
+  once before relying on the change.
+
+  Two limits worth stating with the feature. Indexing a protected source still
+  writes its `.<name>.lock` sidecar beside it, so such a root is not
+  byte-for-byte untouched while being indexed — and a root on a read-only mount
+  cannot be indexed at all (#2501). And the `mm context` artifact Store and the
+  `mm wiki` are separate stores with their own roots: listing one here does not
+  stop them. See [Configuration](docs/guides/configuration.md).
 
 ## [0.6.3] — 2026-09-17
 

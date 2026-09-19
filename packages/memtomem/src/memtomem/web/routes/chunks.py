@@ -138,6 +138,15 @@ async def edit_chunk(
     if chunk.metadata.source_file.is_symlink():
         raise HTTPException(status_code=403, detail="Cannot edit chunks from symlinked files.")
 
+    # Before ``locked_source_chunk`` below: taking the L2 sidecar creates
+    # ``.<name>.lock`` next to the source with ``O_RDWR | O_CREAT``, which for a
+    # protected source is a write into the directory this root exists to keep
+    # memtomem out of — for a request that is refused a moment later. Decided on
+    # the preflight chunk; the gate further down still decides on the fresh
+    # chunk, which is what covers a concurrent migrate re-scoping it.
+    if index_engine.is_read_only_source(chunk.metadata.source_file):
+        raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+
     from memtomem import privacy
     from memtomem.tools.memory_mutation import locked_source_chunk, mutate_source_and_reindex
 
@@ -404,7 +413,16 @@ async def delete_chunk(
     # or out-of-boundary id 404s before we take a lock. It is not the
     # authoritative check — ``locked_source_chunk`` re-screens the chunk it
     # re-fetches under the lock, which is the value the delete acts on.
-    await _screened_chunk(storage, chunk_id, config)
+    preflight = await _screened_chunk(storage, chunk_id, config)
+
+    # Before ``locked_source_chunk`` below: taking the L2 sidecar creates
+    # ``.<name>.lock`` next to the source with ``O_RDWR | O_CREAT``, which for a
+    # protected source is a write into the directory this root exists to keep
+    # memtomem out of — for a request that is refused a moment later. Decided on
+    # the preflight chunk; the gate further down still decides on the fresh
+    # chunk, which is what covers a concurrent migrate re-scoping it.
+    if index_engine.is_read_only_source(preflight.metadata.source_file):
+        raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
 
     import asyncio
 

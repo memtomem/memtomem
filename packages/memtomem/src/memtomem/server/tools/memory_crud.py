@@ -291,6 +291,16 @@ async def _locked_chunk(
     if chunk is None or not in_boundary(chunk, boundary):
         yield None, f"Error: chunk {chunk_id} not found.", False
         return
+    # Before the sidecar acquire below, which creates ``.<name>.lock`` next to
+    # the source with ``O_RDWR | O_CREAT`` — a file written into a directory a
+    # read-only root exists to keep memtomem out of, for a request that is then
+    # refused anyway. Decided on the probe fetch, like the web routes do: the
+    # per-chunk gates in the tool bodies still decide on the *fresh* chunk, so a
+    # ``memory-migrate`` re-scoping this chunk while we wait is still caught
+    # there. This copy only keeps the refusal from leaving a file behind.
+    if app.index_engine.is_read_only_source(chunk.metadata.source_file):
+        yield None, f"Error: {SOURCE_READ_ONLY_DETAIL}", False
+        return
     source_file = chunk.metadata.source_file
     for _ in range(_CHUNK_LOCK_MOVE_RETRIES):
         key = AppContext.memory_file_lock_key(source_file)

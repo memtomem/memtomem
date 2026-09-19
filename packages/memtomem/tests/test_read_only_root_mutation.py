@@ -132,6 +132,92 @@ async def test_a_read_only_source_is_refused_before_any_write(
 
 
 @pytest.mark.parametrize("surface", SURFACES)
+async def test_a_refusal_leaves_no_bytes_in_the_protected_directory(read_only_source, surface):
+    """A refused mutation must not create the L2 sidecar next to the source.
+
+    ``async_memory_file_lock`` opens ``.<name>.lock`` with ``O_RDWR | O_CREAT``
+    and does not remove it on release (measured), so the lock is itself a write
+    into the directory the root exists to protect. Both MCP surfaces did exactly
+    that until the gate moved ahead of ``_locked_chunk``'s acquire; the web
+    routes already refused earlier, and are pinned here so they cannot drift
+    into the same order.
+
+    Asserted on the directory's contents rather than on the error, because the
+    error was already correct while the sidecar was still being created.
+    """
+    comp, source, chunk = read_only_source
+    # The fixture indexed this file while the root was still writable, which left
+    # its own sidecar. Clear it so what follows measures only what the refusal
+    # does — the setup's lock is not the observation.
+    for stale in source.parent.glob(".*.lock"):
+        stale.unlink()
+    before = sorted(p.name for p in source.parent.iterdir())
+    assert before == ["note.md"], f"the observation must start clean, got {before}"
+
+    _assert_read_only(await _request(comp, surface, chunk.id))
+
+    after = sorted(p.name for p in source.parent.iterdir())
+    assert after == before, f"refusal left {set(after) - set(before)} in the protected directory"
+
+
+@pytest.mark.parametrize("surface", ("mcp_edit", "web_edit"))
+async def test_a_chunk_re_scoped_into_a_protected_root_under_the_lock_is_refused(
+    bm25_only_components, tmp_path, monkeypatch, surface
+):
+    """What the *in-lock* gate is for, and the only thing the pre-lock one cannot do.
+
+    Both gates now exist on each surface, so removing either leaves the other
+    covering the ordinary case — which makes the in-lock copy unfalsifiable
+    unless something exercises its distinct job. That job is this race:
+    ``memory-migrate`` re-scopes the chunk onto a *protected* source while we
+    wait for L2, so the pre-lock gate judged the old (writable) path and only
+    the re-fetch under the lock sees where the write would actually land.
+
+    Simulated by making the second ``get_chunk`` — the one the lock helpers
+    re-fetch with — answer with the moved chunk, which is exactly the window the
+    helpers' own move-retry logic exists for.
+    """
+    import dataclasses
+
+    comp, mem_dir = bm25_only_components
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    writable_source = mem_dir / "note.md"
+    writable_source.write_text(ORIGINAL, encoding="utf-8")
+    await _index(comp, writable_source)
+    (chunk,) = await comp.storage.list_chunks_by_source(writable_source)
+
+    protected_source = vault / "note.md"
+    protected_source.write_text(ORIGINAL, encoding="utf-8")
+    comp.config.indexing.read_only_memory_dirs = [vault]
+    assert not comp.index_engine.is_read_only_source(writable_source)
+    assert comp.index_engine.is_read_only_source(protected_source)
+
+    moved = dataclasses.replace(
+        chunk, metadata=dataclasses.replace(chunk.metadata, source_file=protected_source)
+    )
+    real_get_chunk = comp.storage.get_chunk
+    calls = {"n": 0}
+
+    async def get_chunk(uid):
+        calls["n"] += 1
+        # First call is the pre-lock probe and must look writable; every later
+        # one is a re-fetch under the lock and reports the move.
+        return await real_get_chunk(uid) if calls["n"] == 1 else moved
+
+    monkeypatch.setattr(comp.storage, "get_chunk", get_chunk)
+
+    result = await _request(comp, surface, chunk.id)
+
+    assert calls["n"] >= 2, "the re-fetch under the lock did not happen; the race was not exercised"
+    if isinstance(result, str):
+        assert "read_only" in result or "not found" in result, result
+    else:
+        assert result.status_code in (404, 409), result.text
+    assert protected_source.read_text(encoding="utf-8") == ORIGINAL
+
+
+@pytest.mark.parametrize("surface", SURFACES)
 async def test_a_writable_source_still_mutates(bm25_only_components, tmp_path, surface):
     """The control: the gate refuses read-only roots, not every edit.
 

@@ -684,6 +684,14 @@ memtomem process might take it re-introduces exactly the race the lock exists
 to prevent, since two processes would then lock two different files under one
 path and both believe they hold it.
 
+> **Read-only roots are not exempt (#2501).** Indexing a source under
+> `indexing.read_only_memory_dirs` still creates its sidecar beside it, so such
+> a root is not byte-for-byte untouched while it is being indexed. Two
+> consequences: the owning tool will show the sidecars, and a root on a
+> genuinely read-only mount (or a `0555` directory) cannot be indexed at all —
+> creating the sidecar fails first. A *refused* write leaves nothing behind;
+> this is about indexing, which is supposed to happen.
+
 You will see them in any tree you index — a registered `memory_dirs` folder,
 a `mm index <path>` run, or a Reindex from the Web UI — including your own
 source repositories. A directory scan leaves one next to each file it selects
