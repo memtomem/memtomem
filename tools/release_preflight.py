@@ -90,17 +90,86 @@ def lock_version(repo_root: Path) -> str:
     return value
 
 
-def validate_contract(tag: str, repo_root: Path) -> str:
-    """Validate tag, member metadata, lock metadata, and changelog parity."""
+def registry_manifest_versions(repo_root: Path) -> tuple[str, str]:
+    """Return (server version, pypi package version) from ``server.json``.
+
+    The MCP registry rejects a record whose server version and packaged
+    distribution version disagree, and it resolves the distribution from PyPI
+    at publish time. Both therefore ride the same release tag as
+    ``pyproject.toml`` and ``uv.lock`` — a fourth place a version can drift,
+    so the release contract owns it rather than the publish step discovering
+    it (the marker in ``packages/memtomem/README.md`` is verified against the
+    *released* PyPI description, which is far too late to fix).
+    """
+    manifest_path = repo_root / "server.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseCheckError(f"cannot read valid JSON from {manifest_path}: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ReleaseCheckError(f"{manifest_path} must contain a JSON object")
+    server_version = manifest.get("version")
+    if not isinstance(server_version, str) or not server_version:
+        raise ReleaseCheckError(f"missing version in {manifest_path}")
+    packages = manifest.get("packages")
+    if not isinstance(packages, list):
+        raise ReleaseCheckError(f"missing packages array in {manifest_path}")
+    # A non-object entry is a malformed manifest, not a non-match: skipping it
+    # would let ``[{valid}, null]`` pass a check whose whole job is to fail closed.
+    for position, row in enumerate(packages):
+        if not isinstance(row, dict):
+            raise ReleaseCheckError(
+                f"packages[{position}] in {manifest_path} is not an object: {row!r}"
+            )
+    pypi = [
+        row
+        for row in packages
+        if row.get("registryType") == "pypi" and row.get("identifier") == "memtomem"
+    ]
+    if len(pypi) != 1:
+        raise ReleaseCheckError(
+            f"expected one pypi memtomem package in {manifest_path}, found {len(pypi)}"
+        )
+    package_version = pypi[0].get("version")
+    if not isinstance(package_version, str) or not package_version:
+        raise ReleaseCheckError(f"missing pypi package version in {manifest_path}")
+    return server_version, package_version
+
+
+def validate_contract(tag: str, repo_root: Path, *, require_registry_manifest: bool = False) -> str:
+    """Validate tag, member metadata, lock metadata, and changelog parity.
+
+    ``require_registry_manifest`` is opt-in because this validator runs against
+    two different trees. A release validates the tree it is cutting, which must
+    carry ``server.json``. The SBOM workflow runs *current* tooling against an
+    **immutable historical checkout** (``release-sbom.yml`` checks out the tag
+    into ``release/``), and every tag predating the manifest legitimately has no
+    such file — making it mandatory there would break backfills for the whole
+    existing release history. The release workflow passes the flag; a guard test
+    pins that it keeps doing so, so the opt-in cannot rot into a silent skip.
+    """
     expected = version_from_tag(tag)
     actual_project = project_version(repo_root)
     actual_lock = lock_version(repo_root)
+    if require_registry_manifest:
+        actual_server, actual_server_package = registry_manifest_versions(repo_root)
+    else:
+        actual_server = actual_server_package = expected
     if actual_project != expected:
         raise ReleaseCheckError(
             f"tag version {expected} does not match package version {actual_project}"
         )
     if actual_lock != expected:
         raise ReleaseCheckError(f"tag version {expected} does not match lock version {actual_lock}")
+    if actual_server != expected:
+        raise ReleaseCheckError(
+            f"tag version {expected} does not match server.json version {actual_server}"
+        )
+    if actual_server_package != expected:
+        raise ReleaseCheckError(
+            f"tag version {expected} does not match server.json pypi package version "
+            f"{actual_server_package}"
+        )
     changelog = (repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
     if not re.search(rf"^## \[{re.escape(expected)}\](?:\s|$)", changelog, re.MULTILINE):
         raise ReleaseCheckError(f"CHANGELOG.md has no release heading for {expected}")
@@ -343,6 +412,14 @@ def _build_parser() -> argparse.ArgumentParser:
     contract.add_argument("--tag", required=True)
     contract.add_argument("--repo-root", type=Path, default=Path.cwd())
     contract.add_argument("--github-output")
+    contract.add_argument(
+        "--require-registry-manifest",
+        action="store_true",
+        help=(
+            "Also require server.json to match the tag. Off by default so SBOM "
+            "backfills can validate historical tags that predate the manifest."
+        ),
+    )
 
     artifacts = subparsers.add_parser("artifacts")
     artifacts.add_argument("--dist", type=Path, required=True)
@@ -361,7 +438,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         if args.command == "contract":
-            version = validate_contract(args.tag, args.repo_root.resolve())
+            version = validate_contract(
+                args.tag,
+                args.repo_root.resolve(),
+                require_registry_manifest=args.require_registry_manifest,
+            )
             _write_github_output(args.github_output, "version", version)
             print(version)
         elif args.command == "artifacts":

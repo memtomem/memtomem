@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import tarfile
 import zipfile
 from pathlib import Path
@@ -32,6 +33,9 @@ def _repo(
     *,
     version: str = "0.3.6",
     lock_version: str | None = None,
+    server_version: str | None = None,
+    server_package_version: str | None = None,
+    server_manifest: str | None = None,
     cryptography: str = ">=48.0.1",
     urllib3: str = ">=2.7.0",
 ) -> Path:
@@ -61,6 +65,23 @@ def _repo(
         encoding="utf-8",
     )
     (tmp_path / "CHANGELOG.md").write_text(f"## [{version}] — 2026-07-12\n", encoding="utf-8")
+    if server_manifest is None:
+        server_manifest = json.dumps(
+            {
+                "name": "io.github.memtomem/memtomem",
+                "description": "test",
+                "version": server_version or version,
+                "packages": [
+                    {
+                        "registryType": "pypi",
+                        "identifier": "memtomem",
+                        "version": server_package_version or version,
+                        "transport": {"type": "stdio"},
+                    }
+                ],
+            }
+        )
+    (tmp_path / "server.json").write_text(server_manifest, encoding="utf-8")
     return tmp_path
 
 
@@ -118,9 +139,146 @@ def test_contract_accepts_matching_project_lock_and_changelog(tmp_path: Path) ->
     assert rp.validate_contract("v0.3.6", _repo(tmp_path)) == "0.3.6"
 
 
+def test_contract_accepts_a_matching_registry_manifest(tmp_path: Path) -> None:
+    assert (
+        rp.validate_contract("v0.3.6", _repo(tmp_path), require_registry_manifest=True) == "0.3.6"
+    )
+
+
+def test_contract_rejects_a_non_object_manifest_root(tmp_path: Path) -> None:
+    with pytest.raises(rp.ReleaseCheckError, match="must contain a JSON object"):
+        rp.validate_contract(
+            "v0.3.6", _repo(tmp_path, server_manifest="[]"), require_registry_manifest=True
+        )
+
+
+def test_contract_rejects_a_malformed_package_entry_beside_a_valid_one(tmp_path: Path) -> None:
+    """A valid match must not launder a malformed sibling entry."""
+    manifest = json.dumps(
+        {
+            "version": "0.3.6",
+            "packages": [
+                {
+                    "registryType": "pypi",
+                    "identifier": "memtomem",
+                    "version": "0.3.6",
+                    "transport": {"type": "stdio"},
+                },
+                None,
+            ],
+        }
+    )
+    with pytest.raises(rp.ReleaseCheckError, match=r"packages\[1\]"):
+        rp.validate_contract(
+            "v0.3.6", _repo(tmp_path, server_manifest=manifest), require_registry_manifest=True
+        )
+
+
+def test_release_workflow_opts_into_the_registry_manifest_check() -> None:
+    """The opt-in must not rot into a silent skip at the one call site that needs it."""
+    workflow = (_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "--require-registry-manifest" in workflow
+
+
+def test_sbom_workflow_does_not_require_the_registry_manifest() -> None:
+    """It validates historical tags, which legitimately have no manifest."""
+    workflow = (_ROOT / ".github" / "workflows" / "release-sbom.yml").read_text(encoding="utf-8")
+    assert "--require-registry-manifest" not in workflow
+
+
 def test_contract_rejects_lock_drift(tmp_path: Path) -> None:
     with pytest.raises(rp.ReleaseCheckError, match="lock version"):
         rp.validate_contract("v0.3.6", _repo(tmp_path, lock_version="0.3.5"))
+
+
+def test_contract_rejects_server_manifest_drift(tmp_path: Path) -> None:
+    """The registry record's own version is the fourth place a release can drift."""
+    with pytest.raises(rp.ReleaseCheckError, match="server.json version"):
+        rp.validate_contract(
+            "v0.3.6", _repo(tmp_path, server_version="0.3.5"), require_registry_manifest=True
+        )
+
+
+def test_contract_rejects_server_manifest_package_drift(tmp_path: Path) -> None:
+    """The registry rejects a record whose packaged distribution disagrees."""
+    with pytest.raises(rp.ReleaseCheckError, match="pypi package version"):
+        rp.validate_contract(
+            "v0.3.6",
+            _repo(tmp_path, server_package_version="0.3.5"),
+            require_registry_manifest=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("manifest", "expected"),
+    [
+        ("{ not json", "valid JSON"),
+        (json.dumps({"packages": []}), "missing version"),
+        (json.dumps({"version": "0.3.6"}), "missing packages array"),
+        (
+            json.dumps(
+                {
+                    "version": "0.3.6",
+                    "packages": [{"registryType": "npm", "identifier": "memtomem"}],
+                }
+            ),
+            "found 0",
+        ),
+        (
+            json.dumps(
+                {
+                    "version": "0.3.6",
+                    "packages": [
+                        {"registryType": "pypi", "identifier": "memtomem", "version": "0.3.6"},
+                        {"registryType": "pypi", "identifier": "memtomem", "version": "0.3.6"},
+                    ],
+                }
+            ),
+            "found 2",
+        ),
+        (
+            json.dumps(
+                {
+                    "version": "0.3.6",
+                    "packages": [{"registryType": "pypi", "identifier": "memtomem"}],
+                }
+            ),
+            "missing pypi package version",
+        ),
+    ],
+)
+def test_contract_fails_closed_on_unusable_server_manifest(
+    tmp_path: Path, manifest: str, expected: str
+) -> None:
+    """An unreadable manifest fails the release rather than being skipped."""
+    with pytest.raises(rp.ReleaseCheckError, match=expected):
+        rp.validate_contract(
+            "v0.3.6", _repo(tmp_path, server_manifest=manifest), require_registry_manifest=True
+        )
+
+
+def test_contract_reports_a_missing_server_manifest(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "server.json").unlink()
+    with pytest.raises(rp.ReleaseCheckError, match="cannot read valid JSON"):
+        rp.validate_contract("v0.3.6", repo, require_registry_manifest=True)
+
+
+def test_contract_skips_the_manifest_for_historical_tags(tmp_path: Path) -> None:
+    """``release-sbom.yml`` runs current tooling against an immutable old tag.
+
+    Every release predating ``server.json`` has no manifest; requiring one
+    unconditionally would break SBOM backfills across the whole history.
+    """
+    repo = _repo(tmp_path)
+    (repo / "server.json").unlink()
+
+    assert rp.validate_contract("v0.3.6", repo) == "0.3.6"
+
+
+def test_contract_ignores_manifest_drift_when_not_required(tmp_path: Path) -> None:
+    """The opt-out really is an opt-out — otherwise the flag means nothing."""
+    assert rp.validate_contract("v0.3.6", _repo(tmp_path, server_version="0.3.5")) == "0.3.6"
 
 
 def test_contract_rejects_missing_changelog_heading(tmp_path: Path) -> None:

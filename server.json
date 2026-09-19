@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.memtomem/memtomem",
+  "description": "Markdown-first long-term memory for AI agents. Hybrid BM25 + vector search, runs locally.",
+  "version": "0.6.3",
+  "repository": {
+    "url": "https://github.com/memtomem/memtomem",
+    "source": "github"
+  },
+  "websiteUrl": "https://memtomem.com",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "memtomem",
+      "version": "0.6.3",
+      "runtimeHint": "uvx",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve",
+          "valueHint": "subcommand",
+          "description": "Run the MCP stdio server. The distribution's console script is the CLI, so the server needs this subcommand."
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
