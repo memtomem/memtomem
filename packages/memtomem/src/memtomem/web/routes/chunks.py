@@ -19,6 +19,7 @@ from memtomem.source_provenance import (
     SOURCE_READ_ONLY_DETAIL,
     STALE_SOURCE_PROVENANCE_DETAIL,
     ExcludedSourceError,
+    ReadOnlySourceError,
     StaleSourceProvenanceError,
 )
 from memtomem.tools.memory_writer import (
@@ -137,6 +138,15 @@ async def edit_chunk(
     if chunk.metadata.source_file.is_symlink():
         raise HTTPException(status_code=403, detail="Cannot edit chunks from symlinked files.")
 
+    # Before ``locked_source_chunk`` below: taking the L2 sidecar creates
+    # ``.<name>.lock`` next to the source with ``O_RDWR | O_CREAT``, which for a
+    # protected source is a write into the directory this root exists to keep
+    # memtomem out of — for a request that is refused a moment later. Decided on
+    # the preflight chunk; the gate further down still decides on the fresh
+    # chunk, which is what covers a concurrent migrate re-scoping it.
+    if index_engine.is_read_only_source(chunk.metadata.source_file):
+        raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+
     from memtomem import privacy
     from memtomem.tools.memory_mutation import locked_source_chunk, mutate_source_and_reindex
 
@@ -187,6 +197,12 @@ async def edit_chunk(
         if chunk.metadata.redaction_count:
             raise HTTPException(status_code=409, detail="masked_projection_read_only")
         if meta.source_read_only:
+            raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+        # Config, not the stored flag: a source indexed before its root was
+        # declared read-only still carries ``source_read_only=0``, and waiting
+        # for a re-index to stamp it would leave exactly the files the user just
+        # asked us to stop writing editable in the meantime.
+        if index_engine.is_read_only_source(meta.source_file):
             raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
 
         inferred_scope = meta.scope or "user"
@@ -304,6 +320,12 @@ async def edit_chunk(
             # Raised before the helper reads or writes anything (#2488), so
             # there is nothing to invalidate.
             raise HTTPException(status_code=409, detail=EXCLUDED_SOURCE_DETAIL) from exc
+        except ReadOnlySourceError as exc:
+            # The gate above this ``try`` normally refuses first; this covers the
+            # narrow window where the config was reloaded between the two (the
+            # web runtime hot-reloads it, ``web/hot_reload.py``). Also a pure
+            # refusal — nothing read, nothing written, nothing to invalidate.
+            raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL) from exc
         except StaleSourceProvenanceError as exc:
             # Normally a pure refusal. Invalidate conservatively: if this type
             # came from a later stage, the helper still ran its normal rollback.
@@ -391,7 +413,16 @@ async def delete_chunk(
     # or out-of-boundary id 404s before we take a lock. It is not the
     # authoritative check — ``locked_source_chunk`` re-screens the chunk it
     # re-fetches under the lock, which is the value the delete acts on.
-    await _screened_chunk(storage, chunk_id, config)
+    preflight = await _screened_chunk(storage, chunk_id, config)
+
+    # Before ``locked_source_chunk`` below: taking the L2 sidecar creates
+    # ``.<name>.lock`` next to the source with ``O_RDWR | O_CREAT``, which for a
+    # protected source is a write into the directory this root exists to keep
+    # memtomem out of — for a request that is refused a moment later. Decided on
+    # the preflight chunk; the gate further down still decides on the fresh
+    # chunk, which is what covers a concurrent migrate re-scoping it.
+    if index_engine.is_read_only_source(preflight.metadata.source_file):
+        raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
 
     import asyncio
 
@@ -568,6 +599,13 @@ async def delete_chunk(
                 # leave the deleted chunk searchable (#2488).
                 if index_engine.is_excluded(source):
                     raise HTTPException(status_code=409, detail=EXCLUDED_SOURCE_DETAIL)
+                # Same reason this route copies the guard above, and the same
+                # config-over-stored-flag argument as the edit route's: the
+                # helper that would otherwise refuse is not on this path, and a
+                # source indexed before its root became read-only still has the
+                # flag unset. ``remove_lines`` below writes the file.
+                if index_engine.is_read_only_source(source):
+                    raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
                 if meta.start_line < 1 or meta.end_line < meta.start_line:
                     raise HTTPException(
                         status_code=409,

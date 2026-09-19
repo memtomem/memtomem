@@ -58,7 +58,7 @@ async def mem_fetch(
 
     from memtomem.config import classify_scope
     from memtomem.indexing.url_fetcher import FetchPrivacyError, FetchTargetRefusedError
-    from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
+    from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL, READ_ONLY_TARGET_DETAIL
 
     scope, _ = classify_scope(output_dir, app.config.indexing.project_memory_dirs)
     try:
@@ -67,7 +67,7 @@ async def mem_fetch(
             output_dir,
             force_unsafe=force_unsafe,
             scope=scope,
-            is_excluded=app.index_engine.is_excluded,
+            index_guard=app.index_engine,
         )
     except FetchPrivacyError:
         return "Fetch blocked by the redaction guard; no file was written."
@@ -75,10 +75,16 @@ async def mem_fetch(
         # #2488: refused before the write, so nothing is on disk to clean up.
         if exc.reason == "excluded":
             return f"Error: {EXCLUDED_TARGET_DETAIL}"
-        return (
-            f"Error: the fetch destination {exc.path} is a symbolic link; nothing was "
-            "written. Remove the link to fetch this URL."
-        )
+        if exc.reason == "read_only":
+            return f"Error: {READ_ONLY_TARGET_DETAIL}"
+        if exc.reason == "symlink":
+            return (
+                f"Error: the fetch destination {exc.path} is a symbolic link; nothing was "
+                "written. Remove the link to fetch this URL."
+            )
+        # Every reason above is handled; a new one must not inherit the last
+        # message and tell the user to remove a link that is not there.
+        return f"Error: the fetch destination {exc.path} was refused ({exc.reason})."
     except Exception as exc:
         return f"Error fetching URL: {exc}"
 

@@ -41,6 +41,8 @@ from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.indexing.redaction_exemption import declared_exemption
 from memtomem.models import Chunk, IndexingStats
+from memtomem.storage.sqlite_helpers import norm_dir_prefix as _norm_dir_prefix
+from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 
 if TYPE_CHECKING:
@@ -480,40 +482,10 @@ def _dir_creation_time_iso(p: Path) -> str | None:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
-def norm_dir_prefix(d: str | Path) -> str:
-    """Return the directory path normalized for ``str.startswith`` matching.
-
-    Adds a trailing ``os.sep`` (platform-native separator) so a configured
-    dir does not falsely claim files under a sibling sharing the same
-    prefix (e.g. ``/foo`` should not match ``/foo-bar/...``). Always runs
-    through :func:`~memtomem.storage.sqlite_helpers.norm_path` (which
-    resolves symlinks and applies Unicode NFC) so the prefix shape matches
-    the source-side normalisation regardless of whether the dir currently
-    exists on disk — the chunks table holds resolved paths, and a
-    configured-but-missing dir would otherwise compare in raw ``/tmp``
-    form against resolved ``/private/tmp`` source paths on macOS.
-
-    The trailing-separator step uses ``os.sep`` rather than a hardcoded
-    ``"/"`` so the prefix is consistent with ``norm_path``'s output on
-    Windows, where ``Path.resolve()`` returns backslash-separated strings
-    (``C:\\Users\\foo``) — a hardcoded ``"/"`` would yield a mixed-form
-    prefix that never matches a native source path under
-    ``startswith`` (#647). On POSIX, ``os.sep == "/"`` so behaviour is
-    unchanged.
-
-    Used by both :func:`memory_dir_stats` (which buckets chunks per
-    configured dir) and :func:`resolve_owning_memory_dir` (which goes
-    the other way — given a source, find the owning dir). Keeping the
-    normalisation in one place ensures the two views stay consistent
-    when the prefix rules evolve.
-    """
-    from memtomem.storage.sqlite_helpers import norm_path
-
-    p = Path(d).expanduser()
-    base = norm_path(p)
-    if not base.endswith(os.sep):
-        base += os.sep
-    return base
+# Re-exported (not redefined) so the four call sites that import it from this
+# module keep working while ``config`` can validate read-only roots with the
+# same predicate without importing the engine. See the helper's own docstring.
+norm_dir_prefix = _norm_dir_prefix
 
 
 def resolve_owning_memory_dir(
@@ -1505,6 +1477,9 @@ class IndexEngine:
         # catches partially overlapping ranges, such as a first fragment that
         # includes the section heading and later fragments on its last line.
         shared_lines: set[int] = set()
+        # Hoisted out of the per-chunk loop: the answer is a property of the
+        # file, not of any one chunk, and it costs a path resolve per root.
+        under_read_only_root = self.is_read_only_source(file_path)
         furthest_end = 0
         furthest_index = -1
         ranges = sorted(
@@ -1524,6 +1499,7 @@ class IndexEngine:
                 or bool(chunk.metadata.redaction_count)
                 or index in shared_lines
                 or incompatible_lines
+                or under_read_only_root
             )
             if not read_only and span not in span_hashes:
                 span_hashes[span] = source_span_hash(source_lines, *span)
@@ -1751,6 +1727,33 @@ class IndexEngine:
         """
         user_spec = _build_exclude_spec(self._config.exclude_patterns)
         return _path_is_excluded(file_path, self._config.all_index_roots(), user_spec)
+
+    def is_read_only_source(self, file_path: Path) -> bool:
+        """True when ``file_path`` lies under a configured read-only index root.
+
+        The sibling of :meth:`is_excluded`: both answer "may this source be
+        written?" from configuration alone, so a mutation surface can refuse
+        *before* touching the file. Unlike ``is_excluded`` a read-only source
+        is still indexed — the flag only withholds the right to rewrite it.
+
+        Two callers, deliberately: :meth:`chunk_content` stamps
+        ``source_read_only`` on new chunks (so the existing per-chunk gates
+        cover them), and the mutation surfaces consult this directly, which is
+        what protects a source indexed *before* its root was declared
+        read-only — those chunks still carry ``source_read_only=0`` and would
+        otherwise stay writable until a re-index.
+
+        Both sides canonicalise through the same pair of helpers the rest of
+        the root machinery uses — :func:`~memtomem.storage.sqlite_helpers.norm_path`
+        for the source and :func:`norm_dir_prefix` for each root — so ``~``
+        expansion, symlink aliases, Unicode NFC/NFD and the trailing-separator
+        rule (``/vault`` must not claim ``/vault2``) behave here exactly as
+        they do in :func:`resolve_owning_memory_dir`. Neither helper raises on
+        a path that cannot be resolved: ``norm_path`` falls back to the input
+        spelling, and a missing directory still yields a usable prefix, which
+        is why an unavailable mount does not turn this into an error path.
+        """
+        return _is_under_any_root(file_path, self._config.read_only_memory_dirs)
 
     async def index_file(
         self,

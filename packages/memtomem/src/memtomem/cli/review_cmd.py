@@ -195,7 +195,10 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
             daily_target: Path | None = None
             if candidate["destination"] != "pinned":
                 from memtomem.memory_scope import require_user_base
-                from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
+                from memtomem.source_provenance import (
+                    EXCLUDED_TARGET_DETAIL,
+                    READ_ONLY_TARGET_DETAIL,
+                )
 
                 base = require_user_base(
                     comp.config.indexing.memory_dirs,
@@ -206,6 +209,8 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                 # zeroed stats, leaving the entry unindexed.
                 if comp.index_engine.is_excluded(daily_target):
                     raise click.ClickException(EXCLUDED_TARGET_DETAIL)
+                if comp.index_engine.is_read_only_source(daily_target):
+                    raise click.ClickException(READ_ONLY_TARGET_DETAIL)
             claimed = await comp.storage.claim_memory_candidate(candidate_id, reviewer, reason)
             if claimed is None:
                 raise click.ClickException("Candidate state changed concurrently")

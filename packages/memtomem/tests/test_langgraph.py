@@ -598,6 +598,7 @@ class TestAddPrivacyGate:
         # A ``MagicMock`` predicate answers truthy, which the #2488 guard reads
         # as "excluded"; these tests are about the privacy gate.
         comp.index_engine.is_excluded = MagicMock(return_value=False)
+        comp.index_engine.is_read_only_source = MagicMock(return_value=False)
         # ``add`` classifies its target against this list (ADR-0011 §5, #2321).
         # Named explicitly rather than left as a MagicMock attribute so these
         # tests assert a user-tier write because the config says so, not

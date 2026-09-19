@@ -25,7 +25,11 @@ from typing import TYPE_CHECKING
 from memtomem.context import _atomic
 from memtomem.context._atomic import async_memory_file_lock
 from memtomem.search.visibility import chunk_in_scope_boundary
-from memtomem.source_provenance import ExcludedSourceError, StaleSourceProvenanceError
+from memtomem.source_provenance import (
+    ExcludedSourceError,
+    ReadOnlySourceError,
+    StaleSourceProvenanceError,
+)
 from memtomem.tools.memory_writer import (
     RestoreOutcome,
     SourceChangedError,
@@ -160,10 +164,15 @@ async def mutate_source_and_reindex(
 
     A source indexing now skips raises :class:`ExcludedSourceError` before
     anything is read or written: its re-index would return zeroed stats and
-    leave the old chunks searchable beside the new bytes (#2488).
+    leave the old chunks searchable beside the new bytes (#2488). A source under
+    a read-only index root raises :class:`ReadOnlySourceError` in the same
+    place and for the same reason — refusing before the read is what keeps a
+    write off a file another tool owns, whatever the stored per-chunk flag says.
     """
     if index_engine.is_excluded(source_file):
         raise ExcludedSourceError(str(source_file))
+    if index_engine.is_read_only_source(source_file):
+        raise ReadOnlySourceError(str(source_file))
     pre_image = await asyncio.to_thread(read_pre_image, source_file)
     mutation_completed = False
     try:

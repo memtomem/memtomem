@@ -474,7 +474,7 @@ async def _fetch(comp, output_dir: Path, monkeypatch):
             "https://example.com/page",
             output_dir,
             client=client,
-            is_excluded=comp.index_engine.is_excluded,
+            index_guard=comp.index_engine,
         )
 
 
@@ -584,7 +584,8 @@ async def test_obsidian_import_that_writes_nothing_says_why(bm25_only_components
 
     assert result == (
         "Obsidian import wrote nothing: 2 target(s) excluded from indexing, "
-        "0 target(s) are symbolic links, 0 file(s) blocked by the redaction guard."
+        "0 target(s) are symbolic links, 0 target(s) under a read-only index root, "
+        "0 file(s) blocked by the redaction guard."
     )
     assert not (mem_dir / "_imported" / "obsidian" / "kept.md").exists()
 
@@ -615,7 +616,7 @@ async def test_importer_skips_a_symlinked_target(bm25_only_components, tmp_path,
     imported = await import_obsidian(
         _vault(tmp_path),
         out,
-        is_excluded=comp.index_engine.is_excluded,
+        index_guard=comp.index_engine,
         excluded_paths=excluded,
         symlink_paths=symlinks,
     )

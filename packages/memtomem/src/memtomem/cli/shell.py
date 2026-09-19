@@ -229,6 +229,11 @@ async def _cmd_add(comp, args: list[str]) -> None:
 
         click.secho(EXCLUDED_TARGET_DETAIL, fg="red")
         return
+    if comp.index_engine.is_read_only_source(target):
+        from memtomem.source_provenance import READ_ONLY_TARGET_DETAIL
+
+        click.secho(READ_ONLY_TARGET_DETAIL, fg="red")
+        return
     target.parent.mkdir(parents=True, exist_ok=True)
 
     append_entry(target, content)

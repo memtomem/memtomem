@@ -13,6 +13,7 @@ from memtomem import privacy
 from memtomem.config import Mem2MemConfig, TargetScope
 from memtomem.context._atomic import atomic_write_text
 from memtomem.errors import ConfigError
+from memtomem.source_provenance import READ_ONLY_TARGET_DETAIL
 from memtomem.memory_scope import (
     EMPTY_MEMORY_DIRS_ERROR,
     require_user_base,
@@ -153,6 +154,28 @@ class PinnedContextStore:
             except ConfigError as exc:
                 self._user_base_refusal = str(exc)
 
+    def _refuse_if_read_only(self, path: Path) -> None:
+        """Refuse a pinned write whose destination is under a read-only root.
+
+        Checked on the *resolved destination*, not on the declared scope, which
+        is what the registered-root lists can and cannot tell us apart: a
+        project tier is derived here (``_base`` → ``resolve_memory_scope_dir``)
+        without that tier having to appear in ``project_memory_dirs``, so a
+        configuration may protect ``<project>/.memtomem/memories.local`` while
+        only its sibling is registered — disjoint roots, and a write straight
+        into the protected one. Resolution also catches a symlink beneath the
+        pinned directory.
+
+        Only the two mutating methods call this, matching the #2322 rule above:
+        reads must stay total, because ``mem_context_compose`` answering with an
+        error instead of a bundle is the shape #1768 exists to prevent.
+        """
+        from memtomem.storage.sqlite_helpers import is_under_any_root
+
+        roots = self.config.indexing.read_only_memory_dirs
+        if is_under_any_root(path, roots):
+            raise ConfigError(READ_ONLY_TARGET_DETAIL)
+
     def _base(self, scope: TargetScope) -> Path:
         if scope == "user":
             if self.user_base is None:
@@ -234,6 +257,7 @@ class PinnedContextStore:
             "agent_id": agent_id,
         }
         frontmatter = yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False).rstrip()
+        self._refuse_if_read_only(path)
         atomic_write_text(path, f"---\n{frontmatter}\n---\n{content.rstrip()}\n")
         return PinnedBlock(
             block_id=block_id,
@@ -301,6 +325,7 @@ class PinnedContextStore:
                 audit_context={"block_id": block_id},
             )
         path = self._path(scope, block_id, agent_id)
+        self._refuse_if_read_only(path)
         existed = path.exists()
         path.unlink(missing_ok=True)
         return existed

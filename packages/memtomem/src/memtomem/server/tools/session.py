@@ -967,7 +967,7 @@ async def _write_summary_archive(
     # and a symlinked one would be judged through the link but replaced itself.
     # Either way no chunk results, so answer the "no chunk" contract without
     # writing.
-    refusal = refuse_replace_target(prepared.target, app.index_engine.is_excluded)
+    refusal = refuse_replace_target(prepared.target, app.index_engine)
     if refusal is not None:
         logger.warning("session_summary_target_refused reason=%s path=%s", refusal, prepared.target)
         return None, None

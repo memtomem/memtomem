@@ -414,6 +414,11 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         # (#1587). Checking outside the lock would let another writer change
         # the file's namespace in between and turn the guard into decoration.
         # ``lock_held=True`` skips the nested engine acquire.
+        # Before the sidecar acquire: ``memory_lock_path`` RESOLVES the target, so a day file that is a symlink into a protected root gets its ``.lock`` created inside that root — a write into the directory we are about to refuse to write. The in-lock gate stays authoritative for the final target.
+        if comp.index_engine.is_read_only_source(path):
+            from memtomem.source_provenance import READ_ONLY_TARGET_DETAIL
+
+            raise click.ClickException(READ_ONLY_TARGET_DETAIL)
         try:
             async with async_file_lock(memory_lock_path(path), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
                 # #2488: an excluded target would take the append and re-index to
@@ -422,6 +427,10 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                     from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
 
                     raise click.ClickException(EXCLUDED_TARGET_DETAIL)
+                if comp.index_engine.is_read_only_source(path):
+                    from memtomem.source_provenance import READ_ONLY_TARGET_DETAIL
+
+                    raise click.ClickException(READ_ONLY_TARGET_DETAIL)
                 mix_err = await namespace_mix_refusal(
                     index_engine=comp.index_engine,
                     storage=comp.storage,

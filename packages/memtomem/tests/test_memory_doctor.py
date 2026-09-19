@@ -3428,7 +3428,13 @@ class TestFixCli:
         payload = json.loads(result.output)
         assert payload["status"] == "would-fix"
         assert payload["applied"] is False
-        assert payload["summary"] == {"files": 1, "lines": 1, "skipped": 0, "errors": 0}
+        assert payload["summary"] == {
+            "files": 1,
+            "lines": 1,
+            "skipped": 0,
+            "errors": 0,
+            "read_only_refused": 0,
+        }
         f = payload["files"][0]
         assert f["index_file"] == "MEMORY.md"
         assert f["removed"] == [{"line": 2, "text": "- [Dead](gone.md) — drop"}]
@@ -3456,7 +3462,13 @@ class TestFixCli:
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--json"])
         payload = json.loads(result.output)
         assert payload["status"] == "would-partial"  # NOT would-fix, NOT clean
-        assert payload["summary"] == {"files": 1, "lines": 1, "skipped": 1, "errors": 0}
+        assert payload["summary"] == {
+            "files": 1,
+            "lines": 1,
+            "skipped": 1,
+            "errors": 0,
+            "read_only_refused": 0,
+        }
         f = payload["files"][0]
         assert f["removed"] == [{"line": 1, "text": "- [Dead](gone.md) — drop"}]
         assert f["skipped"] == [
@@ -3610,7 +3622,13 @@ class TestFixCli:
 
         payload = json.loads(result.output)
         assert payload["status"] == "partial"
-        assert payload["summary"] == {"files": 1, "lines": 0, "skipped": 1, "errors": 0}
+        assert payload["summary"] == {
+            "files": 1,
+            "lines": 0,
+            "skipped": 1,
+            "errors": 0,
+            "read_only_refused": 0,
+        }
         assert result.exit_code == 1
         assert (mem_dir / "MEMORY.md").read_bytes() == before
 
@@ -3632,7 +3650,13 @@ class TestFixCli:
         f = payload["files"][0]
         assert "utf-8" in f["error"]
         assert f["removed"] == [] and f["skipped"] == []
-        assert payload["summary"] == {"files": 1, "lines": 0, "skipped": 0, "errors": 1}
+        assert payload["summary"] == {
+            "files": 1,
+            "lines": 0,
+            "skipped": 0,
+            "errors": 1,
+            "read_only_refused": 0,
+        }
 
     def test_fix_apply_unreadable_index_is_error_and_writes_nothing(self, tmp_path, monkeypatch):
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._BODY)
@@ -3663,7 +3687,13 @@ class TestFixCli:
         payload = json.loads(result.output)
         assert payload["status"] == "error"  # precedence: error > fixed
         assert result.exit_code == 1
-        assert payload["summary"] == {"files": 2, "lines": 1, "skipped": 0, "errors": 1}
+        assert payload["summary"] == {
+            "files": 2,
+            "lines": 1,
+            "skipped": 0,
+            "errors": 1,
+            "read_only_refused": 0,
+        }
         good = next(f for f in payload["files"] if f["error"] is None)
         bad = next(f for f in payload["files"] if f["error"] is not None)
         assert good["removed"] == [{"line": 2, "text": "- [Dead](gone.md) — drop"}]
