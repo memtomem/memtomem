@@ -801,6 +801,15 @@ def test_artifacts_reject_unsafe_sdist_members(tmp_path: Path, member_kind: str)
         rp.validate_artifacts(dist, "0.3.6", repo)
 
 
+class _JSONResponse(io.BytesIO):
+    status = 200
+
+
+class _TruncatedResponse(_JSONResponse):
+    def read(self, *args):
+        raise http.client.IncompleteRead(b'{"info":', 4096)
+
+
 class _Clock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -894,15 +903,24 @@ def test_wait_ci_fails_closed_after_three_api_errors(error_factory) -> None:
     assert caught.value.__cause__ is calls[-1]
 
 
-def test_wait_ci_recovers_from_truncated_response_and_resets_error_count(monkeypatch):
+@pytest.mark.parametrize(
+    "response_factory",
+    [
+        pytest.param(_TruncatedResponse, id="incomplete-read"),
+        pytest.param(lambda: _JSONResponse(b'{"workflow_runs": [{"a": "\xc3'), id="utf8"),
+    ],
+)
+def test_wait_ci_recovers_from_truncated_response_and_resets_error_count(
+    monkeypatch, response_factory
+):
     clock = _Clock()
     responses = iter(
         [
-            _TruncatedResponse(),
-            _TruncatedResponse(),
+            response_factory(),
+            response_factory(),
             _JSONResponse(b'{"workflow_runs": []}'),
-            _TruncatedResponse(),
-            _TruncatedResponse(),
+            response_factory(),
+            response_factory(),
             _JSONResponse(
                 json.dumps(
                     {
@@ -928,12 +946,25 @@ def test_wait_ci_recovers_from_truncated_response_and_resets_error_count(monkeyp
         next(responses)
 
 
-def test_wait_ci_cli_reports_truncated_response_without_traceback(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "response_factory, diagnostic",
+    [
+        pytest.param(_TruncatedResponse, "IncompleteRead", id="incomplete-read"),
+        pytest.param(
+            lambda: _JSONResponse(b'{"workflow_runs": [{"a": "\xc3'),
+            "unexpected end of data",
+            id="utf8",
+        ),
+    ],
+)
+def test_wait_ci_cli_reports_truncated_response_without_traceback(
+    monkeypatch, capsys, response_factory, diagnostic
+):
     calls = []
 
     def open_request(request, timeout):
         assert request.full_url.startswith("https://api.github.com/repos/memtomem/memtomem/")
-        response = _TruncatedResponse()
+        response = response_factory()
         calls.append(response)
         return response
 
@@ -959,7 +990,19 @@ def test_wait_ci_cli_reports_truncated_response_without_traceback(monkeypatch, c
     assert all(response.closed for response in calls)
     output = capsys.readouterr()
     assert "GitHub Actions API failed 3 consecutive times" in output.err
-    assert "IncompleteRead" in output.err
+    assert diagnostic in output.err
+    assert "Traceback" not in output.err
+    assert not output.out
+
+
+def test_cli_reports_unconverted_protocol_error(monkeypatch, capsys):
+    def fail(*args, **kwargs):
+        raise http.client.BadStatusLine("broken status")
+
+    monkeypatch.setattr(rp, "validate_opencode_pypi", fail)
+    assert rp.main(["opencode-pypi", "--repo-root", "."]) == 1
+    output = capsys.readouterr()
+    assert "release preflight failed: broken status" in output.err
     assert "Traceback" not in output.err
     assert not output.out
 
@@ -1260,15 +1303,6 @@ def test_http_probe_distinguishes_bad_json_from_transient_network(monkeypatch):
     monkeypatch.setattr(rp.urllib.request, "urlopen", unavailable)
     with pytest.raises(rp._ProbePending, match="could not confirm"):
         rp._request_json("https://pypi.org/example", 10)
-
-
-class _JSONResponse(io.BytesIO):
-    status = 200
-
-
-class _TruncatedResponse(_JSONResponse):
-    def read(self, *args):
-        raise http.client.IncompleteRead(b'{"info":', 4096)
 
 
 @pytest.mark.parametrize(

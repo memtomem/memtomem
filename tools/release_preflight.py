@@ -54,8 +54,8 @@ class _ProbePending(ReleaseCheckError):
 
 _REGISTRY_SERVER_NAME = "io.github.memtomem/memtomem"
 _FetchJSON = Callable[[str, float], tuple[int, Any]]
-# Both HTTP boundaries deliberately use the full protocol-error family with
-# their bounded retry policies. Even a persistent protocol/configuration error
+# Both HTTP boundaries deliberately handle the full protocol-error family.
+# Callers decide whether to retry; persistent protocol/configuration errors
 # must end in a diagnostic refusal, not escape the gate as a raw traceback.
 _HTTP_TRANSPORT_ERRORS = (OSError, http.client.HTTPException)
 
@@ -617,7 +617,12 @@ def wait_for_exact_main_ci(
         try:
             rows = fetch_runs(repository, sha, token)
             consecutive_errors = 0
-        except (*_HTTP_TRANSPORT_ERRORS, json.JSONDecodeError, ReleaseCheckError) as exc:
+        except (
+            *_HTTP_TRANSPORT_ERRORS,
+            json.JSONDecodeError,
+            UnicodeError,
+            ReleaseCheckError,
+        ) as exc:
             consecutive_errors += 1
             if consecutive_errors >= 3:
                 raise ReleaseCheckError(
@@ -746,7 +751,7 @@ def main(argv: list[str] | None = None) -> int:
                 interval_seconds=args.interval_seconds,
             )
             print(f"exact main CI succeeded: {run.get('html_url') or run.get('id')}")
-    except (OSError, UnicodeError, ReleaseCheckError) as exc:
+    except (*_HTTP_TRANSPORT_ERRORS, UnicodeError, ReleaseCheckError) as exc:
         print(f"release preflight failed: {exc}", file=sys.stderr)
         return 1
     return 0
