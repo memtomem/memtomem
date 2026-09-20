@@ -11,8 +11,8 @@
     "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
   "devDependencies": {
-    "jsdom": "^30.0.1",
-    "vitest": "5.0.0"
+    "jsdom": "^30.1.0",
+    "vitest": "5.0.1"
   },
   "overrides": {
     "form-data": ">=4.0.6",
