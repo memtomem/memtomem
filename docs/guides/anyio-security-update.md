@@ -71,7 +71,7 @@ provide AnyIO >=4.14.2. For the default plugin's package specification, inspect
 the same resolved environment with:
 
 ```bash
-uvx --from 'memtomem[onnx]==0.6.3' python -c "from importlib.metadata import version; print(version('anyio'))"
+uvx --from 'memtomem[onnx]==0.6.4' python -c "from importlib.metadata import version; print(version('anyio'))"
 ```
 
 For a different launcher, substitute its exact `--from` value and preserve any

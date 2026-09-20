@@ -58,7 +58,7 @@ mm --version                          # verify install
 ### 2. Setup
 
 > **After upgrading the Claude plugin:** re-check `/mcp` after reloading.
-> The plugin launches `memtomem[onnx]==0.6.3`. A manual registration whose launch
+> The plugin launches `memtomem[onnx]==0.6.4`. A manual registration whose launch
 > differs — base-only `memtomem`, or the ONNX launch pinned to an earlier
 > release — no longer matches for deduplication and may expose
 > duplicate tools. Confirm the manual entry's name and scope, then align its
@@ -144,7 +144,7 @@ uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 
 **No install** (uvx on demand):
 ```bash
-claude mcp add memtomem -s user -- uvx --isolated --from "memtomem[all]==0.6.3" memtomem-server
+claude mcp add memtomem -s user -- uvx --isolated --from "memtomem[all]==0.6.4" memtomem-server
 ```
 
 See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor / Windsurf / Claude Desktop / Gemini CLI / Kimi Code.
