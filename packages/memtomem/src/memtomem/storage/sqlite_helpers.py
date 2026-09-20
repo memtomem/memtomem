@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 from collections.abc import Iterable
 from pathlib import Path
-from uuid import uuid4
 
 from memtomem.models import NamespaceFilter
 
@@ -80,187 +79,49 @@ def norm_dir_prefix(d: str | Path) -> str:
     return base
 
 
-def _swap_case_component(name: str) -> str | None:
-    """Return ``name`` with its case flipped, or ``None`` if it carries none."""
-    swapped = name.swapcase()
-    return swapped if swapped != name else None
+def _identity_match(spellings: tuple[str, ...], root: Path) -> bool:
+    """Whether either spelling passes through ``root`` itself, by inode identity.
 
+    This replaces asking whether the filesystem folds case. That question had no
+    trustworthy answer — a probe either inspected entries another tool owns, or
+    created one inside a directory memtomem promised not to write into — and one
+    answer was then applied to a whole path whose components can sit on
+    different filesystems.
 
-_CASE_PROBE_CACHE: dict[str, bool] = {}
+    Identity needs none of that. ``norm_path`` has already resolved the
+    spelling, so slicing it to the root's own depth names the directory that
+    occupies the root's position in that path, whatever case it was typed in and
+    whatever links were traversed to get there. ``(st_dev, st_ino)`` then says
+    whether that is the protected directory. A case-insensitive filesystem
+    answers yes for ``VAULT`` because it really is the same directory; a
+    case-sensitive one answers no because it really is not. Nothing is written,
+    nothing is cached, and no property is extrapolated across a mount boundary.
 
-#: Prefix of the file the writing arm creates. Carries no ``.md`` suffix so an
-#: indexed directory does not treat it as content, and is removed immediately.
-_CASE_PROBE_PREFIX = ".memtomem-case-probe-"
+    ``stat`` follows links deliberately. A path that reaches the protected
+    directory reaches it however it is spelled; the one over-refusal this adds
+    is a link *outside* the root pointing at it, where replacing the link would
+    not touch the root. For a protection rule that is the safe direction.
 
-
-def _same_directory(base: Path, alias: Path) -> bool | None:
-    """Whether ``alias`` names the same directory as ``base``, writing nothing.
-
-    Sound for *directories* in a way it is not for files: a directory cannot be
-    hard-linked (measured: ``EPERM`` on macOS and Linux), so two directory names
-    that resolve to one inode are the same entry rather than a forged pair. A
-    **symlink** could still forge it, so either side being one is inconclusive.
-
-    ``samefile`` raises :class:`FileNotFoundError` both when ``alias`` is absent
-    — the conclusive *case-sensitive* — and when ``base`` has gone since it was
-    seen, which answers nothing; the caller caches what it is told, so ``base``
-    is asked again rather than recording a transient failure as a property.
+    The root must exist to have an identity. When it does not, only the literal
+    prefix rule applies — see :func:`is_under_any_root`.
     """
     try:
-        if os.path.islink(base) or os.path.islink(alias):
-            return None
-    except OSError:
-        return None
-    try:
-        return base.samefile(alias)
-    except FileNotFoundError:
-        try:
-            if base.exists():
-                return False
-        except OSError:
-            return None
-        return None
-    except OSError:
-        return None
-
-
-def _probe_by_spelling(directory: Path) -> bool | None:
-    """Re-spell ``directory``'s own name. Reads only — safe inside a protected root."""
-    swapped_name = _swap_case_component(directory.name)
-    if swapped_name is None:
-        return None
-    return _same_directory(directory, directory.parent / swapped_name)
-
-
-def _probe_by_writing(directory: Path) -> bool | None:
-    """Create one file in ``directory`` and ask whether a re-spelled name finds it.
-
-    The fallback for a directory whose name cannot be flipped. Asking about a
-    name **this function just created** is what makes it trustworthy where
-    inspecting existing entries is not: among files, a hard link or two symlinks
-    to one target make ``Note.md`` and ``nOTE.MD`` the same file on a
-    case-sensitive filesystem while the directory keeps the names apart.
-
-    Never called on a read-only root — see :func:`_probe_case_insensitive`.
-    """
-    name = f"{_CASE_PROBE_PREFIX}{uuid4().hex}-Probe"
-    swapped_name = _swap_case_component(name)
-    if swapped_name is None:  # pragma: no cover - the literal suffix has a case
-        return None
-    probe = directory / name
-    try:
-        fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except OSError:
-        return None
-    try:
-        os.close(fd)
-        return os.path.exists(directory / swapped_name)
-    except OSError:
-        return None
-    finally:
-        try:
-            os.unlink(probe)
-        except OSError:
-            pass
-
-
-def _same_device(path: Path, device: int) -> bool:
-    """Whether ``path`` is on ``device``. A mount boundary ends every walk here:
-    another filesystem's case semantics are not this one's."""
-    try:
-        return path.stat().st_dev == device
+        root_stat = Path(norm_path(root)).stat()
     except OSError:
         return False
-
-
-def _probe_case_insensitive(root: str) -> bool | None:
-    """Ask the filesystem holding ``root``, or ``None`` when it cannot answer.
-
-    ``root`` may not have been created yet, so the question goes to the nearest
-    **existing** directory — the one the root will be created inside, hence the
-    same filesystem.
-
-    Two arms, and the order is the point. ``root`` is a directory memtomem has
-    promised not to write into, and that promise is about *this application*,
-    not about the mode bits: a read-only root is very often OS-writable. So the
-    read-only arm goes first and is the only one allowed to touch the root
-    itself. The writing arm is the fallback for a name with no case to flip, and
-    it starts at the root's **parent** so nothing is ever created inside the
-    protected directory.
-
-    Both walks stop at a mount boundary, and every unanswerable case returns
-    ``None`` rather than a guess, so the caller can decline to remember it.
-    """
-    probe_dir = Path(root)
-    while True:
+    key = (root_stat.st_dev, root_stat.st_ino)
+    depth = len(Path(norm_path(root)).parts)
+    for spelling in spellings:
+        parts = Path(spelling).parts
+        if len(parts) < depth:
+            continue
         try:
-            if probe_dir.is_dir():
-                break
+            at_depth = Path(*parts[:depth]).stat()
         except OSError:
-            # Permission and other stat failures propagate out of ``is_dir()``;
-            # an unreadable root must not break checks for unrelated targets.
-            return None
-        parent = probe_dir.parent
-        if parent == probe_dir:
-            return None
-        probe_dir = parent
-
-    try:
-        device = probe_dir.stat().st_dev
-    except OSError:
-        return None
-
-    cursor = probe_dir
-    while True:
-        answer = _probe_by_spelling(cursor)
-        if answer is not None:
-            return answer
-        parent = cursor.parent
-        if parent == cursor or not _same_device(parent, device):
-            break
-        cursor = parent
-
-    cursor = probe_dir.parent
-    while cursor != probe_dir and _same_device(cursor, device):
-        answer = _probe_by_writing(cursor)
-        if answer is not None:
-            return answer
-        parent = cursor.parent
-        if parent == cursor:
-            break
-        cursor = parent
-    return None
-
-
-def _root_is_case_insensitive(root: str) -> bool:
-    """Whether the filesystem holding ``root`` treats case as insignificant.
-
-    Probed rather than inferred from the platform: macOS ships case-insensitive
-    APFS by default but can mount case-sensitive volumes, Windows can expose
-    case-sensitive directories, and Linux can mount either. Asking the
-    filesystem is the only answer that is right on all of them.
-
-    Anything unanswerable is reported as case-*sensitive*, the answer that adds
-    no refusals — but that answer is **not** remembered. A conclusive probe
-    describes a mount and is cached, because this runs on every write-target
-    check; an inconclusive one describes only the moment it ran. Caching it
-    would leave a read-only root that is configured before it is created
-    unprotected against differently cased spellings for the life of the
-    process, which is precisely the window in which a provider directory is
-    declared and then synced into place.
-
-    The cache still assumes a given path keeps its case semantics once the
-    answer is conclusive; a volume remounted with the opposite semantics over
-    the same path mid-process is not tracked.
-    """
-    cached = _CASE_PROBE_CACHE.get(root)
-    if cached is not None:
-        return cached
-    answer = _probe_case_insensitive(root)
-    if answer is None:
-        return False
-    _CASE_PROBE_CACHE[root] = answer
-    return answer
+            continue
+        if (at_depth.st_dev, at_depth.st_ino) == key:
+            return True
+    return False
 
 
 def is_under_any_root(target: str | Path, roots: Iterable[str | Path]) -> bool:
@@ -302,12 +163,19 @@ def is_under_any_root(target: str | Path, roots: Iterable[str | Path]) -> bool:
     creating anything inside it) — without this, protecting exactly that
     directory protected everything in it except the act of preparing it.
 
-    On a case-insensitive filesystem the comparison also folds case, decided
-    per root by :func:`_root_is_case_insensitive` rather than by platform: the
-    same machine can host both kinds of volume. Folding is deliberately not
-    unconditional — on a case-sensitive filesystem ``/vault`` and ``/Vault``
-    really are two directories, and refusing writes to the unprotected one
-    would be a wrong answer, not a cautious one.
+    A spelling that matches neither prefix literally can still *be* the root —
+    ``VAULT/note.md`` for ``/Vault`` on a case-insensitive volume names the
+    protected file. That is settled by :func:`_identity_match`, which asks the
+    kernel whether the directory at the root's depth is the root, rather than
+    asking the filesystem whether it folds case and applying that answer to the
+    whole path. On a case-sensitive volume ``/vault`` and ``/Vault`` are two
+    directories with two inodes, so nothing is refused that nobody protected.
+
+    **A root that does not exist yet has no identity**, so only the literal
+    prefix rule covers it: a differently cased spelling of an uncreated root is
+    not refused. The same spelling still is. This is narrower than the probe
+    this replaced, which guessed the answer from a neighbouring directory --
+    and guessed it by writing into one.
     """
     if not roots:
         return False
@@ -322,13 +190,8 @@ def is_under_any_root(target: str | Path, roots: Iterable[str | Path]) -> bool:
         bare = prefix.rstrip(os.sep)
         if any(s == bare or s.startswith(prefix) for s in spellings):
             return True
-        if _root_is_case_insensitive(bare):
-            folded_prefix, folded_bare = prefix.casefold(), bare.casefold()
-            if any(
-                s.casefold() == folded_bare or s.casefold().startswith(folded_prefix)
-                for s in spellings
-            ):
-                return True
+        if _identity_match(spellings, Path(root)):
+            return True
     return False
 
 
