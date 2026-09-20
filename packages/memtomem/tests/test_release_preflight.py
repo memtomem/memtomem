@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import copy
+import http.client
 import io
 import json
 import shlex
@@ -1182,6 +1183,106 @@ def test_http_probe_distinguishes_bad_json_from_transient_network(monkeypatch):
     monkeypatch.setattr(rp.urllib.request, "urlopen", unavailable)
     with pytest.raises(rp._ProbePending, match="could not confirm"):
         rp._request_json("https://pypi.org/example", 10)
+
+
+class _JSONResponse(io.BytesIO):
+    status = 200
+
+
+class _TruncatedResponse(_JSONResponse):
+    def read(self, *args):
+        raise http.client.IncompleteRead(b'{"info":', 4096)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [http.client.BadStatusLine("broken status"), http.client.LineTooLong("status line")],
+)
+def test_http_probe_classifies_protocol_errors_as_pending(monkeypatch, error):
+    def broken_response(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(rp.urllib.request, "urlopen", broken_response)
+    with pytest.raises(rp._ProbePending, match="could not confirm") as caught:
+        rp._request_json("https://pypi.org/example", 10)
+    assert caught.value.__cause__ is error
+
+
+def test_registry_recovers_from_truncated_pypi_body(tmp_path, monkeypatch):
+    clock = _Clock()
+    calls = []
+    truncated = _TruncatedResponse()
+
+    def open_request(request, timeout):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            return truncated
+        if len(calls) == 2:
+            return _JSONResponse(json.dumps(_pypi_metadata()).encode())
+        raise urllib.error.HTTPError(request.full_url, 404, "not found", {}, io.BytesIO())
+
+    monkeypatch.setattr(rp.urllib.request, "urlopen", open_request)
+    assert (
+        rp.validate_registry_publish(
+            "v0.3.6",
+            _repo(tmp_path),
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+        == "0.3.6"
+    )
+    assert truncated.closed
+    assert clock.now == 10
+    assert calls[:2] == ["https://pypi.org/pypi/memtomem/0.3.6/json"] * 2
+    assert len(calls) == 3
+    assert calls[2].endswith("/versions/0.3.6?include_deleted=true")
+
+
+def test_registry_repeated_body_truncation_exhausts_polling_budget(tmp_path, monkeypatch):
+    clock = _Clock()
+    timeouts = []
+
+    def open_request(request, timeout):
+        assert request.full_url.startswith("https://pypi.org/")
+        timeouts.append(timeout)
+        return _TruncatedResponse()
+
+    monkeypatch.setattr(rp.urllib.request, "urlopen", open_request)
+    with pytest.raises(
+        rp.ReleaseCheckError, match="timed out after 12s: could not confirm.*IncompleteRead"
+    ):
+        rp.validate_registry_publish(
+            "v0.3.6",
+            _repo(tmp_path),
+            timeout_seconds=12,
+            interval_seconds=10,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+    assert clock.now == 12
+    assert timeouts == [10, 2]
+
+
+@pytest.mark.parametrize("command", ["registry", "opencode-pypi"])
+def test_readiness_cli_reports_http_failure_without_traceback(
+    tmp_path, monkeypatch, capsys, command
+):
+    def open_request(request, timeout):
+        if command == "registry" and request.full_url.startswith("https://pypi.org/"):
+            return _JSONResponse(json.dumps(_pypi_metadata()).encode())
+        return _TruncatedResponse()
+
+    monkeypatch.setattr(rp.urllib.request, "urlopen", open_request)
+    args = [command, "--repo-root", str(_opencode_repo(tmp_path))]
+    if command == "registry":
+        args += ["--tag", "v0.3.6"]
+    assert rp.main(args) == 1
+    output = capsys.readouterr()
+    assert "release preflight failed" in output.err
+    assert "could not confirm" in output.err
+    assert "IncompleteRead" in output.err
+    assert "Traceback" not in output.err
+    assert not output.out
 
 
 @pytest.mark.parametrize("command", ["registry", "opencode-pypi"])

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import email
+import http.client
 import json
 import math
 import os
@@ -70,7 +71,7 @@ def _request_json(url: str, timeout: float) -> tuple[int, Any]:
         return exc.code, None
     except (json.JSONDecodeError, UnicodeError) as exc:
         raise ReleaseCheckError(f"invalid JSON from {url}: {exc}") from exc
-    except OSError as exc:
+    except (OSError, http.client.HTTPException) as exc:
         raise _ProbePending(f"could not confirm {url}: {exc}") from exc
 
 
