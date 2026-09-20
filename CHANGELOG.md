@@ -40,30 +40,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mm wiki` are separate stores with their own roots: listing one here does not
   stop them. See [Configuration](docs/guides/configuration.md).
 
-- **`mm serve` runs the MCP stdio server from the CLI (#2502).** The MCP
-  registry can only express a launch as `uvx <pypi-name>` plus the record's
-  arguments, and this distribution's console script is the CLI — so a
-  registry-driven client would have run the CLI, read its help text and seen a
-  server that exited immediately. `mm serve` gives that launch shape something
-  to reach. It is deliberately stdio-only: network transports stay on
-  `memtomem-server`, where ADR-0029's trusted-network stance and its flags
-  already live, and Click refuses `--transport` by name rather than ignoring
-  it. `memtomem-server` remains a first-class, permanently supported entry
-  point.
+- **`mm serve` runs the MCP stdio server from the CLI (#2502).** A registry
+  client launches this package as `uvx memtomem` — the record's `runtimeHint`
+  — and appends its `packageArguments`, and this distribution's console script
+  is the CLI. With no subcommand to append, such a client would have run the
+  CLI, read its help text and seen a server that exited immediately.
+  `mm serve` gives that launch shape something to reach. It is deliberately
+  stdio-only: network transports stay on `memtomem-server`, where ADR-0029's
+  trusted-network stance and its flags already live, and Click refuses
+  `--transport` by name rather than ignoring it. `memtomem-server` remains a
+  first-class, permanently supported entry point.
 
 - **An MCP registry record (`server.json`), pinned to the release (#2503).**
   Publishing to registry.modelcontextprotocol.io needs two artifacts this repo
   did not carry: the PyPI ownership marker, which the registry reads from the
   *released* package description, and the record itself. The record is a
   fourth place a version can drift — after the tag, `pyproject.toml` and
-  `uv.lock` — and the registry rejects a record whose server and distribution
-  versions disagree, so the release contract owns it rather than letting
-  `mcp-publisher` discover the mismatch after a release has shipped. The check
-  is opt-in (`--require-registry-manifest`): `release-sbom.yml` runs current
-  tooling against immutable historical checkouts, where every tag predating
-  this file legitimately has no `server.json`. Guard tests pin that the
-  release workflow passes the flag and the SBOM workflow does not, so the
-  opt-in cannot rot into a silent skip.
+  `uv.lock`. The version in the record is the one the registry actually
+  resolves: it reads the marker from `pypi.org/pypi/<name>/<version>/json`,
+  the description of that exact release, so a record naming a version whose
+  published description carries no marker is refused at publish time. Keeping
+  the record level with the tag is this project's release policy — the
+  registry does not itself compare the two numbers — and the release contract
+  owns it rather than letting `mcp-publisher` surface the drift after a
+  release has shipped. The check is opt-in (`--require-registry-manifest`):
+  `release-sbom.yml` runs current tooling against immutable historical
+  checkouts, where every tag predating this file legitimately has no
+  `server.json`. Guard tests pin that the release workflow passes the flag and
+  the SBOM workflow does not, so the opt-in cannot rot into a silent skip.
 
 ### Changed
 
