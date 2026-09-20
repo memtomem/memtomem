@@ -90,17 +90,171 @@ def lock_version(repo_root: Path) -> str:
     return value
 
 
-def validate_contract(tag: str, repo_root: Path) -> str:
-    """Validate tag, member metadata, lock metadata, and changelog parity."""
+# Transcribed from the pinned schema, read rather than assumed:
+#
+#   Package.required = [registryType, identifier, transport], with no
+#   ``if``/``then``/``allOf``/``dependentRequired`` anywhere in the definition
+#   — the requirement does not vary by registryType, so pypi, oci and mcpb
+#   records are all held to the same three keys. ``registryType`` itself has
+#   no enum, so it is deliberately not checked against a list.
+#
+#   Every argument is a PositionalArgument or a NamedArgument. Both require
+#   ``type``; NamedArgument also requires ``name``; PositionalArgument
+#   requires ``value`` or ``valueHint`` (an ``anyOf``).
+_PACKAGE_REQUIRED_KEYS = ("registryType", "identifier", "transport")
+_ARGUMENT_TYPES = frozenset({"positional", "named"})
+
+
+def _check_package_shape(package: dict, where: str, manifest_path: Path) -> None:
+    """Reject a package entry the registry would reject at publish time.
+
+    An ``isinstance(row, dict)`` sweep is not a shape check: ``{}`` clears it,
+    then fails the ``registryType`` / ``identifier`` selection below and is
+    never looked at again, leaving the count of real pypi entries at 1. A
+    manifest carrying a malformed sibling therefore passed a check whose whole
+    job is to fail closed — measured, ``('0.6.3', '0.6.3')``, accepted. So
+    validate the shape of *every* entry, not only of the one we go on to read.
+
+    The alternative is validating the document against the pinned schema with
+    ``jsonschema``. That is strictly better coverage and was deliberately not
+    taken: it adds a dependency to the release path, which runs
+    ``--no-project`` on a bare interpreter. These checks are the subset that
+    matters here, and the schema URL in ``server.json`` stays the source they
+    are transcribed from.
+    """
+    missing = [key for key in _PACKAGE_REQUIRED_KEYS if key not in package]
+    if missing:
+        raise ReleaseCheckError(
+            f"{where} in {manifest_path} is missing required key(s): {', '.join(missing)}"
+        )
+    for field in ("packageArguments", "runtimeArguments"):
+        # ``field not in package``, not ``get(field) is None``: an explicit
+        # ``"runtimeArguments": null`` is a present field carrying an invalid
+        # value, and conflating it with an absent one let it skip every check
+        # below. Absent is fine; null is a malformed record.
+        if field not in package:
+            continue
+        arguments = package[field]
+        if not isinstance(arguments, list):
+            raise ReleaseCheckError(f"{where}.{field} in {manifest_path} is not an array")
+        for position, argument in enumerate(arguments):
+            at = f"{where}.{field}[{position}]"
+            if not isinstance(argument, dict):
+                raise ReleaseCheckError(f"{at} in {manifest_path} is not an object: {argument!r}")
+            kind = argument.get("type")
+            # ``isinstance`` before membership, not for tidiness: ``{"type": []}``
+            # is unhashable and turns the ``in`` test into an uncaught TypeError
+            # — a crash where the contract is supposed to produce a refusal.
+            if not isinstance(kind, str) or kind not in _ARGUMENT_TYPES:
+                raise ReleaseCheckError(
+                    f"{at} in {manifest_path} has type {kind!r}, "
+                    f"not one of {sorted(_ARGUMENT_TYPES)}"
+                )
+            if kind == "named":
+                if "name" not in argument:
+                    raise ReleaseCheckError(f"{at} in {manifest_path} is named but has no name")
+                if not isinstance(argument["name"], str):
+                    raise ReleaseCheckError(
+                        f"{at} in {manifest_path} has a non-string name: {argument['name']!r}"
+                    )
+                # Stricter than the schema on purpose. ``NamedArgument.name``
+                # is a plain ``string`` with no ``minLength`` or ``pattern``,
+                # so ``""`` validates — and produces a flag that is not a
+                # flag. This validator only ever runs against our own record,
+                # where that is a defect to catch at tag time, not a foreign
+                # record we would be wrong to reject.
+                if not argument["name"]:
+                    raise ReleaseCheckError(f"{at} in {manifest_path} has an empty name")
+            # PositionalArgument is an ``anyOf`` over these two: one of them
+            # has to be there or the entry contributes nothing to the command
+            # line and is schema-invalid besides.
+            if kind == "positional" and "value" not in argument and "valueHint" not in argument:
+                raise ReleaseCheckError(
+                    f"{at} in {manifest_path} is positional but has neither value nor valueHint"
+                )
+
+
+def registry_manifest_versions(repo_root: Path) -> tuple[str, str]:
+    """Return (server version, pypi package version) from ``server.json``.
+
+    The MCP registry rejects a record whose server version and packaged
+    distribution version disagree, and it resolves the distribution from PyPI
+    at publish time. Both therefore ride the same release tag as
+    ``pyproject.toml`` and ``uv.lock`` — a fourth place a version can drift,
+    so the release contract owns it rather than the publish step discovering
+    it (the marker in ``packages/memtomem/README.md`` is verified against the
+    *released* PyPI description, which is far too late to fix).
+    """
+    manifest_path = repo_root / "server.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseCheckError(f"cannot read valid JSON from {manifest_path}: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ReleaseCheckError(f"{manifest_path} must contain a JSON object")
+    server_version = manifest.get("version")
+    if not isinstance(server_version, str) or not server_version:
+        raise ReleaseCheckError(f"missing version in {manifest_path}")
+    packages = manifest.get("packages")
+    if not isinstance(packages, list):
+        raise ReleaseCheckError(f"missing packages array in {manifest_path}")
+    # A non-object entry is a malformed manifest, not a non-match: skipping it
+    # would let ``[{valid}, null]`` pass a check whose whole job is to fail closed.
+    for position, row in enumerate(packages):
+        if not isinstance(row, dict):
+            raise ReleaseCheckError(
+                f"packages[{position}] in {manifest_path} is not an object: {row!r}"
+            )
+        _check_package_shape(row, f"packages[{position}]", manifest_path)
+    pypi = [
+        row
+        for row in packages
+        if row.get("registryType") == "pypi" and row.get("identifier") == "memtomem"
+    ]
+    if len(pypi) != 1:
+        raise ReleaseCheckError(
+            f"expected one pypi memtomem package in {manifest_path}, found {len(pypi)}"
+        )
+    package_version = pypi[0].get("version")
+    if not isinstance(package_version, str) or not package_version:
+        raise ReleaseCheckError(f"missing pypi package version in {manifest_path}")
+    return server_version, package_version
+
+
+def validate_contract(tag: str, repo_root: Path, *, require_registry_manifest: bool = False) -> str:
+    """Validate tag, member metadata, lock metadata, and changelog parity.
+
+    ``require_registry_manifest`` is opt-in because this validator runs against
+    two different trees. A release validates the tree it is cutting, which must
+    carry ``server.json``. The SBOM workflow runs *current* tooling against an
+    **immutable historical checkout** (``release-sbom.yml`` checks out the tag
+    into ``release/``), and every tag predating the manifest legitimately has no
+    such file — making it mandatory there would break backfills for the whole
+    existing release history. The release workflow passes the flag; a guard test
+    pins that it keeps doing so, so the opt-in cannot rot into a silent skip.
+    """
     expected = version_from_tag(tag)
     actual_project = project_version(repo_root)
     actual_lock = lock_version(repo_root)
+    if require_registry_manifest:
+        actual_server, actual_server_package = registry_manifest_versions(repo_root)
+    else:
+        actual_server = actual_server_package = expected
     if actual_project != expected:
         raise ReleaseCheckError(
             f"tag version {expected} does not match package version {actual_project}"
         )
     if actual_lock != expected:
         raise ReleaseCheckError(f"tag version {expected} does not match lock version {actual_lock}")
+    if actual_server != expected:
+        raise ReleaseCheckError(
+            f"tag version {expected} does not match server.json version {actual_server}"
+        )
+    if actual_server_package != expected:
+        raise ReleaseCheckError(
+            f"tag version {expected} does not match server.json pypi package version "
+            f"{actual_server_package}"
+        )
     changelog = (repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
     if not re.search(rf"^## \[{re.escape(expected)}\](?:\s|$)", changelog, re.MULTILINE):
         raise ReleaseCheckError(f"CHANGELOG.md has no release heading for {expected}")
@@ -339,10 +493,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    contract = subparsers.add_parser("contract")
+    # ``allow_abbrev=False`` because ``--require-registry-manifest`` is a
+    # safety gate whose presence is audited by reading the workflow, and
+    # argparse accepts any unambiguous prefix — ``--require`` alone enables
+    # it. An audit that scans for the full spelling would miss every
+    # abbreviation, so the parser is narrowed until the spelling is the only
+    # one that works, rather than the audit being taught to enumerate them.
+    contract = subparsers.add_parser("contract", allow_abbrev=False)
     contract.add_argument("--tag", required=True)
     contract.add_argument("--repo-root", type=Path, default=Path.cwd())
     contract.add_argument("--github-output")
+    contract.add_argument(
+        "--require-registry-manifest",
+        action="store_true",
+        help=(
+            "Also require server.json to match the tag. Off by default so SBOM "
+            "backfills can validate historical tags that predate the manifest."
+        ),
+    )
 
     artifacts = subparsers.add_parser("artifacts")
     artifacts.add_argument("--dist", type=Path, required=True)
@@ -361,7 +529,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         if args.command == "contract":
-            version = validate_contract(args.tag, args.repo_root.resolve())
+            version = validate_contract(
+                args.tag,
+                args.repo_root.resolve(),
+                require_registry_manifest=args.require_registry_manifest,
+            )
             _write_github_output(args.github_output, "version", version)
             print(version)
         elif args.command == "artifacts":
