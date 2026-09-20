@@ -995,7 +995,9 @@ def test_wait_ci_cli_reports_truncated_response_without_traceback(
     assert not output.out
 
 
-def test_cli_reports_unconverted_protocol_error(monkeypatch, capsys):
+def test_cli_converts_protocol_error_at_the_final_boundary(monkeypatch, capsys):
+    # Inject past the HTTP boundaries to verify the CLI's defensive fallback;
+    # current HTTP callers already convert protocol errors themselves.
     def fail(*args, **kwargs):
         raise http.client.BadStatusLine("broken status")
 

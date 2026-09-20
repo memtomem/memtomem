@@ -57,6 +57,8 @@ _FetchJSON = Callable[[str, float], tuple[int, Any]]
 # Both HTTP boundaries deliberately handle the full protocol-error family.
 # Callers decide whether to retry; persistent protocol/configuration errors
 # must end in a diagnostic refusal, not escape the gate as a raw traceback.
+# Decode errors have separate policies: readiness probes reject malformed
+# metadata immediately; CI polling allows up to three consecutive API errors.
 _HTTP_TRANSPORT_ERRORS = (OSError, http.client.HTTPException)
 
 
@@ -74,6 +76,9 @@ def _request_json(url: str, timeout: float) -> tuple[int, Any]:
         exc.close()
         return exc.code, None
     except (json.JSONDecodeError, UnicodeError) as exc:
+        # Treat malformed release metadata as invalid rather than spend the
+        # readiness window retrying a potentially persistent payload defect.
+        # Transport truncation reported as IncompleteRead remains pending below.
         raise ReleaseCheckError(f"invalid JSON from {url}: {exc}") from exc
     except _HTTP_TRANSPORT_ERRORS as exc:
         raise _ProbePending(f"could not confirm {url}: {exc}") from exc
