@@ -10,6 +10,47 @@ name: Publish
 # Both paths share the same `pypi` GitHub environment, gated to tag
 # pushes matching `v*` and `test-v*` only.
 #
+# ---------------------------------------------------------------------------
+# Release order, and the four things that bite
+# ---------------------------------------------------------------------------
+#
+#   1. changelog PR (entries only)  →  2. version-only bump PR  →  3. merge
+#   4. wait for the main-push CI run on the squash commit to go green
+#   5. test-v<X>a1  →  TestPyPI  →  install-and-handshake smoke
+#   6. v<X>         →  PyPI      →  confirm on two surfaces
+#   7. opencode-v<Y>  →  npm     →  only after 6 is confirmed
+#   8. mcp-publisher publish      →  only after 6 is confirmed
+#
+# (a) The dry-run is ONE SHOT PER VERSION. `_TEST_TAG_RE` in
+#     tools/release_preflight.py drops the attempt suffix, so `test-v1.2.3a1`
+#     uploads **1.2.3** to TestPyPI, not 1.2.3a1 — and `skip-existing: true`
+#     below makes a later `a2` a silent no-op. Check TestPyPI for that version
+#     before pushing the tag; if it is already there, the retry uploads nothing.
+#
+# (b) Step 4 is not optional politeness. The preflight's `wait-ci` step requires
+#     the exact main-push run for $GITHUB_SHA to have succeeded, so tagging
+#     early just burns up to 2400s of waiting.
+#
+# (c) Step 7 has no machine guard. release-opencode-plugin.yml checks the tag,
+#     main ancestry, the main CI run and `npm test` — never PyPI — while the
+#     package it ships pins `memtomem[onnx]==<core>`. Push both tags together
+#     and npm can serve a package whose dependency does not exist yet. See
+#     issue #2510.
+#
+# (d) Publication surfaces lag, in both directions. A green publish job is not
+#     an upload (`skip-existing` can mask one), and a registry's first "not
+#     found" is often a cache. Confirm on two surfaces — JSON API *and* simple
+#     index, or packument *and* version document — and when they disagree, the
+#     publish step's own log is the authority. Keep "could not confirm" separate
+#     from "failed".
+#
+# Step 8 is still manual (issue #2509). Before running it: the MCP registry
+# reads its ownership marker from the *version-specific* PyPI endpoint
+# (`/pypi/<name>/<version>/json`) and version metadata is immutable once
+# published, so a wrong record cannot be overwritten — only deprecated and
+# superseded. Verify the marker and that the name is not already listed at that
+# version before publishing, not after.
+#
 # The OIDC publish job builds and publishes in one job — no distribution
 # artifact crosses jobs or run-attempts. A read-only preflight independently
 # verifies the exact main CI run, package contract, and isolated installs;

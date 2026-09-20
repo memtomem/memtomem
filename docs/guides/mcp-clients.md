@@ -11,15 +11,42 @@
 
 | Command | What it is | When to use |
 |---------|-----------|-------------|
-| `memtomem-server` | **MCP server** — runs in the background, connects to your editor | Always use this in MCP config |
-| `memtomem` (or `mm`) | **CLI tool** — terminal commands for search, index, etc. | Optional, for terminal use |
+| `memtomem-server` | **MCP server** — runs in the background, connects to your editor | Use this in MCP config |
+| `memtomem serve` | The same stdio server, reached through the CLI | Only where a launcher can pass a subcommand but not choose the executable — this is what the registry record uses |
+| `memtomem` (or `mm`) | **CLI tool** — terminal commands for search, index, etc., plus `serve` | Terminal use |
 
-> **Common mistake**: Using `memtomem` instead of `memtomem-server` in your MCP config will fail.
+> **Common mistake**: a bare `memtomem` in your MCP config will fail — the client
+> gets the CLI's help text and a process that exits. `memtomem-server` is the
+> entry point to reach for. `memtomem serve` is the one exception: it starts the
+> same stdio server and exists because a registry entry launches
+> `uvx <distribution>` and can only append arguments. It is stdio-only; network
+> transports and their flags live on `memtomem-server`.
 
 Normal registrations contain only the server command. The server reads the
 configuration written by `mm init` from `~/.memtomem/config.json`. Add an
 `env` block only when you deliberately want that client to override the saved
 configuration; environment variables have the highest precedence.
+
+### Listed in the MCP Registry
+
+memtomem is published to the official
+[MCP Registry](https://registry.modelcontextprotocol.io) as:
+
+```
+io.github.memtomem/memtomem
+```
+
+That name is the canonical identifier for this server. The registry is
+[designed for downstream aggregators](https://github.com/modelcontextprotocol/registry)
+— marketplaces and directories build on its API rather than users browsing it
+directly — so what the listing buys you is **discovery**: tools that index the
+registry can find memtomem and read how to launch it, without this guide.
+
+The listing describes the same launch every section below sets up by hand: the
+PyPI distribution `memtomem`, run through `uvx`, with `serve` appended. If your
+client already installs from an MCP marketplace, look for that name. Otherwise
+follow your editor's section — the registry entry does not replace those
+instructions, and no client is known to install directly from the registry today.
 
 ---
 
