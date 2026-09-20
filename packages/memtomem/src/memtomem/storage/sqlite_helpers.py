@@ -79,7 +79,7 @@ def norm_dir_prefix(d: str | Path) -> str:
     return base
 
 
-def _identity_match(spellings: tuple[str, ...], root: Path) -> bool:
+def _identity_match(spellings: tuple[str, ...], root_norm: str) -> bool:
     """Whether either spelling passes through ``root`` itself, by inode identity.
 
     This replaces asking whether the filesystem folds case. That question had no
@@ -104,13 +104,22 @@ def _identity_match(spellings: tuple[str, ...], root: Path) -> bool:
 
     The root must exist to have an identity. When it does not, only the literal
     prefix rule applies — see :func:`is_under_any_root`.
+
+    ``root_norm`` is the **already normalized** root — the same string the
+    literal prefix was built from, minus its trailing separator. Re-deriving it
+    here is what broke this once: ``norm_dir_prefix`` expands ``~`` and this did
+    not, so a ``~/Vault`` root had its prefix built from the home directory
+    while the identity arm stat'ed ``<cwd>/~/Vault`` and matched nothing. Two
+    arms of one rule must be told which path they are about, not each work it
+    out.
     """
+    root_path = Path(root_norm)
     try:
-        root_stat = Path(norm_path(root)).stat()
+        root_stat = root_path.stat()
     except OSError:
         return False
     key = (root_stat.st_dev, root_stat.st_ino)
-    depth = len(Path(norm_path(root)).parts)
+    depth = len(root_path.parts)
     for spelling in spellings:
         parts = Path(spelling).parts
         if len(parts) < depth:
@@ -184,13 +193,15 @@ def is_under_any_root(target: str | Path, roots: Iterable[str | Path]) -> bool:
     # ``norm_path`` would resolve the leaf too, which is exactly what this
     # second spelling must not do.
     entry = norm_path(path.parent).rstrip(os.sep) + os.sep + path.name
-    spellings = (resolved, entry)
+    # For a path with no symlink in it the two spellings are identical, which is
+    # the common case; checking it twice doubles the stat calls per root.
+    spellings = (resolved,) if entry == resolved else (resolved, entry)
     for root in roots:
         prefix = norm_dir_prefix(root)
         bare = prefix.rstrip(os.sep)
         if any(s == bare or s.startswith(prefix) for s in spellings):
             return True
-        if _identity_match(spellings, Path(root)):
+        if _identity_match(spellings, bare):
             return True
     return False
 

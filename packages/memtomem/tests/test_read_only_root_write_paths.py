@@ -308,24 +308,52 @@ def test_a_case_alias_of_a_protected_root_is_protected(tmp_path):
     assert not is_under_any_root(tmp_path / "Vault2" / "note.md", [vault])
 
 
-def test_two_directories_with_one_name_are_told_apart_by_inode(tmp_path):
-    """The control the old rule could not express.
+def test_identity_is_about_this_directory_not_about_the_name(tmp_path):
+    """Both halves in one place, because only together do they need identity.
 
-    A filesystem property answered once for a whole path cannot distinguish two
-    directories that merely share a name. Identity can: only the configured root
-    has the root's inode, so a same-named directory elsewhere is not protected
-    however the filesystem treats case.
+    The negative half alone proves nothing — a literal prefix comparison already
+    tells `a/Vault` from `b/Vault`, and it passes even if the identity arm
+    always answers no. The positive half is what requires it: `a/vAULT` matches
+    no prefix literally and is protected only because it is the same directory.
+    Asserting both pins that the rule is per-directory rather than per-name.
     """
     from memtomem.storage.sqlite_helpers import is_under_any_root
+
+    if not _folds_case(tmp_path):
+        pytest.skip("filesystem is case-sensitive; the alias is a different directory")
 
     protected = tmp_path / "a" / "Vault"
     protected.mkdir(parents=True)
     impostor = tmp_path / "b" / "Vault"
     impostor.mkdir(parents=True)
 
-    assert is_under_any_root(protected / "note.md", [protected])
-    assert not is_under_any_root(impostor / "note.md", [protected]), (
+    assert is_under_any_root(tmp_path / "a" / "vAULT" / "note.md", [protected]), (
+        "an alias of the protected directory was not recognised as it"
+    )
+    assert not is_under_any_root(tmp_path / "b" / "vAULT" / "note.md", [protected]), (
         "a directory that only shares the root's name was treated as the root"
+    )
+
+
+def test_a_root_written_with_a_tilde_is_expanded_for_both_arms(tmp_path, monkeypatch):
+    """The literal prefix expands `~`; the identity arm must expand the same one.
+
+    `~/Vault` in a config is ordinary. When only one arm expanded it, the prefix
+    was built from the home directory while identity stat'ed `<cwd>/~/Vault`, so
+    `~/vAULT/note.md` matched neither and the root went unprotected.
+    """
+    from helpers import set_home
+
+    from memtomem.storage.sqlite_helpers import is_under_any_root
+
+    set_home(monkeypatch, tmp_path)
+    if not _folds_case(tmp_path):
+        pytest.skip("filesystem is case-sensitive; the alias is a different directory")
+
+    (tmp_path / "Vault").mkdir()
+
+    assert is_under_any_root(tmp_path / "vAULT" / "note.md", ["~/Vault"]), (
+        "a tilde-written root lost its case-alias protection"
     )
 
 
