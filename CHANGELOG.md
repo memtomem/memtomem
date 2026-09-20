@@ -39,6 +39,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   cannot be indexed at all (#2501). And the `mm context` artifact Store and the
   `mm wiki` are separate stores with their own roots: listing one here does not
   stop them. See [Configuration](docs/guides/configuration.md).
+
+- **`mm serve` runs the MCP stdio server from the CLI (#2502).** The MCP
+  registry can only express a launch as `uvx <pypi-name>` plus the record's
+  arguments, and this distribution's console script is the CLI — so a
+  registry-driven client would have run the CLI, read its help text and seen a
+  server that exited immediately. `mm serve` gives that launch shape something
+  to reach. It is deliberately stdio-only: network transports stay on
+  `memtomem-server`, where ADR-0029's trusted-network stance and its flags
+  already live, and Click refuses `--transport` by name rather than ignoring
+  it. `memtomem-server` remains a first-class, permanently supported entry
+  point.
+
+- **An MCP registry record (`server.json`), pinned to the release (#2503).**
+  Publishing to registry.modelcontextprotocol.io needs two artifacts this repo
+  did not carry: the PyPI ownership marker, which the registry reads from the
+  *released* package description, and the record itself. The record is a
+  fourth place a version can drift — after the tag, `pyproject.toml` and
+  `uv.lock` — and the registry rejects a record whose server and distribution
+  versions disagree, so the release contract owns it rather than letting
+  `mcp-publisher` discover the mismatch after a release has shipped. The check
+  is opt-in (`--require-registry-manifest`): `release-sbom.yml` runs current
+  tooling against immutable historical checkouts, where every tag predating
+  this file legitimately has no `server.json`. Guard tests pin that the
+  release workflow passes the flag and the SBOM workflow does not, so the
+  opt-in cannot rot into a silent skip.
+
+### Changed
+
+- **The search table says which scale its Score column is on (#2504).** The
+  table printed a bare number. A fused score is a rank sum, so a single-leg top
+  hit shows `0.0164` — that is `1/(60+1)` — which reads on screen as a 1.6%
+  match with nothing on the surface saying otherwise. #1767 already put
+  `score_scale` in the JSON payload for this reason; the human-facing table now
+  carries a caption line under the leg footer. The caption names the base scale
+  and says modifiers can rescale it, because time decay and the access,
+  importance and entity-match boosts multiply on top when enabled. A result set
+  with `score_scale="none"` was not ranked for relevance at all and gets no
+  caption. Only the table changes; `json`, `plain`, `context` and `smart` are
+  untouched.
+
+- **A bare `mm index` says which directory it is about to walk (#2505).**
+  `PATH` defaults to `.`, so someone following a setup guide inside a code
+  repository indexed the repository rather than their memory directory: the
+  walk pulls in fixtures and tooling files, the redaction gate blocks the ones
+  carrying secret-class patterns, and the command exits 1 — a refusal that
+  reads as a broken install rather than a mis-aimed command. Measured in this
+  repo, the bare form pulled in `tools/bandit-baseline.json` among others and
+  exited 1, while the same command with an explicit path indexed three files
+  cleanly. It stays a notice rather than a changed default, because scripts
+  legitimately pass no path, and it goes to stderr, so `--json` and every other
+  stdout contract is untouched. It fires only for a direct index: the
+  automation plugin's hook calls `index --flush` with no path and is not told
+  it is about to walk the current directory.
+
 ### Security
 
 - Update locked anyio 4.13.0 to 4.14.2 (#2497) for
