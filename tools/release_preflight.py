@@ -54,6 +54,10 @@ class _ProbePending(ReleaseCheckError):
 
 _REGISTRY_SERVER_NAME = "io.github.memtomem/memtomem"
 _FetchJSON = Callable[[str, float], tuple[int, Any]]
+# Both HTTP boundaries deliberately use the full protocol-error family with
+# their bounded retry policies. Even a persistent protocol/configuration error
+# must end in a diagnostic refusal, not escape the gate as a raw traceback.
+_HTTP_TRANSPORT_ERRORS = (OSError, http.client.HTTPException)
 
 
 def _request_json(url: str, timeout: float) -> tuple[int, Any]:
@@ -71,7 +75,7 @@ def _request_json(url: str, timeout: float) -> tuple[int, Any]:
         return exc.code, None
     except (json.JSONDecodeError, UnicodeError) as exc:
         raise ReleaseCheckError(f"invalid JSON from {url}: {exc}") from exc
-    except (OSError, http.client.HTTPException) as exc:
+    except _HTTP_TRANSPORT_ERRORS as exc:
         raise _ProbePending(f"could not confirm {url}: {exc}") from exc
 
 
@@ -613,7 +617,7 @@ def wait_for_exact_main_ci(
         try:
             rows = fetch_runs(repository, sha, token)
             consecutive_errors = 0
-        except (OSError, urllib.error.URLError, json.JSONDecodeError, ReleaseCheckError) as exc:
+        except (*_HTTP_TRANSPORT_ERRORS, json.JSONDecodeError, ReleaseCheckError) as exc:
             consecutive_errors += 1
             if consecutive_errors >= 3:
                 raise ReleaseCheckError(

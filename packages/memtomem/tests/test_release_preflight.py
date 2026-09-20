@@ -860,13 +860,25 @@ def test_wait_ci_fails_immediately_on_exact_failed_run() -> None:
         )
 
 
-def test_wait_ci_fails_closed_after_three_api_errors() -> None:
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        pytest.param(lambda: OSError("offline"), id="network"),
+        pytest.param(lambda: http.client.IncompleteRead(b"{", 99), id="truncated-body"),
+        pytest.param(lambda: http.client.BadStatusLine("broken status"), id="bad-status"),
+        pytest.param(lambda: http.client.LineTooLong("status line"), id="long-status"),
+    ],
+)
+def test_wait_ci_fails_closed_after_three_api_errors(error_factory) -> None:
     clock = _Clock()
+    calls = []
 
     def fail(*_args):
-        raise OSError("offline")
+        error = error_factory()
+        calls.append(error)
+        raise error
 
-    with pytest.raises(rp.ReleaseCheckError, match="3 consecutive"):
+    with pytest.raises(rp.ReleaseCheckError, match="3 consecutive") as caught:
         rp.wait_for_exact_main_ci(
             repository="memtomem/memtomem",
             sha="abc",
@@ -877,6 +889,79 @@ def test_wait_ci_fails_closed_after_three_api_errors() -> None:
             monotonic=clock.monotonic,
             sleep=clock.sleep,
         )
+    assert len(calls) == 3
+    assert clock.now == 2
+    assert caught.value.__cause__ is calls[-1]
+
+
+def test_wait_ci_recovers_from_truncated_response_and_resets_error_count(monkeypatch):
+    clock = _Clock()
+    responses = iter(
+        [
+            _TruncatedResponse(),
+            _TruncatedResponse(),
+            _JSONResponse(b'{"workflow_runs": []}'),
+            _TruncatedResponse(),
+            _TruncatedResponse(),
+            _JSONResponse(
+                json.dumps(
+                    {
+                        "workflow_runs": [_run(status="completed", conclusion="success")],
+                    }
+                ).encode()
+            ),
+        ]
+    )
+    monkeypatch.setattr(rp.urllib.request, "urlopen", lambda *a, **kw: next(responses))
+    result = rp.wait_for_exact_main_ci(
+        repository="memtomem/memtomem",
+        sha="abc",
+        token="token",
+        timeout_seconds=10,
+        interval_seconds=1,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+    assert result["id"] == 123
+    assert clock.now == 5
+    with pytest.raises(StopIteration):
+        next(responses)
+
+
+def test_wait_ci_cli_reports_truncated_response_without_traceback(monkeypatch, capsys):
+    calls = []
+
+    def open_request(request, timeout):
+        assert request.full_url.startswith("https://api.github.com/repos/memtomem/memtomem/")
+        response = _TruncatedResponse()
+        calls.append(response)
+        return response
+
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(rp.urllib.request, "urlopen", open_request)
+    assert (
+        rp.main(
+            [
+                "wait-ci",
+                "--repository",
+                "memtomem/memtomem",
+                "--sha",
+                "abc",
+                "--timeout-seconds",
+                "10",
+                "--interval-seconds",
+                "0",
+            ]
+        )
+        == 1
+    )
+    assert len(calls) == 3
+    assert all(response.closed for response in calls)
+    output = capsys.readouterr()
+    assert "GitHub Actions API failed 3 consecutive times" in output.err
+    assert "IncompleteRead" in output.err
+    assert "Traceback" not in output.err
+    assert not output.out
 
 
 def test_wait_ci_times_out_when_no_exact_run_appears() -> None:
@@ -1148,9 +1233,6 @@ def test_opencode_refuses_pin_drift_before_network(tmp_path, change):
 
 @pytest.mark.parametrize("status", [200, 404, 503])
 def test_http_probe_preserves_status_and_sets_headers_and_timeout(monkeypatch, status):
-    class Response(io.BytesIO):
-        pass
-
     def open_request(request, timeout):
         assert request.full_url == "https://pypi.org/pypi/memtomem/0.3.6/json"
         assert request.get_header("Accept") == "application/json"
@@ -1158,9 +1240,7 @@ def test_http_probe_preserves_status_and_sets_headers_and_timeout(monkeypatch, s
         assert timeout == 10
         if status != 200:
             raise urllib.error.HTTPError(request.full_url, status, "error", {}, io.BytesIO(b"bad"))
-        response = Response(json.dumps(_pypi_metadata()).encode())
-        response.status = 200
-        return response
+        return _JSONResponse(json.dumps(_pypi_metadata()).encode())
 
     monkeypatch.setattr(rp.urllib.request, "urlopen", open_request)
     actual, body = rp._request_json("https://pypi.org/pypi/memtomem/0.3.6/json", 10)
@@ -1169,10 +1249,7 @@ def test_http_probe_preserves_status_and_sets_headers_and_timeout(monkeypatch, s
 
 
 def test_http_probe_distinguishes_bad_json_from_transient_network(monkeypatch):
-    class Response(io.BytesIO):
-        status = 200
-
-    monkeypatch.setattr(rp.urllib.request, "urlopen", lambda *a, **kw: Response(b"not JSON"))
+    monkeypatch.setattr(rp.urllib.request, "urlopen", lambda *a, **kw: _JSONResponse(b"not JSON"))
     with pytest.raises(rp.ReleaseCheckError, match="invalid JSON") as error:
         rp._request_json("https://pypi.org/example", 10)
     assert not isinstance(error.value, rp._ProbePending)
@@ -1195,10 +1272,15 @@ class _TruncatedResponse(_JSONResponse):
 
 
 @pytest.mark.parametrize(
-    "error",
-    [http.client.BadStatusLine("broken status"), http.client.LineTooLong("status line")],
+    "error_factory",
+    [
+        pytest.param(lambda: http.client.BadStatusLine("broken status"), id="bad-status"),
+        pytest.param(lambda: http.client.LineTooLong("status line"), id="long-status"),
+    ],
 )
-def test_http_probe_classifies_protocol_errors_as_pending(monkeypatch, error):
+def test_http_probe_classifies_protocol_errors_as_pending(monkeypatch, error_factory):
+    error = error_factory()
+
     def broken_response(*args, **kwargs):
         raise error
 
