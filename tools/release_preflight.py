@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import email
 import json
+import math
 import os
 import re
 import sys
@@ -44,6 +45,173 @@ _SDIST_TOP_LEVEL_ALLOWLIST = {
 
 class ReleaseCheckError(RuntimeError):
     """A release invariant was not met."""
+
+
+class _ProbePending(ReleaseCheckError):
+    """A missing or temporarily unavailable release may become visible later."""
+
+
+_REGISTRY_SERVER_NAME = "io.github.memtomem/memtomem"
+_FetchJSON = Callable[[str, float], tuple[int, Any]]
+
+
+def _request_json(url: str, timeout: float) -> tuple[int, Any]:
+    request = urllib.request.Request(
+        url, headers={"Accept": "application/json", "User-Agent": "memtomem-release-preflight"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            if response.status != 200:
+                return response.status, None
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as exc:
+        # Readiness depends on the HTTP status, not a registry's error-body shape.
+        exc.close()
+        return exc.code, None
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise ReleaseCheckError(f"invalid JSON from {url}: {exc}") from exc
+    except OSError as exc:
+        raise _ProbePending(f"could not confirm {url}: {exc}") from exc
+
+
+def _contains_mcp_name(description: str, server_name: str) -> bool:
+    # Match registry v1.8.1 internal/validators/registries/mcpname.go: a name
+    # must terminate, but an unspaced HTML comment close is also a boundary.
+    return (
+        re.search(
+            re.escape(f"mcp-name: {server_name}") + r"(?=$|[^A-Za-z0-9._/-]|-->|--!>)",
+            description,
+        )
+        is not None
+    )
+
+
+def _probe_pypi_release(
+    version: str,
+    *,
+    fetch_json: _FetchJSON,
+    timeout: float = 10,
+    server_name: str | None = None,
+) -> None:
+    url = f"https://pypi.org/pypi/memtomem/{urllib.parse.quote(version, safe='')}/json"
+    status, payload = fetch_json(url, timeout)
+    if status == 404:
+        raise _ProbePending(f"memtomem=={version} is absent from PyPI (HTTP 404 at {url})")
+    if status == 429 or 500 <= status < 600:
+        raise _ProbePending(f"could not confirm memtomem=={version}: HTTP {status} at {url}")
+    if status != 200:
+        raise ReleaseCheckError(f"cannot verify memtomem=={version}: HTTP {status} at {url}")
+    info = payload.get("info") if isinstance(payload, dict) else None
+    if not isinstance(info, dict):
+        raise ReleaseCheckError(f"invalid PyPI metadata for memtomem=={version} at {url}: no info")
+    if info.get("name") != "memtomem" or info.get("version") != version:
+        raise ReleaseCheckError(f"PyPI package/version mismatch for memtomem=={version} at {url}")
+    if server_name is not None:
+        description = info.get("description")
+        if not isinstance(description, str):
+            raise ReleaseCheckError(f"invalid PyPI description for memtomem=={version} at {url}")
+        if not _contains_mcp_name(description, server_name):
+            raise _ProbePending(
+                f"memtomem=={version} at {url} lacks the complete ownership token "
+                f"'mcp-name: {server_name}'"
+            )
+
+
+def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = None) -> str:
+    """Require the core version actually pinned by OpenCode to exist on PyPI."""
+    core = _load_toml(repo_root / "packages/memtomem-plugin-assets/contract.toml").get("core")
+    if not isinstance(core, dict) or not isinstance(core.get("version"), str):
+        raise ReleaseCheckError("plugin contract has no core.version")
+    version = version_from_tag(f"v{core['version']}")
+    extras = core.get("mcp_extras")
+    if not isinstance(extras, list) or not all(
+        isinstance(extra, str) and re.fullmatch(r"[A-Za-z0-9_-]+", extra) for extra in extras
+    ):
+        raise ReleaseCheckError("plugin contract has invalid core.mcp_extras")
+    requirement = f"memtomem[{','.join(extras)}]=={version}"
+    generated = (repo_root / "packages/opencode-memtomem/src/generated.ts").read_text(
+        encoding="utf-8"
+    )
+    for field, expected in (("CORE_VERSION", version), ("MCP_REQUIREMENT", requirement)):
+        values = re.findall(rf'^export const {field} = "([^"\n]*)";$', generated, re.MULTILINE)
+        if values != [expected]:
+            raise ReleaseCheckError(f"OpenCode generated {field} does not match {expected!r}")
+    try:
+        _probe_pypi_release(version, fetch_json=fetch_json or _request_json)
+    except ReleaseCheckError as exc:
+        raise ReleaseCheckError(
+            f"OpenCode cannot publish while memtomem=={version} is unverified: {exc}. "
+            f"Wait for / approve the PyPI v{version} release, confirm propagation, "
+            "then rerun the OpenCode release."
+        ) from exc
+    return version
+
+
+def validate_registry_publish(
+    tag: str,
+    repo_root: Path,
+    *,
+    timeout_seconds: float = 300,
+    interval_seconds: float = 10,
+    fetch_json: _FetchJSON | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Read-only gate: exact released ownership and an unused registry version."""
+    if not _PROD_TAG_RE.fullmatch(tag):
+        raise ReleaseCheckError("MCP registry publication requires a production vX.Y.Z tag")
+    for label, value in (("timeout", timeout_seconds), ("interval", interval_seconds)):
+        if not math.isfinite(value) or value <= 0:
+            raise ReleaseCheckError(f"{label} must be finite and greater than zero")
+    version = validate_contract(tag, repo_root, require_registry_manifest=True)
+    manifest = json.loads((repo_root / "server.json").read_text(encoding="utf-8"))
+    if manifest.get("name") != _REGISTRY_SERVER_NAME:
+        raise ReleaseCheckError(f"server.json name must be {_REGISTRY_SERVER_NAME}")
+    package = next(
+        row
+        for row in manifest["packages"]
+        if row["registryType"] == "pypi" and row["identifier"] == "memtomem"
+    )
+    if package.get("registryBaseUrl", "https://pypi.org") != "https://pypi.org":
+        raise ReleaseCheckError("server.json must use production PyPI https://pypi.org")
+    fetch_json = fetch_json or _request_json
+    deadline = monotonic() + timeout_seconds
+    last_error = "no successful PyPI probe"
+    while (remaining := deadline - monotonic()) > 0:
+        try:
+            _probe_pypi_release(
+                version,
+                fetch_json=fetch_json,
+                timeout=min(10, remaining),
+                server_name=_REGISTRY_SERVER_NAME,
+            )
+            break
+        except _ProbePending as exc:
+            last_error = str(exc)
+            print(f"Waiting for PyPI: {last_error}", file=sys.stderr)
+            sleep(min(interval_seconds, max(0, deadline - monotonic())))
+    else:
+        raise ReleaseCheckError(
+            f"timed out after {timeout_seconds:g}s: {last_error}; "
+            "confirm the released PyPI description before retrying registry publication"
+        )
+    # Deleted versions are immutable too; the default API hides them.
+    name = urllib.parse.quote(_REGISTRY_SERVER_NAME, safe="")
+    url = (
+        f"https://registry.modelcontextprotocol.io/v0.1/servers/{name}/versions/{version}"
+        "?include_deleted=true"
+    )
+    status, _ = fetch_json(url, 10)
+    if status == 200:
+        raise ReleaseCheckError(
+            f"{_REGISTRY_SERVER_NAME} version {version} is already listed at {url}; "
+            "refusing a second publish (including deprecated or deleted versions)"
+        )
+    if status != 404:
+        raise ReleaseCheckError(
+            f"cannot confirm registry version is unused: HTTP {status} at {url}"
+        )
+    return version
 
 
 def version_from_tag(tag: str) -> str:
@@ -517,6 +685,15 @@ def _build_parser() -> argparse.ArgumentParser:
     artifacts.add_argument("--version", required=True)
     artifacts.add_argument("--repo-root", type=Path, default=Path.cwd())
 
+    registry = subparsers.add_parser("registry", allow_abbrev=False)
+    registry.add_argument("--tag", required=True)
+    registry.add_argument("--repo-root", type=Path, default=Path.cwd())
+    registry.add_argument("--timeout-seconds", type=float, default=300)
+    registry.add_argument("--interval-seconds", type=float, default=10)
+
+    opencode = subparsers.add_parser("opencode-pypi", allow_abbrev=False)
+    opencode.add_argument("--repo-root", type=Path, default=Path.cwd())
+
     wait_ci = subparsers.add_parser("wait-ci")
     wait_ci.add_argument("--repository", required=True)
     wait_ci.add_argument("--sha", required=True)
@@ -541,6 +718,17 @@ def main(argv: list[str] | None = None) -> int:
                 args.dist.resolve(), args.version, args.repo_root.resolve()
             )
             print(f"validated {wheel.name} and {sdist.name}")
+        elif args.command == "registry":
+            version = validate_registry_publish(
+                args.tag,
+                args.repo_root.resolve(),
+                timeout_seconds=args.timeout_seconds,
+                interval_seconds=args.interval_seconds,
+            )
+            print(f"registry publication prerequisites verified for {version}")
+        elif args.command == "opencode-pypi":
+            version = validate_opencode_pypi(args.repo_root.resolve())
+            print(f"OpenCode core pin memtomem=={version} is available on PyPI")
         else:
             token = os.environ.get("GITHUB_TOKEN", "")
             if not token:

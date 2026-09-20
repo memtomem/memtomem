@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import io
 import json
 import shlex
 import tarfile
+import urllib.error
 import zipfile
 from pathlib import Path
 from types import ModuleType
@@ -358,7 +360,9 @@ def _workflow(workflow_name: str) -> dict:
     )
 
 
-def _contract_argv(document: dict, job_name: str, step_id: str) -> list[str]:
+def _single_command_argv(
+    document: dict, job_name: str, step_id: str, prefix: tuple[str, ...]
+) -> list[str]:
     """The argv of one named step, on the condition that it is a lone command.
 
     This replaces a shell-command splitter that three consecutive review
@@ -401,11 +405,14 @@ def _contract_argv(document: dict, job_name: str, step_id: str) -> list[str]:
     # can distinguish from its absence is not defence in depth, it is an
     # unpinned line. Measured: deleting ``comments=True`` changed nothing.
     argv = shlex.split(command)
-    assert tuple(argv[: len(_CONTRACT_PREFIX)]) == _CONTRACT_PREFIX, (
-        f"step {step_id!r} must invoke {' '.join(_CONTRACT_PREFIX)}, "
-        f"got: {argv[: len(_CONTRACT_PREFIX)]}"
+    assert tuple(argv[: len(prefix)]) == prefix, (
+        f"step {step_id!r} must invoke {' '.join(prefix)}, got: {argv[: len(prefix)]}"
     )
     return argv
+
+
+def _contract_argv(document: dict, job_name: str, step_id: str) -> list[str]:
+    return _single_command_argv(document, job_name, step_id, _CONTRACT_PREFIX)
 
 
 def _parsed_contract_args(document: dict, job_name: str, step_id: str) -> object:
@@ -884,3 +891,465 @@ def test_wait_ci_times_out_when_no_exact_run_appears() -> None:
             monotonic=clock.monotonic,
             sleep=clock.sleep,
         )
+
+
+# Release-readiness checks use fake HTTP and time; they must never publish or
+# depend on live registry contents in CI.
+_SERVER_NAME = "io.github.memtomem/memtomem"
+
+
+def _pypi_metadata(version="0.3.6", description=None):
+    return {
+        "info": {
+            "name": "memtomem",
+            "version": version,
+            "description": description
+            if description is not None
+            else f"<!-- mcp-name: {_SERVER_NAME} -->",
+        }
+    }
+
+
+def _opencode_repo(tmp_path):
+    repo = _repo(tmp_path)
+    contract = repo / "packages/memtomem-plugin-assets/contract.toml"
+    contract.parent.mkdir(parents=True)
+    contract.write_text('[core]\nversion = "0.3.6"\nmcp_extras = ["onnx"]\n', encoding="utf-8")
+    generated = repo / "packages/opencode-memtomem/src/generated.ts"
+    generated.parent.mkdir(parents=True)
+    generated.write_text(
+        'export const CORE_VERSION = "0.3.6";\n'
+        'export const MCP_REQUIREMENT = "memtomem[onnx]==0.3.6";\n',
+        encoding="utf-8",
+    )
+    return repo
+
+
+@pytest.mark.parametrize("suffix", ["", " ", "\n", "<br>", "-->", "--!>", ","])
+def test_registry_ownership_token_accepts_upstream_boundaries(suffix):
+    assert rp._contains_mcp_name(f"<!-- mcp-name: {_SERVER_NAME}{suffix}", _SERVER_NAME)
+
+
+@pytest.mark.parametrize("suffix", ["-pro", ".extra", "_extra", "/extra", "2", "Z"])
+def test_registry_ownership_token_rejects_name_prefix_confusion(suffix):
+    wrong = f"mcp-name: {_SERVER_NAME}{suffix}"
+    assert not rp._contains_mcp_name(wrong, _SERVER_NAME)
+    assert rp._contains_mcp_name(wrong + f"\nmcp-name: {_SERVER_NAME}", _SERVER_NAME)
+
+
+def test_registry_waits_for_released_description_before_checking_unused_version(tmp_path):
+    clock = _Clock()
+    calls = []
+    replies = iter(
+        [
+            (404, None),
+            (503, None),
+            (200, _pypi_metadata(description="no marker yet")),
+            (200, _pypi_metadata()),
+            (404, None),
+        ]
+    )
+
+    def fetch(url, timeout):
+        calls.append((url, timeout))
+        return next(replies)
+
+    assert (
+        rp.validate_registry_publish(
+            "v0.3.6",
+            _repo(tmp_path),
+            timeout_seconds=40,
+            interval_seconds=10,
+            fetch_json=fetch,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+        == "0.3.6"
+    )
+    assert clock.now == 30
+    assert calls[:4] == [("https://pypi.org/pypi/memtomem/0.3.6/json", 10)] * 4
+    assert calls[4] == (
+        "https://registry.modelcontextprotocol.io/v0.1/servers/"
+        "io.github.memtomem%2Fmemtomem/versions/0.3.6?include_deleted=true",
+        10,
+    )
+
+
+@pytest.mark.parametrize(
+    "response,reason",
+    [
+        ((404, None), "absent from PyPI"),
+        ((429, None), "HTTP 429"),
+        ((503, None), "HTTP 503"),
+        ((200, _pypi_metadata(description="missing")), "ownership token"),
+    ],
+)
+def test_registry_propagation_timeout_reports_last_observed_failure(tmp_path, response, reason):
+    clock = _Clock()
+    calls = []
+
+    def fetch(url, timeout):
+        assert url.startswith("https://pypi.org/")  # Never reaches the registry.
+        calls.append(timeout)
+        return response
+
+    with pytest.raises(rp.ReleaseCheckError, match=reason):
+        rp.validate_registry_publish(
+            "v0.3.6",
+            _repo(tmp_path),
+            timeout_seconds=12,
+            interval_seconds=10,
+            fetch_json=fetch,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+    assert clock.now == 12
+    assert calls == [10, 2]  # Final request and sleep respect the remaining budget.
+
+
+def test_registry_retries_transport_error_but_not_bad_metadata(tmp_path):
+    clock = _Clock()
+    replies = iter([rp._ProbePending("network unavailable"), (200, _pypi_metadata()), (404, None)])
+
+    def fetch(*_):
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    assert (
+        rp.validate_registry_publish(
+            "v0.3.6",
+            _repo(tmp_path),
+            fetch_json=fetch,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+        == "0.3.6"
+    )
+    assert clock.now == 10
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        (403, None),
+        (200, []),
+        (200, {}),
+        (200, {"info": []}),
+        (200, _pypi_metadata(version="9.9.9")),
+        (200, {"info": {"name": "other", "version": "0.3.6"}}),
+        (200, {"info": {"name": "memtomem", "version": "0.3.6", "description": None}}),
+    ],
+)
+def test_registry_rejects_bad_metadata_without_polling(tmp_path, response):
+    clock = _Clock()
+    with pytest.raises(rp.ReleaseCheckError):
+        rp.validate_registry_publish(
+            "v0.3.6",
+            _repo(tmp_path),
+            fetch_json=lambda *_: response,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+    assert clock.now == 0
+
+
+@pytest.mark.parametrize("state", ["active", "deprecated", "deleted"])
+def test_registry_refuses_every_already_listed_state(tmp_path, state):
+    replies = iter([(200, _pypi_metadata()), (200, {"status": state})])
+    with pytest.raises(rp.ReleaseCheckError, match="already listed"):
+        rp.validate_registry_publish("v0.3.6", _repo(tmp_path), fetch_json=lambda *_: next(replies))
+
+
+@pytest.mark.parametrize("status", [301, 401, 403, 429, 500, 503])
+def test_registry_does_not_treat_unavailable_lookup_as_unused(tmp_path, status):
+    replies = iter([(200, _pypi_metadata()), (status, None)])
+    with pytest.raises(rp.ReleaseCheckError, match="cannot confirm registry"):
+        rp.validate_registry_publish("v0.3.6", _repo(tmp_path), fetch_json=lambda *_: next(replies))
+
+
+@pytest.mark.parametrize(
+    "change", ["test-tag", "tag-drift", "name", "pypi-base", "package-version"]
+)
+def test_registry_local_refusal_precedes_any_network(tmp_path, change):
+    repo = _repo(tmp_path)
+    manifest_path = repo / "server.json"
+    manifest = json.loads(manifest_path.read_text())
+    tag = "v0.3.6"
+    if change == "test-tag":
+        tag = "test-v0.3.6a1"
+    elif change == "tag-drift":
+        tag = "v0.3.7"
+    elif change == "name":
+        manifest["name"] = "io.github.someone/other"
+    elif change == "pypi-base":
+        manifest["packages"][0]["registryBaseUrl"] = "https://test.pypi.org"
+    else:
+        manifest["packages"][0]["version"] = "0.3.5"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(rp.ReleaseCheckError):
+        rp.validate_registry_publish(tag, repo, fetch_json=lambda *_: pytest.fail("network called"))
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
+@pytest.mark.parametrize("field", ["timeout_seconds", "interval_seconds"])
+def test_registry_rejects_unbounded_or_nonpositive_polling(tmp_path, value, field):
+    with pytest.raises(rp.ReleaseCheckError, match="finite and greater"):
+        rp.validate_registry_publish("v0.3.6", tmp_path, **{field: value})
+
+
+def test_opencode_checks_its_actual_core_pin_once(tmp_path):
+    calls = []
+
+    def fetch(url, timeout):
+        calls.append((url, timeout))
+        return 200, _pypi_metadata(description="no ownership marker needed for npm")
+
+    assert rp.validate_opencode_pypi(_opencode_repo(tmp_path), fetch_json=fetch) == "0.3.6"
+    assert calls == [("https://pypi.org/pypi/memtomem/0.3.6/json", 10)]
+
+
+@pytest.mark.parametrize("status,reason", [(404, "absent"), (503, "could not confirm")])
+def test_opencode_missing_or_unavailable_pypi_fails_with_recovery(tmp_path, status, reason):
+    calls = []
+
+    def fetch(*args):
+        calls.append(args)
+        return status, None
+
+    with pytest.raises(rp.ReleaseCheckError) as error:
+        rp.validate_opencode_pypi(_opencode_repo(tmp_path), fetch_json=fetch)
+    message = str(error.value)
+    assert all(text in message for text in ["memtomem==0.3.6", reason, "approve", "rerun"])
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("change", ["version", "requirement", "duplicate", "missing", "contract"])
+def test_opencode_refuses_pin_drift_before_network(tmp_path, change):
+    repo = _opencode_repo(tmp_path)
+    generated = repo / "packages/opencode-memtomem/src/generated.ts"
+    text = generated.read_text()
+    if change == "version":
+        text = text.replace('CORE_VERSION = "0.3.6"', 'CORE_VERSION = "0.3.7"')
+    elif change == "requirement":
+        text = text.replace("memtomem[onnx]", "memtomem[all]")
+    elif change == "duplicate":
+        text += 'export const CORE_VERSION = "0.3.6";\n'
+    elif change == "missing":
+        text = ""
+    else:
+        (repo / "packages/memtomem-plugin-assets/contract.toml").write_text("[core]\n")
+    generated.write_text(text)
+    with pytest.raises(rp.ReleaseCheckError):
+        rp.validate_opencode_pypi(repo, fetch_json=lambda *_: pytest.fail("network called"))
+
+
+@pytest.mark.parametrize("status", [200, 404, 503])
+def test_http_probe_preserves_status_and_sets_headers_and_timeout(monkeypatch, status):
+    class Response(io.BytesIO):
+        pass
+
+    def open_request(request, timeout):
+        assert request.full_url == "https://pypi.org/pypi/memtomem/0.3.6/json"
+        assert request.get_header("Accept") == "application/json"
+        assert request.get_header("User-agent") == "memtomem-release-preflight"
+        assert timeout == 10
+        if status != 200:
+            raise urllib.error.HTTPError(request.full_url, status, "error", {}, io.BytesIO(b"bad"))
+        response = Response(json.dumps(_pypi_metadata()).encode())
+        response.status = 200
+        return response
+
+    monkeypatch.setattr(rp.urllib.request, "urlopen", open_request)
+    actual, body = rp._request_json("https://pypi.org/pypi/memtomem/0.3.6/json", 10)
+    assert actual == status
+    assert body == (_pypi_metadata() if status == 200 else None)
+
+
+def test_http_probe_distinguishes_bad_json_from_transient_network(monkeypatch):
+    class Response(io.BytesIO):
+        status = 200
+
+    monkeypatch.setattr(rp.urllib.request, "urlopen", lambda *a, **kw: Response(b"not JSON"))
+    with pytest.raises(rp.ReleaseCheckError, match="invalid JSON") as error:
+        rp._request_json("https://pypi.org/example", 10)
+    assert not isinstance(error.value, rp._ProbePending)
+
+    def unavailable(*a, **kw):
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(rp.urllib.request, "urlopen", unavailable)
+    with pytest.raises(rp._ProbePending, match="could not confirm"):
+        rp._request_json("https://pypi.org/example", 10)
+
+
+@pytest.mark.parametrize("command", ["registry", "opencode-pypi"])
+@pytest.mark.parametrize("allowed", [True, False])
+def test_readiness_cli_actually_runs_the_gate(tmp_path, monkeypatch, capsys, command, allowed):
+    repo = _opencode_repo(tmp_path)
+    replies = iter(
+        [(200, _pypi_metadata()), (404 if allowed else 200, {})]
+        if command == "registry"
+        else [(200, _pypi_metadata()) if allowed else (404, None)]
+    )
+    monkeypatch.setattr(rp, "_request_json", lambda *_: next(replies))
+    args = [command, "--repo-root", str(repo)]
+    if command == "registry":
+        args += ["--tag", "v0.3.6"]
+    assert rp.main(args) == (0 if allowed else 1)
+    output = capsys.readouterr()
+    assert ("release preflight failed" in output.err) is not allowed
+    with pytest.raises(StopIteration):
+        next(replies)  # Proves the selected CLI command used every required probe.
+
+
+_REGISTRY_PREFIX = (*_CONTRACT_PREFIX[:-1], "registry")
+_OPENCODE_PREFIX = ("python", "tools/release_preflight.py", "opencode-pypi")
+
+
+def _required_step(document, job_name, step_id):
+    job = document["jobs"][job_name]
+    assert "continue-on-error" not in job
+    steps = [step for step in job["steps"] if step.get("id") == step_id]
+    assert len(steps) == 1
+    step = steps[0]
+    for bypass in ("if", "continue-on-error", "shell"):
+        assert bypass not in step
+    return step
+
+
+def _assert_readiness_workflows(release, opencode):
+    registry = release["jobs"]["mcp-registry"]
+    assert registry["needs"] == "publish"
+    assert registry["if"] == "${{ startsWith(github.ref_name, 'v') }}"
+    assert registry["permissions"] == {"contents": "read", "id-token": "write"}
+    assert registry["concurrency"] == {
+        "group": "mcp-registry-${{ github.ref }}",
+        "cancel-in-progress": False,
+    }
+    assert registry["runs-on"] == "ubuntu-latest"
+    checkout = registry["steps"][0]
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert checkout["with"] == {"persist-credentials": False}
+    ids = [step.get("id") for step in registry["steps"]]
+    ordered = ["registry-gate", "publisher-install", "registry-login", "registry-publish"]
+    assert [item for item in ids if item in ordered] == ordered
+    for step_id in ordered:
+        _required_step(release, "mcp-registry", step_id)
+    argv = _single_command_argv(release, "mcp-registry", "registry-gate", _REGISTRY_PREFIX)
+    args = rp._build_parser().parse_args(argv[len(_REGISTRY_PREFIX) - 1 :])
+    assert (args.tag, args.repo_root, args.timeout_seconds, args.interval_seconds) == (
+        "$GITHUB_REF_NAME",
+        Path("."),
+        300,
+        10,
+    )
+    for step_id, expected in (
+        ("registry-login", ("./mcp-publisher", "login", "github-oidc")),
+        ("registry-publish", ("./mcp-publisher", "publish")),
+    ):
+        assert _single_command_argv(release, "mcp-registry", step_id, expected) == list(expected)
+    install = _required_step(release, "mcp-registry", "publisher-install")
+    assert install["env"] == {
+        "MCP_PUBLISHER_VERSION": "1.8.1",
+        "MCP_PUBLISHER_SHA256": "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc",
+    }
+    assert (
+        '"https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"'
+        in install["run"]
+    )
+    assert (
+        'echo "$MCP_PUBLISHER_SHA256  $RUNNER_TEMP/mcp-publisher.tar.gz" | sha256sum --check --strict'
+        in install["run"]
+    )
+    assert install["run"].index("sha256sum") < install["run"].index("tar xzf")
+
+    gate = _required_step(opencode, "preflight", "pypi-core")
+    assert "if" not in opencode["jobs"]["preflight"]
+    assert gate["working-directory"] == "${{ github.workspace }}"
+    argv = _single_command_argv(opencode, "preflight", "pypi-core", _OPENCODE_PREFIX)
+    args = rp._build_parser().parse_args(argv[len(_OPENCODE_PREFIX) - 1 :])
+    assert args.repo_root == Path(".")
+    publish = opencode["jobs"]["publish"]
+    assert publish["needs"] == "preflight"
+    assert "if" not in publish  # No always() bypass of a failed preflight.
+    assert "continue-on-error" not in publish
+
+
+def test_readiness_workflows_enforce_publication_order_and_gates():
+    _assert_readiness_workflows(_workflow("release.yml"), _workflow("release-opencode-plugin.yml"))
+
+
+@pytest.mark.parametrize(
+    "target", ["registry-gate", "registry-login", "registry-publish", "pypi-core"]
+)
+@pytest.mark.parametrize(
+    "bypass", ["delete", "echo", "if", "continue-on-error", "shell", "comment", "or-true"]
+)
+def test_readiness_workflow_guard_rejects_disabled_or_decoy_commands(target, bypass):
+    release = copy.deepcopy(_workflow("release.yml"))
+    opencode = copy.deepcopy(_workflow("release-opencode-plugin.yml"))
+    document, job = (opencode, "preflight") if target == "pypi-core" else (release, "mcp-registry")
+    step = _required_step(document, job, target)
+    if bypass == "delete":
+        document["jobs"][job]["steps"].remove(step)
+    elif bypass == "echo":
+        step["run"] = "echo " + step["run"]
+    elif bypass == "comment":
+        step["run"] = "# " + step["run"]
+    elif bypass == "or-true":
+        step["run"] = step["run"].strip() + " || true"
+    else:
+        step[bypass] = {"if": "${{ false }}", "continue-on-error": True, "shell": "echo {0}"}[
+            bypass
+        ]
+    with pytest.raises(AssertionError):
+        _assert_readiness_workflows(release, opencode)
+
+
+@pytest.mark.parametrize(
+    "bypass",
+    [
+        "registry-needs",
+        "opencode-needs",
+        "prod-filter",
+        "permissions",
+        "concurrency",
+        "order",
+        "job-continue",
+        "always-publish",
+        "wrong-root",
+        "checkout-main",
+        "checksum",
+    ],
+)
+def test_readiness_workflow_guard_rejects_dependency_and_order_bypasses(bypass):
+    release = _workflow("release.yml")
+    opencode = _workflow("release-opencode-plugin.yml")
+    registry = release["jobs"]["mcp-registry"]
+    if bypass == "registry-needs":
+        registry["needs"] = "preflight"
+    elif bypass == "opencode-needs":
+        opencode["jobs"]["publish"]["needs"] = []
+    elif bypass == "prod-filter":
+        registry["if"] = "${{ always() }}"
+    elif bypass == "permissions":
+        registry["permissions"] = {"contents": "read"}
+    elif bypass == "concurrency":
+        registry["concurrency"]["cancel-in-progress"] = True
+    elif bypass == "order":
+        registry["steps"][-1], registry["steps"][2] = registry["steps"][2], registry["steps"][-1]
+    elif bypass == "job-continue":
+        registry["continue-on-error"] = True
+    elif bypass == "always-publish":
+        opencode["jobs"]["publish"]["if"] = "${{ always() }}"
+    elif bypass == "wrong-root":
+        _required_step(opencode, "preflight", "pypi-core")["working-directory"] = "."
+    elif bypass == "checkout-main":
+        registry["steps"][0]["with"]["ref"] = "main"
+    else:
+        step = _required_step(release, "mcp-registry", "publisher-install")
+        step["run"] = step["run"].replace("sha256sum --check --strict", "cat")
+    with pytest.raises(AssertionError):
+        _assert_readiness_workflows(release, opencode)

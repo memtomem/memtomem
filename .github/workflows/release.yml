@@ -28,7 +28,7 @@ name: Publish
 #   5. test-v<X>a1  →  TestPyPI  →  install-and-handshake smoke
 #   6. v<X>         →  PyPI      →  confirm on two surfaces
 #   7. opencode-v<Y>  →  npm     →  only after 6 is confirmed
-#   8. mcp-publisher publish      →  only after 6 is confirmed
+#   8. mcp-registry job (automatic after PyPI publish; independent of step 7)
 #
 # (a) The dry-run is ONE SHOT PER VERSION. `_TEST_TAG_RE` in
 #     tools/release_preflight.py drops the attempt suffix, so `test-v1.2.3a1`
@@ -40,11 +40,10 @@ name: Publish
 #     the exact main-push run for $GITHUB_SHA to have succeeded, so tagging
 #     early just burns up to 2400s of waiting.
 #
-# (c) Step 7 has no machine guard. release-opencode-plugin.yml checks the tag,
-#     main ancestry, the main CI run and `npm test` — never PyPI — while the
-#     package it ships pins `memtomem[onnx]==<core>`. Push both tags together
-#     and npm can serve a package whose dependency does not exist yet. See
-#     issue #2510.
+# (c) Step 7 checks the exact core pin against the version-specific PyPI JSON
+#     API in preflight (#2510). If that version is absent, approve / wait for
+#     the PyPI release and confirm propagation before rerunning OpenCode.
+#     Keep the separate tags: npm does not wait for PyPI environment approval.
 #
 # (d) A green publish job is not an upload (`skip-existing` can mask one), and
 #     an upload is not yet availability — npm says so outright ("may take a few
@@ -55,12 +54,13 @@ name: Publish
 #     the upload happened, never that the artifact is fetchable. Keep "could not
 #     confirm" separate from "failed".
 #
-# Step 8 is still manual (issue #2509). Before running it: the MCP registry
-# reads its ownership marker from the *version-specific* PyPI endpoint
-# (`/pypi/<name>/<version>/json`) and version metadata is immutable once
-# published, so a wrong record cannot be overwritten — only deprecated and
-# superseded. Verify the marker and that the name is not already listed at that
-# version before publishing, not after.
+# Step 8 uses GitHub OIDC, with no stored token (#2509). Its read-only gate
+# polls the version-specific PyPI description for the ownership token for up
+# to 300s, then requires the registry version to be unused (including deleted
+# records). A completed release rerun FAILS this gate instead of publishing
+# twice. Fix a missing ownership marker with a new PyPI release; immutable
+# metadata cannot be repaired by rerunning this workflow. Retry only after
+# checking which prerequisite failed. TestPyPI never publishes to the registry.
 #
 # The OIDC publish job builds and publishes in one job — no distribution
 # artifact crosses jobs or run-attempts. A read-only preflight independently
@@ -184,6 +184,50 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
           skip-existing: true
+
+  mcp-registry:
+    name: Publish to the MCP Registry
+    needs: publish
+    if: ${{ startsWith(github.ref_name, 'v') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: mcp-registry-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Verify released ownership and refuse an already-listed version
+        id: registry-gate
+        run: >-
+          uv run --no-project --python 3.12 python tools/release_preflight.py registry
+          --tag "$GITHUB_REF_NAME" --repo-root .
+          --timeout-seconds 300 --interval-seconds 10
+      - name: Install checksum-pinned mcp-publisher
+        id: publisher-install
+        env:
+          MCP_PUBLISHER_VERSION: "1.8.1"
+          MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --max-time 60 \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" \
+            --output "$RUNNER_TEMP/mcp-publisher.tar.gz"
+          echo "$MCP_PUBLISHER_SHA256  $RUNNER_TEMP/mcp-publisher.tar.gz" | sha256sum --check --strict
+          tar xzf "$RUNNER_TEMP/mcp-publisher.tar.gz" mcp-publisher
+      - name: Authenticate with GitHub OIDC
+        id: registry-login
+        run: ./mcp-publisher login github-oidc
+      - name: Publish the checked-in server record
+        id: registry-publish
+        run: ./mcp-publisher publish
 
   sbom:
     name: Publish production SBOMs
