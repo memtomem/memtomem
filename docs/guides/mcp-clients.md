@@ -12,7 +12,7 @@
 | Command | What it is | When to use |
 |---------|-----------|-------------|
 | `memtomem-server` | **MCP server** — runs in the background, connects to your editor | Use this in MCP config |
-| `memtomem serve` | The same stdio server, reached through the CLI | Only where a launcher can pass a subcommand but not choose the executable — this is what the registry record uses |
+| `memtomem serve` | The same stdio server, reached through the CLI | Valid anywhere; it exists for launchers that can append an argument but not pick the executable, which is what the registry record needs |
 | `memtomem` (or `mm`) | **CLI tool** — terminal commands for search, index, etc., plus `serve` | Terminal use |
 
 > **Common mistake**: a bare `memtomem` in your MCP config will fail — the client
@@ -36,17 +36,26 @@ memtomem is published to the official
 io.github.memtomem/memtomem
 ```
 
-That name is the canonical identifier for this server. The registry is
-[designed for downstream aggregators](https://github.com/modelcontextprotocol/registry)
-— marketplaces and directories build on its API rather than users browsing it
-directly — so what the listing buys you is **discovery**: tools that index the
-registry can find memtomem and read how to launch it, without this guide.
+That name is the canonical identifier for this server. The registry describes
+itself as
+["intended to be consumed primarily by downstream aggregators"](https://github.com/modelcontextprotocol/registry)
+such as marketplaces — you can query it directly, but its main audience is the
+tools built on top of it. So what the listing buys you is **discovery**:
+anything indexing the registry can find memtomem and read how to launch it,
+without this guide.
 
-The listing describes the same launch every section below sets up by hand: the
-PyPI distribution `memtomem`, run through `uvx`, with `serve` appended. If your
-client already installs from an MCP marketplace, look for that name. Otherwise
-follow your editor's section — the registry entry does not replace those
-instructions, and no client is known to install directly from the registry today.
+The listing does **not** describe the same launch as the sections below, and the
+difference is worth knowing. The record runs the base distribution — `uvx
+memtomem serve`, no extras, no version pin. The sections here mostly register
+the installed `memtomem-server`, and the uvx examples pin
+`memtomem[all]==<version>`. All three reach the same stdio server, but they do
+not give it the same dependencies: the record's environment has no ONNX
+embeddings and no Web UI unless your saved configuration does not need them.
+
+Whether a client can install from that name depends on the client and on the
+package type — some tools do resolve registry records directly, and support is
+uneven. If yours does not, follow your editor's section; the listing does not
+replace those instructions.
 
 ---
 
@@ -933,7 +942,9 @@ ad-hoc sqlite consumers are not registered and stay invisible to it.
 ### Tools don't appear in my editor
 
 1. **Restart your editor** after changing MCP configuration
-2. Check that you used `memtomem-server` (not `memtomem`) in your config
+2. Check your config names a server entry point — `memtomem-server`, or
+   `memtomem` **with the `serve` argument**. A bare `memtomem` with no
+   subcommand gives the client the CLI's help text and a process that exits
 3. Verify the install is reachable: `mm --version` (or `uvx --from memtomem mm --version` for uvx-only setups) — side-effect-free
 4. From inside the editor, ask it to call the `mem_status` tool — a successful response confirms the MCP handshake reached the server
 

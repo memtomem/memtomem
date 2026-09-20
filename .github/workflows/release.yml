@@ -14,7 +14,16 @@ name: Publish
 # Release order, and the four things that bite
 # ---------------------------------------------------------------------------
 #
-#   1. changelog PR (entries only)  →  2. version-only bump PR  →  3. merge
+#   1. changelog PR (entries only)  →  2. version bump PR  →  3. merge
+#
+#   Step 2 is "version-only" in the sense that it changes no behaviour — but it
+#   is NOT just pyproject. It also moves uv.lock, the `## [X.Y.Z]` changelog
+#   heading, BOTH server.json version fields, contract.toml's core version and
+#   all five plugin delivery versions, hook_dispatch.py's CORE_VERSION, the
+#   documentation and example pins, and the static cache manifest — then
+#   re-renders with tools/render_plugin_assets.py.
+#   test_core_version_is_single_sourced_across_automation_assets pins
+#   contract.toml's core to pyproject's, so a package-only bump fails CI.
 #   4. wait for the main-push CI run on the squash commit to go green
 #   5. test-v<X>a1  →  TestPyPI  →  install-and-handshake smoke
 #   6. v<X>         →  PyPI      →  confirm on two surfaces
@@ -37,12 +46,14 @@ name: Publish
 #     and npm can serve a package whose dependency does not exist yet. See
 #     issue #2510.
 #
-# (d) Publication surfaces lag, in both directions. A green publish job is not
-#     an upload (`skip-existing` can mask one), and a registry's first "not
-#     found" is often a cache. Confirm on two surfaces — JSON API *and* simple
-#     index, or packument *and* version document — and when they disagree, the
-#     publish step's own log is the authority. Keep "could not confirm" separate
-#     from "failed".
+# (d) A green publish job is not an upload (`skip-existing` can mask one), and
+#     an upload is not yet availability — npm says so outright ("may take a few
+#     minutes to become available"). Read surfaces can also disagree with each
+#     other for a while. So: confirm by *retrieval*, on two surfaces (JSON API
+#     and simple index, or packument and version document), and re-probe before
+#     concluding anything is missing. The publish step's log establishes that
+#     the upload happened, never that the artifact is fetchable. Keep "could not
+#     confirm" separate from "failed".
 #
 # Step 8 is still manual (issue #2509). Before running it: the MCP registry
 # reads its ownership marker from the *version-specific* PyPI endpoint
