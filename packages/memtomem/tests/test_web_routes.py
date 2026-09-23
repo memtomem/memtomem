@@ -441,6 +441,54 @@ class TestBootstrapState:
         assert data["total_sources"] == 3
         assert data["db_path"] == str(Path(app.state.config.storage.sqlite_path).resolve())
         assert data["memory_dirs"]
+        assert data["read_only_memory_dirs"] == []
+
+    async def test_ready_state_lists_read_only_roots_resolved(
+        self, app, client: AsyncClient, tmp_path, monkeypatch
+    ):
+        """Read-only roots are indexed like the other tiers, so they are listed (#2521).
+
+        Registered through a symlink alias: ``tmp_path`` is already a realpath,
+        so a plain path would pass even if the route skipped ``resolve()``.
+        """
+        set_home(monkeypatch, tmp_path)
+        config_path = tmp_path / ".memtomem" / "config.json"
+        config_path.parent.mkdir()
+        config_path.write_text("{}", encoding="utf-8")
+        app.state.startup_state = "ready"
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        alias = tmp_path / "vault-alias"
+        try:
+            alias.symlink_to(vault, target_is_directory=True)
+        except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+            pytest.skip("symlink creation is not permitted here")
+        indexing = app.state.config.indexing
+        indexing.read_only_memory_dirs = [alias]
+
+        data = (await client.get("/api/bootstrap")).json()
+
+        assert data["read_only_memory_dirs"] == [str(vault.resolve())]
+        # The other tiers still report their own roots, not this one.
+        assert data["memory_dirs"] == [
+            str(Path(p).expanduser().resolve()) for p in indexing.memory_dirs
+        ]
+        assert data["project_memory_dirs"] == []
+
+    async def test_missing_config_reports_empty_root_lists(
+        self, app, client: AsyncClient, tmp_path, monkeypatch
+    ):
+        set_home(monkeypatch, tmp_path)
+        app.state.startup_state = "ready"
+        app.state.config = None
+
+        resp = await client.get("/api/bootstrap")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["memory_dirs"] == []
+        assert data["project_memory_dirs"] == []
+        assert data["read_only_memory_dirs"] == []
 
 
 # ---------------------------------------------------------------------------

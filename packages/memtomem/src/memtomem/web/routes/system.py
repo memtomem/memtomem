@@ -334,6 +334,7 @@ async def get_bootstrap_state(request: Request) -> dict[str, Any]:
 
     memory_dirs = []
     project_memory_dirs = []
+    read_only_memory_dirs = []
     project_context_root = None
     db_path = None
     mismatch = False
@@ -341,6 +342,9 @@ async def get_bootstrap_state(request: Request) -> dict[str, Any]:
         memory_dirs = [str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs]
         project_memory_dirs = [
             str(Path(p).expanduser().resolve()) for p in config.indexing.project_memory_dirs
+        ]
+        read_only_memory_dirs = [
+            str(Path(p).expanduser().resolve()) for p in config.indexing.read_only_memory_dirs
         ]
         db_path = str(Path(config.storage.sqlite_path).expanduser().resolve())
         from memtomem.server.tools.search import _resolve_project_context_from_dirs
@@ -370,6 +374,7 @@ async def get_bootstrap_state(request: Request) -> dict[str, Any]:
         "db_path": db_path,
         "memory_dirs": memory_dirs,
         "project_memory_dirs": project_memory_dirs,
+        "read_only_memory_dirs": read_only_memory_dirs,
         "project_context_root": project_context_root,
         "embedding_mismatch": mismatch,
     }

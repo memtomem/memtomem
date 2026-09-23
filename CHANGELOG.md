@@ -15,6 +15,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mem_status`) now shows a *Read-only roots* group after *Project sources*
   when any are set, and `mm status --json` carries the resolved paths as
   `config.read_only_memory_dirs`, an empty list when none are.
+- **`GET /api/bootstrap` lists read-only memory roots too (#2521).** Its
+  snapshot of configured roots returned `memory_dirs` and
+  `project_memory_dirs` only; it now also returns `read_only_memory_dirs`,
+  resolved like the other two and an empty list when none are set or the
+  config is unavailable. The Web UI does not read these lists, so nothing
+  changes on screen.
 
 ## [0.6.4] — 2026-09-20
 
