@@ -301,6 +301,10 @@
   "sources.empty_vendor_placeholder": "{vendor} memory not found",
   "sources.add_manually_btn": "+ Add manually",
   "sources.default_pill": "default",
+  "sources.tier_pill.read_only": "read-only",
+  "sources.tier_pill.read_only_title": "Read-only root: memtomem indexes these files but never rewrites them",
+  "sources.tier_pill.project": "project",
+  "sources.tier_pill.project_title": "Project memory root (project_memory_dirs)",
   "sources.meta_avg_tokens": "avg {n} tok",
 
   "index.help": "Three ways to add memories to memtomem.",

@@ -5710,7 +5710,8 @@ class TestMemoryDirsStatus:
 
 class TestOpenMemoryDir:
     """``POST /api/memory-dirs/open`` reveals a registered dir in the OS
-    file manager. Whitelist-gated against ``memory_dirs`` so the route
+    file manager. Whitelist-gated against the configured index roots
+    (``all_index_roots()`` — user, project and read-only tiers) so the route
     can't be coerced into spawning a file manager pointed at arbitrary
     filesystem paths even if ``mm web`` were ever bound to a non-loopback
     interface."""
@@ -5764,6 +5765,175 @@ class TestOpenMemoryDir:
         # The path passed to the helper should be the resolved target.
         called_with = opener.call_args.args[0]
         assert called_with == target.resolve()
+
+
+class TestNonUserTierRootsOwnTheirSources:
+    """Project and read-only roots own their sources in the Web read paths.
+
+    Both tiers are indexed from their own roots (``all_index_roots()``), but
+    ``GET /api/sources`` and ``GET /api/stats`` used to attribute a source to
+    a ``memory_dirs`` root only, so these files came back with
+    ``memory_dir=None, kind=None``: the Sources tree filed them under
+    "Other (unregistered)" and ``?kind=memory`` dropped them. (#2522)
+    """
+
+    @staticmethod
+    def _symlinked_root(tmp_path: Path, name: str) -> tuple[Path, Path]:
+        """Return ``(real, alias)``. ``tmp_path`` is already a realpath, so a
+        root registered without an alias would pass even if a route skipped
+        ``resolve()``. The alias keeps ``name`` as its tail because ``kind``
+        is classified from the configured spelling."""
+        real = tmp_path / "real" / name
+        real.mkdir(parents=True)
+        alias = tmp_path / "alias" / name
+        alias.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            alias.symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+            pytest.skip("symlink creation is not permitted here")
+        return real, alias
+
+    @staticmethod
+    def _row(source: Path) -> tuple:
+        return (source, 1, "2026-09-23T10:00:00", "default", 10, 10, 10)
+
+    async def test_read_only_source_is_owned_by_its_root(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        real, alias = self._symlinked_root(tmp_path, "vault")
+        source = real / "note.md"
+        source.write_text("x", encoding="utf-8")
+        app.state.config.indexing.read_only_memory_dirs = [alias]
+        app.state.storage.get_source_files_with_counts.return_value = [self._row(source)]
+
+        src = (await client.get("/api/sources")).json()["sources"][0]
+        dirs = (await client.get("/api/memory-dirs/status")).json()["dirs"]
+
+        assert src["memory_dir"] == str(real.resolve())
+        # ``kind`` is path-shape based, same as every other tier.
+        assert src["kind"] == "general"
+        # Same key the frontend looks the group's status up by.
+        assert src["memory_dir"] in {d["path"] for d in dirs}
+
+    async def test_memory_shaped_read_only_root_survives_kind_memory_filter(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        real, alias = self._symlinked_root(tmp_path, "kb/memories")
+        source = real / "note.md"
+        source.write_text("x", encoding="utf-8")
+        app.state.config.indexing.read_only_memory_dirs = [alias]
+        app.state.storage.get_source_files_with_counts.return_value = [self._row(source)]
+
+        data = (await client.get("/api/sources", params={"kind": "memory"})).json()
+
+        assert [s["path"] for s in data["sources"]] == [str(source)]
+        assert data["sources"][0]["memory_dir"] == str(real.resolve())
+
+    async def test_project_shared_source_is_owned_by_its_root(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        shared = tmp_path / "proj" / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        source = shared / "note.md"
+        source.write_text("x", encoding="utf-8")
+        app.state.config.indexing.memory_dirs = []
+        app.state.config.indexing.project_memory_dirs = [shared]
+        app.state.storage.get_source_files_with_counts.return_value = [self._row(source)]
+
+        src = (await client.get("/api/sources")).json()["sources"][0]
+
+        assert src["memory_dir"] == str(shared.resolve())
+        assert src["kind"] == "memory"
+        assert src["target_scope"] == "project_shared"
+
+    async def test_nested_project_root_wins_over_enclosing_user_dir(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        proj = tmp_path / "proj"
+        shared = proj / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        inside = shared / "note.md"
+        outside = proj / "readme.md"
+        for f in (inside, outside):
+            f.write_text("x", encoding="utf-8")
+        app.state.config.indexing.memory_dirs = [proj]
+        app.state.config.indexing.project_memory_dirs = [shared]
+        app.state.storage.get_source_files_with_counts.return_value = [
+            self._row(outside),
+            self._row(inside),
+        ]
+
+        by_path = {
+            s["path"]: s["memory_dir"] for s in (await client.get("/api/sources")).json()["sources"]
+        }
+
+        assert by_path == {
+            str(outside): str(proj.resolve()),
+            str(inside): str(shared.resolve()),
+        }
+
+    async def test_source_outside_every_root_stays_an_orphan(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """Preservation: widening ownership must not adopt unrelated files."""
+        real, alias = self._symlinked_root(tmp_path, "vault")
+        stray = tmp_path / "uploads" / "stray.md"
+        stray.parent.mkdir()
+        stray.write_text("x", encoding="utf-8")
+        app.state.config.indexing.read_only_memory_dirs = [alias]
+        app.state.storage.get_source_files_with_counts.return_value = [self._row(stray)]
+
+        src = (await client.get("/api/sources")).json()["sources"][0]
+
+        assert src["memory_dir"] is None
+        assert src["kind"] is None
+
+    async def test_stats_home_sources_attribute_read_only_root(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        real, alias = self._symlinked_root(tmp_path, "vault")
+        source = real / "note.md"
+        source.write_text("x", encoding="utf-8")
+        app.state.config.indexing.read_only_memory_dirs = [alias]
+        app.state.storage.get_source_files_with_counts.return_value = [self._row(source)]
+
+        home = (await client.get("/api/stats")).json()["home_sources"]
+
+        assert [(s["memory_dir"], s["kind"]) for s in home] == [(str(real.resolve()), "general")]
+
+    async def test_status_labels_each_root_with_its_tier(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        user = tmp_path / "notes"
+        user.mkdir()
+        shared = tmp_path / "proj" / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        real, alias = self._symlinked_root(tmp_path, "vault")
+        app.state.config.indexing.memory_dirs = [user]
+        app.state.config.indexing.project_memory_dirs = [shared]
+        app.state.config.indexing.read_only_memory_dirs = [alias]
+
+        dirs = (await client.get("/api/memory-dirs/status")).json()["dirs"]
+
+        assert {d["path"]: d["tier"] for d in dirs} == {
+            str(user.resolve()): "user",
+            str(shared.resolve()): "project",
+            str(real.resolve()): "read_only",
+        }
+
+    async def test_open_accepts_a_read_only_root(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """The Sources tree sends the resolved path it got from the status
+        endpoint; a root registered through an alias must still match."""
+        real, alias = self._symlinked_root(tmp_path, "vault")
+        app.state.config.indexing.read_only_memory_dirs = [alias]
+
+        with patch("memtomem.web.routes.system._open_in_file_manager") as opener:
+            resp = await client.post("/api/memory-dirs/open", json={"path": str(real.resolve())})
+
+        assert resp.status_code == 200, resp.text
+        opener.assert_called_once_with(real.resolve())
 
 
 class TestRemoveMemoryDirChunkCleanup:

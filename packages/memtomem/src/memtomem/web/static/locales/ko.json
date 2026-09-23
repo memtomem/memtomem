@@ -301,6 +301,10 @@
   "sources.empty_vendor_placeholder": "{vendor} 메모리 없음",
   "sources.add_manually_btn": "+ 수동 추가",
   "sources.default_pill": "기본",
+  "sources.tier_pill.read_only": "읽기 전용",
+  "sources.tier_pill.read_only_title": "읽기 전용 루트: memtomem 이 인덱싱만 하고 파일은 수정하지 않음",
+  "sources.tier_pill.project": "프로젝트",
+  "sources.tier_pill.project_title": "프로젝트 메모리 루트 (project_memory_dirs)",
   "sources.meta_avg_tokens": "평균 {n}토큰",
 
   "index.help": "memtomem 에 기억을 추가하는 3가지 방법.",

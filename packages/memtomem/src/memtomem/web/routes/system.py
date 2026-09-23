@@ -1296,14 +1296,16 @@ def _open_in_file_manager(path: Path) -> None:
 
 @router.post("/memory-dirs/open")
 async def open_memory_dir(request: Request, config=Depends(get_config)):
-    """Reveal a registered ``memory_dir`` in the OS file manager.
+    """Reveal a configured index root in the OS file manager.
 
-    Body: ``{path: str}``. The path must already be in
-    ``config.indexing.memory_dirs`` — arbitrary filesystem paths cannot
-    be opened through this endpoint, since ``mm web`` is a local tool
-    but defense-in-depth keeps the route useful even if the bind host
-    were ever changed away from ``127.0.0.1``. Missing dirs return 404
-    rather than spawning a file-manager pointed at nothing.
+    Body: ``{path: str}``. The path must already be one of
+    ``config.indexing.all_index_roots()`` — user, project, or read-only
+    (#2522: the Sources tree shows a group, and this button, for every
+    tier). Arbitrary filesystem paths cannot be opened through this
+    endpoint, since ``mm web`` is a local tool but defense-in-depth keeps
+    the route useful even if the bind host were ever changed away from
+    ``127.0.0.1``. Missing dirs return 404 rather than spawning a
+    file-manager pointed at nothing.
     """
     body = await request.json()
     dir_path = body.get("path", "").strip()
@@ -1313,11 +1315,15 @@ async def open_memory_dir(request: Request, config=Depends(get_config)):
     resolved = Path(dir_path).expanduser().resolve()
     resolved_norm = norm_path(resolved)
 
+    # Resolved on both sides: the Sources tree sends the resolved path it
+    # got from ``/api/memory-dirs/status``, which a root configured under a
+    # symlinked prefix would otherwise never match.
     in_list = any(
-        norm_path(Path(p).expanduser()) == resolved_norm for p in config.indexing.memory_dirs
+        norm_path(Path(p).expanduser().resolve()) == resolved_norm
+        for p in config.indexing.all_index_roots()
     )
     if not in_list:
-        raise HTTPException(status_code=404, detail="Directory not in memory_dirs")
+        raise HTTPException(status_code=404, detail="Directory is not a configured index root")
     if not resolved.is_dir():
         raise HTTPException(status_code=404, detail="Directory does not exist on disk")
 
@@ -1344,6 +1350,11 @@ async def memory_dirs_status(
     Drives the "(N chunks)" / "(not indexed)" badges — users pick which
     dirs need a manual reindex instead of paying a blind startup scan
     cost across every provider memory dir.
+
+    Each entry carries ``tier`` — ``user`` (``memory_dirs``), ``project``
+    (``project_memory_dirs``) or ``read_only`` (``read_only_memory_dirs``)
+    — so the Sources tree can badge a group and offer "Remove from
+    memory_dirs" only where it applies. (#2522)
     """
     from memtomem.indexing.engine import memory_dir_stats
 
@@ -1352,6 +1363,21 @@ async def memory_dirs_status(
         config.indexing.all_index_roots(),
         supported_extensions=config.indexing.supported_extensions,
     )
+
+    def _resolved(dirs: Iterable[Path]) -> set[str]:
+        return {norm_path(Path(d).expanduser().resolve()) for d in dirs}
+
+    # First match wins, in ``all_index_roots()`` order. Read-only roots are
+    # disjoint from the writable tiers (``check_read_only_roots_disjoint``);
+    # a path listed as both user and project reports ``user``.
+    tiers = (
+        ("user", _resolved(config.indexing.memory_dirs)),
+        ("project", _resolved(config.indexing.project_memory_dirs)),
+        ("read_only", _resolved(config.indexing.read_only_memory_dirs)),
+    )
+    for entry in stats:
+        key = norm_path(Path(str(entry["path"])))
+        entry["tier"] = next((name for name, paths in tiers if key in paths), None)
     return {"dirs": stats}
 
 
@@ -1773,10 +1799,12 @@ async def get_stats(storage=Depends(get_storage), config=Depends(get_config)) ->
     distribution = await storage.get_chunk_size_distribution()
 
     pmdirs = config.indexing.project_memory_dirs
+    # Every index root owns its sources, matching ``GET /api/sources`` —
+    # a read-only or project root's files are not orphans. (#2522)
     indexed_dirs = sorted(
         (
             (norm_dir_prefix(d), str(Path(d).expanduser().resolve()), memory_dir_kind(d))
-            for d in config.indexing.memory_dirs
+            for d in config.indexing.all_index_roots()
         ),
         key=lambda t: -len(t[0]),
     )

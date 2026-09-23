@@ -4746,10 +4746,12 @@ function _setSourcesMobileDetail(active) {
 //   1. ``<details class="source-vendor-group">`` per vendor
 //      (user / claude / openai), keyed off the ``provider`` field on
 //      ``GET /api/memory-dirs/status``.
-//   2. ``.source-group`` per ``memory_dir`` inside that vendor, with
-//      the same chevron header used by General mode plus three
-//      hover-revealed actions on the right edge: Open · Reindex ·
-//      Remove. Each source-group's children are file cards (the same
+//   2. ``.source-group`` per index root inside that vendor, with
+//      the same chevron header used by General mode plus hover-revealed
+//      actions on the right edge: Open · Reindex · Remove. Remove edits
+//      ``memory_dirs``, so project and read-only roots (``tier`` on the
+//      status entry, #2522) get a tier pill instead of it. Each
+//      source-group's children are file cards (the same
 //      ``.source-item`` shape General uses) so the file-click → chunks
 //      drill-in flow is identical in both modes.
 //
@@ -4761,12 +4763,14 @@ function _renderMemorySourceTree(sources, list) {
   const statusByPath = STATE.memoryStatusByPath || {};
 
   // Orphan = indexed source whose ``memory_dir`` is null on the
-  // ``/api/sources`` row. Two paths feed into this bucket:
+  // ``/api/sources`` row, i.e. no configured root of any tier owns it
+  // (project and read-only roots own their files since #2522). Two paths
+  // feed into this bucket:
   //   1. Index tab uploads land in ``~/.memtomem/uploads/`` (see
-  //      ``system.py:upload_files``), which isn't a configured
-  //      ``memory_dir`` — server returns ``memory_dir=null, kind=null``.
-  //   2. A configured dir was removed from ``memory_dirs`` after its
-  //      files were indexed; the chunks survive but no longer have an
+  //      ``system.py:upload_files``), which isn't a configured root —
+  //      server returns ``memory_dir=null, kind=null``.
+  //   2. A configured root was removed from config after its files
+  //      were indexed; the chunks survive but no longer have an
   //      owning dir. Server-side intent (sources.py: "orphans ride
   //      along with general") is to surface these so users can find and
   //      prune them — without the bucket below they vanish entirely.
@@ -4849,11 +4853,19 @@ function _renderMemorySourceTree(sources, list) {
 
   const byProvider = {};
   for (const p of PROVIDER_ORDER) byProvider[p] = { order: [], byCategory: {} };
-  // Union of configured dirs and dirs that show up in the sources
-  // response — covers orphaned chunks whose memory_dir was unset in
-  // config but still has indexed rows.
+  // Union of the user-tier dirs and the owning roots the sources response
+  // names — which is how project and read-only roots with indexed files get
+  // a group. Files no configured root owns have ``memory_dir=null`` and go
+  // to ``orphanItems`` instead.
   const allDirs = new Set(memDirs);
   for (const k of Object.keys(sourcesByDir)) if (k) allDirs.add(k);
+  // Read-only roots are configured roots too, so show them before any of
+  // their files is indexed (Discovered / empty group), like ``memDirs``.
+  // Project roots stay source-driven: listing them from status would
+  // surface the hidden-by-default ``memories.local`` tier. (#2522)
+  for (const [path, st] of Object.entries(statusByPath)) {
+    if (st && st.tier === 'read_only') allDirs.add(path);
+  }
   for (const d of allDirs) {
     const st = statusByPath[d];
     const cat = presentationCategoryForDir(d, st);
@@ -5682,6 +5694,19 @@ function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
     header.appendChild(pill);
   }
 
+  // Tier pill for roots outside ``memory_dirs`` (#2522). ``tier`` comes
+  // from ``/api/memory-dirs/status``; user-tier groups carry no pill.
+  const tier = status && status.tier;
+  if (tier === 'read_only' || tier === 'project') {
+    const pill = document.createElement('span');
+    pill.className = 'source-group-tier-pill';
+    pill.dataset.tier = tier;
+    pill.textContent = (typeof t === 'function')
+      ? t('sources.tier_pill.' + tier) : (tier === 'read_only' ? 'read-only' : 'project');
+    pill.title = (typeof t === 'function') ? t('sources.tier_pill.' + tier + '_title') : '';
+    header.appendChild(pill);
+  }
+
   // 3-state status:
   //   - missing  → exists === false (red, "missing")
   //   - pending  → file_count > 0 && chunk_count === 0 (amber, ready to index)
@@ -5742,18 +5767,26 @@ function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
   });
   actions.appendChild(reindexBtn);
 
-  const removeBtn = document.createElement('button');
-  removeBtn.type = 'button';
-  removeBtn.className = 'btn-ghost btn-xs source-group-remove';
-  removeBtn.textContent = tFallback('sources.memory_dirs.action_delete', 'Remove');
-  removeBtn.title = tFallback('sources.memory_dirs.delete_title', 'Remove from memory_dirs');
-  if ((STATE.memoryDirs || []).length <= 1) removeBtn.disabled = true;
-  removeBtn.addEventListener('click', (ev) => {
-    ev.stopPropagation();
-    ev.preventDefault();
-    if (typeof mdRemove === 'function') mdRemove(dir);
-  });
-  actions.appendChild(removeBtn);
+  // Remove edits ``memory_dirs``, so only user-tier roots get it — the
+  // route 404s for project / read-only roots. Without a status entry
+  // (degraded fetch) fall back to membership in the user-tier list.
+  const isUserTier = status
+    ? status.tier === 'user'
+    : (STATE.memoryDirs || []).includes(dir);
+  if (isUserTier) {
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'btn-ghost btn-xs source-group-remove';
+    removeBtn.textContent = tFallback('sources.memory_dirs.action_delete', 'Remove');
+    removeBtn.title = tFallback('sources.memory_dirs.delete_title', 'Remove from memory_dirs');
+    if ((STATE.memoryDirs || []).length <= 1) removeBtn.disabled = true;
+    removeBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      if (typeof mdRemove === 'function') mdRemove(dir);
+    });
+    actions.appendChild(removeBtn);
+  }
 
   header.appendChild(actions);
   group.appendChild(header);

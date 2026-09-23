@@ -21,6 +21,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   resolved like the other two and an empty list when none are set or the
   config is unavailable. The Web UI does not read these lists, so nothing
   changes on screen.
+- **The Web Sources tab no longer files read-only and project roots under
+  "Other (unregistered)" (#2522).** `GET /api/sources` and `GET /api/stats`
+  matched each source against `memory_dirs` only, so files indexed from
+  `indexing.read_only_memory_dirs` or `project_memory_dirs` came back without
+  an owning root — they landed in the orphan bucket, and `?kind=memory`
+  dropped them even when the root is memory-shaped. Both now match against
+  every configured root, and `kind` follows the root's path shape as it does
+  for `memory_dirs`. Where the Sources tree shows directory groups, each such
+  root gets its own, with a *read-only* or *project* pill and no Remove button
+  (Remove only edits `memory_dirs`). A read-only root with files but nothing
+  indexed yet appears under *Discovered*, offering *Index*.
+  `GET /api/memory-dirs/status` entries carry the root's `tier` (`user`,
+  `project` or `read_only`), and `POST /api/memory-dirs/open` accepts any
+  configured root.
 
 ## [0.6.4] — 2026-09-20
 
