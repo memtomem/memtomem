@@ -551,7 +551,10 @@ candidate) refuse with a configuration error naming
 never writes: an Obsidian vault, a docs checkout, any directory whose
 files another tool owns. They are discovered, watched, indexed and
 searched exactly like `memory_dirs` — read-only constrains who may
-*rewrite* the files, not whether they are findable.
+*rewrite* the files, not whether they are findable. `mm status` lists
+them under *Read-only roots* (omitted when none are set), and
+`mm status --json` carries the resolved paths as
+`config.read_only_memory_dirs`.
 
 What refuses, and what does not:
 

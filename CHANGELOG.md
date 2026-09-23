@@ -3,6 +3,19 @@
 All notable changes will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
+## [Unreleased]
+
+### Fixed
+
+- **`mm status` lists read-only memory roots (#2519).** The report showed
+  `memory_dirs` and `project_memory_dirs` but never
+  `indexing.read_only_memory_dirs`, so a configured vault was invisible there
+  even though it was loaded, watched and indexed — and the bare `mm index`
+  hint points users to `mm status` for exactly that list. The text report (and
+  `mem_status`) now shows a *Read-only roots* group after *Project sources*
+  when any are set, and `mm status --json` carries the resolved paths as
+  `config.read_only_memory_dirs`, an empty list when none are.
+
 ## [0.6.4] — 2026-09-20
 
 ### Upgrading
