@@ -35,6 +35,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `GET /api/memory-dirs/status` entries carry the root's `tier` (`user`,
   `project` or `read_only`), and `POST /api/memory-dirs/open` accepts any
   configured root.
+- **A parent root's Sources counts no longer include a nested root's files,
+  and removing it no longer deletes that root's chunks (#2524).** When
+  configured roots nest (two `memory_dirs`, or a `project_memory_dirs` root
+  inside a user dir), `GET /api/memory-dirs/status` counted each root by path
+  prefix. The parent's badge then included files that the Sources tree lists
+  under the nested root's own group, and the Sources totals, which add per-root
+  numbers, counted those files twice. Each source, and each file on disk, now
+  counts only for its most specific root, which is the rule the tree groups by. A
+  symlink counts where it points, because that is the path the index stores.
+  `POST /api/memory-dirs/remove` with `delete_chunks` used the same prefix
+  sweep, so removing `~/work` also dropped the chunks of a still-registered
+  `~/work/notes`. It now deletes only the sources the removed dir owns, which
+  is the number its confirm dialog shows. Files on disk were never touched.
 
 ## [0.6.4] — 2026-09-20
 

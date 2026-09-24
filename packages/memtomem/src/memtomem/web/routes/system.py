@@ -1157,8 +1157,11 @@ async def remove_memory_dir(
     Body: ``{path: str, delete_chunks?: bool}``. ``delete_chunks=False`` (the
     default) is the safe behaviour — only the registration is removed,
     indexed chunks stay searchable. ``delete_chunks=True`` additionally
-    drops every chunk whose ``source_file`` is under the resolved dir
-    prefix; the underlying files on disk are never touched. The Web UI's
+    drops the chunks of every source the removed dir owns, meaning the
+    sources under it that no more specific still-configured root also
+    contains. A nested root that stays registered keeps its chunks, so the
+    number deleted is the dir's status ``chunk_count``, which the confirm
+    dialog shows (#2524). The underlying files on disk are never touched. The Web UI's
     delete confirm shows a checkbox so the user opts in explicitly.
     """
     body = await request.json()
@@ -1218,10 +1221,24 @@ async def remove_memory_dir(
                     # one place; matches the comparison done by
                     # :func:`resolve_owning_memory_dir` (#647).
                     prefix = norm_dir_prefix(resolved)
+                    # Roots nested under this one that are still configured once
+                    # it is gone: their sources stay (#2524). Strictly longer,
+                    # so the sweep deletes exactly the dir's status
+                    # ``chunk_count``, which the confirm dialog shows. The
+                    # count includes a path that another tier (project) also
+                    # lists, so this sweep deletes it too.
+                    kept = [
+                        p
+                        for p in map(norm_dir_prefix, config.indexing.all_index_roots())
+                        if len(p) > len(prefix)
+                    ]
                     try:
                         for row in rows:
                             source_path = row[0]
-                            if norm_path(source_path).startswith(prefix):
+                            target = norm_path(source_path)
+                            if target.startswith(prefix) and not any(
+                                target.startswith(p) for p in kept
+                            ):
                                 deleted_chunks += await storage.delete_by_source(source_path)
                     finally:
                         # Same cache-staleness class as #2141: these rows are

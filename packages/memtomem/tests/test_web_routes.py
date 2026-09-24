@@ -5872,6 +5872,31 @@ class TestNonUserTierRootsOwnTheirSources:
             str(inside): str(shared.resolve()),
         }
 
+    async def test_status_counts_match_the_groups_the_tree_shows(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2524: the enclosing user dir's badge leaves out the project root's file."""
+        proj = tmp_path / "proj"
+        shared = proj / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        inside = shared / "note.md"
+        outside = proj / "readme.md"
+        for f in (inside, outside):
+            f.write_text("x", encoding="utf-8")
+        app.state.config.indexing.memory_dirs = [proj]
+        app.state.config.indexing.project_memory_dirs = [shared]
+        app.state.storage.get_source_files_with_counts.return_value = [
+            self._row(outside),
+            self._row(inside),
+        ]
+
+        dirs = (await client.get("/api/memory-dirs/status")).json()["dirs"]
+        counts = {
+            d["path"]: (d["source_file_count"], d["chunk_count"], d["file_count"]) for d in dirs
+        }
+
+        assert counts == {str(proj.resolve()): (1, 1, 1), str(shared.resolve()): (1, 1, 1)}
+
     async def test_source_outside_every_root_stays_an_orphan(
         self, app, client: AsyncClient, tmp_path: Path
     ) -> None:
@@ -5938,7 +5963,8 @@ class TestNonUserTierRootsOwnTheirSources:
 
 class TestRemoveMemoryDirChunkCleanup:
     """``POST /api/memory-dirs/remove`` with ``delete_chunks=true`` must
-    drop every chunk under the resolved dir prefix; the default keeps
+    drop the chunks of every source the dir owns (a still-configured nested
+    root keeps its own, #2524); the default keeps
     chunks searchable so the Web UI's checkbox-opt-in stays the safe
     path. Mirrors the dir-level UX: removing a watch entry is reversible
     until the user explicitly elects chunk cleanup."""
@@ -6034,6 +6060,113 @@ class TestRemoveMemoryDirChunkCleanup:
 
         assert app.state.storage.delete_by_source.await_count == 2
         assert app.state.search_pipeline.invalidate_cache.call_count == 1
+
+    @staticmethod
+    def _serve_rows(app, rows: list[tuple[Path, int]]) -> None:
+        """Serve ``rows`` as ``(path, chunks)``; each delete returns that source's chunks."""
+        chunks = {path: n for path, n in rows}
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (path, n, "2026-04-29T00:00:00", "default", 100, 50, 200) for path, n in rows
+        ]
+        app.state.storage.delete_by_source = AsyncMock(side_effect=lambda p: chunks[p])
+
+    @staticmethod
+    def _deleted(app) -> list[Path]:
+        return [call.args[0] for call in app.state.storage.delete_by_source.call_args_list]
+
+    async def test_nested_user_dir_that_stays_keeps_its_chunks(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2524: removing ``work`` must not sweep a still-registered ``work/notes``."""
+        work = tmp_path / "work"
+        notes = work / "notes"
+        notes.mkdir(parents=True)
+        own, nested = work / "a.md", notes / "n.md"
+        app.state.config.indexing.memory_dirs = [work, notes]
+        self._serve_rows(app, [(own, 2), (nested, 7)])
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(work), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted_chunks"] == 2
+        assert self._deleted(app) == [own]
+
+    async def test_nested_user_dir_removed_under_a_parent_that_stays(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """The other direction: a remaining *ancestor* is no reason to keep the
+        removed child's chunks, only a root at least as specific is."""
+        work = tmp_path / "work"
+        notes = work / "notes"
+        notes.mkdir(parents=True)
+        own, nested = work / "a.md", notes / "n.md"
+        app.state.config.indexing.memory_dirs = [work, notes]
+        self._serve_rows(app, [(own, 2), (nested, 7)])
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(notes), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted_chunks"] == 7
+        assert self._deleted(app) == [nested]
+
+    async def test_sweep_deletes_what_the_status_count_showed(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """The confirm dialog shows the dir's status ``chunk_count``; the sweep
+        must delete exactly that many, leaving a nested project root intact."""
+        proj = tmp_path / "proj"
+        shared = proj / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        own, inside = proj / "readme.md", shared / "note.md"
+        app.state.config.indexing.memory_dirs = [proj, other]
+        app.state.config.indexing.project_memory_dirs = [shared]
+        self._serve_rows(app, [(own, 3), (inside, 5)])
+
+        dirs = (await client.get("/api/memory-dirs/status")).json()["dirs"]
+        shown = next(d["chunk_count"] for d in dirs if d["path"] == str(proj.resolve()))
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(proj), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted_chunks"] == shown == 3
+        assert self._deleted(app) == [own]
+
+    async def test_path_also_in_another_tier_deletes_what_the_dialog_showed(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """A path in both ``memory_dirs`` and ``project_memory_dirs`` reports
+        ``tier: user``, so the tree offers Remove with its status count. The
+        sweep must delete that count, not keep everything because the project
+        tier still lists the path (only a *more specific* root keeps chunks)."""
+        shared = tmp_path / "proj" / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        note = shared / "note.md"
+        app.state.config.indexing.memory_dirs = [shared, other]
+        app.state.config.indexing.project_memory_dirs = [shared]
+        self._serve_rows(app, [(note, 4)])
+
+        dirs = (await client.get("/api/memory-dirs/status")).json()["dirs"]
+        shown = next(d["chunk_count"] for d in dirs if d["path"] == str(shared.resolve()))
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(shared), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted_chunks"] == shown == 4
+        assert self._deleted(app) == [note]
 
 
 class TestUploadRedaction:

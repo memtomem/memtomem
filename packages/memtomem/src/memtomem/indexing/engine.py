@@ -516,10 +516,29 @@ def resolve_owning_memory_dir(
     return best[1] if best else None
 
 
+def _longest_owning_prefix(target: str, prefixes: Iterable[str]) -> str | None:
+    """Return the longest of ``prefixes`` that ``target`` starts with.
+
+    ``target`` is a :func:`norm_path` string and ``prefixes`` are
+    :func:`norm_dir_prefix` strings, both computed by the caller so a loop over
+    many sources normalises each path once. This is the longest-prefix rule of
+    :func:`resolve_owning_memory_dir`, which the Sources tree uses, applied to
+    strings that are already normalised. The status counts and the web remove
+    sweep use it so that each source belongs to exactly one root. (#2524)
+    """
+    best: str | None = None
+    for prefix in prefixes:
+        if target.startswith(prefix) and (best is None or len(prefix) > len(best)):
+            best = prefix
+    return best
+
+
 def _count_files_on_disk(
     p: Path,
     extensions: frozenset[str],
     memory_dirs: Iterable[str | Path] = (),
+    *,
+    root_prefixes: Sequence[str] | None = None,
 ) -> int:
     """Count regular files under ``p`` whose suffix is in ``extensions``.
 
@@ -538,21 +557,43 @@ def _count_files_on_disk(
     ``memory_dirs`` must be *every* configured root, not just ``p``. The skip
     only applies to a worktree nested under the root that owns the file, so a
     worktree the user explicitly registered is owned by itself and is indexed.
-    Counting with ``[p]`` alone hides that root from the ownership lookup and
-    subtracts files the engine does index — measured as a parent root
-    reporting ``source_file_count=2`` beside ``file_count=1``. A caller that
-    passes none falls back to ``[p]``, which still skips worktrees nested under
-    ``p`` and only loses the ability to see a *separately registered* one as
-    its own root.
+    A caller that passes none falls back to ``[p]``. Worktrees nested under
+    ``p`` are still skipped, but files owned by any other nested root are
+    counted, because that root cannot be seen (see below).
+
+    The count is exclusive: a file counts only when ``p`` is its longest-prefix
+    owner among ``memory_dirs``, the same rule :func:`memory_dir_stats` applies
+    to indexed sources. A file under a more specific configured root counts for
+    that root, and so does a registered worktree nested in ``p``. Ownership is
+    decided on the file's :func:`norm_path`, which is the key that storage uses.
+    So a symlink in ``p`` that points into another root is not counted for
+    ``p``. The target file is counted under the root that owns it, which is the
+    root its source row is attributed to (#2524). This is a count of directory
+    entries, not of distinct files: a file and a link to it inside the same
+    root count twice.
+
+    ``root_prefixes`` is ``norm_dir_prefix`` of every entry in ``memory_dirs``.
+    :func:`memory_dir_stats` passes it so a status request normalises each
+    root once, not once per root. When it is omitted, the prefixes are
+    computed here.
     """
+    from memtomem.storage.sqlite_helpers import norm_path
+
     worktree_cache: WorktreeMemo = {}
     roots = list(memory_dirs) or [p]
+    own_prefix = norm_dir_prefix(p)
+    prefixes = (
+        list(root_prefixes) if root_prefixes is not None else [norm_dir_prefix(r) for r in roots]
+    )
+    if own_prefix not in prefixes:
+        prefixes.append(own_prefix)
     try:
         return sum(
             1
             for fp in p.rglob("*")
             if fp.is_file()
             and fp.suffix in extensions
+            and _longest_owning_prefix(norm_path(fp), prefixes) == own_prefix
             and not _under_nested_worktree(fp, roots, worktree_cache)
         )
     except OSError:
@@ -583,8 +624,8 @@ async def memory_dir_stats(
 
     ``created_at`` is the OS filesystem creation time (ISO-8601 UTC,
     ``None`` for missing dirs); ``last_indexed`` is the max
-    ``chunks.updated_at`` over source files under the dir prefix (``None``
-    when the dir has no chunks). Both feed the Web UI sort dropdown that
+    ``chunks.updated_at`` over the source files the dir owns, leaving out those
+    a more specific configured root owns (``None`` when it owns no chunks). Both feed the Web UI sort dropdown that
     appears once a product leaf has ≥ 6 entries.
 
     When ``supported_extensions`` is provided, each existing dir is also
@@ -597,7 +638,12 @@ async def memory_dir_stats(
 
     Aggregation: one ``get_source_files_with_counts()`` call over the
     whole ``chunks`` table, bucketed in Python by normalised-path prefix
-    — avoids N LIKE queries for large dir lists. ``kind`` is provided
+    — avoids N LIKE queries for large dir lists. Counts are exclusive:
+    each source goes to its longest-prefix owner only, the rule the
+    Sources tree groups by, so a parent root does not count what a
+    nested root owns. Per-root numbers of distinct roots can be summed;
+    one root listed twice reports the same numbers in both entries
+    (#2524). ``kind`` is provided
     by :func:`~memtomem.config.memory_dir_kind` so the Web UI can split
     the Sources page into Memory and General views from the same
     response shape.
@@ -606,6 +652,7 @@ async def memory_dir_stats(
 
     rows = await storage.get_source_files_with_counts()
     dir_list = list(memory_dirs)
+    prefixes = [norm_dir_prefix(d) for d in dir_list]
 
     file_counts: list[int]
     if supported_extensions:
@@ -616,6 +663,7 @@ async def memory_dir_stats(
                     Path(d).expanduser(),
                     supported_extensions,
                     dir_list,
+                    root_prefixes=prefixes,
                 )
                 if Path(d).expanduser().exists()
                 else _resolved_zero()
@@ -625,25 +673,28 @@ async def memory_dir_stats(
     else:
         file_counts = [0] * len(dir_list)
 
+    # Each source is credited to its longest-prefix owner only, so a parent
+    # root's numbers leave out what a nested root owns. The Sources tree groups
+    # files by the same rule (#2524). Roots that share a prefix, like one path
+    # listed in two tiers, read the same bucket.
+    buckets: dict[str, list[Any]] = {prefix: [0, 0, None] for prefix in prefixes}
+    for row in rows:
+        # row = (Path, chunk_count, last_updated, namespaces, ...)
+        source_path, count, last_updated = row[0], row[1], row[2]
+        owner = _longest_owning_prefix(norm_path(source_path), prefixes)
+        if owner is None:
+            continue
+        bucket = buckets[owner]
+        bucket[0] += count
+        bucket[1] += 1
+        if last_updated is not None and (bucket[2] is None or last_updated > bucket[2]):
+            bucket[2] = last_updated
+
     out: list[dict[str, object]] = []
-    for d, file_count in zip(dir_list, file_counts):
+    for d, prefix, file_count in zip(dir_list, prefixes, file_counts):
         dir_path = Path(d).expanduser().resolve()
         exists = dir_path.exists()
-        prefix = norm_dir_prefix(d)
-
-        chunk_count = 0
-        source_file_count = 0
-        max_last_updated: str | None = None
-        for row in rows:
-            # row = (Path, chunk_count, last_updated, namespaces, ...)
-            source_path, count, last_updated = row[0], row[1], row[2]
-            if norm_path(source_path).startswith(prefix):
-                chunk_count += count
-                source_file_count += 1
-                if last_updated is not None and (
-                    max_last_updated is None or last_updated > max_last_updated
-                ):
-                    max_last_updated = last_updated
+        chunk_count, source_file_count, max_last_updated = buckets[prefix]
 
         category = categorize_memory_dir(d)
         out.append(
