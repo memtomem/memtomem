@@ -7,6 +7,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A create or modify event dropped by a full watcher queue is no longer lost
+  (#2530).**
+  The watcher buffers events in a 1,000-slot queue. A burst larger than that
+  overflows it when the event loop is held off during the burst, or when the
+  burst arrives while the previous batch is still being indexed. Each dropped
+  path was only logged by its basename, and nothing reindexed it, so a changed
+  file among them stayed stale in search until something touched it again. In
+  48 regenerations of a 1,129-file tree, 4 overflowed (each right after a loop
+  stall of about 60 ms), and one of them lost the change under test. A drop now marks
+  its root, and the root is rescanned once the burst settles. Content-hash dedup
+  keeps unchanged files cheap. The first drop per root logs one warning with the
+  full path and the root to be rescanned; the rest go to debug. A rescan that
+  `stop()` interrupts is named in a warning with `mm index <root>`. A rescan
+  walks existing files only, so a dropped *delete* still leaves that file's
+  chunks for the orphan sweep.
 - **`mm status` lists read-only memory roots (#2519).** The report showed
   `memory_dirs` and `project_memory_dirs` but never
   `indexing.read_only_memory_dirs`, so a configured vault was invisible there
