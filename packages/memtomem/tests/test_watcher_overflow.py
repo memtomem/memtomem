@@ -24,7 +24,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from watchdog.events import FileModifiedEvent
+from watchdog.events import FileDeletedEvent, FileModifiedEvent, FileMovedEvent
 
 from memtomem.indexing import watcher as watcher_module
 from memtomem.indexing.watcher import _STOP_SENTINEL, FileWatcher
@@ -254,10 +254,11 @@ async def test_rescan_skips_a_root_removed_after_the_drop(components, memory_dir
     )
 
     with mock.patch.object(components.index_engine, "index_path") as index_path:
-        await watcher._rescan_overflowed_roots()
+        await watcher._rescan_overflowed_roots(set())
 
     index_path.assert_not_called()
     assert not watcher._rescan_due
+    assert not watcher._dropped_paths
 
 
 async def test_stop_names_a_rescan_it_cancelled(
@@ -304,9 +305,9 @@ async def test_drop_during_a_walk_marks_the_root_again(components, memory_dir):
 
     watcher._note_overflow(memory_dir / "early.md")
     with mock.patch.object(components.index_engine, "index_path", walk):
-        await watcher._rescan_overflowed_roots()
+        await watcher._rescan_overflowed_roots(set())
         assert set(watcher._rescan_due) == {memory_dir}
-        await watcher._rescan_overflowed_roots()
+        await watcher._rescan_overflowed_roots(set())
 
     assert walks == 2
     assert not watcher._rescan_due
@@ -355,7 +356,7 @@ async def test_root_removed_during_an_earlier_walk_is_skipped(components, memory
 
     real_index_path = components.index_engine.index_path
     with mock.patch.object(components.index_engine, "index_path", walk):
-        await watcher._rescan_overflowed_roots()
+        await watcher._rescan_overflowed_roots(set())
 
     assert len(walked) == 1
 
@@ -369,7 +370,176 @@ async def test_a_rescan_that_changes_nothing_still_logs_completion(components, m
     watcher._note_overflow(note)
 
     with caplog.at_level(logging.INFO, logger="memtomem.indexing.watcher"):
-        await watcher._rescan_overflowed_roots()
+        await watcher._rescan_overflowed_roots(set())
 
     done = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Watcher rescan")]
     assert done == [f"Watcher rescan {memory_dir}: indexed=0 skipped=1 deleted=0"]
+
+
+# -- Dropped paths are replayed as events (#2532) ------------------------------
+#
+# A walk only visits files that exist, so the rescan alone cannot purge a file
+# whose delete event was dropped. The dropped path itself is handed back to the
+# ordinary per-event pipeline.
+
+
+async def _index_note(components, path: Path, marker: str) -> None:
+    path.write_text(f"# Note\n\n{marker} body\n", encoding="utf-8")
+    await components.index_engine.index_file(path)
+    assert await components.storage.list_chunks_by_source(path)
+
+
+async def _wait_until_gone(components, path: Path, timeout: float = 5.0) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if not await components.storage.list_chunks_by_source(path):
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+def _spy_replayed(watcher: FileWatcher) -> list[set[Path]]:
+    """Record the dropped paths each rescan starts with. The drop callbacks run
+    on the loop after the burst, so the dropped set is read inside the rescan."""
+    replayed: list[set[Path]] = []
+    real_rescan = watcher._rescan_overflowed_roots
+
+    async def spy_rescan(pending):
+        replayed.append({p for paths in watcher._dropped_paths.values() for p in paths})
+        await real_rescan(pending)
+
+    watcher._rescan_overflowed_roots = spy_rescan
+    return replayed
+
+
+def _fire_deleted(handler, path: Path) -> None:
+    handler.on_deleted(FileDeletedEvent(str(path)))
+
+
+async def test_delete_dropped_while_the_loop_is_held_off_is_purged(
+    small_queue, components, memory_dir
+):
+    fillers, _changed = await _seed(components, memory_dir)
+    gone = memory_dir / "gone.md"
+    await _index_note(components, gone, "gone-marker")
+    gone.unlink()
+    watcher = FileWatcher(components.index_engine, components.config.indexing, debounce_ms=100)
+    handler = watcher._make_handler(asyncio.get_running_loop())
+    replayed = _spy_replayed(watcher)
+    task = asyncio.create_task(watcher._process_events())
+    await asyncio.sleep(0)
+
+    def burst() -> None:
+        _fire(handler, fillers)
+        _fire_deleted(handler, gone)
+
+    producer = threading.Thread(target=burst)
+    producer.start()
+    producer.join()
+    purged = await _wait_until_gone(components, gone)
+    await _stop(watcher, task)
+
+    assert replayed and gone in replayed[0], "the delete must be dropped, or this proves nothing"
+    assert purged, "a dropped delete left the file's chunks searchable"
+
+
+async def test_move_dropped_during_a_burst_purges_its_source(small_queue, components, memory_dir):
+    fillers, _changed = await _seed(components, memory_dir)
+    src = memory_dir / "before.md"
+    dest = memory_dir / "after.md"
+    await _index_note(components, src, "moved-marker")
+    src.rename(dest)
+    watcher = FileWatcher(components.index_engine, components.config.indexing, debounce_ms=100)
+    handler = watcher._make_handler(asyncio.get_running_loop())
+    replayed = _spy_replayed(watcher)
+    task = asyncio.create_task(watcher._process_events())
+    await asyncio.sleep(0)
+
+    def burst() -> None:
+        _fire(handler, fillers)
+        handler.on_moved(FileMovedEvent(str(src), str(dest)))
+
+    producer = threading.Thread(target=burst)
+    producer.start()
+    producer.join()
+    purged = await _wait_until_gone(components, src)
+    indexed = await _wait_for_marker(components, dest, "moved-marker")
+    await _stop(watcher, task)
+
+    assert replayed and src in replayed[0], "the move must be dropped, or this proves nothing"
+    assert purged, "a dropped move left its source's chunks searchable"
+    assert indexed
+
+
+async def test_rescan_replays_only_the_dropped_paths(components, memory_dir):
+    """A file deleted without a dropped event keeps its rows: the rescan does
+    not reconcile the whole root, so an emptied mount is not purged by it."""
+    _mock_embedder(components)
+    quiet = memory_dir / "quiet.md"
+    await _index_note(components, quiet, "quiet-marker")
+    quiet.unlink()
+    present = memory_dir / "present.md"
+    await _index_note(components, present, "present-marker")
+    watcher = FileWatcher(components.index_engine, components.config.indexing, debounce_ms=50)
+    watcher._note_overflow(present)
+
+    pending: set[Path] = set()
+    await watcher._rescan_overflowed_roots(pending)
+    await watcher._flush_batch(pending)
+
+    assert pending == {present}
+    assert await components.storage.list_chunks_by_source(quiet)
+
+
+async def test_drop_during_a_walk_is_replayed_by_the_next_rescan(components, memory_dir):
+    watcher = FileWatcher(components.index_engine, components.config.indexing, debounce_ms=50)
+    early = memory_dir / "early.md"
+    late = memory_dir / "late.md"
+    real_index_path = components.index_engine.index_path
+    walks = 0
+
+    async def walk(path, *args, **kwargs):
+        nonlocal walks
+        walks += 1
+        if walks == 1:
+            watcher._note_overflow(late)
+        return await real_index_path(path, *args, **kwargs)
+
+    watcher._note_overflow(early)
+    pending: set[Path] = set()
+    with mock.patch.object(components.index_engine, "index_path", walk):
+        await watcher._rescan_overflowed_roots(pending)
+        assert pending == {early}
+        assert watcher._dropped_paths == {memory_dir: {late}}
+        await watcher._rescan_overflowed_roots(pending)
+
+    assert pending == {early, late}
+    assert not watcher._dropped_paths
+
+
+async def test_replayed_path_does_not_inherit_backoff(components, memory_dir):
+    watcher = FileWatcher(components.index_engine, components.config.indexing, debounce_ms=50)
+    path = memory_dir / "busy.md"
+    watcher._retry_after[path] = 1e12
+    watcher._retry_attempts[path] = 4
+    watcher._note_overflow(path)
+
+    await watcher._rescan_overflowed_roots(set())
+
+    assert path not in watcher._retry_after
+    assert path not in watcher._retry_attempts
+
+
+async def test_stop_replays_a_dropped_delete_before_exiting(components, memory_dir):
+    _mock_embedder(components)
+    gone = memory_dir / "gone.md"
+    await _index_note(components, gone, "gone-marker")
+    gone.unlink()
+    watcher = FileWatcher(components.index_engine, components.config.indexing, debounce_ms=60_000)
+    watcher._note_overflow(gone)
+
+    task = asyncio.create_task(watcher._process_events())
+    await _stop(watcher, task)
+
+    assert not await components.storage.list_chunks_by_source(gone)

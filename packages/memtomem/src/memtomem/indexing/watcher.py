@@ -34,8 +34,10 @@ _STOP_SENTINEL = Path("/dev/null/__stop__")
 # between two of its turns: the loop thread is held off during a burst, or the
 # processor is busy flushing the previous batch (#2530). A dropped event marks
 # its root for a rescan once the burst settles, so a drop costs a walk rather
-# than a stale index. The shutdown sentinel can still be dropped. Raising this
-# makes rescans rarer on a very large tree; it does not make them unnecessary.
+# than a stale index; the dropped path itself is replayed then too, so a dropped
+# delete still purges (#2532). The shutdown sentinel can still be dropped.
+# Raising this makes rescans rarer on a very large tree; it does not make them
+# unnecessary.
 _WATCHER_QUEUE_MAXSIZE = 1000
 
 # How long ``stop`` waits for the processor to flush and finish any rescan
@@ -195,7 +197,10 @@ class FileWatcher:
         # ``_rescanning`` is the root whose walk is in flight, kept apart so a
         # walk cancelled by ``stop`` is still reported as unfinished;
         # ``_rescan_attempts`` counts retryable failures per root, not drops.
+        # ``_dropped_paths`` holds the dropped paths themselves per root, taken
+        # together with ``_rescan_due`` and replayed as events (#2532).
         self._rescan_due: dict[Path, int] = {}
+        self._dropped_paths: dict[Path, set[Path]] = {}
         self._rescanning: Path | None = None
         self._rescan_attempts: dict[Path, int] = {}
         # Serializes every change to the observer/handler/task triple:
@@ -241,6 +246,8 @@ class FileWatcher:
         burst settles; content-hash dedup keeps unchanged files cheap. The
         root is the most specific configured one, matching the engine's
         containment rule, so a nested root is walked instead of its parent.
+        The path is kept as well: a walk only visits files that exist, so a
+        dropped delete is replayed as its own event (#2532).
         Only the first drop per root per episode is a warning; the rest are
         debug lines, since the rescan covers them all.
         """
@@ -255,6 +262,7 @@ class FileWatcher:
         root = max(roots, key=lambda r: len(r.parts))
         drops = self._rescan_due.get(root, 0)
         self._rescan_due[root] = drops + 1
+        self._dropped_paths.setdefault(root, set()).add(path)
         if drops == 0:
             logger.warning(
                 "File watcher queue full, dropping event for %s; will rescan %s "
@@ -283,6 +291,7 @@ class FileWatcher:
             # the observer can deliver, and overflow, before the processor
             # takes its first turn, and that drop must survive to be rescanned.
             self._rescan_due.clear()
+            self._dropped_paths.clear()
             self._rescanning = None
             self._rescan_attempts.clear()
             handler = self._make_handler(loop)
@@ -455,7 +464,8 @@ class FileWatcher:
             if unfinished:
                 logger.warning(
                     "File watcher stopped before rescanning %s after dropped events; "
-                    "run `mm index <root>` on each to pick up changes it missed",
+                    "run `mm index <root>` on each to pick up changes it missed, "
+                    "and `mm gc orphan-sources --apply` to remove files deleted meanwhile",
                     ", ".join(str(r) for r in unfinished),
                 )
             if self._observer:
@@ -657,7 +667,8 @@ class FileWatcher:
         Collects changed files into a set.  When no new events arrive for
         ``_debounce_s`` seconds, all accumulated files are reindexed in a
         single batch before the set is cleared. A root marked by a queue
-        overflow is rescanned at the same point, after the batch (#2530).
+        overflow is rescanned at the same point, after the batch (#2530), and
+        its dropped paths join ``pending`` for the next window (#2532).
         """
         pending: set[Path] = set()
         loop = asyncio.get_running_loop()
@@ -693,10 +704,12 @@ class FileWatcher:
                     raise TimeoutError
                 file_path = await asyncio.wait_for(self._queue.get(), timeout=timeout)
                 if file_path == _STOP_SENTINEL:
+                    # Rescan first: it adds the dropped paths to ``pending``,
+                    # so the final flush replays them too (#2532).
+                    if self._rescan_due:
+                        await self._rescan_overflowed_roots(pending)
                     if pending:
                         await self._flush_batch(pending)
-                    if self._rescan_due:
-                        await self._rescan_overflowed_roots()
                     return
                 if first is None:
                     first = loop.time()
@@ -731,11 +744,11 @@ class FileWatcher:
                         ) * random.uniform(0.8, 1.2)  # nosec B311 - scheduling jitter only
                     pending = (pending - ready) | retry
                 if self._rescan_due:
-                    await self._rescan_overflowed_roots()
+                    await self._rescan_overflowed_roots(pending)
                 first = loop.time() if pending else None
                 last = loop.time()
 
-    async def _rescan_overflowed_roots(self) -> None:
+    async def _rescan_overflowed_roots(self, pending: set[Path]) -> None:
         """Walk each root that lost events to a queue overflow (#2530).
 
         Each root is taken off ``_rescan_due`` as its walk starts, so drops
@@ -744,21 +757,33 @@ class FileWatcher:
         skipped, the same rule ``_reindex`` applies to single paths. A
         retryable failure marks the root again, up to
         ``_BACKFILL_MAX_ATTEMPTS`` walks; the debounce interval is the
-        backoff. A walk only visits files that exist, so an overflow that
-        dropped a delete leaves that file's chunks for the orphan sweep.
+        backoff.
+
+        A walk only visits files that exist, so the root's dropped paths are
+        also added to *pending*, before the walk and whatever its outcome, and
+        replayed as the events they were (#2532). That is what purges a
+        dropped delete or a move's source: ``index_file`` decides, as it does
+        for a delivered event. A path that still exists is indexed again,
+        after the walk.
         """
         for root in list(self._rescan_due):
             drops = self._rescan_due.pop(root)
+            dropped = self._dropped_paths.pop(root, set())
             # Per root, not once per pass: a reconfigure can remove a root
             # while an earlier root's walk is awaited.
             if root not in self._configured_roots():
                 self._rescan_attempts.pop(root, None)
                 logger.info("Skipped rescan of %s: no longer a configured root", root)
                 continue
+            for path in dropped:
+                # A replayed event is a new event: no inherited backoff.
+                self._retry_after.pop(path, None)
+                self._retry_attempts.pop(path, None)
+            pending |= dropped
             attempt = self._rescan_attempts.get(root, 0) + 1
             self._rescanning = root
             # Left set if this is cancelled, so ``stop`` can name the root.
-            failure = await self._rescan_root(root, drops)
+            failure = await self._rescan_root(root, drops, len(dropped))
             self._rescanning = None
             if failure is None:
                 self._rescan_attempts.pop(root, None)
@@ -783,7 +808,7 @@ class FileWatcher:
                     root,
                 )
 
-    async def _rescan_root(self, root: Path, drops: int) -> str | None:
+    async def _rescan_root(self, root: Path, drops: int, replayed: int) -> str | None:
         """Walk *root* once; return the retryable failure, else ``None``.
 
         A permanent failure is logged here and returns ``None``: walking the
@@ -791,9 +816,10 @@ class FileWatcher:
         """
         logger.info(
             "Rescanning %s after %d dropped watcher event(s); "
-            "a rescan does not remove files deleted meanwhile",
+            "queued %d dropped path(s) for reindex",
             root,
             drops,
+            replayed,
         )
         try:
             stats = await self._engine.index_path(root, recursive=True)

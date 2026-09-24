@@ -19,9 +19,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   its root, and the root is rescanned once the burst settles. Content-hash dedup
   keeps unchanged files cheap. The first drop per root logs one warning with the
   full path and the root to be rescanned; the rest go to debug. A rescan that
-  `stop()` interrupts is named in a warning with `mm index <root>`. A rescan
-  walks existing files only, so a dropped *delete* still leaves that file's
-  chunks for the orphan sweep.
+  `stop()` interrupts is named in a warning with `mm index <root>`.
+- **A delete or move event dropped by a full watcher queue now purges the old
+  path (#2532).** The #2530 rescan walks only files that exist, so a dropped
+  delete, or the source of a dropped move, left that file's chunks searchable
+  until the opt-in orphan sweep or a manual `mm gc orphan-sources --apply`.
+  The watcher now keeps each dropped path and, when its root is rescanned,
+  replays it through the same per-event reindex a delivered event gets. A
+  missing file is purged exactly as a delivered delete would be. The rescan
+  does not reconcile the whole root, so a file deleted without a dropped event
+  is not touched. The warning for a rescan that `stop()` interrupts now also
+  names `mm gc orphan-sources --apply`.
 - **`mm status` lists read-only memory roots (#2519).** The report showed
   `memory_dirs` and `project_memory_dirs` but never
   `indexing.read_only_memory_dirs`, so a configured vault was invisible there
