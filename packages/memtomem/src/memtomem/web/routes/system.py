@@ -1228,8 +1228,10 @@ async def remove_memory_dir(
                 # the awaits further down would let a swap made in between
                 # redirect the sweep (#2539). ``resolve()`` runs on the path as
                 # sent, not on ``literal``: ``abspath`` folds ``..`` without
-                # following symlinks, so ``link/../d`` would otherwise check
-                # and remove a directory the OS would not reach by that path.
+                # following symlinks, so on POSIX ``link/../d`` would otherwise
+                # check and remove a directory the OS would not reach by that
+                # path. Win32 folds ``..`` first itself, and so does
+                # ``ntpath.realpath``, so there both sides agree.
                 expanded = Path(dir_path).expanduser()
                 literal = os.path.abspath(expanded)
                 resolved = expanded.resolve()

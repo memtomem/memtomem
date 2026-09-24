@@ -6316,6 +6316,13 @@ class TestRemoveMemoryDirChunkCleanup:
         """#2539: ``a/link/../target`` reaches ``b/target`` on disk, since ``..``
         applies after ``link`` is followed. Folding ``..`` first would check and
         remove ``a/target`` instead."""
+        import sys
+
+        if sys.platform == "win32":
+            pytest.skip(
+                "Win32 folds '..' before following links (ntpath.realpath starts "
+                "with normpath), so there the path does name a/target"
+            )
         a_target, b_target = tmp_path / "a" / "target", tmp_path / "b" / "target"
         b_sub, z = tmp_path / "b" / "sub", tmp_path / "z"
         for d in (a_target, b_sub, b_target, z):
