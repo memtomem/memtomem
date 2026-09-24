@@ -6173,8 +6173,9 @@ class TestRemoveMemoryDirChunkCleanup:
     async def test_sweep_deletes_what_the_status_count_showed(
         self, app, client: AsyncClient, tmp_path: Path
     ) -> None:
-        """The confirm dialog shows the dir's status ``delete_chunk_count``; the sweep
-        must delete exactly that many, leaving a nested project root intact."""
+        """The confirm dialog shows the dir's status ``delete_chunk_count``. When
+        nothing changes in between, the sweep deletes exactly that many, leaving a
+        nested project root intact."""
         proj = tmp_path / "proj"
         shared = proj / ".memtomem" / "memories"
         shared.mkdir(parents=True)
@@ -6194,6 +6195,33 @@ class TestRemoveMemoryDirChunkCleanup:
         assert resp.status_code == 200, resp.text
         assert resp.json()["deleted_chunks"] == shown == 3
         assert self._deleted(app) == [own]
+
+    async def test_status_count_is_a_preview_when_a_nested_root_goes_away(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2537: the dialog's count comes from an earlier request. When another
+        client removes a nested root in between, the sweep applies the rule to
+        the roots configured now, and ``deleted_chunks`` reports what it did."""
+        work = tmp_path / "work"
+        notes = work / "notes"
+        other = tmp_path / "other"
+        notes.mkdir(parents=True)
+        other.mkdir()
+        own, nested = work / "a.md", notes / "n.md"
+        app.state.config.indexing.memory_dirs = [work, notes, other]
+        self._serve_rows(app, [(own, 2), (nested, 7)])
+
+        shown = await self._shown(client, work)
+        app.state.config.indexing.memory_dirs = [work, other]
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(work), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert shown == 2
+        assert resp.json()["deleted_chunks"] == 9
+        assert self._deleted(app) == [own, nested]
 
     async def test_path_also_in_another_tier_keeps_its_chunks(
         self, app, client: AsyncClient, tmp_path: Path

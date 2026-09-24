@@ -3,9 +3,9 @@
 Both remove entry points, the Sources tree's ``handleRemove`` and the Memory
 Dirs panel's ``mdRemove``, build their dialog with
 ``memoryDirRemoveConfirmOptions``. The dialog offers *delete chunks* with the
-status ``delete_chunk_count``, the number the server's sweep deletes. A dir
-that another root still contains deletes nothing, so the dialog drops the
-checkbox and says the chunks stay. A status without the field (an older
+status ``delete_chunk_count``, a preview of the number the server's sweep
+deletes (#2537). A dir that another root still contains deletes nothing, so
+the dialog drops the checkbox and says the chunks stay. A status without the field (an older
 server) keeps offering the full ``chunk_count``.
 """
 

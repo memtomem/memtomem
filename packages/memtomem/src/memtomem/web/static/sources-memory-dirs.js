@@ -1082,8 +1082,11 @@ async function mdAdd(path, opts = {}) {
  * tree (``handleRemove``) and the Memory Dirs panel (``mdRemove``).
  *
  * Chunk cleanup is an opt-in checkbox, default unchecked, offered only when
- * the remove would delete something: the checkbox shows the status
- * ``delete_chunk_count``, the number the sweep deletes (#2534). A dir that
+ * the status says the remove would delete something: the checkbox shows the
+ * status ``delete_chunk_count`` (#2534). That count is a preview. Roots or
+ * indexed files can change before the remove, and the toast counts the
+ * response's ``deleted_chunks``, the number actually deleted, when it is not
+ * 0 (#2537). A dir that
  * another root still contains deletes nothing, so the dialog says its chunks
  * stay instead. A status without the field (an older server) keeps the full
  * ``chunk_count``; a dir with no chunks gets the plain boolean confirm.

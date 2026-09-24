@@ -1160,9 +1160,10 @@ async def remove_memory_dir(
     drops the chunks of every source under the removed dir that no
     still-configured index root contains. A nested root, an enclosing root,
     or the same path listed in another tier keeps its sources, since it would
-    index them again anyway (#2524, #2534). The number deleted is the dir's
-    status ``delete_chunk_count``, which the confirm dialog shows. The
-    underlying files on disk are never touched. The Web UI's delete confirm
+    index them again anyway (#2524, #2534). The dir's status
+    ``delete_chunk_count``, which the confirm dialog shows, is a preview of
+    that number, and the response's ``deleted_chunks`` is what the sweep did.
+    The underlying files on disk are never touched. The Web UI's delete confirm
     shows a checkbox so the user opts in explicitly.
 
     Known limits (#2534):
@@ -1176,6 +1177,15 @@ async def remove_memory_dir(
       backfill ``index_path`` run) can write after the sweep read its rows.
       Taking ``_index_lock`` would not close this, because the bulk path holds
       only per-file sidecars (#2105).
+    - The dialog's count comes from an earlier status request, which reads
+      the config without reloading it. Roots or indexed files can change
+      before this request: another tab, the CLI, a ``config.json`` edit, or
+      the watcher. The sweep applies the rule to the roots and rows present
+      when it runs, so it can delete more or fewer chunks than the dialog
+      showed. More only when a nested root went away or files were indexed
+      under the dir, which leaves chunks under the dir that no remaining root
+      would index. The route does not re-check the count, because any
+      watcher write that changes the dir's chunks would fail it (#2537).
     """
     body = await request.json()
     dir_path = body.get("path", "").strip()
@@ -1377,9 +1387,12 @@ async def memory_dirs_status(
     — so the Sources tree can badge a group and offer "Remove from
     memory_dirs" only where it applies. (#2522)
 
-    ``delete_chunk_count`` is what ``POST /memory-dirs/remove`` with
-    ``delete_chunks`` would delete for that entry: 0 when another root still
-    contains the whole dir, and 0 for tiers the route cannot remove. (#2534)
+    ``delete_chunk_count`` is a preview of what ``POST /memory-dirs/remove``
+    with ``delete_chunks`` would delete for that entry: 0 when another root
+    still contains the whole dir, and 0 for tiers the route cannot remove.
+    (#2534) It is computed from this request's config, which is not reloaded
+    here, and rows. The remove applies the same rule to what is configured
+    and indexed when it runs, and reports that number (#2537).
     """
     from memtomem.indexing.engine import memory_dir_stats, norm_dir_prefix, remove_sweeps_nothing
 
