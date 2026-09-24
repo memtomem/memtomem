@@ -533,6 +533,36 @@ def _longest_owning_prefix(target: str, prefixes: Iterable[str]) -> str | None:
     return best
 
 
+def swept_on_remove(target: str, removed_prefix: str, surviving_prefixes: Iterable[str]) -> bool:
+    """True when removing the root at ``removed_prefix`` should delete ``target``.
+
+    A source is swept when it lies under the removed root and no index root
+    that survives the removal still contains it. A surviving root that
+    contains the source (a nested root, an ancestor, or the same path listed
+    in another tier) would index it again on its next walk or watcher event,
+    so deleting it would only make it disappear for a while (#2534). Strings
+    are :func:`norm_path` / :func:`norm_dir_prefix` forms, as in
+    :func:`_longest_owning_prefix`.
+    """
+    return (
+        target.startswith(removed_prefix)
+        and _longest_owning_prefix(target, surviving_prefixes) is None
+    )
+
+
+def remove_sweeps_nothing(removed_prefix: str, surviving_prefixes: Iterable[str]) -> bool:
+    """True when a surviving root contains the whole removed root.
+
+    That root is an ancestor of the removed one or the same path, so
+    :func:`swept_on_remove` is false for every source under it. Otherwise the
+    sweep deletes exactly the sources the removed root owns under the
+    longest-prefix rule, because a surviving root inside it already owns its
+    own sources. So the status count of what a remove would delete is either
+    0 or the root's exclusive ``chunk_count`` (#2534).
+    """
+    return any(removed_prefix.startswith(p) for p in surviving_prefixes)
+
+
 def _count_files_on_disk(
     p: Path,
     extensions: frozenset[str],

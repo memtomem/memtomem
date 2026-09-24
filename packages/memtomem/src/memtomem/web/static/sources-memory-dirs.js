@@ -287,25 +287,9 @@ function _buildMemoryDirsPanel(initialDirs) {
   }
 
   async function handleRemove(path) {
-    // Offer chunk cleanup as an opt-in checkbox when the dir actually
-    // has indexed chunks. Default unchecked — the destructive path
-    // requires a deliberate click, mirroring the existing safe-by-
-    // default remove semantics. Dirs with zero chunks fall back to the
-    // simple boolean confirm.
-    const st = statusByPath[path];
-    const chunkCount = (st && st.chunk_count) || 0;
-    const extraOption = chunkCount > 0
-      ? {
-          id: 'deleteChunks',
-          label: t('confirm.memory_dir_delete_chunks_label', { count: chunkCount }),
-          defaultChecked: false,
-        }
-      : null;
-    const result = await showConfirm({
-      title: t('confirm.memory_dir_remove_title'),
-      message: t('confirm.memory_dir_remove_msg', { path }),
-      extraOption,
-    });
+    const opts = memoryDirRemoveConfirmOptions(path, statusByPath[path]);
+    const { extraOption } = opts;
+    const result = await showConfirm(opts);
     const ok = extraOption ? result && result.ok : result;
     if (!ok) return;
     const deleteChunks = !!(extraOption && result && result.extras && result.extras.deleteChunks);
@@ -1093,21 +1077,40 @@ async function mdAdd(path, opts = {}) {
   }
 }
 
-async function mdRemove(path) {
-  const st = (STATE.memoryStatusByPath || {})[path];
+/**
+ * ``showConfirm`` options for removing a memory dir, shared by the Sources
+ * tree (``handleRemove``) and the Memory Dirs panel (``mdRemove``).
+ *
+ * Chunk cleanup is an opt-in checkbox, default unchecked, offered only when
+ * the remove would delete something: the checkbox shows the status
+ * ``delete_chunk_count``, the number the sweep deletes (#2534). A dir that
+ * another root still contains deletes nothing, so the dialog says its chunks
+ * stay instead. A status without the field (an older server) keeps the full
+ * ``chunk_count``; a dir with no chunks gets the plain boolean confirm.
+ */
+function memoryDirRemoveConfirmOptions(path, st) {
   const chunkCount = (st && st.chunk_count) || 0;
-  const extraOption = chunkCount > 0
-    ? {
-        id: 'deleteChunks',
-        label: t('confirm.memory_dir_delete_chunks_label', { count: chunkCount }),
-        defaultChecked: false,
-      }
-    : null;
-  const result = await showConfirm({
+  const deleteCount = (st && st.delete_chunk_count) ?? chunkCount;
+  return {
     title: t('confirm.memory_dir_remove_title'),
     message: t('confirm.memory_dir_remove_msg', { path }),
-    extraOption,
-  });
+    warningText: chunkCount > 0 && deleteCount === 0
+      ? t('confirm.memory_dir_chunks_still_covered')
+      : '',
+    extraOption: deleteCount > 0
+      ? {
+          id: 'deleteChunks',
+          label: t('confirm.memory_dir_delete_chunks_label', { count: deleteCount }),
+          defaultChecked: false,
+        }
+      : null,
+  };
+}
+
+async function mdRemove(path) {
+  const opts = memoryDirRemoveConfirmOptions(path, (STATE.memoryStatusByPath || {})[path]);
+  const { extraOption } = opts;
+  const result = await showConfirm(opts);
   const ok = extraOption ? result && result.ok : result;
   if (!ok) return;
   const deleteChunks = !!(extraOption && result && result.extras && result.extras.deleteChunks);
