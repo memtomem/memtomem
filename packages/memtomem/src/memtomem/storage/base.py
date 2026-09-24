@@ -250,7 +250,7 @@ class StorageBackend(Protocol):
     # Batch sibling of the above (#2261). Two contract points:
     #   * **Sparse** — a file with no chunks is absent, not zero — and keys are
     #     the caller's own Path objects, so two spellings that normalise to one
-    #     stored path (symlink, NFC/NFD) collapse to a single entry owned by
+    #     stored path (symlink; NFC/NFD on macOS) collapse to a single entry owned by
     #     whichever was passed last. Summing the values is therefore correct.
     #   * The input is **caller-sized**, not code-sized: ``mm purge`` matches
     #     against every source in the store. An implementation must answer for

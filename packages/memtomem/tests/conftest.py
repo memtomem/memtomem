@@ -533,6 +533,19 @@ def _isolate_claude_projects_scan(
 
 
 @pytest.fixture
+def folds_unicode_forms(monkeypatch):
+    """Key paths as macOS does: NFC and NFD spellings fold to one (#235).
+
+    ``fold_path_form`` folds only on macOS, where the filesystem treats the two
+    forms as one path (#2544). Tests that pin the folding contract force it on
+    so they run on every CI platform, not only the macOS job.
+    """
+    import memtomem.storage.sqlite_helpers as _helpers
+
+    monkeypatch.setattr(_helpers, "FOLDS_UNICODE_FORMS", True)
+
+
+@pytest.fixture
 async def components(tmp_path):
     """Create components with a temporary DB for isolated testing."""
     import json

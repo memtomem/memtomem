@@ -110,7 +110,7 @@ async def list_sources(
     # Pre-compute (prefix, dir_path, kind) once per request so the
     # per-source classification stays O(D × startswith) instead of
     # O(D × Path.resolve()). For ~30 dirs × ~300 sources that drops
-    # ~9000 syscalls / NFC normalisations off the hot path of
+    # ~9000 syscalls / Unicode-form folds off the hot path of
     # ``GET /api/sources``. Sorted by prefix length descending so the
     # first match in the inner loop is the longest-prefix-wins one —
     # matches :func:`resolve_owning_memory_dir`'s tie-break rule for

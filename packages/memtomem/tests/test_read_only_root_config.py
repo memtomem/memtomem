@@ -96,6 +96,7 @@ def test_overlap_is_detected_through_a_symlinked_alias(tmp_path):
         _cfg([real], [alias])
 
 
+@pytest.mark.usefixtures("folds_unicode_forms")
 def test_overlap_is_detected_across_unicode_normalisation(tmp_path):
     """NFC and NFD spellings of one directory are one directory (#235)."""
     nfc = tmp_path / "볼트"

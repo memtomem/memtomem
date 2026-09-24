@@ -204,6 +204,7 @@ async def test_path_outside_every_root_is_dropped(tmp_path):
     assert engine.calls == []
 
 
+@pytest.mark.usefixtures("folds_unicode_forms")
 async def test_nfd_spelled_path_under_nfc_root_is_reindexed(tmp_path):
     # macOS hands back decomposed names; users type composed ones. The remove
     # sweep compares NFC forms, so the guard must too, or it drops live events.

@@ -115,11 +115,12 @@ def require_configured() -> None:
 
 
 def require_indexed_source(user_path: str, indexed_sources: Iterable[Path]) -> Path:
-    """Return the NFC-normalized Path for ``user_path`` if it matches any indexed source.
+    """Return the :func:`norm_path` key of ``user_path`` if it matches any indexed source.
 
     Raises 403 when the path is not indexed. Normalizes both sides with
-    ``norm_path`` (resolve + NFC) so an NFC user-typed path can still match
-    an NFD on-disk path on macOS/APFS (issue #235).
+    ``norm_path`` (resolve + the macOS-only Unicode-form fold) so an NFC
+    user-typed path can still match an NFD on-disk path on macOS/APFS
+    (issue #235). Elsewhere the two forms are two paths (#2544).
     """
     request_norm = norm_path(Path(user_path))
     indexed_norms = {norm_path(p) for p in indexed_sources}

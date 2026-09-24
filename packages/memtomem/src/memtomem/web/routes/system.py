@@ -21,7 +21,6 @@ import os
 import subprocess
 import sys
 import stat
-import unicodedata
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
@@ -50,7 +49,7 @@ from memtomem.source_provenance import (
     ExcludedSourceError,
     ReadOnlySourceError,
 )
-from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_helpers import fold_path_form, norm_path
 from memtomem.tools.memory_writer import append_entry
 from memtomem.web import hot_reload as _hot_reload
 from memtomem.web.deps import (
@@ -1243,7 +1242,7 @@ async def remove_memory_dir(
                             "try again, or send the resolved path."
                         ),
                     )
-                resolved_norm = unicodedata.normalize("NFC", str(resolved))
+                resolved_norm = fold_path_form(str(resolved))
 
                 new_dirs = [
                     p
@@ -1279,9 +1278,10 @@ async def remove_memory_dir(
                     from memtomem.indexing.engine import norm_dir_prefix, swept_on_remove
 
                     rows = await storage.get_source_files_with_counts()
-                    # The same form :func:`norm_dir_prefix` builds (NFC, a
-                    # trailing ``os.sep``; #647), made from the path checked
-                    # above instead of resolving it again after the await.
+                    # The same form :func:`norm_dir_prefix` builds (Unicode form
+                    # folded where the filesystem folds it, a trailing
+                    # ``os.sep``; #647), made from the path checked above
+                    # instead of resolving it again after the await.
                     # A second resolve would follow a symlink swapped in
                     # meanwhile and sweep that directory (#2539).
                     prefix = (

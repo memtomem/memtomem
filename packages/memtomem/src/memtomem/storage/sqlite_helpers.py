@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import struct
+import sys
 import unicodedata
 import hashlib
 from datetime import datetime, timezone
@@ -25,21 +26,52 @@ def deserialize_f32(data: bytes) -> list[float]:
     return list(struct.unpack(f"{n}f", data))
 
 
+# Whether a path key folds Unicode normalisation forms. Read at call time, so
+# tests can force either answer on any platform. See :func:`fold_path_form`.
+FOLDS_UNICODE_FORMS = sys.platform == "darwin"
+
+
+def fold_path_form(path: str) -> str:
+    """Fold a path string to NFC where the filesystem treats NFC and NFD as one.
+
+    macOS volumes (APFS, HFS+) do not distinguish the forms, so ``café`` typed
+    in NFC and ``café`` stored in NFD name one directory there, and the key has
+    to fold them or the two spellings of one file never compare equal (#235).
+
+    Linux and Windows filesystems (ext4, NTFS) keep the forms apart: they can be
+    two directories, and the NFD one is reachable only by its own bytes. Folding
+    there makes the key the address of a different path. A file under an NFD
+    directory was stored under an NFC path that does not exist, so the orphan
+    scan confirmed it missing and cleanup deleted live chunks; an NFC and an NFD
+    sibling shared one key, so indexing either replaced the other's chunks
+    (#2544). There the resolved spelling is already the one on disk, and it is
+    returned unchanged.
+
+    The answer is per platform, not per volume: a volume that keeps the forms
+    apart mounted on macOS (NFS, FUSE ext4) is still folded, as before, and a
+    folding one mounted on Linux (ext4 ``casefold``, SMB from a Mac) is not, so
+    two spellings of one file can be keyed twice there. Asking each volume
+    would mean probing directories memtomem may not write to.
+    """
+    return unicodedata.normalize("NFC", path) if FOLDS_UNICODE_FORMS else path
+
+
 def norm_path(p: Path) -> str:
     """Normalize path to a canonical string.
 
-    Resolves symlinks (``/tmp`` → ``/private/tmp`` on macOS) and applies
-    Unicode NFC normalization so NFD (typically produced by macOS/APFS) and
-    NFC (typed by users or emitted by some cloud clients) forms of the same
-    path compare equal. Without NFC here, non-ASCII paths such as
+    Resolves symlinks (``/tmp`` → ``/private/tmp`` on macOS) and folds the
+    Unicode normalisation form where the filesystem does (macOS), so NFD and
+    NFC spellings of the same path compare equal there. Without that,
+    non-ASCII paths such as
     ``~/Library/CloudStorage/GoogleDrive-.../내 드라이브/...`` can fail the
-    equality check used by the web routes (see issue #235).
+    equality check used by the web routes (see issue #235). Elsewhere the two
+    forms are two paths and are kept apart — see :func:`fold_path_form`.
     """
     try:
         resolved = str(p.resolve())
     except OSError:
         resolved = str(p)
-    return unicodedata.normalize("NFC", resolved)
+    return fold_path_form(resolved)
 
 
 def norm_dir_prefix(d: str | Path) -> str:
@@ -48,9 +80,10 @@ def norm_dir_prefix(d: str | Path) -> str:
     Adds a trailing ``os.sep`` (platform-native separator) so a configured
     dir does not falsely claim files under a sibling sharing the same
     prefix (e.g. ``/foo`` should not match ``/foo-bar/...``). Always runs
-    through :func:`norm_path` (which resolves symlinks and applies Unicode
-    NFC) so the prefix shape matches the source-side normalisation
-    regardless of whether the dir currently exists on disk — the chunks
+    through :func:`norm_path` (which resolves symlinks and folds the
+    Unicode form where the filesystem does) so the prefix shape matches the
+    source-side normalisation regardless of whether the dir currently exists
+    on disk — the chunks
     table holds resolved paths, and a configured-but-missing dir would
     otherwise compare in raw ``/tmp`` form against resolved
     ``/private/tmp`` source paths on macOS.

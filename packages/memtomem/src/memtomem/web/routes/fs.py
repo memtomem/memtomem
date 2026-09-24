@@ -19,14 +19,13 @@ without conflating with real auth failures elsewhere.
 from __future__ import annotations
 
 import os
-import unicodedata
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from memtomem.context.projects import KnownProjectsStore
-from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_helpers import fold_path_form, norm_path
 from memtomem.web.deps import get_config
 
 router = APIRouter(prefix="/fs", tags=["fs"])
@@ -62,7 +61,7 @@ def _index_allow_list_roots(config) -> list[Path]:
     """Return the Index picker's allow-list roots in display order.
 
     Order is ``~`` first, then ``config.indexing.memory_dirs`` in config
-    order. Duplicates (same NFC-normalized resolved path) are dropped on
+    order. Duplicates (same :func:`norm_path` key) are dropped on
     first occurrence so the response stays stable when ``~`` itself is also
     listed in ``memory_dirs``.
     """
@@ -134,17 +133,18 @@ def _display_name(p: Path) -> str:
 def _request_paths(raw: str) -> tuple[Path, Path]:
     """Compute the two views of a request path.
 
-    The first is *symbolic*: NFC-normalized and lexically cleaned (``..``
-    collapsed), but symlinks are NOT followed. This is what the response's
+    The first is *symbolic*: Unicode form folded where the filesystem folds
+    it (:func:`fold_path_form`) and lexically cleaned (``..`` collapsed), but
+    symlinks are NOT followed. This is what the response's
     ``path`` / ``parent`` fields carry and what ``iterdir`` runs against,
     so children inherit the symbolic prefix the user clicked. The second
-    is *resolved*: ``.resolve()`` + NFC, used for the boundary check and
+    is *resolved*: :func:`norm_path`, used for the boundary check and
     the existence / is_dir gates so security stays anchored to the real
     on-disk location regardless of how many symlinks the symbolic path
     crosses.
     """
     expanded = Path(raw).expanduser()
-    symbolic_str = unicodedata.normalize("NFC", os.path.normpath(str(expanded)))
+    symbolic_str = fold_path_form(os.path.normpath(str(expanded)))
     symbolic = Path(symbolic_str)
     resolved = Path(norm_path(expanded))
     return symbolic, resolved
@@ -216,7 +216,7 @@ async def list_directory(
                 continue
         except (PermissionError, OSError):
             continue
-        children.append(FsEntry(name=child.name, path=unicodedata.normalize("NFC", str(child))))
+        children.append(FsEntry(name=child.name, path=fold_path_form(str(child))))
 
     children.sort(key=lambda e: e.name.casefold())
 
@@ -229,10 +229,10 @@ async def list_directory(
         # user recognises from the breadcrumb.
         parent_resolved = Path(norm_path(parent_path))
         if _inside_any_root(parent_resolved, roots):
-            parent_str = unicodedata.normalize("NFC", str(parent_path))
+            parent_str = fold_path_form(str(parent_path))
 
     return FsListResponse(
-        path=unicodedata.normalize("NFC", str(symbolic)),
+        path=fold_path_form(str(symbolic)),
         parent=parent_str,
         is_root=False,
         entries=children,

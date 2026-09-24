@@ -516,7 +516,8 @@ class IndexingConfig(ConfigModel):
         writable one would be written through the parent, and a writable root
         inside a read-only one would punch a hole in the protected subtree.
         Comparison goes through :func:`norm_dir_prefix` so ``~`` expansion,
-        symlink aliases, Unicode NFC/NFD and the trailing-separator rule (so
+        symlink aliases, the Unicode-form fold (macOS only) and the
+        trailing-separator rule (so
         ``/vault`` does not claim ``/vault2``) are the same ones the engine's
         own predicate uses — a second spelling of this rule would be free to
         drift from the one that enforces it.

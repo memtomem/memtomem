@@ -140,7 +140,7 @@ _REBUILD_FTS_BATCH_SIZE = 1000
 
 
 # Prefix for per-source AI summary records in the ``_memtomem_meta`` k/v
-# table. The full key is ``ai_summary:<resolved-NFC-path>`` so a prefix
+# table. The full key is ``ai_summary:<norm_path(source)>`` so a prefix
 # scan (``key LIKE 'ai_summary:%'``) cleanly separates summary rows from
 # the embedding-meta keys that share the same table.
 _AI_SUMMARY_KEY_PREFIX = "ai_summary:"
@@ -2195,7 +2195,7 @@ class SqliteBackend(
             prefix = norm_path(source_prefix)
             # Component-aware prefix: anchor on ``<prefix><sep>`` so a request
             # for ``docs`` does not match ``docsuite``. ``norm_path`` already
-            # resolves symlinks and NFC-normalises so the prefix and stored
+            # resolves symlinks and folds the Unicode form (macOS) so the prefix and stored
             # paths share the same canonical form.
             #
             # ``substr(...) = ?`` instead of ``LIKE``: SQLite's built-in LIKE
@@ -3252,7 +3252,7 @@ class SqliteBackend(
         - **Sparse.** A file with no chunks is absent rather than ``0``; read a
           missing key as zero. Callers that want a total just ``sum(...)``.
         - **Aliases collapse.** Two inputs that normalise to the same stored
-          path (symlink, NFC/NFD spelling) yield one entry, keyed by whichever
+          path (symlink; NFC/NFD spelling on macOS) yield one entry, keyed by whichever
           the caller passed last. Paths that came out of the store — the purge
           case — are already canonical and distinct, so this cannot bite there.
         """

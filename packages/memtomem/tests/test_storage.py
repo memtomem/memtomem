@@ -997,8 +997,14 @@ class TestRelations:
         assert len(await storage.get_related(c1.id)) == 0
 
 
+@pytest.mark.usefixtures("folds_unicode_forms")
 class TestNormPathUnicode:
-    """Regression for #235: ``norm_path`` must collapse NFD and NFC into one form."""
+    """Regression for #235: ``norm_path`` must collapse NFD and NFC into one form.
+
+    That is the macOS keying, forced on here so every platform checks it. Where
+    the filesystem keeps the forms apart they stay apart — see
+    ``test_unicode_form_keys.py`` (#2544).
+    """
 
     def test_nfd_and_nfc_korean_paths_compare_equal(self, tmp_path):
         nfd_path = tmp_path / unicodedata.normalize("NFD", "내 드라이브") / "file.md"

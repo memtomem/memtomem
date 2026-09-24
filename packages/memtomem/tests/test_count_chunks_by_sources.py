@@ -79,6 +79,7 @@ class TestCounts:
 
         assert list(counts) == [source]
 
+    @pytest.mark.usefixtures("folds_unicode_forms")
     async def test_two_spellings_of_one_path_collapse_to_the_last(self, storage):
         """``norm_path`` folds NFD into NFC, so both spellings name one file.
 

@@ -427,3 +427,33 @@ def fake_context_windows(chunks: dict[Path, list[Chunk]] | list[Chunk]):
         return out
 
     return _get_context_windows
+
+
+# ``café`` in its two Unicode normalisation forms (#2544).
+CAFE_NFC = "café"
+CAFE_NFD = "café"
+
+
+def filesystem_keeps_unicode_forms_apart(parent: Path) -> bool:
+    """Whether ``parent``'s filesystem holds an NFC and an NFD name side by side.
+
+    Asks the filesystem, never the code under test: a skip guard that consulted
+    ``fold_path_form`` would turn a regression in it into a skip. ext4 and NTFS
+    answer yes; APFS and HFS+ refuse the second ``mkdir``.
+    """
+    probe = parent / "unicode-form-probe"
+    probe.mkdir()
+    (probe / CAFE_NFC).mkdir()
+    try:
+        (probe / CAFE_NFD).mkdir()
+    except FileExistsError:
+        return False
+    return True
+
+
+def filesystem_folds_unicode_forms(parent: Path) -> bool:
+    """Whether ``parent``'s filesystem finds an NFD name by its NFC spelling."""
+    probe = parent / "unicode-fold-probe"
+    probe.mkdir()
+    (probe / CAFE_NFD).mkdir()
+    return (probe / CAFE_NFC).exists()

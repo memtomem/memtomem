@@ -7,6 +7,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **On Linux and Windows, a path whose name is in Unicode NFD form keeps its
+  own index key (#2544).** Every stored source path was folded to NFC. That is
+  right on macOS, where an NFC and an NFD spelling name one directory (#235).
+  On ext4 or NTFS they are two directories, so the fold keyed a file by a path
+  that does not exist or belongs to a sibling. Measured on Linux: a note under
+  an NFD `café/` was confirmed as a missing source by the orphan scan, so
+  `mm gc orphan-sources --apply`, `mem_cleanup_orphans` and auto-maintenance
+  deleted live chunks. An NFC `café/` beside it shared the key, so indexing
+  one file replaced the other's chunks. Removing one of the two memory dirs in
+  the Web UI removed both, and the directory picker returned a path that did
+  not open. Paths now fold only on macOS. A volume that keeps the forms apart
+  mounted on macOS is still folded, as before. A folding volume mounted on
+  Linux (ext4 `casefold`, SMB to a Mac) is not, so one file reached by two
+  spellings can be indexed twice there.
+
+  Existing databases on Linux or Windows: a row keyed by the old fold names a
+  path that does not exist. `mm gc orphan-sources --apply` removes it, and a
+  re-index adds the file under its own path. Where NFC and NFD siblings had
+  already been merged into one row, that row belongs to the NFC file and is
+  kept. A re-index corrects its content, but it may keep the namespace the NFD
+  file gave it. To reset it, delete that source (`mem_delete` with
+  `source_file`, or *Delete* in the Web UI's Sources view) and index it again.
 - **A create or modify event dropped by a full watcher queue is no longer lost
   (#2530).**
   The watcher buffers events in a 1,000-slot queue. A burst larger than that

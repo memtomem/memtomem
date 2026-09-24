@@ -31,7 +31,14 @@ from memtomem.models import Chunk, ChunkMetadata, IndexingStats, SearchResult
 from memtomem.search.pipeline import RetrievalStats
 from memtomem.source_provenance import source_span_hash
 from memtomem.web.app import create_app
-from .helpers import consent_lines, isolate_config_paths, set_home
+from .helpers import (
+    CAFE_NFC,
+    CAFE_NFD,
+    consent_lines,
+    filesystem_keeps_unicode_forms_apart,
+    isolate_config_paths,
+    set_home,
+)
 from .web.test_upload_quarantine import (
     TestUploadQuarantineBoundaries,  # noqa: F401
     TestUploadQuarantineLifecycle,  # noqa: F401
@@ -4758,6 +4765,7 @@ class TestLocaleEndpoints:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("folds_unicode_forms")
 class TestUnicodePaths:
     """Regression for #235 and #238: NFD on-disk vs NFC user-input path mismatch.
 
@@ -4769,6 +4777,9 @@ class TestUnicodePaths:
 
     - #235 (sources/chunks routes) — raw ``.resolve()`` 403 mismatch.
     - #238 (memory-dirs routes) — ``in`` / ``!=`` dedup/remove mismatch.
+
+    That folding is macOS keying (#2544 folds only there), forced on so every
+    platform runs these.
     """
 
     @staticmethod
@@ -6393,6 +6404,54 @@ class TestRemoveMemoryDirChunkCleanup:
 
         await self._remove_refused(app, client, nfc)
 
+    async def test_unicode_form_sibling_keeps_its_registration_and_chunks(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2544: where the filesystem keeps NFC and NFD names apart, ``café``
+        in each form is its own root. Folding them into one key made removing
+        the NFC root drop the NFD root's registration and sweep its chunks."""
+        if not filesystem_keeps_unicode_forms_apart(tmp_path):
+            pytest.skip("this filesystem treats NFC and NFD names as one")
+        nfc, nfd = tmp_path / CAFE_NFC, tmp_path / CAFE_NFD
+        nfc.mkdir()
+        nfd.mkdir()
+        app.state.config.indexing.memory_dirs = [nfd, nfc]
+        self._serve_rows(app, [(nfc / "a.md", 2), (nfd / "b.md", 5)])
+
+        shown = await self._shown(client, nfc)
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(nfc), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert app.state.config.indexing.memory_dirs == [nfd]
+        assert resp.json()["deleted_chunks"] == shown == 2
+        assert self._deleted(app) == [nfc / "a.md"]
+
+    async def test_an_unconfigured_unicode_form_sibling_is_not_found(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2544, the issue's own case: only the NFD root is configured, and an
+        NFC directory beside it is posted. That is not a configured root."""
+        if not filesystem_keeps_unicode_forms_apart(tmp_path):
+            pytest.skip("this filesystem treats NFC and NFD names as one")
+        nfc, nfd, z = tmp_path / CAFE_NFC, tmp_path / CAFE_NFD, tmp_path / "z"
+        for d in (nfc, nfd, z):
+            d.mkdir()
+        app.state.config.indexing.memory_dirs = [nfd, z]
+        self._serve_rows(app, [(nfd / "b.md", 5)])
+
+        with patch("memtomem.web.routes.system.save_config_overrides") as save:
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(nfc), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 404, resp.text
+        assert app.state.config.indexing.memory_dirs == [nfd, z]
+        save.assert_not_called()
+        assert self._deleted(app) == []
+
     @pytest.mark.requires_symlinks
     async def test_alias_spelling_submission_is_refused(
         self, app, client: AsyncClient, tmp_path: Path
@@ -7353,6 +7412,33 @@ class TestFsList:
         nfc_path = unicodedata.normalize("NFC", str(memdir / "한글노트"))
         resp2 = await client.get(f"/api/fs/list?path={nfc_path}")
         assert resp2.status_code == 200, resp2.text
+
+    async def test_an_nfd_dirname_round_trips_where_forms_stay_apart(
+        self,
+        app,
+        client: AsyncClient,
+        fs_tree,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        """#2544: where the filesystem keeps NFC and NFD names apart, the picker
+        must hand back the NFD directory's own bytes. An NFC-folded path names a
+        directory that does not exist, so clicking the entry answered 404."""
+        if not filesystem_keeps_unicode_forms_apart(tmp_path):
+            pytest.skip("this filesystem treats NFC and NFD names as one")
+        memdir = fs_tree["memdir"]
+        (memdir / CAFE_NFD / "inner").mkdir(parents=True)
+        set_home(monkeypatch, fs_tree["home"])
+        self._wire_memory_dirs(app, [memdir], monkeypatch)
+
+        resp = await client.get("/api/fs/list", params={"path": str(memdir)})
+        entry = next(e for e in resp.json()["entries"] if e["name"] == CAFE_NFD)
+        assert entry["path"] == str(memdir / CAFE_NFD)
+
+        resp2 = await client.get("/api/fs/list", params={"path": entry["path"]})
+        assert resp2.status_code == 200, resp2.text
+        assert resp2.json()["path"] == entry["path"]
+        assert [e["name"] for e in resp2.json()["entries"]] == ["inner"]
 
 
 class TestChunkCrudCrossProcessLock:

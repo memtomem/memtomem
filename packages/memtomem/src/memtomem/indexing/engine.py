@@ -1827,8 +1827,8 @@ class IndexEngine:
         Both sides canonicalise through the same pair of helpers the rest of
         the root machinery uses — :func:`~memtomem.storage.sqlite_helpers.norm_path`
         for the source and :func:`norm_dir_prefix` for each root — so ``~``
-        expansion, symlink aliases, Unicode NFC/NFD and the trailing-separator
-        rule (``/vault`` must not claim ``/vault2``) behave here exactly as
+        expansion, symlink aliases, the Unicode-form fold (macOS only) and the
+        trailing-separator rule (``/vault`` must not claim ``/vault2``) behave here exactly as
         they do in :func:`resolve_owning_memory_dir`. Neither helper raises on
         a path that cannot be resolved: ``norm_path`` falls back to the input
         spelling, and a missing directory still yields a usable prefix, which
