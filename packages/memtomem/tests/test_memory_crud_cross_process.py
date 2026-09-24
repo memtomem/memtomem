@@ -757,7 +757,7 @@ async def test_index_path_parent_gone_falls_back_to_index_lock(
 
 
 @pytest.mark.asyncio
-async def test_watcher_reindex_returns_path_on_timeout(monkeypatch):
+async def test_watcher_reindex_returns_path_on_timeout(monkeypatch, tmp_path):
     """``_reindex`` returns the path (not ``None``) when the reindex times out
     on the sidecar, so the caller can retry it — the change is not lost."""
     from memtomem.config import IndexingConfig
@@ -767,20 +767,23 @@ async def test_watcher_reindex_returns_path_on_timeout(monkeypatch):
         async def index_file(self, path):
             raise TimeoutError("sidecar held")
 
-    watcher = FileWatcher(_Engine(), IndexingConfig(memory_dirs=[]))
-    result = await watcher._reindex(Path("/some/notes.md"))
-    assert result == Path("/some/notes.md")
+    # The path must sit under a configured root, or ``_reindex`` drops it before
+    # the engine is asked (#2528).
+    notes = tmp_path / "notes.md"
+    watcher = FileWatcher(_Engine(), IndexingConfig(memory_dirs=[tmp_path]))
+    result = await watcher._reindex(notes)
+    assert result == notes
 
 
 @pytest.mark.asyncio
-async def test_watcher_flush_batch_requeues_only_timed_out(monkeypatch):
+async def test_watcher_flush_batch_requeues_only_timed_out(monkeypatch, tmp_path):
     """``_flush_batch`` returns exactly the files whose reindex timed out (to be
     retried next window) and drops the ones that succeeded."""
     from memtomem.config import IndexingConfig
     from memtomem.indexing.watcher import FileWatcher
 
-    ok = Path("/mem/ok.md")
-    stuck = Path("/mem/stuck.md")
+    ok = tmp_path / "ok.md"
+    stuck = tmp_path / "stuck.md"
 
     class _Engine:
         async def index_file(self, path):
@@ -794,7 +797,7 @@ async def test_watcher_flush_batch_requeues_only_timed_out(monkeypatch):
 
             return _Stats()
 
-    watcher = FileWatcher(_Engine(), IndexingConfig(memory_dirs=[]))
+    watcher = FileWatcher(_Engine(), IndexingConfig(memory_dirs=[tmp_path]))
     retry = await watcher._flush_batch({ok, stuck})
     assert retry == {stuck}
 

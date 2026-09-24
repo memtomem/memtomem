@@ -16,6 +16,7 @@ from watchdog.observers.polling import PollingObserver
 
 from memtomem.config import IndexingConfig
 from memtomem.errors import NamespaceResolutionError, RetryableError
+from memtomem.storage.sqlite_helpers import is_under_any_root
 
 if TYPE_CHECKING:
     from watchdog.observers.api import BaseObserver, ObservedWatch
@@ -842,8 +843,23 @@ class FileWatcher:
     async def _reindex(self, file_path: Path) -> Path | None:
         """Reindex one changed file. Returns ``file_path`` when the reindex
         timed out acquiring the file's cross-process sidecar (so the caller can
-        retry it next window), else ``None``."""
+        retry it next window), else ``None``.
+
+        A path no longer contained in any configured root is dropped. Events are
+        collected before a flush and ``reconfigure`` leaves them alone, so a file
+        edited just before its root was removed would otherwise be indexed again
+        after the remove swept its chunks (#2528). ``index_file`` cannot do this
+        check itself: its default scope never asks about an existing file, and
+        other callers index outside the roots on purpose. This is containment
+        only. Suffix, exclude and worktree filtering stay with the event handler
+        and the engine. It is also a check, not a lock: a flush that passed it
+        before the root was removed can still write afterwards.
+        """
         from memtomem.indexing.engine import PrivacyRejection
+
+        if not is_under_any_root(file_path, self._config.all_index_roots()):
+            logger.info("Skipped auto-reindex for %s: not under a configured root", file_path.name)
+            return None
 
         try:
             stats = await self._engine.index_file(file_path)
