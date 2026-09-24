@@ -77,10 +77,10 @@ async def list_sources(
         None,
         description=(
             "Filter to one bucket of the Sources page sub-toggle. "
-            "``memory`` keeps only sources under a configured memory_dir "
+            "``memory`` keeps only sources under a configured index root "
             "whose kind is ``memory``; ``general`` keeps the rest, "
-            "including orphan sources whose owning dir is no longer "
-            "registered (so they don't disappear from the UI)."
+            "including orphan sources that no configured root owns "
+            "(so they don't disappear from the UI)."
         ),
     ),
     target_scope: TargetScope | None = Query(
@@ -123,10 +123,16 @@ async def list_sources(
     # lookups miss whenever a memory_dir is registered under a symlinked
     # prefix (macOS ``/tmp`` → ``/private/tmp``, Docker bind mounts).
     # Same one-line treatment as #668 / engine.py:memory_dir_stats. (#675)
+    #
+    # Every tier owns its sources, not just ``memory_dirs``: a file under a
+    # ``project_memory_dirs`` or ``read_only_memory_dirs`` root is indexed
+    # from that root, so it must not be reported as an orphan. Same root
+    # list ``/api/memory-dirs/status`` walks, so each ``memory_dir`` here
+    # has a status entry to look up. (#2522)
     indexed_dirs: list[tuple[str, Path, MemoryDirKind]] = sorted(
         (
             (norm_dir_prefix(d), Path(d).expanduser().resolve(), memory_dir_kind(d))
-            for d in config.indexing.memory_dirs
+            for d in config.indexing.all_index_roots()
         ),
         key=lambda t: -len(t[0]),
     )
@@ -170,8 +176,9 @@ async def list_sources(
         source_kind: MemoryDirKind | None
         memory_dir_str: str | None
         if match is None:
-            # Orphan: indexed source whose configured dir was removed
-            # after indexing. Show in General view rather than hiding so
+            # Orphan: indexed source that no configured root owns — an
+            # Index-tab upload, or a root removed from config after its
+            # files were indexed. Show in General view rather than hiding so
             # users can still find and prune the chunks; ``kind=None``
             # signals that the categorisation is unknowable, not that
             # the source is "general" by intent.

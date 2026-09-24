@@ -20,10 +20,12 @@ class SourceOut(BaseModel):
     avg_tokens: int = 0
     min_tokens: int = 0
     max_tokens: int = 0
-    # The configured ``memory_dir`` that contains this source, expanded
-    # to an absolute path. ``None`` for orphan sources whose owning dir
-    # was unregistered after indexing — they still appear in the General
-    # view so users can prune or re-register them.
+    # The configured index root that contains this source — from any tier
+    # (``memory_dirs``, ``project_memory_dirs``, ``read_only_memory_dirs``;
+    # #2522), resolved to an absolute path. ``None`` for orphan sources no
+    # configured root owns (uploads, a root unregistered after indexing) —
+    # they still appear in the General view so users can prune or
+    # re-register them.
     memory_dir: str | None = None
     # ``"memory"`` for agent / user-memory dirs (auto-classified by path
     # pattern) and ``"general"`` for arbitrary indexed folders. ``None``

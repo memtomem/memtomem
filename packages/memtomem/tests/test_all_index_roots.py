@@ -110,11 +110,12 @@ class TestConsumerRegressionPin:
         # Wizard / init flow targets the user-tier registry.
         "memtomem/cli/init_cmd.py",
         # User-tier registry endpoints (POST /memory-dirs add/remove,
-        # GET /api/system snapshot, sources tab listing). The functional
-        # fan-out call sites in this file (memory_dirs_status,
-        # reindex_all, index_path_stream guard, trigger_index guard)
-        # were migrated in PR-B to ``all_index_roots()``; the user-tier
-        # registry endpoints intentionally stay on ``memory_dirs``.
+        # GET /api/system snapshot) and the per-tier ``tier`` label on
+        # memory_dirs_status. The functional fan-out call sites in this
+        # file (memory_dirs_status, reindex_all, index_path_stream guard,
+        # trigger_index guard, and since #2522 get_stats attribution and
+        # the memory-dirs/open allowlist) use ``all_index_roots()``; the
+        # user-tier registry endpoints intentionally stay on ``memory_dirs``.
         "memtomem/web/routes/system.py",
         # Web app bootstrap — initializes the user-tier registry.
         "memtomem/web/app.py",
@@ -122,8 +123,6 @@ class TestConsumerRegressionPin:
         # PR-F may broaden to project tiers if file-browser access
         # to project_memory_dirs is wanted.
         "memtomem/web/routes/fs.py",
-        # User-tier sources tab listing.
-        "memtomem/web/routes/sources.py",
         # Scratch promote — derives a write target from user-tier dirs.
         "memtomem/web/routes/scratch.py",
         # CLI agent shell write-target derivation (defaults to user

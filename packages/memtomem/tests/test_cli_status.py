@@ -638,6 +638,118 @@ class TestStatusSourceRendering:
         assert _shorten_status_path(path, home=home) == expected
 
 
+class TestStatusReadOnlyRoots:
+    """``indexing.read_only_memory_dirs`` is reported like the other tiers (#2519).
+
+    Those roots are discovered, watched, indexed and searched like
+    ``memory_dirs``, so ``mm status`` is where a user confirms one is
+    registered — and the bare ``mm index`` hint (#2505) sends them there.
+    """
+
+    @staticmethod
+    def _data(*, read_only: list[str] | None) -> dict:
+        # Three distinct paths, one per tier, so a renderer that reads the
+        # wrong key cannot pass.
+        config: dict = {
+            "storage_backend": "sqlite",
+            "db_path": "/opt/mm/memtomem.db",
+            "embedding": {"provider": "none", "model": None, "dimension": 0},
+            "top_k": 10,
+            "rrf_k": 60,
+            "watcher_backend": "native",
+            "memory_dirs": ["/opt/user-notes"],
+            "project_memory_dirs": ["/work/app/.memtomem/memories"],
+        }
+        if read_only is not None:
+            config["read_only_memory_dirs"] = read_only
+        return {
+            "config": config,
+            "runtime": {"cwd": "/work/app", "project_context_root": None},
+            "index": {
+                "total_chunks": 0,
+                "total_sources": 0,
+                "orphaned_sources": 0,
+                "dense_coverage": None,
+            },
+            "immutable": {},
+            "warnings": [],
+        }
+
+    def test_group_renders_inside_runtime_context_after_project_sources(self) -> None:
+        lines = iter_status_lines(self._data(read_only=["/srv/vault"]))
+        rendered = [line.text for line in lines]
+        project_header = rendered.index("Project sources: 1")
+
+        assert rendered[project_header + 1] == "  - /work/app/.memtomem/memories"
+        assert rendered[project_header + 2] == "Read-only roots: 1"
+        assert rendered[project_header + 3] == "  - /srv/vault"
+        assert lines[project_header + 4].role == "blank"
+
+    @pytest.mark.parametrize("read_only", [None, []], ids=["key-absent", "empty"])
+    def test_group_is_omitted_when_no_root_is_configured(self, read_only: list[str] | None) -> None:
+        rendered = [line.text for line in iter_status_lines(self._data(read_only=read_only))]
+
+        assert not any(text.startswith("Read-only roots") for text in rendered)
+        project_header = rendered.index("Project sources: 1")
+        assert rendered[project_header + 2] == ""
+
+    def test_collector_publishes_resolved_roots(self, tmp_path: Path) -> None:
+        """The published entry is canonical, not the spelling in the config.
+
+        Registered through a symlink alias: ``tmp_path`` is already a realpath,
+        so a plain path would pass even if the collector skipped ``resolve()``.
+        """
+        import asyncio
+
+        from memtomem.server.context import AppContext
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        alias = tmp_path / "vault-alias"
+        try:
+            alias.symlink_to(vault, target_is_directory=True)
+        except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+            pytest.skip("symlink creation is not permitted here")
+        comp = _mock_components(
+            config=Mem2MemConfig(indexing={"read_only_memory_dirs": [str(alias)]}),
+        )
+
+        data = asyncio.run(collect_status_report(AppContext.from_components(comp)))
+
+        assert data["config"]["read_only_memory_dirs"] == [str(vault.resolve())]
+
+    def test_collector_publishes_empty_list_when_unset(self) -> None:
+        import asyncio
+
+        from memtomem.server.context import AppContext
+
+        comp = _mock_components()
+        data = asyncio.run(collect_status_report(AppContext.from_components(comp)))
+
+        assert data["config"]["read_only_memory_dirs"] == []
+
+    def test_mm_status_text_and_json_list_the_root(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        comp = _mock_components(
+            config=Mem2MemConfig(indexing={"read_only_memory_dirs": [str(vault)]}),
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        text = runner.invoke(cli, ["status"])
+        assert text.exit_code == 0, text.output
+        rendered = text.stdout.splitlines()
+        header = rendered.index("Read-only roots: 1")
+        assert rendered[header + 1] == f"  - {_shorten_status_path(str(vault.resolve()))}"
+
+        as_json = runner.invoke(cli, ["status", "--json"])
+        assert as_json.exit_code == 0, as_json.output
+        data = json.loads(as_json.stdout)
+        assert data["config"]["read_only_memory_dirs"] == [str(vault.resolve())]
+
+
 class TestStatusMcpParity:
     """``mm status`` and the MCP ``mem_status`` tool must render identical text.
 

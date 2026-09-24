@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import stat
+import unicodedata
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
@@ -334,6 +335,7 @@ async def get_bootstrap_state(request: Request) -> dict[str, Any]:
 
     memory_dirs = []
     project_memory_dirs = []
+    read_only_memory_dirs = []
     project_context_root = None
     db_path = None
     mismatch = False
@@ -341,6 +343,9 @@ async def get_bootstrap_state(request: Request) -> dict[str, Any]:
         memory_dirs = [str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs]
         project_memory_dirs = [
             str(Path(p).expanduser().resolve()) for p in config.indexing.project_memory_dirs
+        ]
+        read_only_memory_dirs = [
+            str(Path(p).expanduser().resolve()) for p in config.indexing.read_only_memory_dirs
         ]
         db_path = str(Path(config.storage.sqlite_path).expanduser().resolve())
         from memtomem.server.tools.search import _resolve_project_context_from_dirs
@@ -370,6 +375,7 @@ async def get_bootstrap_state(request: Request) -> dict[str, Any]:
         "db_path": db_path,
         "memory_dirs": memory_dirs,
         "project_memory_dirs": project_memory_dirs,
+        "read_only_memory_dirs": read_only_memory_dirs,
         "project_context_root": project_context_root,
         "embedding_mismatch": mismatch,
     }
@@ -1141,6 +1147,19 @@ async def add_memory_dir(
     }
 
 
+def _path_identity_key(path: str) -> str:
+    """Compare a path as sent with what it resolves to.
+
+    ``os.path.normcase`` so a Windows spelling that differs only in case or
+    separators still matches; it is the identity on POSIX. No Unicode
+    normalisation: ``resolve()`` keeps the names of components that are not
+    symlinks as given, so a difference in form means a link was followed. On
+    a filesystem that keeps NFC and NFD names apart, folding them here would
+    let a symlink from one to the other pass (#2539).
+    """
+    return os.path.normcase(path)
+
+
 @router.post("/memory-dirs/remove")
 async def remove_memory_dir(
     request: Request,
@@ -1152,18 +1171,49 @@ async def remove_memory_dir(
     Body: ``{path: str, delete_chunks?: bool}``. ``delete_chunks=False`` (the
     default) is the safe behaviour — only the registration is removed,
     indexed chunks stay searchable. ``delete_chunks=True`` additionally
-    drops every chunk whose ``source_file`` is under the resolved dir
-    prefix; the underlying files on disk are never touched. The Web UI's
-    delete confirm shows a checkbox so the user opts in explicitly.
+    drops the chunks of every source under the removed dir that no
+    still-configured index root contains. A nested root, an enclosing root,
+    or the same path listed in another tier keeps its sources, since it would
+    index them again anyway (#2524, #2534). The dir's status
+    ``delete_chunk_count``, which the confirm dialog shows, is a preview of
+    that number, and the response's ``deleted_chunks`` is what the sweep did.
+    The underlying files on disk are never touched. The Web UI's delete confirm
+    shows a checkbox so the user opts in explicitly.
+
+    Known limits (#2534):
+
+    - Containment is decided on the stored, resolved path. A symlink in a
+      surviving root that points at a file under the removed one does not
+      keep that file's chunks. The surviving root's next walk, or the next
+      event on the link, indexes the file again.
+    - The sweep takes no indexing lock. Indexing that was already under way
+      when the dir was removed (a watcher flush that passed its root check, a
+      backfill ``index_path`` run) can write after the sweep read its rows.
+      Taking ``_index_lock`` would not close this, because the bulk path holds
+      only per-file sidecars (#2105).
+    - The dialog's count comes from an earlier status request, which reads
+      the config without reloading it. Roots or indexed files can change
+      before this request: another tab, the CLI, a ``config.json`` edit, or
+      the watcher. The sweep applies the rule to the roots and rows present
+      when it runs, so it can delete more or fewer chunks than the dialog
+      showed. More only when a nested root went away or files were indexed
+      under the dir, which leaves chunks under the dir that no remaining root
+      would index. The route does not re-check the count, because any
+      watcher write that changes the dir's chunks would fail it (#2537).
+
+    The path must still resolve to itself. Both Web UI callers send a path the
+    server returned already resolved. If that path, or one of its parents, has
+    since become a symlink or junction, it now names a different directory,
+    and removing or sweeping that one would act on a root the user did not
+    pick. The route answers 409 and changes nothing. A client that sends an
+    alias spelling, such as a symlinked prefix, gets the same 409 and has to
+    send the resolved path (#2539).
     """
     body = await request.json()
     dir_path = body.get("path", "").strip()
     if not dir_path:
         raise HTTPException(status_code=400, detail="path is required")
     delete_chunks = bool(body.get("delete_chunks", False))
-
-    resolved = Path(dir_path).expanduser().resolve()
-    resolved_norm = norm_path(resolved)
 
     try:
         async with _asyncio.timeout(60):
@@ -1173,6 +1223,27 @@ async def remove_memory_dir(
                 )
                 _check_reload_block(request)
                 config = request.app.state.config
+
+                # Resolved once, here, and reused below: resolving again after
+                # the awaits further down would let a swap made in between
+                # redirect the sweep (#2539). ``resolve()`` runs on the path as
+                # sent, not on ``literal``: ``abspath`` folds ``..`` without
+                # following symlinks, so on POSIX ``link/../d`` would otherwise
+                # check and remove a directory the OS would not reach by that
+                # path. Win32 folds ``..`` first itself, and so does
+                # ``ntpath.realpath``, so there both sides agree.
+                expanded = Path(dir_path).expanduser()
+                literal = os.path.abspath(expanded)
+                resolved = expanded.resolve()
+                if _path_identity_key(literal) != _path_identity_key(str(resolved)):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"{literal} now resolves to {resolved}. Reload the list and "
+                            "try again, or send the resolved path."
+                        ),
+                    )
+                resolved_norm = unicodedata.normalize("NFC", str(resolved))
 
                 new_dirs = [
                     p
@@ -1205,18 +1276,26 @@ async def remove_memory_dir(
                 # the schema's ``ON DELETE CASCADE``.
                 deleted_chunks = 0
                 if delete_chunks:
-                    from memtomem.indexing.engine import norm_dir_prefix
+                    from memtomem.indexing.engine import norm_dir_prefix, swept_on_remove
 
                     rows = await storage.get_source_files_with_counts()
-                    # Use the canonical helper so the trailing-separator
-                    # rule (``os.sep``, native form on Windows) stays in
-                    # one place; matches the comparison done by
-                    # :func:`resolve_owning_memory_dir` (#647).
-                    prefix = norm_dir_prefix(resolved)
+                    # The same form :func:`norm_dir_prefix` builds (NFC, a
+                    # trailing ``os.sep``; #647), made from the path checked
+                    # above instead of resolving it again after the await.
+                    # A second resolve would follow a symlink swapped in
+                    # meanwhile and sweep that directory (#2539).
+                    prefix = (
+                        resolved_norm if resolved_norm.endswith(os.sep) else resolved_norm + os.sep
+                    )
+                    # Every root still configured now that this one is gone. A
+                    # source any of them contains stays (#2524, #2534); the
+                    # status ``delete_chunk_count`` the dialog shows applies the
+                    # same rule.
+                    surviving = [norm_dir_prefix(p) for p in config.indexing.all_index_roots()]
                     try:
                         for row in rows:
                             source_path = row[0]
-                            if norm_path(source_path).startswith(prefix):
+                            if swept_on_remove(norm_path(source_path), prefix, surviving):
                                 deleted_chunks += await storage.delete_by_source(source_path)
                     finally:
                         # Same cache-staleness class as #2141: these rows are
@@ -1291,14 +1370,16 @@ def _open_in_file_manager(path: Path) -> None:
 
 @router.post("/memory-dirs/open")
 async def open_memory_dir(request: Request, config=Depends(get_config)):
-    """Reveal a registered ``memory_dir`` in the OS file manager.
+    """Reveal a configured index root in the OS file manager.
 
-    Body: ``{path: str}``. The path must already be in
-    ``config.indexing.memory_dirs`` — arbitrary filesystem paths cannot
-    be opened through this endpoint, since ``mm web`` is a local tool
-    but defense-in-depth keeps the route useful even if the bind host
-    were ever changed away from ``127.0.0.1``. Missing dirs return 404
-    rather than spawning a file-manager pointed at nothing.
+    Body: ``{path: str}``. The path must already be one of
+    ``config.indexing.all_index_roots()`` — user, project, or read-only
+    (#2522: the Sources tree shows a group, and this button, for every
+    tier). Arbitrary filesystem paths cannot be opened through this
+    endpoint, since ``mm web`` is a local tool but defense-in-depth keeps
+    the route useful even if the bind host were ever changed away from
+    ``127.0.0.1``. Missing dirs return 404 rather than spawning a
+    file-manager pointed at nothing.
     """
     body = await request.json()
     dir_path = body.get("path", "").strip()
@@ -1308,11 +1389,15 @@ async def open_memory_dir(request: Request, config=Depends(get_config)):
     resolved = Path(dir_path).expanduser().resolve()
     resolved_norm = norm_path(resolved)
 
+    # Resolved on both sides: the Sources tree sends the resolved path it
+    # got from ``/api/memory-dirs/status``, which a root configured under a
+    # symlinked prefix would otherwise never match.
     in_list = any(
-        norm_path(Path(p).expanduser()) == resolved_norm for p in config.indexing.memory_dirs
+        norm_path(Path(p).expanduser().resolve()) == resolved_norm
+        for p in config.indexing.all_index_roots()
     )
     if not in_list:
-        raise HTTPException(status_code=404, detail="Directory not in memory_dirs")
+        raise HTTPException(status_code=404, detail="Directory is not a configured index root")
     if not resolved.is_dir():
         raise HTTPException(status_code=404, detail="Directory does not exist on disk")
 
@@ -1339,14 +1424,59 @@ async def memory_dirs_status(
     Drives the "(N chunks)" / "(not indexed)" badges — users pick which
     dirs need a manual reindex instead of paying a blind startup scan
     cost across every provider memory dir.
+
+    Each entry carries ``tier`` — ``user`` (``memory_dirs``), ``project``
+    (``project_memory_dirs``) or ``read_only`` (``read_only_memory_dirs``)
+    — so the Sources tree can badge a group and offer "Remove from
+    memory_dirs" only where it applies. (#2522)
+
+    ``delete_chunk_count`` is a preview of what ``POST /memory-dirs/remove``
+    with ``delete_chunks`` would delete for that entry: 0 when another root
+    still contains the whole dir, and 0 for tiers the route cannot remove.
+    (#2534) It is computed from this request's config, which is not reloaded
+    here, and rows. The remove applies the same rule to what is configured
+    and indexed when it runs, and reports that number (#2537).
     """
-    from memtomem.indexing.engine import memory_dir_stats
+    from memtomem.indexing.engine import memory_dir_stats, norm_dir_prefix, remove_sweeps_nothing
 
     stats = await memory_dir_stats(
         storage,
         config.indexing.all_index_roots(),
         supported_extensions=config.indexing.supported_extensions,
     )
+
+    def _resolved(dirs: Iterable[Path]) -> set[str]:
+        return {norm_path(Path(d).expanduser().resolve()) for d in dirs}
+
+    # First match wins, in ``all_index_roots()`` order. Read-only roots are
+    # disjoint from the writable tiers (``check_read_only_roots_disjoint``);
+    # a path listed as both user and project reports ``user``.
+    tiers = (
+        ("user", _resolved(config.indexing.memory_dirs)),
+        ("project", _resolved(config.indexing.project_memory_dirs)),
+        ("read_only", _resolved(config.indexing.read_only_memory_dirs)),
+    )
+    # The remove route drops every ``memory_dirs`` entry equal to the path, so
+    # what survives is every other root, including the same path in another
+    # tier.
+    user_keys = [norm_path(Path(p).expanduser()) for p in config.indexing.memory_dirs]
+    others = [
+        norm_dir_prefix(p)
+        for p in (*config.indexing.project_memory_dirs, *config.indexing.read_only_memory_dirs)
+    ]
+    for entry in stats:
+        key = norm_path(Path(str(entry["path"])))
+        entry["tier"] = next((name for name, paths in tiers if key in paths), None)
+        delete_count = 0
+        if entry["tier"] == "user":
+            surviving = [
+                norm_dir_prefix(p)
+                for p, k in zip(config.indexing.memory_dirs, user_keys)
+                if k != key
+            ] + others
+            if not remove_sweeps_nothing(norm_dir_prefix(key), surviving):
+                delete_count = entry["chunk_count"]
+        entry["delete_chunk_count"] = delete_count
     return {"dirs": stats}
 
 
@@ -1768,10 +1898,12 @@ async def get_stats(storage=Depends(get_storage), config=Depends(get_config)) ->
     distribution = await storage.get_chunk_size_distribution()
 
     pmdirs = config.indexing.project_memory_dirs
+    # Every index root owns its sources, matching ``GET /api/sources`` —
+    # a read-only or project root's files are not orphans. (#2522)
     indexed_dirs = sorted(
         (
             (norm_dir_prefix(d), str(Path(d).expanduser().resolve()), memory_dir_kind(d))
-            for d in config.indexing.memory_dirs
+            for d in config.indexing.all_index_roots()
         ),
         key=lambda t: -len(t[0]),
     )

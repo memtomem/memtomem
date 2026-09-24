@@ -6,6 +6,7 @@ import asyncio
 import logging
 import random
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,7 @@ from watchdog.observers.polling import PollingObserver
 
 from memtomem.config import IndexingConfig
 from memtomem.errors import NamespaceResolutionError, RetryableError
+from memtomem.storage.sqlite_helpers import is_under_any_root
 
 if TYPE_CHECKING:
     from watchdog.observers.api import BaseObserver, ObservedWatch
@@ -28,10 +30,19 @@ logger = logging.getLogger(__name__)
 _STOP_SENTINEL = Path("/dev/null/__stop__")
 
 # Max pending file-change events buffered between the watchdog thread and the
-# async processor. When this fills (indexer is slower than the change rate),
-# new events — including the shutdown sentinel — are dropped and a warning
-# is logged. Raise this if you watch a very large tree with a slow indexer.
+# async processor. It fills when more events arrive than the processor takes
+# between two of its turns: the loop thread is held off during a burst, or the
+# processor is busy flushing the previous batch (#2530). A dropped event marks
+# its root for a rescan once the burst settles, so a drop costs a walk rather
+# than a stale index; the dropped path itself is replayed then too, so a dropped
+# delete still purges (#2532). The shutdown sentinel can still be dropped.
+# Raising this makes rescans rarer on a very large tree; it does not make them
+# unnecessary.
 _WATCHER_QUEUE_MAXSIZE = 1000
+
+# How long ``stop`` waits for the processor to flush and finish any rescan
+# before cancelling it.
+_STOP_FLUSH_TIMEOUT_S = 5.0
 
 # Startup-backfill retry budget for retryable failures (issue #2021). A root
 # whose walk fails with a ``RetryableError`` (namespace preservation could not
@@ -68,11 +79,13 @@ class _MarkdownEventHandler(FileSystemEventHandler):
         queue: asyncio.Queue[Path],
         loop: asyncio.AbstractEventLoop,
         supported_extensions: frozenset[str],
+        on_overflow: Callable[[Path], None] | None = None,
     ) -> None:
         super().__init__()
         self._queue = queue
         self._loop = loop
         self._supported = supported_extensions
+        self._on_overflow = on_overflow
 
     def _enqueue(self, path: str) -> None:
         p = Path(path)
@@ -85,11 +98,18 @@ class _MarkdownEventHandler(FileSystemEventHandler):
             self._loop.call_soon_threadsafe(self._put_or_warn, p)
 
     def _put_or_warn(self, p: Path) -> None:
-        """Runs on the event loop thread; drop loudly when the queue is full."""
+        """Runs on the event loop thread; drop loudly when the queue is full.
+
+        With an ``on_overflow`` callback the drop is handed to it, which both
+        logs and schedules recovery; without one the drop is only logged.
+        """
         try:
             self._queue.put_nowait(p)
         except asyncio.QueueFull:
-            logger.warning("File watcher queue full, dropping event for %s", p.name)
+            if self._on_overflow is not None:
+                self._on_overflow(p)
+            else:
+                logger.warning("File watcher queue full, dropping event for %s", p)
 
     def on_modified(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
@@ -172,6 +192,17 @@ class FileWatcher:
         self._backfill_task: asyncio.Task[None] | None = None
         self._handler: _MarkdownEventHandler | None = None
         self._watches: dict[Path, ObservedWatch] = {}
+        # Queue-overflow recovery (#2530). ``_rescan_due`` maps a root to the
+        # number of events dropped under it since its last rescan began;
+        # ``_rescanning`` is the root whose walk is in flight, kept apart so a
+        # walk cancelled by ``stop`` is still reported as unfinished;
+        # ``_rescan_attempts`` counts retryable failures per root, not drops.
+        # ``_dropped_paths`` holds the dropped paths themselves per root, taken
+        # together with ``_rescan_due`` and replayed as events (#2532).
+        self._rescan_due: dict[Path, int] = {}
+        self._dropped_paths: dict[Path, set[Path]] = {}
+        self._rescanning: Path | None = None
+        self._rescan_attempts: dict[Path, int] = {}
         # Serializes every change to the observer/handler/task triple:
         # ``start``, ``stop`` and ``reconfigure``. It used to guard only
         # ``reconfigure``, which was enough while the only start and stop
@@ -195,6 +226,53 @@ class FileWatcher:
         if self._search_pipeline is not None and stats.mutated:
             self._search_pipeline.invalidate_cache()
 
+    def _make_handler(self, loop: asyncio.AbstractEventLoop) -> _MarkdownEventHandler:
+        """Build the event handler that feeds this watcher's queue."""
+        return _MarkdownEventHandler(
+            self._queue,
+            loop,
+            self._config.supported_extensions,
+            on_overflow=self._note_overflow,
+        )
+
+    def _configured_roots(self) -> list[Path]:
+        return [Path(d).expanduser().resolve() for d in self._config.all_index_roots()]
+
+    def _note_overflow(self, path: Path) -> None:
+        """Record a dropped event so its root is rescanned (#2530).
+
+        Runs on the loop thread, from ``_put_or_warn``. A drop cannot tell
+        whether the file had changed, so the whole root is walked once the
+        burst settles; content-hash dedup keeps unchanged files cheap. The
+        root is the most specific configured one, matching the engine's
+        containment rule, so a nested root is walked instead of its parent.
+        The path is kept as well: a walk only visits files that exist, so a
+        dropped delete is replayed as its own event (#2532).
+        Only the first drop per root per episode is a warning; the rest are
+        debug lines, since the rescan covers them all.
+        """
+        roots = [r for r in self._configured_roots() if path.is_relative_to(r)]
+        if not roots:
+            # The root was removed after the event fired; nothing to recover.
+            logger.warning(
+                "File watcher queue full, dropping event for %s (under no configured root)",
+                path,
+            )
+            return
+        root = max(roots, key=lambda r: len(r.parts))
+        drops = self._rescan_due.get(root, 0)
+        self._rescan_due[root] = drops + 1
+        self._dropped_paths.setdefault(root, set()).add(path)
+        if drops == 0:
+            logger.warning(
+                "File watcher queue full, dropping event for %s; will rescan %s "
+                "once the burst settles",
+                path,
+                root,
+            )
+        else:
+            logger.debug("File watcher queue full, dropping event for %s", path)
+
     async def start(self) -> None:
         """Schedule the watched roots and start the observer and processor task."""
         async with self._lifecycle_lock:
@@ -209,7 +287,14 @@ class FileWatcher:
             # Pending events from the stopped lifecycle go with it; a start
             # runs a backfill over the watched roots anyway.
             self._queue = asyncio.Queue(maxsize=_WATCHER_QUEUE_MAXSIZE)
-            handler = _MarkdownEventHandler(self._queue, loop, self._config.supported_extensions)
+            # Reset before the observer starts, never in ``_process_events``:
+            # the observer can deliver, and overflow, before the processor
+            # takes its first turn, and that drop must survive to be rescanned.
+            self._rescan_due.clear()
+            self._dropped_paths.clear()
+            self._rescanning = None
+            self._rescan_attempts.clear()
+            handler = self._make_handler(loop)
             self._handler = handler
             backend = effective_watcher_backend(self._config)
             self._observer = _create_observer(self._config)
@@ -368,13 +453,21 @@ class FileWatcher:
                 except asyncio.QueueFull:
                     logger.warning("File watcher queue full; could not signal graceful shutdown")
                 try:
-                    await asyncio.wait_for(self._task, timeout=5.0)
+                    await asyncio.wait_for(self._task, timeout=_STOP_FLUSH_TIMEOUT_S)
                 except (TimeoutError, asyncio.CancelledError):
                     self._task.cancel()
                     try:
                         await self._task
                     except asyncio.CancelledError:
                         pass
+            unfinished = sorted({*self._rescan_due, *filter(None, [self._rescanning])})
+            if unfinished:
+                logger.warning(
+                    "File watcher stopped before rescanning %s after dropped events; "
+                    "run `mm index <root>` on each to pick up changes it missed, "
+                    "and `mm gc orphan-sources --apply` to remove files deleted meanwhile",
+                    ", ".join(str(r) for r in unfinished),
+                )
             if self._observer:
                 self._observer.stop()
                 # Only join a thread that actually started. An observer whose
@@ -506,13 +599,24 @@ class FileWatcher:
                 )
         return indexed
 
-    def _log_backfill_stats(self, d: Path, stats: IndexingStats, reported: set[str]) -> None:
+    def _log_backfill_stats(
+        self,
+        d: Path,
+        stats: IndexingStats,
+        reported: set[str],
+        label: str = "Startup backfill",
+        *,
+        always_summarize: bool = False,
+    ) -> None:
         """Per-attempt summary lines for one root's walk.
 
         ``reported`` accumulates the blocked paths and permanent errors this
         root has already named, so a re-walk driven by a *retryable* file
         doesn't reprint them (issue #2021). Mutated in place — the caller
-        keeps one set per root.
+        keeps one set per root. ``label`` names the walk: the startup
+        backfill, or the rescan after a queue overflow. ``always_summarize``
+        logs the counts even for a walk that changed nothing, so a rescan
+        always leaves a completion record.
         """
         blocked_paths = [p for p in stats.blocked_paths if p not in reported]
         if blocked_paths:
@@ -520,7 +624,8 @@ class FileWatcher:
             # backfill — name them so the log is actionable.
             reported.update(blocked_paths)
             logger.warning(
-                "Startup backfill %s: %d file(s) blocked by redaction guard: %s",
+                "%s %s: %d file(s) blocked by redaction guard: %s",
+                label,
                 d,
                 len(blocked_paths),
                 ", ".join(blocked_paths),
@@ -540,14 +645,16 @@ class FileWatcher:
             # backend errors) — previously dropped. One aggregated line
             # per dir bounds the per-restart log noise.
             logger.warning(
-                "Startup backfill %s: %d file(s) skipped or failed: %s",
+                "%s %s: %d file(s) skipped or failed: %s",
+                label,
                 d,
                 len(other_errors),
                 "; ".join(other_errors),
             )
-        if stats.indexed_chunks or stats.deleted_chunks:
+        if always_summarize or stats.indexed_chunks or stats.deleted_chunks:
             logger.info(
-                "Startup backfill %s: indexed=%d skipped=%d deleted=%d",
+                "%s %s: indexed=%d skipped=%d deleted=%d",
+                label,
                 d,
                 stats.indexed_chunks,
                 stats.skipped_chunks,
@@ -559,7 +666,9 @@ class FileWatcher:
 
         Collects changed files into a set.  When no new events arrive for
         ``_debounce_s`` seconds, all accumulated files are reindexed in a
-        single batch before the set is cleared.
+        single batch before the set is cleared. A root marked by a queue
+        overflow is rescanned at the same point, after the batch (#2530), and
+        its dropped paths join ``pending`` for the next window (#2532).
         """
         pending: set[Path] = set()
         loop = asyncio.get_running_loop()
@@ -581,11 +690,12 @@ class FileWatcher:
                     for path in pending
                     if (deadline := self._retry_after.get(path, 0.0)) > now
                 ]
-                if len(blocked) == len(pending):
+                if len(blocked) == len(pending) and not self._rescan_due:
                     # Every pending path is inside its retry backoff, so no
                     # flush can happen at the debounce/max-wait deadline. Sleep
                     # to the earliest expiry instead of waking on each tick and
-                    # finding nothing to do.
+                    # finding nothing to do. A due rescan is work that no
+                    # backoff covers, so it keeps the debounce deadline.
                     timeout = max(timeout, min(blocked) - now)
             try:
                 # Check the deadline before consuming another queued event: a
@@ -594,6 +704,10 @@ class FileWatcher:
                     raise TimeoutError
                 file_path = await asyncio.wait_for(self._queue.get(), timeout=timeout)
                 if file_path == _STOP_SENTINEL:
+                    # Rescan first: it adds the dropped paths to ``pending``,
+                    # so the final flush replays them too (#2532).
+                    if self._rescan_due:
+                        await self._rescan_overflowed_roots(pending)
                     if pending:
                         await self._flush_batch(pending)
                     return
@@ -605,19 +719,19 @@ class FileWatcher:
                 self._retry_after.pop(file_path, None)
                 self._retry_attempts.pop(file_path, None)
             except TimeoutError:
-                if pending:
-                    now = loop.time()
-                    ready = {p for p in pending if self._retry_after.get(p, 0) <= now}
-                    if not ready:
-                        # Every pending path is still inside its retry backoff,
-                        # so there is nothing to flush. Returning to the top
-                        # (rather than calling ``_flush_batch`` with an empty set
-                        # and rewriting the window bookkeeping) lets the timeout
-                        # computed above sleep until the earliest backoff
-                        # expires, instead of waking once per debounce interval
-                        # to discover the same thing. The deadlines are left
-                        # untouched because no work was attempted.
-                        continue
+                now = loop.time()
+                ready = {p for p in pending if self._retry_after.get(p, 0) <= now}
+                if not ready and not self._rescan_due:
+                    # Every pending path is still inside its retry backoff,
+                    # so there is nothing to flush. Returning to the top
+                    # (rather than calling ``_flush_batch`` with an empty set
+                    # and rewriting the window bookkeeping) lets the timeout
+                    # computed above sleep until the earliest backoff
+                    # expires, instead of waking once per debounce interval
+                    # to discover the same thing. The deadlines are left
+                    # untouched because no work was attempted.
+                    continue
+                if ready:
                     retry = await self._flush_batch(ready)
                     for path in ready - retry:
                         self._retry_attempts.pop(path, None)
@@ -629,8 +743,101 @@ class FileWatcher:
                             30, 2**attempts
                         ) * random.uniform(0.8, 1.2)  # nosec B311 - scheduling jitter only
                     pending = (pending - ready) | retry
-                    first = loop.time() if pending else None
-                    last = loop.time()
+                if self._rescan_due:
+                    await self._rescan_overflowed_roots(pending)
+                first = loop.time() if pending else None
+                last = loop.time()
+
+    async def _rescan_overflowed_roots(self, pending: set[Path]) -> None:
+        """Walk each root that lost events to a queue overflow (#2530).
+
+        Each root is taken off ``_rescan_due`` as its walk starts, so drops
+        during the walk mark it again for the next window: the walk may
+        already have passed those files. A root no longer configured is
+        skipped, the same rule ``_reindex`` applies to single paths. A
+        retryable failure marks the root again, up to
+        ``_BACKFILL_MAX_ATTEMPTS`` walks; the debounce interval is the
+        backoff.
+
+        A walk only visits files that exist, so the root's dropped paths are
+        also added to *pending*, before the walk and whatever its outcome, and
+        replayed as the events they were (#2532). That is what purges a
+        dropped delete or a move's source: ``index_file`` decides, as it does
+        for a delivered event. A path that still exists is indexed again,
+        after the walk.
+        """
+        for root in list(self._rescan_due):
+            drops = self._rescan_due.pop(root)
+            dropped = self._dropped_paths.pop(root, set())
+            # Per root, not once per pass: a reconfigure can remove a root
+            # while an earlier root's walk is awaited.
+            if root not in self._configured_roots():
+                self._rescan_attempts.pop(root, None)
+                logger.info("Skipped rescan of %s: no longer a configured root", root)
+                continue
+            for path in dropped:
+                # A replayed event is a new event: no inherited backoff.
+                self._retry_after.pop(path, None)
+                self._retry_attempts.pop(path, None)
+            pending |= dropped
+            attempt = self._rescan_attempts.get(root, 0) + 1
+            self._rescanning = root
+            # Left set if this is cancelled, so ``stop`` can name the root.
+            failure = await self._rescan_root(root, drops, len(dropped))
+            self._rescanning = None
+            if failure is None:
+                self._rescan_attempts.pop(root, None)
+            elif attempt < _BACKFILL_MAX_ATTEMPTS:
+                self._rescan_attempts[root] = attempt
+                self._rescan_due[root] = self._rescan_due.get(root, 0) + drops
+                logger.warning(
+                    "Rescan of %s failed retryably (%s); retrying next window (attempt %d/%d)",
+                    root,
+                    failure,
+                    attempt,
+                    _BACKFILL_MAX_ATTEMPTS,
+                )
+            else:
+                self._rescan_attempts.pop(root, None)
+                logger.error(
+                    "Rescan of %s still failing after %d attempt(s): %s; "
+                    "run `mm index %s` to pick up changes the watcher missed",
+                    root,
+                    attempt,
+                    failure,
+                    root,
+                )
+
+    async def _rescan_root(self, root: Path, drops: int, replayed: int) -> str | None:
+        """Walk *root* once; return the retryable failure, else ``None``.
+
+        A permanent failure is logged here and returns ``None``: walking the
+        root again would fail the same way.
+        """
+        logger.info(
+            "Rescanning %s after %d dropped watcher event(s); "
+            "queued %d dropped path(s) for reindex",
+            root,
+            drops,
+            replayed,
+        )
+        try:
+            stats = await self._engine.index_path(root, recursive=True)
+        except RetryableError as exc:
+            return str(exc)
+        except Exception as exc:
+            logger.error(
+                "Rescan failed for %s: %s; run `mm index %s` to pick up changes the watcher missed",
+                root,
+                exc,
+                root,
+            )
+            return None
+        self._invalidate_if_mutated(stats)
+        self._log_backfill_stats(root, stats, set(), label="Watcher rescan", always_summarize=True)
+        if stats.retryable_errors:
+            return "; ".join(stats.retryable_errors)
+        return None
 
     async def _flush_batch(self, pending: set[Path]) -> set[Path]:
         """Reindex every file in *pending*; return the set to retry next window.
@@ -662,8 +869,23 @@ class FileWatcher:
     async def _reindex(self, file_path: Path) -> Path | None:
         """Reindex one changed file. Returns ``file_path`` when the reindex
         timed out acquiring the file's cross-process sidecar (so the caller can
-        retry it next window), else ``None``."""
+        retry it next window), else ``None``.
+
+        A path no longer contained in any configured root is dropped. Events are
+        collected before a flush and ``reconfigure`` leaves them alone, so a file
+        edited just before its root was removed would otherwise be indexed again
+        after the remove swept its chunks (#2528). ``index_file`` cannot do this
+        check itself: its default scope never asks about an existing file, and
+        other callers index outside the roots on purpose. This is containment
+        only. Suffix, exclude and worktree filtering stay with the event handler
+        and the engine. It is also a check, not a lock: a flush that passed it
+        before the root was removed can still write afterwards.
+        """
         from memtomem.indexing.engine import PrivacyRejection
+
+        if not is_under_any_root(file_path, self._config.all_index_roots()):
+            logger.info("Skipped auto-reindex for %s: not under a configured root", file_path.name)
+            return None
 
         try:
             stats = await self._engine.index_file(file_path)

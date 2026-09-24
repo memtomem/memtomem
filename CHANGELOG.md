@@ -3,6 +3,121 @@
 All notable changes will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
+## [Unreleased]
+
+### Fixed
+
+- **A create or modify event dropped by a full watcher queue is no longer lost
+  (#2530).**
+  The watcher buffers events in a 1,000-slot queue. A burst larger than that
+  overflows it when the event loop is held off during the burst, or when the
+  burst arrives while the previous batch is still being indexed. Each dropped
+  path was only logged by its basename, and nothing reindexed it, so a changed
+  file among them stayed stale in search until something touched it again. In
+  48 regenerations of a 1,129-file tree, 4 overflowed (each right after a loop
+  stall of about 60 ms), and one of them lost the change under test. A drop now marks
+  its root, and the root is rescanned once the burst settles. Content-hash dedup
+  keeps unchanged files cheap. The first drop per root logs one warning with the
+  full path and the root to be rescanned; the rest go to debug. A rescan that
+  `stop()` interrupts is named in a warning with `mm index <root>`.
+- **A delete or move event dropped by a full watcher queue now purges the old
+  path (#2532).** The #2530 rescan walks only files that exist, so a dropped
+  delete, or the source of a dropped move, left that file's chunks searchable
+  until the opt-in orphan sweep or a manual `mm gc orphan-sources --apply`.
+  The watcher now keeps each dropped path and, when its root is rescanned,
+  replays it through the same per-event reindex a delivered event gets. A
+  missing file is purged exactly as a delivered delete would be. The rescan
+  does not reconcile the whole root, so a file deleted without a dropped event
+  is not touched. The warning for a rescan that `stop()` interrupts now also
+  names `mm gc orphan-sources --apply`.
+- **`mm status` lists read-only memory roots (#2519).** The report showed
+  `memory_dirs` and `project_memory_dirs` but never
+  `indexing.read_only_memory_dirs`, so a configured vault was invisible there
+  even though it was loaded, watched and indexed — and the bare `mm index`
+  hint points users to `mm status` for exactly that list. The text report (and
+  `mem_status`) now shows a *Read-only roots* group after *Project sources*
+  when any are set, and `mm status --json` carries the resolved paths as
+  `config.read_only_memory_dirs`, an empty list when none are.
+- **`GET /api/bootstrap` lists read-only memory roots too (#2521).** Its
+  snapshot of configured roots returned `memory_dirs` and
+  `project_memory_dirs` only; it now also returns `read_only_memory_dirs`,
+  resolved like the other two and an empty list when none are set or the
+  config is unavailable. The Web UI does not read these lists, so nothing
+  changes on screen.
+- **The Web Sources tab no longer files read-only and project roots under
+  "Other (unregistered)" (#2522).** `GET /api/sources` and `GET /api/stats`
+  matched each source against `memory_dirs` only, so files indexed from
+  `indexing.read_only_memory_dirs` or `project_memory_dirs` came back without
+  an owning root — they landed in the orphan bucket, and `?kind=memory`
+  dropped them even when the root is memory-shaped. Both now match against
+  every configured root, and `kind` follows the root's path shape as it does
+  for `memory_dirs`. Where the Sources tree shows directory groups, each such
+  root gets its own, with a *read-only* or *project* pill and no Remove button
+  (Remove only edits `memory_dirs`). A read-only root with files but nothing
+  indexed yet appears under *Discovered*, offering *Index*.
+  `GET /api/memory-dirs/status` entries carry the root's `tier` (`user`,
+  `project` or `read_only`), and `POST /api/memory-dirs/open` accepts any
+  configured root.
+- **A parent root's Sources counts no longer include a nested root's files,
+  and removing it no longer deletes that root's chunks (#2524).** When
+  configured roots nest (two `memory_dirs`, or a `project_memory_dirs` root
+  inside a user dir), `GET /api/memory-dirs/status` counted each root by path
+  prefix. The parent's badge then included files that the Sources tree lists
+  under the nested root's own group, and the Sources totals, which add per-root
+  numbers, counted those files twice. Each source, and each file on disk, now
+  counts only for its most specific root, which is the rule the tree groups by. A
+  symlink counts where it points, because that is the path the index stores.
+  `POST /api/memory-dirs/remove` with `delete_chunks` used the same prefix
+  sweep, so removing `~/work` also dropped the chunks of a still-registered
+  `~/work/notes`. It now keeps the sources of a still-registered nested root
+  (#2534 below narrows the sweep further). Files on disk were never touched.
+- **The Sources header counts the files the tree shows (#2529).** The
+  "{files} files · {chunks} chunks" line added up every root's
+  `/api/memory-dirs/status` numbers. That included a `memories.local` root
+  registered in `project_memory_dirs`, whose files the tree hides by default,
+  and it left out the "Other (unregistered)" files the tree lists under User.
+  The line now counts the indexed files the tree renders for the active vendor,
+  orphans included. It still ignores the filter, as before. A root that the tree
+  files under Claude by its path (such as `.claude/plans`) now counts toward
+  Claude, not toward the provider its status row reports.
+- **Removing a root with *delete chunks* no longer lets the file watcher put
+  a just-edited file back (#2528).** The watcher collects changed files and
+  indexes them after a short debounce. Removing a root did not clear the files
+  it had already collected. A file edited under that root just before
+  *Remove* was therefore indexed again after its chunks were deleted, and
+  showed up under "Other (unregistered)". The watcher now skips any collected
+  file that is no longer inside a configured root. The same applies when a
+  root is dropped by editing `config.json` or by the MCP server's root sync.
+  The check runs before indexing starts. An index of that root that is already
+  in progress when you remove it can still finish writing.
+- ***Delete chunks* keeps what another root still indexes (#2534).**
+  `POST /api/memory-dirs/remove` with `delete_chunks` deleted the chunks of a
+  removed root's files even when a root that stays configured still contains
+  them: an enclosing root, or the same path listed in `project_memory_dirs`.
+  That root indexed them again on its next walk or file event, so the chunks
+  only disappeared for a while. The sweep now skips any source a remaining
+  root contains. `GET /api/memory-dirs/status` entries carry
+  `delete_chunk_count`, the number such a remove would delete, and the confirm
+  dialog's checkbox offers it as the current count. It is a preview: if roots
+  or indexed files change before you confirm, the remove applies the rule to what is configured then,
+  and the toast shows the number it actually deleted, if any (#2537). When
+  the dialog's number is 0 for a directory that has indexed chunks, the dialog
+  drops the checkbox and says another directory keeps the files indexed, as of
+  when it opened. Two cases are unchanged and documented as known limits. A symlink in a remaining root that points at a file under the
+  removed one does not keep that file, because the index stores the link's
+  target. Indexing already under way when you remove the root can write after
+  the sweep.
+- **Removing a memory directory that became a symlink no longer removes
+  another root (#2539).** `POST /api/memory-dirs/remove` resolved the path it
+  was given. If the directory, or one of its parents, had been replaced by a
+  symlink to another configured root after the list was loaded, the remove
+  dropped that root's registration too. With *delete chunks* it also deleted
+  that root's chunks. The route now answers 409 and changes nothing when the
+  path no longer resolves to itself. It also builds the sweep prefix from the
+  path it checked, so a swap made during the sweep cannot redirect it. The
+  Web UI already sends resolved paths. An API client that sends an alias
+  spelling, such as a symlinked prefix, now has to send the resolved path.
+
 ## [0.6.4] — 2026-09-20
 
 ### Upgrading

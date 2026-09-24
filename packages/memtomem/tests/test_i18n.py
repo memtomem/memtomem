@@ -74,6 +74,16 @@ class TestLocaleFiles:
         orphan = set(ko) - set(en)
         assert not orphan, f"Keys in ko.json missing from en.json: {sorted(orphan)}"
 
+    def test_remove_dialog_labels_its_chunk_count_as_current(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """#2537: the count comes from the status fetched when the dialog
+        opened, and the sweep can delete more or fewer. The label must say
+        the number is the current one, not promise that many."""
+        key = "confirm.memory_dir_delete_chunks_label"
+        assert en[key].endswith("(currently {count})")
+        assert ko[key].endswith("(현재 {count}개)")
+
     def test_placeholder_parity(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """Each key's {param} placeholders must match between en and ko."""
         mismatches: list[str] = []
