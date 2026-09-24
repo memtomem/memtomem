@@ -1148,13 +1148,16 @@ async def add_memory_dir(
 
 
 def _path_identity_key(path: str) -> str:
-    """Compare two spellings of a path the way the filesystem would.
+    """Compare a path as sent with what it resolves to.
 
-    NFC because :func:`norm_path` keys are NFC, and ``os.path.normcase`` so a
-    Windows spelling that differs only in case or separators still matches.
-    ``normcase`` is the identity on POSIX.
+    ``os.path.normcase`` so a Windows spelling that differs only in case or
+    separators still matches; it is the identity on POSIX. No Unicode
+    normalisation: ``resolve()`` keeps the names of components that are not
+    symlinks as given, so a difference in form means a link was followed. On
+    a filesystem that keeps NFC and NFD names apart, folding them here would
+    let a symlink from one to the other pass (#2539).
     """
-    return unicodedata.normalize("NFC", os.path.normcase(path))
+    return os.path.normcase(path)
 
 
 @router.post("/memory-dirs/remove")

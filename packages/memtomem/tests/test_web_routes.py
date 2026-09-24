@@ -6348,19 +6348,43 @@ class TestRemoveMemoryDirChunkCleanup:
 
         await self._remove_refused(app, client, x)
 
-    def test_path_identity_key_folds_case_and_unicode_form(
+    def test_path_identity_key_folds_case_but_not_unicode_form(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """#2539: a Windows spelling that differs only in case must not be
-        refused, and neither must an NFD spelling of an NFC path."""
+        refused. NFC and NFD spellings stay distinct, because on a filesystem
+        that keeps them apart they name different directories."""
         from memtomem.web.routes.system import _path_identity_key
 
         nfc = unicodedata.normalize("NFC", "/notes/caf\u00e9")
         nfd = unicodedata.normalize("NFD", nfc)
-        assert _path_identity_key(nfd) == _path_identity_key(nfc)
+        assert _path_identity_key(nfd) != _path_identity_key(nfc)
 
         monkeypatch.setattr(os.path, "normcase", str.lower)
         assert _path_identity_key("C:\\Notes") == _path_identity_key("c:\\notes")
+
+    async def test_symlink_between_unicode_forms_is_refused(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2539: on a filesystem that keeps NFC and NFD names apart, an NFC
+        ``cafe`` that became a symlink to the configured NFD one resolves to it.
+        ``resolve`` is patched so the case runs on normalisation-insensitive
+        filesystems too."""
+        nfc_name = unicodedata.normalize("NFC", "caf\u00e9")
+        nfd_name = unicodedata.normalize("NFD", nfc_name)
+        nfc, nfd, z = tmp_path / nfc_name, tmp_path / nfd_name, tmp_path / "z"
+        nfd.mkdir()
+        z.mkdir()
+        app.state.config.indexing.memory_dirs = [nfd, z]
+        self._serve_rows(app, [(nfd / "a.md", 4)])
+        real_resolve = Path.resolve
+
+        def _resolve(self: Path, strict: bool = False) -> Path:
+            return nfd if str(self) == str(nfc) else real_resolve(self, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", _resolve)
+
+        await self._remove_refused(app, client, nfc)
 
     @pytest.mark.requires_symlinks
     async def test_alias_spelling_submission_is_refused(
