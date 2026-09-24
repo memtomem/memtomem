@@ -435,6 +435,9 @@ async def collect_status_report(app: AppContext) -> dict:
             "project_memory_dirs": [
                 str(Path(p).expanduser().resolve()) for p in config.indexing.project_memory_dirs
             ],
+            "read_only_memory_dirs": [
+                str(Path(p).expanduser().resolve()) for p in config.indexing.read_only_memory_dirs
+            ],
             "watcher_backend": effective_watcher_backend(config.indexing),
         },
         "runtime": {
@@ -781,6 +784,12 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
             ),
         )
     )
+    # #2519: read-only roots are indexed and searched like the tiers above, so
+    # the report has to confirm they are registered. Omitted when unset —
+    # unlike the two tiers above, most installs never configure one.
+    read_only_dirs = [str(path) for path in cfg.get("read_only_memory_dirs", [])]
+    if read_only_dirs:
+        lines.extend(_status_source_lines("Read-only roots", read_only_dirs, group_providers=False))
     lines += [
         StatusLine("blank"),
         StatusLine("section", value="Index stats", meta={"tone": "plain"}),

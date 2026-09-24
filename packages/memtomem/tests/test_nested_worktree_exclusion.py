@@ -454,24 +454,32 @@ def test_the_engine_walk_keeps_a_registered_worktree(repo: Path, tmp_path: Path)
 def test_the_disk_count_does_not_contradict_the_walk_for_a_registered_worktree(
     repo: Path,
 ) -> None:
-    """Counting with the parent root alone subtracted a file the engine indexes."""
+    """A registered worktree's file is counted once, under the worktree root.
+
+    The engine indexes it (see the walk test above) and storage attributes it to
+    the worktree by longest prefix. Counts are exclusive (#2524), so the parent
+    leaves it out whether or not the worktree is registered. Unregistered, it is
+    a nested worktree; registered, a more specific root owns it.
+    """
     worktree = repo / ".worktrees/wt"
     run("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=repo)
+    roots = [repo, worktree]
 
-    # With every root in view the worktree owns itself, so its file counts.
-    assert _count_files_on_disk(repo, frozenset({".md"}), [repo, worktree]) == 2
-    # With the parent alone it is a nested worktree and does not.
+    assert _count_files_on_disk(worktree, frozenset({".md"}), roots) == 1
+    assert _count_files_on_disk(repo, frozenset({".md"}), roots) == 1
     assert _count_files_on_disk(repo, frozenset({".md"}), [repo]) == 1
 
 
-async def test_web_sources_count_keeps_a_registered_worktree_in_its_parent(
+async def test_web_sources_count_puts_a_registered_worktree_under_its_own_root(
     repo: Path, tmp_path: Path
 ) -> None:
-    """Pins the call site, not just the helper: ``memory_dir_stats`` must pass the root list.
+    """Through ``memory_dir_stats``: each root counts only the files it owns.
 
-    ``_count_files_on_disk`` counts correctly when handed every root; a call
-    site that hands it only its own root still passes every helper test, and
-    the Sources tab then reads ``source_file_count=2`` beside ``file_count=1``.
+    Before #2524 the parent's count included the registered worktree's file
+    (2), which the Sources tree lists under the worktree group. The call-site
+    half of "every root must be passed" is pinned by the nested-root tests in
+    ``test_indexing_engine.py``: the worktree case cannot show it, because a
+    parent counted alone skips the nested worktree anyway.
     """
     from memtomem.indexing.engine import memory_dir_stats
 
@@ -487,7 +495,7 @@ async def test_web_sources_count_keeps_a_registered_worktree_in_its_parent(
         await storage.close()
 
     by_path = {Path(str(r["path"])).resolve(): r["file_count"] for r in rows}
-    assert by_path[repo.resolve()] == 2
+    assert by_path[repo.resolve()] == 1
     assert by_path[worktree.resolve()] == 1
 
 

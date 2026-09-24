@@ -441,6 +441,54 @@ class TestBootstrapState:
         assert data["total_sources"] == 3
         assert data["db_path"] == str(Path(app.state.config.storage.sqlite_path).resolve())
         assert data["memory_dirs"]
+        assert data["read_only_memory_dirs"] == []
+
+    async def test_ready_state_lists_read_only_roots_resolved(
+        self, app, client: AsyncClient, tmp_path, monkeypatch
+    ):
+        """Read-only roots are indexed like the other tiers, so they are listed (#2521).
+
+        Registered through a symlink alias: ``tmp_path`` is already a realpath,
+        so a plain path would pass even if the route skipped ``resolve()``.
+        """
+        set_home(monkeypatch, tmp_path)
+        config_path = tmp_path / ".memtomem" / "config.json"
+        config_path.parent.mkdir()
+        config_path.write_text("{}", encoding="utf-8")
+        app.state.startup_state = "ready"
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        alias = tmp_path / "vault-alias"
+        try:
+            alias.symlink_to(vault, target_is_directory=True)
+        except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+            pytest.skip("symlink creation is not permitted here")
+        indexing = app.state.config.indexing
+        indexing.read_only_memory_dirs = [alias]
+
+        data = (await client.get("/api/bootstrap")).json()
+
+        assert data["read_only_memory_dirs"] == [str(vault.resolve())]
+        # The other tiers still report their own roots, not this one.
+        assert data["memory_dirs"] == [
+            str(Path(p).expanduser().resolve()) for p in indexing.memory_dirs
+        ]
+        assert data["project_memory_dirs"] == []
+
+    async def test_missing_config_reports_empty_root_lists(
+        self, app, client: AsyncClient, tmp_path, monkeypatch
+    ):
+        set_home(monkeypatch, tmp_path)
+        app.state.startup_state = "ready"
+        app.state.config = None
+
+        resp = await client.get("/api/bootstrap")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["memory_dirs"] == []
+        assert data["project_memory_dirs"] == []
+        assert data["read_only_memory_dirs"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -5662,7 +5710,8 @@ class TestMemoryDirsStatus:
 
 class TestOpenMemoryDir:
     """``POST /api/memory-dirs/open`` reveals a registered dir in the OS
-    file manager. Whitelist-gated against ``memory_dirs`` so the route
+    file manager. Whitelist-gated against the configured index roots
+    (``all_index_roots()`` — user, project and read-only tiers) so the route
     can't be coerced into spawning a file manager pointed at arbitrary
     filesystem paths even if ``mm web`` were ever bound to a non-loopback
     interface."""
@@ -5718,9 +5767,204 @@ class TestOpenMemoryDir:
         assert called_with == target.resolve()
 
 
+class TestNonUserTierRootsOwnTheirSources:
+    """Project and read-only roots own their sources in the Web read paths.
+
+    Both tiers are indexed from their own roots (``all_index_roots()``), but
+    ``GET /api/sources`` and ``GET /api/stats`` used to attribute a source to
+    a ``memory_dirs`` root only, so these files came back with
+    ``memory_dir=None, kind=None``: the Sources tree filed them under
+    "Other (unregistered)" and ``?kind=memory`` dropped them. (#2522)
+    """
+
+    @staticmethod
+    def _symlinked_root(tmp_path: Path, name: str) -> tuple[Path, Path]:
+        """Return ``(real, alias)``. ``tmp_path`` is already a realpath, so a
+        root registered without an alias would pass even if a route skipped
+        ``resolve()``. The alias keeps ``name`` as its tail because ``kind``
+        is classified from the configured spelling."""
+        real = tmp_path / "real" / name
+        real.mkdir(parents=True)
+        alias = tmp_path / "alias" / name
+        alias.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            alias.symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+            pytest.skip("symlink creation is not permitted here")
+        return real, alias
+
+    @staticmethod
+    def _row(source: Path) -> tuple:
+        return (source, 1, "2026-09-23T10:00:00", "default", 10, 10, 10)
+
+    async def test_read_only_source_is_owned_by_its_root(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        real, alias = self._symlinked_root(tmp_path, "vault")
+        source = real / "note.md"
+        source.write_text("x", encoding="utf-8")
+        app.state.config.indexing.read_only_memory_dirs = [alias]
+        app.state.storage.get_source_files_with_counts.return_value = [self._row(source)]
+
+        src = (await client.get("/api/sources")).json()["sources"][0]
+        dirs = (await client.get("/api/memory-dirs/status")).json()["dirs"]
+
+        assert src["memory_dir"] == str(real.resolve())
+        # ``kind`` is path-shape based, same as every other tier.
+        assert src["kind"] == "general"
+        # Same key the frontend looks the group's status up by.
+        assert src["memory_dir"] in {d["path"] for d in dirs}
+
+    async def test_memory_shaped_read_only_root_survives_kind_memory_filter(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        real, alias = self._symlinked_root(tmp_path, "kb/memories")
+        source = real / "note.md"
+        source.write_text("x", encoding="utf-8")
+        app.state.config.indexing.read_only_memory_dirs = [alias]
+        app.state.storage.get_source_files_with_counts.return_value = [self._row(source)]
+
+        data = (await client.get("/api/sources", params={"kind": "memory"})).json()
+
+        assert [s["path"] for s in data["sources"]] == [str(source)]
+        assert data["sources"][0]["memory_dir"] == str(real.resolve())
+
+    async def test_project_shared_source_is_owned_by_its_root(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        shared = tmp_path / "proj" / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        source = shared / "note.md"
+        source.write_text("x", encoding="utf-8")
+        app.state.config.indexing.memory_dirs = []
+        app.state.config.indexing.project_memory_dirs = [shared]
+        app.state.storage.get_source_files_with_counts.return_value = [self._row(source)]
+
+        src = (await client.get("/api/sources")).json()["sources"][0]
+
+        assert src["memory_dir"] == str(shared.resolve())
+        assert src["kind"] == "memory"
+        assert src["target_scope"] == "project_shared"
+
+    async def test_nested_project_root_wins_over_enclosing_user_dir(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        proj = tmp_path / "proj"
+        shared = proj / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        inside = shared / "note.md"
+        outside = proj / "readme.md"
+        for f in (inside, outside):
+            f.write_text("x", encoding="utf-8")
+        app.state.config.indexing.memory_dirs = [proj]
+        app.state.config.indexing.project_memory_dirs = [shared]
+        app.state.storage.get_source_files_with_counts.return_value = [
+            self._row(outside),
+            self._row(inside),
+        ]
+
+        by_path = {
+            s["path"]: s["memory_dir"] for s in (await client.get("/api/sources")).json()["sources"]
+        }
+
+        assert by_path == {
+            str(outside): str(proj.resolve()),
+            str(inside): str(shared.resolve()),
+        }
+
+    async def test_status_counts_match_the_groups_the_tree_shows(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2524: the enclosing user dir's badge leaves out the project root's file."""
+        proj = tmp_path / "proj"
+        shared = proj / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        inside = shared / "note.md"
+        outside = proj / "readme.md"
+        for f in (inside, outside):
+            f.write_text("x", encoding="utf-8")
+        app.state.config.indexing.memory_dirs = [proj]
+        app.state.config.indexing.project_memory_dirs = [shared]
+        app.state.storage.get_source_files_with_counts.return_value = [
+            self._row(outside),
+            self._row(inside),
+        ]
+
+        dirs = (await client.get("/api/memory-dirs/status")).json()["dirs"]
+        counts = {
+            d["path"]: (d["source_file_count"], d["chunk_count"], d["file_count"]) for d in dirs
+        }
+
+        assert counts == {str(proj.resolve()): (1, 1, 1), str(shared.resolve()): (1, 1, 1)}
+
+    async def test_source_outside_every_root_stays_an_orphan(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """Preservation: widening ownership must not adopt unrelated files."""
+        real, alias = self._symlinked_root(tmp_path, "vault")
+        stray = tmp_path / "uploads" / "stray.md"
+        stray.parent.mkdir()
+        stray.write_text("x", encoding="utf-8")
+        app.state.config.indexing.read_only_memory_dirs = [alias]
+        app.state.storage.get_source_files_with_counts.return_value = [self._row(stray)]
+
+        src = (await client.get("/api/sources")).json()["sources"][0]
+
+        assert src["memory_dir"] is None
+        assert src["kind"] is None
+
+    async def test_stats_home_sources_attribute_read_only_root(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        real, alias = self._symlinked_root(tmp_path, "vault")
+        source = real / "note.md"
+        source.write_text("x", encoding="utf-8")
+        app.state.config.indexing.read_only_memory_dirs = [alias]
+        app.state.storage.get_source_files_with_counts.return_value = [self._row(source)]
+
+        home = (await client.get("/api/stats")).json()["home_sources"]
+
+        assert [(s["memory_dir"], s["kind"]) for s in home] == [(str(real.resolve()), "general")]
+
+    async def test_status_labels_each_root_with_its_tier(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        user = tmp_path / "notes"
+        user.mkdir()
+        shared = tmp_path / "proj" / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        real, alias = self._symlinked_root(tmp_path, "vault")
+        app.state.config.indexing.memory_dirs = [user]
+        app.state.config.indexing.project_memory_dirs = [shared]
+        app.state.config.indexing.read_only_memory_dirs = [alias]
+
+        dirs = (await client.get("/api/memory-dirs/status")).json()["dirs"]
+
+        assert {d["path"]: d["tier"] for d in dirs} == {
+            str(user.resolve()): "user",
+            str(shared.resolve()): "project",
+            str(real.resolve()): "read_only",
+        }
+
+    async def test_open_accepts_a_read_only_root(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """The Sources tree sends the resolved path it got from the status
+        endpoint; a root registered through an alias must still match."""
+        real, alias = self._symlinked_root(tmp_path, "vault")
+        app.state.config.indexing.read_only_memory_dirs = [alias]
+
+        with patch("memtomem.web.routes.system._open_in_file_manager") as opener:
+            resp = await client.post("/api/memory-dirs/open", json={"path": str(real.resolve())})
+
+        assert resp.status_code == 200, resp.text
+        opener.assert_called_once_with(real.resolve())
+
+
 class TestRemoveMemoryDirChunkCleanup:
     """``POST /api/memory-dirs/remove`` with ``delete_chunks=true`` must
-    drop every chunk under the resolved dir prefix; the default keeps
+    drop the chunks of every source under the dir that no still-configured
+    root contains (#2524, #2534); the default keeps
     chunks searchable so the Web UI's checkbox-opt-in stays the safe
     path. Mirrors the dir-level UX: removing a watch entry is reversible
     until the user explicitly elects chunk cleanup."""
@@ -5816,6 +6060,434 @@ class TestRemoveMemoryDirChunkCleanup:
 
         assert app.state.storage.delete_by_source.await_count == 2
         assert app.state.search_pipeline.invalidate_cache.call_count == 1
+
+    @staticmethod
+    def _serve_rows(app, rows: list[tuple[Path, int]]) -> None:
+        """Serve ``rows`` as ``(path, chunks)``; each delete returns that source's chunks."""
+        chunks = {path: n for path, n in rows}
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (path, n, "2026-04-29T00:00:00", "default", 100, 50, 200) for path, n in rows
+        ]
+        app.state.storage.delete_by_source = AsyncMock(side_effect=lambda p: chunks[p])
+
+    @staticmethod
+    def _deleted(app) -> list[Path]:
+        return [call.args[0] for call in app.state.storage.delete_by_source.call_args_list]
+
+    async def test_nested_user_dir_that_stays_keeps_its_chunks(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2524: removing ``work`` must not sweep a still-registered ``work/notes``."""
+        work = tmp_path / "work"
+        notes = work / "notes"
+        notes.mkdir(parents=True)
+        own, nested = work / "a.md", notes / "n.md"
+        app.state.config.indexing.memory_dirs = [work, notes]
+        self._serve_rows(app, [(own, 2), (nested, 7)])
+
+        shown = await self._shown(client, work)
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(work), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted_chunks"] == shown == 2
+        assert self._deleted(app) == [own]
+
+    async def _shown(self, client: AsyncClient, root: Path) -> int:
+        """The count the confirm dialog offers to delete for ``root``."""
+        dirs = (await client.get("/api/memory-dirs/status")).json()["dirs"]
+        return next(d["delete_chunk_count"] for d in dirs if d["path"] == str(root.resolve()))
+
+    async def test_nested_user_dir_removed_under_a_parent_that_stays(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2534: the remaining parent still contains the child's files and
+        would index them again, so the sweep keeps them and the dialog offers
+        nothing to delete."""
+        work = tmp_path / "work"
+        notes = work / "notes"
+        notes.mkdir(parents=True)
+        own, nested = work / "a.md", notes / "n.md"
+        app.state.config.indexing.memory_dirs = [work, notes]
+        self._serve_rows(app, [(own, 2), (nested, 7)])
+
+        shown = await self._shown(client, notes)
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(notes), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted_chunks"] == shown == 0
+        assert self._deleted(app) == []
+
+    async def test_symlink_in_a_surviving_root_does_not_keep_its_target(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """Known limit (#2534): containment is decided on the stored, resolved
+        path. A link in ``kept`` pointing at a file under the removed root does
+        not keep that file; ``kept``'s next walk indexes it again."""
+        kept = tmp_path / "kept"
+        removed = tmp_path / "removed"
+        kept.mkdir()
+        removed.mkdir()
+        target = removed / "t.md"
+        target.write_text("## T\n\nbody\n", encoding="utf-8")
+        (kept / "link.md").symlink_to(target)
+        app.state.config.indexing.memory_dirs = [kept, removed]
+        self._serve_rows(app, [(target.resolve(), 3)])
+
+        shown = await self._shown(client, removed)
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(removed), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted_chunks"] == shown == 3
+        assert self._deleted(app) == [target.resolve()]
+
+    async def test_tiers_the_route_cannot_remove_offer_nothing(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        user = tmp_path / "notes"
+        shared = tmp_path / "proj" / ".memtomem" / "memories"
+        vault = tmp_path / "vault"
+        for d in (user, shared, vault):
+            d.mkdir(parents=True)
+        app.state.config.indexing.memory_dirs = [user]
+        app.state.config.indexing.project_memory_dirs = [shared]
+        app.state.config.indexing.read_only_memory_dirs = [vault]
+        self._serve_rows(app, [(user / "u.md", 1), (shared / "s.md", 2), (vault / "v.md", 4)])
+
+        dirs = (await client.get("/api/memory-dirs/status")).json()["dirs"]
+
+        assert {d["tier"]: (d["chunk_count"], d["delete_chunk_count"]) for d in dirs} == {
+            "user": (1, 1),
+            "project": (2, 0),
+            "read_only": (4, 0),
+        }
+
+    async def test_sweep_deletes_what_the_status_count_showed(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """The confirm dialog shows the dir's status ``delete_chunk_count``. When
+        nothing changes in between, the sweep deletes exactly that many, leaving a
+        nested project root intact."""
+        proj = tmp_path / "proj"
+        shared = proj / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        own, inside = proj / "readme.md", shared / "note.md"
+        app.state.config.indexing.memory_dirs = [proj, other]
+        app.state.config.indexing.project_memory_dirs = [shared]
+        self._serve_rows(app, [(own, 3), (inside, 5)])
+
+        shown = await self._shown(client, proj)
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(proj), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted_chunks"] == shown == 3
+        assert self._deleted(app) == [own]
+
+    async def test_status_count_is_a_preview_when_a_nested_root_goes_away(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2537: the dialog's count comes from an earlier request. When another
+        client removes a nested root in between, the sweep applies the rule to
+        the roots configured now, and ``deleted_chunks`` reports what it did."""
+        work = tmp_path / "work"
+        notes = work / "notes"
+        other = tmp_path / "other"
+        notes.mkdir(parents=True)
+        other.mkdir()
+        own, nested = work / "a.md", notes / "n.md"
+        app.state.config.indexing.memory_dirs = [work, notes, other]
+        self._serve_rows(app, [(own, 2), (nested, 7)])
+
+        shown = await self._shown(client, work)
+        app.state.config.indexing.memory_dirs = [work, other]
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(work), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert shown == 2
+        assert resp.json()["deleted_chunks"] == 9
+        assert self._deleted(app) == [own, nested]
+
+    @pytest.mark.requires_symlinks
+    async def test_dir_swapped_for_a_symlink_to_another_root_is_refused(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2539: ``x`` became a symlink to the configured root ``y`` after the
+        dialog read the status. Removing ``x`` must not drop ``y``'s
+        registration or sweep its chunks."""
+        x, y, z = tmp_path / "x", tmp_path / "y", tmp_path / "z"
+        for d in (x, y, z):
+            d.mkdir()
+        app.state.config.indexing.memory_dirs = [x, y, z]
+        self._serve_rows(app, [(x / "a.md", 1), (y / "b.md", 4)])
+
+        x.rmdir()
+        x.symlink_to(y, target_is_directory=True)
+        with patch("memtomem.web.routes.system.save_config_overrides") as save:
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(x), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 409, resp.text
+        assert app.state.config.indexing.memory_dirs == [x, y, z]
+        save.assert_not_called()
+        assert self._deleted(app) == []
+
+    async def _remove_refused(self, app, client: AsyncClient, path: Path) -> None:
+        """POST a remove with ``delete_chunks`` and assert it changed nothing."""
+        before = list(app.state.config.indexing.memory_dirs)
+        with patch("memtomem.web.routes.system.save_config_overrides") as save:
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(path), "delete_chunks": True}
+            )
+        assert resp.status_code == 409, resp.text
+        assert app.state.config.indexing.memory_dirs == before
+        save.assert_not_called()
+        assert self._deleted(app) == []
+
+    @pytest.mark.requires_symlinks
+    async def test_stale_dir_swapped_onto_the_only_matching_root_is_refused(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2539: ``x`` was unregistered elsewhere and then pointed at ``y``. The
+        path now matches only ``y``, which the user did not pick."""
+        x, y, z = tmp_path / "x", tmp_path / "y", tmp_path / "z"
+        for d in (x, y, z):
+            d.mkdir()
+        app.state.config.indexing.memory_dirs = [y, z]
+        self._serve_rows(app, [(y / "b.md", 4)])
+        x.rmdir()
+        x.symlink_to(y, target_is_directory=True)
+
+        await self._remove_refused(app, client, x)
+
+    @pytest.mark.requires_symlinks
+    async def test_dir_retargeted_outside_the_config_is_refused(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2539: ``y`` is not configured, but its chunks must not be swept
+        because ``x`` now points at it."""
+        x, y, z = tmp_path / "x", tmp_path / "y", tmp_path / "z"
+        for d in (x, y, z):
+            d.mkdir()
+        app.state.config.indexing.memory_dirs = [x, z]
+        self._serve_rows(app, [(x / "a.md", 1), (y / "b.md", 4)])
+        x.rmdir()
+        x.symlink_to(y, target_is_directory=True)
+
+        await self._remove_refused(app, client, x)
+
+    @pytest.mark.requires_symlinks
+    async def test_parent_swapped_for_a_symlink_is_refused(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2539: the path's own name is unchanged, but its parent now points at
+        the parent of another configured root."""
+        a_notes, b_notes, z = tmp_path / "a" / "notes", tmp_path / "b" / "notes", tmp_path / "z"
+        for d in (a_notes, b_notes, z):
+            d.mkdir(parents=True)
+        app.state.config.indexing.memory_dirs = [a_notes, b_notes, z]
+        self._serve_rows(app, [(a_notes / "a.md", 1), (b_notes / "b.md", 4)])
+        a_notes.rmdir()
+        a_notes.parent.rmdir()
+        a_notes.parent.symlink_to(b_notes.parent, target_is_directory=True)
+
+        await self._remove_refused(app, client, a_notes)
+
+    @pytest.mark.requires_symlinks
+    async def test_dotdot_after_a_symlink_is_refused(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2539: ``a/link/../target`` reaches ``b/target`` on disk, since ``..``
+        applies after ``link`` is followed. Folding ``..`` first would check and
+        remove ``a/target`` instead."""
+        import sys
+
+        if sys.platform == "win32":
+            pytest.skip(
+                "Win32 folds '..' before following links (ntpath.realpath starts "
+                "with normpath), so there the path does name a/target"
+            )
+        a_target, b_target = tmp_path / "a" / "target", tmp_path / "b" / "target"
+        b_sub, z = tmp_path / "b" / "sub", tmp_path / "z"
+        for d in (a_target, b_sub, b_target, z):
+            d.mkdir(parents=True)
+        (tmp_path / "a" / "link").symlink_to(b_sub, target_is_directory=True)
+        app.state.config.indexing.memory_dirs = [a_target, b_target, z]
+        self._serve_rows(app, [(a_target / "a.md", 1), (b_target / "b.md", 4)])
+
+        await self._remove_refused(
+            app, client, Path(os.path.join(str(tmp_path / "a" / "link"), "..", "target"))
+        )
+
+    async def test_path_that_resolves_elsewhere_is_refused_without_symlinks(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2539 without filesystem symlinks, so it also runs where
+        ``requires_symlinks`` skips (Windows without the privilege): the path
+        now resolves to another configured root."""
+        x, y, z = tmp_path / "x", tmp_path / "y", tmp_path / "z"
+        for d in (x, y, z):
+            d.mkdir()
+        app.state.config.indexing.memory_dirs = [x, y, z]
+        self._serve_rows(app, [(x / "a.md", 1), (y / "b.md", 4)])
+        real_resolve = Path.resolve
+
+        def _resolve(self: Path, strict: bool = False) -> Path:
+            return y if self == x else real_resolve(self, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", _resolve)
+
+        await self._remove_refused(app, client, x)
+
+    def test_path_identity_key_folds_case_but_not_unicode_form(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2539: a Windows spelling that differs only in case must not be
+        refused. NFC and NFD spellings stay distinct, because on a filesystem
+        that keeps them apart they name different directories."""
+        from memtomem.web.routes.system import _path_identity_key
+
+        nfc = unicodedata.normalize("NFC", "/notes/caf\u00e9")
+        nfd = unicodedata.normalize("NFD", nfc)
+        assert _path_identity_key(nfd) != _path_identity_key(nfc)
+
+        monkeypatch.setattr(os.path, "normcase", str.lower)
+        assert _path_identity_key("C:\\Notes") == _path_identity_key("c:\\notes")
+
+    async def test_symlink_between_unicode_forms_is_refused(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2539: on a filesystem that keeps NFC and NFD names apart, an NFC
+        ``cafe`` that became a symlink to the configured NFD one resolves to it.
+        ``resolve`` is patched so the case runs on normalisation-insensitive
+        filesystems too."""
+        nfc_name = unicodedata.normalize("NFC", "caf\u00e9")
+        nfd_name = unicodedata.normalize("NFD", nfc_name)
+        nfc, nfd, z = tmp_path / nfc_name, tmp_path / nfd_name, tmp_path / "z"
+        nfd.mkdir()
+        z.mkdir()
+        app.state.config.indexing.memory_dirs = [nfd, z]
+        self._serve_rows(app, [(nfd / "a.md", 4)])
+        real_resolve = Path.resolve
+
+        def _resolve(self: Path, strict: bool = False) -> Path:
+            return nfd if str(self) == str(nfc) else real_resolve(self, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", _resolve)
+
+        await self._remove_refused(app, client, nfc)
+
+    @pytest.mark.requires_symlinks
+    async def test_alias_spelling_submission_is_refused(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2539, declared narrowing: a client must send the resolved path. Both
+        Web UI callers do, because the server hands them resolved paths."""
+        real = tmp_path / "real"
+        d, z = real / "d", tmp_path / "z"
+        d.mkdir(parents=True)
+        z.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        app.state.config.indexing.memory_dirs = [d, z]
+        self._serve_rows(app, [(d / "a.md", 1)])
+
+        await self._remove_refused(app, client, link / "d")
+
+    @pytest.mark.requires_symlinks
+    async def test_alias_spellings_of_one_dir_are_removed_together(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """Two config spellings of one directory are the same root. Removing its
+        resolved path drops both, as before #2539."""
+        real = tmp_path / "real"
+        d, z = real / "d", tmp_path / "z"
+        d.mkdir(parents=True)
+        z.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        app.state.config.indexing.memory_dirs = [d, link / "d", z]
+        self._serve_rows(app, [(d / "a.md", 1)])
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(d), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert app.state.config.indexing.memory_dirs == [z]
+        assert resp.json()["deleted_chunks"] == 1
+
+    @pytest.mark.requires_symlinks
+    async def test_swap_during_the_sweep_does_not_redirect_it(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2539: the path passes the check, then becomes a symlink to an
+        unconfigured ``y`` while the sweep awaits its rows. The sweep must use
+        the path it checked, not resolve it again into ``y``."""
+        x, y, z = tmp_path / "x", tmp_path / "y", tmp_path / "z"
+        for d in (x, y, z):
+            d.mkdir()
+        app.state.config.indexing.memory_dirs = [x, z]
+        self._serve_rows(app, [(y / "b.md", 4)])
+        rows = app.state.storage.get_source_files_with_counts.return_value
+
+        async def _swap_then_rows():
+            x.rmdir()
+            x.symlink_to(y, target_is_directory=True)
+            return rows
+
+        app.state.storage.get_source_files_with_counts = AsyncMock(side_effect=_swap_then_rows)
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(x), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted_chunks"] == 0
+        assert self._deleted(app) == []
+
+    async def test_path_also_in_another_tier_keeps_its_chunks(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """A path in both ``memory_dirs`` and ``project_memory_dirs`` reports
+        ``tier: user``, so the tree offers Remove. The project tier still lists
+        the path and would index its files again, so the sweep keeps them and
+        the dialog offers nothing to delete (#2534)."""
+        shared = tmp_path / "proj" / ".memtomem" / "memories"
+        shared.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        note = shared / "note.md"
+        app.state.config.indexing.memory_dirs = [shared, other]
+        app.state.config.indexing.project_memory_dirs = [shared]
+        self._serve_rows(app, [(note, 4)])
+
+        shown = await self._shown(client, shared)
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(shared), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted_chunks"] == shown == 0
+        assert self._deleted(app) == []
 
 
 class TestUploadRedaction:

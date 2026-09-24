@@ -815,3 +815,188 @@ describe('_renderMemorySourceTree — orphan rendering', () => {
     expect(leafLabels).toEqual(expect.arrayContaining(['app-a', 'app-b', 'site']));
   });
 });
+
+/* The header stats line (``#sources-stats``) counts the files the tree
+ * renders for the active vendor (#2529). It used to sum every status row of
+ * the vendor, which included a registered ``memories.local`` root whose
+ * ``project_local`` sources ``/api/sources`` hides, and left out orphans. */
+describe('_renderSourcesStats — header counts what the tree renders', () => {
+  let window;
+  let document;
+
+  const USER_DIR = '/home/user/.memtomem/memory';
+  const LOCAL_DIR = '/home/user/proj/.memtomem/memories.local';
+  const SHARED_DIR = '/home/user/proj/.memtomem/memories';
+  const PLANS_DIR = '/home/user/.claude/plans';
+
+  const status = (overrides = {}) => ({
+    provider: 'user',
+    category: 'user',
+    exists: true,
+    chunk_count: 0,
+    file_count: 0,
+    source_file_count: 0,
+    ...overrides,
+  });
+  const source = (dir, name, chunks) => ({
+    memory_dir: dir,
+    path: `${dir || '/home/user/.memtomem/uploads'}/${name}`,
+    chunk_count: chunks,
+  });
+
+  const render = (visible) => {
+    const list = document.getElementById('sources-list');
+    list.innerHTML = '';
+    window._renderMemorySourceTree(visible ?? window.STATE.allSources, list);
+    return document.getElementById('sources-stats');
+  };
+  const expected = (files, chunks) => window.t('header.stat_files_chunks', {
+    files,
+    chunks: chunks.toLocaleString(),
+  });
+
+  beforeEach(async () => {
+    const dom = await bootApp({ scripts: ['i18n.js', 'app.js', 'sources-memory-dirs.js'] });
+    window = dom.window;
+    document = window.document;
+    window.CSS = window.CSS || { escape: (value) => String(value).replace(/"/g, '\\"') };
+    window.HTMLElement.prototype.scrollIntoView = () => {};
+  });
+
+  it('leaves out a memories.local root the tree hides', () => {
+    Object.assign(window.STATE, {
+      sourcesActiveVendor: 'user',
+      memoryDirs: [USER_DIR],
+      memoryStatusByPath: {
+        [USER_DIR]: status({ chunk_count: 5, file_count: 1, source_file_count: 1 }),
+        // Status reports the hidden tier's counts; /api/sources has no rows for it.
+        [LOCAL_DIR]: status({ chunk_count: 9, file_count: 2, source_file_count: 2, tier: 'project' }),
+      },
+      allSources: [source(USER_DIR, 'a.md', 5)],
+    });
+
+    const stats = render();
+
+    expect(stats.hidden).toBe(false);
+    expect(stats.textContent).toBe(expected(1, 5));
+  });
+
+  it('counts a project root that is visible only through its sources', () => {
+    Object.assign(window.STATE, {
+      sourcesActiveVendor: 'user',
+      memoryDirs: [USER_DIR],
+      memoryStatusByPath: {
+        [USER_DIR]: status({ chunk_count: 5, file_count: 1, source_file_count: 1 }),
+        [SHARED_DIR]: status({ chunk_count: 3, file_count: 1, source_file_count: 1, tier: 'project' }),
+      },
+      allSources: [source(USER_DIR, 'a.md', 5), source(SHARED_DIR, 'p.md', 3)],
+    });
+
+    expect(render().textContent).toBe(expected(2, 8));
+  });
+
+  it('counts orphans under User only', () => {
+    Object.assign(window.STATE, {
+      sourcesActiveVendor: 'user',
+      memoryDirs: [],
+      memoryStatusByPath: {},
+      allSources: [source(null, 'upload.md', 4)],
+    });
+
+    const userStats = render();
+    // Only orphans: the header is shown, where summing status rows hid it.
+    expect(userStats.hidden).toBe(false);
+    expect(userStats.textContent).toBe(expected(1, 4));
+
+    window.STATE.sourcesActiveVendor = 'claude';
+    expect(render().hidden).toBe(true);
+  });
+
+  it("counts a missing root's sources, as the tree keeps their cards", () => {
+    Object.assign(window.STATE, {
+      sourcesActiveVendor: 'user',
+      memoryDirs: [USER_DIR],
+      memoryStatusByPath: { [USER_DIR]: status({ exists: false }) },
+      allSources: [source(USER_DIR, 'gone.md', 6)],
+    });
+
+    expect(render().textContent).toBe(expected(1, 6));
+  });
+
+  it('does not follow a filter that narrows the tree', () => {
+    const all = [
+      { ...source(USER_DIR, 'alpha.md', 5), namespaces: ['default'] },
+      { ...source(SHARED_DIR, 'beta.md', 3), namespaces: ['team'] },
+    ];
+    Object.assign(window.STATE, {
+      sourcesActiveVendor: 'user',
+      memoryDirs: [USER_DIR],
+      memoryStatusByPath: {
+        [USER_DIR]: status({ chunk_count: 5, file_count: 1, source_file_count: 1 }),
+        [SHARED_DIR]: status({ chunk_count: 3, file_count: 1, source_file_count: 1, tier: 'project' }),
+      },
+      allSources: all,
+      sourcesNsFilter: '',
+    });
+    const filterInput = document.getElementById('sources-filter');
+    // Unfiltered, the tree lists both files, so the absence checks below are
+    // about the filter and not about how file names render.
+    render();
+    expect(document.getElementById('sources-list').textContent).toContain('alpha.md');
+    expect(document.getElementById('sources-list').textContent).toContain('beta.md');
+
+    // A text filter, rendered through the real filter path: the tree narrows
+    // to alpha.md (the project root drops out of its groups), and the header
+    // still reports the vendor's totals.
+    filterInput.value = 'alpha';
+    let stats = render(window._getFilteredSorted());
+    let tree = document.getElementById('sources-list').textContent;
+    expect(tree).toContain('alpha.md');
+    expect(tree).not.toContain('beta.md');
+    expect(stats.hidden).toBe(false);
+    expect(stats.textContent).toBe(expected(2, 8));
+
+    // A namespace filter.
+    filterInput.value = '';
+    window.STATE.sourcesNsFilter = 'team';
+    stats = render(window._getFilteredSorted());
+    tree = document.getElementById('sources-list').textContent;
+    expect(tree).toContain('beta.md');
+    expect(tree).not.toContain('alpha.md');
+    expect(stats.hidden).toBe(false);
+    expect(stats.textContent).toBe(expected(2, 8));
+  });
+
+  it('counts a source whose root has no status row, under User like the tree', () => {
+    const bare = '/home/user/notes';
+    Object.assign(window.STATE, {
+      sourcesActiveVendor: 'user',
+      memoryDirs: [bare],
+      // Degraded status fetch: no row for the root.
+      memoryStatusByPath: {},
+      allSources: [source(bare, 'n.md', 2)],
+    });
+
+    const stats = render();
+
+    expect(document.getElementById('sources-list').textContent).toContain('n.md');
+    expect(stats.textContent).toBe(expected(1, 2));
+  });
+
+  it("uses the tree's vendor for a .claude/plans root, not the raw provider", () => {
+    Object.assign(window.STATE, {
+      sourcesActiveVendor: 'user',
+      memoryDirs: [USER_DIR, PLANS_DIR],
+      memoryStatusByPath: {
+        [USER_DIR]: status({ chunk_count: 5, file_count: 1, source_file_count: 1 }),
+        // A stale status row still says ``user``; the tree files it under Claude.
+        [PLANS_DIR]: status({ chunk_count: 7, file_count: 1, source_file_count: 1 }),
+      },
+      allSources: [source(USER_DIR, 'a.md', 5), source(PLANS_DIR, 'plan.md', 7)],
+    });
+
+    expect(render().textContent).toBe(expected(1, 5));
+    window.STATE.sourcesActiveVendor = 'claude';
+    expect(render().textContent).toBe(expected(1, 7));
+  });
+});

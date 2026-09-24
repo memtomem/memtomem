@@ -1836,6 +1836,16 @@ button:active { opacity: 0.7; }
   border: 1px solid rgba(var(--accent-rgb, 59, 130, 246), 0.25);
   margin-left: 4px;
 }
+/* Tier pill for project / read-only roots (#2522) — muted so it reads as
+   a property of the root, not an accent like the default pill. */
+.source-group-tier-pill {
+  font-size: 0.62rem; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 6px; border-radius: 999px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  margin-left: 4px;
+}
 /* Discovered sub-section: auto-detected memory dirs we haven't indexed
    yet. Rendered muted + collapsed under their vendor group so they read
    as "candidates", not the primary content. */

@@ -5163,6 +5163,115 @@ class TestMemoryDirStats:
         assert result[0]["file_count"] == 0
 
 
+class TestMemoryDirStatsNestedRoots:
+    """Nested configured roots: every number is exclusive (#2524).
+
+    The Sources tree groups each source under its longest-prefix root, and the
+    web totals add per-root numbers together. A parent root that also counted
+    its nested roots' files showed chunks the tree lists under another group
+    and counted them twice in the totals.
+    """
+
+    async def test_parent_leaves_out_what_a_nested_root_owns(self, tmp_path):
+        from memtomem.indexing.engine import memory_dir_stats
+
+        parent = tmp_path / "work"
+        child = parent / "notes"
+        child.mkdir(parents=True)
+        own = parent / "own.md"
+        nested = child / "n.md"
+        own.write_text("#")
+        nested.write_text("#")
+        # Distinct timestamps, child newer: with one shared timestamp an
+        # inclusive ``last_indexed`` would read the same.
+        storage = _FakeStorageForStats(
+            [
+                (own, 2, "2026-01-01", "default", 1, 1, 1),
+                (nested, 7, "2026-06-01", "default", 1, 1, 1),
+            ]
+        )
+
+        result = await memory_dir_stats(
+            storage, [parent, child], supported_extensions=frozenset({".md"})
+        )
+        by_path = {r["path"]: r for r in result}
+
+        p, c = by_path[str(parent)], by_path[str(child)]
+        assert (p["chunk_count"], p["source_file_count"], p["file_count"]) == (2, 1, 1)
+        assert p["last_indexed"] == "2026-01-01"
+        assert (c["chunk_count"], c["source_file_count"], c["file_count"]) == (7, 1, 1)
+        assert c["last_indexed"] == "2026-06-01"
+
+    async def test_order_of_roots_does_not_change_ownership(self, tmp_path):
+        from memtomem.indexing.engine import memory_dir_stats
+
+        parent = tmp_path / "work"
+        child = parent / "notes"
+        child.mkdir(parents=True)
+        nested = child / "n.md"
+        nested.write_text("#")
+        storage = _FakeStorageForStats([_row(nested, 7)])
+
+        result = await memory_dir_stats(storage, [child, parent])
+        by_path = {r["path"]: r["chunk_count"] for r in result}
+        assert by_path == {str(child): 7, str(parent): 0}
+
+    async def test_one_root_listed_twice_reports_the_same_counts(self, tmp_path):
+        """A path in two tiers (user and project) is one root, not a tie to 0."""
+        from memtomem.indexing.engine import memory_dir_stats
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        note = root / "a.md"
+        note.write_text("#")
+        storage = _FakeStorageForStats([_row(note, 3)])
+
+        result = await memory_dir_stats(
+            storage, [root, root], supported_extensions=frozenset({".md"})
+        )
+        assert [(r["chunk_count"], r["file_count"]) for r in result] == [(3, 1), (3, 1)]
+
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="symlink creation needs privileges on Windows"
+    )
+    async def test_file_symlinked_into_a_nested_root_counts_there(self, tmp_path):
+        """Storage keys a symlinked file by its target, so the disk count does too."""
+        from memtomem.indexing.engine import memory_dir_stats
+
+        parent = tmp_path / "work"
+        child = parent / "notes"
+        child.mkdir(parents=True)
+        target = child / "n.md"
+        target.write_text("#")
+        (parent / "alias.md").symlink_to(target)
+        storage = _FakeStorageForStats([])
+
+        result = await memory_dir_stats(
+            storage, [parent, child], supported_extensions=frozenset({".md"})
+        )
+        by_path = {r["path"]: r["file_count"] for r in result}
+        assert by_path == {str(parent): 0, str(child): 1}
+
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="symlink creation needs privileges on Windows"
+    )
+    async def test_file_symlinked_into_a_sibling_root_counts_there(self, tmp_path):
+        from memtomem.indexing.engine import memory_dir_stats
+
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        target = b / "note.md"
+        target.write_text("#")
+        (a / "alias.md").symlink_to(target)
+        storage = _FakeStorageForStats([])
+
+        result = await memory_dir_stats(storage, [a, b], supported_extensions=frozenset({".md"}))
+        by_path = {r["path"]: r["file_count"] for r in result}
+        assert by_path == {str(a): 0, str(b): 1}
+
+
 # ===========================================================================
 # 11b. norm_dir_prefix — trailing separator pin (#647)
 # ===========================================================================
