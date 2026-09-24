@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import stat
+import unicodedata
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
@@ -1146,6 +1147,16 @@ async def add_memory_dir(
     }
 
 
+def _path_identity_key(path: str) -> str:
+    """Compare two spellings of a path the way the filesystem would.
+
+    NFC because :func:`norm_path` keys are NFC, and ``os.path.normcase`` so a
+    Windows spelling that differs only in case or separators still matches.
+    ``normcase`` is the identity on POSIX.
+    """
+    return unicodedata.normalize("NFC", os.path.normcase(path))
+
+
 @router.post("/memory-dirs/remove")
 async def remove_memory_dir(
     request: Request,
@@ -1186,15 +1197,20 @@ async def remove_memory_dir(
       under the dir, which leaves chunks under the dir that no remaining root
       would index. The route does not re-check the count, because any
       watcher write that changes the dir's chunks would fail it (#2537).
+
+    The path must still resolve to itself. Both Web UI callers send a path the
+    server returned already resolved. If that path, or one of its parents, has
+    since become a symlink or junction, it now names a different directory,
+    and removing or sweeping that one would act on a root the user did not
+    pick. The route answers 409 and changes nothing. A client that sends an
+    alias spelling, such as a symlinked prefix, gets the same 409 and has to
+    send the resolved path (#2539).
     """
     body = await request.json()
     dir_path = body.get("path", "").strip()
     if not dir_path:
         raise HTTPException(status_code=400, detail="path is required")
     delete_chunks = bool(body.get("delete_chunks", False))
-
-    resolved = Path(dir_path).expanduser().resolve()
-    resolved_norm = norm_path(resolved)
 
     try:
         async with _asyncio.timeout(60):
@@ -1204,6 +1220,25 @@ async def remove_memory_dir(
                 )
                 _check_reload_block(request)
                 config = request.app.state.config
+
+                # Resolved once, here, and reused below: resolving again after
+                # the awaits further down would let a swap made in between
+                # redirect the sweep (#2539). ``resolve()`` runs on the path as
+                # sent, not on ``literal``: ``abspath`` folds ``..`` without
+                # following symlinks, so ``link/../d`` would otherwise check
+                # and remove a directory the OS would not reach by that path.
+                expanded = Path(dir_path).expanduser()
+                literal = os.path.abspath(expanded)
+                resolved = expanded.resolve()
+                if _path_identity_key(literal) != _path_identity_key(str(resolved)):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"{literal} now resolves to {resolved}. Reload the list and "
+                            "try again, or send the resolved path."
+                        ),
+                    )
+                resolved_norm = unicodedata.normalize("NFC", str(resolved))
 
                 new_dirs = [
                     p
@@ -1239,11 +1274,14 @@ async def remove_memory_dir(
                     from memtomem.indexing.engine import norm_dir_prefix, swept_on_remove
 
                     rows = await storage.get_source_files_with_counts()
-                    # Use the canonical helper so the trailing-separator
-                    # rule (``os.sep``, native form on Windows) stays in
-                    # one place; matches the comparison done by
-                    # :func:`resolve_owning_memory_dir` (#647).
-                    prefix = norm_dir_prefix(resolved)
+                    # The same form :func:`norm_dir_prefix` builds (NFC, a
+                    # trailing ``os.sep``; #647), made from the path checked
+                    # above instead of resolving it again after the await.
+                    # A second resolve would follow a symlink swapped in
+                    # meanwhile and sweep that directory (#2539).
+                    prefix = (
+                        resolved_norm if resolved_norm.endswith(os.sep) else resolved_norm + os.sep
+                    )
                     # Every root still configured now that this one is gone. A
                     # source any of them contains stays (#2524, #2534); the
                     # status ``delete_chunk_count`` the dialog shows applies the

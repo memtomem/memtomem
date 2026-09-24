@@ -107,6 +107,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   removed one does not keep that file, because the index stores the link's
   target. Indexing already under way when you remove the root can write after
   the sweep.
+- **Removing a memory directory that became a symlink no longer removes
+  another root (#2539).** `POST /api/memory-dirs/remove` resolved the path it
+  was given. If the directory, or one of its parents, had been replaced by a
+  symlink to another configured root after the list was loaded, the remove
+  dropped that root's registration too. With *delete chunks* it also deleted
+  that root's chunks. The route now answers 409 and changes nothing when the
+  path no longer resolves to itself. It also builds the sweep prefix from the
+  path it checked, so a swap made during the sweep cannot redirect it. The
+  Web UI already sends resolved paths. An API client that sends an alias
+  spelling, such as a symlinked prefix, now has to send the resolved path.
 
 ## [0.6.4] — 2026-09-20
 
