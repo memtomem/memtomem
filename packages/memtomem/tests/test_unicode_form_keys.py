@@ -13,6 +13,7 @@ the other.
 
 from __future__ import annotations
 
+import hashlib
 import unicodedata
 from pathlib import Path
 
@@ -20,7 +21,12 @@ import pytest
 
 import memtomem.storage.sqlite_helpers as helpers_mod
 from memtomem.storage.orphan_detect import scan_orphans
-from memtomem.storage.sqlite_helpers import fold_path_form, norm_dir_prefix, norm_path
+from memtomem.storage.sqlite_helpers import (
+    fold_path_form,
+    norm_dir_prefix,
+    norm_path,
+    project_boundary_key,
+)
 
 from helpers import (
     CAFE_NFC,
@@ -60,6 +66,29 @@ class TestWithoutFolding:
 
         monkeypatch.setattr(Path, "resolve", _boom)
         assert Path(norm_path(Path(f"/tmp/{CAFE_NFD}"))).name == CAFE_NFD
+
+    def test_the_project_boundary_key_still_folds(self, tmp_path: Path) -> None:
+        """A hash, not an address: it keeps the pre-#2544 derivation, so rows
+        already stored under an NFD project root stay reachable."""
+        root = tmp_path / CAFE_NFD
+        before = unicodedata.normalize("NFC", str(root.resolve()))
+        expected = hashlib.sha256(f"project\0{before}".encode("utf-8")).hexdigest()
+
+        assert project_boundary_key(root) == expected
+        assert project_boundary_key(tmp_path / CAFE_NFC) == expected
+
+    async def test_history_written_before_the_change_is_read_after_it(
+        self, bm25_only_components, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp, _mem_dir = bm25_only_components
+        root = tmp_path / CAFE_NFD
+        monkeypatch.setattr(helpers_mod, "FOLDS_UNICODE_FORMS", True)
+        await comp.storage.save_query_history("echidna", [], [], [], project_context_root=root)
+
+        monkeypatch.setattr(helpers_mod, "FOLDS_UNICODE_FORMS", False)
+        rows = await comp.storage.get_query_history(project_context_root=root)
+
+        assert [r["query_text"] for r in rows] == ["echidna"]
 
 
 def _require_distinct_forms(tmp_path: Path) -> None:

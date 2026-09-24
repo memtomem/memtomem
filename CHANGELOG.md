@@ -20,7 +20,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   not open. Paths now fold only on macOS. A volume that keeps the forms apart
   mounted on macOS is still folded, as before. A folding volume mounted on
   Linux (ext4 `casefold`, SMB to a Mac) is not, so one file reached by two
-  spellings can be indexed twice there.
+  spellings can be indexed twice there. The project key that query history,
+  search runs and feedback are stored under still folds on every platform.
+  It is a hash, not a path, so history already recorded for a project root
+  with an NFD name stays visible.
 
   Existing databases on Linux or Windows: a row keyed by the old fold names a
   path that does not exist. `mm gc orphan-sources --apply` removes it, and a

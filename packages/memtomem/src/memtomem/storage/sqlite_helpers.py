@@ -245,10 +245,19 @@ def project_boundary_key(project_context_root: Path | str | None) -> str:
     ``None`` is a real boundary: it represents a user-only invocation outside
     a registered project.  Absolute roots are never persisted in history rows
     or returned through diagnostics.
+
+    The root is folded to NFC on every platform, unlike :func:`norm_path`.
+    This key is a hash that history, search runs and feedback are stored
+    under; it is never used to open a path, so folding it cannot point
+    anything at a missing file (#2544). Following ``norm_path``'s per-platform
+    rule instead would give an NFD root on Linux or Windows a new key and hide
+    every row already written under the old one. The cost is that two roots
+    differing only in Unicode form share one boundary there, as they always
+    have.
     """
     if project_context_root is None:
         return "user"
-    canonical = norm_path(Path(project_context_root))
+    canonical = unicodedata.normalize("NFC", norm_path(Path(project_context_root)))
     return hashlib.sha256(f"project\0{canonical}".encode("utf-8")).hexdigest()
 
 
