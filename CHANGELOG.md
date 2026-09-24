@@ -57,6 +57,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   orphans included. It still ignores the filter, as before. A root that the tree
   files under Claude by its path (such as `.claude/plans`) now counts toward
   Claude, not toward the provider its status row reports.
+- **Removing a root with *delete chunks* no longer lets the file watcher put
+  a just-edited file back (#2528).** The watcher collects changed files and
+  indexes them after a short debounce. Removing a root did not clear the files
+  it had already collected. A file edited under that root just before
+  *Remove* was therefore indexed again after its chunks were deleted, and
+  showed up under "Other (unregistered)". The watcher now skips any collected
+  file that is no longer inside a configured root. The same applies when a
+  root is dropped by editing `config.json` or by the MCP server's root sync.
+  The check runs before indexing starts. An index of that root that is already
+  in progress when you remove it can still finish writing.
 
 ## [0.6.4] — 2026-09-20
 
