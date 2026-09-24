@@ -69,8 +69,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   symlink counts where it points, because that is the path the index stores.
   `POST /api/memory-dirs/remove` with `delete_chunks` used the same prefix
   sweep, so removing `~/work` also dropped the chunks of a still-registered
-  `~/work/notes`. It now deletes only the sources the removed dir owns, which
-  is the number its confirm dialog shows. Files on disk were never touched.
+  `~/work/notes`. It now keeps the sources of a still-registered nested root
+  (#2534 below narrows the sweep further). Files on disk were never touched.
 - **The Sources header counts the files the tree shows (#2529).** The
   "{files} files · {chunks} chunks" line added up every root's
   `/api/memory-dirs/status` numbers. That included a `memories.local` root
@@ -90,6 +90,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   root is dropped by editing `config.json` or by the MCP server's root sync.
   The check runs before indexing starts. An index of that root that is already
   in progress when you remove it can still finish writing.
+- ***Delete chunks* keeps what another root still indexes (#2534).**
+  `POST /api/memory-dirs/remove` with `delete_chunks` deleted the chunks of a
+  removed root's files even when a root that stays configured still contains
+  them: an enclosing root, or the same path listed in `project_memory_dirs`.
+  That root indexed them again on its next walk or file event, so the chunks
+  only disappeared for a while. The sweep now skips any source a remaining
+  root contains. `GET /api/memory-dirs/status` entries carry
+  `delete_chunk_count`, the number such a remove would delete, and the confirm
+  dialog offers that number. When it is 0 for a directory that has indexed
+  chunks, the dialog drops the checkbox and says the files stay indexed. Two cases are unchanged and documented as
+  known limits. A symlink in a remaining root that points at a file under the
+  removed one does not keep that file, because the index stores the link's
+  target. Indexing already under way when you remove the root can write after
+  the sweep.
 
 ## [0.6.4] — 2026-09-20
 

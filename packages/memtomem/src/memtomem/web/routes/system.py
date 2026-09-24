@@ -1157,12 +1157,25 @@ async def remove_memory_dir(
     Body: ``{path: str, delete_chunks?: bool}``. ``delete_chunks=False`` (the
     default) is the safe behaviour — only the registration is removed,
     indexed chunks stay searchable. ``delete_chunks=True`` additionally
-    drops the chunks of every source the removed dir owns, meaning the
-    sources under it that no more specific still-configured root also
-    contains. A nested root that stays registered keeps its chunks, so the
-    number deleted is the dir's status ``chunk_count``, which the confirm
-    dialog shows (#2524). The underlying files on disk are never touched. The Web UI's
-    delete confirm shows a checkbox so the user opts in explicitly.
+    drops the chunks of every source under the removed dir that no
+    still-configured index root contains. A nested root, an enclosing root,
+    or the same path listed in another tier keeps its sources, since it would
+    index them again anyway (#2524, #2534). The number deleted is the dir's
+    status ``delete_chunk_count``, which the confirm dialog shows. The
+    underlying files on disk are never touched. The Web UI's delete confirm
+    shows a checkbox so the user opts in explicitly.
+
+    Known limits (#2534):
+
+    - Containment is decided on the stored, resolved path. A symlink in a
+      surviving root that points at a file under the removed one does not
+      keep that file's chunks. The surviving root's next walk, or the next
+      event on the link, indexes the file again.
+    - The sweep takes no indexing lock. Indexing that was already under way
+      when the dir was removed (a watcher flush that passed its root check, a
+      backfill ``index_path`` run) can write after the sweep read its rows.
+      Taking ``_index_lock`` would not close this, because the bulk path holds
+      only per-file sidecars (#2105).
     """
     body = await request.json()
     dir_path = body.get("path", "").strip()
@@ -1213,7 +1226,7 @@ async def remove_memory_dir(
                 # the schema's ``ON DELETE CASCADE``.
                 deleted_chunks = 0
                 if delete_chunks:
-                    from memtomem.indexing.engine import norm_dir_prefix
+                    from memtomem.indexing.engine import norm_dir_prefix, swept_on_remove
 
                     rows = await storage.get_source_files_with_counts()
                     # Use the canonical helper so the trailing-separator
@@ -1221,24 +1234,15 @@ async def remove_memory_dir(
                     # one place; matches the comparison done by
                     # :func:`resolve_owning_memory_dir` (#647).
                     prefix = norm_dir_prefix(resolved)
-                    # Roots nested under this one that are still configured once
-                    # it is gone: their sources stay (#2524). Strictly longer,
-                    # so the sweep deletes exactly the dir's status
-                    # ``chunk_count``, which the confirm dialog shows. The
-                    # count includes a path that another tier (project) also
-                    # lists, so this sweep deletes it too.
-                    kept = [
-                        p
-                        for p in map(norm_dir_prefix, config.indexing.all_index_roots())
-                        if len(p) > len(prefix)
-                    ]
+                    # Every root still configured now that this one is gone. A
+                    # source any of them contains stays (#2524, #2534); the
+                    # status ``delete_chunk_count`` the dialog shows applies the
+                    # same rule.
+                    surviving = [norm_dir_prefix(p) for p in config.indexing.all_index_roots()]
                     try:
                         for row in rows:
                             source_path = row[0]
-                            target = norm_path(source_path)
-                            if target.startswith(prefix) and not any(
-                                target.startswith(p) for p in kept
-                            ):
+                            if swept_on_remove(norm_path(source_path), prefix, surviving):
                                 deleted_chunks += await storage.delete_by_source(source_path)
                     finally:
                         # Same cache-staleness class as #2141: these rows are
@@ -1372,8 +1376,12 @@ async def memory_dirs_status(
     (``project_memory_dirs``) or ``read_only`` (``read_only_memory_dirs``)
     — so the Sources tree can badge a group and offer "Remove from
     memory_dirs" only where it applies. (#2522)
+
+    ``delete_chunk_count`` is what ``POST /memory-dirs/remove`` with
+    ``delete_chunks`` would delete for that entry: 0 when another root still
+    contains the whole dir, and 0 for tiers the route cannot remove. (#2534)
     """
-    from memtomem.indexing.engine import memory_dir_stats
+    from memtomem.indexing.engine import memory_dir_stats, norm_dir_prefix, remove_sweeps_nothing
 
     stats = await memory_dir_stats(
         storage,
@@ -1392,9 +1400,27 @@ async def memory_dirs_status(
         ("project", _resolved(config.indexing.project_memory_dirs)),
         ("read_only", _resolved(config.indexing.read_only_memory_dirs)),
     )
+    # The remove route drops every ``memory_dirs`` entry equal to the path, so
+    # what survives is every other root, including the same path in another
+    # tier.
+    user_keys = [norm_path(Path(p).expanduser()) for p in config.indexing.memory_dirs]
+    others = [
+        norm_dir_prefix(p)
+        for p in (*config.indexing.project_memory_dirs, *config.indexing.read_only_memory_dirs)
+    ]
     for entry in stats:
         key = norm_path(Path(str(entry["path"])))
         entry["tier"] = next((name for name, paths in tiers if key in paths), None)
+        delete_count = 0
+        if entry["tier"] == "user":
+            surviving = [
+                norm_dir_prefix(p)
+                for p, k in zip(config.indexing.memory_dirs, user_keys)
+                if k != key
+            ] + others
+            if not remove_sweeps_nothing(norm_dir_prefix(key), surviving):
+                delete_count = entry["chunk_count"]
+        entry["delete_chunk_count"] = delete_count
     return {"dirs": stats}
 
 

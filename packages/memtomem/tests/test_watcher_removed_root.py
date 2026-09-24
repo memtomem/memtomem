@@ -11,6 +11,7 @@ through, so a narrower containment rule fails here rather than dropping events.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import unicodedata
 from pathlib import Path
@@ -34,6 +35,19 @@ async def _indexed_sources(comp) -> set[str]:
     return {str(row[0]) for row in await comp.storage.get_source_files_with_counts()}
 
 
+def _web_app(comp):
+    """The web app wired to the real ``comp`` stack, without a lifespan."""
+    app = create_app(lifespan=None, mode="dev")
+    for name in ("storage", "index_engine", "search_pipeline", "config"):
+        setattr(app.state, name, getattr(comp, name))
+    app.dependency_overrides[require_configured] = lambda: None
+    # Without a current signature ``reload_if_stale`` rebuilds the config from
+    # disk and the route would act on that, not on the injected components.
+    app.state.config_signature = hot_reload.current_signature()
+    app.state.last_reload_error = None
+    return app
+
+
 async def test_queued_event_under_removed_root_is_not_reindexed(
     bm25_only_components, tmp_path, tmp_path_factory, monkeypatch
 ):
@@ -51,14 +65,7 @@ async def test_queued_event_under_removed_root_is_not_reindexed(
         stats = await comp.index_engine.index_file(source)
         assert stats.indexed_chunks == 1, source
 
-    app = create_app(lifespan=None, mode="dev")
-    for name in ("storage", "index_engine", "search_pipeline", "config"):
-        setattr(app.state, name, getattr(comp, name))
-    app.dependency_overrides[require_configured] = lambda: None
-    # Without a current signature ``reload_if_stale`` rebuilds the config from
-    # disk and the route would act on that, not on the injected components.
-    app.state.config_signature = hot_reload.current_signature()
-    app.state.last_reload_error = None
+    app = _web_app(comp)
     # Not started: the web app shares one ``IndexingConfig`` between engine and
     # watcher, and ``reconfigure`` on a stopped watcher only swaps that config.
     watcher = FileWatcher(comp.index_engine, comp.config.indexing)
@@ -90,6 +97,70 @@ async def test_queued_event_under_removed_root_is_not_reindexed(
     # guard is not simply skipping everything.
     (kept_body,) = await _chunk_contents(comp, kept)
     assert "kept after" in kept_body
+
+
+async def test_indexing_in_flight_at_remove_writes_after_the_sweep(
+    bm25_only_components, tmp_path, tmp_path_factory, monkeypatch
+):
+    """Known limit (#2534): the sweep does not wait for indexing already under
+    way. An ``index_file`` that is waiting on the file's sidecar when the root
+    is removed writes the file's chunks after the sweep deleted them. Taking
+    ``_index_lock`` would not close this: the bulk path holds only sidecars."""
+    from memtomem.context import _atomic
+
+    comp, kept_root = bm25_only_components
+    isolate_config_paths(monkeypatch, tmp_path_factory.mktemp("config-home"))
+    removed_root = tmp_path / "removed"
+    removed_root.mkdir()
+    comp.config.indexing.memory_dirs = [kept_root, removed_root]
+    gone = (removed_root / "gone.md").resolve()
+    gone.write_text("## Gone\n\ngone before\n", encoding="utf-8")
+    assert (await comp.index_engine.index_file(gone)).indexed_chunks == 1
+    gone.write_text("## Gone\n\ngone after\n", encoding="utf-8")
+
+    # The indexer waits on the sidecar for as long as the route may take (60 s),
+    # so a slow sweep cannot time it out before the test releases the lock.
+    monkeypatch.setattr(_atomic, "_MEMORY_SIDECAR_LOCK_BUDGET_S", 120.0)
+    lock_path = _atomic.memory_lock_path(gone)
+    task: asyncio.Task | None = None
+    try:
+        async with _atomic.async_file_lock(lock_path, timeout=5):
+            # Installed after the test holds the sidecar, so only the indexer's
+            # acquire can trip it.
+            real_lock = _atomic.async_file_lock
+            waiting = asyncio.Event()
+
+            def _spy(path, *, timeout):
+                if path == lock_path:
+                    waiting.set()
+                return real_lock(path, timeout=timeout)
+
+            monkeypatch.setattr(_atomic, "async_file_lock", _spy)
+            task = asyncio.create_task(comp.index_engine.index_file(gone))
+            await asyncio.wait_for(waiting.wait(), timeout=5)
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert not task.done()
+
+            async with AsyncClient(
+                transport=ASGITransport(app=_web_app(comp)), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/api/memory-dirs/remove",
+                    json={"path": str(removed_root), "delete_chunks": True},
+                )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["deleted_chunks"] == 1
+            assert await _chunk_contents(comp, gone) == []
+            assert not task.done()
+
+        await asyncio.wait_for(task, timeout=10)
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    (body,) = await _chunk_contents(comp, gone)
+    assert "gone after" in body
 
 
 class _RecordingEngine:

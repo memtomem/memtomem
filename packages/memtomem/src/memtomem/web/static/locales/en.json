@@ -1677,6 +1677,7 @@
   "confirm.memory_dir_remove_title": "Remove memory directory?",
   "confirm.memory_dir_remove_msg": "Remove {path} from memory_dirs? The directory and its files on disk are not touched.",
   "confirm.memory_dir_delete_chunks_label": "Also delete {count} indexed chunks from this directory",
+  "confirm.memory_dir_chunks_still_covered": "Its indexed chunks stay: another configured directory still contains these files and keeps them indexed.",
   "toast.memory_dir.added": "Added {path}",
   "toast.memory_dir.added_indexed": "Added {path} · {chunks} chunks from {files} files",
   "toast.memory_dir.added_index_partial": "Added {path}, but indexing was partial · {chunks} chunks from {files} files",
