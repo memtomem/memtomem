@@ -4671,12 +4671,12 @@ async function loadSources() {
 function renderSourceTree(sources) {
   const list = qs('sources-list');
 
-  // Top summary sums the *indexed* portion of each memory_dir so the
-  // figure matches what the user can actually click into below \u2014 and
-  // avoids inflating the count with unindexed read-only-discovered dirs
-  // whose ``file_count`` reflects disk-only files. Per-dir badges also
-  // surface the ``indexed/files`` split, so this number lines up with
-  // the left side of those badges.
+  // Top summary counts the indexed files the tree renders for the active
+  // vendor: every source row, including "Other (unregistered)" orphans
+  // under User, and nothing the tree hides. A registered ``memories.local``
+  // root has a status row but no ``/api/sources`` rows (the ``project_local``
+  // tier is hidden by default), so it does not count (#2529). Unindexed
+  // Discovered dirs add no files, as before.
   //
   // Scope: the sub-tab strip (issue #570) only renders one vendor's
   // tree at a time, so the stats line is scoped to that vendor too \u2014
@@ -4694,22 +4694,19 @@ function renderSourceTree(sources) {
   _renderMemorySourceTree(sources, list);
 }
 
-function _renderSourcesStats(activeVendor) {
+function _renderSourcesStats(activeVendor, vendorOf) {
   const statsEl = qs('sources-stats');
   if (!statsEl) return;
-  const statusByPath = STATE.memoryStatusByPath || {};
+  // Counted from source rows, not status rows: a status row can belong to a
+  // root the tree never draws (#2529), and the tree lists orphans that no
+  // status row covers. ``STATE.allSources`` is the unfiltered list, so the
+  // line stays vendor-wide while a filter narrows the tree. ``vendorOf`` is
+  // the tree's own vendor rule, handed in by ``_renderMemorySourceTree``.
   let indexedFiles = 0;
   let totalChunks = 0;
-  for (const s of Object.values(statusByPath)) {
-    if (!s || s.exists === false) continue;
-    // Same fallback rule as ``_renderMemorySourceTree``: unknown
-    // providers (forward-compat for a server that adds a vendor before
-    // the client deploys) bucket into ``user``.
-    const rawProvider = s.provider;
-    const provider = (_SOURCES_VENDORS && _SOURCES_VENDORS.includes(rawProvider))
-      ? rawProvider : 'user';
-    if (provider !== activeVendor) continue;
-    indexedFiles += s.source_file_count || 0;
+  for (const s of STATE.allSources || []) {
+    if (vendorOf(s) !== activeVendor) continue;
+    indexedFiles += 1;
     totalChunks += s.chunk_count || 0;
   }
   if (indexedFiles || totalChunks) {
@@ -5030,7 +5027,12 @@ function _renderMemorySourceTree(sources, list) {
   // M chunks" caption above the tree always matches what's rendered
   // below. Doing this in the caller (``renderSourceTree``) would race
   // the NS-filter follow-through that mutates ``activeVendor`` here.
-  _renderSourcesStats(activeVendor);
+  // Orphans ride with ``user`` (see ``orphanItems``); every other source takes
+  // the vendor of the root group it is drawn in.
+  const vendorOf = (src) => (src.memory_dir
+    ? presentationProviderForDir(src.memory_dir, statusByPath[src.memory_dir])
+    : 'user');
+  _renderSourcesStats(activeVendor, vendorOf);
 
   const dirOpenStateKey = (provider, cat, dir) => `${provider}:${cat}:${dir}`;
   const getDirOpen = (provider, cat, dir, defaultOpen) => {

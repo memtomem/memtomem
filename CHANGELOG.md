@@ -48,6 +48,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   sweep, so removing `~/work` also dropped the chunks of a still-registered
   `~/work/notes`. It now deletes only the sources the removed dir owns, which
   is the number its confirm dialog shows. Files on disk were never touched.
+- **The Sources header counts the files the tree shows (#2529).** The
+  "{files} files · {chunks} chunks" line added up every root's
+  `/api/memory-dirs/status` numbers. That included a `memories.local` root
+  registered in `project_memory_dirs`, whose files the tree hides by default,
+  and it left out the "Other (unregistered)" files the tree lists under User.
+  The line now counts the indexed files the tree renders for the active vendor,
+  orphans included. It still ignores the filter, as before. A root that the tree
+  files under Claude by its path (such as `.claude/plans`) now counts toward
+  Claude, not toward the provider its status row reports.
 
 ## [0.6.4] — 2026-09-20
 
