@@ -90,8 +90,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   only disappeared for a while. The sweep now skips any source a remaining
   root contains. `GET /api/memory-dirs/status` entries carry
   `delete_chunk_count`, the number such a remove would delete, and the confirm
-  dialog offers that number. It is a preview: if roots or indexed files change
-  before you confirm, the remove applies the rule to what is configured then,
+  dialog's checkbox offers it as the current count. It is a preview: if roots
+  or indexed files change before you confirm, the remove applies the rule to what is configured then,
   and the toast shows the number it actually deleted, if any (#2537). When
   the dialog's number is 0 for a directory that has indexed chunks, the dialog
   drops the checkbox and says another directory keeps the files indexed, as of
