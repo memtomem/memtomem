@@ -1094,6 +1094,13 @@ class TestCheckServerLivenessStoreScope:
 #: and 4.3.0's changes are confined to typing in ``types.py`` and
 #: ``utils.py``. The 3.x and 4.0/4.1 entries are inherited from the narrower
 #: claim this range replaces, not re-read here.
+#:
+#: 4.3.2 was checked against 4.3.0 in the published wheels: every module
+#: except ``__main__.py`` and ``redis.py`` is byte-identical, lockers
+#: included. ``import portalocker`` does import ``redis.py``, but its
+#: top-level changes are docstring prose; the executable ones sit inside
+#: ``RedisLock`` methods, which the file-lock path never calls. 4.3.1 was
+#: never installed and was not read on its own, so it stays out.
 VERIFIED_PORTALOCKER_RELEASES = (
     "3.0.0",
     "3.1.0",
@@ -1103,6 +1110,7 @@ VERIFIED_PORTALOCKER_RELEASES = (
     "4.1.0",
     "4.2.0",
     "4.3.0",
+    "4.3.2",
 )
 
 #: A run of releases as the prose spells them: slash-joined within a major

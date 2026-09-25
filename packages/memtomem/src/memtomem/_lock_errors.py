@@ -70,13 +70,14 @@ except ImportError:
 # Non-blocking-lock errnos that mean "held by someone else": POSIX
 # ``fcntl.flock`` documents both ``EACCES`` and ``EAGAIN`` for a held lock,
 # and the POSIX backend of every source-verified release
-# (3.0.0/3.1.0/3.1.1/3.2.0 and 4.0.0/4.1.0/4.2.0/4.3.0) maps this pair to
+# (3.0.0/3.1.0/3.1.1/3.2.0 and 4.0.0/4.1.0/4.2.0/4.3.0/4.3.2) maps this pair to
 # ``AlreadyLocked``. Scoped to POSIX on purpose — the Windows msvcrt backend
 # treats a wider errno set as contention (13, 16, 33 and 36) — and the floor
-# is a floor, so a release past the verified ceiling is unverified by
-# construction. That ceiling is pinned rather than remembered:
-# ``test_locking_contention.py`` fails the build when the lockfile moves
-# portalocker past it, which is the moment to re-read the backend.
+# is a floor, so any release outside that set, including a patch between two
+# listed ones, is unverified by construction. The set is pinned rather than
+# remembered: ``test_locking_contention.py`` fails the build when the
+# lockfile moves portalocker to a release outside it, which is the moment
+# to re-read the backend.
 # These errnos are therefore *not* the primary gate — they are the defensive
 # one, and the ``>=3.0`` range is what the pin allows, not what it proves.
 CONTENTION_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN})
@@ -102,14 +103,14 @@ def is_lock_contention(exc: BaseException) -> bool:
     need that translation.
 
     Across every source-verified release (portalocker
-    3.0.0/3.1.0/3.1.1/3.2.0 and 4.0.0/4.1.0/4.2.0/4.3.0 — the floor is
-    ``>=3.0`` and the ceiling is the release the lockfile pins) genuine
+    3.0.0/3.1.0/3.1.1/3.2.0 and 4.0.0/4.1.0/4.2.0/4.3.0/4.3.2 — the floor is
+    ``>=3.0`` and the release the lockfile pins must be one of them) genuine
     contention reaches this function as the ``AlreadyLocked``
     subclass — POSIX ``EACCES``/``EAGAIN`` and Windows
     ``ERROR_LOCK_VIOLATION`` alike — so the ``isinstance`` check below
-    catches it regardless of how the original error is chained. Anything
-    past that ceiling is unverified by construction, which is why the range
-    is pinned in ``test_locking_contention.py``: a bump past it fails the
+    catches it regardless of how the original error is chained. Any release
+    outside that set is unverified by construction, which is why the set
+    is pinned in ``test_locking_contention.py``: a bump to one fails the
     build instead of leaving this paragraph quietly staler. The
     errno/winerror probes are defensive: the cause probes cover a future
     version that might raise a bare ``LockException`` for a held lock (the
