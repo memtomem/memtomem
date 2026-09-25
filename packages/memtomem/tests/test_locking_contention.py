@@ -1101,6 +1101,13 @@ class TestCheckServerLivenessStoreScope:
 #: top-level changes are docstring prose; the executable ones sit inside
 #: ``RedisLock`` methods, which the file-lock path never calls. 4.3.1 was
 #: never installed and was not read on its own, so it stays out.
+#:
+#: 4.4.0 was checked against 4.3.2 the same way: every module except
+#: ``utils.py`` is byte-identical, lockers and ``redis.py`` included. The
+#: ``utils.py`` changes are docstring prose plus a bool-argument
+#: ``DeprecationWarning`` inside ``LockBase.__init__``; memtomem calls the
+#: module-level ``portalocker.lock``/``unlock`` and never constructs a
+#: ``LockBase`` subclass (``Lock``, ``RLock``, ``BoundedSemaphore``, ...).
 VERIFIED_PORTALOCKER_RELEASES = (
     "3.0.0",
     "3.1.0",
@@ -1111,6 +1118,7 @@ VERIFIED_PORTALOCKER_RELEASES = (
     "4.2.0",
     "4.3.0",
     "4.3.2",
+    "4.4.0",
 )
 
 #: A run of releases as the prose spells them: slash-joined within a major
