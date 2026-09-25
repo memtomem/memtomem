@@ -2014,7 +2014,11 @@ class SqliteBackend(
             if not self._in_transaction:
                 db.rollback()
             raise StorageError(f"delete_chunks failed, transaction rolled back: {exc}") from exc
-        return len(rows) + policy_summaries_deleted
+        if policy_summaries_deleted:
+            logger.info(
+                "Deleted %d policy summary chunks with their source", policy_summaries_deleted
+            )
+        return len(rows)
 
     def _delete_policy_summaries_for_source(self, db: sqlite3.Connection, source: str) -> int:
         """Remove policy-owned derived chunks after their last source chunk goes."""
@@ -2253,6 +2257,48 @@ class SqliteBackend(
                 "ORDER BY h.first_seen_at, h.source_file"
             ).fetchall()
         ]
+
+    async def get_hidden_source_files(self) -> set[Path]:
+        """Direct holds plus policy summaries derived from hidden sources."""
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT source_file FROM held_sources "
+            "UNION SELECT source_file FROM pending_source_checks "
+            "UNION SELECT DISTINCT c.source_file FROM chunks c "
+            "WHERE c.origin=? AND ("
+            "EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file="
+            "substr(c.source_file, 1, length(c.source_file) - length(?))) "
+            "OR EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file="
+            "substr(c.source_file, 1, length(c.source_file) - length(?))))",
+            (ORIGIN_CONSOLIDATION_POLICY, CONSOLIDATED_SUFFIX, CONSOLIDATED_SUFFIX),
+        ).fetchall()
+        return {Path(row[0]) for row in rows}
+
+    async def is_source_hidden(self, source_file: Path) -> bool:
+        """Include a policy summary's parent in path-level visibility."""
+        db = self._get_read_db()
+        source = norm_path(source_file)
+        if (
+            db.execute(
+                "SELECT 1 FROM held_sources WHERE source_file=? UNION "
+                "SELECT 1 FROM pending_source_checks WHERE source_file=? LIMIT 1",
+                (source, source),
+            ).fetchone()
+            is not None
+        ):
+            return True
+        if not source.endswith(CONSOLIDATED_SUFFIX):
+            return False
+        parent = source[: -len(CONSOLIDATED_SUFFIX)]
+        return (
+            db.execute(
+                "SELECT 1 FROM chunks c WHERE c.source_file=? AND c.origin=? AND ("
+                "EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file=?) OR "
+                "EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file=?)) LIMIT 1",
+                (source, ORIGIN_CONSOLIDATION_POLICY, parent, parent),
+            ).fetchone()
+            is not None
+        )
 
     async def is_source_held(self, source_file: Path) -> bool:
         db = self._get_read_db()

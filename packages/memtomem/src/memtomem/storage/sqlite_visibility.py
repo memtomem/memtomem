@@ -32,6 +32,7 @@ from memtomem.models import (
     NamespaceFilter,
     ScopeFilter,
 )
+from memtomem.storage.base import StorageBackend
 
 from .sqlite_helpers import escape_like
 from .sqlite_scope import _scopes_glob_clause, _scopes_in_clause
@@ -51,9 +52,7 @@ def _visible_source_sql(alias: str) -> str:
         f"AND NOT EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file={source})"
     )
     derived = (
-        f"EXISTS (SELECT 1 FROM chunks parent WHERE parent.source_file={original} "  # nosec B608
-        f"AND (parent.origin IS NULL OR parent.origin <> '{ORIGIN_CONSOLIDATION_POLICY}')) "
-        f"AND NOT EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file={original}) "  # nosec B608
+        f"NOT EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file={original}) "  # nosec B608
         f"AND NOT EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file={original})"
     )
     return (
@@ -64,6 +63,33 @@ def _visible_source_sql(alias: str) -> str:
 
 VISIBLE_SOURCE_C = _visible_source_sql("c")
 VISIBLE_SOURCE_CHUNKS = _visible_source_sql("chunks")
+
+
+async def hidden_source_paths(storage: StorageBackend) -> set[Path]:
+    """Fetch path-level visibility for Web and export, including policy summaries."""
+    getter = (
+        getattr(storage, "get_hidden_source_files", None)
+        if hasattr(type(storage), "get_hidden_source_files")
+        else None
+    )
+    if getter is not None:
+        return set(await getter())
+    held = await storage.get_held_sources()
+    pending = await storage.get_pending_source_checks()
+    return set([*held, *pending])
+
+
+async def source_hidden(storage: StorageBackend, source: Path) -> bool:
+    """Check a path after a read so newly committed holds stay hidden."""
+    getter = (
+        getattr(storage, "is_source_hidden", None)
+        if hasattr(type(storage), "is_source_hidden")
+        else None
+    )
+    return (
+        bool(await getter(source)) if getter is not None else await storage.is_source_held(source)
+    )
+
 
 # ``_scopes_*_clause`` are private to ``sqlite_scope`` because they are half a
 # rule on their own — the boundary has to be layered on top, which is exactly

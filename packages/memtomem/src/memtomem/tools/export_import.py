@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 
 from memtomem.errors import EmbeddingError
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata, ChunkType
+from memtomem.storage.sqlite_visibility import source_hidden
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 
 if TYPE_CHECKING:
@@ -164,7 +165,7 @@ async def export_chunks(
         # Bundles carry chunks but no source visibility state. Exporting held
         # rows would make deleted or renamed-away content searchable on import.
         # Count only sources with chunks matching these export filters.
-        if await storage.is_source_held(source):
+        if await source_hidden(storage, source):
             omitted_held_sources += bool(selected)
             continue
         records.extend(_chunk_to_dict(chunk) for chunk in selected)

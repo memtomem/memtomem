@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from memtomem.embedding.probe import embed_document_probe
 from memtomem.errors import NamespaceResolutionError
 from memtomem.search.visibility import resolve_visible_chunk
+from memtomem.storage.sqlite_visibility import source_hidden
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
 from memtomem.source_provenance import (
@@ -99,12 +100,12 @@ async def list_chunks(
 ) -> ChunksListResponse:
     indexed_sources = await storage.get_all_source_files()
     request_path = require_indexed_source(source, indexed_sources)
-    if await storage.is_source_held(request_path):
+    if await source_hidden(storage, request_path):
         raise HTTPException(status_code=404, detail="Source not found")
     chunks = await storage.list_chunks_by_source(request_path, limit=limit)
     out = [chunk_to_out(c) for c in chunks]
     total = await storage.count_chunks_by_source(request_path)
-    if await storage.is_source_held(request_path):
+    if await source_hidden(storage, request_path):
         raise HTTPException(status_code=404, detail="Source not found")
     return ChunksListResponse(chunks=out, total=total)
 

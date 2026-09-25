@@ -163,7 +163,7 @@ async def test_orphan_scan_skips_trusted_virtual_summary_but_not_user_file(compo
 
     original_ids = await components.storage.get_chunk_hashes(original)
     assert (
-        await components.storage.delete_chunks([UUID(chunk_id) for chunk_id in original_ids]) == 2
+        await components.storage.delete_chunks([UUID(chunk_id) for chunk_id in original_ids]) == 1
     )
     assert virtual not in await components.storage.get_all_source_files()
 
@@ -184,6 +184,9 @@ async def test_detached_policy_summary_is_orphan_candidate(components, memory_di
 
 
 async def test_policy_summary_tracks_source_hold_and_explicit_purge(components, memory_dir):
+    from memtomem.storage.sqlite_visibility import hidden_source_paths, source_hidden
+    from memtomem.tools.export_import import export_chunks
+
     original = memory_dir / "tracked.md"
     virtual = memory_dir / "tracked.md.consolidated.md"
     await _indexed(components, original, "originalword")
@@ -204,12 +207,18 @@ async def test_policy_summary_tracks_source_hold_and_explicit_purge(components, 
     assert (await components.search_pipeline.search("summaryword"))[0] == []
     assert await components.storage.hold_source(original, "source_missing")
     assert (await components.search_pipeline.search("summaryword"))[0] == []
+    assert virtual in await hidden_source_paths(components.storage)
+    assert await source_hidden(components.storage, virtual)
+    bundle = await export_chunks(components.storage, stamp_provenance=False)
+    assert bundle.total_chunks == 0
+    assert bundle.omitted_held_sources == 2
     health = await check_orphan_count(SimpleNamespace(storage=components.storage))
     assert health.value == {"orphaned": 0, "held": 1, "total_sources": 1}
 
     original.write_text("# Note\n\noriginalword content.\n", encoding="utf-8")
     assert await components.storage.release_source_hold(original)
     assert (await components.search_pipeline.search("summaryword"))[0]
+    assert not await source_hidden(components.storage, virtual)
 
     original.unlink()
     assert await components.storage.hold_source(original, "source_missing")

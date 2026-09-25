@@ -12,6 +12,7 @@ from memtomem.config import MemoryDirKind, TargetScope, classify_scope, memory_d
 from memtomem.indexing.engine import norm_dir_prefix
 from memtomem.indexing.summarizer import regenerate_for_paths
 from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_visibility import hidden_source_paths
 from memtomem.web.deps import (
     get_config,
     get_search_pipeline,
@@ -99,8 +100,7 @@ async def list_sources(
     config=Depends(get_config),
 ) -> SourcesResponse:
     rows = await storage.get_source_files_with_counts()
-    hidden = {str(path) for path in await storage.get_held_sources()}
-    hidden.update(str(path) for path in await storage.get_pending_source_checks())
+    hidden = {str(path) for path in await hidden_source_paths(storage)}
     # Heuristic preview (first heading + first chunk body), populated for
     # every source so the UI has a readable fallback when no LLM summary
     # is cached yet.
@@ -303,8 +303,7 @@ async def source_content_matches(
         raise HTTPException(status_code=400, detail="Query must not be blank.")
 
     pmdirs = config.indexing.project_memory_dirs
-    hidden = {str(path) for path in await storage.get_held_sources()}
-    hidden.update(str(path) for path in await storage.get_pending_source_checks())
+    hidden = {str(path) for path in await hidden_source_paths(storage)}
 
     def _visible_for_scope(path: Path | str) -> bool:
         if str(path) in hidden:
