@@ -133,10 +133,12 @@ class _ScriptedSource:
         self._seq = list(exists_seq)
         self._last = self._seq[-1]
 
-    def exists(self) -> bool:
+    def stat(self):
         if self._seq:
             self._last = self._seq.pop(0)
-        return self._last
+        if not self._last:
+            raise FileNotFoundError(self._name)
+        return None
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<src {self._name}>"
@@ -146,6 +148,7 @@ def _fake_app(sources, *, delete_return: int = 3) -> MagicMock:
     app = MagicMock()
     app.storage.get_all_source_files = AsyncMock(return_value=set(sources))
     app.storage.delete_by_source = AsyncMock(return_value=delete_return)
+    app.storage.hold_source = AsyncMock(return_value=True)
     app.search_pipeline.invalidate_cache = MagicMock()
     return app
 
@@ -185,22 +188,24 @@ class TestCompactionOrphanGuards:
         assert result["chunks_deleted"] == 0
         assert result["orphan_files"] == 12
         assert result["sources_checked"] == 12
-        assert result["skipped_reason"] == "orphan_ratio_exceeded"
+        assert result["held_sources"] == 12
         app.storage.delete_by_source.assert_not_awaited()
-        app.search_pipeline.invalidate_cache.assert_not_called()
+        app.search_pipeline.invalidate_cache.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_small_stable_orphan_is_deleted(self):
-        """A confirmed orphan below the mass-delete brake deletes normally."""
+    async def test_small_stable_orphan_is_held(self):
+        """A confirmed orphan below the old mass-delete floor is held."""
         gone = _ScriptedSource("gone", [False, False])
         present = [_ScriptedSource(f"ok-{i}", [True]) for i in range(4)]
         app = _fake_app([gone, *present], delete_return=3)
 
         result = await JOB_KINDS["compaction"].runner(app)
 
-        assert result["chunks_deleted"] == 3
+        assert result["chunks_deleted"] == 0
         assert result["orphan_files"] == 1
+        assert result["held_sources"] == 1
         assert result["sources_checked"] == 5
         assert "skipped_reason" not in result
-        app.storage.delete_by_source.assert_awaited_once_with(gone)
+        app.storage.delete_by_source.assert_not_awaited()
+        app.storage.hold_source.assert_awaited_once_with(gone, "scan_missing")
         app.search_pipeline.invalidate_cache.assert_called_once()

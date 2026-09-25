@@ -368,6 +368,7 @@ function _invalidateExportPreview() {
   _exportPreviewSignature = null;
   qs('exp-download-btn').disabled = true;
   hide(qs('exp-preview'));
+  hide(qs('exp-held-warning'));
 }
 
 function resetExportPanel() {
@@ -396,6 +397,13 @@ async function runExportPreview() {
   try {
     const data = await api('GET', `/api/export/stats?${_exportParams()}`);
     qs('exp-count').textContent = data.total_chunks;
+    const heldWarning = qs('exp-held-warning');
+    if (data.omitted_held_sources) {
+      heldWarning.textContent = t('settings.export.held_omitted', { count: data.omitted_held_sources });
+      show(heldWarning);
+    } else {
+      hide(heldWarning);
+    }
     _exportPreviewSignature = _exportSignature();
     qs('exp-download-btn').disabled = false;
     show(qs('exp-preview'));

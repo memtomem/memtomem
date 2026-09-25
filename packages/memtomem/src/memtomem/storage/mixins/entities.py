@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from memtomem.errors import StorageError
 from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority_case
+from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_C
 
 if TYPE_CHECKING:
     from memtomem.models import Chunk, ScopeFilter
@@ -251,7 +252,8 @@ class EntityMixin:
             "c.content, c.source_file, c.namespace "
             "FROM chunk_entities e "
             "JOIN chunks c ON e.chunk_id = c.id "
-            "WHERE 1=1 "
+            # Fixed internal SQL fragment; all caller values below use binds.
+            f"WHERE {VISIBLE_SOURCE_C} "  # nosec B608
         )
         params: list = []
 

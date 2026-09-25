@@ -9,6 +9,7 @@ import dataclasses
 import inspect
 import logging
 import os
+import sqlite3
 import stat as stat_module
 import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
@@ -36,7 +37,12 @@ from memtomem.config import (
 from memtomem import privacy
 from memtomem import __version__ as _memtomem_version
 from memtomem.embedding.probe import embed_document_probe
-from memtomem.errors import EmbeddingError, NamespaceResolutionError, RetryableError
+from memtomem.errors import (
+    EmbeddingError,
+    NamespaceResolutionError,
+    RetryableError,
+    TransactionOwnedError,
+)
 from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.indexing.redaction_exemption import declared_exemption
@@ -1689,6 +1695,9 @@ class IndexEngine:
 
         async def _run() -> tuple[IndexFileResult, float]:
             start = time.monotonic()
+            # A new watcher delete may arrive while this file is being read.
+            # Release only visibility rows that preceded this indexing pass.
+            hold_generation = await self._storage.source_hold_snapshot(path)
             result = await self._index_file(
                 path,
                 force,
@@ -1705,6 +1714,28 @@ class IndexEngine:
                 new_source_namespace=new_source_namespace,
                 walk_root=walk_root,
             )
+            # A held source is visible again only after the current contents
+            # have been validated/indexed. Receipt hits take this path without
+            # embedding; failed, excluded and unreadable paths keep the hold.
+            if (
+                hold_generation is not None
+                and not result.get("errors")
+                and (result["total"] or result["skipped"])
+            ):
+                try:
+                    released = await self._storage.release_source_hold(
+                        path, expected_generation=hold_generation
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                        raise
+                    logger.warning("Indexed %s but deferred hold release: %s", path, exc)
+                    released = False
+                except TransactionOwnedError as exc:
+                    logger.warning("Indexed %s but deferred hold release: %s", path, exc)
+                    released = False
+                if released:
+                    result["mutated"] = True
             return result, (time.monotonic() - start) * 1000
 
         # Engine-wide file-pipeline slot, ALWAYS acquired above L2 (#2105).
@@ -1898,13 +1929,10 @@ class IndexEngine:
         the same pair, so a preview cannot describe an operation the write
         would reject).
 
-        If ``file_path`` no longer exists on disk (deleted, renamed away, or
-        replaced by a directory), this removes that source's stale chunks via
-        ``delete_by_source``, regardless of exclude patterns (cleanup is never
-        blocked by exclude). The delete is skipped when the whole containing
-        index root has vanished, so a single missing file is purged but a
-        wholesale root/volume loss is left to the periodic mass-orphan brake
-        (#1565) instead of being mass-deleted per-event (#1566).
+        If ``file_path`` is missing or inaccessible, its existing chunks are
+        held outside search until recovery or explicit cleanup (#2498). A
+        present nonregular replacement is positively known to be no longer an
+        indexable file and is removed.
         """
         # Defense-in-depth: the primary guard lives at the top of
         # ``_index_file`` (covers every caller — watcher, stream endpoint,
@@ -2384,42 +2412,23 @@ class IndexEngine:
     async def _delete_missing_source(
         self, file_path: Path, *, path_scope: PathScope = "configured"
     ) -> IndexFileResult:
-        """Remove stale chunks for a source file that is gone from disk.
+        """Hold chunks for a source whose absence cannot prove deletion.
 
-        Reached when ``stat``/``read_text`` raise ``FileNotFoundError`` /
-        ``NotADirectoryError`` / ``IsADirectoryError`` (the file was deleted,
-        renamed away, or replaced by a directory).
-
-        Deletion is skipped when the most-specific containing index root has
-        itself disappeared: when a whole watched root/volume is unmounted or
-        removed, every path under it reports missing at once, and a per-event
-        purge of the entire tree is exactly the mass-delete we must not do.
-        Root gone → no-op; the two-pass mass-orphan brake (#1565, run by the
-        scheduler / health watchdog / ``mem_cleanup_orphans``) owns that bulk
-        case with a ratio check the per-event path can't replicate. This brake
-        catches whole-root loss; a mountpoint that survives *empty* still
-        passes ``is_dir()`` here, so that bulk case is deliberately left to the
-        periodic mass-orphan scan rather than guessed at per-event. Reuses the
-        same ``delete_by_source`` primitive as those backstops. (#1566)
+        The path may have been deleted or its mount may be unavailable. This
+        applies equally to configured and explicit indexing scopes (#2498).
+        ``path_scope`` remains for the public single-file/bulk call chain;
+        absence no longer changes policy by scope.
         """
-        root = self._containing_index_root(file_path)
-        if path_scope == "configured" and (root is None or not root.is_dir()):
-            return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
-        deleted = await self._storage.delete_by_source(file_path)
-        if deleted:
-            # Path + count only — never log file content on the delete path.
-            logger.info(
-                "Source file gone; removed %d stale chunk(s) from index: %s",
-                deleted,
-                file_path,
-            )
+        held = await self._storage.hold_source(file_path, "source_missing")
+        if held:
+            logger.warning("Source unavailable; holding indexed chunks: %s", file_path)
         return {
             "total": 0,
             "indexed": 0,
             "skipped": 0,
-            "deleted": deleted,
+            "deleted": 0,
             "errors": [],
-            "mutated": deleted > 0,
+            "mutated": held,
         }
 
     async def _extract_entities_for(self, chunks: Sequence[Chunk]) -> int:
@@ -2462,11 +2471,9 @@ class IndexEngine:
         # at least one chunk was successfully upserted. Early/no-write paths
         # may omit the optional keys — consumers must tolerate their absence.
 
-        # Existence check FIRST — before the exclude guard. A file that is gone
-        # from disk is a delete-by-source, and cleanup must never be blocked by
-        # an exclude pattern: the orphan sweep (#1565) already purges excluded
-        # orphans unconditionally, so the live path must match, else a deleted
-        # + newly-excluded file's chunks stay searchable forever. ``stat`` reads
+        # Existence check FIRST — before the exclude guard. A source that is
+        # missing must be held even if newly excluded, so old chunks cannot
+        # remain searchable. ``stat`` reads
         # only metadata (no content), so statting an excluded file first is
         # safe — its content is still never read below. (#1566)
         try:
@@ -2476,9 +2483,16 @@ class IndexEngine:
             # was replaced by a file, so the path cannot exist) — purge its
             # stale chunks instead of a silent no-op.
             return await self._delete_missing_source(file_path, path_scope=path_scope)
-        except OSError:
-            # Transient I/O (EACCES/EIO/ESTALE) — never delete on a blip.
-            return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
+        except OSError as exc:
+            held = await self._storage.hold_source(file_path, f"stat_error:{exc.errno}")
+            return {
+                "total": 0,
+                "indexed": 0,
+                "skipped": 0,
+                "deleted": 0,
+                "errors": [],
+                "mutated": held,
+            }
 
         mismatch = getattr(self._storage, "embedding_mismatch", None)
         if isinstance(mismatch, dict):
@@ -2500,7 +2514,15 @@ class IndexEngine:
         # content read) and BEFORE the exclude guard, so an excluded file that
         # was swapped for a same-named directory is still cleaned up. (#1566)
         if not stat_module.S_ISREG(stat_result.st_mode):
-            return await self._delete_missing_source(file_path, path_scope=path_scope)
+            deleted = await self._storage.delete_by_source(file_path)
+            return {
+                "total": 0,
+                "indexed": 0,
+                "skipped": 0,
+                "deleted": deleted,
+                "errors": [],
+                "mutated": deleted > 0,
+            }
 
         # Primary exclude guard — every caller (index_file, _index_path_inner
         # after _discover_files, index_path_stream single-file branch) funnels
@@ -2558,8 +2580,16 @@ class IndexEngine:
             # — ``stat`` succeeds on the dir, the read fails). Either way the old
             # source no longer exists, so purge its stale chunks. (#1566)
             return await self._delete_missing_source(file_path, path_scope=path_scope)
-        except OSError:
-            return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
+        except OSError as exc:
+            held = await self._storage.hold_source(file_path, f"read_error:{exc.errno}")
+            return {
+                "total": 0,
+                "indexed": 0,
+                "skipped": 0,
+                "deleted": 0,
+                "errors": [],
+                "mutated": held,
+            }
 
         read_ms = (time.monotonic() - read_started) * 1000
         # Skip binary files (null bytes indicate non-text content)

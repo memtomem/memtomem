@@ -72,7 +72,13 @@ async def mem_export(
         namespace_filter=namespace,
     )
 
-    return f"Export complete:\n- Chunks exported: {bundle.total_chunks}\n- Output: {target}"
+    result = f"Export complete:\n- Chunks exported: {bundle.total_chunks}\n- Output: {target}"
+    if bundle.omitted_held_sources:
+        result += (
+            f"\n- Warning: {bundle.omitted_held_sources} held or pending source(s) omitted. "
+            "Restore them and export again for a complete backup."
+        )
+    return result
 
 
 @mcp.tool()

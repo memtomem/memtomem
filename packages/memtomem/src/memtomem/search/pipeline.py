@@ -537,6 +537,7 @@ class SearchPipeline:
         self._search_cache: dict[str, tuple[float, int, list[SearchResult], RetrievalStats]] = {}
         self._cache_ttl = config.cache_ttl
         self._cache_version = 0
+        self._source_visibility_epoch: int | None = None
         self._bg_tasks: set[asyncio.Task] = set()
         # In-flight observation writes, keyed by the run ID already advertised to
         # the caller (#2183). ``flush_observation`` settles one before a reader
@@ -1560,6 +1561,23 @@ class SearchPipeline:
             )
             version_at_start = self._cache_version
             ttl_snapshot = self._cache_ttl
+            # CLI and MCP processes can hold a source while this process has
+            # a warmed result cache. The persisted epoch makes that change
+            # visible before a cached result can be served (#2498).
+            visibility_epoch = (
+                getattr(self._storage, "source_visibility_epoch", None)
+                if hasattr(type(self._storage), "source_visibility_epoch")
+                else None
+            )
+            if visibility_epoch is not None:
+                current_epoch = await visibility_epoch()
+                if (
+                    self._source_visibility_epoch is not None
+                    and current_epoch != self._source_visibility_epoch
+                ):
+                    self.invalidate_cache()
+                    version_at_start = self._cache_version
+                self._source_visibility_epoch = current_epoch
             # ``record=False`` (replay) bypasses the TTL result cache in both
             # directions: it must never be served a cached result nor evict
             # one, so a concurrent interactive search's cache is untouched.

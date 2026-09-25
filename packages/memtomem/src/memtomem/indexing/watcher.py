@@ -35,7 +35,7 @@ _STOP_SENTINEL = Path("/dev/null/__stop__")
 # processor is busy flushing the previous batch (#2530). A dropped event marks
 # its root for a rescan once the burst settles, so a drop costs a walk rather
 # than a stale index; the dropped path itself is replayed then too, so a dropped
-# delete still purges (#2532). The shutdown sentinel can still be dropped.
+# delete is held outside search (#2532, #2498). The shutdown sentinel can still be dropped.
 # Raising this makes rescans rarer on a very large tree; it does not make them
 # unnecessary.
 _WATCHER_QUEUE_MAXSIZE = 1000
@@ -56,6 +56,9 @@ _STOP_FLUSH_TIMEOUT_S = 5.0
 # event or restart.
 _BACKFILL_MAX_ATTEMPTS = 3
 _BACKFILL_RETRY_BASE_S = 5.0
+_HELD_RECHECK_INTERVAL_S = 300.0
+_HELD_RECHECK_BATCH = 100
+_HELD_PROBE_TIMEOUT_S = 2.0
 
 
 def effective_watcher_backend(config: IndexingConfig) -> str:
@@ -80,16 +83,20 @@ class _MarkdownEventHandler(FileSystemEventHandler):
         loop: asyncio.AbstractEventLoop,
         supported_extensions: frozenset[str],
         on_overflow: Callable[[Path], None] | None = None,
+        on_removed: Callable[[Path], None] | None = None,
     ) -> None:
         super().__init__()
         self._queue = queue
         self._loop = loop
         self._supported = supported_extensions
         self._on_overflow = on_overflow
+        self._on_removed = on_removed
 
-    def _enqueue(self, path: str) -> None:
+    def _enqueue(self, path: str, *, removed: bool = False) -> None:
         p = Path(path)
         if p.suffix in self._supported:
+            if removed and self._on_removed is not None:
+                self._on_removed(p)
             # ``call_soon_threadsafe`` only *schedules* the put — a full queue
             # raises ``QueueFull`` later, inside the event loop's callback
             # runner, so the try/except must live in the callback itself
@@ -120,22 +127,21 @@ class _MarkdownEventHandler(FileSystemEventHandler):
             self._enqueue(str(event.src_path))
 
     def on_deleted(self, event: FileSystemEvent) -> None:
-        # #1566: a deleted .md is enqueued like any other path — the consumer
-        # sees it no longer exists on disk and ``index_file`` purges its stale
-        # chunks (delete-by-source). Without this a deleted file's content
-        # stayed searchable until the opt-in orphan-compaction pass ran.
+        # Persist the source check before debounce can lose the path. Its
+        # chunks become hidden immediately and remain stored until recovery or
+        # explicit cleanup (#1566, #2498).
         if not event.is_directory:
-            self._enqueue(str(event.src_path))
+            self._enqueue(str(event.src_path), removed=True)
 
     def on_moved(self, event: FileSystemEvent) -> None:
-        # #1566: enqueue BOTH paths. The old path no longer exists → its chunks
-        # are deleted-by-source; the new path is indexed. The suffix filter in
+        # #1566: enqueue BOTH paths. The old path is held outside search and
+        # the new path is indexed. The suffix filter in
         # ``_enqueue`` still admits a .md ``src`` even when the file was renamed
         # away to a non-.md ``dest`` (rename-away), so the stale chunks are
-        # cleaned in that case too. Previously only ``dest`` was enqueued,
+        # hidden in that case too. Previously only ``dest`` was enqueued,
         # orphaning the old path's chunks on every rename/move.
         if not event.is_directory:
-            self._enqueue(str(event.src_path))
+            self._enqueue(str(event.src_path), removed=True)
             self._enqueue(str(event.dest_path))
 
 
@@ -190,6 +196,12 @@ class FileWatcher:
         self._queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=_WATCHER_QUEUE_MAXSIZE)
         self._task: asyncio.Task[None] | None = None
         self._backfill_task: asyncio.Task[None] | None = None
+        self._pending_replay_task: asyncio.Task[None] | None = None
+        self._held_recheck_task: asyncio.Task[None] | None = None
+        self._stalled_probes: set[asyncio.Task[str]] = set()
+        self._held_cursor = 0
+        self._recheck_wakeup = asyncio.Event()
+        self._journal_failures = 0
         self._handler: _MarkdownEventHandler | None = None
         self._watches: dict[Path, ObservedWatch] = {}
         # Queue-overflow recovery (#2530). ``_rescan_due`` maps a root to the
@@ -233,7 +245,33 @@ class FileWatcher:
             loop,
             self._config.supported_extensions,
             on_overflow=self._note_overflow,
+            on_removed=self._journal_removed,
         )
+
+    def _journal_removed(self, path: Path) -> None:
+        storage = getattr(self._engine, "_storage", None)
+        if storage is None:
+            return
+        journal = (
+            getattr(storage, "queue_source_check_sync", None)
+            if hasattr(type(storage), "queue_source_check_sync")
+            else None
+        )
+        if journal is None:
+            return
+        try:
+            journal(path)
+            self._journal_failures = 0
+        except Exception:
+            if self._journal_failures == 0:
+                logger.warning(
+                    "Could not journal deleted watcher path %s; live queue recovery remains active",
+                    path,
+                    exc_info=True,
+                )
+            else:
+                logger.debug("Could not journal deleted watcher path %s", path, exc_info=True)
+            self._journal_failures += 1
 
     def _configured_roots(self) -> list[Path]:
         return [Path(d).expanduser().resolve() for d in self._config.all_index_roots()]
@@ -316,8 +354,150 @@ class FileWatcher:
 
             self._observer.start()
             self._task = asyncio.create_task(self._process_events())
+            self._pending_replay_task = asyncio.create_task(self._replay_pending_checks())
+            self._held_recheck_task = asyncio.create_task(self._recheck_held_loop())
             if watched and self._config.startup_backfill:
                 self._backfill_task = asyncio.create_task(self._backfill_existing(watched))
+
+    async def _replay_pending_checks(self) -> None:
+        storage = getattr(self._engine, "_storage", None)
+        if storage is None:
+            return
+        getter = (
+            getattr(storage, "get_pending_source_checks", None)
+            if hasattr(type(storage), "get_pending_source_checks")
+            else None
+        )
+        if getter is None:
+            return
+        try:
+            for path in await getter():
+                await self._queue.put(path)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Could not replay pending watcher source checks")
+
+    async def _recheck_held_loop(self) -> None:
+        from memtomem.storage.orphan_detect import source_state
+
+        storage = getattr(self._engine, "_storage", None)
+        if storage is None:
+            return
+        getter = (
+            getattr(storage, "get_held_sources", None)
+            if hasattr(type(storage), "get_held_sources")
+            else None
+        )
+        if getter is None:
+            return
+        pending_getter = (
+            getattr(storage, "get_pending_source_checks", None)
+            if hasattr(type(storage), "get_pending_source_checks")
+            else None
+        )
+        startup_remaining: int | None = None
+        while True:
+            try:
+                held = await getter()
+                pending_checks: set[Path] = set()
+                # A failed post-event settle can leave a path pending without
+                # a held row. Recheck it here as well so recovery does not
+                # depend on another watcher event or a process restart.
+                if pending_getter is not None:
+                    pending_checks = set(await pending_getter())
+                    held = list(dict.fromkeys([*held, *pending_checks]))
+                if startup_remaining is None:
+                    startup_remaining = len(held)
+                else:
+                    # Another process may have released the remaining paths
+                    # since our last batch. Never spin on an empty list with
+                    # a stale startup counter.
+                    startup_remaining = min(startup_remaining, len(held))
+                if held:
+                    batch = [
+                        held[(self._held_cursor + i) % len(held)]
+                        for i in range(min(len(held), _HELD_RECHECK_BATCH))
+                    ]
+                    processed = 0
+                    stalled = False
+                    for path in batch:
+                        if len(self._stalled_probes) >= 2:
+                            logger.warning(
+                                "Held-source probes stalled; waiting before further checks"
+                            )
+                            stalled = True
+                            break
+                        processed += 1
+                        probe = asyncio.create_task(asyncio.to_thread(source_state, path))
+                        self._stalled_probes.add(probe)
+                        probe.add_done_callback(self._stalled_probes.discard)
+                        try:
+                            state = await asyncio.wait_for(
+                                asyncio.shield(probe), timeout=_HELD_PROBE_TIMEOUT_S
+                            )
+                        except TimeoutError:
+                            logger.warning("Held-source probe timed out: %s", path)
+                            # It is already held. A second path normalization
+                            # here could block the event loop on the same mount.
+                            continue
+                        if state == "present":
+                            try:
+                                if is_under_any_root(path, self._config.all_index_roots()):
+                                    stats = await self._engine.index_file(
+                                        path, path_scope="explicit"
+                                    )
+                                    self._invalidate_if_mutated(stats)
+                                    if not await storage.is_source_held(path):
+                                        self._recheck_wakeup.set()
+                                else:
+                                    # A root removed without a chunk sweep must
+                                    # not be reindexed by a late watcher event.
+                                    # Its existing rows may become visible again
+                                    # once the source is positively present.
+                                    if await storage.release_source_hold(path):
+                                        if self._search_pipeline is not None:
+                                            self._search_pipeline.invalidate_cache()
+                                        self._recheck_wakeup.set()
+                            except Exception:
+                                logger.exception("Could not restore held source %s", path)
+                        elif path in pending_checks:
+                            # A failed event settle may have left only a pending
+                            # journal row. Turn it into a durable hold now.
+                            try:
+                                await storage.hold_source(path, "watch_reindex_unresolved")
+                            except Exception:
+                                logger.exception("Could not settle pending source %s", path)
+                        # Missing/unavailable held paths remain held as they are.
+                    self._held_cursor = (self._held_cursor + processed) % len(held)
+                    startup_remaining = max(0, startup_remaining - processed)
+                if held and stalled:
+                    await asyncio.wait(
+                        self._stalled_probes,
+                        timeout=_HELD_RECHECK_INTERVAL_S,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                elif startup_remaining:
+                    await asyncio.sleep(0)
+                else:
+                    try:
+                        await asyncio.wait_for(
+                            self._recheck_wakeup.wait(), timeout=_HELD_RECHECK_INTERVAL_S
+                        )
+                    except TimeoutError:
+                        pass
+                    self._recheck_wakeup.clear()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Held-source recheck failed; retrying")
+                try:
+                    await asyncio.wait_for(
+                        self._recheck_wakeup.wait(), timeout=_HELD_RECHECK_INTERVAL_S
+                    )
+                except TimeoutError:
+                    pass
+                self._recheck_wakeup.clear()
 
     async def reconfigure(self, config: IndexingConfig) -> None:
         """Reconcile live watchdog roots after a successful config change."""
@@ -326,6 +506,7 @@ class FileWatcher:
             handler = self._handler
             if observer is None or handler is None:
                 self._config = config
+                self._recheck_wakeup.set()
                 return
 
             desired = {
@@ -382,6 +563,7 @@ class FileWatcher:
                 self._watches = replacement_watches
                 handler._supported = config.supported_extensions
                 self._config = config
+                self._recheck_wakeup.set()
                 logger.info("File watcher backend changed to: %s", desired_backend)
                 return
 
@@ -413,6 +595,7 @@ class FileWatcher:
                 raise
             handler._supported = config.supported_extensions
             self._config = config
+            self._recheck_wakeup.set()
 
     def rebind(
         self,
@@ -436,6 +619,16 @@ class FileWatcher:
     async def stop(self) -> None:
         """Stop the observer and the processor task, clearing their handles."""
         async with self._lifecycle_lock:
+            background = [self._pending_replay_task, self._held_recheck_task]
+            for task in background:
+                if task is not None:
+                    task.cancel()
+            if any(task is not None for task in background):
+                await asyncio.gather(
+                    *(task for task in background if task is not None), return_exceptions=True
+                )
+            self._pending_replay_task = None
+            self._held_recheck_task = None
             if self._backfill_task is not None and not self._backfill_task.done():
                 # Cancel — the backfill walk can take a while on large trees and
                 # we don't want shutdown to block on it.
@@ -761,7 +954,7 @@ class FileWatcher:
 
         A walk only visits files that exist, so the root's dropped paths are
         also added to *pending*, before the walk and whatever its outcome, and
-        replayed as the events they were (#2532). That is what purges a
+        replayed as the events they were (#2532). That is what holds a
         dropped delete or a move's source: ``index_file`` decides, as it does
         for a delivered event. A path that still exists is indexed again,
         after the walk.
@@ -885,19 +1078,30 @@ class FileWatcher:
 
         if not is_under_any_root(file_path, self._config.all_index_roots()):
             logger.info("Skipped auto-reindex for %s: not under a configured root", file_path.name)
+            storage = getattr(self._engine, "_storage", None)
+            if storage is not None and hasattr(type(storage), "is_source_held"):
+                # The observer journals a delete before it reaches this gate.
+                # Move that pending row into the held recheck path; otherwise
+                # every restart replays and drops the same pending path.
+                try:
+                    if await storage.is_source_held(file_path):
+                        await storage.hold_source(file_path, "watch_root_removed")
+                except Exception:
+                    logger.exception("Could not settle watcher check outside roots: %s", file_path)
             return None
 
         try:
             stats = await self._engine.index_file(file_path)
             self._invalidate_if_mutated(stats)
-            if stats.deleted_chunks and not stats.indexed_chunks and not file_path.exists():
-                # #1566: pure delete pass (file gone from disk) — "Auto-reindexed
-                # ... indexed=0 ... deleted=N" reads as a no-op in logs a user
-                # greps during a privacy check. Name it for what it is.
+            if (
+                stats.mutated
+                and not stats.deleted_chunks
+                and not stats.indexed_chunks
+                and not file_path.exists()
+            ):
                 logger.info(
-                    "Removed deleted file from index: %s (%d stale chunk(s))",
+                    "Held unavailable source outside search: %s",
                     file_path.name,
-                    stats.deleted_chunks,
                 )
             else:
                 logger.info(
@@ -937,6 +1141,18 @@ class FileWatcher:
             return file_path
         except Exception as exc:
             logger.error("Auto-reindex failed for %s: %s", file_path, exc)
+        finally:
+            # Unsupported, excluded, unreadable and failed files may return
+            # without releasing a journaled delete. Keep them hidden and let
+            # the periodic held-source probe retry after the source recovers.
+            storage = getattr(self._engine, "_storage", None)
+            if storage is not None and hasattr(type(storage), "is_source_pending"):
+                try:
+                    if await storage.is_source_pending(file_path):
+                        if await storage.hold_source(file_path, "watch_reindex_unresolved"):
+                            self._recheck_wakeup.set()
+                except Exception:
+                    logger.exception("Could not settle watcher check after reindex: %s", file_path)
         return None
 
 

@@ -841,13 +841,19 @@ class TestExport:
         with patch("memtomem.tools.export_import.export_chunks") as mock_export:
             from memtomem.tools.export_import import ExportBundle
 
-            bundle = ExportBundle(exported_at="2026-01-01T00:00:00Z", total_chunks=42, chunks=[])
+            bundle = ExportBundle(
+                exported_at="2026-01-01T00:00:00Z",
+                total_chunks=42,
+                omitted_held_sources=2,
+                chunks=[],
+            )
             mock_export.return_value = bundle
 
             resp = await client.get("/api/export/stats")
             assert resp.status_code == 200
             data = resp.json()
             assert data["total_chunks"] == 42
+            assert data["omitted_held_sources"] == 2
 
 
 # ---------------------------------------------------------------------------

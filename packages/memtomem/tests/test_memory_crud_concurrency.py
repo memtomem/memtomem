@@ -458,7 +458,9 @@ class TestRollbackAgainstExternalRemoval:
         assert not f.exists()  # the pre-image was NOT written back
         assert "removed by another process" in out
         assert "rolled back" not in out
-        assert await comp.storage.list_chunks_by_source(f.resolve()) == []
+        assert await comp.storage.list_chunks_by_source(f.resolve())
+        assert await comp.storage.is_source_held(f)
+        assert "hidden from search" in out
 
     @pytest.mark.asyncio
     async def test_edit_leaves_a_source_replaced_during_the_reindex_as_found(
@@ -551,15 +553,8 @@ class TestRollbackAgainstExternalRemoval:
         assert not f.exists()
 
     @pytest.mark.asyncio
-    async def test_it_does_not_claim_a_purge_the_orphan_brake_prevented(self, bm25_only_components):
-        """A removed source whose whole index root went with it.
-
-        ``_delete_missing_source`` refuses to purge when the containing root is
-        gone (#1566), and says so with a zero result that raises nothing and
-        carries no errors — indistinguishable, from the stats alone, from "there
-        was nothing to delete". The rows survive, so the result must not tell
-        the caller they were removed.
-        """
+    async def test_removed_source_reports_held_chunks(self, bm25_only_components):
+        """An absent source retains chunks but the rollback hides them."""
         comp, mem_dir = bm25_only_components
         app = AppContext.from_components(comp)
         ctx = StubCtx(app)
@@ -568,18 +563,13 @@ class TestRollbackAgainstExternalRemoval:
         f = mem_dir / "d.md"
         (alpha,) = await _chunks_by_start_line(comp, f)
         self._failing_index(app, f.unlink, RuntimeError("boom"))
-        # Drive the brake by its own condition rather than by deleting the
-        # directory: Windows refuses to remove a tree that still holds the open
-        # sidecar lock, which would stage a different failure entirely.
-        app.index_engine._containing_index_root = lambda _p: None  # type: ignore[method-assign]
-
         out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
 
         assert "removed by another process" in out
-        # The rows really are still there — so say so, and point at the fix.
+        # The rows really are still there, but cannot enter ordinary search.
         assert await comp.storage.list_chunks_by_source(f.resolve()) != []
-        assert "may still be there" in out
-        assert "mem_index" in out
+        assert await comp.storage.is_source_held(f)
+        assert "hidden from search" in out
 
     @pytest.mark.asyncio
     async def test_it_does_not_call_a_reindex_that_reported_errors_reconciled(
@@ -618,7 +608,7 @@ class TestRollbackAgainstExternalRemoval:
 
         out = await memory_crud.mem_edit(chunk_id=str(alpha.id), new_content="EDIT", ctx=ctx)
 
-        assert "may still be there" in out
+        assert "may still be searchable" in out
         assert "mem_index" in out
 
     @pytest.mark.asyncio
@@ -657,7 +647,7 @@ class TestRollbackAgainstExternalRemoval:
         # unverifiable index is reported as such rather than as a purge.
         assert "boom" in out
         assert "removed by another process" in out
-        assert "may still be there" in out
+        assert "may still be searchable" in out
         # The cache invalidation after the check still ran.
         assert invalidations >= 1
 
@@ -754,7 +744,9 @@ class TestForwardWriteAgainstExternalRemoval:
         assert not f.exists()  # the note the user deleted stayed deleted
         assert "removed by another process" in out
         assert "rolled back" not in out
-        assert await comp.storage.list_chunks_by_source(f.resolve()) == []
+        assert await comp.storage.list_chunks_by_source(f.resolve())
+        assert await comp.storage.is_source_held(f)
+        assert "hidden from search" in out
 
     @pytest.mark.asyncio
     async def test_edit_leaves_a_source_replaced_before_the_write_as_found(

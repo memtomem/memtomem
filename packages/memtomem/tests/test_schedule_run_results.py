@@ -398,6 +398,7 @@ class TestDedupJobCoverage:
         storage = MagicMock()
         storage.dense_enabled = True
         storage.get_all_source_files = AsyncMock(return_value={Path("/s.md")})
+        storage.is_source_held = AsyncMock(return_value=False)
         storage.list_chunks_by_source = AsyncMock(return_value=[a, b, pending])
         storage.get_embeddings_for_chunks = AsyncMock(
             return_value={str(a.id): [0.0], str(b.id): [1.0]}

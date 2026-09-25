@@ -75,8 +75,9 @@ _UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9a-fA-F]{4}")
 # for disposable user-data tables — a new virtual-table module an older binary
 # can't DROP, or a trigger that repopulates a cleared table, falls outside that
 # envelope and DOES require a bump.
-# Older writers cannot maintain source_span_hash alongside line ranges (#2371).
-SCHEMA_VERSION = 2
+# Older writers cannot maintain source_span_hash alongside line ranges (#2371),
+# and older readers cannot hide held/pending source chunks (#2498).
+SCHEMA_VERSION = 3
 
 _SCHEMA_VERSION_KEY = "schema_version"
 
@@ -168,6 +169,31 @@ def create_tables(
         )
     """)
 
+    # A held source retains its chunks but must be invisible to older search
+    # code. The schema fence above prevents an older binary from opening this
+    # database and returning those chunks (#2498).
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS held_sources (
+            source_file TEXT PRIMARY KEY,
+            first_seen_at TEXT NOT NULL,
+            last_checked_at TEXT NOT NULL,
+            reason TEXT NOT NULL
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS pending_source_checks (
+            source_file TEXT PRIMARY KEY,
+            queued_at TEXT NOT NULL
+        )
+    """)
+    # Retain a source-local token after release to avoid ABA when a source is
+    # held, released, then held again during one indexing pass.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS source_visibility_generations (
+            source_file TEXT PRIMARY KEY,
+            generation INTEGER NOT NULL
+        )
+    """)
     db.execute("""
         CREATE TABLE IF NOT EXISTS chunks (
             id TEXT PRIMARY KEY,

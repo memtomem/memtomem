@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from memtomem.errors import TransactionOwnedError
 from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server.health_store import HealthSnapshot
+from memtomem.storage.orphan_detect import orphan_candidate_sources
 
 if TYPE_CHECKING:
     from memtomem.server.context import AppContext
@@ -85,13 +87,23 @@ async def check_search_cache_size(app: AppContext) -> HealthSnapshot:
 
 
 async def check_orphan_count(app: AppContext) -> HealthSnapshot:
-    """Count source files that no longer exist on disk."""
+    """Count newly missing sources; already held sources are accounted for."""
     now = time.time()
-    source_files = await app.storage.get_all_source_files()
+    source_files = await orphan_candidate_sources(app.storage)
+    hidden: set[Path] = set()
+    explicit_methods = getattr(app.storage, "__dict__", {})
+    if hasattr(type(app.storage), "get_held_sources") or "get_held_sources" in explicit_methods:
+        hidden.update(await app.storage.get_held_sources())
+    if (
+        hasattr(type(app.storage), "get_pending_source_checks")
+        or "get_pending_source_checks" in explicit_methods
+    ):
+        hidden.update(await app.storage.get_pending_source_checks())
+    known_hidden = source_files & hidden
 
     def _count_orphans() -> tuple[int, int]:
         orphaned = 0
-        for sf in source_files:
+        for sf in source_files - known_hidden:
             if not sf.exists():
                 orphaned += 1
         return orphaned, len(source_files)
@@ -108,7 +120,7 @@ async def check_orphan_count(app: AppContext) -> HealthSnapshot:
     return HealthSnapshot(
         tier="diagnostic",
         check_name="orphan_count",
-        value={"orphaned": orphaned, "total_sources": total},
+        value={"orphaned": orphaned, "held": len(known_hidden), "total_sources": total},
         status=status,
         created_at=now,
     )

@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 
 from memtomem.errors import EmbeddingError
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata, ChunkType
+from memtomem.storage.sqlite_visibility import source_hidden
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 
 if TYPE_CHECKING:
@@ -51,6 +52,7 @@ class ExportBundle:
     version: str = _BUNDLE_VERSION
     exported_at: str = ""
     total_chunks: int = 0
+    omitted_held_sources: int = 0
     chunks: list[dict] = field(default_factory=list)
     # Local-provenance marker (ADR-0006 Axis F.3). Present on self-exports;
     # ``None`` on hand-crafted / pre-F.3 bundles, which then import as foreign.
@@ -67,6 +69,7 @@ class ExportBundle:
             version=data.get("version", _BUNDLE_VERSION),
             exported_at=data.get("exported_at", ""),
             total_chunks=data.get("total_chunks", 0),
+            omitted_held_sources=data.get("omitted_held_sources", 0),
             chunks=data.get("chunks", []),
             provenance=data.get("provenance"),
         )
@@ -147,18 +150,25 @@ async def export_chunks(
     # Substring-only contract with negation — see
     # ``match_source_filter_substring`` for the separator-fold rule (#720).
     records: list[dict] = []
+    omitted_held_sources = 0
     for source in sorted(source_files):
         if source_filter and not match_source_filter_substring(source_filter, str(source)):
             continue
         chunks = await storage.list_chunks_by_source(source, limit=100_000)
-        for chunk in chunks:
-            if tag_filter and tag_filter not in chunk.metadata.tags:
-                continue
-            if since and chunk.created_at < since:
-                continue
-            if namespace_filter and chunk.metadata.namespace != namespace_filter:
-                continue
-            records.append(_chunk_to_dict(chunk))
+        selected = [
+            chunk
+            for chunk in chunks
+            if (not tag_filter or tag_filter in chunk.metadata.tags)
+            and (not since or chunk.created_at >= since)
+            and (not namespace_filter or chunk.metadata.namespace == namespace_filter)
+        ]
+        # Bundles carry chunks but no source visibility state. Exporting held
+        # rows would make deleted or renamed-away content searchable on import.
+        # Count only sources with chunks matching these export filters.
+        if await source_hidden(storage, source):
+            omitted_held_sources += bool(selected)
+            continue
+        records.extend(_chunk_to_dict(chunk) for chunk in selected)
 
     marker: dict | None = None
     if stamp_provenance:
@@ -168,10 +178,17 @@ async def export_chunks(
     bundle = ExportBundle(
         exported_at=datetime.now(timezone.utc).isoformat(),
         total_chunks=len(records),
+        omitted_held_sources=omitted_held_sources,
         chunks=records,
         provenance=marker,
     )
 
+    if omitted_held_sources:
+        logger.warning(
+            "Export omitted %d held or pending source(s); restore them and export again "
+            "before treating this bundle as a complete backup",
+            omitted_held_sources,
+        )
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(bundle.to_json(), encoding="utf-8")

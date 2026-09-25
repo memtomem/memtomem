@@ -1,31 +1,9 @@
-"""Transient-safe orphan-source detection (issue #1565).
+"""Two-pass indexed-source availability scan (#1565, #2498).
 
-An *orphan source* is an indexed ``source_file`` whose path no longer exists
-on disk — its chunks are candidates for deletion. Several call sites detect
-orphans the same way (``[sf for sf in get_all_source_files() if not sf.exists()]``)
-and then delete them: the scheduled ``compaction`` job, the health-watchdog
-auto-maintenance path, and the interactive ``mem_cleanup_orphans`` tool.
-
-A single ``exists()`` check is unsafe when sources live under a cloud-sync or
-network mount (Dropbox/iCloud reconnect, VPN blip, sleep/wake remount): if the
-mount is briefly absent at the moment the check runs, *every* source under it
-reports ``exists() == False`` and an unattended delete wipes all their chunks
-as "orphans". This module centralizes two independent guards:
-
-1. **Two-pass re-check** (:func:`scan_orphans`) — a path is only reported
-   orphaned if it fails ``exists()`` on an initial pass *and* again after a
-   short delay, filtering sub-second transient absences. Mirrors the guard
-   already living inline in ``health_maintenance.py``.
-2. **Mass-delete brake** (:func:`is_suspected_mass_orphan`) — even a stable
-   two-pass result can be a mount that stayed down past the re-check window,
-   so unattended callers additionally refuse to delete when the confirmed
-   orphans are both numerous (absolute floor) *and* a large fraction of all
-   sources. "Everything vanished at once" is far likelier a mount failure than
-   a real mass deletion; the safe move is to skip and warn, not delete.
-
-The thresholds are module constants (not config) — they mirror the previously
-hardcoded 0.5 s delay and add no new config/docs surface. Callers read them at
-call time, so tests can monkeypatch them.
+The scanner distinguishes missing paths from filesystem errors. Automatic
+callers hold either state outside search; only confirmed missing paths are
+candidates for an explicit, freshly checked purge. The old mass-ratio helper
+remains for diagnostics and compatibility, never as an automatic delete gate.
 """
 
 from __future__ import annotations
@@ -42,9 +20,20 @@ if TYPE_CHECKING:
 # in ``MaintenanceExecutor.cleanup_orphans`` before this module existed.
 ORPHAN_RECHECK_DELAY_SECONDS = 0.5
 
-# Mass-delete brake. The absolute floor keeps small corpora deleting normally
-# (deleting the only indexed file is a ratio of 1.0 but not a "mass" event);
-# the brake only engages once *both* thresholds are crossed.
+
+def source_state(source: Path) -> str:
+    """Return present, missing or unavailable without conflating OS errors."""
+    try:
+        source.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return "missing"
+    except OSError:
+        return "unavailable"
+    return "present"
+
+
+# Legacy mass-delete diagnostic thresholds. Absence alone no longer authorizes
+# unattended deletion, so these are not a safety gate for automatic callers.
 MASS_DELETE_MIN_ORPHANS = 10
 MASS_DELETE_RATIO = 0.5
 
@@ -61,6 +50,7 @@ class OrphanScanResult:
     total_sources: int
     first_pass_orphans: int
     confirmed_orphans: list[Path] = field(default_factory=list)
+    unavailable_sources: list[Path] = field(default_factory=list)
 
     @property
     def ratio(self) -> float:
@@ -70,6 +60,20 @@ class OrphanScanResult:
         return len(self.confirmed_orphans) / self.total_sources
 
 
+async def orphan_candidate_sources(storage: StorageBackend) -> set[Path]:
+    """Filesystem-backed sources, plus detached policy summaries for cleanup."""
+    candidate_getter = (
+        getattr(storage, "get_orphan_candidate_source_files", None)
+        if hasattr(type(storage), "get_orphan_candidate_source_files")
+        else None
+    )
+    return set(
+        await candidate_getter()
+        if candidate_getter is not None
+        else await storage.get_all_source_files()
+    )
+
+
 async def scan_orphans(
     storage: StorageBackend,
     *,
@@ -77,30 +81,37 @@ async def scan_orphans(
 ) -> OrphanScanResult:
     """Two-pass scan for indexed sources whose files no longer exist.
 
-    A source is only confirmed orphaned if it fails :meth:`pathlib.Path.exists`
-    on an initial pass *and* again after ``recheck_delay_seconds`` (defaults to
+    A source is only confirmed missing if ``stat`` fails with ENOENT or ENOTDIR
+    on a second pass after ``recheck_delay_seconds`` (defaults to
     :data:`ORPHAN_RECHECK_DELAY_SECONDS`, read at call time). When the first
     pass finds nothing there is no second pass and no delay.
 
-    Both passes run the (potentially slow, blocking) ``exists()`` stats off the
+    Both passes run the (potentially slow, blocking) ``stat`` probes off the
     event loop via :func:`asyncio.to_thread`, matching ``check_orphan_count`` —
     a hanging network mount must not stall the whole server.
     """
     delay = ORPHAN_RECHECK_DELAY_SECONDS if recheck_delay_seconds is None else recheck_delay_seconds
 
-    sources = await storage.get_all_source_files()
+    sources = await orphan_candidate_sources(storage)
     total = len(sources)
 
-    first_pass = await asyncio.to_thread(lambda: [sf for sf in sources if not sf.exists()])
-    if not first_pass:
+    def probe(paths: set[Path] | list[Path]) -> dict[Path, str]:
+        return {source: source_state(source) for source in paths}
+
+    first = await asyncio.to_thread(probe, sources)
+    suspect = [source for source, state in first.items() if state != "present"]
+    if not suspect:
         return OrphanScanResult(total_sources=total, first_pass_orphans=0)
 
     await asyncio.sleep(delay)
-    confirmed = await asyncio.to_thread(lambda: [sf for sf in first_pass if not sf.exists()])
+    second = await asyncio.to_thread(probe, suspect)
+    confirmed = [source for source, state in second.items() if state == "missing"]
+    unavailable = [source for source, state in second.items() if state == "unavailable"]
     return OrphanScanResult(
         total_sources=total,
-        first_pass_orphans=len(first_pass),
+        first_pass_orphans=sum(state == "missing" for state in first.values()),
         confirmed_orphans=confirmed,
+        unavailable_sources=unavailable,
     )
 
 

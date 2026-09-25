@@ -252,7 +252,10 @@ mem_decay_expire(max_age_days=90)                   # delete (dry_run=True by de
 
 ### Orphan cleanup
 
-Remove chunks whose source files have been deleted:
+Missing source files are held outside ordinary search while their chunks remain
+in the database. A rename also leaves the old path's chunks held. Holds do not
+expire automatically; after checking that a file was intentionally removed,
+purge it:
 
 ```
 mm gc orphan-sources             # preview (dry-run)
@@ -260,8 +263,14 @@ mm gc orphan-sources --apply     # delete, with a confirmation prompt
 ```
 
 Over MCP, the same cleanup is `mem_do(action="cleanup_orphans")` for the
-preview and `mem_do(action="cleanup_orphans", params={"dry_run": false})` to
-delete.
+preview and `mem_do(action="cleanup_orphans", params={"dry_run": false,
+"confirm_purge": true})` to delete. `dry_run=false` alone still previews.
+Storage `get_chunk`, MCP `mem_read`, `mem_edit`, `mem_delete`, and `mem_related`
+can still access held content by ID until it is purged. Ordinary search and
+the Web source browser and chunk endpoints hide held chunks. A running watcher
+checks held files in batches of 100 every five minutes. In degraded mode or
+CLI-only use, run `mm index <file>` after restoring a source to make it
+searchable again.
 
 ### Runtime health — `mm doctor`
 
@@ -379,7 +388,7 @@ mm memory doctor --fix --apply   # remove them from the index file
       - project_roadmap.md
       - feedback_review_style.md
       - user_role.md
-  ✗ 1 DB source file(s) no longer exist on disk — chunks linger after the file was deleted (run `mm gc orphan-sources --apply`)
+  ✗ 1 DB source file(s) no longer exist on disk — chunks linger after the file was deleted (review with `mm gc orphan-sources`, then use `--apply` after confirming deletion)
       - /Users/you/.claude/projects/-Users-you-Work-myproj/memory/old_notes.md
   ! MEMORY.md over budget: 25600 bytes (cap 24400); 212 lines (cap 200); 2 line(s) over 200 chars (L8, L40)
       - L8
@@ -401,7 +410,8 @@ Each dir header line reads `{category} · [index={index_file} ·] indexed {db_co
 | `db_coverage` | warn | On disk and indexable, but zero chunks in the DB — `mem_search` can't find it. | `mm index <dir>` |
 | `stale_index` | warn | An indexed file has moved past its chunks, so `mem_search` answers from the old index. Detected by re-chunking the file and diffing against the DB on content hash, heading hierarchy, **line range** and the **retrieval metadata** a search reads but a chunk's text cannot speak for (**tags**, the **validity window**) — so a real edit is caught, a reordering of unchanged sections is caught (it changes which neighbours a context-window search returns), an edit to a section's `> tags: [...]` blockquote or to the frontmatter `valid_from` / `valid_to` window is caught (it changes what `mem_search(tag_filter=…)` matches, or what the validity filter admits, even where the chunk text is identical), and a bare `touch` or an identical re-save is not reported. Not a timestamp comparison: chunk `updated_at` advances on metadata-only writes and stays put through a no-op re-index, so it would both hide real drift and flag untouched content. The check sees what the indexer's diff sees, so every gap found so far was closed in the differ: collapsing two byte-identical chunks into one is reported and cleared by a re-index ([#2123](https://github.com/memtomem/memtomem/issues/2123)), and the two columns stamped onto a chunk from outside its text — a section's `> tags: [...]` blockquote ([#2124](https://github.com/memtomem/memtomem/issues/2124)) and the file's frontmatter validity window ([#2140](https://github.com/memtomem/memtomem/issues/2140)) — are reported and applied as metadata-only updates, with no re-embed. | `mm index <file>` |
 | `stale_index_blocked` | warn | The same drift on a file the redaction guard would **refuse**. `mm index` **skips** such a file rather than failing it, so its chunks stay stale indefinitely and `mm index <file>` alone will not clear it. Matching a pattern is not the same as being refused: a Markdown note that declares `redaction: documents-patterns` in its frontmatter is honoured by the guard, re-indexes normally, and is reported as plain `stale_index` instead. Hit counts only — matched text is never printed. Items name the path relative to the memory root printed above them (`mm index` itself resolves a relative path against your current directory, so join the two or `cd` to the root first). | Remove or move the matched text, then `mm index <file>`; or, once you have triaged the hit as a false positive, `mm index --force-unsafe <file>`; or, for a **Markdown** note that documents the patterns, declare `redaction: documents-patterns` in its frontmatter (that remedy is named only when a listed item is Markdown). Both bypasses are audit-logged and hard-refused for `project_shared` files. |
-| `stale_source` | **error** | A DB chunk's source file no longer exists on disk (deleted; chunks linger). | `mm gc orphan-sources --apply` (dry-run without `--apply`), or `mem_do(action="cleanup_orphans", params={"dry_run": false})` over MCP (see [Orphan cleanup](#orphan-cleanup)) |
+| `stale_source` | **error** | A DB chunk's source file is missing but has not yet entered a visibility hold. | Review with `mm gc orphan-sources`; purge with `mm gc orphan-sources --apply` after confirming the source is gone. |
+| `held_source` | warn | A source's chunks are retained but hidden from ordinary search. The source may be missing or present but unindexable. | Repair and run `mm index <file>` for wanted sources. For confirmed deletions, review with `mm gc orphan-sources` and purge with `--apply`. |
 | `convention_violation` | **error** | An index/meta file (`MEMORY.md` / `README.md` for a `claude-memory` dir) was indexed as searchable content. | `mm purge --matching-excluded --apply` |
 | `broken_link` | **error** | A markdown pointer in the index file (`[title](target.md)`) resolves to a missing target or escapes the memory root. Wikilinks (`[[other-memo]]`) are never pointers — including the `[[memo]](note)` shape, where the parenthetical is prose rather than a destination (recognized only when the raw source accounts for every same-named label; an unattributable mix reports as `ambiguous_index_line` instead) — and are checked separately as `dangling_wikilink`. | `mm memory doctor --fix --apply` removes the `missing_target` subset (see [Fixing broken links](#fixing-broken-links)); fix or remove `outside_root` links by hand. |
 | `db_extra` | warn | A DB source exists on disk but falls outside the current indexable set (unsupported extension or excluded path). | Usually expected. If the path is now excluded, `mm purge --matching-excluded --apply` reclaims it; unsupported-extension residue has no targeted fix yet. |
@@ -416,9 +426,14 @@ Each dir header line reads `{category} · [index={index_file} ·] indexed {db_co
 
 `db_unavailable` and `unowned_chunks` are store-wide, so they print as top-level lines (`(database)` / `(unowned)`) rather than under a dir header.
 
+A held source that returns as an excluded, binary, or otherwise unindexable file
+stays hidden and appears as `held_source` in `mm memory doctor`. Repair the file
+and run `mm index <file>`. If the source is no longer wanted, remove it first,
+then review and apply `mm gc orphan-sources`.
+
 #### Exit codes and JSON
 
-The exit code is `0` when clean or when only advisory (warn/info) findings exist, and `1` when any **error**-severity finding is present (`stale_source`, `convention_violation`, `broken_link`) — so a coverage gap or budget overflow won't fail CI, but a deleted-source leak or broken TOC link will.
+The exit code is `0` when clean or when only advisory (warn/info) findings exist, and `1` when any **error**-severity finding is present (`stale_source`, `convention_violation`, `broken_link`). A missing source already under a visibility hold is `held_source` (warn), so it does not fail CI; a missing source that has not entered a hold remains `stale_source` (error). Review held sources with `mm gc orphan-sources` and explicitly purge confirmed deletions.
 
 `--json` emits a stable payload: a top-level `{status, dirs, summary}`, where `status` is `"issues"` when any error- or warn-severity finding exists and `"ok"` otherwise (info-only stays `"ok"`).
 
@@ -445,7 +460,7 @@ The exit code is `0` when clean or when only advisory (warn/info) findings exist
           "check": "stale_source",
           "severity": "error",
           "count": 1,
-          "summary": "1 DB source file(s) no longer exist on disk — chunks linger after the file was deleted (run `mm gc orphan-sources --apply`)",
+          "summary": "1 DB source file(s) no longer exist on disk — chunks linger after the file was deleted (review with `mm gc orphan-sources`, then use `--apply` after confirming deletion)",
           "items": ["/Users/you/.claude/projects/-Users-you-Work-myproj/memory/old_notes.md"]
         },
         {

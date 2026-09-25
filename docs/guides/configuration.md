@@ -1338,7 +1338,7 @@ run the same preload once with `mm warmup` (no flag needed).
 | `MEMTOMEM_HEALTH_WATCHDOG__DIAGNOSTIC_INTERVAL_SECONDS` | `300.0` | Diagnostic check frequency |
 | `MEMTOMEM_HEALTH_WATCHDOG__DEEP_INTERVAL_SECONDS` | `3600.0` | Deep/expensive check frequency |
 | `MEMTOMEM_HEALTH_WATCHDOG__MAX_SNAPSHOTS` | `1000` | Maximum historical health snapshots to retain |
-| `MEMTOMEM_HEALTH_WATCHDOG__ORPHAN_CLEANUP_THRESHOLD` | `10` | Orphaned files before auto-cleanup triggers |
+| `MEMTOMEM_HEALTH_WATCHDOG__ORPHAN_CLEANUP_THRESHOLD` | `10` | Missing sources before automatic holding outside search triggers; no chunks are deleted |
 | `MEMTOMEM_HEALTH_WATCHDOG__AUTO_MAINTENANCE` | `true` | Perform auto-maintenance actions on critical alerts |
 
 The watchdog runs three tiers of checks at different intervals. Use `mem_watchdog` (or `mem_do(action="watchdog")`) to query health status on demand.

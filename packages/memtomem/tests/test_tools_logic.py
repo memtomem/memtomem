@@ -738,6 +738,8 @@ class TestPolicyEngine:
             [old_time, str(chunk.id)],
         )
         db.commit()
+        await storage.hold_source(chunk.metadata.source_file, "source_missing")
+        assert await storage.is_source_held(chunk.metadata.source_file)
 
         result = await execute_auto_expire(
             storage, {"max_age_days": 90}, namespace=None, dry_run=False
@@ -747,6 +749,7 @@ class TestPolicyEngine:
 
         row = db.execute("SELECT id FROM chunks WHERE id = ?", [str(chunk.id)]).fetchone()
         assert row is None  # deleted
+        assert not await storage.is_source_held(chunk.metadata.source_file)
 
     async def test_auto_expire_keeps_accessed(self, storage):
         """Chunks with access_count > 0 should not be expired even if old."""

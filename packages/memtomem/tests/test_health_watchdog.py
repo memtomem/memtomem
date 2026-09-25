@@ -112,6 +112,8 @@ def mock_app():
     # check must use is pinned separately, in ``TestConnectionRouting``.
     app.storage._get_db.return_value = db
     app.storage._get_read_db.return_value = db
+    app.storage.get_held_sources = AsyncMock(return_value=[])
+    app.storage.get_pending_source_checks = AsyncMock(return_value=[])
     app.search_pipeline._search_cache = {}
     return app, db
 
@@ -265,6 +267,19 @@ class TestDiagnosticChecks:
         assert snap.value["orphaned"] == 15
 
     @pytest.mark.asyncio
+    async def test_held_sources_do_not_keep_orphan_count_critical(self, mock_app, tmp_path):
+        from memtomem.server.health_checks import check_orphan_count
+
+        app, _db = mock_app
+        missing = {tmp_path / f"gone_{i}.md" for i in range(15)}
+        app.storage.get_all_source_files = AsyncMock(return_value=missing)
+        app.storage.get_held_sources = AsyncMock(return_value=list(missing)[:10])
+        app.storage.get_pending_source_checks = AsyncMock(return_value=list(missing)[10:])
+        snap = await check_orphan_count(app)
+        assert snap.status == "ok"
+        assert snap.value == {"orphaned": 0, "held": 15, "total_sources": 15}
+
+    @pytest.mark.asyncio
     async def test_dead_memory_pct(self, mock_app):
         from memtomem.server.health_checks import check_dead_memory_pct
 
@@ -393,14 +408,15 @@ class TestMaintenanceExecutor:
         missing = tmp_path / "gone.md"
         app.storage.get_all_source_files = AsyncMock(return_value={missing})
         app.storage.delete_by_source = AsyncMock(return_value=5)
+        app.storage.hold_source = AsyncMock(return_value=True)
 
         executor = MaintenanceExecutor(app, config)
-        # One orphan is below the mass-delete brake, so it deletes normally.
+        # Every uncertain absence is held, including a single source.
         result = await executor.cleanup_orphans()
         assert result["orphaned"] == 1
-        assert result["deleted_chunks"] == 5
-        # #2159-class: deleting chunks must invalidate the search cache, or
-        # searches keep returning the deleted chunks for the rest of cache_ttl.
+        assert result["held_sources"] == 1
+        assert result["deleted_chunks"] == 0
+        app.storage.delete_by_source.assert_not_awaited()
         app.search_pipeline.invalidate_cache.assert_called_once()
 
     @pytest.mark.asyncio
@@ -418,15 +434,15 @@ class TestMaintenanceExecutor:
         missing = {tmp_path / f"gone-{i}.md" for i in range(12)}
         app.storage.get_all_source_files = AsyncMock(return_value=missing)
         app.storage.delete_by_source = AsyncMock(return_value=5)
+        app.storage.hold_source = AsyncMock(return_value=True)
 
         executor = MaintenanceExecutor(app, config)
         result = await executor.cleanup_orphans()
         assert result["orphaned"] == 12
+        assert result["held_sources"] == 12
         assert result["deleted_chunks"] == 0
-        assert result["skipped_reason"] == "orphan_ratio_exceeded"
         app.storage.delete_by_source.assert_not_awaited()
-        # Nothing was deleted, so the search cache must stay warm.
-        app.search_pipeline.invalidate_cache.assert_not_called()
+        app.search_pipeline.invalidate_cache.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_trim_search_cache(self, mock_app):

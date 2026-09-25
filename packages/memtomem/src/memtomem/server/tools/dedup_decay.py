@@ -13,7 +13,7 @@ from memtomem.server.tools._provenance import (
     capture_session_for_untracked_write,
     flag_untracked_write,
 )
-from memtomem.storage.orphan_detect import scan_orphans
+from memtomem.storage.orphan_detect import scan_orphans, source_state
 
 
 @mcp.tool()
@@ -210,38 +210,51 @@ async def mem_decay_expire(
 async def mem_cleanup_orphans(
     dry_run: bool = True,
     ctx: CtxType = None,
+    *,
+    confirm_purge: bool = False,
 ) -> str:
     """Find and remove orphaned chunks whose source files no longer exist.
 
-    Defaults to dry_run=True for safety -- set dry_run=False to actually delete.
+    Deletion requires both dry_run=False and confirm_purge=True.
 
     Args:
         dry_run: If True (default), only list orphaned files without deleting.
+        confirm_purge: Explicit opt-in to erase confirmed-missing sources when dry_run is False.
     """
     app = await _get_app_initialized(ctx)
-    # Two-pass scan (scan_orphans) so a source that is only transiently
-    # inaccessible — a cloud-sync/network mount mid-reconnect — is not listed
-    # or deleted as an orphan. The mass-delete brake is intentionally *not*
-    # applied here: this tool is user-initiated and dry_run defaults to True,
-    # so an explicit large cleanup is the caller's call to make. See #1565.
+    # Two-pass scan keeps transient absence out of the explicit purge list.
+    # A mass ratio cannot prove deletion or availability (#2498).
     result = await scan_orphans(app.storage)
     orphaned = result.confirmed_orphans
 
     if not orphaned:
-        return f"No orphaned chunks found ({result.total_sources} source files checked)."
+        message = f"No orphaned chunks found ({result.total_sources} source files checked)."
+        if result.unavailable_sources:
+            message += f" {len(result.unavailable_sources)} source(s) unavailable and not eligible for purge."
+        return message
 
-    if dry_run:
+    # ``mem_do`` passes params through at runtime. Only actual JSON booleans
+    # may opt into deletion; the string "false" must stay a preview.
+    if dry_run is not False or confirm_purge is not True:
         lines = [f"Orphaned files: {len(orphaned)} (dry-run, no deletions)\n"]
         for sf in sorted(orphaned):
             lines.append(f"  {sf}")
-        lines.append("\nSet dry_run=False to delete these chunks.")
+        if result.unavailable_sources:
+            lines.append(
+                f"\n{len(result.unavailable_sources)} additional source(s) could not be checked."
+            )
+        lines.append("\nSet dry_run=False and confirm_purge=True to delete these chunks.")
         return "\n".join(lines)
 
     # Same reason as ``mem_ns_delete``: a reaped chunk may be one an
     # earlier provenance event named.
     provenance_session_id = await capture_session_for_untracked_write(app)
     total_deleted = 0
+    skipped = 0
     for sf in orphaned:
+        if await asyncio.to_thread(source_state, sf) != "missing":
+            skipped += 1
+            continue
         deleted = await app.storage.delete_by_source(sf)
         total_deleted += deleted
 
@@ -250,5 +263,6 @@ async def mem_cleanup_orphans(
         await flag_untracked_write(app, provenance_session_id)
 
     return (
-        f"Cleanup complete:\n- Orphaned files: {len(orphaned)}\n- Chunks deleted: {total_deleted}"
+        f"Cleanup complete:\n- Orphaned files: {len(orphaned)}"
+        f"\n- Recovered or unavailable: {skipped}\n- Chunks deleted: {total_deleted}"
     )

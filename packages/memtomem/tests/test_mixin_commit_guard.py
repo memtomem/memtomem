@@ -189,6 +189,11 @@ OWNED_TRANSACTION_WRITERS: dict[tuple[str, str], tuple[str, str]] = {
         "file; the shared writer connection is never touched, and dispatch is "
         "refused while this backend owns a transaction.",
     ),
+    ("sqlite_backend.py", "SqliteBackend.queue_source_check_sync"): (
+        PRIVATE,
+        "The watcher callback journals on a short-lived sqlite3.connect rather "
+        "than the task-owned writer connection.",
+    ),
 }
 
 # kind: authority — the ownership machinery itself. These reach commit and
@@ -743,6 +748,18 @@ _PARTICIPANT_HELPERS: dict[tuple[str, str], str] = {
     ("sqlite_backend.py", "SqliteBackend._reset_unknown_virtual_table"): (
         "Best-effort DROP/DELETE of a vtab whose module is unavailable, inside "
         "reset_all's transaction; it never ends one."
+    ),
+    ("sqlite_backend.py", "SqliteBackend._bump_source_visibility"): (
+        "Updates the source visibility epoch within its caller's transaction."
+    ),
+    ("sqlite_backend.py", "SqliteBackend._clear_source_visibility"): (
+        "Deletes source holds and pending checks within its caller's transaction."
+    ),
+    ("sqlite_backend.py", "SqliteBackend._delete_policy_summaries_for_source"): (
+        "Deletes policy summary rows within delete_chunks' transaction."
+    ),
+    ("sqlite_backend.py", "SqliteBackend.delete_by_namespace._delete_and_clear_empty_sources"): (
+        "Runs inside delete_by_namespace's owned transaction."
     ),
 }
 

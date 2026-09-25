@@ -14,6 +14,7 @@ import sqlite3
 import threading
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace as dataclass_replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Sequence, TypeVar
 from uuid import UUID
@@ -41,6 +42,8 @@ from memtomem.storage.base import (
     parse_tag_filter,
 )
 from memtomem.models import (
+    CONSOLIDATED_SUFFIX,
+    ORIGIN_CONSOLIDATION_POLICY,
     Chunk,
     ChunkMetadata,
     ChunkType,
@@ -52,6 +55,7 @@ from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_helpers import (
     deserialize_f32,
     escape_like,
+    fold_path_form,
     match_source_filter_value,
     namespace_sql,
     norm_path,
@@ -70,7 +74,11 @@ from memtomem.storage.orphan_gc import (
 from memtomem.storage.sqlite_meta import MetaManager
 from memtomem.storage.sqlite_namespace import NamespaceOps
 from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority_case
-from memtomem.storage.sqlite_visibility import neighbor_visibility_sql
+from memtomem.storage.sqlite_visibility import (
+    VISIBLE_SOURCE_C,
+    VISIBLE_SOURCE_CHUNKS,
+    neighbor_visibility_sql,
+)
 from memtomem.storage.mixins import (
     AnalyticsMixin,
     EntityMixin,
@@ -131,6 +139,11 @@ VEC_MAX_KNN_K = 4096
 # Everything else out of SQLite — corruption, I/O, interrupt, schema — must
 # propagate, or a failing store silently serves partial results forever.
 _VEC_K_TOO_LARGE = "k value in knn query too large"
+
+# BM25 can exclude held sources before LIMIT. Dense KNN must apply this
+# separately after the bounded vector candidate query (see dense_search).
+_VISIBLE_SOURCE_C = f"AND {VISIBLE_SOURCE_C}"
+_VISIBLE_SOURCE = VISIBLE_SOURCE_CHUNKS
 
 
 # Batch size for streaming rebuild_fts — bounds peak memory regardless of
@@ -1932,6 +1945,7 @@ class SqliteBackend(
 
         affected_sources = {row[2] for row in rows if row[2]}
 
+        policy_summaries_deleted = 0
         try:
             # Every batch inside this one try/except, so the rollback below
             # still covers the whole delete.
@@ -1982,6 +1996,9 @@ class SqliteBackend(
                         (source_norm,),
                     ).fetchone()
                     if remaining is None:
+                        policy_summaries_deleted += self._delete_policy_summaries_for_source(
+                            db, source_norm
+                        )
                         db.execute(
                             "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
                             (
@@ -1989,6 +2006,7 @@ class SqliteBackend(
                                 f"chunk_descriptions:{_AI_SUMMARY_KEY_PREFIX}{source_norm}",
                             ),
                         )
+                        self._clear_source_visibility(db, source_norm)
 
             if not self._in_transaction:
                 db.commit()
@@ -1996,13 +2014,47 @@ class SqliteBackend(
             if not self._in_transaction:
                 db.rollback()
             raise StorageError(f"delete_chunks failed, transaction rolled back: {exc}") from exc
+        if policy_summaries_deleted:
+            logger.info(
+                "Deleted %d policy summary chunks with their source", policy_summaries_deleted
+            )
+        return len(rows)
+
+    def _delete_policy_summaries_for_source(self, db: sqlite3.Connection, source: str) -> int:
+        """Remove policy-owned derived chunks after their last source chunk goes."""
+        summary_source = source + CONSOLIDATED_SUFFIX
+        rows = db.execute(
+            "SELECT id, rowid FROM chunks WHERE source_file=? AND origin=?",
+            (summary_source, ORIGIN_CONSOLIDATION_POLICY),
+        ).fetchall()
+        for batch in _param_batches(rows):
+            ids = [row[0] for row in batch]
+            rowids = [row[1] for row in batch]
+            db.execute(f"DELETE FROM chunks WHERE id IN ({placeholders(len(ids))})", ids)
+            db.execute(
+                f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids
+            )
+            if self._has_vec_table:
+                db.execute(
+                    f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
+                )
+        if (
+            rows
+            and db.execute(
+                "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (summary_source,)
+            ).fetchone()
+            is None
+        ):
+            self._clear_source_visibility(db, summary_source)
         return len(rows)
 
     async def delete_by_source(self, source_file: Path) -> int:
         db = self._get_db()
+        source = norm_path(source_file)
+        summary_source = source + CONSOLIDATED_SUFFIX
         rows = db.execute(
-            "SELECT id, rowid FROM chunks WHERE source_file=?",
-            (norm_path(source_file),),
+            "SELECT id, rowid FROM chunks WHERE source_file=? OR (source_file=? AND origin=?)",
+            (source, summary_source, ORIGIN_CONSOLIDATION_POLICY),
         ).fetchall()
 
         if not rows:
@@ -2022,6 +2074,14 @@ class SqliteBackend(
                     "DELETE FROM source_index_receipts WHERE source_file=?",
                     (norm_path(source_file),),
                 )
+                self._clear_source_visibility(db, source_file)
+                if (
+                    db.execute(
+                        "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (summary_source,)
+                    ).fetchone()
+                    is None
+                ):
+                    self._clear_source_visibility(db, summary_source)
                 self._commit_if_standalone(db)
             return 0
 
@@ -2060,6 +2120,14 @@ class SqliteBackend(
                 "DELETE FROM source_index_receipts WHERE source_file=?",
                 (norm_path(source_file),),
             )
+            self._clear_source_visibility(db, source_file)
+            if (
+                db.execute(
+                    "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (summary_source,)
+                ).fetchone()
+                is None
+            ):
+                self._clear_source_visibility(db, summary_source)
             if not self._in_transaction:
                 db.commit()
         except Exception as exc:
@@ -2067,6 +2135,275 @@ class SqliteBackend(
                 db.rollback()
             raise StorageError(f"delete_by_source failed, transaction rolled back: {exc}") from exc
         return len(rows)
+
+    @staticmethod
+    def _bump_source_visibility(db: sqlite3.Connection, source: str) -> None:
+        db.execute(
+            "INSERT INTO _memtomem_meta(key, value) VALUES ('source_visibility_epoch', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1"
+        )
+        db.execute(
+            "INSERT INTO source_visibility_generations(source_file, generation) VALUES (?, 1) "
+            "ON CONFLICT(source_file) DO UPDATE SET generation=generation+1",
+            (source,),
+        )
+
+    def _clear_source_visibility(self, db: sqlite3.Connection, source_file: Path | str) -> bool:
+        # Strings from chunks.source_file have already been normalized on write.
+        source = source_file if isinstance(source_file, str) else norm_path(source_file)
+        held = db.execute("DELETE FROM held_sources WHERE source_file=?", (source,)).rowcount
+        pending = db.execute(
+            "DELETE FROM pending_source_checks WHERE source_file=?", (source,)
+        ).rowcount
+        changed = bool(held or pending)
+        if changed:
+            self._bump_source_visibility(db, source)
+        return changed
+
+    async def hold_source(self, source_file: Path, reason: str) -> bool:
+        """Hide existing source chunks without destroying them (#2498)."""
+        # A stale network mount can block Path.resolve(); keep that syscall off
+        # the event loop for scanner and scheduler callers that reach here.
+        source = await asyncio.to_thread(norm_path, source_file)
+        db = self._get_db()
+        if db.in_transaction and not self._in_transaction:
+            raise TransactionOwnedError("hold_source refused an unowned transaction")
+        now = utc_stamp(datetime.now(timezone.utc))
+        existing = db.execute(
+            "SELECT reason FROM held_sources WHERE source_file=?", (source,)
+        ).fetchone()
+        if existing is not None and existing[0] == reason:
+            pending = db.execute(
+                "SELECT 1 FROM pending_source_checks WHERE source_file=?", (source,)
+            ).fetchone()
+            if pending is None:
+                return False
+        with self._rolls_back_if_standalone(db):
+            indexed = db.execute(
+                "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (source,)
+            ).fetchone()
+            if not indexed:
+                changed = self._clear_source_visibility(db, source)
+            else:
+                inserted = db.execute(
+                    "INSERT OR IGNORE INTO held_sources "
+                    "(source_file, first_seen_at, last_checked_at, reason) VALUES (?, ?, ?, ?)",
+                    (source, now, now, reason),
+                ).rowcount
+                if not inserted:
+                    current = db.execute(
+                        "SELECT reason FROM held_sources WHERE source_file=?", (source,)
+                    ).fetchone()
+                    if current is not None and current[0] != reason:
+                        db.execute(
+                            "UPDATE held_sources SET last_checked_at=?, reason=? WHERE source_file=?",
+                            (now, reason, source),
+                        )
+                pending = db.execute(
+                    "DELETE FROM pending_source_checks WHERE source_file=?", (source,)
+                ).rowcount
+                changed = bool(inserted or pending)
+                if changed:
+                    self._bump_source_visibility(db, source)
+            self._commit_if_standalone(db)
+        return changed
+
+    async def release_source_hold(
+        self, source_file: Path, *, expected_generation: int | None = None
+    ) -> bool:
+        db = self._get_db()
+        source = norm_path(source_file)
+        changed = False
+        # Refuse before the rollback guard: this implicit transaction belongs
+        # to neither this method nor a tracked owner, so rolling it back here
+        # would discard someone else's uncommitted work.
+        if db.in_transaction and not self._in_transaction:
+            raise TransactionOwnedError("release_source_hold refused an unowned transaction")
+        with self._rolls_back_if_standalone(db):
+            # The observer uses a separate SQLite connection. Hold the writer
+            # lock while checking this source's generation and clearing rows, so a delete
+            # journaled after indexing began cannot be erased here.
+            if expected_generation is not None and not self._in_transaction:
+                db.execute("BEGIN IMMEDIATE")
+            generation_matches = True
+            if expected_generation is not None:
+                row = db.execute(
+                    "SELECT generation FROM source_visibility_generations WHERE source_file=?",
+                    (source,),
+                ).fetchone()
+                generation_matches = (int(row[0]) if row else 0) == expected_generation
+            # An ordinary receipt hit has no visibility row. Skip DELETE so
+            # the common path stays read-only.
+            if (
+                generation_matches
+                and db.execute(
+                    "SELECT 1 FROM held_sources WHERE source_file=? UNION "
+                    "SELECT 1 FROM pending_source_checks WHERE source_file=? LIMIT 1",
+                    (source, source),
+                ).fetchone()
+                is not None
+            ):
+                changed = self._clear_source_visibility(db, source_file)
+            self._commit_if_standalone(db)
+        return changed
+
+    async def get_held_sources(self) -> list[Path]:
+        db = self._get_read_db()
+        return [
+            Path(row[0])
+            for row in db.execute(
+                "SELECT h.source_file FROM held_sources h "
+                "WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.source_file=h.source_file) "
+                "ORDER BY h.first_seen_at, h.source_file"
+            ).fetchall()
+        ]
+
+    async def get_hidden_source_files(self) -> set[Path]:
+        """Direct holds plus policy summaries derived from hidden sources."""
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT source_file FROM held_sources "
+            "UNION SELECT source_file FROM pending_source_checks "
+            "UNION SELECT DISTINCT c.source_file FROM chunks c "
+            "WHERE c.origin=? AND ("
+            "EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file="
+            "substr(c.source_file, 1, length(c.source_file) - length(?))) "
+            "OR EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file="
+            "substr(c.source_file, 1, length(c.source_file) - length(?))))",
+            (ORIGIN_CONSOLIDATION_POLICY, CONSOLIDATED_SUFFIX, CONSOLIDATED_SUFFIX),
+        ).fetchall()
+        return {Path(row[0]) for row in rows}
+
+    async def is_source_hidden(self, source_file: Path) -> bool:
+        """Include a policy summary's parent in path-level visibility."""
+        db = self._get_read_db()
+        source = norm_path(source_file)
+        if (
+            db.execute(
+                "SELECT 1 FROM held_sources WHERE source_file=? UNION "
+                "SELECT 1 FROM pending_source_checks WHERE source_file=? LIMIT 1",
+                (source, source),
+            ).fetchone()
+            is not None
+        ):
+            return True
+        if not source.endswith(CONSOLIDATED_SUFFIX):
+            return False
+        parent = source[: -len(CONSOLIDATED_SUFFIX)]
+        return (
+            db.execute(
+                "SELECT 1 FROM chunks c WHERE c.source_file=? AND c.origin=? AND ("
+                "EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file=?) OR "
+                "EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file=?)) LIMIT 1",
+                (source, ORIGIN_CONSOLIDATION_POLICY, parent, parent),
+            ).fetchone()
+            is not None
+        )
+
+    async def is_source_held(self, source_file: Path) -> bool:
+        db = self._get_read_db()
+        source = norm_path(source_file)
+        return (
+            db.execute(
+                "SELECT 1 FROM held_sources WHERE source_file=? UNION "
+                "SELECT 1 FROM pending_source_checks WHERE source_file=? LIMIT 1",
+                (source, source),
+            ).fetchone()
+            is not None
+        )
+
+    async def is_source_pending(self, source_file: Path) -> bool:
+        db = self._get_read_db()
+        return (
+            db.execute(
+                "SELECT 1 FROM pending_source_checks WHERE source_file=?",
+                (norm_path(source_file),),
+            ).fetchone()
+            is not None
+        )
+
+    async def source_visibility_epoch(self) -> int:
+        db = self._get_read_db()
+        row = db.execute(
+            "SELECT value FROM _memtomem_meta WHERE key='source_visibility_epoch'"
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    async def source_hold_generation(self, source_file: Path) -> int:
+        db = self._get_read_db()
+        row = db.execute(
+            "SELECT generation FROM source_visibility_generations WHERE source_file=?",
+            (norm_path(source_file),),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    async def source_hold_snapshot(self, source_file: Path) -> int | None:
+        """Return one source's generation only when it is hidden.
+
+        Visibility and generation come from one SQLite statement so a watcher
+        delete cannot slip between separate reads at index start.
+        """
+        db = self._get_read_db()
+        source = norm_path(source_file)
+        row = db.execute(
+            "SELECT COALESCE((SELECT generation FROM source_visibility_generations "
+            "WHERE source_file=?), 0) "
+            "WHERE EXISTS (SELECT 1 FROM held_sources WHERE source_file=?) "
+            "OR EXISTS (SELECT 1 FROM pending_source_checks WHERE source_file=?)",
+            (source, source, source),
+        ).fetchone()
+        return int(row[0]) if row else None
+
+    def queue_source_check_sync(self, source_file: Path) -> bool:
+        """Journal a watcher delete before its volatile debounce queue accepts it.
+
+        Watchdog invokes handlers on its own thread, so use a short-lived WAL
+        writer rather than the task-owned connection. Only indexed paths are
+        recorded. Every delete advances the visibility epoch, including a
+        repeated event for an already pending path, so an older index pass
+        cannot clear the newer event's check.
+        """
+        # The observer's root was resolved when it was scheduled. A deletion
+        # callback must not resolve the path again: a detached network mount
+        # can make that syscall block the watchdog thread indefinitely. A
+        # symlinked subpath may therefore miss the resolved chunks key; the
+        # live queue still receives the event, but restart replay is not
+        # guaranteed for that path.
+        source = fold_path_form(os.path.abspath(os.path.expanduser(str(source_file))))
+        # A contended writer must not park watchdog's observer thread for a
+        # full debounce window per event. The event still enters the queue if
+        # this best-effort journal write times out.
+        db = sqlite3.connect(str(Path(self._config.sqlite_path).expanduser()), timeout=0.05)
+        try:
+            db.execute("PRAGMA synchronous=NORMAL")
+            if not db.execute(
+                "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (source,)
+            ).fetchone():
+                return False
+            db.execute(
+                "INSERT INTO pending_source_checks(source_file, queued_at) VALUES (?, ?) "
+                "ON CONFLICT(source_file) DO UPDATE SET queued_at=excluded.queued_at",
+                (source, utc_stamp(datetime.now(timezone.utc))),
+            )
+            self._bump_source_visibility(db, source)
+            db.commit()
+            return True
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    async def get_pending_source_checks(self) -> list[Path]:
+        db = self._get_read_db()
+        return [
+            Path(row[0])
+            for row in db.execute(
+                "SELECT p.source_file FROM pending_source_checks p "
+                "WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.source_file=p.source_file) "
+                "ORDER BY p.queued_at, p.source_file"
+            ).fetchall()
+        ]
 
     async def find_orphan_project_roots(self) -> list[OrphanProjectReport]:
         """Detect project-tier chunks whose ``project_root`` no longer exists on disk.
@@ -2534,7 +2871,7 @@ class SqliteBackend(
             sql = f"""SELECT c.*, fts.rank
                    FROM chunks_fts fts
                    JOIN chunks c ON c.rowid = fts.rowid
-                   WHERE chunks_fts MATCH ? {ns_clause} {scope_clause} {metadata_clause} {source_clause}
+                   WHERE chunks_fts MATCH ? {ns_clause} {scope_clause} {metadata_clause} {source_clause} {_VISIBLE_SOURCE_C}
                    ORDER BY fts.rank, {tie_break}, c.id
                    LIMIT ?"""
 
@@ -2684,6 +3021,9 @@ class SqliteBackend(
         # at the cost of not seeing a match outside the KNN pool.
         required_tags = set(metadata_filter.tags_any) if metadata_filter is not None else set()
         required_source_filter = source_filter
+        # The hold gate belongs in the outer SQL result. It preserves the
+        # adaptive KNN retry when hidden rows fill the inner pool, while only
+        # visible rows are decoded into Python Chunk objects.
         sql_metadata_filter = (
             dataclass_replace(metadata_filter, tags_any=())
             if metadata_filter is not None and metadata_filter.tags_any
@@ -2721,7 +3061,8 @@ class SqliteBackend(
                    ORDER BY distance
                    LIMIT ?
                ) sub
-               JOIN chunks c ON c.rowid = sub.rowid {ns_clause} {scope_clause} {metadata_clause}
+               JOIN chunks c ON c.rowid = sub.rowid
+               WHERE {VISIBLE_SOURCE_C} {ns_clause} {scope_clause} {metadata_clause}
                ORDER BY sub.distance, {tie_break}, c.id
                LIMIT ?"""
         # Trailing ``c.id`` gives the outer ordering a unique final tiebreak
@@ -2839,6 +3180,8 @@ class SqliteBackend(
             # Done if we hit the requested top_k OR if this attempt already
             # used the largest K the engine will accept (cannot do better by
             # retrying).
+            # Held rows are already excluded by SQL. Tag and source filters
+            # remain bounded by the unfiltered candidate count.
             if len(rows) >= top_k or inner_k >= knn_ceiling:
                 break
 
@@ -3360,7 +3703,7 @@ class SqliteBackend(
         chunk_ids: Sequence[UUID] | None = None,
     ) -> list[Chunk]:
         db = self._get_read_db()
-        conditions: list[str] = []
+        conditions: list[str] = [_VISIBLE_SOURCE]
         params: list[object] = []
 
         if chunk_ids is not None:
@@ -3438,7 +3781,7 @@ class SqliteBackend(
         callers must apply any hard size limit to the assembled body.
         """
         db = self._get_read_db()
-        conditions = [_chunk_ids_sql()]
+        conditions = [_chunk_ids_sql(), _VISIBLE_SOURCE]
         params: list[object] = [_chunk_ids_param(chunk_ids)]
         scope_frag, scope_params = scope_context_sql(None, project_context_root)
         conditions.append(scope_frag)
@@ -3455,6 +3798,24 @@ class SqliteBackend(
         rows = db.execute("SELECT DISTINCT source_file FROM chunks").fetchall()
         return {Path(row[0]) for row in rows}
 
+    async def get_orphan_candidate_source_files(self) -> set[Path]:
+        """Exclude attached virtual summaries from filesystem checks.
+
+        The trusted origin stamp, rather than a filename suffix, identifies
+        summary-only sources. A detached summary or a user chunk sharing that
+        path stays eligible for cleanup.
+        """
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT DISTINCT c.source_file FROM chunks c "
+            "WHERE c.origin IS NULL OR c.origin <> ? OR NOT EXISTS ("
+            "SELECT 1 FROM chunks parent WHERE parent.source_file="
+            "substr(c.source_file, 1, length(c.source_file) - length(?)) "
+            "AND (parent.origin IS NULL OR parent.origin <> ?))",
+            (ORIGIN_CONSOLIDATION_POLICY, CONSOLIDATED_SUFFIX, ORIGIN_CONSOLIDATION_POLICY),
+        ).fetchall()
+        return {Path(row[0]) for row in rows}
+
     async def search_source_files_by_content(self, query: str, limit: int = 10000) -> list[Path]:
         term = query.strip()
         if not term:
@@ -3464,9 +3825,9 @@ class SqliteBackend(
         escaped_json_term = f"%{escape_like(json.dumps(term, ensure_ascii=True)[1:-1])}%"
         rows = db.execute(
             "SELECT source_file FROM chunks "
-            "WHERE content LIKE ? ESCAPE '\\' "
+            f"WHERE {_VISIBLE_SOURCE} AND (content LIKE ? ESCAPE '\\' "
             "   OR heading_hierarchy LIKE ? ESCAPE '\\' "
-            "   OR heading_hierarchy LIKE ? ESCAPE '\\' "
+            "   OR heading_hierarchy LIKE ? ESCAPE '\\') "
             "GROUP BY source_file "
             "ORDER BY MAX(updated_at) DESC, source_file "
             "LIMIT ?",
@@ -3744,8 +4105,32 @@ class SqliteBackend(
         return await self._ns.count_chunks_by_ns_prefix_detail(prefixes)
 
     async def delete_by_namespace(self, namespace: str) -> int:
-        assert self._ns is not None
-        return await self._ns.delete_by_namespace(namespace)
+        ns = self._ns
+        assert ns is not None
+
+        async def _delete_and_clear_empty_sources() -> int:
+            db = self._get_db()
+            sources = [
+                row[0]
+                for row in db.execute(
+                    "SELECT DISTINCT source_file FROM chunks WHERE namespace=?", (namespace,)
+                ).fetchall()
+            ]
+            deleted = await ns.delete_by_namespace(namespace)
+            for source in sources:
+                if (
+                    db.execute(
+                        "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (source,)
+                    ).fetchone()
+                    is None
+                ):
+                    self._clear_source_visibility(db, source)
+            return deleted
+
+        if self._in_transaction:
+            return await _delete_and_clear_empty_sources()
+        async with self.transaction():
+            return await _delete_and_clear_empty_sources()
 
     async def list_namespace_chunk_candidates(
         self,

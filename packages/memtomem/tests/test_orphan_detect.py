@@ -1,14 +1,11 @@
-"""Tests for the shared two-pass orphan detector (issue #1565).
-
-``scan_orphans`` confirms an indexed source is orphaned only when it fails
-``exists()`` on two passes, filtering transient absences (a cloud-sync/network
-mount briefly unavailable). ``is_suspected_mass_orphan`` is the belt-and-braces
-brake for unattended callers: it flags "everything vanished at once" as a likely
-mount failure rather than a real deletion.
-"""
+"""Two-pass source availability and explicit orphan purge checks (#1565, #2498)."""
 
 from __future__ import annotations
 
+from pathlib import Path
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -34,10 +31,12 @@ class _FakeSource:
         self._seq = list(exists_seq)
         self._last = self._seq[-1]
 
-    def exists(self) -> bool:
+    def stat(self):
         if self._seq:
             self._last = self._seq.pop(0)
-        return self._last
+        if not self._last:
+            raise FileNotFoundError(self._name)
+        return None
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<src {self._name}>"
@@ -50,6 +49,22 @@ def _storage(sources) -> MagicMock:
 
 
 class TestScanOrphans:
+    @pytest.mark.asyncio
+    async def test_permission_error_is_unavailable_not_purge_candidate(self, tmp_path):
+        source = tmp_path / "offline.md"
+        real_stat = Path.stat
+
+        def unavailable(self, *args, **kwargs):
+            if self == source:
+                raise PermissionError("temporarily inaccessible")
+            return real_stat(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "stat", autospec=True, side_effect=unavailable):
+            result = await scan_orphans(_storage([source]), recheck_delay_seconds=0)
+
+        assert result.confirmed_orphans == []
+        assert result.unavailable_sources == [source]
+
     @pytest.mark.asyncio
     async def test_empty_sources(self):
         result = await scan_orphans(_storage([]), recheck_delay_seconds=0)
@@ -127,15 +142,7 @@ class TestMassOrphanBrake:
 
 
 class TestInteractiveToolSkipsBrake:
-    """#1565 policy pin: the mass-delete brake is unattended-path only.
-
-    ``mem_cleanup_orphans`` is user-initiated and defaults to ``dry_run=True``,
-    so an explicit ``dry_run=False`` cleanup of many orphans must still delete —
-    the two-pass guard applies, but the brake deliberately does not. This locks
-    in the asymmetry so a future refactor can't silently route the interactive
-    tool through ``is_suspected_mass_orphan`` (which the scheduler and health
-    paths use to skip).
-    """
+    """Explicit purge may delete many confirmed-missing sources at once."""
 
     @pytest.mark.asyncio
     async def test_many_orphans_still_deleted(self, monkeypatch, tmp_path):
@@ -157,8 +164,62 @@ class TestInteractiveToolSkipsBrake:
 
         monkeypatch.setattr(dedup_decay, "_get_app_initialized", _fake_app)
 
-        out = await dedup_decay.mem_cleanup_orphans(dry_run=False, ctx=None)
+        preview = await dedup_decay.mem_cleanup_orphans(dry_run=False, ctx=None)
+        assert "confirm_purge=True" in preview
+        app.storage.delete_by_source.assert_not_awaited()
+
+        string_flag = await dedup_decay.mem_cleanup_orphans(
+            dry_run=False,
+            confirm_purge="false",
+            ctx=None,  # type: ignore[arg-type]
+        )
+        assert "dry-run, no deletions" in string_flag
+        string_dry_run = await dedup_decay.mem_cleanup_orphans(
+            dry_run="false",
+            confirm_purge=True,
+            ctx=None,  # type: ignore[arg-type]
+        )
+        assert "dry-run, no deletions" in string_dry_run
+        app.storage.delete_by_source.assert_not_awaited()
+
+        out = await dedup_decay.mem_cleanup_orphans(dry_run=False, confirm_purge=True, ctx=None)
 
         assert "Cleanup complete" in out
         assert "Orphaned files: 12" in out
         assert app.storage.delete_by_source.await_count == 12  # brake NOT applied
+
+    @pytest.mark.asyncio
+    async def test_recovered_source_is_skipped_at_apply_time(self, monkeypatch, tmp_path):
+        from memtomem.cli import _bootstrap, gc_cmd
+        from memtomem.server.tools import dedup_decay
+        from memtomem.storage import orphan_detect
+
+        source = tmp_path / "returned.md"
+        scan = OrphanScanResult(total_sources=1, first_pass_orphans=1, confirmed_orphans=[source])
+        monkeypatch.setattr(orphan_detect, "scan_orphans", AsyncMock(return_value=scan))
+        monkeypatch.setattr(dedup_decay, "scan_orphans", AsyncMock(return_value=scan))
+        monkeypatch.setattr(orphan_detect, "source_state", lambda _path: "present")
+        monkeypatch.setattr(dedup_decay, "source_state", lambda _path: "present")
+        app = SimpleNamespace(
+            storage=MagicMock(delete_by_source=AsyncMock(return_value=1)),
+            search_pipeline=MagicMock(),
+        )
+
+        @asynccontextmanager
+        async def components():
+            yield app
+
+        monkeypatch.setattr(_bootstrap, "cli_components", components)
+        await gc_cmd._run_orphan_sources(apply_=True, assume_yes=True)
+        app.storage.delete_by_source.assert_not_awaited()
+
+        async def fake_app(_ctx):
+            return app
+
+        monkeypatch.setattr(dedup_decay, "_get_app_initialized", fake_app)
+        monkeypatch.setattr(
+            dedup_decay, "capture_session_for_untracked_write", AsyncMock(return_value=None)
+        )
+        out = await dedup_decay.mem_cleanup_orphans(dry_run=False, confirm_purge=True, ctx=None)
+        assert "Recovered or unavailable: 1" in out
+        app.storage.delete_by_source.assert_not_awaited()

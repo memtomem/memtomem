@@ -984,6 +984,53 @@ def _findings_by_check(report) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+async def test_present_but_held_source_is_reported(doctor_env):
+    config, mem_dir = doctor_env
+    backend = SqliteBackend(
+        config.storage, dimension=0, embedding_provider="none", embedding_model=""
+    )
+    await backend.initialize()
+    try:
+        source = mem_dir / "README.md"  # Present, but excluded from indexing.
+        _insert_chunk(backend, chunk_id="held-present", source_file=source)
+        assert await backend.hold_source(source, "watch_reindex_unresolved")
+    finally:
+        await backend.close()
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    report = next(r for r in reports if r.path != "(unowned)")
+    held = _findings_by_check(report)["held_source"]
+    assert held.severity == "warn"
+    assert held.items == [norm_path(source)]
+    assert "1 present" in held.summary
+
+
+@pytest.mark.asyncio
+async def test_virtual_policy_summary_is_not_a_stale_disk_source(doctor_env):
+    config, mem_dir = doctor_env
+    original = mem_dir / "note.md"
+    virtual = mem_dir / "note.md.consolidated.md"
+    original.write_text("# Note\n\nStill here.\n", encoding="utf-8")
+    backend = SqliteBackend(
+        config.storage, dimension=0, embedding_provider="none", embedding_model=""
+    )
+    await backend.initialize()
+    try:
+        _insert_chunk(backend, chunk_id="original", source_file=original)
+        _insert_chunk(backend, chunk_id="virtual", source_file=virtual)
+        db = backend._get_db()
+        db.execute("UPDATE chunks SET origin='consolidation_policy' WHERE id='virtual'")
+        db.commit()
+    finally:
+        await backend.close()
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    report = next(r for r in reports if r.path != "(unowned)")
+    stale = _findings_by_check(report).get("stale_source")
+    assert stale is None or str(virtual) not in stale.items
+
+
+@pytest.mark.asyncio
 async def test_analysis_detects_all_drift_classes(doctor_env):
     config, mem_dir = doctor_env
 
@@ -1031,7 +1078,7 @@ async def test_analysis_detects_all_drift_classes(doctor_env):
     assert by["stale_source"].items == [norm_path(mem_dir / "ghost.md")]
     # #1928: an error-severity finding must name its remediation (the CLI's
     # own vocabulary — `mm gc orphan-sources`, not the MCP tool name).
-    assert "run `mm gc orphan-sources --apply`" in by["stale_source"].summary
+    assert "review with `mm gc orphan-sources`" in by["stale_source"].summary
     assert by["convention_violation"].severity == "error"
     assert by["convention_violation"].items == [norm_path(mem_dir / "MEMORY.md")]
     assert by["cold_candidate"].severity == "info"
@@ -2449,7 +2496,7 @@ class TestCli:
         assert result.exit_code == 1  # stale_source is error-severity
         assert "no longer exist on disk" in result.output
         # #1928: the rendered finding carries its own remediation command.
-        assert "mm gc orphan-sources --apply" in result.output
+        assert "review with `mm gc orphan-sources`" in result.output
 
     def test_json_payload_shape(self, doctor_env, monkeypatch):
         config, mem_dir = doctor_env
@@ -2706,7 +2753,10 @@ class TestDocsParity:
         # remediation table row. Bind the three doc surfaces to the summary
         # extracted from source so none can drift independently.
         tail = _stale_source_summary_tail()
-        assert "(run `mm gc orphan-sources --apply`)" in tail
+        assert (
+            "(review with `mm gc orphan-sources`, then use `--apply` after confirming deletion)"
+            in tail
+        )
         ref = (
             Path(__file__).resolve().parents[3]
             / "docs"
@@ -2720,7 +2770,7 @@ class TestDocsParity:
         )
         # The remediation table row leads with the same command.
         row = next(line for line in ref.splitlines() if line.startswith("| `stale_source` |"))
-        assert "`mm gc orphan-sources --apply`" in row
+        assert "`mm gc orphan-sources`" in row
 
     def test_stale_index_remediation_pinned_across_doc_surfaces(self):
         """#2078: the two staleness checks must not drift from their guide rows.

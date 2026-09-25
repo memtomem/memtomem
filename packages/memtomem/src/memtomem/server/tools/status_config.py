@@ -30,6 +30,7 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.helpers import _set_config_key
 from memtomem.secret_masking import is_secret_key, mask_secrets
+from memtomem.storage.orphan_detect import orphan_candidate_sources
 
 if TYPE_CHECKING:
     from memtomem.config import Mem2MemConfig, SaveReceipt, SearchConfig
@@ -271,11 +272,29 @@ async def collect_status_report(app: AppContext) -> dict:
 
     # Orphan check — count source files no longer on disk
     orphaned = 0
+    held_sources = 0
+    pending_sources = 0
+    source_files: set[Path] = set()
+    hidden_paths: set[Path] = set()
     try:
-        source_files = await app.storage.get_all_source_files()
-        orphaned = sum(1 for sf in source_files if not sf.exists())
+        source_files = await orphan_candidate_sources(app.storage)
     except Exception:
         logger.debug("Orphan detection failed", exc_info=True)
+    try:
+        if hasattr(type(app.storage), "get_held_sources"):
+            held = set(await app.storage.get_held_sources())
+            held_sources = len(held)
+            hidden_paths.update(held)
+        if hasattr(type(app.storage), "get_pending_source_checks"):
+            pending = set(await app.storage.get_pending_source_checks())
+            pending_sources = len(pending)
+            hidden_paths.update(pending)
+    except Exception:
+        logger.debug("Held-source status query failed", exc_info=True)
+    try:
+        orphaned = sum(1 for sf in source_files - hidden_paths if not sf.exists())
+    except Exception:
+        logger.debug("Unheld orphan count failed", exc_info=True)
 
     # Dense-vector coverage. The ``none`` state surfaces the BM25-only
     # run case loudly: an embedder that crashed mid-init or fell back to
@@ -448,6 +467,8 @@ async def collect_status_report(app: AppContext) -> dict:
             "total_chunks": stats["total_chunks"],
             "total_sources": stats["total_sources"],
             "orphaned_sources": orphaned,
+            "held_sources": held_sources,
+            "pending_source_checks": pending_sources,
             "dense_coverage": dense_coverage,
         },
         # Immutable fields — these cannot be changed via mem_config at
@@ -800,7 +821,13 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
             key="Source files:".ljust(15),
             value=str(index["total_sources"]),
             suffix=(
-                f" ({index['orphaned_sources']} orphaned — run `mm gc orphan-sources`)"
+                f" ({index['orphaned_sources']} orphaned, "
+                f"{index.get('held_sources', 0)} held, "
+                f"{index.get('pending_source_checks', 0)} pending; "
+                "restore available sources with `mm index <path>`, or "
+                "run `mm gc orphan-sources` to review missing ones)"
+                if index.get("held_sources", 0) or index.get("pending_source_checks", 0)
+                else f" ({index['orphaned_sources']} orphaned — run `mm gc orphan-sources`)"
                 if index["orphaned_sources"]
                 else ""
             ),

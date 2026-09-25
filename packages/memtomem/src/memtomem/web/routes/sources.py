@@ -12,6 +12,7 @@ from memtomem.config import MemoryDirKind, TargetScope, classify_scope, memory_d
 from memtomem.indexing.engine import norm_dir_prefix
 from memtomem.indexing.summarizer import regenerate_for_paths
 from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_visibility import hidden_source_paths
 from memtomem.web.deps import (
     get_config,
     get_search_pipeline,
@@ -99,6 +100,7 @@ async def list_sources(
     config=Depends(get_config),
 ) -> SourcesResponse:
     rows = await storage.get_source_files_with_counts()
+    hidden = {str(path) for path in await hidden_source_paths(storage)}
     # Heuristic preview (first heading + first chunk body), populated for
     # every source so the UI has a readable fallback when no LLM summary
     # is cached yet.
@@ -147,6 +149,8 @@ async def list_sources(
 
     all_sources: list[SourceOut] = []
     for p, cnt, last_indexed_iso, ns_csv, avg_tok, min_tok, max_tok in sorted(rows):
+        if str(p) in hidden:
+            continue
         last_indexed_at: datetime | None = None
         if last_indexed_iso:
             try:
@@ -292,16 +296,18 @@ async def source_content_matches(
 
     This powers the Sources tab's lightweight body-aware filter. It uses
     indexed chunk text and cached source summaries, not raw file reads, so
-    deleted/unavailable files still match as long as their chunks remain in
-    storage.
+    held or pending sources are hidden until their availability is confirmed.
     """
     query = q.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Query must not be blank.")
 
     pmdirs = config.indexing.project_memory_dirs
+    hidden = {str(path) for path in await hidden_source_paths(storage)}
 
     def _visible_for_scope(path: Path | str) -> bool:
+        if str(path) in hidden:
+            return False
         source_scope, _project_root = classify_scope(path, pmdirs)
         if target_scope is None:
             return source_scope != "project_local"

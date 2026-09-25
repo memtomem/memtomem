@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from memtomem.storage.orphan_detect import is_suspected_mass_orphan, scan_orphans
+from memtomem.storage.orphan_detect import scan_orphans
 
 if TYPE_CHECKING:
     from memtomem.config import HealthWatchdogConfig
@@ -25,47 +25,25 @@ class MaintenanceExecutor:
         self._config = config
 
     async def cleanup_orphans(self) -> dict:
-        """Delete chunks whose source files no longer exist.
-
-        Uses a two-pass scan to avoid false positives from temporarily
-        inaccessible files (e.g., network mounts, permission changes), and
-        refuses a suspected *mass* orphan event (many sources vanishing at
-        once — the tell-tale of a mount failure, not a real deletion) rather
-        than wiping every chunk under the mount unattended. See #1565.
-        """
+        """Hold uncertain sources without deleting indexed chunks (#2498)."""
         result = await scan_orphans(self._app.storage)
-
-        if not result.confirmed_orphans:
-            return {"orphaned": 0, "deleted_chunks": 0}
-
-        if is_suspected_mass_orphan(result):
-            logger.warning(
-                "Auto-maintenance: skipping suspected mass orphan delete "
-                "(%d/%d sources, %.0f%%) — likely a transient mount/permission "
-                "failure. No chunks deleted.",
-                len(result.confirmed_orphans),
-                result.total_sources,
-                100 * result.ratio,
-            )
-            return {
-                "orphaned": len(result.confirmed_orphans),
-                "deleted_chunks": 0,
-                "skipped_reason": "orphan_ratio_exceeded",
-            }
-
-        total_deleted = 0
+        changed = False
         for sf in result.confirmed_orphans:
-            deleted = await self._app.storage.delete_by_source(sf)
-            total_deleted += deleted
-        if total_deleted > 0:
+            changed |= await self._app.storage.hold_source(sf, "scan_missing")
+        for sf in result.unavailable_sources:
+            changed |= await self._app.storage.hold_source(sf, "scan_unavailable")
+        if changed:
             self._app.search_pipeline.invalidate_cache()
-
-        logger.info(
-            "Auto-maintenance: cleaned %d orphaned files (%d chunks)",
-            len(result.confirmed_orphans),
-            total_deleted,
-        )
-        return {"orphaned": len(result.confirmed_orphans), "deleted_chunks": total_deleted}
+        held = len(result.confirmed_orphans) + len(result.unavailable_sources)
+        if changed:
+            logger.warning(
+                "Auto-maintenance: held %d unavailable source(s); no chunks deleted", held
+            )
+        return {
+            "orphaned": len(result.confirmed_orphans),
+            "held_sources": held,
+            "deleted_chunks": 0,
+        }
 
     async def trim_search_cache(self, max_entries: int = 30) -> dict:
         """Evict oldest entries from the search pipeline cache."""

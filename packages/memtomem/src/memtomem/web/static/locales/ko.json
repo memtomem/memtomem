@@ -1282,6 +1282,7 @@
   "settings.export.preview_btn": "미리보기",
   "settings.export.download_btn": "JSON 다운로드",
   "settings.export.preview_msg": "{count}개 청크가 내보내집니다",
+  "settings.export.held_omitted": "보류 중인 소스 {count}개가 제외됩니다. 완전한 백업을 만들려면 소스를 복구한 뒤 다시 내보내세요.",
   "settings.export.preview_required": "다운로드 전에 현재 필터를 미리보기하세요.",
   "settings.import.title": "가져오기",
   "settings.import.hint": "memtomem_export.json 번들을 업로드하여 청크를 다시 인덱싱합니다.",

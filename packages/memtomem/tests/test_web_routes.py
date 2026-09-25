@@ -198,6 +198,9 @@ def app(_isolated_config_paths: Path):
     storage.get_chunk = AsyncMock(return_value=_make_test_chunk())
     storage.recall_chunks = AsyncMock(return_value=[_make_test_chunk()])
     storage.get_all_source_files = AsyncMock(return_value=[Path("/tmp/test.md")])
+    storage.get_held_sources = AsyncMock(return_value=[])
+    storage.get_pending_source_checks = AsyncMock(return_value=[])
+    storage.is_source_held = AsyncMock(return_value=False)
     storage.search_source_files_by_content = AsyncMock(return_value=[Path("/tmp/test.md")])
     storage.list_chunks_by_source = AsyncMock(return_value=[_make_test_chunk()])
     storage.count_chunks_by_source = AsyncMock(return_value=1)
@@ -1373,6 +1376,23 @@ class TestSearch:
 
 
 class TestSources:
+    async def test_held_source_is_hidden_from_list_and_content_matches(
+        self, app, client: AsyncClient
+    ):
+        held = Path("/tmp/test.md")
+        app.state.storage.get_held_sources.return_value = [held]
+        app.state.storage.get_all_ai_summaries.return_value = {
+            str(held): {"summary": "needle", "language": "en"}
+        }
+
+        listing = await client.get("/api/sources")
+        matches = await client.get("/api/sources/content-matches", params={"q": "needle"})
+
+        assert listing.status_code == 200
+        assert listing.json()["total"] == 0
+        assert matches.status_code == 200
+        assert matches.json()["paths"] == []
+
     async def test_list_sources(self, client: AsyncClient):
         resp = await client.get("/api/sources")
         assert resp.status_code == 200
@@ -1962,6 +1982,15 @@ class TestSources:
 
 
 class TestChunksList:
+    async def test_held_source_is_hidden_from_chunk_list(self, app, client: AsyncClient):
+        app.state.storage.is_source_held.return_value = True
+
+        resp = await client.get("/api/chunks", params={"source": "/tmp/test.md"})
+
+        assert resp.status_code == 404
+        app.state.storage.list_chunks_by_source.assert_not_awaited()
+        app.state.storage.count_chunks_by_source.assert_not_awaited()
+
     async def test_list_chunks_for_source(self, client: AsyncClient):
         resp = await client.get("/api/chunks", params={"source": "/tmp/test.md"})
         assert resp.status_code == 200

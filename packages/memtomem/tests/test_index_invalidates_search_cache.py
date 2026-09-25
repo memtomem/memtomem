@@ -105,7 +105,7 @@ class TestEngineMutatedFlag:
 
         assert stats.mutated is True
 
-    async def test_deleted_file_purge_is_mutated(self, components, memory_dir):
+    async def test_missing_file_hold_is_mutated(self, components, memory_dir):
         _mock_embedder(components)
         path = memory_dir / "gone.md"
         path.write_text(BODY, encoding="utf-8")
@@ -114,8 +114,9 @@ class TestEngineMutatedFlag:
         path.unlink()
         stats = await components.index_engine.index_file(path)
 
-        assert stats.deleted_chunks > 0
+        assert stats.deleted_chunks == 0
         assert stats.mutated is True
+        assert path in await components.storage.get_held_sources()
 
     async def test_index_path_aggregates_mutated(self, components, memory_dir):
         _mock_embedder(components)

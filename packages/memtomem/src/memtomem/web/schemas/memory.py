@@ -93,6 +93,7 @@ class UploadUsageResponse(BaseModel):
 
 class ExportStatsResponse(BaseModel):
     total_chunks: int
+    omitted_held_sources: int = 0
 
 
 class ImportResponse(BaseModel):

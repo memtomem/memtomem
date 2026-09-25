@@ -1,14 +1,12 @@
-"""Watcher delete/move handling: deleting or renaming a watched file must
-remove its chunks from the index (regression coverage for #1566).
+"""Watcher delete/move handling: missing sources are retained but hidden
+from search (regression coverage for #1566 and #2498).
 
 Two layers:
 
 * ``_MarkdownEventHandler`` — the watchdog handler correctly enqueues the
   right path(s) for ``on_deleted`` / ``on_moved`` (with the suffix filter).
-* ``IndexEngine.index_file`` — a path that no longer exists on disk purges
-  its stale chunks via ``delete_by_source``, gated on the containing index
-  root still existing (mount-blip brake) and without resurrecting a deleted
-  parent directory.
+* ``IndexEngine.index_file`` — a path that no longer exists on disk holds
+  its chunks outside search without resurrecting a deleted parent directory.
 """
 
 from __future__ import annotations
@@ -158,14 +156,14 @@ class TestQueueFullDrop:
 
 
 # ===========================================================================
-# Engine-level: missing file == delete-by-source
+# Engine-level: missing file == visibility hold
 # ===========================================================================
 
 
-class TestDeleteMissingSource:
-    """``index_file`` purges chunks for a source file that is gone from disk."""
+class TestHoldMissingSource:
+    """``index_file`` hides chunks for a source file that is gone from disk."""
 
-    async def test_deleted_file_removes_its_chunks(self, components, memory_dir):
+    async def test_deleted_file_holds_its_chunks(self, components, memory_dir):
         md_path = memory_dir / "delete_me.md"
         await _index_content(components, md_path)
         assert len(await components.storage.get_chunk_hashes(md_path)) > 0
@@ -173,12 +171,13 @@ class TestDeleteMissingSource:
         md_path.unlink()
         stats = await components.index_engine.index_file(md_path)
 
-        assert stats.deleted_chunks > 0
-        assert len(await components.storage.get_chunk_hashes(md_path)) == 0
+        assert stats.deleted_chunks == 0
+        assert len(await components.storage.get_chunk_hashes(md_path)) > 0
+        assert md_path in await components.storage.get_held_sources()
+        assert await components.storage.bm25_search("Some") == []
 
     async def test_transient_oserror_does_not_delete(self, components, memory_dir):
-        """A non-ENOENT OSError (EACCES/EIO) must never delete — only a genuine
-        missing file does. Guards against a permission/mount blip mass-deleting."""
+        """An EACCES/EIO blip must retain chunks outside search."""
         md_path = memory_dir / "blip.md"
         await _index_content(components, md_path)
         assert len(await components.storage.get_chunk_hashes(md_path)) > 0
@@ -197,8 +196,7 @@ class TestDeleteMissingSource:
         assert len(await components.storage.get_chunk_hashes(md_path)) > 0
 
     async def test_unmounted_root_does_not_delete(self, components, memory_dir):
-        """If the whole index root is gone (unmount), skip deletion — the
-        two-pass orphan scan adjudicates that case instead."""
+        """A missing root cannot authorize deletion of its sources."""
         md_path = memory_dir / "note.md"
         await _index_content(components, md_path)
         assert len(await components.storage.get_chunk_hashes(md_path)) > 0
@@ -210,10 +208,10 @@ class TestDeleteMissingSource:
         assert stats.deleted_chunks == 0
         assert len(await components.storage.get_chunk_hashes(md_path)) > 0
 
-    async def test_subdir_deletion_removes_chunks_without_resurrecting_dir(
+    async def test_subdir_deletion_holds_chunks_without_resurrecting_dir(
         self, components, memory_dir
     ):
-        """Deleting a file whose subdirectory was removed must clean its chunks
+        """Deleting a file whose subdirectory was removed must hold its chunks
         and must NOT recreate the deleted directory (the sidecar-lock mkdir
         hazard)."""
         subdir = memory_dir / "sub"
@@ -225,11 +223,12 @@ class TestDeleteMissingSource:
         shutil.rmtree(subdir)
         stats = await components.index_engine.index_file(md_path)
 
-        assert stats.deleted_chunks > 0
-        assert len(await components.storage.get_chunk_hashes(md_path)) == 0
+        assert stats.deleted_chunks == 0
+        assert len(await components.storage.get_chunk_hashes(md_path)) > 0
+        assert md_path in await components.storage.get_held_sources()
         assert not subdir.exists(), "deleted subdirectory must not be resurrected by the lock mkdir"
 
-    async def test_rename_cleans_old_path_and_indexes_new(self, components, memory_dir):
+    async def test_rename_holds_old_path_and_indexes_new(self, components, memory_dir):
         old_path = memory_dir / "before.md"
         new_path = memory_dir / "after.md"
         await _index_content(components, old_path)
@@ -238,18 +237,18 @@ class TestDeleteMissingSource:
         old_path.rename(new_path)
 
         del_stats = await components.index_engine.index_file(old_path)
-        assert del_stats.deleted_chunks > 0
-        assert len(await components.storage.get_chunk_hashes(old_path)) == 0
+        assert del_stats.deleted_chunks == 0
+        assert len(await components.storage.get_chunk_hashes(old_path)) > 0
+        assert old_path in await components.storage.get_held_sources()
 
         add_stats = await components.index_engine.index_file(new_path)
         assert add_stats.indexed_chunks > 0
         assert len(await components.storage.get_chunk_hashes(new_path)) > 0
 
-    async def test_deleted_excluded_path_is_still_purged(self, components, memory_dir):
+    async def test_deleted_excluded_path_is_still_held(self, components, memory_dir):
         """Cleanup is not blocked by exclude: a file indexed before an exclude
-        pattern was added, then deleted, must still have its stale chunks purged
-        — matching the exclude-agnostic orphan sweep (otherwise deleted-and-
-        excluded content would persist forever)."""
+        pattern was added, then deleted, must still hide its stale chunks
+        outside search despite the exclude pattern."""
         md_path = memory_dir / "was_indexed.md"
         await _index_content(components, md_path)
         assert len(await components.storage.get_chunk_hashes(md_path)) > 0
@@ -258,8 +257,9 @@ class TestDeleteMissingSource:
         md_path.unlink()
         stats = await components.index_engine.index_file(md_path)
 
-        assert stats.deleted_chunks > 0
-        assert len(await components.storage.get_chunk_hashes(md_path)) == 0
+        assert stats.deleted_chunks == 0
+        assert len(await components.storage.get_chunk_hashes(md_path)) > 0
+        assert md_path in await components.storage.get_held_sources()
 
     async def test_present_excluded_path_is_not_indexed_or_purged(self, components, memory_dir):
         """A still-present excluded file is a no-op: its (pre-exclude) chunks are
@@ -308,10 +308,8 @@ class TestDeleteMissingSource:
         assert stats.deleted_chunks > 0
         assert len(await components.storage.get_chunk_hashes(md_path)) == 0
 
-    async def test_nested_root_removed_engages_brake(self, components, tmp_path):
-        """When nested roots are configured and the most-specific one is removed,
-        the brake keys off *that* root (not a surviving parent) and skips the
-        delete — leaving the bulk case to the two-pass mass-orphan scan."""
+    async def test_nested_root_removed_holds_source(self, components, tmp_path):
+        """A missing nested root is held even when its parent survives."""
         outer = tmp_path / "outer"
         inner = outer / "inner"
         inner.mkdir(parents=True)
@@ -329,11 +327,11 @@ class TestDeleteMissingSource:
 
 
 # ===========================================================================
-# Mid-level: the consumer drives the delete end-to-end (no real Observer)
+# Mid-level: the consumer drives the hold end-to-end (no real Observer)
 # ===========================================================================
 
 
-async def test_process_events_deletes_via_queue(components, memory_dir):
+async def test_process_events_holds_via_queue(components, memory_dir):
     """Feed the deleted path + stop sentinel straight into the queue and run
     the consumer — deterministic, no filesystem-event timing."""
     md_path = memory_dir / "queued.md"
@@ -351,12 +349,12 @@ async def test_process_events_deletes_via_queue(components, memory_dir):
 
     await watcher._process_events()
 
-    assert len(await components.storage.get_chunk_hashes(md_path)) == 0
+    assert len(await components.storage.get_chunk_hashes(md_path)) > 0
+    assert md_path in await components.storage.get_held_sources()
 
 
-async def test_reindex_logs_removed_not_reindexed(components, memory_dir, caplog):
-    """The delete pass logs 'Removed deleted file from index', not the
-    misleading 'Auto-reindexed ... indexed=0 ... deleted=N'."""
+async def test_reindex_logs_held_source(components, memory_dir, caplog):
+    """A missing source log names the hold rather than a no-op reindex."""
     md_path = memory_dir / "logtest.md"
     await _index_content(components, md_path)
 
@@ -371,7 +369,7 @@ async def test_reindex_logs_removed_not_reindexed(components, memory_dir, caplog
         await watcher._reindex(md_path)
 
     messages = [r.getMessage() for r in caplog.records]
-    assert any("Removed deleted file from index" in m for m in messages)
+    assert any("Held unavailable source outside search" in m for m in messages)
     assert not any("Auto-reindexed" in m for m in messages)
 
 

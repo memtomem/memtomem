@@ -209,6 +209,31 @@ async def test_self_export_with_secret_roundtrips_unchanged(tmp_path):
     assert any(_SECRET in c.content for c in rows)
 
 
+async def test_export_import_does_not_publish_held_source(tmp_path):
+    src = await _make_storage(tmp_path, "held-export-src")
+    visible = _make_chunk("visibleexportword", source="visible.md")
+    held = _make_chunk("hiddenexportword", source="held.md")
+    await src.upsert_chunks([visible, held])
+    await src.hold_source(held.metadata.source_file, "missing")
+
+    bundle_path = tmp_path / "visible-only.json"
+    bundle = await export_chunks(src, output_path=bundle_path, stamp_provenance=False)
+    assert bundle.total_chunks == 1
+    assert bundle.omitted_held_sources == 1
+    assert json.loads(bundle_path.read_text(encoding="utf-8"))["omitted_held_sources"] == 1
+    assert bundle.chunks[0]["content"] == "visibleexportword"
+
+    dst = await _make_storage(tmp_path, "held-export-dst")
+    stats = await import_chunks(dst, _FakeEmbedder(), bundle_path, extract_entities=False)
+    assert stats.imported_chunks == 1
+    assert await dst.bm25_search("hiddenexportword") == []
+    assert await dst.bm25_search("visibleexportword")
+
+    filtered = await export_chunks(src, namespace_filter="unrelated", stamp_provenance=False)
+    assert filtered.total_chunks == 0
+    assert filtered.omitted_held_sources == 0
+
+
 async def test_self_export_verifies_only_with_matching_key(tmp_path):
     """The same self-export imported under a *different* install key is foreign
     and gets gated (proves the marker is key-bound, not just present)."""

@@ -224,6 +224,24 @@ def sweep_orphan_project_root(
                     (f"{_AI_SUMMARY_KEY_PREFIX}{source_norm}",),
                 )
                 ai_summaries_deleted += cursor.rowcount or 0
+                held = db.execute(
+                    "DELETE FROM held_sources WHERE source_file = ?", (source_norm,)
+                ).rowcount
+                pending = db.execute(
+                    "DELETE FROM pending_source_checks WHERE source_file = ?", (source_norm,)
+                ).rowcount
+                if held or pending:
+                    db.execute(
+                        "INSERT INTO _memtomem_meta(key, value) "
+                        "VALUES ('source_visibility_epoch', '1') "
+                        "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1"
+                    )
+                    db.execute(
+                        "INSERT INTO source_visibility_generations(source_file, generation) "
+                        "VALUES (?, 1) ON CONFLICT(source_file) "
+                        "DO UPDATE SET generation=generation+1",
+                        (source_norm,),
+                    )
 
         db.execute("COMMIT")
     except Exception:
