@@ -12,7 +12,6 @@ import logging
 import os
 import sqlite3
 import threading
-import unicodedata
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
@@ -54,6 +53,7 @@ from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_helpers import (
     deserialize_f32,
     escape_like,
+    fold_path_form,
     match_source_filter_value,
     namespace_sql,
     norm_path,
@@ -2271,7 +2271,7 @@ class SqliteBackend(
         # symlinked subpath may therefore miss the resolved chunks key; the
         # live queue still receives the event, but restart replay is not
         # guaranteed for that path.
-        source = unicodedata.normalize("NFC", os.path.abspath(os.path.expanduser(str(source_file))))
+        source = fold_path_form(os.path.abspath(os.path.expanduser(str(source_file))))
         # A contended writer must not park watchdog's observer thread for a
         # full debounce window per event. The event still enters the queue if
         # this best-effort journal write times out.

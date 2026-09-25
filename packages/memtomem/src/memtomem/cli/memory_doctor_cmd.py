@@ -61,9 +61,10 @@ Checks (per configured ``memory_dir``):
   counts only; matched bytes are never shown.
 * **stale_source** — DB chunks whose ``source_file`` is gone from disk and
   have not yet entered a visibility hold.
-* **held_source** — missing sources whose chunks are retained but hidden while
-  availability is uncertain. Advisory; review and explicitly purge confirmed
-  deletions with ``mm gc orphan-sources --apply``.
+* **held_source** — sources whose chunks are retained but hidden while
+  availability or reindexing is unresolved, including present files that
+  cannot be indexed. Advisory; repair and reindex wanted files, or explicitly
+  purge confirmed deletions with ``mm gc orphan-sources --apply``.
 * **convention_violation** — an index/meta file (``MEMORY.md`` / ``README.md``
   for a ``claude-memory`` dir) indexed as searchable content despite the
   provider convention.
@@ -1468,6 +1469,11 @@ def _analyze_dir(
     # (meta file indexed), and an unexpected residue.
     stale: list[str] = []
     held_missing: list[str] = []
+    held_present = [
+        str(row[0])
+        for k, row in db_norm.items()
+        if k in (held_sources or set()) and Path(row[0]).exists()
+    ]
     violations: list[str] = []
     unexpected: list[str] = []
     for k, row in db_norm.items():
@@ -1496,16 +1502,17 @@ def _analyze_dir(
                 items=sorted(stale),
             )
         )
-    if held_missing:
+    if held_missing or held_present:
         report.findings.append(
             Finding(
                 check="held_source",
                 severity="warn",
                 summary=(
-                    f"{len(held_missing)} source(s) are unavailable and hidden from search; "
-                    "restore the source or review `mm gc orphan-sources`"
+                    f"{len(held_missing) + len(held_present)} source(s) are held and hidden "
+                    f"from search ({len(held_missing)} missing, {len(held_present)} present); "
+                    "repair and run `mm index <file>`, or explicitly purge unwanted chunks"
                 ),
-                items=sorted(held_missing),
+                items=sorted([*held_missing, *held_present]),
             )
         )
     if violations:
@@ -1537,7 +1544,7 @@ def _analyze_dir(
     cold = [
         (row[0], row[1])  # (path, chunk_count)
         for k, row in db_norm.items()
-        if k in disk_norm and row[3] == 0 and row[2] is None
+        if k in disk_norm and k not in (held_sources or set()) and row[3] == 0 and row[2] is None
     ]
     if cold:
         cold.sort(key=lambda pc: (-pc[1], str(pc[0])))

@@ -54,6 +54,68 @@ async def test_pending_delete_hidden_and_replayed_after_restart(components, memo
     assert await components.storage.get_chunk_hashes(path) == old_ids
 
 
+async def test_delete_journal_keeps_nfd_path_on_nonfolding_platform(
+    components, memory_dir, monkeypatch
+):
+    from memtomem.storage import sqlite_helpers
+    from memtomem.storage.sqlite_helpers import norm_path
+
+    indexed = memory_dir / "indexed.md"
+    await _indexed(components, indexed)
+    nfd_path = memory_dir / "cafe\u0301.md"
+    db = components.storage._get_db()
+    db.execute(
+        "UPDATE chunks SET source_file=? WHERE source_file=?",
+        (str(nfd_path), norm_path(indexed)),
+    )
+    db.commit()
+    monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", False)
+
+    assert components.storage.queue_source_check_sync(nfd_path)
+    assert nfd_path in await components.storage.get_pending_source_checks()
+
+
+async def test_periodic_recheck_recovers_pending_without_a_new_event(components, memory_dir):
+    path = memory_dir / "pending-returned.md"
+    await _indexed(components, path)
+    assert components.storage.queue_source_check_sync(path)
+    assert path in await components.storage.get_pending_source_checks()
+
+    watcher = FileWatcher(components.index_engine, components.config.indexing)
+    task = asyncio.create_task(watcher._recheck_held_loop())
+    try:
+        for _ in range(100):
+            if path not in await components.storage.get_pending_source_checks():
+                break
+            await asyncio.sleep(0.01)
+        assert path not in await components.storage.get_pending_source_checks()
+        assert not await components.storage.is_source_held(path)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_periodic_recheck_holds_missing_pending_without_a_new_event(components, memory_dir):
+    path = memory_dir / "pending-missing.md"
+    await _indexed(components, path)
+    path.unlink()
+    assert components.storage.queue_source_check_sync(path)
+    assert path in await components.storage.get_pending_source_checks()
+
+    watcher = FileWatcher(components.index_engine, components.config.indexing)
+    task = asyncio.create_task(watcher._recheck_held_loop())
+    try:
+        for _ in range(100):
+            if path in await components.storage.get_held_sources():
+                break
+            await asyncio.sleep(0.01)
+        assert path in await components.storage.get_held_sources()
+        assert path not in await components.storage.get_pending_source_checks()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_held_source_recovers_after_successful_reindex(components, memory_dir):
     path = memory_dir / "return.md"
     await _indexed(components, path)

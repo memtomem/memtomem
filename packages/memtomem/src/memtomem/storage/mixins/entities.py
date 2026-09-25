@@ -252,7 +252,8 @@ class EntityMixin:
             "c.content, c.source_file, c.namespace "
             "FROM chunk_entities e "
             "JOIN chunks c ON e.chunk_id = c.id "
-            f"WHERE {VISIBLE_SOURCE_C} "
+            # Fixed internal SQL fragment; all caller values below use binds.
+            f"WHERE {VISIBLE_SOURCE_C} "  # nosec B608
         )
         params: list = []
 

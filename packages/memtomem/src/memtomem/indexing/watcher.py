@@ -391,10 +391,22 @@ class FileWatcher:
         )
         if getter is None:
             return
+        pending_getter = (
+            getattr(storage, "get_pending_source_checks", None)
+            if hasattr(type(storage), "get_pending_source_checks")
+            else None
+        )
         startup_remaining: int | None = None
         while True:
             try:
                 held = await getter()
+                pending_checks: set[Path] = set()
+                # A failed post-event settle can leave a path pending without
+                # a held row. Recheck it here as well so recovery does not
+                # depend on another watcher event or a process restart.
+                if pending_getter is not None:
+                    pending_checks = set(await pending_getter())
+                    held = list(dict.fromkeys([*held, *pending_checks]))
                 if startup_remaining is None:
                     startup_remaining = len(held)
                 else:
@@ -449,7 +461,14 @@ class FileWatcher:
                                         self._recheck_wakeup.set()
                             except Exception:
                                 logger.exception("Could not restore held source %s", path)
-                        # Missing/unavailable paths remain held as they are.
+                        elif path in pending_checks:
+                            # A failed event settle may have left only a pending
+                            # journal row. Turn it into a durable hold now.
+                            try:
+                                await storage.hold_source(path, "watch_reindex_unresolved")
+                            except Exception:
+                                logger.exception("Could not settle pending source %s", path)
+                        # Missing/unavailable held paths remain held as they are.
                     self._held_cursor = (self._held_cursor + processed) % len(held)
                     startup_remaining = max(0, startup_remaining - processed)
                 if held and stalled:

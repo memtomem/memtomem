@@ -168,6 +168,20 @@ class TestInteractiveToolSkipsBrake:
         assert "confirm_purge=True" in preview
         app.storage.delete_by_source.assert_not_awaited()
 
+        string_flag = await dedup_decay.mem_cleanup_orphans(
+            dry_run=False,
+            confirm_purge="false",
+            ctx=None,  # type: ignore[arg-type]
+        )
+        assert "dry-run, no deletions" in string_flag
+        string_dry_run = await dedup_decay.mem_cleanup_orphans(
+            dry_run="false",
+            confirm_purge=True,
+            ctx=None,  # type: ignore[arg-type]
+        )
+        assert "dry-run, no deletions" in string_dry_run
+        app.storage.delete_by_source.assert_not_awaited()
+
         out = await dedup_decay.mem_cleanup_orphans(dry_run=False, confirm_purge=True, ctx=None)
 
         assert "Cleanup complete" in out

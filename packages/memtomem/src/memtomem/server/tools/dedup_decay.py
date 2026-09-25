@@ -233,7 +233,9 @@ async def mem_cleanup_orphans(
             message += f" {len(result.unavailable_sources)} source(s) unavailable and not eligible for purge."
         return message
 
-    if dry_run or not confirm_purge:
+    # ``mem_do`` passes params through at runtime. Only actual JSON booleans
+    # may opt into deletion; the string "false" must stay a preview.
+    if dry_run is not False or confirm_purge is not True:
         lines = [f"Orphaned files: {len(orphaned)} (dry-run, no deletions)\n"]
         for sf in sorted(orphaned):
             lines.append(f"  {sf}")

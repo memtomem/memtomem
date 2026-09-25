@@ -31,9 +31,9 @@ from memtomem.models import NamespaceFilter, ScopeFilter
 from .sqlite_helpers import escape_like
 from .sqlite_scope import _scopes_glob_clause, _scopes_in_clause
 
-# A missing source is retained for recovery but cannot participate in any
-# content-producing read. Keep the aliased and unaliased SQL here so ranked
-# search, entity search, and maintenance discovery apply the same gate.
+# A missing source is retained for recovery but hidden from ranked search,
+# entity search, and maintenance discovery. ID-addressed storage and MCP reads
+# still reach held chunks until an explicit purge.
 VISIBLE_SOURCE_C = (
     "NOT EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file=c.source_file) "
     "AND NOT EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file=c.source_file)"
