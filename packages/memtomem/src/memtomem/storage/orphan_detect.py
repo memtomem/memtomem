@@ -60,6 +60,20 @@ class OrphanScanResult:
         return len(self.confirmed_orphans) / self.total_sources
 
 
+async def orphan_candidate_sources(storage: StorageBackend) -> set[Path]:
+    """Filesystem-backed sources, plus detached policy summaries for cleanup."""
+    candidate_getter = (
+        getattr(storage, "get_orphan_candidate_source_files", None)
+        if hasattr(type(storage), "get_orphan_candidate_source_files")
+        else None
+    )
+    return set(
+        await candidate_getter()
+        if candidate_getter is not None
+        else await storage.get_all_source_files()
+    )
+
+
 async def scan_orphans(
     storage: StorageBackend,
     *,
@@ -78,16 +92,7 @@ async def scan_orphans(
     """
     delay = ORPHAN_RECHECK_DELAY_SECONDS if recheck_delay_seconds is None else recheck_delay_seconds
 
-    candidate_getter = (
-        getattr(storage, "get_orphan_candidate_source_files", None)
-        if hasattr(type(storage), "get_orphan_candidate_source_files")
-        else None
-    )
-    sources = (
-        await candidate_getter()
-        if candidate_getter is not None
-        else await storage.get_all_source_files()
-    )
+    sources = await orphan_candidate_sources(storage)
     total = len(sources)
 
     def probe(paths: set[Path] | list[Path]) -> dict[Path, str]:

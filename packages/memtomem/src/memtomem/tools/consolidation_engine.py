@@ -24,7 +24,13 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from memtomem.errors import StorageError
-from memtomem.models import ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata, ChunkType
+from memtomem.models import (
+    CONSOLIDATED_SUFFIX,
+    ORIGIN_CONSOLIDATION_POLICY,
+    Chunk,
+    ChunkMetadata,
+    ChunkType,
+)
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 from memtomem.tools.entity_extraction import _ACTION_RE, _DECISION_RE
 
@@ -39,7 +45,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_SUMMARY_NAMESPACE = "archive:summary"
 DECAY_FACTOR = 0.5  # keep_originals=False → halve importance score
 DECAY_FLOOR = 0.3  # keep_originals=False → importance_score floor (never below)
-CONSOLIDATED_SUFFIX = ".consolidated.md"
 SUMMARY_MAX_LEN = 160
 KEYWORD_BOOST_MAX_LEN = 140
 CHECKLIST_PREVIEW_LEN = 60

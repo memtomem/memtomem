@@ -1006,6 +1006,31 @@ async def test_present_but_held_source_is_reported(doctor_env):
 
 
 @pytest.mark.asyncio
+async def test_virtual_policy_summary_is_not_a_stale_disk_source(doctor_env):
+    config, mem_dir = doctor_env
+    original = mem_dir / "note.md"
+    virtual = mem_dir / "note.md.consolidated.md"
+    original.write_text("# Note\n\nStill here.\n", encoding="utf-8")
+    backend = SqliteBackend(
+        config.storage, dimension=0, embedding_provider="none", embedding_model=""
+    )
+    await backend.initialize()
+    try:
+        _insert_chunk(backend, chunk_id="original", source_file=original)
+        _insert_chunk(backend, chunk_id="virtual", source_file=virtual)
+        db = backend._get_db()
+        db.execute("UPDATE chunks SET origin='consolidation_policy' WHERE id='virtual'")
+        db.commit()
+    finally:
+        await backend.close()
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    report = next(r for r in reports if r.path != "(unowned)")
+    stale = _findings_by_check(report).get("stale_source")
+    assert stale is None or str(virtual) not in stale.items
+
+
+@pytest.mark.asyncio
 async def test_analysis_detects_all_drift_classes(doctor_env):
     config, mem_dir = doctor_env
 

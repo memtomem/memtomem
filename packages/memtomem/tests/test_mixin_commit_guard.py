@@ -755,6 +755,9 @@ _PARTICIPANT_HELPERS: dict[tuple[str, str], str] = {
     ("sqlite_backend.py", "SqliteBackend._clear_source_visibility"): (
         "Deletes source holds and pending checks within its caller's transaction."
     ),
+    ("sqlite_backend.py", "SqliteBackend._delete_policy_summaries_for_source"): (
+        "Deletes policy summary rows within delete_chunks' transaction."
+    ),
     ("sqlite_backend.py", "SqliteBackend.delete_by_namespace._delete_and_clear_empty_sources"): (
         "Runs inside delete_by_namespace's owned transaction."
     ),

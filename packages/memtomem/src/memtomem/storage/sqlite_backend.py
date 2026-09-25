@@ -42,6 +42,7 @@ from memtomem.storage.base import (
     parse_tag_filter,
 )
 from memtomem.models import (
+    CONSOLIDATED_SUFFIX,
     ORIGIN_CONSOLIDATION_POLICY,
     Chunk,
     ChunkMetadata,
@@ -1944,6 +1945,7 @@ class SqliteBackend(
 
         affected_sources = {row[2] for row in rows if row[2]}
 
+        policy_summaries_deleted = 0
         try:
             # Every batch inside this one try/except, so the rollback below
             # still covers the whole delete.
@@ -1994,6 +1996,9 @@ class SqliteBackend(
                         (source_norm,),
                     ).fetchone()
                     if remaining is None:
+                        policy_summaries_deleted += self._delete_policy_summaries_for_source(
+                            db, source_norm
+                        )
                         db.execute(
                             "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
                             (
@@ -2009,13 +2014,43 @@ class SqliteBackend(
             if not self._in_transaction:
                 db.rollback()
             raise StorageError(f"delete_chunks failed, transaction rolled back: {exc}") from exc
+        return len(rows) + policy_summaries_deleted
+
+    def _delete_policy_summaries_for_source(self, db: sqlite3.Connection, source: str) -> int:
+        """Remove policy-owned derived chunks after their last source chunk goes."""
+        summary_source = source + CONSOLIDATED_SUFFIX
+        rows = db.execute(
+            "SELECT id, rowid FROM chunks WHERE source_file=? AND origin=?",
+            (summary_source, ORIGIN_CONSOLIDATION_POLICY),
+        ).fetchall()
+        for batch in _param_batches(rows):
+            ids = [row[0] for row in batch]
+            rowids = [row[1] for row in batch]
+            db.execute(f"DELETE FROM chunks WHERE id IN ({placeholders(len(ids))})", ids)
+            db.execute(
+                f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids
+            )
+            if self._has_vec_table:
+                db.execute(
+                    f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})", rowids
+                )
+        if (
+            rows
+            and db.execute(
+                "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (summary_source,)
+            ).fetchone()
+            is None
+        ):
+            self._clear_source_visibility(db, summary_source)
         return len(rows)
 
     async def delete_by_source(self, source_file: Path) -> int:
         db = self._get_db()
+        source = norm_path(source_file)
+        summary_source = source + CONSOLIDATED_SUFFIX
         rows = db.execute(
-            "SELECT id, rowid FROM chunks WHERE source_file=?",
-            (norm_path(source_file),),
+            "SELECT id, rowid FROM chunks WHERE source_file=? OR (source_file=? AND origin=?)",
+            (source, summary_source, ORIGIN_CONSOLIDATION_POLICY),
         ).fetchall()
 
         if not rows:
@@ -2036,6 +2071,13 @@ class SqliteBackend(
                     (norm_path(source_file),),
                 )
                 self._clear_source_visibility(db, source_file)
+                if (
+                    db.execute(
+                        "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (summary_source,)
+                    ).fetchone()
+                    is None
+                ):
+                    self._clear_source_visibility(db, summary_source)
                 self._commit_if_standalone(db)
             return 0
 
@@ -2075,6 +2117,13 @@ class SqliteBackend(
                 (norm_path(source_file),),
             )
             self._clear_source_visibility(db, source_file)
+            if (
+                db.execute(
+                    "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (summary_source,)
+                ).fetchone()
+                is None
+            ):
+                self._clear_source_visibility(db, summary_source)
             if not self._in_transaction:
                 db.commit()
         except Exception as exc:
@@ -3704,15 +3753,20 @@ class SqliteBackend(
         return {Path(row[0]) for row in rows}
 
     async def get_orphan_candidate_source_files(self) -> set[Path]:
-        """Exclude virtual policy summaries from filesystem availability checks.
+        """Exclude attached virtual summaries from filesystem checks.
 
         The trusted origin stamp, rather than a filename suffix, identifies
-        summary-only sources. A user chunk sharing that path keeps it eligible.
+        summary-only sources. A detached summary or a user chunk sharing that
+        path stays eligible for cleanup.
         """
         db = self._get_read_db()
         rows = db.execute(
-            "SELECT DISTINCT source_file FROM chunks WHERE origin IS NULL OR origin <> ?",
-            (ORIGIN_CONSOLIDATION_POLICY,),
+            "SELECT DISTINCT c.source_file FROM chunks c "
+            "WHERE c.origin IS NULL OR c.origin <> ? OR NOT EXISTS ("
+            "SELECT 1 FROM chunks parent WHERE parent.source_file="
+            "substr(c.source_file, 1, length(c.source_file) - length(?)) "
+            "AND (parent.origin IS NULL OR parent.origin <> ?))",
+            (ORIGIN_CONSOLIDATION_POLICY, CONSOLIDATED_SUFFIX, ORIGIN_CONSOLIDATION_POLICY),
         ).fetchall()
         return {Path(row[0]) for row in rows}
 

@@ -26,22 +26,44 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-from memtomem.models import NamespaceFilter, ScopeFilter
+from memtomem.models import (
+    CONSOLIDATED_SUFFIX,
+    ORIGIN_CONSOLIDATION_POLICY,
+    NamespaceFilter,
+    ScopeFilter,
+)
 
 from .sqlite_helpers import escape_like
 from .sqlite_scope import _scopes_glob_clause, _scopes_in_clause
 
+
 # A missing source is retained for recovery but hidden from ranked search,
 # entity search, and maintenance discovery. ID-addressed storage and MCP reads
 # still reach held chunks until an explicit purge.
-VISIBLE_SOURCE_C = (
-    "NOT EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file=c.source_file) "
-    "AND NOT EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file=c.source_file)"
-)
-VISIBLE_SOURCE_CHUNKS = (
-    "NOT EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file=chunks.source_file) "
-    "AND NOT EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file=chunks.source_file)"
-)
+def _visible_source_sql(alias: str) -> str:
+    # Only the two fixed table spellings below reach this SQL fragment.
+    if alias not in {"c", "chunks"}:
+        raise ValueError("unsupported source visibility table alias")
+    source = f"{alias}.source_file"
+    original = f"substr({source}, 1, length({source}) - length('{CONSOLIDATED_SUFFIX}'))"
+    direct = (
+        f"NOT EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file={source}) "  # nosec B608
+        f"AND NOT EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file={source})"
+    )
+    derived = (
+        f"EXISTS (SELECT 1 FROM chunks parent WHERE parent.source_file={original} "  # nosec B608
+        f"AND (parent.origin IS NULL OR parent.origin <> '{ORIGIN_CONSOLIDATION_POLICY}')) "
+        f"AND NOT EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file={original}) "  # nosec B608
+        f"AND NOT EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file={original})"
+    )
+    return (
+        f"({direct} AND ({alias}.origin IS NULL OR {alias}.origin <> "
+        f"'{ORIGIN_CONSOLIDATION_POLICY}' OR ({derived})))"  # nosec B608
+    )
+
+
+VISIBLE_SOURCE_C = _visible_source_sql("c")
+VISIBLE_SOURCE_CHUNKS = _visible_source_sql("chunks")
 
 # ``_scopes_*_clause`` are private to ``sqlite_scope`` because they are half a
 # rule on their own — the boundary has to be layered on top, which is exactly

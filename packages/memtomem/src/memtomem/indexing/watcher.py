@@ -1149,7 +1149,8 @@ class FileWatcher:
             if storage is not None and hasattr(type(storage), "is_source_pending"):
                 try:
                     if await storage.is_source_pending(file_path):
-                        await storage.hold_source(file_path, "watch_reindex_unresolved")
+                        if await storage.hold_source(file_path, "watch_reindex_unresolved"):
+                            self._recheck_wakeup.set()
                 except Exception:
                     logger.exception("Could not settle watcher check after reindex: %s", file_path)
         return None

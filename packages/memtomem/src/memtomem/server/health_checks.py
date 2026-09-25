@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from memtomem.errors import TransactionOwnedError
 from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server.health_store import HealthSnapshot
+from memtomem.storage.orphan_detect import orphan_candidate_sources
 
 if TYPE_CHECKING:
     from memtomem.server.context import AppContext
@@ -88,7 +89,7 @@ async def check_search_cache_size(app: AppContext) -> HealthSnapshot:
 async def check_orphan_count(app: AppContext) -> HealthSnapshot:
     """Count newly missing sources; already held sources are accounted for."""
     now = time.time()
-    source_files = await app.storage.get_all_source_files()
+    source_files = await orphan_candidate_sources(app.storage)
     hidden: set[Path] = set()
     explicit_methods = getattr(app.storage, "__dict__", {})
     if hasattr(type(app.storage), "get_held_sources") or "get_held_sources" in explicit_methods:

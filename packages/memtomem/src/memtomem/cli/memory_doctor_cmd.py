@@ -132,6 +132,8 @@ import click
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
+from memtomem.models import CONSOLIDATED_SUFFIX, ORIGIN_CONSOLIDATION_POLICY
+
 if TYPE_CHECKING:
     from memtomem.config import Mem2MemConfig
 
@@ -894,7 +896,11 @@ _SOURCE_SIGNALS_SQL = (
     " COALESCE(SUM(access_count), 0),"
     " COALESCE(MAX(importance_score), 0.0),"
     " COALESCE(AVG(importance_score), 0.0)"
-    " FROM chunks GROUP BY source_file ORDER BY source_file"
+    " FROM chunks c WHERE c.origin IS NULL OR c.origin <> ? OR NOT EXISTS ("
+    "SELECT 1 FROM chunks parent WHERE parent.source_file="
+    "substr(c.source_file, 1, length(c.source_file) - length(?)) "
+    "AND (parent.origin IS NULL OR parent.origin <> ?))"
+    " GROUP BY c.source_file ORDER BY c.source_file"
 )
 
 
@@ -925,7 +931,10 @@ def _read_source_signals(
     try:
         conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=5)
         conn.execute("PRAGMA query_only=ON")
-        rows = conn.execute(_SOURCE_SIGNALS_SQL).fetchall()
+        rows = conn.execute(
+            _SOURCE_SIGNALS_SQL,
+            (ORIGIN_CONSOLIDATION_POLICY, CONSOLIDATED_SUFFIX, ORIGIN_CONSOLIDATION_POLICY),
+        ).fetchall()
     except sqlite3.DatabaseError:
         return None  # missing/old-schema/corrupt — degrade to disk-only checks
     finally:

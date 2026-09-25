@@ -10,9 +10,10 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from memtomem.models import Chunk, ChunkMetadata, IndexingStats
+from memtomem.models import ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata, IndexingStats
 from memtomem.storage.orphan_detect import scan_orphans
 from memtomem.storage.sqlite_backend import SqliteBackend
+from memtomem.server.health_checks import check_orphan_count
 
 from memtomem.indexing.watcher import FileWatcher, _STOP_SENTINEL
 from memtomem.config import IndexingConfig
@@ -145,18 +146,77 @@ async def test_orphan_scan_skips_trusted_virtual_summary_but_not_user_file(compo
     virtual = memory_dir / "original.md.consolidated.md"
     await _indexed(components, original)
     await _indexed(components, user_file)
+    await _indexed(components, virtual, "summaryword")
     db = components.storage._get_db()
     db.execute(
-        "UPDATE chunks SET source_file=?, origin='consolidation_policy' WHERE source_file=?",
-        (str(virtual), str(original)),
+        "UPDATE chunks SET origin=? WHERE source_file=?",
+        (ORIGIN_CONSOLIDATION_POLICY, str(virtual)),
     )
     db.commit()
+    virtual.unlink()
     user_file.unlink()
 
     result = await scan_orphans(components.storage, recheck_delay_seconds=0)
     assert virtual not in result.confirmed_orphans
     assert user_file in result.confirmed_orphans
-    assert result.total_sources == 1
+    assert result.total_sources == 2
+
+    original_ids = await components.storage.get_chunk_hashes(original)
+    assert (
+        await components.storage.delete_chunks([UUID(chunk_id) for chunk_id in original_ids]) == 2
+    )
+    assert virtual not in await components.storage.get_all_source_files()
+
+
+async def test_detached_policy_summary_is_orphan_candidate(components, memory_dir):
+    virtual = memory_dir / "detached.md.consolidated.md"
+    await _indexed(components, virtual, "summaryword")
+    db = components.storage._get_db()
+    db.execute(
+        "UPDATE chunks SET origin=? WHERE source_file=?",
+        (ORIGIN_CONSOLIDATION_POLICY, str(virtual)),
+    )
+    db.commit()
+    virtual.unlink()
+
+    detached = await scan_orphans(components.storage, recheck_delay_seconds=0)
+    assert detached.confirmed_orphans == [virtual]
+
+
+async def test_policy_summary_tracks_source_hold_and_explicit_purge(components, memory_dir):
+    original = memory_dir / "tracked.md"
+    virtual = memory_dir / "tracked.md.consolidated.md"
+    await _indexed(components, original, "originalword")
+    await _indexed(components, virtual, "summaryword")
+    db = components.storage._get_db()
+    db.execute(
+        "UPDATE chunks SET origin=? WHERE source_file=?",
+        (ORIGIN_CONSOLIDATION_POLICY, str(virtual)),
+    )
+    db.commit()
+    virtual.unlink()
+
+    assert (await components.search_pipeline.search("summaryword"))[0]
+    health = await check_orphan_count(SimpleNamespace(storage=components.storage))
+    assert health.value == {"orphaned": 0, "held": 0, "total_sources": 1}
+    original.unlink()
+    assert components.storage.queue_source_check_sync(original)
+    assert (await components.search_pipeline.search("summaryword"))[0] == []
+    assert await components.storage.hold_source(original, "source_missing")
+    assert (await components.search_pipeline.search("summaryword"))[0] == []
+    health = await check_orphan_count(SimpleNamespace(storage=components.storage))
+    assert health.value == {"orphaned": 0, "held": 1, "total_sources": 1}
+
+    original.write_text("# Note\n\noriginalword content.\n", encoding="utf-8")
+    assert await components.storage.release_source_hold(original)
+    assert (await components.search_pipeline.search("summaryword"))[0]
+
+    original.unlink()
+    assert await components.storage.hold_source(original, "source_missing")
+    assert await components.storage.delete_by_source(original) == 2
+    assert await components.storage.get_all_source_files() == set()
+    assert (await components.search_pipeline.search("summaryword"))[0] == []
+    assert (await scan_orphans(components.storage, recheck_delay_seconds=0)).total_sources == 0
 
 
 async def test_held_source_recovers_after_successful_reindex(components, memory_dir):

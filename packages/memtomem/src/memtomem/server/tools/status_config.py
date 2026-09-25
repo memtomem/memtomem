@@ -30,6 +30,7 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.helpers import _set_config_key
 from memtomem.secret_masking import is_secret_key, mask_secrets
+from memtomem.storage.orphan_detect import orphan_candidate_sources
 
 if TYPE_CHECKING:
     from memtomem.config import Mem2MemConfig, SaveReceipt, SearchConfig
@@ -276,7 +277,7 @@ async def collect_status_report(app: AppContext) -> dict:
     source_files: set[Path] = set()
     hidden_paths: set[Path] = set()
     try:
-        source_files = set(await app.storage.get_all_source_files())
+        source_files = await orphan_candidate_sources(app.storage)
     except Exception:
         logger.debug("Orphan detection failed", exc_info=True)
     try:

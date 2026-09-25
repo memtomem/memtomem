@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 #: ``_make_summary_chunk`` or the one-shot migration backfill that adopts
 #: summaries written before the column existed.
 ORIGIN_CONSOLIDATION_POLICY = "consolidation_policy"
+CONSOLIDATED_SUFFIX = ".consolidated.md"
 
 #: The origins a chunk may legitimately carry. Stored as TEXT, so a value from
 #: an older or newer writer decodes verbatim and simply never equals a known
