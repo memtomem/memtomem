@@ -32,6 +32,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   kept. A re-index corrects its content, but it may keep the namespace the NFD
   file gave it. To reset it, delete that source (`mem_delete` with
   `source_file`, or *Delete* in the Web UI's Sources view) and index it again.
+- **Missing source files no longer lose their indexed chunks automatically
+  (#2498).** Watcher deletes and orphan scans now hold missing or inaccessible
+  sources outside search and entity/consolidation previews while retaining
+  their chunks for recovery. Watcher
+  delete callbacks journal pending checks in SQLite so a stop or restart can
+  replay them without startup backfill. For source paths reached through a
+  symlink, the live watcher queue still checks deletes, but the journal may
+  miss the resolved database path. This also covers an empty surviving
+  mountpoint, a directory replaced by a mountpoint, and an unregistered nested
+  mount. Scheduled compaction and health
+  maintenance no longer purge missing sources; use `mm gc orphan-sources
+  --apply` after confirming deletion. MCP cleanup now needs both
+  `dry_run=false` and `confirm_purge=true` to purge. The database schema moves
+  from version 2 to 3; older binaries refuse the new visibility state rather
+  than returning held chunks in search. Renames leave hidden copies at the old
+  path until an explicit orphan purge; storage `get_chunk` and MCP `mem_read`,
+  `mem_edit`, `mem_delete`, and `mem_related` can access held chunks by ID,
+  while search and Web chunk-ID lookup hide them. Exports omit held sources
+  and report the omitted count; restore them and export again before treating
+  a bundle as a complete backup.
 - **A create or modify event dropped by a full watcher queue is no longer lost
   (#2530).**
   The watcher buffers events in a 1,000-slot queue. A burst larger than that
@@ -45,13 +65,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   keeps unchanged files cheap. The first drop per root logs one warning with the
   full path and the root to be rescanned; the rest go to debug. A rescan that
   `stop()` interrupts is named in a warning with `mm index <root>`.
-- **A delete or move event dropped by a full watcher queue now purges the old
+- **A delete or move event dropped by a full watcher queue now checks the old
   path (#2532).** The #2530 rescan walks only files that exist, so a dropped
   delete, or the source of a dropped move, left that file's chunks searchable
   until the opt-in orphan sweep or a manual `mm gc orphan-sources --apply`.
   The watcher now keeps each dropped path and, when its root is rescanned,
   replays it through the same per-event reindex a delivered event gets. A
-  missing file is purged exactly as a delivered delete would be. The rescan
+  missing file is held outside search as a delivered delete would be (#2498).
+  The rescan
   does not reconcile the whole root, so a file deleted without a dropped event
   is not touched. The warning for a rescan that `stop()` interrupts now also
   names `mm gc orphan-sources --apply`.

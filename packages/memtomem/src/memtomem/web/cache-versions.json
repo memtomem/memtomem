@@ -129,7 +129,8 @@
     },
     "/settings-maintenance.js": {
       "versions": {
-        "5": "2014fa70bfd38f2a4e207403dc66dc49e20670c4dc53bfa921e8b42ff482d78f"
+        "5": "2014fa70bfd38f2a4e207403dc66dc49e20670c4dc53bfa921e8b42ff482d78f",
+        "6": "bc1a645614793d0ec9956e2b8ecc0717792847578fcd4364cdb0b6219eb94a78"
       }
     },
     "/settings-namespaces.js": {

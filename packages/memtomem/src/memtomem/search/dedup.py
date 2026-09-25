@@ -123,6 +123,11 @@ class DedupScanner:
         keep_chunk = chunks_map.get(keep_id)
         if keep_chunk is None:
             return 0
+        # A held row is retained for recovery, not a candidate to keep or
+        # merge away. Recheck at apply time because a scan result may be stale.
+        for chunk in chunks_map.values():
+            if await self._storage.is_source_held(chunk.metadata.source_file):
+                raise ValueError("Cannot merge chunks from a held source")
 
         # Collect tags from chunks being deleted
         merged_tags: set[str] = set(keep_chunk.metadata.tags)
@@ -165,6 +170,8 @@ class DedupScanner:
         source_files = await self._storage.get_all_source_files()
         chunks: list[Chunk] = []
         for source in source_files:
+            if await self._storage.is_source_held(source):
+                continue
             file_chunks = await self._storage.list_chunks_by_source(source, limit=max_count)
             chunks.extend(file_chunks)
             if len(chunks) >= max_count:

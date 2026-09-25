@@ -99,9 +99,13 @@ async def list_chunks(
 ) -> ChunksListResponse:
     indexed_sources = await storage.get_all_source_files()
     request_path = require_indexed_source(source, indexed_sources)
+    if await storage.is_source_held(request_path):
+        raise HTTPException(status_code=404, detail="Source not found")
     chunks = await storage.list_chunks_by_source(request_path, limit=limit)
     out = [chunk_to_out(c) for c in chunks]
     total = await storage.count_chunks_by_source(request_path)
+    if await storage.is_source_held(request_path):
+        raise HTTPException(status_code=404, detail="Source not found")
     return ChunksListResponse(chunks=out, total=total)
 
 

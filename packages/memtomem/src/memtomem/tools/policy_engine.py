@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from memtomem.storage.sqlite_helpers import escape_like
 
@@ -274,9 +275,7 @@ async def execute_auto_expire(
         _record_ids(outcome, "deleted_ids", ids)
 
     if not dry_run and count > 0:
-        ph = ",".join("?" for _ in ids)
-        db.execute(f"DELETE FROM chunks WHERE id IN ({ph})", ids)
-        db.commit()
+        await storage.delete_chunks([UUID(chunk_id) for chunk_id in ids])
 
     return PolicyRunResult(
         policy_name="",
@@ -449,6 +448,8 @@ async def execute_auto_consolidate(
 
     for g in raw_groups:
         source_path = Path(g["source"])
+        if await storage.is_source_held(source_path):
+            continue
 
         chunks = await storage.list_chunks_by_source(source_path, limit=20)
         if len(chunks) < min_group_size:
@@ -547,6 +548,8 @@ async def execute_auto_consolidate(
                     llm_fallback_count += 1
             if summary is None:
                 summary = make_heuristic_summary(chunks, source_path, max_bullets=max_bullets)
+            if await storage.is_source_held(source_path):
+                continue
             group_dict = {
                 "source": str(source_path),
                 "chunk_ids": [str(c.id) for c in chunks],

@@ -63,6 +63,8 @@ async def mem_consolidate(
     for path, count, updated, ns, avg_tok, _, _ in sources:
         if count < min_group_size:
             continue
+        if await app.storage.is_source_held(path):
+            continue
         chunks = await app.storage.list_chunks_by_source(path, limit=20)
         if len(chunks) < min_group_size:
             continue
@@ -195,6 +197,8 @@ async def mem_consolidate_apply(
     group = next((g for g in groups if g["group_id"] == group_id), None)
     if group is None:
         return f"Error: group_id {group_id} not found. Run mem_consolidate again."
+    if await app.storage.is_source_held(Path(group["source"])):
+        return "Error: source is unavailable. Run mem_consolidate after it returns."
 
     # ADR-0011 cross-scope check. Load source chunks by id (the
     # truth source); a re-index between ``mem_consolidate`` and
@@ -206,6 +210,9 @@ async def mem_consolidate_apply(
     except (ValueError, TypeError):
         return f"Error: group {group_id} contains invalid chunk_ids."
     chunks_map = await app.storage.get_chunks_batch(chunk_uuids) if chunk_uuids else {}
+    for chunk in chunks_map.values():
+        if await app.storage.is_source_held(chunk.metadata.source_file):
+            return "Error: source is unavailable. Run mem_consolidate after it returns."
     source_scopes = {(c.metadata.scope or "user") for c in chunks_map.values()}
     if len(source_scopes) > 1:
         # Mixed-scope group — refuse because the summary would otherwise
@@ -316,6 +323,8 @@ async def mem_consolidate_apply(
     run_namespaces = [group.get("namespace") or "default"]
 
     try:
+        if await app.storage.is_source_held(Path(group["source"])):
+            return "Error: source is unavailable. Run mem_consolidate after it returns."
         add_result, stats = await _mem_add_core(
             content=summary,
             title=f"Consolidated: {source_name}",

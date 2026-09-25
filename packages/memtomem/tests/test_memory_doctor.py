@@ -1031,7 +1031,7 @@ async def test_analysis_detects_all_drift_classes(doctor_env):
     assert by["stale_source"].items == [norm_path(mem_dir / "ghost.md")]
     # #1928: an error-severity finding must name its remediation (the CLI's
     # own vocabulary — `mm gc orphan-sources`, not the MCP tool name).
-    assert "run `mm gc orphan-sources --apply`" in by["stale_source"].summary
+    assert "review with `mm gc orphan-sources`" in by["stale_source"].summary
     assert by["convention_violation"].severity == "error"
     assert by["convention_violation"].items == [norm_path(mem_dir / "MEMORY.md")]
     assert by["cold_candidate"].severity == "info"
@@ -2449,7 +2449,7 @@ class TestCli:
         assert result.exit_code == 1  # stale_source is error-severity
         assert "no longer exist on disk" in result.output
         # #1928: the rendered finding carries its own remediation command.
-        assert "mm gc orphan-sources --apply" in result.output
+        assert "review with `mm gc orphan-sources`" in result.output
 
     def test_json_payload_shape(self, doctor_env, monkeypatch):
         config, mem_dir = doctor_env
@@ -2706,7 +2706,10 @@ class TestDocsParity:
         # remediation table row. Bind the three doc surfaces to the summary
         # extracted from source so none can drift independently.
         tail = _stale_source_summary_tail()
-        assert "(run `mm gc orphan-sources --apply`)" in tail
+        assert (
+            "(review with `mm gc orphan-sources`, then use `--apply` after confirming deletion)"
+            in tail
+        )
         ref = (
             Path(__file__).resolve().parents[3]
             / "docs"
@@ -2720,7 +2723,7 @@ class TestDocsParity:
         )
         # The remediation table row leads with the same command.
         row = next(line for line in ref.splitlines() if line.startswith("| `stale_source` |"))
-        assert "`mm gc orphan-sources --apply`" in row
+        assert "`mm gc orphan-sources`" in row
 
     def test_stale_index_remediation_pinned_across_doc_surfaces(self):
         """#2078: the two staleness checks must not drift from their guide rows.

@@ -43,20 +43,25 @@ class _FakeStorage:
         similarities: dict[tuple[str, str], float] | None = None,
         without_vector: set[UUID] | None = None,
         dense_enabled: bool = True,
+        held_sources: set[Path] | None = None,
     ):
         # similarities keyed by (query_content, candidate_content). Missing pair => 0.0.
         self._chunks = chunks
         self._similarities = similarities or {}
         self._without_vector = without_vector or set()
         self.dense_enabled = dense_enabled
+        self.held_sources = held_sources or set()
         self.lookups: list[list[str]] = []
         self.probes: list[dict] = []
 
     async def get_all_source_files(self) -> list[Path]:
-        return [Path("/s.md")] if self._chunks else []
+        return sorted({chunk.metadata.source_file for chunk in self._chunks})
 
     async def list_chunks_by_source(self, source: Path, limit: int) -> list[Chunk]:
-        return self._chunks[:limit]
+        return [chunk for chunk in self._chunks if chunk.metadata.source_file == source][:limit]
+
+    async def is_source_held(self, source: Path) -> bool:
+        return source in self.held_sources
 
     async def get_chunks_batch(self, ids: list[UUID]) -> dict[UUID, Chunk]:
         by_id = {c.id: c for c in self._chunks}
@@ -148,6 +153,22 @@ class TestExactDuplicates:
         result = await scanner.scan()
 
         assert result == []
+
+    @pytest.mark.asyncio
+    async def test_held_source_is_excluded_and_cannot_be_a_merge_target(self, scanner_factory):
+        held = _mk("same text")
+        visible = replace(
+            _mk("same text"),
+            metadata=replace(held.metadata, source_file=Path("/visible.md")),
+        )
+        scanner, storage = scanner_factory(
+            [held, visible], held_sources={held.metadata.source_file}
+        )
+
+        assert await scanner.scan() == []
+        with pytest.raises(ValueError, match="held source"):
+            await scanner.merge(held.id, [visible.id], dry_run=False)
+        assert {chunk.id for chunk in storage._chunks} == {held.id, visible.id}
 
 
 class TestNearDuplicates:

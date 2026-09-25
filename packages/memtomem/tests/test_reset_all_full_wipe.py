@@ -28,6 +28,9 @@ from memtomem.errors import StorageError
 EXPECTED_USER_TABLES = frozenset(
     {
         "source_index_receipts",
+        "held_sources",
+        "pending_source_checks",
+        "source_visibility_generations",
         "access_log",
         "assertion_edges",
         "canonical_entities",

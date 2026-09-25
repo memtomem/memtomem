@@ -59,8 +59,11 @@ Checks (per configured ``memory_dir``):
   ordinary ``stale_index`` instead, which is why the routing asks
   ``IndexEngine.preview_redaction_decision`` rather than scanning here. Hit
   counts only; matched bytes are never shown.
-* **stale_source** — DB chunks whose ``source_file`` is gone from disk (the
-  file was deleted but its chunks linger; there is no single-file delete CLI).
+* **stale_source** — DB chunks whose ``source_file`` is gone from disk and
+  have not yet entered a visibility hold.
+* **held_source** — missing sources whose chunks are retained but hidden while
+  availability is uncertain. Advisory; review and explicitly purge confirmed
+  deletions with ``mm gc orphan-sources --apply``.
 * **convention_violation** — an index/meta file (``MEMORY.md`` / ``README.md``
   for a ``claude-memory`` dir) indexed as searchable content despite the
   provider convention.
@@ -91,8 +94,8 @@ Checks (per configured ``memory_dir``):
 
 Output: human glyphs by default, ``--json`` for a structured payload. Exit
 ``1`` when any *error*-severity finding exists (``stale_source``,
-``convention_violation``, ``broken_link``), else ``0``. Coverage gaps, stale
-indexes, orphans, dangling wikilinks, budget and cold candidates are advisory (a
+``convention_violation``, ``broken_link``), else ``0``. Held sources, coverage
+gaps, stale indexes, orphans, dangling wikilinks, budget and cold candidates are advisory (a
 partially-indexed dir is
 a legitimate steady state) so they warn without failing the exit code —
 mirrors ``mm sync-doctor`` (warns don't fail) while exposing a JSON + exit
@@ -930,6 +933,26 @@ def _read_source_signals(
     return [(Path(r[0]), int(r[1]), r[2], int(r[3]), float(r[4]), float(r[5])) for r in rows]
 
 
+def _read_held_source_paths(db_path: Path) -> set[str]:
+    """Read persisted visibility holds without opening a writing backend."""
+    db = db_path.expanduser().absolute()
+    if not db.exists():
+        return set()
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=5)
+        conn.execute("PRAGMA query_only=ON")
+        rows = conn.execute(
+            "SELECT source_file FROM held_sources UNION SELECT source_file FROM pending_source_checks"
+        ).fetchall()
+        return {row[0] for row in rows}
+    except sqlite3.DatabaseError:
+        return set()
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 # ── Staleness: has a file changed since its chunks were written? ────
 
 
@@ -1264,6 +1287,7 @@ def _analyze_dir(
     engine: object,
     db_rows: list[tuple[Path, int, str | None, int, float, float]],
     memory_dirs: list[Path],
+    held_sources: set[str] | None = None,
 ) -> DirReport:
     """Run every check for one configured ``memory_dir``. Pure given inputs.
 
@@ -1443,6 +1467,7 @@ def _analyze_dir(
     # 3/4. DB-only sources — split into stale (deleted), convention violation
     # (meta file indexed), and an unexpected residue.
     stale: list[str] = []
+    held_missing: list[str] = []
     violations: list[str] = []
     unexpected: list[str] = []
     for k, row in db_norm.items():
@@ -1450,7 +1475,10 @@ def _analyze_dir(
             continue
         src = row[0]
         if not Path(src).exists():
-            stale.append(str(src))
+            if k in (held_sources or set()):
+                held_missing.append(str(src))
+            else:
+                stale.append(str(src))
         elif Path(src).name in excluded:
             violations.append(str(src))
         else:
@@ -1463,9 +1491,21 @@ def _analyze_dir(
                 summary=(
                     f"{len(stale)} DB source file(s) no longer exist on disk — "
                     "chunks linger after the file was deleted "
-                    "(run `mm gc orphan-sources --apply`)"
+                    "(review with `mm gc orphan-sources`, then use `--apply` after confirming deletion)"
                 ),
                 items=sorted(stale),
+            )
+        )
+    if held_missing:
+        report.findings.append(
+            Finding(
+                check="held_source",
+                severity="warn",
+                summary=(
+                    f"{len(held_missing)} source(s) are unavailable and hidden from search; "
+                    "restore the source or review `mm gc orphan-sources`"
+                ),
+                items=sorted(held_missing),
             )
         )
     if violations:
@@ -1728,6 +1768,7 @@ def _gather_reports(
     raw_signals = _read_source_signals(Path(config.storage.sqlite_path))
     db_unreadable = raw_signals is None
     signals = raw_signals or []
+    held_sources = _read_held_source_paths(Path(config.storage.sqlite_path))
     memory_dirs = config.indexing.all_index_roots()
 
     # Bucket every DB source row to the configured dir that owns it
@@ -1754,6 +1795,7 @@ def _gather_reports(
                 engine=engine,
                 db_rows=by_dir.get(key, []),
                 memory_dirs=memory_dirs,
+                held_sources=held_sources,
             )
         )
 

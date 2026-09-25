@@ -77,6 +77,7 @@ def _rollback_error(
     outcome: RestoreOutcome,
     *,
     reconciled: bool,
+    held: bool = False,
 ) -> str:
     """The result string for a failed ``op`` and what its rollback managed (#2347).
 
@@ -88,15 +89,16 @@ def _rollback_error(
     ``reconciled`` is what the caller *verified* about the index, never what it
     assumed: a rollback re-index reports trouble in ``stats.errors`` rather than
     raising, and on a removed source it can return a clean zero result while
-    purging nothing (#1566's brake). So the messages below promise a purge only
-    where one was confirmed, and otherwise name the doubt and point at
-    ``mem_index``.
+    holding its chunks (#2498). The message names the verified visibility
+    state: purged, held outside search, or unresolved.
     """
     if outcome is RestoreOutcome.source_removed:
         index_note = (
-            "its index rows were removed too"
+            "its indexed chunks were retained but hidden from search"
+            if held
+            else "its index rows were removed too"
             if reconciled
-            else "its index rows may still be there (see the server log); run mem_index"
+            else "its index rows may still be searchable (see the server log); run mem_index"
         )
         return (
             f"Error: {op} failed, and {source_file} was removed by another process while "
@@ -453,6 +455,7 @@ async def _mutate_file_and_reindex(
         else:
             outcome = await asyncio.to_thread(restore_pre_image_quietly, source_file, pre_image)
         reconciled = True
+        held = False
         try:
             rollback_stats = await app.index_engine.index_file(
                 source_file, already_scanned=True, lock_held=True
@@ -467,15 +470,14 @@ async def _mutate_file_and_reindex(
             # unreadable replacement a clean reconcile.
             reconciled = not rollback_stats.errors
         if outcome is RestoreOutcome.source_removed and reconciled:
-            # And a clean return still is not evidence for a *removed* source:
-            # ``_delete_missing_source`` deliberately no-ops when the whole
-            # containing index root is gone (#1566's mass-orphan brake) and
-            # returns a zero result that looks exactly like "nothing to do".
-            # Whether the rows are gone is answerable directly, so ask rather
-            # than infer — the alternative is a message that assures the caller
-            # of a purge that never happened.
+            # A clean return is not proof of a purge. Missing sources now keep
+            # their chunks under a visibility hold; verify whether rows were
+            # removed or held before telling the caller what happened.
             try:
-                reconciled = not await app.storage.list_chunks_by_source(source_file.resolve())
+                rows = await app.storage.list_chunks_by_source(source_file.resolve())
+                if rows:
+                    held = await app.storage.is_source_held(source_file)
+                    reconciled = held
             except Exception:
                 # This check runs inside the rollback handler, so it lives under
                 # the same rule as the restore beside it (#2347): a cleanup step
@@ -505,7 +507,9 @@ async def _mutate_file_and_reindex(
             # or #2346's degraded refusal — and the caller never learns what
             # actually happened to its file. Those say so in the result string.
             raise
-        return None, _rollback_error(op, source_file, exc, outcome, reconciled=reconciled)
+        return None, _rollback_error(
+            op, source_file, exc, outcome, reconciled=reconciled, held=held
+        )
 
 
 def _validate_path(

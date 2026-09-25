@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import shutil
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -214,6 +215,7 @@ class TestStorageHelpers:
             project_root=str(dead),
         )
         _set_ai_summary(backend, source)
+        assert await backend.hold_source(Path(source), "source_missing")
         shutil.rmtree(dead)
 
         assert _row_count(backend, "chunks") == 1
@@ -232,6 +234,7 @@ class TestStorageHelpers:
         assert _row_count(backend, "chunks") == 0
         assert _row_count(backend, "chunks_fts") == 0
         assert _meta_count(backend) == 0
+        assert not await backend.is_source_held(Path(source))
 
     @pytest.mark.asyncio
     async def test_sweep_does_not_touch_other_project_roots(self, backend, tmp_path):

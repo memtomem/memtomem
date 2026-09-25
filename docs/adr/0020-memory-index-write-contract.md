@@ -167,7 +167,7 @@ deliberately left to the human / agent:
 | `budget` | Trimming an over-budget TOC means choosing *which entries to cut* — prose judgement, i.e. curation. |
 | `index_orphan` | *Adding* a missing pointer requires generating a title + hook and choosing insertion order. Generation, not deletion. |
 | `stale_index`, `stale_index_blocked` | DB-side, and a write with real cost. Re-indexing is `mm index <file>`'s job; for the redaction-blocked subset it would be a no-op anyway (#2078). |
-| `stale_source`, `convention_violation` | DB-side. Fixed by `mem_do(action="cleanup_orphans")` / `mm purge --matching-excluded`, not by editing the index file. |
+| `stale_source`, `convention_violation` | DB-side. Review missing sources with `mem_do(action="cleanup_orphans")`, then explicitly purge with `dry_run=false, confirm_purge=true`; use `mm purge --matching-excluded` for convention violations. Editing the index file does not change DB chunks. |
 
 ### 4. Dry-run by default; `--apply` to write
 

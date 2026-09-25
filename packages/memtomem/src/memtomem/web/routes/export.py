@@ -59,7 +59,10 @@ async def export_stats(
         namespace_filter=namespace,
         stamp_provenance=False,
     )
-    return ExportStatsResponse(total_chunks=bundle.total_chunks)
+    return ExportStatsResponse(
+        total_chunks=bundle.total_chunks,
+        omitted_held_sources=bundle.omitted_held_sources,
+    )
 
 
 @router.post("/import", response_model=ImportResponse)

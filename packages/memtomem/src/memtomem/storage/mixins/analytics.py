@@ -8,6 +8,7 @@ from pathlib import Path
 
 from memtomem.storage.sqlite_helpers import project_boundary_key
 from memtomem.storage.sqlite_scope import scope_context_sql
+from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_CHUNKS
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +286,9 @@ class AnalyticsMixin:
         """Return source files with enough chunks for consolidation — for scheduler."""
         db = self._get_db()
         rows = db.execute(
-            "SELECT source_file, COUNT(*) as cnt FROM chunks GROUP BY source_file HAVING cnt >= ? ORDER BY cnt DESC LIMIT ?",
+            "SELECT source_file, COUNT(*) as cnt FROM chunks "
+            f"WHERE {VISIBLE_SOURCE_CHUNKS} "
+            "GROUP BY source_file HAVING cnt >= ? ORDER BY cnt DESC LIMIT ?",
             (min_size, max_groups),
         ).fetchall()
         return [{"source": r[0], "chunk_count": r[1]} for r in rows]

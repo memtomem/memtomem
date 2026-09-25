@@ -1282,6 +1282,7 @@
   "settings.export.preview_btn": "Preview",
   "settings.export.download_btn": "Download JSON",
   "settings.export.preview_msg": "{count} chunks will be exported",
+  "settings.export.held_omitted": "{count} held or pending source(s) are omitted. Restore them and export again for a complete backup.",
   "settings.export.preview_required": "Preview the current filters before downloading.",
   "settings.import.title": "Import",
   "settings.import.hint": "Upload a memtomem_export.json bundle to re-index its chunks.",

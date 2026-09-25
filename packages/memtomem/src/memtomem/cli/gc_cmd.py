@@ -94,16 +94,22 @@ def orphan_sources(apply_: bool, assume_yes: bool) -> None:
 
 async def _run_orphan_sources(*, apply_: bool, assume_yes: bool) -> None:
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.storage.orphan_detect import scan_orphans
+    from memtomem.storage.orphan_detect import scan_orphans, source_state
 
     async with cli_components() as comp:
         result = await scan_orphans(comp.storage)
         orphaned = sorted(result.confirmed_orphans)
+        unavailable = sorted(result.unavailable_sources)
         if not orphaned:
             click.secho(
                 f"No orphaned sources found ({result.total_sources} source files checked).",
                 fg="green",
             )
+            if unavailable:
+                click.secho(
+                    f"{len(unavailable)} source(s) could not be checked and are not eligible for purge.",
+                    fg="yellow",
+                )
             return
 
         click.echo(
@@ -113,6 +119,11 @@ async def _run_orphan_sources(*, apply_: bool, assume_yes: bool) -> None:
         )
         for source in orphaned:
             click.echo(f"  - {source}")
+        if unavailable:
+            click.secho(
+                f"{len(unavailable)} additional source(s) could not be checked and will not be purged.",
+                fg="yellow",
+            )
 
         if not apply_:
             click.echo("\nRun with --apply to delete their indexed chunks.")
@@ -127,14 +138,20 @@ async def _run_orphan_sources(*, apply_: bool, assume_yes: bool) -> None:
             return
 
         deleted = 0
+        skipped = 0
         for source in orphaned:
+            if await asyncio.to_thread(source_state, source) != "missing":
+                skipped += 1
+                continue
             deleted += await comp.storage.delete_by_source(source)
         if deleted and getattr(comp, "search_pipeline", None) is not None:
             comp.search_pipeline.invalidate_cache()
-        click.secho(
-            f"Cleanup complete: {deleted} chunks deleted from {len(orphaned)} sources.",
-            fg="green",
+        summary = (
+            f"Cleanup complete: {deleted} chunks deleted from {len(orphaned) - skipped} sources"
         )
+        if skipped:
+            summary += f" ({skipped} recovered or unavailable; skipped)"
+        click.secho(summary + ".", fg="green")
 
 
 async def _run(*, apply_: bool, assume_yes: bool) -> None:

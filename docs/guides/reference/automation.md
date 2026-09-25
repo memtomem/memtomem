@@ -231,7 +231,7 @@ whitelisted `JOB_KINDS`:
 
 | `job_kind`                | Effect                                                      |
 |---------------------------|-------------------------------------------------------------|
-| `compaction`              | Delete chunks whose source files no longer exist on disk    |
+| `compaction`              | Hold unavailable source chunks outside search for recovery  |
 | `importance_decay`        | Delete chunks older than `max_age_days` (TTL-based decay)   |
 | `dead_chunk_link_cleanup` | Remove `chunk_links` rows whose source chunk is gone        |
 | `dedup_scan`              | Surface duplicate-chunk candidates (no auto-merge)          |
@@ -285,8 +285,7 @@ Each schedule keeps the outcome of its latest run:
 | `last_run_result` | The summary the job returned (`null` for `error` / `timeout`)           |
 
 `skipped` means the job returned normally but did no work, and its
-`skipped_reason` says why. For example, `compaction` refuses a suspected
-mass deletion (`orphan_ratio_exceeded`), and `dedup_scan` has no scanner
+`skipped_reason` says why. For example, `dedup_scan` has no scanner
 (`dedup_scanner_not_initialized`). `mm schedule list` prints the reason next
 to the status. `mm schedule list --json` and `schedule_list` return the whole
 record.

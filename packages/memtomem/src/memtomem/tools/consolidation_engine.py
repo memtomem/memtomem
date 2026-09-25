@@ -504,6 +504,11 @@ async def apply_consolidation(
     # would never be revisited — the hole would be permanent rather than retried
     # (#2155 for entities, #2158 for the rest).
     async with storage.transaction():
+        # A watcher can journal an unavailable source after candidate
+        # discovery. Check under SQLite's write lock before publishing a
+        # summary derived from chunks that are now hidden.
+        if await storage.is_source_held(Path(group["source"])):
+            raise StorageError("consolidation source became unavailable")
         # Clear the path first so a regeneration replaces rather than
         # duplicates, and so the old summary is only gone once its replacement
         # has landed.

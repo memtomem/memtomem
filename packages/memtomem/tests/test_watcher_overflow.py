@@ -389,11 +389,11 @@ async def _index_note(components, path: Path, marker: str) -> None:
     assert await components.storage.list_chunks_by_source(path)
 
 
-async def _wait_until_gone(components, path: Path, timeout: float = 5.0) -> bool:
+async def _wait_until_held(components, path: Path, timeout: float = 5.0) -> bool:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
-        if not await components.storage.list_chunks_by_source(path):
+        if await components.storage.is_source_held(path):
             return True
         await asyncio.sleep(0.05)
     return False
@@ -417,7 +417,7 @@ def _fire_deleted(handler, path: Path) -> None:
     handler.on_deleted(FileDeletedEvent(str(path)))
 
 
-async def test_delete_dropped_while_the_loop_is_held_off_is_purged(
+async def test_delete_dropped_while_the_loop_is_held_off_is_hidden(
     small_queue, components, memory_dir
 ):
     fillers, _changed = await _seed(components, memory_dir)
@@ -437,14 +437,15 @@ async def test_delete_dropped_while_the_loop_is_held_off_is_purged(
     producer = threading.Thread(target=burst)
     producer.start()
     producer.join()
-    purged = await _wait_until_gone(components, gone)
+    held = await _wait_until_held(components, gone)
     await _stop(watcher, task)
 
     assert replayed and gone in replayed[0], "the delete must be dropped, or this proves nothing"
-    assert purged, "a dropped delete left the file's chunks searchable"
+    assert held, "a dropped delete left the file's chunks searchable"
+    assert await components.storage.list_chunks_by_source(gone)
 
 
-async def test_move_dropped_during_a_burst_purges_its_source(small_queue, components, memory_dir):
+async def test_move_dropped_during_a_burst_holds_its_source(small_queue, components, memory_dir):
     fillers, _changed = await _seed(components, memory_dir)
     src = memory_dir / "before.md"
     dest = memory_dir / "after.md"
@@ -463,12 +464,13 @@ async def test_move_dropped_during_a_burst_purges_its_source(small_queue, compon
     producer = threading.Thread(target=burst)
     producer.start()
     producer.join()
-    purged = await _wait_until_gone(components, src)
+    held = await _wait_until_held(components, src)
     indexed = await _wait_for_marker(components, dest, "moved-marker")
     await _stop(watcher, task)
 
     assert replayed and src in replayed[0], "the move must be dropped, or this proves nothing"
-    assert purged, "a dropped move left its source's chunks searchable"
+    assert held, "a dropped move left its source's chunks searchable"
+    assert await components.storage.list_chunks_by_source(src)
     assert indexed
 
 
@@ -542,4 +544,5 @@ async def test_stop_replays_a_dropped_delete_before_exiting(components, memory_d
     task = asyncio.create_task(watcher._process_events())
     await _stop(watcher, task)
 
-    assert not await components.storage.list_chunks_by_source(gone)
+    assert await components.storage.is_source_held(gone)
+    assert await components.storage.list_chunks_by_source(gone)
