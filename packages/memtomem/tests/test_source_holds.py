@@ -11,6 +11,8 @@ from uuid import UUID
 
 import pytest
 from memtomem.models import Chunk, ChunkMetadata, IndexingStats
+from memtomem.storage.orphan_detect import scan_orphans
+from memtomem.storage.sqlite_backend import SqliteBackend
 
 from memtomem.indexing.watcher import FileWatcher, _STOP_SENTINEL
 from memtomem.config import IndexingConfig
@@ -52,6 +54,27 @@ async def test_pending_delete_hidden_and_replayed_after_restart(components, memo
     assert path not in await components.storage.get_pending_source_checks()
     assert path in await components.storage.get_held_sources()
     assert await components.storage.get_chunk_hashes(path) == old_ids
+
+
+async def test_external_hold_invalidates_warm_search_cache(components, memory_dir):
+    path = memory_dir / "external-hold.md"
+    await _indexed(components, path)
+    assert (await components.search_pipeline.search("mountword"))[0]
+
+    other = SqliteBackend(
+        components.config.storage,
+        dimension=components.storage._dimension,
+        embedding_provider=components.storage._embedding_provider,
+        embedding_model=components.storage._embedding_model,
+        embedding_policy_fingerprint=components.storage._embedding_policy_fingerprint,
+        embedding_max_sequence_tokens=components.storage._embedding_max_sequence_tokens,
+    )
+    await other.initialize()
+    try:
+        assert await other.hold_source(path, "external_test")
+        assert (await components.search_pipeline.search("mountword"))[0] == []
+    finally:
+        await other.close()
 
 
 async def test_delete_journal_keeps_nfd_path_on_nonfolding_platform(
@@ -114,6 +137,26 @@ async def test_periodic_recheck_holds_missing_pending_without_a_new_event(compon
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_orphan_scan_skips_trusted_virtual_summary_but_not_user_file(components, memory_dir):
+    original = memory_dir / "original.md"
+    user_file = memory_dir / "user.consolidated.md"
+    virtual = memory_dir / "original.md.consolidated.md"
+    await _indexed(components, original)
+    await _indexed(components, user_file)
+    db = components.storage._get_db()
+    db.execute(
+        "UPDATE chunks SET source_file=?, origin='consolidation_policy' WHERE source_file=?",
+        (str(virtual), str(original)),
+    )
+    db.commit()
+    user_file.unlink()
+
+    result = await scan_orphans(components.storage, recheck_delay_seconds=0)
+    assert virtual not in result.confirmed_orphans
+    assert user_file in result.confirmed_orphans
+    assert result.total_sources == 1
 
 
 async def test_held_source_recovers_after_successful_reindex(components, memory_dir):
@@ -300,6 +343,24 @@ async def test_release_refusal_preserves_unowned_pending_transaction(components,
     try:
         with pytest.raises(TransactionOwnedError):
             await components.storage.release_source_hold(path, expected_generation=generation)
+        assert db.in_transaction
+        assert db.execute("SELECT value FROM _memtomem_meta WHERE key='hold_probe'").fetchone() == (
+            "kept",
+        )
+    finally:
+        db.rollback()
+
+
+async def test_hold_refusal_preserves_unowned_pending_transaction(components, memory_dir):
+    from memtomem.errors import TransactionOwnedError
+
+    path = memory_dir / "hold-transaction.md"
+    await _indexed(components, path)
+    db = components.storage._get_db()
+    db.execute("INSERT INTO _memtomem_meta(key, value) VALUES ('hold_probe', 'kept')")
+    try:
+        with pytest.raises(TransactionOwnedError):
+            await components.storage.hold_source(path, "missing")
         assert db.in_transaction
         assert db.execute("SELECT value FROM _memtomem_meta WHERE key='hold_probe'").fetchone() == (
             "kept",

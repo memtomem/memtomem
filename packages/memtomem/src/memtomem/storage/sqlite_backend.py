@@ -42,6 +42,7 @@ from memtomem.storage.base import (
     parse_tag_filter,
 )
 from memtomem.models import (
+    ORIGIN_CONSOLIDATION_POLICY,
     Chunk,
     ChunkMetadata,
     ChunkType,
@@ -2112,6 +2113,8 @@ class SqliteBackend(
         # the event loop for scanner and scheduler callers that reach here.
         source = await asyncio.to_thread(norm_path, source_file)
         db = self._get_db()
+        if db.in_transaction and not self._in_transaction:
+            raise TransactionOwnedError("hold_source refused an unowned transaction")
         now = utc_stamp(datetime.now(timezone.utc))
         existing = db.execute(
             "SELECT reason FROM held_sources WHERE source_file=?", (source,)
@@ -3698,6 +3701,19 @@ class SqliteBackend(
     async def get_all_source_files(self) -> set[Path]:
         db = self._get_db()
         rows = db.execute("SELECT DISTINCT source_file FROM chunks").fetchall()
+        return {Path(row[0]) for row in rows}
+
+    async def get_orphan_candidate_source_files(self) -> set[Path]:
+        """Exclude virtual policy summaries from filesystem availability checks.
+
+        The trusted origin stamp, rather than a filename suffix, identifies
+        summary-only sources. A user chunk sharing that path keeps it eligible.
+        """
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT DISTINCT source_file FROM chunks WHERE origin IS NULL OR origin <> ?",
+            (ORIGIN_CONSOLIDATION_POLICY,),
+        ).fetchall()
         return {Path(row[0]) for row in rows}
 
     async def search_source_files_by_content(self, query: str, limit: int = 10000) -> list[Path]:
