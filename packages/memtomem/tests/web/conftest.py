@@ -298,6 +298,48 @@ def install_default_stubs(page) -> None:
     )
 
 
+def goto_after_i18n_init(
+    page,
+    url: str,
+    *,
+    probe_key: str = "common.done",
+    lang: str | None = None,
+    timeout: float = 10_000,
+) -> None:
+    """Navigate to ``url`` and return once the SPA has finished booting.
+
+    Two boot steps race a spec that navigates as soon as its target element
+    mounts (#2546). Before ``I18N.init()`` loads the locale cache, ``t()``
+    returns the key itself, so text read that early shows raw keys like
+    ``settings.ctx.detail.meta_layout``. After init, if ``location.hash``
+    names a tab (a spec's own ``activateTab`` sets it), the boot handler
+    activates that tab. That re-runs the section loader and wipes any panel
+    the spec already opened. ``app.js`` sets ``<html data-booted="true">``
+    at the end of that handler, and the wait below keys on it. Init's
+    ``langchange`` dispatch is too early a signal: it fires inside
+    ``I18N.init()``, before the handler awaits UI mode and handles the hash.
+
+    The marker alone does not prove translations arrived: ``_load`` returns
+    quietly on a non-OK locale response and boot carries on. The wait
+    therefore also requires ``t(probe_key)`` to stop returning the key. Pass
+    the key the spec actually renders, so its absence fails here.
+
+    ``lang`` seeds the ``m2m-lang`` localStorage key that init's ``_detect``
+    reads first. Specs that assert on English literals pass ``"en"`` so the
+    runner's ``navigator.language`` cannot change what they read.
+    """
+    if lang is not None:
+        page.add_init_script(
+            f"try {{ localStorage.setItem('m2m-lang', {json.dumps(lang)}); }} catch (e) {{}}"
+        )
+    page.goto(url)
+    page.wait_for_function(
+        "(key) => document.documentElement.dataset.booted === 'true' && t(key) !== key",
+        arg=probe_key,
+        timeout=timeout,
+    )
+
+
 @pytest.fixture(scope="session")
 def run_async() -> Callable[[Coroutine[Any, Any, _T]], _T]:
     """Run a coroutine on a private loop in a worker thread.

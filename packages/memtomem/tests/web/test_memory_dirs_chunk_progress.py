@@ -27,6 +27,8 @@ import json
 
 import pytest
 
+from .conftest import goto_after_i18n_init
+
 pytestmark = pytest.mark.browser
 
 
@@ -66,22 +68,6 @@ def _install_default_stubs(page) -> None:
                 ]
             },
         ),
-    )
-
-
-def _goto_after_i18n_ready(page, mm_web_url: str) -> None:
-    """Navigate once the locale cache can render chunk progress labels."""
-    page.goto(mm_web_url)
-    page.wait_for_function(
-        """
-        () => typeof t === 'function'
-          && t('common.file_chunk_progress', {
-            file: 'probe.md',
-            done: 1,
-            total: 2,
-          }).includes('probe.md')
-        """,
-        timeout=5000,
     )
 
 
@@ -163,7 +149,7 @@ def test_chunk_progress_updates_meta_badge_and_resets_on_file_boundary(
     ``progress`` resets it. Would have failed CI on PR #658.
     """
     _install_default_stubs(page)
-    _goto_after_i18n_ready(page, mm_web_url)
+    goto_after_i18n_init(page, mm_web_url, probe_key="common.file_chunk_progress")
 
     result = page.evaluate(
         _driver(
@@ -206,7 +192,7 @@ def test_threshold_below_run_leaves_meta_badge_at_original(page, mm_web_url: str
     pins the server-side ``progress_threshold`` gate's UI invariant.
     """
     _install_default_stubs(page)
-    _goto_after_i18n_ready(page, mm_web_url)
+    goto_after_i18n_init(page, mm_web_url, probe_key="common.file_chunk_progress")
 
     result = page.evaluate(
         _driver(
