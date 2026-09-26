@@ -184,6 +184,15 @@ const STATE = {
         activateTab(_visibleMainTabs()[0] || 'home', { historyMode: 'replace' });
       }
     }
+    // Boot is done: ``I18N.init()`` has returned (it also returns after a
+    // non-OK locale response, so this does not prove translations loaded) and
+    // the hash tab, if any, has been activated above. Section fetches that
+    // activation started may still be in flight. Browser tests wait for this
+    // before they navigate, because that ``activateTab`` re-runs the section
+    // loader and wipes whatever panel a test opened earlier (#2546).
+    // ``langchange`` is not a substitute: it fires inside ``I18N.init()``,
+    // before this handler awaits UI mode and handles the hash.
+    document.documentElement.dataset.booted = 'true';
   });
 })();
 

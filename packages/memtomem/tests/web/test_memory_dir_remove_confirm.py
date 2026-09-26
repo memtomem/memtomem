@@ -15,18 +15,11 @@ import json
 
 import pytest
 
-from .conftest import install_default_stubs
+from .conftest import goto_after_i18n_init, install_default_stubs
 
 pytestmark = pytest.mark.browser
 
 _COVERED_KEY = "confirm.memory_dir_chunks_still_covered"
-
-
-def _goto_after_i18n_ready(page, mm_web_url: str) -> None:
-    page.goto(mm_web_url)
-    page.wait_for_function(
-        f"() => typeof t === 'function' && t('{_COVERED_KEY}') !== '{_COVERED_KEY}'"
-    )
 
 
 @pytest.mark.parametrize(
@@ -43,7 +36,7 @@ def test_confirm_options_follow_delete_chunk_count(
     page, mm_web_url: str, status, checkbox_count, warns
 ) -> None:
     install_default_stubs(page)
-    _goto_after_i18n_ready(page, mm_web_url)
+    goto_after_i18n_init(page, mm_web_url, probe_key=_COVERED_KEY)
 
     opts = page.evaluate(
         "(st) => memoryDirRemoveConfirmOptions('/tmp/notes', st ?? undefined)", status
@@ -77,7 +70,7 @@ def test_md_remove_of_a_covered_dir_warns_and_deletes_nothing(page, mm_web_url: 
         )
 
     page.route("**/api/memory-dirs/remove", _remove)
-    _goto_after_i18n_ready(page, mm_web_url)
+    goto_after_i18n_init(page, mm_web_url, probe_key=_COVERED_KEY)
 
     page.evaluate(
         """() => {
