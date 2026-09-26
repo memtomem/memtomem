@@ -51,6 +51,15 @@ Or run `mm init` and pick the English or Korean-optimized preset, or select "Loc
 
 The model is downloaded automatically on first use (~490 MB for multilingual-e5-small) and cached in `~/.memtomem/cache/fastembed/` (override with `MEMTOMEM_FASTEMBED_CACHE` or `FASTEMBED_CACHE_PATH`).
 
+The download goes through `huggingface_hub`. memtomem runs those E5 calls with Hub telemetry
+off, even if `HF_HUB_DISABLE_TELEMETRY`, `DISABLE_TELEMETRY` or `DO_NOT_TRACK` is set to a false
+value. Unless another component in the same process changes that setting mid-download, they send
+no `agent/<id>` user-agent tag and skip the agent-registry fetch that writes
+`HF_HOME/.agent_harnesses.json`. `MEMTOMEM_FASTEMBED_CACHE` moves the model files only:
+`huggingface_hub` still keeps its own files, such as its xet logs, under `HF_HOME`
+(`$XDG_CACHE_HOME/huggingface/`, else `~/.cache/huggingface/`, by default) or `HF_XET_CACHE`.
+Set those before starting memtomem to put them elsewhere.
+
 `multilingual-e5-small` fixes two values: the dimension must be `384` and
 `MAX_SEQUENCE_TOKENS` must be `512` (so `0` is rejected). It also fills in
 two inference threads, an ONNX batch of four, and a smaller chunk budget
