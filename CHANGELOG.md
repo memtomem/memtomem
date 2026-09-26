@@ -5,6 +5,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **Web Sources badges no longer count the held or pending sources the tree
+  hides, and name them separately (#2561).** In 0.6.5 a root with held or
+  pending sources showed more files and chunks than its tree, because the tree
+  hides those sources and the per-root counts did not.
+  `GET /api/memory-dirs/status` now also reports `held_source_file_count` and
+  `held_chunk_count`, under the rule the Sources list uses to hide them.
+  `chunk_count` and `source_file_count` stay totals. The Sources tree and the
+  Memory Dirs panel show totals minus held. The tree explains the held part in
+  the first line of the root's group and in the count's tooltip; the panel
+  adds "N hidden" to the root's line. So where the tree groups files under a
+  root header, a root whose sources are all held no longer renders as an empty
+  row with no reason; such a root's group opens by default unless you
+  collapsed it. Its state still follows the totals: it offers Reindex, not
+  Index, and is not listed as *Discovered*. Views that list files without root
+  headers do not show such a root at all: a Sources filter; a Chunks, Size or
+  Recent sort; and a product with a single root when the vendor has more than
+  one product. The *delete chunks* count still includes held chunks, because
+  the remove deletes them, and its label now says how many come from those
+  hidden sources. The remove dialog reloads the counts when it opens; if that
+  fails, it offers only removing the root, not deleting its chunks.
+
 ## [0.6.5] — 2026-09-26
 
 ### Upgrading

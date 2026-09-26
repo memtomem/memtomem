@@ -4934,6 +4934,10 @@ function _renderMemorySourceTree(sources, list) {
     // state — without this branch, any NS/path filter ever set on the page
     // makes all Discovered dirs vanish at once (the original ``Claude (0)``
     // guard was scoped to indexed-empty rows, not Discovered ones).
+    // A root whose sources are all held or pending has no visible source to
+    // match and is not Discovered, so a filter drops it: the filter shows
+    // matching listed sources. Unfiltered, its group explains the hidden
+    // sources in its first line (#2561).
     const visibleCatsRaw = filterActive
       ? categoriesAll
           .map(cat => [cat, bucket.byCategory[cat].filter(d => (sourcesByDir[d] || []).length > 0 || isDiscovered(d))])
@@ -5310,6 +5314,11 @@ function _renderMemorySourceTree(sources, list) {
       const { dir, items } = node.leaf;
       const pendingInDir = !!STATE.pendingActivatePath
         && items.some(s => s.path === STATE.pendingActivatePath);
+      // A root that lists nothing because every source is held or pending
+      // opens by default, so its first line says why (#2561). A state the
+      // user set still wins in ``getDirOpen``.
+      const allHeld = items.length === 0
+        && memoryDirVisibleCounts(statusByPath[dir]).heldSources > 0;
       wrap.appendChild(_renderMemoryDirGroup(
         dir,
         items,
@@ -5318,7 +5327,7 @@ function _renderMemorySourceTree(sources, list) {
         {
           isDefault: dir === defaultDir,
           label: node.label,
-          open: getDirOpen(provider, cat, dir, pendingInDir),
+          open: getDirOpen(provider, cat, dir, pendingInDir || allHeld),
           onToggle: (open) => setDirOpen(provider, cat, dir, open),
         },
       ));
@@ -5675,6 +5684,37 @@ function _renderMemorySourceTree(sources, list) {
   }
 }
 
+// What the Sources tree lists for a root: the ``/api/memory-dirs/status``
+// totals minus the held or pending sources ``GET /api/sources`` hides.
+// Totals still drive state (Discovered, pending, Index/Reindex), because
+// held chunks stay in the index. A server without ``held_*`` fields leaves
+// the totals as they are (#2561).
+function memoryDirVisibleCounts(st) {
+  const heldSources = (st && st.held_source_file_count) || 0;
+  const heldChunks = (st && st.held_chunk_count) || 0;
+  return {
+    indexed: Math.max(0, ((st && st.source_file_count) || 0) - heldSources),
+    chunks: Math.max(0, ((st && st.chunk_count) || 0) - heldChunks),
+    heldSources,
+    heldChunks,
+  };
+}
+
+// ``{text, title}`` for the muted "N hidden" note, or ``null`` when the
+// root has no held or pending sources. ``text`` is the short form the Memory
+// Dirs panel appends to its meta line; ``title`` is the full sentence, which
+// the Sources tree shows as a line inside the group.
+function memoryDirHeldNote(counts) {
+  if (!counts || counts.heldSources <= 0) return null;
+  return {
+    text: t('sources.memory_dirs.status_held', { count: counts.heldSources }),
+    title: t('sources.memory_dirs.status_held_title', {
+      count: counts.heldSources,
+      chunks: counts.heldChunks,
+    }),
+  };
+}
+
 function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
   const { isDefault, label = null, open = true, onToggle = null } = opts || {};
   // ``<details>`` gives us a native chevron + auto-flip on toggle and
@@ -5722,22 +5762,31 @@ function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
   //   - missing  → exists === false (red, "missing")
   //   - pending  → file_count > 0 && chunk_count === 0 (amber, ready to index)
   //   - indexed  → otherwise (no color)
+  // The state reads the total ``chunk_count``; the numbers are what the
+  // tree lists (``memoryDirVisibleCounts``).
+  let heldNote = null;
   if (status) {
     const statsBadge = document.createElement('span');
     statsBadge.className = 'source-group-stats';
     const files = (typeof status.file_count === 'number') ? status.file_count : 0;
-    const indexed = status.source_file_count || 0;
-    const chunks = status.chunk_count || 0;
+    const counts = memoryDirVisibleCounts(status);
+    const { indexed, chunks } = counts;
     if (status.exists === false) {
       statsBadge.classList.add('missing');
       statsBadge.textContent = (typeof t === 'function')
         ? t('sources.memory_dirs.status_missing') : 'missing';
     } else {
-      if (chunks === 0 && files > 0) statsBadge.classList.add('pending');
+      if ((status.chunk_count || 0) === 0 && files > 0) statsBadge.classList.add('pending');
       statsBadge.textContent = (typeof t === 'function')
         ? t('sources.memory_dirs.status_group', { files, indexed, chunks })
         : (indexed + '/' + files + ' files, ' + chunks + ' chunks');
     }
+    // Held or pending sources are explained inside the group, not in this
+    // header, which has no width to spare for the path. The badge keeps the
+    // sentence as a tooltip so a collapsed group still carries it. ``title``
+    // survives ``mdReindexOne``, which rewrites only the badge's text.
+    heldNote = memoryDirHeldNote(counts);
+    if (heldNote) statsBadge.title = heldNote.title;
     header.appendChild(statsBadge);
   }
 
@@ -5802,6 +5851,13 @@ function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
   header.appendChild(actions);
   group.appendChild(header);
 
+  // First line of the group: what the tree does not list, and why (#2561).
+  if (heldNote) {
+    const line = document.createElement('div');
+    line.className = 'source-group-held-note';
+    line.textContent = heldNote.title;
+    group.appendChild(line);
+  }
   for (const s of items) {
     group.appendChild(_renderMemorySourceItem(s, maxChunks));
   }

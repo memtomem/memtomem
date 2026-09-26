@@ -287,7 +287,7 @@ function _buildMemoryDirsPanel(initialDirs) {
   }
 
   async function handleRemove(path) {
-    const opts = memoryDirRemoveConfirmOptions(path, statusByPath[path]);
+    const opts = await memoryDirRemoveConfirmFresh(path);
     const { extraOption } = opts;
     const result = await showConfirm(opts);
     const ok = extraOption ? result && result.ok : result;
@@ -552,7 +552,13 @@ function _buildMemoryDirsPanel(initialDirs) {
       // also gives the user a heads-up about how big a Reindex is
       // about to be.
       if (!st) return '';
-      if (st.exists === false) return t('sources.memory_dirs.status_missing');
+      // Held or pending sources the tree does not list (#2561).
+      const counts = memoryDirVisibleCounts(st);
+      const held = memoryDirHeldNote(counts);
+      if (st.exists === false) {
+        const missing = t('sources.memory_dirs.status_missing');
+        return held ? missing + ' · ' + held.text : missing;
+      }
 
       const parts = [];
       if (st.created_at) {
@@ -568,9 +574,9 @@ function _buildMemoryDirsPanel(initialDirs) {
         ));
       }
       const fileCount = (typeof st.file_count === 'number') ? st.file_count : 0;
-      const chunkCount = st.chunk_count || 0;
-      const indexedCount = st.source_file_count || 0;
-      if (chunkCount > 0) {
+      const chunkCount = counts.chunks;
+      const indexedCount = counts.indexed;
+      if ((st.chunk_count || 0) > 0) {
         // Indexed: show indexed/disk files + chunks together. Same
         // ``{indexed}/{files}`` shape as the group label so the row's
         // own progress (e.g. ``18/18`` fully indexed) is visible at a
@@ -589,6 +595,7 @@ function _buildMemoryDirsPanel(initialDirs) {
         // Truly empty dir (no supported files on disk).
         parts.push(t('sources.memory_dirs.status_empty'));
       }
+      if (held) parts.push(held.text);
       return parts.join(' · ');
     }
 
@@ -729,6 +736,12 @@ function _buildMemoryDirsPanel(initialDirs) {
         if (vb !== va) return vb - va;
         return pathCmp(a, b);
       };
+      const byVisibleChunksDesc = (a, b) => {
+        const va = memoryDirVisibleCounts(statusByPath[a]).chunks;
+        const vb = memoryDirVisibleCounts(statusByPath[b]).chunks;
+        if (vb !== va) return vb - va;
+        return pathCmp(a, b);
+      };
       const byStrDesc = (key) => (a, b) => {
         const sa = statusByPath[a];
         const sb = statusByPath[b];
@@ -757,7 +770,8 @@ function _buildMemoryDirsPanel(initialDirs) {
         // than the indexed-only ``source_file_count`` which is 0
         // until the dir is reindexed.
         case 'files_desc': arr.sort(byNumDesc('file_count')); break;
-        case 'chunks_desc': arr.sort(byNumDesc('chunk_count')); break;
+        // Sorts by the chunk number the row shows (#2561).
+        case 'chunks_desc': arr.sort(byVisibleChunksDesc); break;
         case 'created_desc': arr.sort(byStrDesc('created_at')); break;
         case 'created_asc': arr.sort(byStrAsc('created_at')); break;
         case 'last_indexed_desc': arr.sort(byStrDesc('last_indexed')); break;
@@ -797,27 +811,34 @@ function _buildMemoryDirsPanel(initialDirs) {
       // still on disk waiting — without it, "27 files" was ambiguous
       // (was that "27 on disk" or "27 indexed"?) and disagreed with
       // the row sum when most dirs were unindexed.
+      // Counts are what the tree lists; held or pending sources are summed
+      // separately for the "N hidden" note (#2561).
       let chunks = 0;
       let files = 0;
       let indexed = 0;
+      let heldSources = 0;
+      let heldChunks = 0;
       let any = false;
       for (const path of entries) {
         const st = statusByPath[path];
         if (st) {
           any = true;
-          chunks += st.chunk_count || 0;
+          const counts = memoryDirVisibleCounts(st);
+          chunks += counts.chunks;
           files += (typeof st.file_count === 'number') ? st.file_count : 0;
-          indexed += st.source_file_count || 0;
+          indexed += counts.indexed;
+          heldSources += counts.heldSources;
+          heldChunks += counts.heldChunks;
         }
       }
-      return { chunks, files, indexed, any };
+      return { chunks, files, indexed, heldSources, heldChunks, any };
     }
 
     function _buildStatusBadge(aggregate) {
       const badge = document.createElement('span');
       badge.className = 'memory-dirs-status-group';
-      if (aggregate.chunks === 0) badge.classList.add('empty');
-      badge.textContent = t(
+      if (aggregate.chunks + aggregate.heldChunks === 0) badge.classList.add('empty');
+      let text = t(
         'sources.memory_dirs.status_group',
         {
           files: aggregate.files,
@@ -825,6 +846,12 @@ function _buildMemoryDirsPanel(initialDirs) {
           chunks: aggregate.chunks,
         },
       );
+      const held = memoryDirHeldNote(aggregate);
+      if (held) {
+        text += ' · ' + held.text;
+        badge.title = held.title;
+      }
+      badge.textContent = text;
       return badge;
     }
 
@@ -1079,7 +1106,8 @@ async function mdAdd(path, opts = {}) {
 
 /**
  * ``showConfirm`` options for removing a memory dir, shared by the Sources
- * tree (``handleRemove``) and the Memory Dirs panel (``mdRemove``).
+ * tree (``handleRemove``) and the Memory Dirs panel (``mdRemove``), which
+ * both build them through ``memoryDirRemoveConfirmFresh``.
  *
  * Chunk cleanup is an opt-in checkbox, default unchecked, offered only when
  * the status says the remove would delete something: the checkbox shows the
@@ -1090,10 +1118,17 @@ async function mdAdd(path, opts = {}) {
  * another root still contains deletes nothing, so the dialog says its chunks
  * stay instead. A status without the field (an older server) keeps the full
  * ``chunk_count``; a dir with no chunks gets the plain boolean confirm.
+ *
+ * The count includes chunks of held or pending sources, because the sweep
+ * deletes them, and the tree does not list them. When there are any, the
+ * label says how many (#2561). ``delete_chunk_count`` is either 0 or the
+ * whole ``chunk_count``, so the held part of a non-zero count is
+ * ``held_chunk_count``.
  */
 function memoryDirRemoveConfirmOptions(path, st) {
   const chunkCount = (st && st.chunk_count) || 0;
   const deleteCount = (st && st.delete_chunk_count) ?? chunkCount;
+  const heldCount = (st && st.held_chunk_count) || 0;
   return {
     title: t('confirm.memory_dir_remove_title'),
     message: t('confirm.memory_dir_remove_msg', { path }),
@@ -1103,15 +1138,44 @@ function memoryDirRemoveConfirmOptions(path, st) {
     extraOption: deleteCount > 0
       ? {
           id: 'deleteChunks',
-          label: t('confirm.memory_dir_delete_chunks_label', { count: deleteCount }),
+          label: heldCount > 0
+            ? t('confirm.memory_dir_delete_chunks_label_held', {
+                count: deleteCount,
+                held: heldCount,
+              })
+            : t('confirm.memory_dir_delete_chunks_label', { count: deleteCount }),
           defaultChecked: false,
         }
       : null,
   };
 }
 
+/**
+ * Refetch ``/api/memory-dirs/status`` and build the remove dialog from the
+ * fresh entry, so the checkbox count and its held part are current when the
+ * dialog opens (#2561). It is still a preview: the remove re-evaluates what
+ * it deletes when it runs (#2537). A path the fresh status no longer lists
+ * gets the plain confirm. When the refetch fails, the dialog offers the
+ * registration-only remove and says why chunk deletion is missing, instead
+ * of showing a count it could not refresh.
+ */
+async function memoryDirRemoveConfirmFresh(path) {
+  let entry;
+  try {
+    const resp = await api('GET', '/api/memory-dirs/status');
+    entry = ((resp && resp.dirs) || []).find(d => d && d.path === path);
+  } catch (err) {
+    console.warn('memory-dirs/status refresh for remove failed:', err);
+    return {
+      ...memoryDirRemoveConfirmOptions(path, undefined),
+      warningText: t('confirm.memory_dir_counts_unavailable'),
+    };
+  }
+  return memoryDirRemoveConfirmOptions(path, entry);
+}
+
 async function mdRemove(path) {
-  const opts = memoryDirRemoveConfirmOptions(path, (STATE.memoryStatusByPath || {})[path]);
+  const opts = await memoryDirRemoveConfirmFresh(path);
   const { extraOption } = opts;
   const result = await showConfirm(opts);
   const ok = extraOption ? result && result.ok : result;
