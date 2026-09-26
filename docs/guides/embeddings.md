@@ -52,13 +52,14 @@ Or run `mm init` and pick the English or Korean-optimized preset, or select "Loc
 The model is downloaded automatically on first use (~490 MB for multilingual-e5-small) and cached in `~/.memtomem/cache/fastembed/` (override with `MEMTOMEM_FASTEMBED_CACHE` or `FASTEMBED_CACHE_PATH`).
 
 The download goes through `huggingface_hub`. memtomem runs it with Hub telemetry off: the pinned
-E5 calls, and the `fastembed` constructors for other ONNX embedding models and the `fastembed`
-reranker, which download on a cache miss. This applies even if `HF_HUB_DISABLE_TELEMETRY`,
-`DISABLE_TELEMETRY` or `DO_NOT_TRACK` is set to a false value. Unless another component in the
-same process changes that setting mid-download, these downloads send no `agent/<id>` user-agent
-tag and skip the agent-registry fetch that writes `HF_HOME/.agent_harnesses.json`. The `local`
-(sentence-transformers) reranker is not covered. `MEMTOMEM_FASTEMBED_CACHE` moves the model files only:
-`huggingface_hub` still keeps its own files, such as its xet logs, under `HF_HOME`
+E5 calls, the `fastembed` constructors for other ONNX embedding models and the `fastembed`
+reranker, and the `local` (sentence-transformers) reranker, which download on a cache miss. This
+applies even if `HF_HUB_DISABLE_TELEMETRY`, `DISABLE_TELEMETRY` or `DO_NOT_TRACK` is set to a
+false value. Unless another component in the same process changes that setting mid-download,
+these downloads send no `agent/<id>` user-agent tag and skip the agent-registry fetch that writes
+`HF_HOME/.agent_harnesses.json`. `MEMTOMEM_FASTEMBED_CACHE` moves the `fastembed` and E5 model
+files only: the `local` reranker uses sentence-transformers' own model cache (under `HF_HOME` by
+default), and `huggingface_hub` keeps its own files, such as its xet logs, under `HF_HOME`
 (`$XDG_CACHE_HOME/huggingface/`, else `~/.cache/huggingface/`, by default) or `HF_XET_CACHE`.
 Set those before starting memtomem to put them elsewhere.
 
