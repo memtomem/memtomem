@@ -18,7 +18,7 @@ import json
 
 import pytest
 
-from .conftest import install_default_stubs
+from .conftest import goto_after_i18n_init, install_default_stubs
 
 pytestmark = pytest.mark.browser
 
@@ -127,6 +127,20 @@ def _stub_list_and_detail(page, kind: str, detail: dict) -> None:
     page.route(f"**/api/context/{kind}/{detail['name']}**", _detail_handler)
 
 
+def _goto(page, mm_web_url: str) -> None:
+    """Navigate in English once translations are in (#2546).
+
+    The meta labels and chip keys all go through ``t()``. Read before init
+    finishes and they are the raw keys. The assertions are English literals,
+    so the locale is pinned too.
+    """
+    goto_after_i18n_init(page, mm_web_url, probe_key="settings.ctx.detail.meta_layout", lang="en")
+
+
+def _assert_no_raw_keys(text: str) -> None:
+    assert "settings.ctx." not in text, f"Untranslated i18n key rendered, got {text!r}"
+
+
 def _open_detail(page, kind: str, name: str) -> None:
     """Navigate Settings → ctx-{kind}, wait for the cwd group items to
     render, click the card, await the detail meta header to mount.
@@ -159,19 +173,26 @@ def test_skill_detail_meta_header_renders_description_scope_layout(page, mm_web_
     install_default_stubs(page)
     _stub_list_and_detail(page, "skills", _SKILL_DETAIL)
 
-    page.goto(mm_web_url)
+    _goto(page, mm_web_url)
     _open_detail(page, "skills", "my-skill")
 
     meta_text = page.locator("#ctx-skills-detail .ctx-detail-meta").text_content() or ""
-    assert "A reusable skill for X." in meta_text, (
-        f"Skill description must appear in meta header, got {meta_text!r}"
+    _assert_no_raw_keys(meta_text)
+    by_label = dict(
+        page.locator("#ctx-skills-detail .ctx-detail-meta-row").evaluate_all(
+            """rows => rows.map(r => [
+              r.querySelector('.ctx-detail-meta-label').textContent,
+              r.querySelector('.ctx-detail-meta-value').textContent,
+            ])"""
+        )
     )
-    assert "Directory" in meta_text or "dir" in meta_text.lower(), (
-        f"Skill layout chip must appear in meta header, got {meta_text!r}"
-    )
-    assert "aux file" in meta_text.lower(), (
-        f"Skill file count must appear in meta header, got {meta_text!r}"
-    )
+    # Exact values, not substrings: ``"dir" in text`` also matched the raw
+    # key ``settings.ctx.detail.meta_layout_dir`` (#2546).
+    assert by_label.get("Description:") == "A reusable skill for X.", by_label
+    assert by_label.get("Stored in:") == "Project (shared)", by_label
+    assert by_label.get("Layout:") == "Directory · 2 aux file(s)", by_label
+    # The value is ``toLocaleString()`` output, so only the row is pinned.
+    assert "Modified:" in by_label, by_label
 
     # Symmetric negative pin: skills must NOT render the agent/command
     # chip row.
@@ -186,13 +207,14 @@ def test_agent_detail_chip_row_renders_role_isolation_kind_temperature(
     install_default_stubs(page)
     _stub_list_and_detail(page, "agents", _AGENT_DETAIL)
 
-    page.goto(mm_web_url)
+    _goto(page, mm_web_url)
     _open_detail(page, "agents", "code-reviewer")
 
     chips_locator = page.locator("#ctx-agents-detail .ctx-detail-chip")
     chips_locator.first.wait_for(timeout=4_000)
     chips_text = chips_locator.all_text_contents()
     flat = " | ".join(chips_text)
+    _assert_no_raw_keys(flat)
     assert "reviewer" in flat, f"Agent role chip missing, got chips = {chips_text!r}"
     assert "worktree" in flat, f"Agent isolation chip missing, got {chips_text!r}"
     assert "tool" in flat, f"Agent kind chip missing, got {chips_text!r}"
@@ -204,13 +226,14 @@ def test_command_detail_chip_row_renders_argument_hint_tools_model(page, mm_web_
     install_default_stubs(page)
     _stub_list_and_detail(page, "commands", _COMMAND_DETAIL)
 
-    page.goto(mm_web_url)
+    _goto(page, mm_web_url)
     _open_detail(page, "commands", "review")
 
     chips_locator = page.locator("#ctx-commands-detail .ctx-detail-chip")
     chips_locator.first.wait_for(timeout=4_000)
     chips_text = chips_locator.all_text_contents()
     flat = " | ".join(chips_text)
+    _assert_no_raw_keys(flat)
     assert "<pr-number>" in flat, f"Command argument_hint chip missing, got {chips_text!r}"
     assert "Read" in flat and "Bash" in flat, (
         f"Command allowed_tools chip must include the tool list, got {chips_text!r}"
@@ -227,12 +250,13 @@ def test_agent_detail_omits_chip_when_field_is_empty(page, mm_web_url: str) -> N
     sparse = {**_AGENT_DETAIL, "fields": {"description": "Reviews code", "role": "reviewer"}}
     _stub_list_and_detail(page, "agents", sparse)
 
-    page.goto(mm_web_url)
+    _goto(page, mm_web_url)
     _open_detail(page, "agents", "code-reviewer")
 
     chips_locator = page.locator("#ctx-agents-detail .ctx-detail-chip")
     chips_text = chips_locator.all_text_contents()
     flat = " ".join(chips_text)
+    _assert_no_raw_keys(flat)
     assert "undefined" not in flat.lower(), (
         f"Empty fields must not render as 'undefined' chips, got {chips_text!r}"
     )

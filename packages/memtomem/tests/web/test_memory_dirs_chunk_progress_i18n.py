@@ -17,6 +17,8 @@ import json
 
 import pytest
 
+from .conftest import goto_after_i18n_init
+
 pytestmark = pytest.mark.browser
 
 
@@ -70,33 +72,13 @@ def test_locale_toggle_mid_stream_flips_chunk_progress_template(page, mm_web_url
     locale.
     """
     _install_default_stubs(page)
-    # ``I18N.init()`` is kicked off from app.js's DOMContentLoaded
-    # handler and finishes asynchronously with a tail
-    # ``_lang = _detect()`` + ``langchange`` dispatch. If we call
-    # ``setLang`` before init has completed, init's tail can clobber
-    # our ``_lang`` during the ``_load`` await window — observable on
-    # CI runners where ``navigator.language`` defaults to en-US (init
-    # resolves to 'en' and overwrites our 'ko'). Local Macs with
-    # ko-KR converge on the same value, hiding the race.
-    #
-    # ``document.documentElement.lang`` is not a usable "init done"
-    # signal because index.html ships with ``<html lang="en">``
-    # statically — the attribute is truthy before init even starts.
-    # ``add_init_script`` runs before any page script, so the
-    # listener it installs is guaranteed to catch init's tail
-    # ``langchange`` dispatch.
-    page.add_init_script(
-        """
-        window.__i18nInitFired = false;
-        window.addEventListener(
-          'langchange',
-          () => { window.__i18nInitFired = true; },
-          { once: true },
-        );
-        """
-    )
-    page.goto(mm_web_url)
-    page.wait_for_function("() => window.__i18nInitFired === true", timeout=5000)
+    # ``setLang`` must wait for ``I18N.init()`` to finish: its tail
+    # ``_lang = _detect()`` would otherwise clobber our ``_lang`` during the
+    # ``_load`` await window. That shows on CI runners, where
+    # ``navigator.language`` is en-US and init overwrites our 'ko'; local
+    # Macs with ko-KR converge on the same value and hide the race. The
+    # helper returns only after boot, which awaits init.
+    goto_after_i18n_init(page, mm_web_url, probe_key="common.file_chunk_progress")
 
     result = page.evaluate(
         """
