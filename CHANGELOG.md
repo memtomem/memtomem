@@ -136,10 +136,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   delete, or the source of a dropped move, used to leave that file's chunks
   searchable. The watcher now keeps each dropped path and, when its root is
   rescanned, replays it through the same per-event reindex a delivered event
-  gets. With #2498 a delete is also journaled before it is queued, so its
-  chunks leave search at once even if the event is then dropped, and the
-  replay turns that into a hold. The rescan does not reconcile the whole root,
-  so a file deleted without an event is not touched. The warning for a rescan
+  gets. With #2498 a delete is also journaled before it is queued. When that
+  write succeeds (it gives up after 50 ms of database lock contention and logs
+  a warning), the chunks leave search at once even if the event is then
+  dropped, and the replay turns that into a hold. The rescan does not
+  reconcile the whole root, so a file deleted without an event is not touched. The warning for a rescan
   that `stop()` interrupts also names `mm gc orphan-sources --apply`; preview
   with `mm gc orphan-sources` first, because `--apply` purges held chunks
   permanently.
