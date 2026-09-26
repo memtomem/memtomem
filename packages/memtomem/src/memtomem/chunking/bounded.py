@@ -582,6 +582,99 @@ def chunk_code(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
     return result
 
 
+@dataclass(frozen=True)
+class _JsonMember:
+    start: int
+    value_start: int
+    end: int
+    segment: str
+
+
+def _pack_json_siblings(
+    text: str,
+    members: list[_JsonMember],
+    budget: TokenBudget,
+    floor: int,
+    target: int,
+    ceiling: int,
+) -> list[tuple[int, int]]:
+    """Pack a run of complete sibling members without crossing its parent."""
+
+    def tokens(start: int, end: int) -> int:
+        return budget.count(text[members[start].start : members[end - 1].end])
+
+    # Satisfy the floor before growing towards the target. Growing first can
+    # strand a short tail against a group that has already filled the budget.
+    groups: list[list[int]] = []
+    start = 0
+    while start < len(members):
+        end = start + 1
+        while end < len(members) and tokens(start, end) < floor:
+            if tokens(start, end + 1) > ceiling:
+                break
+            end += 1
+        groups.append([start, end])
+        start = end
+
+    # A final short group may need a boundary shifted from its neighbour, not
+    # a wholesale merge. Keep both resulting bodies inside the exact ceiling.
+    index = 0
+    while floor > 0 and index < len(groups):
+        start, end = groups[index]
+        if tokens(start, end) >= floor:
+            index += 1
+            continue
+        if index and tokens(groups[index - 1][0], end) <= ceiling:
+            groups[index - 1][1] = end
+            groups.pop(index)
+            index = max(0, index - 1)
+            continue
+        if index + 1 < len(groups) and tokens(start, groups[index + 1][1]) <= ceiling:
+            groups[index + 1][0] = start
+            groups.pop(index)
+            continue
+        shifted = False
+        if index:
+            previous = groups[index - 1]
+            for boundary in range(previous[1] - 1, previous[0], -1):
+                if (
+                    floor <= tokens(previous[0], boundary) <= ceiling
+                    and floor <= tokens(boundary, end) <= ceiling
+                ):
+                    previous[1] = boundary
+                    groups[index][0] = boundary
+                    shifted = True
+                    break
+        if not shifted and index + 1 < len(groups):
+            following = groups[index + 1]
+            for boundary in range(following[0] + 1, following[1]):
+                if (
+                    floor <= tokens(start, boundary) <= ceiling
+                    and floor <= tokens(boundary, following[1]) <= ceiling
+                ):
+                    groups[index][1] = boundary
+                    following[0] = boundary
+                    shifted = True
+                    break
+        index += 1
+
+    if target <= 0:
+        return [(start, end) for start, end in groups]
+    packed: list[tuple[int, int]] = []
+    index = 0
+    while index < len(groups):
+        start, end = groups[index]
+        while index + 1 < len(groups) and tokens(start, end) < target:
+            candidate = groups[index + 1][1]
+            if tokens(start, candidate) > ceiling:
+                break
+            end = candidate
+            index += 1
+        packed.append((start, end))
+        index += 1
+    return packed
+
+
 def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
     """Split oversized containers by JSON pointer, decoding long string values.
 
@@ -609,6 +702,22 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
             pos += 1
         return pos
 
+    def emit(pos: int, end: int, body: str, label: str, *, grouped: bool = False) -> None:
+        chunks.append(
+            Chunk(
+                content=body,
+                metadata=ChunkMetadata(
+                    source_file=path,
+                    heading_hierarchy=(path.stem, label),
+                    start_line=text.count("\n", 0, pos) + 1,
+                    end_line=text.count("\n", 0, end) + 1,
+                    retrieval_context=(
+                        f"JSON members: {label}" if grouped else f"JSON pointer: {label}"
+                    ),
+                ),
+            )
+        )
+
     def visit(pos: int, pointer: str, depth: int = 0) -> int:
         if depth > 32:
             raise ValueError("deep JSON requires lossless fallback")
@@ -617,8 +726,10 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
         raw = text[pos:end]
         if budget.count(raw) > budget.body and isinstance(value, (dict, list)) and value:
             cursor = pos + 1
+            members: list[_JsonMember] = []
             for index in range(len(value)):
                 cursor = whitespace(cursor)
+                member_start = cursor
                 if isinstance(value, dict):
                     key, cursor = decoder.raw_decode(text, cursor)
                     cursor = whitespace(cursor)
@@ -628,25 +739,53 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
                     segment = str(key).replace("~", "~0").replace("/", "~1")
                 else:
                     segment = str(index)
-                cursor = whitespace(visit(cursor, pointer + "/" + segment, depth + 1))
+                value_start = whitespace(cursor)
+                _, member_end = decoder.raw_decode(text, value_start)
+                members.append(_JsonMember(member_start, value_start, member_end, segment))
+                cursor = whitespace(member_end)
                 if index + 1 < len(value):
                     if text[cursor] != ",":
                         raise ValueError("invalid JSON separator")
                     cursor += 1
+            ceiling = min(config.max_chunk_tokens or budget.body, budget.body)
+            run: list[_JsonMember] = []
+
+            def flush() -> None:
+                if not run:
+                    return
+                for first, last in _pack_json_siblings(
+                    text,
+                    run,
+                    budget,
+                    config.min_chunk_tokens,
+                    config.target_chunk_tokens,
+                    ceiling,
+                ):
+                    if last == first + 1:
+                        member = run[first]
+                        visit(member.value_start, pointer + "/" + member.segment, depth + 1)
+                    else:
+                        first_member, last_member = run[first], run[last - 1]
+                        label = f"{pointer or '/'} [{first_member.segment}..{last_member.segment}]"
+                        emit(
+                            first_member.start,
+                            last_member.end,
+                            text[first_member.start : last_member.end],
+                            label,
+                            grouped=True,
+                        )
+                run.clear()
+
+            for member in members:
+                if budget.count(text[member.start : member.end]) <= ceiling:
+                    run.append(member)
+                else:
+                    flush()
+                    visit(member.value_start, pointer + "/" + member.segment, depth + 1)
+            flush()
         else:
             body = value if isinstance(value, str) and budget.count(raw) > budget.body else raw
-            chunks.append(
-                Chunk(
-                    content=body,
-                    metadata=ChunkMetadata(
-                        source_file=path,
-                        heading_hierarchy=(path.stem, pointer or "/"),
-                        start_line=text.count("\n", 0, pos) + 1,
-                        end_line=text.count("\n", 0, end) + 1,
-                        retrieval_context=f"JSON pointer: {pointer or '/'}",
-                    ),
-                )
-            )
+            emit(pos, end, body, pointer or "/")
         return end
 
     serialized = True
