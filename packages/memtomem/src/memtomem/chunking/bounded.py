@@ -588,6 +588,16 @@ class _JsonMember:
     value_start: int
     end: int
     segment: str
+    token_count: int
+
+
+def _json_member_anchor(member: _JsonMember, size: int, floor: int, target: int) -> bool:
+    """Choose a cut from a member segment, weighted by its token size."""
+    if target <= 0:
+        return True
+    window = max(1, target - floor)
+    digest = hashlib.blake2b(member.segment.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") % window < size
 
 
 def _pack_json_siblings(
@@ -598,23 +608,35 @@ def _pack_json_siblings(
     target: int,
     ceiling: int,
 ) -> list[tuple[int, int]]:
-    """Pack a run of complete sibling members without crossing its parent."""
+    """Pack siblings with content-defined cuts and an exact hard ceiling."""
 
     def tokens(start: int, end: int) -> int:
         return budget.count(text[members[start].start : members[end - 1].end])
 
-    # Satisfy the floor before growing towards the target. Growing first can
-    # strand a short tail against a group that has already filled the budget.
+    # A fixed-size greedy pack shifts every later boundary after an insertion.
+    # Object keys select stable anchors, so a changed prefix converges at the
+    # next anchor. Array segments are indices: inserting at the front shifts
+    # their anchors and range labels, as it did with per-element JSON pointers.
+    # Anchors may cut below target, trading extra chunks for stable object
+    # identities. The floor delays early cuts; the ceiling forces a cut.
     groups: list[list[int]] = []
     start = 0
-    while start < len(members):
-        end = start + 1
-        while end < len(members) and tokens(start, end) < floor:
-            if tokens(start, end + 1) > ceiling:
-                break
-            end += 1
+    end = 0
+    while end < len(members):
+        candidate = end + 1
+        candidate_tokens = tokens(start, candidate)
+        if end > start and candidate_tokens > ceiling:
+            groups.append([start, end])
+            start = end
+            continue
+        end = candidate
+        if candidate_tokens >= floor and _json_member_anchor(
+            members[end - 1], members[end - 1].token_count, floor, target
+        ):
+            groups.append([start, end])
+            start = end
+    if start < end:
         groups.append([start, end])
-        start = end
 
     # A final short group may need a boundary shifted from its neighbour, not
     # a wholesale merge. Keep both resulting bodies inside the exact ceiling.
@@ -633,7 +655,6 @@ def _pack_json_siblings(
             groups[index + 1][0] = start
             groups.pop(index)
             continue
-        shifted = False
         if index:
             previous = groups[index - 1]
             for boundary in range(previous[1] - 1, previous[0], -1):
@@ -643,36 +664,9 @@ def _pack_json_siblings(
                 ):
                     previous[1] = boundary
                     groups[index][0] = boundary
-                    shifted = True
-                    break
-        if not shifted and index + 1 < len(groups):
-            following = groups[index + 1]
-            for boundary in range(following[0] + 1, following[1]):
-                if (
-                    floor <= tokens(start, boundary) <= ceiling
-                    and floor <= tokens(boundary, following[1]) <= ceiling
-                ):
-                    groups[index][1] = boundary
-                    following[0] = boundary
-                    shifted = True
                     break
         index += 1
-
-    if target <= 0:
-        return [(start, end) for start, end in groups]
-    packed: list[tuple[int, int]] = []
-    index = 0
-    while index < len(groups):
-        start, end = groups[index]
-        while index + 1 < len(groups) and tokens(start, end) < target:
-            candidate = groups[index + 1][1]
-            if tokens(start, candidate) > ceiling:
-                break
-            end = candidate
-            index += 1
-        packed.append((start, end))
-        index += 1
-    return packed
+    return [(start, end) for start, end in groups]
 
 
 def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
@@ -741,7 +735,15 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
                     segment = str(index)
                 value_start = whitespace(cursor)
                 _, member_end = decoder.raw_decode(text, value_start)
-                members.append(_JsonMember(member_start, value_start, member_end, segment))
+                members.append(
+                    _JsonMember(
+                        member_start,
+                        value_start,
+                        member_end,
+                        segment,
+                        budget.count(text[member_start:member_end]),
+                    )
+                )
                 cursor = whitespace(member_end)
                 if index + 1 < len(value):
                     if text[cursor] != ",":
@@ -750,23 +752,34 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
             ceiling = min(config.max_chunk_tokens or budget.body, budget.body)
             run: list[_JsonMember] = []
 
-            def flush() -> None:
-                if not run:
+            def emit_run(group: list[_JsonMember]) -> None:
+                if not group:
                     return
                 for first, last in _pack_json_siblings(
                     text,
-                    run,
+                    group,
                     budget,
                     config.min_chunk_tokens,
                     config.target_chunk_tokens,
                     ceiling,
                 ):
                     if last == first + 1:
-                        member = run[first]
+                        member = group[first]
                         visit(member.value_start, pointer + "/" + member.segment, depth + 1)
                     else:
-                        first_member, last_member = run[first], run[last - 1]
-                        label = f"{pointer or '/'} [{first_member.segment}..{last_member.segment}]"
+                        first_member, last_member = group[first], group[last - 1]
+                        # The heading is a displayed range descriptor, not a
+                        # JSON pointer. JSON quoting keeps punctuation in keys
+                        # and parent paths unambiguous to readers and tools.
+                        label = json.dumps(
+                            {
+                                "parent": pointer or "/",
+                                "first": first_member.segment,
+                                "last": last_member.segment,
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
                         emit(
                             first_member.start,
                             last_member.end,
@@ -774,15 +787,15 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
                             label,
                             grouped=True,
                         )
-                run.clear()
 
             for member in members:
-                if budget.count(text[member.start : member.end]) <= ceiling:
+                if member.token_count <= ceiling:
                     run.append(member)
                 else:
-                    flush()
+                    emit_run(run)
+                    run = []
                     visit(member.value_start, pointer + "/" + member.segment, depth + 1)
-            flush()
+            emit_run(run)
         else:
             body = value if isinstance(value, str) and budget.count(raw) > budget.body else raw
             emit(pos, end, body, pointer or "/")
