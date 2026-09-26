@@ -51,14 +51,14 @@ mm --version                          # verify install
 
 `[all]` bundles the features the sections below describe — ONNX dense embeddings, Korean tokenizer, Ollama / OpenAI providers, code chunker, and the Web UI. For a BM25-only install without those downloads (~40 MB vs ~250 MB), see the [minimal install option](docs/guides/getting-started.md#option-a-from-pypi-recommended-for-most-users) in the Getting Started guide.
 
-> If `mm --version` shows an older version than the [latest release](https://github.com/memtomem/memtomem/releases), `uv` is likely serving cached PyPI metadata — re-run with `uv tool install 'memtomem[all]' --refresh`, or clear the cache first: `uv cache clean memtomem`.
+> If `mm --version` shows an older version than the [latest release](https://github.com/memtomem/memtomem/releases) right after installing, `uv` is likely serving cached PyPI metadata — re-run with `uv tool install 'memtomem[all]' --refresh`, or clear the cache first: `uv cache clean memtomem`. To upgrade an existing uv tool install, use `mm upgrade` instead: it keeps your extras and stops servers still running the old version.
 
 > **`mm: command not found`?** `uv tool install` drops the shim into `~/.local/bin`, which isn't on `$PATH` in fresh shells on macOS/Linux. Run `uv tool update-shell`, then open a new shell and re-run `mm --version`.
 
 ### 2. Setup
 
 > **After upgrading the Claude plugin:** re-check `/mcp` after reloading.
-> The plugin launches `memtomem[onnx]==0.6.4`. A manual registration whose launch
+> The plugin launches `memtomem[onnx]==0.6.5`. A manual registration whose launch
 > differs — base-only `memtomem`, or the ONNX launch pinned to an earlier
 > release — no longer matches for deduplication and may expose
 > duplicate tools. Confirm the manual entry's name and scope, then align its
@@ -144,7 +144,7 @@ uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 
 **No install** (uvx on demand):
 ```bash
-claude mcp add memtomem -s user -- uvx --isolated --from "memtomem[all]==0.6.4" memtomem-server
+claude mcp add memtomem -s user -- uvx --isolated --from "memtomem[all]==0.6.5" memtomem-server
 ```
 
 See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor / Windsurf / Claude Desktop / Gemini CLI / Kimi Code.

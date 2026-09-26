@@ -252,7 +252,7 @@ all modes initialize storage and may create or initialize the database.
 
 ## CLI Reference
 
-The complete v0.6.4 top-level command catalog is grouped below. Run `mm
+The complete v0.6.5 top-level command catalog is grouped below. Run `mm
 <command> --help` for its subcommands and flags.
 
 | Area | Top-level commands |
@@ -307,7 +307,7 @@ mm reset --backup                      # snapshot the DB to <db>.pre-reset-<ts>.
 mm reset --force                       # bypass only the stale pid/web/DB-lock heuristics (not registry or barrier evidence)
 mm reset --json                        # emit a machine-readable ack instead of prose (also on mm add / mm purge)
 mm upgrade                             # uv-tool installs: on POSIX stop every MCP server and Web UI, reinstall, then recycle respawns
-mm upgrade --version 0.6.4 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
+mm upgrade --version 0.6.5 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
 # upgrade --json: dry runs add inventory_complete/warnings; a post-install partial failure adds cleanup_complete:false
 # warnings is additive on Windows, where processes are never killed automatically; db_lock_warning still requests a manual restart
 

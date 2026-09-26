@@ -1,14 +1,14 @@
 [core]
-version = "0.6.4"
+version = "0.6.5"
 tool_mode = "core"
 mcp_extras = ["onnx"]
 
 [plugins]
-claude_version = "0.5.6"
-codex_version = "0.3.6"
-automation_version = "0.3.5"
-opencode_version = "0.3.6"
-kimi_version = "0.2.5"
+claude_version = "0.5.7"
+codex_version = "0.3.7"
+automation_version = "0.3.6"
+opencode_version = "0.3.7"
+kimi_version = "0.2.6"
 
 [opencode]
 package = "opencode-memtomem"

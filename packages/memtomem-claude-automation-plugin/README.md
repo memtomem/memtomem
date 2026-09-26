@@ -11,8 +11,11 @@ retrieval and write-time indexing. Install the safe base plugin first.
 The hooks use the memtomem CLI, pinned to the same reviewed core release:
 
 ```sh
-uv tool install 'memtomem==0.6.4'
+uv tool install 'memtomem==0.6.5'
 ```
+
+Already have memtomem installed as a uv tool? Run `mm upgrade --version 0.6.5`
+instead: a bare reinstall drops the extras you installed it with.
 
 The dispatcher is launched through `uv`, so it does not depend on a
 platform-specific `python3` command alias.

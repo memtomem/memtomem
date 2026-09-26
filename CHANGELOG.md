@@ -5,8 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.6.5] — 2026-09-26
+
 ### Upgrading
 
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.6 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.6.5;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.6.5`, confirm with `mm --version`, then start a new
+  Claude Code session — the compatibility check is refreshed at session start,
+  and until then those hooks are skipped. `mm upgrade` re-passes the extras
+  recorded in uv's tool receipt, which a bare `uv tool install
+  'memtomem==0.6.5'` drops. If the receipt is missing or unreadable it finds
+  none; check the `Extras:` line of `mm upgrade --version 0.6.5 --dry-run`
+  and pass `--extras` when it says none were detected.
 - **The database moves to schema version 3, and earlier releases cannot open
   it afterwards (#2498).** The first process of this release to open the
   database migrates it. An earlier binary then stops with `This database has
