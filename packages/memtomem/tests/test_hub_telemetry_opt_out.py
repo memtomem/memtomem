@@ -175,6 +175,8 @@ def test_overlapping_threads_keep_the_flag_until_the_last_exit():
 
 
 def test_user_agent_drops_the_agent_tag_inside_the_window(monkeypatch):
+    if not hasattr(_headers, "detect_agent"):
+        pytest.skip("this huggingface-hub has no agent detection to tag the user agent")
     monkeypatch.setattr(_headers, "detect_agent", lambda: "probe")
     # Witness: the stub is live, so the negative below is not vacuous.
     assert "agent/probe" in build_hf_headers(token=False)["user-agent"]
