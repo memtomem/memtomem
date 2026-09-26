@@ -5,13 +5,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Upgrading
+
+- **The database moves to schema version 3, and earlier releases cannot open
+  it afterwards (#2498).** The first process of this release to open the
+  database migrates it. An earlier binary then stops with `This database has
+  schema version 3, but this memtomem binary only supports up to 2` and exit
+  code 1, without touching the data, and points you to `mm upgrade`. Any
+  client that launches its own copy of the server, such as an MCP entry
+  pinned to an earlier `memtomem==` version, has to move to this release
+  too.
+- **Purging a missing source is now an explicit step (#2498).** Scheduled
+  compaction, health maintenance and the watcher only hold a missing source
+  outside search. To delete its chunks, review with `mm gc orphan-sources`,
+  then run `mm gc orphan-sources --apply`. MCP callers of `cleanup_orphans`
+  that passed `dry_run=false` to delete now get a preview and must add
+  `confirm_purge=true`. One case still deletes on its own: a path that now
+  holds a directory or other non-regular file loses its chunks on the next
+  event for it.
+- **`mm memory doctor` reports a held missing source as `held_source`, a
+  warning, instead of `stale_source`, an error (#2498).** A script that reads
+  its JSON findings, or treats exit code 1 as "missing sources", now sees exit
+  code 0 when held sources are the only finding.
+- **Oversized JSON containers may be re-chunked on their next index
+  (#2481).** A chunk whose content changes through the new packing gets a new
+  ID and is embedded again on the next reindex; unchanged chunks keep theirs.
+  JSON that fits the chunk
+  budget, and every other format, is chunked as before.
+
 ### Changed
 
 - **Oversized JSON containers pack adjacent small members into bounded chunks
   (#2481).** Group labels identify the parent and first/last members. Stable
   object-key boundaries limit downstream chunk changes when a key is inserted;
-  array boundaries remain positional. Existing oversized JSON sources receive
-  new chunk identities and require reembedding when reindexed after upgrade.
+  array boundaries remain positional. When an existing oversized JSON source
+  is reindexed after upgrade, chunks whose content changes through packing get
+  new IDs and are embedded again; the index matches chunks by content hash, so
+  an unchanged chunk keeps its ID and vector.
 - **Local embedding and reranker model downloads run with huggingface_hub telemetry off (#2550, #2552, #2556).**
   With telemetry on, huggingface-hub adds the host AI agent to its user agent
   (`agent/claude-code`, for example), and 1.32 also caches its agent registry at
@@ -42,7 +72,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   own index key (#2544).** Every stored source path was folded to NFC. That is
   right on macOS, where an NFC and an NFD spelling name one directory (#235).
   On ext4 or NTFS they are two directories, so the fold keyed a file by a path
-  that does not exist or belongs to a sibling. Measured on Linux: a note under
+  that does not exist or belongs to a sibling. Measured on Linux with 0.6.4: a note under
   an NFD `café/` was confirmed as a missing source by the orphan scan, so
   `mm gc orphan-sources --apply`, `mem_cleanup_orphans` and auto-maintenance
   deleted live chunks. An NFC `café/` beside it shared the key, so indexing
@@ -72,7 +102,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   symlink, the live watcher queue still checks deletes, but the journal may
   miss the resolved database path. This also covers an empty surviving
   mountpoint, a directory replaced by a mountpoint, and an unregistered nested
-  mount. Scheduled compaction and health
+  mount. A path that now holds a directory or other non-regular file is still
+  removed on its event, since it is known not to be an indexable file.
+  Scheduled compaction and health
   maintenance no longer purge missing sources; use `mm gc orphan-sources
   --apply` after confirming deletion. MCP cleanup now needs both
   `dry_run=false` and `confirm_purge=true` to purge. The database schema moves
@@ -80,7 +112,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   than returning held chunks in search. Renames leave hidden copies at the old
   path until an explicit orphan purge; storage `get_chunk` and MCP `mem_read`,
   `mem_edit`, `mem_delete`, and `mem_related` can access held chunks by ID,
-  while search and Web chunk-ID lookup hide them. Exports omit held sources
+  while search and Web chunk-ID lookup hide them. The Web Sources tab hides
+  held sources too, but the per-root counts in `GET /api/memory-dirs/status`,
+  and the *delete chunks* count derived from them, still include their chunks,
+  so a root with held sources shows more than its tree. Exports omit held sources
   and report the omitted count; restore them and export again before treating
   a bundle as a complete backup.
 - **A create or modify event dropped by a full watcher queue is no longer lost
@@ -98,15 +133,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `stop()` interrupts is named in a warning with `mm index <root>`.
 - **A delete or move event dropped by a full watcher queue now checks the old
   path (#2532).** The #2530 rescan walks only files that exist, so a dropped
-  delete, or the source of a dropped move, left that file's chunks searchable
-  until the opt-in orphan sweep or a manual `mm gc orphan-sources --apply`.
-  The watcher now keeps each dropped path and, when its root is rescanned,
-  replays it through the same per-event reindex a delivered event gets. A
-  missing file is held outside search as a delivered delete would be (#2498).
-  The rescan
-  does not reconcile the whole root, so a file deleted without a dropped event
-  is not touched. The warning for a rescan that `stop()` interrupts now also
-  names `mm gc orphan-sources --apply`.
+  delete, or the source of a dropped move, used to leave that file's chunks
+  searchable. The watcher now keeps each dropped path and, when its root is
+  rescanned, replays it through the same per-event reindex a delivered event
+  gets. With #2498 a delete is also journaled before it is queued, so its
+  chunks leave search at once even if the event is then dropped, and the
+  replay turns that into a hold. The rescan does not reconcile the whole root,
+  so a file deleted without an event is not touched. The warning for a rescan
+  that `stop()` interrupts also names `mm gc orphan-sources --apply`; preview
+  with `mm gc orphan-sources` first, because `--apply` purges held chunks
+  permanently.
 - **`mm status` lists read-only memory roots (#2519).** The report showed
   `memory_dirs` and `project_memory_dirs` but never
   `indexing.read_only_memory_dirs`, so a configured vault was invisible there
