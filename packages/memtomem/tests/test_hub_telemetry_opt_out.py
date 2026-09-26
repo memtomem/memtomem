@@ -1,4 +1,4 @@
-"""memtomem's own Hub downloads run with huggingface_hub telemetry off (#2550)."""
+"""memtomem's Hub downloads run with huggingface_hub telemetry off (#2550, #2552)."""
 
 from __future__ import annotations
 
@@ -12,10 +12,11 @@ import huggingface_hub  # noqa: E402
 from huggingface_hub import constants  # noqa: E402
 from huggingface_hub.utils import _headers, build_hf_headers  # noqa: E402
 
-from memtomem.embedding import profiles  # noqa: E402
+from memtomem.config import EmbeddingConfig, RerankConfig  # noqa: E402
+from memtomem.embedding import hub_telemetry, profiles  # noqa: E402
+from memtomem.embedding.hub_telemetry import hub_telemetry_off  # noqa: E402
 from memtomem.embedding.profiles import (  # noqa: E402
     E5_TOKENIZER,
-    _hub_telemetry_off,
     e5_snapshot,
     resolve_tokenizer,
 )
@@ -24,7 +25,7 @@ from memtomem.embedding.profiles import (  # noqa: E402
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(constants, "HF_HUB_DISABLE_TELEMETRY", False)
-    monkeypatch.setattr(profiles, "_hub_telemetry_depth", 0)
+    monkeypatch.setattr(hub_telemetry, "_hub_telemetry_depth", 0)
     monkeypatch.setattr(profiles, "_verify_file", lambda *args: None)
     monkeypatch.setenv("MEMTOMEM_FASTEMBED_CACHE", str(tmp_path / "cache"))
     for name in ("HF_HUB_DISABLE_TELEMETRY", "DISABLE_TELEMETRY", "DO_NOT_TRACK"):
@@ -77,14 +78,14 @@ def test_existing_opt_out_is_kept(monkeypatch, tmp_path):
 
 def test_a_false_written_during_the_window_is_not_clobbered(monkeypatch):
     monkeypatch.setattr(constants, "HF_HUB_DISABLE_TELEMETRY", True)
-    with _hub_telemetry_off():
+    with hub_telemetry_off():
         constants.HF_HUB_DISABLE_TELEMETRY = False
     assert constants.HF_HUB_DISABLE_TELEMETRY is False
 
 
 def test_a_true_written_during_the_window_is_reverted():
     # Documented limit: indistinguishable from the window's own write.
-    with _hub_telemetry_off():
+    with hub_telemetry_off():
         constants.HF_HUB_DISABLE_TELEMETRY = True
     assert constants.HF_HUB_DISABLE_TELEMETRY is False
 
@@ -132,8 +133,8 @@ def test_snapshot_and_tokenizer_use_separate_windows(monkeypatch, tmp_path):
 
 
 def test_nested_windows_restore_only_on_the_outer_exit():
-    with _hub_telemetry_off():
-        with _hub_telemetry_off():
+    with hub_telemetry_off():
+        with hub_telemetry_off():
             assert constants.HF_HUB_DISABLE_TELEMETRY is True
         assert constants.HF_HUB_DISABLE_TELEMETRY is True
     assert constants.HF_HUB_DISABLE_TELEMETRY is False
@@ -146,7 +147,7 @@ def test_overlapping_threads_keep_the_flag_until_the_last_exit():
 
     def first():
         try:
-            with _hub_telemetry_off():
+            with hub_telemetry_off():
                 a_inside.set()
                 assert b_inside.wait(5)
         except BaseException as exc:  # surfaced below
@@ -157,7 +158,7 @@ def test_overlapping_threads_keep_the_flag_until_the_last_exit():
     def second():
         try:
             assert a_inside.wait(5)
-            with _hub_telemetry_off():
+            with hub_telemetry_off():
                 b_inside.set()
                 assert a_done.wait(5)
                 seen["after_first_exit"] = constants.HF_HUB_DISABLE_TELEMETRY
@@ -180,6 +181,58 @@ def test_user_agent_drops_the_agent_tag_inside_the_window(monkeypatch):
     monkeypatch.setattr(_headers, "detect_agent", lambda: "probe")
     # Witness: the stub is live, so the negative below is not vacuous.
     assert "agent/probe" in build_hf_headers(token=False)["user-agent"]
-    with _hub_telemetry_off():
+    with hub_telemetry_off():
         assert "agent/" not in build_hf_headers(token=False)["user-agent"]
     assert "agent/probe" in build_hf_headers(token=False)["user-agent"]
+
+
+def _onnx_embedder(monkeypatch, text_embedding):
+    pytest.importorskip("fastembed")
+    from memtomem.embedding import onnx
+
+    monkeypatch.setattr("fastembed.TextEmbedding", text_embedding)
+    monkeypatch.setattr(onnx, "_register_custom_models_if_needed", lambda: None)
+    monkeypatch.setattr(onnx, "_verify_cpu_mem_arena", lambda *args: None)
+    monkeypatch.setattr(onnx, "_configure_tokenizer_limit", lambda *args: (None, None))
+    return onnx.OnnxEmbedder(
+        EmbeddingConfig(provider="onnx", model="bge-small-en-v1.5", dimension=384)
+    )
+
+
+def _fastembed_reranker(monkeypatch, text_cross_encoder):
+    pytest.importorskip("fastembed")
+    from memtomem.search.reranker.fastembed import FastEmbedReranker
+
+    monkeypatch.setattr("fastembed.rerank.cross_encoder.TextCrossEncoder", text_cross_encoder)
+    return FastEmbedReranker(
+        RerankConfig(enabled=True, provider="fastembed", model="Xenova/ms-marco-MiniLM-L-6-v2")
+    )
+
+
+@pytest.mark.parametrize("build", [_onnx_embedder, _fastembed_reranker])
+def test_fastembed_constructor_runs_with_telemetry_off(monkeypatch, build):
+    seen: list[bool] = []
+
+    class _Model:
+        def __init__(self, *args, **kwargs):
+            seen.append(constants.HF_HUB_DISABLE_TELEMETRY)
+
+    loaded = build(monkeypatch, _Model)._get_model()
+    assert isinstance(loaded, _Model)
+    assert seen == [True]
+    assert constants.HF_HUB_DISABLE_TELEMETRY is False
+
+
+@pytest.mark.parametrize("build", [_onnx_embedder, _fastembed_reranker])
+def test_flag_is_restored_when_a_fastembed_constructor_raises(monkeypatch, build):
+    error = RuntimeError("download unavailable")
+
+    class _Model:
+        def __init__(self, *args, **kwargs):
+            assert constants.HF_HUB_DISABLE_TELEMETRY is True
+            raise error
+
+    with pytest.raises(RuntimeError) as caught:
+        build(monkeypatch, _Model)._get_model()
+    assert caught.value is error
+    assert constants.HF_HUB_DISABLE_TELEMETRY is False

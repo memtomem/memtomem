@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from memtomem._settlement import settle_shielded
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+from memtomem.embedding.hub_telemetry import hub_telemetry_off
 
 if TYPE_CHECKING:
     from memtomem.config import RerankConfig
@@ -101,7 +102,11 @@ class FastEmbedReranker:
             self._loading = True
             self._load_error = None
             try:
-                model = TextCrossEncoder(model_name=self._config.model, cache_dir=str(cache_dir))
+                # A cache miss downloads from the Hub inside this constructor (#2552).
+                with hub_telemetry_off():
+                    model = TextCrossEncoder(
+                        model_name=self._config.model, cache_dir=str(cache_dir)
+                    )
             except ValueError as exc:
                 supported = [m.get("model", "") for m in TextCrossEncoder.list_supported_models()]
                 self._load_error = str(exc)
