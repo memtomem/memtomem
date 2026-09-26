@@ -12,7 +12,7 @@ import os
 import sqlite3
 import stat as stat_module
 import time
-from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -641,11 +641,13 @@ async def memory_dir_stats(
     memory_dirs: Iterable[str | Path],
     *,
     supported_extensions: frozenset[str] | None = None,
+    hidden: Collection[str] | None = None,
 ) -> list[dict[str, object]]:
     """Return per-dir index status for each configured ``memory_dir``.
 
-    Shape: ``[{path, chunk_count, source_file_count, file_count, exists,
-    category, provider, kind, created_at, last_indexed}]`` in the same
+    Shape: ``[{path, chunk_count, source_file_count, held_chunk_count,
+    held_source_file_count, file_count, exists, category, provider, kind,
+    created_at, last_indexed}]`` in the same
     order as ``memory_dirs``. Drives the web UI's "(N chunks)" / "(not
     indexed)" badges so users can see which dirs need a manual reindex
     (the running watcher only reacts to fs events, so files that landed
@@ -683,9 +685,18 @@ async def memory_dir_stats(
     by :func:`~memtomem.config.memory_dir_kind` so the Web UI can split
     the Sources page into Memory and General views from the same
     response shape.
+
+    ``hidden`` is the set of ``str(path)`` source paths the Sources tree does
+    not list: :func:`~memtomem.storage.sqlite_visibility.hidden_source_paths`
+    in the form ``GET /api/sources`` compares against. A source in it still
+    counts toward ``chunk_count`` and ``source_file_count``, which stay totals
+    of what the root owns in the index, and also toward ``held_chunk_count``
+    and ``held_source_file_count``. Totals minus held are what the tree lists
+    for the root (#2561). Without ``hidden`` the held counts are 0.
     """
     from memtomem.storage.sqlite_helpers import norm_path
 
+    hidden_paths = hidden if hidden is not None else ()
     rows = await storage.get_source_files_with_counts()
     dir_list = list(memory_dirs)
     prefixes = [norm_dir_prefix(d) for d in dir_list]
@@ -713,7 +724,8 @@ async def memory_dir_stats(
     # root's numbers leave out what a nested root owns. The Sources tree groups
     # files by the same rule (#2524). Roots that share a prefix, like one path
     # listed in two tiers, read the same bucket.
-    buckets: dict[str, list[Any]] = {prefix: [0, 0, None] for prefix in prefixes}
+    # Bucket: [chunks, sources, last_updated, held chunks, held sources].
+    buckets: dict[str, list[Any]] = {prefix: [0, 0, None, 0, 0] for prefix in prefixes}
     for row in rows:
         # row = (Path, chunk_count, last_updated, namespaces, ...)
         source_path, count, last_updated = row[0], row[1], row[2]
@@ -725,12 +737,17 @@ async def memory_dir_stats(
         bucket[1] += 1
         if last_updated is not None and (bucket[2] is None or last_updated > bucket[2]):
             bucket[2] = last_updated
+        if str(source_path) in hidden_paths:
+            bucket[3] += count
+            bucket[4] += 1
 
     out: list[dict[str, object]] = []
     for d, prefix, file_count in zip(dir_list, prefixes, file_counts):
         dir_path = Path(d).expanduser().resolve()
         exists = dir_path.exists()
-        chunk_count, source_file_count, max_last_updated = buckets[prefix]
+        chunk_count, source_file_count, max_last_updated, held_chunks, held_sources = buckets[
+            prefix
+        ]
 
         category = categorize_memory_dir(d)
         out.append(
@@ -743,6 +760,8 @@ async def memory_dir_stats(
                 "path": str(dir_path),
                 "chunk_count": chunk_count,
                 "source_file_count": source_file_count,
+                "held_chunk_count": held_chunks,
+                "held_source_file_count": held_sources,
                 "file_count": file_count,
                 "exists": exists,
                 "category": category,

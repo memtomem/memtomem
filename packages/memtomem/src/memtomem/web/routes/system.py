@@ -1436,13 +1436,23 @@ async def memory_dirs_status(
     (#2534) It is computed from this request's config, which is not reloaded
     here, and rows. The remove applies the same rule to what is configured
     and indexed when it runs, and reports that number (#2537).
+
+    ``held_chunk_count`` and ``held_source_file_count`` count what the entry
+    owns that ``GET /api/sources`` hides, under the same
+    :func:`~memtomem.storage.sqlite_visibility.hidden_source_paths` rule, so
+    totals minus held are what the Sources tree lists for the root. The
+    delete count still includes held chunks, because the sweep removes them
+    (#2561).
     """
     from memtomem.indexing.engine import memory_dir_stats, norm_dir_prefix, remove_sweeps_nothing
+    from memtomem.storage.sqlite_visibility import hidden_source_paths
 
+    hidden = {str(path) for path in await hidden_source_paths(storage)}
     stats = await memory_dir_stats(
         storage,
         config.indexing.all_index_roots(),
         supported_extensions=config.indexing.supported_extensions,
+        hidden=hidden,
     )
 
     def _resolved(dirs: Iterable[Path]) -> set[str]:
