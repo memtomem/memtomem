@@ -12,13 +12,13 @@ registers an MCP server, not the CLI. So offer the pinned form, which works
 either way:
 
 ```bash
-uvx --from "memtomem[all]==0.6.4" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.5" mm doctor --claude-mcp
 ```
 
 This diagnostic runs in its own environment. It does not install dependencies
 into, or repair, the plugin server environment.
 Before installation, doctor compares manual registrations with the launch this
-release's plugin bundles (`memtomem[onnx]==0.6.4`). After installation, it reads
+release's plugin bundles (`memtomem[onnx]==0.6.5`). After installation, it reads
 the actual plugin manifest. Use `/mcp` to verify the session, and repeat the
 diagnostic after installation.
 

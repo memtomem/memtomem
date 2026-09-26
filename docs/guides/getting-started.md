@@ -261,7 +261,7 @@ claude mcp add memtomem -s user -- memtomem-server
 
 This reuses the persistent `memtomem[all]` environment installed above. For a
 one-off setup without a persistent install, use `uvx --isolated --from
-"memtomem[all]==0.6.4" memtomem-server`. Claude Code users can instead
+"memtomem[all]==0.6.5" memtomem-server`. Claude Code users can instead
 install the [memtomem plugin](integrations/claude-code.md#mcp-server-setup),
 which provides an exact-pinned MCP server and seven focused workflows. Automatic
 indexing hooks are supplied only by the separate `memtomem-automation` plugin.
@@ -335,10 +335,13 @@ Confirm `mm status` works in a terminal, then restart the client and follow
 
 ### Install and upgrade issues
 
-If `mm --version` is older than the latest release, re-run the installation
-command with `--refresh`. `mm upgrade` automates this only for `uv tool`
-installs; pipx, project, and source installs use their own package-manager
-workflow. Detailed recovery commands live in
+To upgrade a `uv tool` install, run `mm upgrade` (or
+`mm upgrade --version <X.Y.Z>` for an exact release) rather than re-running
+`uv tool install`; the [CLI reference](reference/data-config-cli.md#cli-reference)
+covers what it preserves and stops. If `mm --version` is still older
+than the latest release right after installing, re-run the installation
+command with `--refresh`. pipx, project, and source installs use their own
+package-manager workflow. Detailed recovery commands live in
 [Data, config & CLI](reference/data-config-cli.md#cli-reference).
 
 ## Optional: Share rules, skills, sub-agents, and commands across editors
