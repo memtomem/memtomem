@@ -12,7 +12,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   object-key boundaries limit downstream chunk changes when a key is inserted;
   array boundaries remain positional. Existing oversized JSON sources receive
   new chunk identities and require reembedding when reindexed after upgrade.
-- **The pinned E5 model downloads with huggingface_hub telemetry off (#2550).**
+- **ONNX model and `fastembed` reranker downloads run with huggingface_hub telemetry off (#2550).**
   With telemetry on, huggingface-hub adds the host AI agent to its user agent
   (`agent/claude-code`, for example), and 1.32 also caches its agent registry at
   `HF_HOME/.agent_harnesses.json`, whatever `cache_dir` memtomem passes.
@@ -25,8 +25,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   telemetry. Measured with an agent environment and an isolated `HF_HOME`, a
   tokenizer download no longer leaves `.agent_harnesses.json`. Its xet log files
   (under `HF_HOME/xet/` unless `HF_XET_CACHE` is set) were written with and
-  without the change, so this does not stop them. fastembed and reranker
-  downloads are not covered.
+  without the change, so this does not stop them. The `fastembed` constructors
+  for other ONNX embedding models and for the `fastembed` reranker, which
+  download on a cache miss, now run in the same window (#2552). Measured the same way
+  through memtomem's own loaders, a first `bge-small-en-v1.5` and
+  `Xenova/ms-marco-MiniLM-L-6-v2` download each left `.agent_harnesses.json`
+  before and only an xet log after. The `local` (sentence-transformers) reranker
+  is not covered.
 
 ### Fixed
 

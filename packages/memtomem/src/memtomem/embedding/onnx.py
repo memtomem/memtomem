@@ -15,6 +15,7 @@ from memtomem._settlement import settle_shielded
 from memtomem.config import EmbeddingConfig
 from memtomem.embedding.aliases import resolve_embedder_id
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+from memtomem.embedding.hub_telemetry import hub_telemetry_off
 from memtomem.errors import EmbeddingError
 from memtomem.embedding.profiles import E5_MODEL, is_e5
 
@@ -384,13 +385,15 @@ class OnnxEmbedder:
             self._loading = True
             self._load_error = None
             try:
-                model = TextEmbedding(
-                    model_name=model_id,
-                    threads=threads,
-                    cache_dir=str(cache_dir),
-                    enable_cpu_mem_arena=self._config.onnx_cpu_mem_arena,
-                    **model_options,
-                )
+                # A cache miss downloads from the Hub inside this constructor (#2552).
+                with hub_telemetry_off():
+                    model = TextEmbedding(
+                        model_name=model_id,
+                        threads=threads,
+                        cache_dir=str(cache_dir),
+                        enable_cpu_mem_arena=self._config.onnx_cpu_mem_arena,
+                        **model_options,
+                    )
                 _verify_cpu_mem_arena(model, self._config.onnx_cpu_mem_arena)
                 tokenizer, active_limit = _configure_tokenizer_limit(
                     model, self._config.max_sequence_tokens

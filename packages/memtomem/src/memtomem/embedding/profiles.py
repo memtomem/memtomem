@@ -5,12 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
-import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from memtomem.embedding.hub_telemetry import hub_telemetry_off
 
 if TYPE_CHECKING:
     from memtomem.config import Mem2MemConfig
@@ -25,43 +24,6 @@ CPU_VARIANTS = ("fp32", "int8-arm64", "int8-avx2", "int8-avx512", "int8-avx512-v
 
 def is_e5(model: str) -> bool:
     return model in ("multilingual-e5-small", E5_MODEL)
-
-
-_hub_telemetry_lock = threading.Lock()
-_hub_telemetry_depth = 0
-_hub_telemetry_saved = False
-
-
-@contextmanager
-def _hub_telemetry_off() -> Iterator[None]:
-    """Run memtomem's own Hub calls with huggingface_hub telemetry off (#2550).
-
-    With telemetry on, huggingface_hub tags the user agent with the host AI agent
-    (``agent/<id>``) and caches its agent registry at ``HF_HOME/.agent_harnesses.json``,
-    ignoring the ``cache_dir`` passed here. The flag is read per request, so flipping
-    it after import works. This overrides an explicit opt-in in the environment.
-
-    The flag is process-global: another Hub request in this process that builds its
-    headers while a window is open is also sent without telemetry. The last exit restores the saved value only if the flag still
-    reads True, so a False written by another component meanwhile is kept, while a
-    True written meanwhile cannot be told apart from ours and is reverted. An async
-    exception during the bookkeeping itself can leave the flag set.
-    """
-    global _hub_telemetry_depth, _hub_telemetry_saved
-    from huggingface_hub import constants
-
-    with _hub_telemetry_lock:
-        if _hub_telemetry_depth == 0:
-            _hub_telemetry_saved = constants.HF_HUB_DISABLE_TELEMETRY
-            constants.HF_HUB_DISABLE_TELEMETRY = True
-        _hub_telemetry_depth += 1
-    try:
-        yield
-    finally:
-        with _hub_telemetry_lock:
-            _hub_telemetry_depth -= 1
-            if _hub_telemetry_depth == 0 and constants.HF_HUB_DISABLE_TELEMETRY is True:
-                constants.HF_HUB_DISABLE_TELEMETRY = _hub_telemetry_saved
 
 
 @lru_cache(maxsize=8)
@@ -85,7 +47,7 @@ def resolve_tokenizer(path: str) -> Path:
 
     from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 
-    with _hub_telemetry_off():
+    with hub_telemetry_off():
         resolved = Path(
             hf_hub_download(
                 E5_MODEL,
@@ -111,7 +73,7 @@ def e5_snapshot() -> Path:
 
     from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 
-    with _hub_telemetry_off():
+    with hub_telemetry_off():
         snapshot = Path(
             snapshot_download(
                 E5_MODEL,
