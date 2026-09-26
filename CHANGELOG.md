@@ -7,6 +7,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **Oversized JSON containers pack adjacent small members into bounded chunks
+  (#2481).** Group labels identify the parent and first/last members. Stable
+  object-key boundaries limit downstream chunk changes when a key is inserted;
+  array boundaries remain positional. Existing oversized JSON sources receive
+  new chunk identities and require reembedding when reindexed after upgrade.
 - **ONNX model and `fastembed` reranker downloads run with huggingface_hub telemetry off (#2550).**
   With telemetry on, huggingface-hub adds the host AI agent to its user agent
   (`agent/claude-code`, for example), and 1.32 also caches its agent registry at

@@ -582,9 +582,104 @@ def chunk_code(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
     return result
 
 
-def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
-    """Split oversized containers by JSON pointer, decoding long string values.
+@dataclass(frozen=True)
+class _JsonMember:
+    start: int
+    value_start: int
+    end: int
+    name: str
+    token_count: int
 
+    @property
+    def segment(self) -> str:
+        """The member name escaped as one JSON pointer segment."""
+        return self.name.replace("~", "~0").replace("/", "~1")
+
+
+def _json_member_anchor(member: _JsonMember, size: int, floor: int, target: int) -> bool:
+    """Choose a cut from a member segment, weighted by its token size."""
+    if target <= 0:
+        return True
+    window = max(1, target - floor)
+    digest = hashlib.blake2b(member.segment.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") % window < size
+
+
+def _pack_json_siblings(
+    text: str,
+    members: list[_JsonMember],
+    budget: TokenBudget,
+    floor: int,
+    target: int,
+    ceiling: int,
+) -> list[tuple[int, int]]:
+    """Pack siblings with content-defined cuts and an exact hard ceiling."""
+
+    def tokens(start: int, end: int) -> int:
+        return budget.count(text[members[start].start : members[end - 1].end])
+
+    # A fixed-size greedy pack shifts every later boundary after an insertion.
+    # Object keys select stable anchors, so a changed prefix converges at the
+    # next anchor. Array segments are indices: inserting at the front shifts
+    # their anchors and range labels, as it did with per-element JSON pointers.
+    # Anchors may cut below target, trading extra chunks for stable object
+    # identities. The floor delays early cuts; the ceiling forces a cut.
+    groups: list[list[int]] = []
+    start = 0
+    end = 0
+    while end < len(members):
+        candidate = end + 1
+        candidate_tokens = tokens(start, candidate)
+        if end > start and candidate_tokens > ceiling:
+            groups.append([start, end])
+            start = end
+            continue
+        end = candidate
+        if candidate_tokens >= floor and _json_member_anchor(
+            members[end - 1], members[end - 1].token_count, floor, target
+        ):
+            groups.append([start, end])
+            start = end
+    if start < end:
+        groups.append([start, end])
+
+    # A final short group may need a boundary shifted from its neighbour, not
+    # a wholesale merge. Keep both resulting bodies inside the exact ceiling.
+    index = 0
+    while floor > 0 and index < len(groups):
+        start, end = groups[index]
+        if tokens(start, end) >= floor:
+            index += 1
+            continue
+        if index and tokens(groups[index - 1][0], end) <= ceiling:
+            groups[index - 1][1] = end
+            groups.pop(index)
+            index = max(0, index - 1)
+            continue
+        if index + 1 < len(groups) and tokens(start, groups[index + 1][1]) <= ceiling:
+            groups[index + 1][0] = start
+            groups.pop(index)
+            continue
+        if index:
+            previous = groups[index - 1]
+            for boundary in range(previous[1] - 1, previous[0], -1):
+                if (
+                    floor <= tokens(previous[0], boundary) <= ceiling
+                    and floor <= tokens(boundary, end) <= ceiling
+                ):
+                    previous[1] = boundary
+                    groups[index][0] = boundary
+                    break
+        index += 1
+    return [(start, end) for start, end in groups]
+
+
+def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
+    """Split oversized containers by pointer, packing adjacent small members.
+
+    Group labels contain a parent pointer and first/last raw member names or
+    stringified array indices.
+    Long string values are decoded before splitting.
     Source ranges always refer to the original serialized scalar/container.
     Keys, escape sequences and virtual newlines cannot invent source lines.
     Invalid JSON falls back to lossless raw text splitting.
@@ -609,6 +704,22 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
             pos += 1
         return pos
 
+    def emit(pos: int, end: int, body: str, label: str, *, grouped: bool = False) -> None:
+        chunks.append(
+            Chunk(
+                content=body,
+                metadata=ChunkMetadata(
+                    source_file=path,
+                    heading_hierarchy=(path.stem, label),
+                    start_line=text.count("\n", 0, pos) + 1,
+                    end_line=text.count("\n", 0, end) + 1,
+                    retrieval_context=(
+                        f"JSON members: {label}" if grouped else f"JSON pointer: {label}"
+                    ),
+                ),
+            )
+        )
+
     def visit(pos: int, pointer: str, depth: int = 0) -> int:
         if depth > 32:
             raise ValueError("deep JSON requires lossless fallback")
@@ -617,36 +728,85 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
         raw = text[pos:end]
         if budget.count(raw) > budget.body and isinstance(value, (dict, list)) and value:
             cursor = pos + 1
+            members: list[_JsonMember] = []
             for index in range(len(value)):
                 cursor = whitespace(cursor)
+                member_start = cursor
                 if isinstance(value, dict):
                     key, cursor = decoder.raw_decode(text, cursor)
                     cursor = whitespace(cursor)
                     if text[cursor] != ":":
                         raise ValueError("invalid JSON member")
                     cursor += 1
-                    segment = str(key).replace("~", "~0").replace("/", "~1")
+                    name = str(key)
                 else:
-                    segment = str(index)
-                cursor = whitespace(visit(cursor, pointer + "/" + segment, depth + 1))
+                    name = str(index)
+                value_start = whitespace(cursor)
+                _, member_end = decoder.raw_decode(text, value_start)
+                members.append(
+                    _JsonMember(
+                        member_start,
+                        value_start,
+                        member_end,
+                        name,
+                        budget.count(text[member_start:member_end]),
+                    )
+                )
+                cursor = whitespace(member_end)
                 if index + 1 < len(value):
                     if text[cursor] != ",":
                         raise ValueError("invalid JSON separator")
                     cursor += 1
+            ceiling = min(config.max_chunk_tokens or budget.body, budget.body)
+            run: list[_JsonMember] = []
+
+            def emit_run(group: list[_JsonMember]) -> None:
+                if not group:
+                    return
+                for first, last in _pack_json_siblings(
+                    text,
+                    group,
+                    budget,
+                    config.min_chunk_tokens,
+                    config.target_chunk_tokens,
+                    ceiling,
+                ):
+                    if last == first + 1:
+                        member = group[first]
+                        visit(member.value_start, pointer + "/" + member.segment, depth + 1)
+                    else:
+                        first_member, last_member = group[first], group[last - 1]
+                        # The heading is a JSON range descriptor: parent is a
+                        # pointer, while first/last are raw names or stringified indices.
+                        # JSON quoting keeps their punctuation unambiguous.
+                        label = json.dumps(
+                            {
+                                "parent": pointer or "/",
+                                "first": first_member.name,
+                                "last": last_member.name,
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        emit(
+                            first_member.start,
+                            last_member.end,
+                            text[first_member.start : last_member.end],
+                            label,
+                            grouped=True,
+                        )
+
+            for member in members:
+                if member.token_count <= ceiling:
+                    run.append(member)
+                else:
+                    emit_run(run)
+                    run = []
+                    visit(member.value_start, pointer + "/" + member.segment, depth + 1)
+            emit_run(run)
         else:
             body = value if isinstance(value, str) and budget.count(raw) > budget.body else raw
-            chunks.append(
-                Chunk(
-                    content=body,
-                    metadata=ChunkMetadata(
-                        source_file=path,
-                        heading_hierarchy=(path.stem, pointer or "/"),
-                        start_line=text.count("\n", 0, pos) + 1,
-                        end_line=text.count("\n", 0, end) + 1,
-                        retrieval_context=f"JSON pointer: {pointer or '/'}",
-                    ),
-                )
-            )
+            emit(pos, end, body, pointer or "/")
         return end
 
     serialized = True
