@@ -336,9 +336,9 @@ Confirm `mm status` works in a terminal, then restart the client and follow
 ### Install and upgrade issues
 
 To upgrade a `uv tool` install, run `mm upgrade` (or
-`mm upgrade --version <X.Y.Z>` for an exact release). It re-passes the extras
-recorded in uv's tool receipt and stops servers still running the old version,
-which re-running `uv tool install` does not. If `mm --version` is still older
+`mm upgrade --version <X.Y.Z>` for an exact release) rather than re-running
+`uv tool install`; the [CLI reference](reference/data-config-cli.md#cli-reference)
+covers what it preserves and stops. If `mm --version` is still older
 than the latest release right after installing, re-run the installation
 command with `--refresh`. pipx, project, and source installs use their own
 package-manager workflow. Detailed recovery commands live in

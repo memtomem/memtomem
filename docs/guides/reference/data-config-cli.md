@@ -308,6 +308,7 @@ mm reset --force                       # bypass only the stale pid/web/DB-lock h
 mm reset --json                        # emit a machine-readable ack instead of prose (also on mm add / mm purge)
 mm upgrade                             # uv-tool installs: on POSIX stop every MCP server and Web UI, reinstall, then recycle respawns
 mm upgrade --version 0.6.5 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
+# upgrade re-passes the extras in uv's tool receipt; if it is missing or unreadable, --dry-run shows "Extras: none detected" — pass --extras (e.g. all or onnx,web)
 # upgrade --json: dry runs add inventory_complete/warnings; a post-install partial failure adds cleanup_complete:false
 # warnings is additive on Windows, where processes are never killed automatically; db_lock_warning still requests a manual restart
 

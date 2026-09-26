@@ -312,7 +312,9 @@ uv tool install 'memtomem==0.6.5'
 ```
 
 Already have memtomem installed as a uv tool? Run `mm upgrade --version 0.6.5`
-instead: a bare reinstall drops the extras you installed it with.
+instead of reinstalling; the
+[CLI reference](../reference/data-config-cli.md#cli-reference) covers what it
+preserves and stops.
 
 The bundled dispatcher reads Claude's hook JSON from stdin; it never expands
 prompt or tool fields as shell variables. It validates the `mm` version at
