@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **The pinned E5 model downloads with huggingface_hub telemetry off (#2550).**
+  With telemetry on, huggingface-hub adds the host AI agent to its user agent
+  (`agent/claude-code`, for example), and 1.32 also caches its agent registry at
+  `HF_HOME/.agent_harnesses.json`, whatever `cache_dir` memtomem passes.
+  memtomem runs as an MCP server under such agents, so a first E5 download
+  there, with telemetry left on, did both. The two E5 Hub calls now turn
+  telemetry off for their duration. This applies even when
+  `HF_HUB_DISABLE_TELEMETRY`, `DISABLE_TELEMETRY` or `DO_NOT_TRACK` is set to a
+  false value. The setting is process-wide, so another Hub request in the same
+  process that builds its headers during that window is also sent without
+  telemetry. Measured with an agent environment and an isolated `HF_HOME`, a
+  tokenizer download no longer leaves `.agent_harnesses.json`. Its xet log files
+  (under `HF_HOME/xet/` unless `HF_XET_CACHE` is set) were written with and
+  without the change, so this does not stop them. fastembed and reranker
+  downloads are not covered.
+
 ### Fixed
 
 - **On Linux and Windows, a path whose name is in Unicode NFD form keeps its
