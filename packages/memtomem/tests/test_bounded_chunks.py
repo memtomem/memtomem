@@ -238,11 +238,11 @@ def test_json_front_key_insert_preserves_later_chunk_identity(bounded_config):
     assert_bounded(after, config)
 
 
-def test_json_group_range_escapes_special_member_names(bounded_config):
+def test_json_group_range_displays_raw_member_names_and_parent_pointer(bounded_config):
     import json
 
     config = bounded_config.model_copy(update={"min_chunk_tokens": 20, "target_chunk_tokens": 0})
-    text = json.dumps({"p range=x": {"a/b": 0.5, "c]..d": 0.5, "barrier": "x" * 100}})
+    text = json.dumps({"p/a~b": {"~1": 0.5, "a/b~c": 0.5, "barrier": "x" * 100}})
     chunks = chunk_json(Path("special.json"), text, config)
     grouped = [
         chunk for chunk in chunks if chunk.metadata.retrieval_context.startswith("JSON members:")
@@ -250,10 +250,11 @@ def test_json_group_range_escapes_special_member_names(bounded_config):
 
     assert len(grouped) == 1
     assert json.loads(grouped[0].metadata.heading_hierarchy[-1]) == {
-        "parent": "/p range=x",
-        "first": "a~1b",
-        "last": "c]..d",
+        "parent": "/p~1a~0b",
+        "first": "~1",
+        "last": "a/b~c",
     }
+    assert bounded_module._JsonMember(0, 0, 0, "~1", 0).segment == "~01"
     assert_bounded(chunks, config)
 
 

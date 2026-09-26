@@ -587,8 +587,13 @@ class _JsonMember:
     start: int
     value_start: int
     end: int
-    segment: str
+    name: str
     token_count: int
+
+    @property
+    def segment(self) -> str:
+        """The member name escaped as one JSON pointer segment."""
+        return self.name.replace("~", "~0").replace("/", "~1")
 
 
 def _json_member_anchor(member: _JsonMember, size: int, floor: int, target: int) -> bool:
@@ -670,8 +675,11 @@ def _pack_json_siblings(
 
 
 def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
-    """Split oversized containers by JSON pointer, decoding long string values.
+    """Split oversized containers by pointer, packing adjacent small members.
 
+    Group labels contain a parent pointer and first/last raw member names or
+    stringified array indices.
+    Long string values are decoded before splitting.
     Source ranges always refer to the original serialized scalar/container.
     Keys, escape sequences and virtual newlines cannot invent source lines.
     Invalid JSON falls back to lossless raw text splitting.
@@ -730,9 +738,9 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
                     if text[cursor] != ":":
                         raise ValueError("invalid JSON member")
                     cursor += 1
-                    segment = str(key).replace("~", "~0").replace("/", "~1")
+                    name = str(key)
                 else:
-                    segment = str(index)
+                    name = str(index)
                 value_start = whitespace(cursor)
                 _, member_end = decoder.raw_decode(text, value_start)
                 members.append(
@@ -740,7 +748,7 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
                         member_start,
                         value_start,
                         member_end,
-                        segment,
+                        name,
                         budget.count(text[member_start:member_end]),
                     )
                 )
@@ -768,14 +776,14 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
                         visit(member.value_start, pointer + "/" + member.segment, depth + 1)
                     else:
                         first_member, last_member = group[first], group[last - 1]
-                        # The heading is a displayed range descriptor, not a
-                        # JSON pointer. JSON quoting keeps punctuation in keys
-                        # and parent paths unambiguous to readers and tools.
+                        # The heading is a JSON range descriptor: parent is a
+                        # pointer, while first/last are raw names or stringified indices.
+                        # JSON quoting keeps their punctuation unambiguous.
                         label = json.dumps(
                             {
                                 "parent": pointer or "/",
-                                "first": first_member.segment,
-                                "last": last_member.segment,
+                                "first": first_member.name,
+                                "last": last_member.name,
                             },
                             ensure_ascii=False,
                             separators=(",", ":"),
