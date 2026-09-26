@@ -57,10 +57,28 @@ reranker, which download on a cache miss. This applies even if `HF_HUB_DISABLE_T
 `DISABLE_TELEMETRY` or `DO_NOT_TRACK` is set to a false value. Unless another component in the
 same process changes that setting mid-download, these downloads send no `agent/<id>` user-agent
 tag and skip the agent-registry fetch that writes `HF_HOME/.agent_harnesses.json`. The `local`
-(sentence-transformers) reranker is not covered. `MEMTOMEM_FASTEMBED_CACHE` moves the model files only:
-`huggingface_hub` still keeps its own files, such as its xet logs, under `HF_HOME`
-(`$XDG_CACHE_HOME/huggingface/`, else `~/.cache/huggingface/`, by default) or `HF_XET_CACHE`.
-Set those before starting memtomem to put them elsewhere.
+(sentence-transformers) reranker is not covered.
+
+`MEMTOMEM_FASTEMBED_CACHE` and `FASTEMBED_CACHE_PATH` select model snapshot storage, not Xet's
+own cache data or logs. Xet logs normally go under `HF_XET_CACHE/logs/`. `HF_XET_CACHE` defaults
+to `HF_HOME/xet/`, and `HF_HOME` normally defaults to `$XDG_CACHE_HOME/huggingface/` (or
+`~/.cache/huggingface/` when `XDG_CACHE_HOME` is unset). memtomem preserves these Hugging Face
+defaults. Set `HF_HOME` or `HF_XET_CACHE` before starting memtomem if you want to move Xet data
+as well.
+
+To move only Xet logs, this POSIX shell example uses the default memtomem model-cache location;
+the log directory is an example, not a path derived automatically from cache overrides:
+
+```sh
+mkdir -p "$HOME/.memtomem/cache/fastembed/xet-logs/"
+export HF_XET_LOG_DEST="$HOME/.memtomem/cache/fastembed/xet-logs/"
+memtomem-server
+```
+
+If you override the model cache with `MEMTOMEM_FASTEMBED_CACHE` or `FASTEMBED_CACHE_PATH`,
+substitute your actual chosen directory in the example. Set `HF_XET_LOG_DEST` before starting
+memtomem and before any `hf_xet` initialization in a shared Python process. It affects Xet
+logging for the whole process and leaves Xet cache data at `HF_XET_CACHE`.
 
 `multilingual-e5-small` fixes two values: the dimension must be `384` and
 `MAX_SEQUENCE_TOKENS` must be `512` (so `0` is rejected). It also fills in

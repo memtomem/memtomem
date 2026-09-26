@@ -1500,7 +1500,7 @@ carry the `MEMTOMEM_` prefix.
 | `MEMTOMEM_LOG_LEVEL` | `INFO` | `memtomem-server` log level (`DEBUG`, `INFO`, `WARNING`, ...) |
 | `MEMTOMEM_LOG_FORMAT` | `text` | `memtomem-server` log format: `text` or `json` |
 | `MEMTOMEM_WIKI_PATH` | `~/.memtomem-wiki` | Override the wiki store location (ADR-0008) |
-| `MEMTOMEM_FASTEMBED_CACHE` | _(platform cache dir)_ | Override the ONNX / `fastembed` model cache directory. `huggingface_hub` still writes its own files under `HF_HOME`; see [Embeddings](embeddings.md) |
+| `MEMTOMEM_FASTEMBED_CACHE` | _(platform cache dir)_ | Select ONNX / `fastembed` model snapshot storage (also selectable with `FASTEMBED_CACHE_PATH`). Xet cache data stays at `HF_XET_CACHE` (default `HF_HOME/xet/`), with logs normally in its `logs/` directory; memtomem preserves Hugging Face defaults. See [Embeddings](embeddings.md#onnx-local-no-server) for log-only relocation. |
 | `MEMTOMEM_INDEX_DEBOUNCE_QUEUE` | _(state dir)_ | Override the file-watcher debounce queue file path |
 
 ## Querying and Modifying at Runtime
