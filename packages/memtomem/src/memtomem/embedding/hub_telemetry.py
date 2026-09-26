@@ -1,4 +1,4 @@
-"""Run memtomem's Hub downloads with huggingface_hub telemetry off (#2550, #2552)."""
+"""Run memtomem's Hub downloads with huggingface_hub telemetry off (#2550, #2552, #2556)."""
 
 from __future__ import annotations
 
@@ -15,9 +15,10 @@ _hub_telemetry_saved = False
 def hub_telemetry_off() -> Iterator[None]:
     """Run memtomem's Hub downloads with huggingface_hub telemetry off.
 
-    Covers the pinned E5 calls (#2550) and the fastembed ``TextEmbedding`` and
-    ``TextCrossEncoder`` constructors, which download through huggingface_hub on a
-    cache miss (#2552). With telemetry on, huggingface_hub tags the user agent with
+    Covers the pinned E5 calls (#2550), the fastembed ``TextEmbedding`` and
+    ``TextCrossEncoder`` constructors (#2552) and the sentence-transformers
+    ``CrossEncoder`` constructor (#2556); the constructors download through
+    huggingface_hub on a cache miss. With telemetry on, huggingface_hub tags the user agent with
     the host AI agent (``agent/<id>``) and caches its agent registry at
     ``HF_HOME/.agent_harnesses.json``, ignoring the ``cache_dir`` passed to it. The
     flag is read per request, so flipping it after import works. This overrides an

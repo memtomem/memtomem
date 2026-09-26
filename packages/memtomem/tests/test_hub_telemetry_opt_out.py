@@ -1,8 +1,10 @@
-"""memtomem's Hub downloads run with huggingface_hub telemetry off (#2550, #2552)."""
+"""memtomem's Hub downloads run with huggingface_hub telemetry off (#2550, #2552, #2556)."""
 
 from __future__ import annotations
 
+import sys
 import threading
+import types
 
 import pytest
 
@@ -209,8 +211,21 @@ def _fastembed_reranker(monkeypatch, text_cross_encoder):
     )
 
 
-@pytest.mark.parametrize("build", [_onnx_embedder, _fastembed_reranker])
-def test_fastembed_constructor_runs_with_telemetry_off(monkeypatch, build):
+def _local_reranker(monkeypatch, cross_encoder):
+    # sentence-transformers is not a memtomem dependency, so a stand-in module
+    # lets this run where it is not installed.
+    from memtomem.search.reranker.local import LocalReranker
+
+    module = types.ModuleType("sentence_transformers")
+    module.CrossEncoder = cross_encoder  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", module)
+    return LocalReranker(
+        RerankConfig(enabled=True, provider="local", model="cross-encoder/ms-marco-MiniLM-L-6-v2")
+    )
+
+
+@pytest.mark.parametrize("build", [_onnx_embedder, _fastembed_reranker, _local_reranker])
+def test_model_constructor_runs_with_telemetry_off(monkeypatch, build):
     seen: list[bool] = []
 
     class _Model:
@@ -223,8 +238,8 @@ def test_fastembed_constructor_runs_with_telemetry_off(monkeypatch, build):
     assert constants.HF_HUB_DISABLE_TELEMETRY is False
 
 
-@pytest.mark.parametrize("build", [_onnx_embedder, _fastembed_reranker])
-def test_flag_is_restored_when_a_fastembed_constructor_raises(monkeypatch, build):
+@pytest.mark.parametrize("build", [_onnx_embedder, _fastembed_reranker, _local_reranker])
+def test_flag_is_restored_when_a_model_constructor_raises(monkeypatch, build):
     error = RuntimeError("download unavailable")
 
     class _Model:

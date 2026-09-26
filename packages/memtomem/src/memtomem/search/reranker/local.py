@@ -9,6 +9,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from memtomem._settlement import settle_shielded
+from memtomem.embedding.hub_telemetry import hub_telemetry_off
 
 if TYPE_CHECKING:
     from memtomem.config import RerankConfig
@@ -62,7 +63,9 @@ class LocalReranker:
                 if model is None:
                     from sentence_transformers import CrossEncoder
 
-                    model = CrossEncoder(self._config.model)
+                    # A cache miss downloads from the Hub inside this constructor (#2556).
+                    with hub_telemetry_off():
+                        model = CrossEncoder(self._config.model)
                     # Publish-then-verify: close() does not take this lock,
                     # so it can land while the construction above is in
                     # flight. Publishing first and re-checking makes every
