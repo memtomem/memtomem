@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from memtomem.chunking import bounded as bounded_module
 from memtomem.chunking.bounded import TokenBudget, bound_chunks, chunk_code, chunk_json
 from memtomem.config import IndexingConfig
 from memtomem.indexing.chunk_context import enrich_context
@@ -137,6 +138,143 @@ def test_json_array_and_invalid_input(bounded_config):
     fallback = chunk_json(Path("invalid.json"), invalid, bounded_config)
     assert "".join(c.content for c in fallback) == invalid
     assert_bounded(fallback, bounded_config)
+
+
+def test_json_scalar_siblings_pack_with_parent_range_and_floor(bounded_config):
+    import json
+
+    config = bounded_config.model_copy(update={"min_chunk_tokens": 24, "target_chunk_tokens": 42})
+    text = json.dumps({"floors": {f"k{index:02}": 0.5 for index in range(40)}}, indent=2)
+    chunks = chunk_json(Path("floors.json"), text, config)
+    budget = TokenBudget(config)
+
+    assert len(chunks) < 20
+    assert all(budget.count(chunk.content) >= config.min_chunk_tokens for chunk in chunks)
+    assert all(chunk.metadata.retrieval_context.startswith("JSON members: {") for chunk in chunks)
+    assert all(
+        json.loads(chunk.metadata.heading_hierarchy[-1])["parent"] == "/floors" for chunk in chunks
+    )
+    assert all('"k' in chunk.content and "0.5" in chunk.content for chunk in chunks)
+    assert all(
+        chunk.metadata.source_read_only and chunk.metadata.source_span_hash is None
+        for chunk in chunks
+    )
+    assert_bounded(chunks, config)
+
+    # The engine bypasses its generic short-chunk merge for bounded JSON.
+    indexed = IndexEngine(None, None, config).chunk_content(Path("floors.json"), text)
+    assert [chunk.content for chunk in indexed] == [chunk.content for chunk in chunks]
+
+
+def test_json_array_groups_preserve_source_slices_and_line_ranges(bounded_config):
+    import json
+
+    config = bounded_config.model_copy(update={"min_chunk_tokens": 24, "target_chunk_tokens": 42})
+    text = (
+        '{"records":[\n'
+        + ",\n".join(json.dumps({"id": index, "score": 0.5}) for index in range(30))
+        + "\n]}"
+    )
+    chunks = chunk_json(Path("records.json"), text, config)
+
+    assert len(chunks) < 30
+    assert any(
+        chunk.metadata.retrieval_context.startswith("JSON members: {")
+        and json.loads(chunk.metadata.heading_hierarchy[-1])["parent"] == "/records"
+        for chunk in chunks
+    )
+    for chunk in chunks:
+        start = text.index(chunk.content)
+        end = start + len(chunk.content)
+        assert chunk.metadata.start_line == text.count("\n", 0, start) + 1
+        assert chunk.metadata.end_line == text.count("\n", 0, end) + 1
+    assert_bounded(chunks, config)
+
+
+def test_json_short_tail_borrows_member_from_left(monkeypatch):
+    class CharBudget:
+        @staticmethod
+        def count(value):
+            return len(value)
+
+    members = [
+        bounded_module._JsonMember(0, 0, 25, "a", 25),
+        bounded_module._JsonMember(25, 25, 35, "b", 10),
+        bounded_module._JsonMember(35, 35, 50, "c", 15),
+    ]
+    monkeypatch.setattr(
+        bounded_module,
+        "_json_member_anchor",
+        lambda member, size, floor, target: member.segment == "b",
+    )
+    assert bounded_module._pack_json_siblings(
+        "A" * 25 + "B" * 10 + "C" * 15,
+        members,
+        CharBudget(),
+        floor=20,
+        target=30,
+        ceiling=40,
+    ) == [(0, 1), (1, 3)]
+
+
+def test_json_front_key_insert_preserves_later_chunk_identity(bounded_config):
+    import json
+
+    config = bounded_config.model_copy(
+        update={"hard_max_chunk_tokens": 512, "chunk_model_tokens": 1024}
+    )
+    values = {f"k{index:06}": index for index in range(2000)}
+    before = chunk_json(Path("values.json"), json.dumps(values, indent=2), config)
+    after = chunk_json(Path("values.json"), json.dumps({"k000000a": 1, **values}, indent=2), config)
+    old_identity = {(chunk.content, chunk.metadata.retrieval_context) for chunk in before}
+
+    assert len(before) < 200
+    assert (
+        sum(
+            (chunk.content, chunk.metadata.retrieval_context) not in old_identity for chunk in after
+        )
+        <= len(after) // 8
+    )
+    assert_bounded(after, config)
+
+
+def test_json_group_range_displays_raw_member_names_and_parent_pointer(bounded_config):
+    import json
+
+    config = bounded_config.model_copy(update={"min_chunk_tokens": 20, "target_chunk_tokens": 0})
+    text = json.dumps({"p/a~b": {"~1": 0.5, "a/b~c": 0.5, "barrier": "x" * 100}})
+    chunks = chunk_json(Path("special.json"), text, config)
+    grouped = [
+        chunk for chunk in chunks if chunk.metadata.retrieval_context.startswith("JSON members:")
+    ]
+
+    assert len(grouped) == 1
+    assert json.loads(grouped[0].metadata.heading_hierarchy[-1]) == {
+        "parent": "/p~1a~0b",
+        "first": "~1",
+        "last": "a/b~c",
+    }
+    assert bounded_module._JsonMember(0, 0, 0, "~1", 0).segment == "~01"
+    assert_bounded(chunks, config)
+
+
+def test_json_small_document_and_unavoidable_short_member(bounded_config):
+    import json
+
+    config = bounded_config.model_copy(update={"min_chunk_tokens": 24, "target_chunk_tokens": 42})
+    small = '{"score": 0.5}'
+    one = chunk_json(Path("small.json"), small, config)
+    assert len(one) == 1
+    assert one[0].content == small
+
+    # The long string consumes its own budget; its tiny sibling has no legal
+    # same-parent group and keeps its exact pointer.
+    text = json.dumps({"large": "x" * 100, "score": 0.5})
+    chunks = chunk_json(Path("mixed.json"), text, config)
+    short = [chunk for chunk in chunks if chunk.content == "0.5"]
+    assert len(short) == 1
+    assert short[0].metadata.retrieval_context.startswith("JSON pointer: /score")
+    assert_bounded(chunks, config)
 
 
 def test_engine_final_budget_after_overlap(bounded_config):
