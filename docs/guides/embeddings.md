@@ -52,19 +52,20 @@ Or run `mm init` and pick the English or Korean-optimized preset, or select "Loc
 The model is downloaded automatically on first use (~490 MB for multilingual-e5-small) and cached in `~/.memtomem/cache/fastembed/` (override with `MEMTOMEM_FASTEMBED_CACHE` or `FASTEMBED_CACHE_PATH`).
 
 The download goes through `huggingface_hub`. memtomem runs it with Hub telemetry off: the pinned
-E5 calls, and the `fastembed` constructors for other ONNX embedding models and the `fastembed`
-reranker, which download on a cache miss. This applies even if `HF_HUB_DISABLE_TELEMETRY`,
-`DISABLE_TELEMETRY` or `DO_NOT_TRACK` is set to a false value. Unless another component in the
-same process changes that setting mid-download, these downloads send no `agent/<id>` user-agent
-tag and skip the agent-registry fetch that writes `HF_HOME/.agent_harnesses.json`. The `local`
-(sentence-transformers) reranker is not covered.
+E5 calls, the `fastembed` constructors for other ONNX embedding models and the `fastembed`
+reranker, and the `local` (sentence-transformers) reranker, which download on a cache miss. This
+applies even if `HF_HUB_DISABLE_TELEMETRY`, `DISABLE_TELEMETRY` or `DO_NOT_TRACK` is set to a
+false value. Unless another component in the same process changes that setting mid-download,
+these downloads send no `agent/<id>` user-agent tag and skip the agent-registry fetch that writes
+`HF_HOME/.agent_harnesses.json`.
 
-`MEMTOMEM_FASTEMBED_CACHE` and `FASTEMBED_CACHE_PATH` select model snapshot storage, not Xet's
-own cache data or logs. Xet logs normally go under `HF_XET_CACHE/logs/`. `HF_XET_CACHE` defaults
-to `HF_HOME/xet/`, and `HF_HOME` normally defaults to `$XDG_CACHE_HOME/huggingface/` (or
-`~/.cache/huggingface/` when `XDG_CACHE_HOME` is unset). memtomem preserves these Hugging Face
-defaults. Set `HF_HOME` or `HF_XET_CACHE` before starting memtomem if you want to move Xet data
-as well.
+`MEMTOMEM_FASTEMBED_CACHE` and `FASTEMBED_CACHE_PATH` select `fastembed` and E5 model snapshot
+storage, not Xet's own cache data or logs. The `local` reranker uses sentence-transformers' own
+model cache (under `HF_HOME` by default). Xet logs normally go under `HF_XET_CACHE/logs/`.
+`HF_XET_CACHE` defaults to `HF_HOME/xet/`, and `HF_HOME` normally defaults to
+`$XDG_CACHE_HOME/huggingface/` (or `~/.cache/huggingface/` when `XDG_CACHE_HOME` is unset).
+memtomem preserves these Hugging Face defaults. Set `HF_HOME` or `HF_XET_CACHE` before starting
+memtomem if you want to move Xet data as well.
 
 To move only Xet logs, this POSIX shell example uses the default memtomem model-cache location;
 the log directory is an example, not a path derived automatically from cache overrides:
