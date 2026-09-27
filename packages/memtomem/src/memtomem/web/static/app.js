@@ -2405,7 +2405,7 @@ window.addEventListener('langchange', () => {
   renderEmbMismatchBanner();
   // The Sources partial-list note (#2566) is JS-owned text with no
   // ``data-i18n``, so ``applyDOM`` leaves it in the old language.
-  _renderSourcesPartialNote();
+  _retranslateSourcesPartialNote();
   // NOTE: search-results / chunk-browser microcopy keyed in S1.3 is rendered
   // imperatively via t() and localizes on the next render, not on a live
   // language toggle. A safe live repaint needs per-surface state preservation
@@ -4768,14 +4768,31 @@ function _renderSourcesPartialNote() {
   const omitted = STATE.sourcesOmitted || 0;
   if (omitted > 0) {
     const shown = (STATE.allSources || []).length;
-    note.textContent = t('sources.partial_note', {
-      shown: shown.toLocaleString(),
-      total: (shown + omitted).toLocaleString(),
-    });
+    // Kept on the element so a language switch re-words the numbers the
+    // rendered tree was drawn with, not whatever the state holds by then.
+    note.dataset.shown = String(shown);
+    note.dataset.total = String(shown + omitted);
+    _translateSourcesPartialNote(note);
     note.hidden = false;
   } else {
     note.hidden = true;
   }
+}
+
+function _translateSourcesPartialNote(note) {
+  note.textContent = t('sources.partial_note', {
+    shown: Number(note.dataset.shown).toLocaleString(),
+    total: Number(note.dataset.total).toLocaleString(),
+  });
+}
+
+// ``langchange`` re-words a visible note only. Whether it shows is the
+// tree render's call: Home's dashboard can replace ``STATE.allSources`` and
+// ``sourcesOmitted`` without redrawing the tree (#2571), and the note must
+// keep describing the tree on screen until that tree is redrawn.
+function _retranslateSourcesPartialNote() {
+  const note = qs('sources-partial-note');
+  if (note && !note.hidden && note.dataset.total) _translateSourcesPartialNote(note);
 }
 
 

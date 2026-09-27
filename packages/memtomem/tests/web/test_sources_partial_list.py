@@ -314,6 +314,27 @@ def test_language_switch_retranslates_the_note(page, mm_web_url: str) -> None:
     assert korean != english
 
 
+def test_language_switch_after_a_late_home_load_keeps_the_note(page, mm_web_url: str) -> None:
+    """Home can replace the Sources state without redrawing the tree (#2571).
+    A language switch then re-words the note for the capped tree still on
+    screen instead of hiding it."""
+    api = _Api(_TREE_STATUS, _sources_body(_TREE_ROWS, omitted=3))
+    page.add_init_script("try { localStorage.setItem('m2m-lang', 'en'); } catch (e) {}")
+    _open_tree(page, mm_web_url, api)
+
+    api.stats = {"home_sources": [*_TREE_ROWS, _source(f"{_USER}/c.md", _USER)]}
+    page.evaluate("() => loadDashboard()")
+    page.wait_for_function(
+        "() => STATE.allSources.length === 3 && STATE.sourcesOmitted === 0", timeout=5_000
+    )
+
+    page.evaluate("() => I18N.setLang('ko')")
+    page.wait_for_function("() => I18N.lang() === 'ko'", timeout=5_000)
+    header = _header(page)
+    assert header["note"] == _partial_note(page, 2, 5)
+    assert header["noteVisible"] is True
+
+
 # ---------------------------------------------------------------------------
 # Memory Dirs panel drill-in
 # ---------------------------------------------------------------------------
