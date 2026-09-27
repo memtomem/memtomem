@@ -47,6 +47,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Such a root renders like a user root with all sources held: its group opens
   with the line naming the hidden sources. A `memories.local` root still does
   not appear, even when all its drafts are held.
+- **Web Sources says when its file list stops at 10,000 (#2566).** The Sources
+  tree and the Memory Dirs panel load at most 10,000 sources, the cap on
+  `GET /api/sources`, while the per-root badges count all of a root's listed
+  sources. Above the cap the lists were shorter than the badges with no sign
+  of it. The tree now shows how many of the indexed files were loaded, across
+  all tabs, under its header. A panel drill-in says how many of the
+  directory's files it shows when the cut reached that directory; a directory
+  whose files were all cut off shows that note instead of "No indexed files".
+  A drill-in opened just before a reindex also no longer keeps the file list
+  from before it.
 
 ## [0.6.5] — 2026-09-26
 

@@ -82,11 +82,17 @@ function _buildMemoryDirsPanel(initialDirs) {
   // changes. Within one render generation, drill-ins after the first
   // reuse the cached response. Reindex also invalidates explicitly
   // so the file list picks up new chunks without a full re-render.
-  let _memorySourcesByDir = null;
+  // The cached value is ``{byDir, omitted}``, set in one assignment so the
+  // rows and the count of rows left out (#2566) always come from one
+  // response. ``_memorySourcesGen`` moves on every invalidation, so a
+  // request that was already out cannot publish its older answer.
+  let _memorySources = null;
   let _memorySourcesPromise = null;
+  let _memorySourcesGen = 0;
   function _invalidateSourcesCache() {
-    _memorySourcesByDir = null;
+    _memorySources = null;
     _memorySourcesPromise = null;
+    _memorySourcesGen += 1;
   }
 
   function _apiErrorText(err) {
@@ -145,30 +151,61 @@ function _buildMemoryDirsPanel(initialDirs) {
     // Single in-flight promise — avoids racing fetches when the user
     // mashes multiple path rows in quick succession before the first
     // one has a chance to populate the cache.
-    if (_memorySourcesByDir !== null) return _memorySourcesByDir;
+    if (_memorySources !== null) return _memorySources;
     if (_memorySourcesPromise) return _memorySourcesPromise;
-    _memorySourcesPromise = (async () => {
+    const gen = _memorySourcesGen;
+    const promise = (async () => {
       // ``limit=10000`` matches the route's hard cap. With the unified
       // single-panel view we ask for every indexed source (no kind
       // filter) so user-added dirs that classify as ``general`` still
-      // surface their file rows in their vendor group. Hitting the cap
-      // would be a pathological config and the user would see truncated
-      // drill-ins, not a crash.
+      // surface their file rows in their vendor group. Past the cap the
+      // response's ``total`` exceeds its rows, and the drill-in says the
+      // list is partial (#2566).
       const data = await api('GET', '/api/sources?limit=10000');
+      // Invalidated while this request was out (reindex, add, remove):
+      // its answer predates the change, so hand the caller the current one.
+      if (gen !== _memorySourcesGen) return _fetchMemorySources();
       const byDir = {};
       for (const s of (data && data.sources) || []) {
         const key = s.memory_dir || '';
         if (!byDir[key]) byDir[key] = [];
         byDir[key].push(s);
       }
-      _memorySourcesByDir = byDir;
-      return byDir;
+      _memorySources = {
+        byDir,
+        omitted: _sourcesOmitted(data),
+        loaded: ((data && data.sources) || []).length,
+      };
+      return _memorySources;
     })();
+    _memorySourcesPromise = promise;
     try {
-      return await _memorySourcesPromise;
+      return await promise;
     } finally {
-      _memorySourcesPromise = null;
+      // A newer request may own the slot by now; leave it in place.
+      if (_memorySourcesPromise === promise) _memorySourcesPromise = null;
     }
+  }
+
+  // Drill-in note when ``/api/sources`` left rows out (#2566). The dir's
+  // status entry says how many of its files the list should hold (the row
+  // badge's number), so only a dir that got fewer is flagged, and a dir that
+  // should hold none keeps its empty text. With no status entry the dir's
+  // share of the cut is unknown, so the note gives the overall numbers.
+  function _drillInPartialText(rows, omitted, loaded, st) {
+    if (!(omitted > 0)) return null;
+    if (!st) {
+      return t('sources.partial_note', {
+        shown: loaded.toLocaleString(),
+        total: (loaded + omitted).toLocaleString(),
+      });
+    }
+    const listed = memoryDirVisibleCounts(st).indexed;
+    if (rows >= listed) return null;
+    return t('sources.memory_dirs.files_partial', {
+      shown: rows.toLocaleString(),
+      total: listed.toLocaleString(),
+    });
   }
 
   async function _toggleDirExpand(path, item, pathBtn) {
@@ -194,8 +231,10 @@ function _buildMemoryDirsPanel(initialDirs) {
     pathBtn.setAttribute('aria-expanded', 'true');
 
     let byDir;
+    let omitted;
+    let loaded;
     try {
-      byDir = await _fetchMemorySources();
+      ({ byDir, omitted, loaded } = await _fetchMemorySources());
     } catch (err) {
       filesWrap.innerHTML = '';
       const errEl = document.createElement('div');
@@ -232,8 +271,17 @@ function _buildMemoryDirsPanel(initialDirs) {
       }
     }
 
+    const partial = _drillInPartialText(entries.length, omitted, loaded, statusByPath[path]);
     filesWrap.innerHTML = '';
+    if (partial) {
+      const note = document.createElement('div');
+      note.className = 'memory-dirs-files-partial';
+      note.textContent = partial;
+      filesWrap.appendChild(note);
+    }
     if (!entries.length) {
+      // With a partial note the dir's files are past the cut, not absent.
+      if (partial) return;
       const empty = document.createElement('div');
       empty.className = 'memory-dirs-files-empty';
       empty.textContent = t('sources.memory_dirs.files_empty');

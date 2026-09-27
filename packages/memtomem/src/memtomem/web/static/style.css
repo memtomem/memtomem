@@ -851,6 +851,12 @@ mark {
   text-align: center; margin-bottom: 8px;
 }
 
+/* Sources list cut short by the /api/sources cap (#2566) */
+.sources-partial-note {
+  font-size: 0.7rem; color: var(--muted);
+  padding: 0 10px; margin: -4px 0 8px; text-align: center;
+}
+
 /* Sources sort row */
 .sources-sort-row { display: flex; gap: 2px; margin-bottom: 6px; }
 .sources-sort-btn {
@@ -1929,6 +1935,11 @@ button.memory-dirs-path:focus-visible {
   font-size: 0.78rem;
   color: var(--muted);
   font-style: italic;
+  padding: 4px 0;
+}
+.memory-dirs-files-partial {
+  font-size: 0.78rem;
+  color: var(--muted);
   padding: 4px 0;
 }
 .memory-dirs-files-list {
