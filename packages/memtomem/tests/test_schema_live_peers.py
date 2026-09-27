@@ -204,6 +204,32 @@ class TestMigratingSideRefuses:
         await storage.initialize()
         await storage.close()
 
+    async def test_newer_migration_during_enumeration_leaves_file_untouched(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A newer release migrates past this binary while the registry is read.
+
+        The open-time fence already passed, so without a second one the open
+        would switch the journal mode before ``create_tables`` refused.
+        """
+        cfg = await _make_old_store(tmp_path)
+
+        def migrate_past_meanwhile(digest: str) -> EnumerationResult:
+            _migrate_past(cfg.sqlite_path)
+            return EnumerationResult((), True)
+
+        monkeypatch.setattr(schema_peers, "enumerate_live_instances", migrate_past_meanwhile)
+        storage = SqliteBackend(cfg, dimension=8)
+        with pytest.raises(SchemaDowngradeError) as excinfo:
+            await storage.initialize()
+        assert not isinstance(excinfo.value, SchemaMigrationBlockedError)
+        assert not Path(str(cfg.sqlite_path) + "-wal").exists()
+        db = sqlite3.connect(cfg.sqlite_path)
+        try:
+            assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        finally:
+            db.close()
+
     async def test_real_registration_in_another_process_blocks(self, tmp_path) -> None:
         cfg = await _make_old_store(tmp_path)
         q = _CTX.Queue()

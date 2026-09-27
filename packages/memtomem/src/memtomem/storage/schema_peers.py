@@ -32,7 +32,11 @@ from memtomem._instance_registry import (
     store_digest_for,
 )
 from memtomem.errors import SchemaMigrationBlockedError
-from memtomem.storage.sqlite_schema import SCHEMA_VERSION, read_schema_version
+from memtomem.storage.sqlite_schema import (
+    SCHEMA_VERSION,
+    check_schema_downgrade,
+    read_schema_version,
+)
 
 
 def _is_empty(db: sqlite3.Connection) -> bool:
@@ -64,6 +68,10 @@ async def refuse_migration_under_live_peers(db: sqlite3.Connection, db_path: Pat
     result = await asyncio.to_thread(enumerate_live_instances, digest)
     own = current_process_id()
     peers = sorted({info.pid for info in result.instances if info.procid != own})
+    # The enumeration can take seconds, and another process may have migrated
+    # meanwhile, possibly past this binary. The caller's downgrade fence ran
+    # before that, so repeat it here, before any setup that writes the file.
+    check_schema_downgrade(db)
     # Re-read after enumerating (see module docstring for why the order matters).
     if not _migrates(db):
         return
