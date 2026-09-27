@@ -300,6 +300,20 @@ def test_ko_locale_renders_the_ko_note(page, mm_web_url: str) -> None:
     assert "5개" in note and "2개" in note
 
 
+def test_language_switch_retranslates_the_note(page, mm_web_url: str) -> None:
+    """The note has no ``data-i18n``, so ``langchange`` must redraw it."""
+    api = _Api(_TREE_STATUS, _sources_body(_TREE_ROWS, omitted=3))
+    page.add_init_script("try { localStorage.setItem('m2m-lang', 'en'); } catch (e) {}")
+    _open_tree(page, mm_web_url, api)
+    english = _header(page)["note"]
+
+    page.evaluate("() => I18N.setLang('ko')")
+    page.wait_for_function("() => I18N.lang() === 'ko'", timeout=5_000)
+    korean = _header(page)["note"]
+    assert korean == _partial_note(page, 2, 5)
+    assert korean != english
+
+
 # ---------------------------------------------------------------------------
 # Memory Dirs panel drill-in
 # ---------------------------------------------------------------------------

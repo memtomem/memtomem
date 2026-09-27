@@ -2403,6 +2403,9 @@ window.addEventListener('langchange', () => {
   // cache is ready (and on every later toggle). No-op if no mismatch is
   // showing. See feedback_i18n_init_order_race.
   renderEmbMismatchBanner();
+  // The Sources partial-list note (#2566) is JS-owned text with no
+  // ``data-i18n``, so ``applyDOM`` leaves it in the old language.
+  _renderSourcesPartialNote();
   // NOTE: search-results / chunk-browser microcopy keyed in S1.3 is rendered
   // imperatively via t() and localizes on the next render, not on a live
   // language toggle. A safe live repaint needs per-surface state preservation
