@@ -1437,22 +1437,25 @@ async def memory_dirs_status(
     here, and rows. The remove applies the same rule to what is configured
     and indexed when it runs, and reports that number (#2537).
 
-    ``held_chunk_count`` and ``held_source_file_count`` count what the entry
-    owns that ``GET /api/sources`` hides, under the same
-    :func:`~memtomem.storage.sqlite_visibility.hidden_source_paths` rule, so
-    totals minus held are what the Sources tree lists for the root. The
-    delete count still includes held chunks, because the sweep removes them
-    (#2561).
+    What the entry owns that ``GET /api/sources`` does not list by default is
+    counted under the rule that route applies
+    (:class:`~memtomem.web.source_visibility.SourceVisibility`):
+    ``hidden_chunk_count`` / ``hidden_source_file_count`` count every such
+    source once, so totals minus hidden are what the Sources tree lists for
+    the root. ``held_*`` counts the held or pending ones (#2561) and
+    ``project_local_*`` the ``project_local`` tier (#2567); a held draft is in
+    both. The delete count still includes hidden chunks, because the sweep
+    removes them.
     """
     from memtomem.indexing.engine import memory_dir_stats, norm_dir_prefix, remove_sweeps_nothing
-    from memtomem.storage.sqlite_visibility import hidden_source_paths
+    from memtomem.web.source_visibility import load_source_visibility
 
-    hidden = {str(path) for path in await hidden_source_paths(storage)}
+    visibility = await load_source_visibility(storage, config)
     stats = await memory_dir_stats(
         storage,
         config.indexing.all_index_roots(),
         supported_extensions=config.indexing.supported_extensions,
-        hidden=hidden,
+        hidden_reasons=lambda path: visibility.check(path)[0],
     )
 
     def _resolved(dirs: Iterable[Path]) -> set[str]:

@@ -552,9 +552,10 @@ function _buildMemoryDirsPanel(initialDirs) {
       // also gives the user a heads-up about how big a Reindex is
       // about to be.
       if (!st) return '';
-      // Held or pending sources the tree does not list (#2561).
+      // Sources the tree does not list: held or pending (#2561) and
+      // ``project_local`` drafts (#2567), each counted once.
       const counts = memoryDirVisibleCounts(st);
-      const held = memoryDirHeldNote(counts);
+      const held = memoryDirHiddenNote(counts);
       if (st.exists === false) {
         const missing = t('sources.memory_dirs.status_missing');
         return held ? missing + ' · ' + held.text : missing;
@@ -811,33 +812,42 @@ function _buildMemoryDirsPanel(initialDirs) {
       // still on disk waiting — without it, "27 files" was ambiguous
       // (was that "27 on disk" or "27 indexed"?) and disagreed with
       // the row sum when most dirs were unindexed.
-      // Counts are what the tree lists; held or pending sources are summed
-      // separately for the "N hidden" note (#2561).
-      let chunks = 0;
-      let files = 0;
-      let indexed = 0;
-      let heldSources = 0;
-      let heldChunks = 0;
-      let any = false;
+      // Counts are what the tree lists; hidden sources and their reasons are
+      // summed separately for the "N hidden" note (#2561, #2567). Roots own
+      // disjoint sources, so per-root counts add up.
+      const sum = {
+        chunks: 0,
+        files: 0,
+        indexed: 0,
+        hiddenSources: 0,
+        hiddenChunks: 0,
+        heldSources: 0,
+        heldChunks: 0,
+        localSources: 0,
+        localChunks: 0,
+        any: false,
+      };
       for (const path of entries) {
         const st = statusByPath[path];
         if (st) {
-          any = true;
+          sum.any = true;
           const counts = memoryDirVisibleCounts(st);
-          chunks += counts.chunks;
-          files += (typeof st.file_count === 'number') ? st.file_count : 0;
-          indexed += counts.indexed;
-          heldSources += counts.heldSources;
-          heldChunks += counts.heldChunks;
+          sum.files += (typeof st.file_count === 'number') ? st.file_count : 0;
+          for (const key of [
+            'chunks', 'indexed', 'hiddenSources', 'hiddenChunks',
+            'heldSources', 'heldChunks', 'localSources', 'localChunks',
+          ]) {
+            sum[key] += counts[key];
+          }
         }
       }
-      return { chunks, files, indexed, heldSources, heldChunks, any };
+      return sum;
     }
 
     function _buildStatusBadge(aggregate) {
       const badge = document.createElement('span');
       badge.className = 'memory-dirs-status-group';
-      if (aggregate.chunks + aggregate.heldChunks === 0) badge.classList.add('empty');
+      if (aggregate.chunks + aggregate.hiddenChunks === 0) badge.classList.add('empty');
       let text = t(
         'sources.memory_dirs.status_group',
         {
@@ -846,7 +856,7 @@ function _buildMemoryDirsPanel(initialDirs) {
           chunks: aggregate.chunks,
         },
       );
-      const held = memoryDirHeldNote(aggregate);
+      const held = memoryDirHiddenNote(aggregate);
       if (held) {
         text += ' · ' + held.text;
         badge.title = held.title;
@@ -1123,7 +1133,9 @@ async function mdAdd(path, opts = {}) {
  * deletes them, and the tree does not list them. When there are any, the
  * label says how many (#2561). ``delete_chunk_count`` is either 0 or the
  * whole ``chunk_count``, so the held part of a non-zero count is
- * ``held_chunk_count``.
+ * ``held_chunk_count``. ``project_local`` drafts need no label of their own:
+ * a source is ``project_local`` only under a registered project root, which
+ * then contains any root that owns it, so such a root's count is 0 (#2567).
  */
 function memoryDirRemoveConfirmOptions(path, st) {
   const chunkCount = (st && st.chunk_count) || 0;

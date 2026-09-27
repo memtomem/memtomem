@@ -27,6 +27,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the remove deletes them, and its label now says how many come from those
   hidden sources. The remove dialog reloads the counts when it opens; if that
   fails, it offers only removing the root, not deleting its chunks.
+- **Web Sources badges also leave out the `project_local` drafts the tree
+  hides (#2567).** The Sources list hides the `project_local` tier
+  (`.memtomem/memories.local/` under a registered project) unless asked for it,
+  but a root that owns such files, such as a user root at `<project>/.memtomem`,
+  still counted them. `GET /api/memory-dirs/status` now also reports
+  `hidden_source_file_count` and `hidden_chunk_count`, every source the Sources
+  list does not show, counted once, and `project_local_source_file_count` and
+  `project_local_chunk_count`. `held_*` keeps its meaning, so a held draft is in
+  both `held_*` and `project_local_*`. The badges and the Memory Dirs panel show
+  totals minus hidden, and the note names each reason. The list, the body
+  filter and the counts now apply one shared visibility rule.
 
 ## [0.6.5] — 2026-09-26
 

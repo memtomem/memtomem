@@ -8,17 +8,17 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from memtomem.config import MemoryDirKind, TargetScope, classify_scope, memory_dir_kind
+from memtomem.config import MemoryDirKind, TargetScope, memory_dir_kind
 from memtomem.indexing.engine import norm_dir_prefix
 from memtomem.indexing.summarizer import regenerate_for_paths
 from memtomem.storage.sqlite_helpers import norm_path
-from memtomem.storage.sqlite_visibility import hidden_source_paths
 from memtomem.web.deps import (
     get_config,
     get_search_pipeline,
     get_storage,
     require_indexed_source,
 )
+from memtomem.web.source_visibility import load_source_visibility
 from memtomem.web.routes._confirm import needs_confirmation_envelope
 from memtomem.web.schemas.core import DeleteResponse
 from memtomem.web.schemas.sources import (
@@ -100,7 +100,9 @@ async def list_sources(
     config=Depends(get_config),
 ) -> SourcesResponse:
     rows = await storage.get_source_files_with_counts()
-    hidden = {str(path) for path in await hidden_source_paths(storage)}
+    # Held/pending and the tier filter, the same rule the per-root counts in
+    # ``/api/memory-dirs/status`` apply (#2567).
+    visibility = await load_source_visibility(storage, config)
     # Heuristic preview (first heading + first chunk body), populated for
     # every source so the UI has a readable fallback when no LLM summary
     # is cached yet.
@@ -139,35 +141,8 @@ async def list_sources(
         key=lambda t: -len(t[0]),
     )
 
-    # ADR-0011 / ADR-0016: pre-resolve project_memory_dirs so the
-    # per-source ``classify_scope`` lookup can refuse unregistered
-    # project-tier paths (the public API of ``classify_scope`` falls
-    # back to ``"user"`` for any path under ``.memtomem/...`` whose
-    # owning project_memory_dir was not registered, mirroring the
-    # indexer's safety net at config.py:1495-1507).
-    pmdirs = config.indexing.project_memory_dirs
-
     all_sources: list[SourceOut] = []
     for p, cnt, last_indexed_iso, ns_csv, avg_tok, min_tok, max_tok in sorted(rows):
-        if str(p) in hidden:
-            continue
-        last_indexed_at: datetime | None = None
-        if last_indexed_iso:
-            try:
-                last_indexed_at = datetime.fromisoformat(last_indexed_iso)
-                if last_indexed_at.tzinfo is None:
-                    last_indexed_at = last_indexed_at.replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                pass
-
-        file_size: int | None = None
-        try:
-            file_size = p.stat().st_size
-        except OSError:
-            pass
-
-        namespaces = ns_csv.split(",") if ns_csv else ["default"]
-
         target = norm_path(p)
         match = next(
             (
@@ -203,25 +178,34 @@ async def list_sources(
             if kind == "general" and source_kind == "memory":
                 continue
 
-        # ADR-0016 §7: path-classify the source's canonical-residency
-        # tier. ``classify_scope`` returns ``"user"`` for any path that
-        # is not under a registered project_memory_dir (including
-        # otherwise project-shaped paths whose owning dir was not
-        # registered) — matches the indexer's persisted scope so the
-        # badge agrees with the chunk's stored ``meta.scope``.
-        source_scope, _src_project_root = classify_scope(p, pmdirs)
-
-        # ADR-0015 §4a project_local default-hidden rule. When the
-        # caller passes ``?target_scope=`` we narrow to exactly that
-        # tier (the only way to surface ``project_local`` sources).
-        # When omitted, ``project_local`` rows fall out — keeps the
-        # draft tier out of overview / list views unless the operator
-        # explicitly asks for it.
-        if target_scope is None:
-            if source_scope == "project_local":
-                continue
-        elif source_scope != target_scope:
+        # After the kind filter, so rows it drops are never classified: the
+        # scope half resolves project-shaped paths. ADR-0016 §7:
+        # ``source_scope`` is the path-classified tier, which matches the
+        # chunk's stored ``meta.scope`` (``classify_scope`` refuses
+        # project-tier paths whose project_memory_dir is not registered).
+        # ADR-0015 §4a: without ``?target_scope=`` the ``project_local`` draft
+        # tier is hidden; with it the list narrows to exactly that tier, the
+        # only way to surface ``project_local`` sources.
+        hidden_reasons, source_scope = visibility.check(p, target_scope)
+        if hidden_reasons:
             continue
+
+        last_indexed_at: datetime | None = None
+        if last_indexed_iso:
+            try:
+                last_indexed_at = datetime.fromisoformat(last_indexed_iso)
+                if last_indexed_at.tzinfo is None:
+                    last_indexed_at = last_indexed_at.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                pass
+
+        file_size: int | None = None
+        try:
+            file_size = p.stat().st_size
+        except OSError:
+            pass
+
+        namespaces = ns_csv.split(",") if ns_csv else ["default"]
 
         path_str = str(p)
         hh, first_content = summaries.get(path_str, ([], ""))
@@ -302,16 +286,11 @@ async def source_content_matches(
     if not query:
         raise HTTPException(status_code=400, detail="Query must not be blank.")
 
-    pmdirs = config.indexing.project_memory_dirs
-    hidden = {str(path) for path in await hidden_source_paths(storage)}
+    visibility = await load_source_visibility(storage, config)
 
     def _visible_for_scope(path: Path | str) -> bool:
-        if str(path) in hidden:
-            return False
-        source_scope, _project_root = classify_scope(path, pmdirs)
-        if target_scope is None:
-            return source_scope != "project_local"
-        return source_scope == target_scope
+        hidden_reasons, _scope = visibility.check(path, target_scope)
+        return not hidden_reasons
 
     paths: list[Path] = []
     for candidate in await storage.search_source_files_by_content(query, limit=10000):

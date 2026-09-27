@@ -5314,11 +5314,12 @@ function _renderMemorySourceTree(sources, list) {
       const { dir, items } = node.leaf;
       const pendingInDir = !!STATE.pendingActivatePath
         && items.some(s => s.path === STATE.pendingActivatePath);
-      // A root that lists nothing because every source is held or pending
-      // opens by default, so its first line says why (#2561). A state the
-      // user set still wins in ``getDirOpen``.
-      const allHeld = items.length === 0
-        && memoryDirVisibleCounts(statusByPath[dir]).heldSources > 0;
+      // A root that lists nothing because every source is hidden (held,
+      // pending, or a ``project_local`` draft) opens by default, so its first
+      // line says why (#2561, #2567). A state the user set still wins in
+      // ``getDirOpen``.
+      const allHidden = items.length === 0
+        && memoryDirVisibleCounts(statusByPath[dir]).hiddenSources > 0;
       wrap.appendChild(_renderMemoryDirGroup(
         dir,
         items,
@@ -5327,7 +5328,7 @@ function _renderMemorySourceTree(sources, list) {
         {
           isDefault: dir === defaultDir,
           label: node.label,
-          open: getDirOpen(provider, cat, dir, pendingInDir || allHeld),
+          open: getDirOpen(provider, cat, dir, pendingInDir || allHidden),
           onToggle: (open) => setDirOpen(provider, cat, dir, open),
         },
       ));
@@ -5685,34 +5686,61 @@ function _renderMemorySourceTree(sources, list) {
 }
 
 // What the Sources tree lists for a root: the ``/api/memory-dirs/status``
-// totals minus the held or pending sources ``GET /api/sources`` hides.
-// Totals still drive state (Discovered, pending, Index/Reindex), because
-// held chunks stay in the index. A server without ``held_*`` fields leaves
-// the totals as they are (#2561).
+// totals minus the sources ``GET /api/sources`` hides by default, which
+// ``hidden_*`` counts once each. Its reasons overlap (a held ``project_local``
+// draft is both), so ``held_*`` and ``project_local_*`` are only for the note,
+// never subtracted (#2567). Totals still drive state (Discovered, pending,
+// Index/Reindex), because hidden chunks stay in the index. A #2561 server
+// without ``hidden_*`` subtracts ``held_*``; an older one leaves the totals.
 function memoryDirVisibleCounts(st) {
+  const num = (v) => (typeof v === 'number' ? v : null);
   const heldSources = (st && st.held_source_file_count) || 0;
   const heldChunks = (st && st.held_chunk_count) || 0;
+  const hiddenSources = num(st && st.hidden_source_file_count) ?? heldSources;
+  const hiddenChunks = num(st && st.hidden_chunk_count) ?? heldChunks;
   return {
-    indexed: Math.max(0, ((st && st.source_file_count) || 0) - heldSources),
-    chunks: Math.max(0, ((st && st.chunk_count) || 0) - heldChunks),
+    indexed: Math.max(0, ((st && st.source_file_count) || 0) - hiddenSources),
+    chunks: Math.max(0, ((st && st.chunk_count) || 0) - hiddenChunks),
+    hiddenSources,
+    hiddenChunks,
     heldSources,
     heldChunks,
+    localSources: (st && st.project_local_source_file_count) || 0,
+    localChunks: (st && st.project_local_chunk_count) || 0,
   };
 }
 
 // ``{text, title}`` for the muted "N hidden" note, or ``null`` when the
-// root has no held or pending sources. ``text`` is the short form the Memory
-// Dirs panel appends to its meta line; ``title`` is the full sentence, which
-// the Sources tree shows as a line inside the group.
-function memoryDirHeldNote(counts) {
-  if (!counts || counts.heldSources <= 0) return null;
-  return {
-    text: t('sources.memory_dirs.status_held', { count: counts.heldSources }),
-    title: t('sources.memory_dirs.status_held_title', {
-      count: counts.heldSources,
-      chunks: counts.heldChunks,
-    }),
-  };
+// root hides nothing. ``text`` is the short form the Memory Dirs panel
+// appends to its meta line; ``title`` is the full sentence, which the Sources
+// tree shows as a line inside the group. Both lead with the union, so a held
+// draft reads as one hidden source; the sentence then names each reason,
+// which can overlap. With no ``project_local`` part the sentence is the
+// #2561 one.
+function memoryDirHiddenNote(counts) {
+  if (!counts || counts.hiddenSources <= 0) return null;
+  const text = t('sources.memory_dirs.status_held', { count: counts.hiddenSources });
+  if (counts.localSources <= 0) {
+    return {
+      text,
+      title: t('sources.memory_dirs.status_held_title', {
+        count: counts.hiddenSources,
+        chunks: counts.hiddenChunks,
+      }),
+    };
+  }
+  const parts = [t('sources.memory_dirs.status_hidden_title', {
+    count: counts.hiddenSources,
+    chunks: counts.hiddenChunks,
+  })];
+  if (counts.heldSources > 0) {
+    parts.push(t('sources.memory_dirs.status_hidden_held', { count: counts.heldSources }));
+  }
+  parts.push(t('sources.memory_dirs.status_hidden_local', { count: counts.localSources }));
+  if (counts.heldSources + counts.localSources > counts.hiddenSources) {
+    parts.push(t('sources.memory_dirs.status_hidden_overlap'));
+  }
+  return { text, title: parts.join(' ') };
 }
 
 function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
@@ -5764,7 +5792,7 @@ function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
   //   - indexed  → otherwise (no color)
   // The state reads the total ``chunk_count``; the numbers are what the
   // tree lists (``memoryDirVisibleCounts``).
-  let heldNote = null;
+  let hiddenNote = null;
   if (status) {
     const statsBadge = document.createElement('span');
     statsBadge.className = 'source-group-stats';
@@ -5781,12 +5809,12 @@ function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
         ? t('sources.memory_dirs.status_group', { files, indexed, chunks })
         : (indexed + '/' + files + ' files, ' + chunks + ' chunks');
     }
-    // Held or pending sources are explained inside the group, not in this
+    // Hidden sources are explained inside the group, not in this
     // header, which has no width to spare for the path. The badge keeps the
     // sentence as a tooltip so a collapsed group still carries it. ``title``
     // survives ``mdReindexOne``, which rewrites only the badge's text.
-    heldNote = memoryDirHeldNote(counts);
-    if (heldNote) statsBadge.title = heldNote.title;
+    hiddenNote = memoryDirHiddenNote(counts);
+    if (hiddenNote) statsBadge.title = hiddenNote.title;
     header.appendChild(statsBadge);
   }
 
@@ -5852,10 +5880,10 @@ function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
   group.appendChild(header);
 
   // First line of the group: what the tree does not list, and why (#2561).
-  if (heldNote) {
+  if (hiddenNote) {
     const line = document.createElement('div');
     line.className = 'source-group-held-note';
-    line.textContent = heldNote.title;
+    line.textContent = hiddenNote.title;
     group.appendChild(line);
   }
   for (const s of items) {
