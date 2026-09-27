@@ -1,11 +1,13 @@
-"""Per-root status counts agree with the Sources tree about held sources (#2561).
+"""Per-root status counts agree with the Sources tree about hidden sources.
 
 ``GET /api/sources`` hides held and pending sources, and consolidation-policy
-summaries of them, through ``hidden_source_paths``. ``GET
-/api/memory-dirs/status`` reports each root's totals plus the part the tree
-hides, under the same rule, so totals minus held are what the tree lists for
-the root. The delete-chunks preview stays the full total, because the remove
-sweep deletes held rows too.
+summaries of them, through ``hidden_source_paths`` (#2561), and by default the
+``project_local`` tier (#2567). ``GET /api/memory-dirs/status`` reports each
+root's totals plus the part the tree hides, under the same rule: ``hidden_*``
+counts each hidden source once, so totals minus hidden are what the tree lists
+for the root, while ``held_*`` and ``project_local_*`` each count one reason
+whole and can overlap. The delete-chunks preview is what the remove sweeps,
+hidden rows included.
 
 Real storage, real routes: the fixture holds, queues and derives the hidden
 states the way production does, so the agreement is not between two mocks.
