@@ -304,7 +304,7 @@ mm doctor --json   # structured output for scripting / CI
 
 ```
 ✓ runtime directory /tmp/memtomem-501
-! 29 live server processes across 7 stores (median age 1.6d, max 8.6d)
+! 29 live memtomem processes across 7 stores (median age 1.6d, max 8.6d)
   all recorded parents alive
   29 is unusually many — check which clients and services still hold one
 ✓ instance registry clean (1 root(s) consulted)

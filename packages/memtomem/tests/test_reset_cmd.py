@@ -641,7 +641,7 @@ class TestResetRegistryGate:
         with _hold_pid_lock(entry):
             result = CliRunner().invoke(cli, ["reset", "-y"])
         assert result.exit_code == 2, result.output
-        assert "live memtomem-server instance is registered" in result.output
+        assert "live memtomem instance (a memtomem-server or the Web UI) is" in result.output
 
     def test_live_sentinel_refuses_despite_force(self, home, reg):
         """``--force`` covers the stale-pid heuristics, not positive
@@ -668,7 +668,7 @@ class TestResetRegistryGate:
         finally:
             inst.cleanup()
         assert result.exit_code == 2, result.output
-        assert "live memtomem-server instance is registered" in result.output
+        assert "live memtomem instance (a memtomem-server or the Web UI) is" in result.output
 
     def test_unknown_refuses_with_retry_advice(self, home, monkeypatch):
         """Transient cause → retry wording, and the persistent cause's

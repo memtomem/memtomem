@@ -99,7 +99,7 @@ class TestReportsAccumulationWithoutAnOrphanGate:
         seeded(_snapshot(_info(1000 + i, digest=f"{i:016x}") for i in range(12)))
         result = _run()
         assert result.exit_code == 0
-        assert "12 live server processes" in result.output
+        assert "12 live memtomem processes" in result.output
         assert "all recorded parents alive" in result.output
         # Accumulation is worth flagging, but never as a failure.
         assert "!" in result.output
@@ -108,14 +108,14 @@ class TestReportsAccumulationWithoutAnOrphanGate:
         seeded(_snapshot([_info(1000), _info(1001)]))
         result = _run()
         assert result.exit_code == 0
-        assert "2 live server processes" in result.output
+        assert "2 live memtomem processes" in result.output
         assert _payload(_run(["--json"]))["status"] == "pass"
 
     def test_zero_instances_is_a_clean_pass(self, seeded):
         seeded(_snapshot())
         result = _run()
         assert result.exit_code == 0
-        assert "no live server processes" in result.output
+        assert "no live memtomem processes" in result.output
         assert _payload(_run(["--json"]))["status"] == "pass"
 
     def test_zero_from_an_incomplete_scan_is_not_stated_as_an_absence(self, seeded):
@@ -134,7 +134,7 @@ class TestProcessIdentity:
         ]
         seeded(_snapshot(rows))
         result = _run()
-        assert "1 live server process across 2 stores" in result.output
+        assert "1 live memtomem process across 2 stores" in result.output
         data = _payload(_run(["--json"]))["checks"][1]["data"]
         assert data["processes"] == 1
         assert data["registrations"] == 2
@@ -266,7 +266,7 @@ class TestAgeAggregation:
         seeded(_snapshot([_info(1000)]), age=None)
         result = _run()
         assert result.exit_code == 0
-        assert "1 live server process" in result.output
+        assert "1 live memtomem process" in result.output
         assert "median age" not in result.output, "no distribution without a known age"
         assert _payload(_run(["--json"]))["instances"][0]["age_seconds"] is None
 
@@ -325,7 +325,7 @@ class TestDegradedScans:
         out = _run().output
         assert "no server has registered here" not in out
         assert "historical runtime directory" in out
-        assert "1 live server process" in out
+        assert "1 live memtomem process" in out
 
     def test_absent_canonical_dir_with_nothing_found_says_so(self, seeded):
         seeded(_snapshot(), runtime_ok=False)

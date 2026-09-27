@@ -930,8 +930,11 @@ registered server recorded the same parent PID — an observation that the
 processes were launched by one parent, which makes the
 duplicate-registration reading more likely (it is not proof; one editor
 parent can also legitimately spawn several workspace servers). The signal
-covers `memtomem-server` processes that have opened storage; `mm web` and
-ad-hoc sqlite consumers are not registered and stay invisible to it.
+counts `memtomem-server` processes that have opened storage. A running
+`mm web` also registers, but it is not counted as a server: when it has the
+store open beside two or more servers, the warning names its pid separately,
+and beside a single server there is no warning. Ad-hoc sqlite consumers are
+not registered and stay invisible to it.
 
 [Concurrent MCP + Web server]: reference/operations.md#concurrent-mcp--web-server
 

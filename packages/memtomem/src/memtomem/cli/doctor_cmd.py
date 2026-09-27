@@ -360,21 +360,22 @@ def _check_server_instances(snapshot: RegistrySnapshot, rows: list[InstanceRow])
             return CheckResult(
                 name="server-instances",
                 status="pass",
-                message="no live server processes",
+                message="no live memtomem processes",
                 data=data,
             )
         # Zero from a scan that could not finish is a lower bound like any other
-        # count, and saying "no live server processes" would state the one thing
-        # the scan failed to establish.
+        # count, and saying "no live memtomem processes" would state the one
+        # thing the scan failed to establish.
         return CheckResult(
             name="server-instances",
             status="warn",
-            message="no live server processes found",
+            message="no live memtomem processes found",
             detail="enumeration was incomplete — zero here is a lower bound, not an absence",
             data=data,
         )
 
-    summary = f"{processes} live server process{'es' if processes != 1 else ''}"
+    # "memtomem", not "server": ``mm web`` registers a store sentinel too (#2574).
+    summary = f"{processes} live memtomem process{'es' if processes != 1 else ''}"
     summary += f" across {stores} store{'s' if stores != 1 else ''}"
     if unregistered:
         # Named rather than folded into the total: this is precisely the
@@ -465,7 +466,7 @@ def _check_registry_hygiene(snapshot: RegistrySnapshot) -> CheckResult:
             name="registry-hygiene",
             status="warn",
             message=f"{unparseable_seen} held entr(ies) could not be attributed",
-            detail="the live-server count above is a lower bound",
+            detail="the live-process count above is a lower bound",
             data=data,
         )
     if stale_seen or unlocked_fresh_seen:

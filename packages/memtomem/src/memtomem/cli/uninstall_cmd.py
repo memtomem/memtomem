@@ -1269,14 +1269,15 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
         click.echo("")
         if registry_state.state == "LIVE":
             click.secho(
-                "A live memtomem-server instance is registered for this user. "
-                "Refusing to delete state — an active server holds the store "
-                "open and deleting it risks corruption.",
+                "A live memtomem instance (a memtomem-server or the Web UI) is "
+                "registered for this user. Refusing to delete state — an active "
+                "process holds the store open and deleting it risks corruption.",
                 fg="red",
             )
             click.secho(
                 "  Stop every memtomem-server (close editor sessions using "
-                "memtomem) and retry. --force does not override this check.",
+                "memtomem) and any `mm web`, then retry. --force does not "
+                "override this check.",
                 fg="red",
             )
         elif registry_state.state == "UNTRUSTED":

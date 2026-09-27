@@ -85,7 +85,7 @@ from memtomem.cli._prompts import confirm as _confirm
     is_flag=True,
     help="Bypass the stale-pid/db-lock safety heuristics (use only if you know "
     "the pid or lock is stale). Does NOT override instance-registry evidence "
-    "of a live server or a held lifecycle barrier — those are positive "
+    "of a live server or Web UI, or a held lifecycle barrier — those are positive "
     "liveness, not heuristics.",
 )
 @click.option(
@@ -142,11 +142,13 @@ def _refuse_registry(probe: UninstallProbeResult, *, as_json: bool = False) -> N
     """
     if probe.state == "LIVE":
         _refuse(
-            "A live memtomem-server instance is registered for this user. "
-            "Refusing to reset — an active server holds the store open, and "
-            "wiping it underneath can lose writes or corrupt the WAL.",
+            "A live memtomem instance (a memtomem-server or the Web UI) is "
+            "registered for this user. Refusing to reset — an active process "
+            "holds the store open, and wiping it underneath can lose writes or "
+            "corrupt the WAL.",
             "Stop every memtomem-server (close editor sessions using "
-            "memtomem) and retry. --force does not override this check.",
+            "memtomem) and any `mm web`, then retry. --force does not override "
+            "this check.",
             as_json=as_json,
         )
     elif probe.state == "UNTRUSTED":

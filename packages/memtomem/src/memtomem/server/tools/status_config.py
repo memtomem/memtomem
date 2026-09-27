@@ -180,6 +180,22 @@ async def mem_stats(
     return out
 
 
+def _web_ui_identity() -> tuple[int, str] | None:
+    """Return the running Web UI's registry ``(pid, procid)``, or ``None``.
+
+    Any probe failure answers ``None``, which leaves the Web UI counted — the
+    behaviour before it registered, never a hidden server.
+    """
+    try:
+        from memtomem.cli._liveness import check_web_liveness
+        from memtomem.cli.web import verified_web_identity
+
+        return verified_web_identity(check_web_liveness())
+    except Exception:
+        logger.debug("web UI identity probe failed", exc_info=True)
+        return None
+
+
 def _collect_concurrent_writers(db_path: Path) -> dict | None:
     """Build the ``concurrent_server_writers`` warning, or ``None``.
 
@@ -204,6 +220,15 @@ def _collect_concurrent_writers(db_path: Path) -> dict | None:
     groups: dict[str, object] = {}
     for info in result.instances:
         groups.setdefault(info.procid, info)
+    # ``mm web`` registers too (#2574), but this warning is about MCP client
+    # registrations: a Web UI beside one server is the normal setup. Its group
+    # is set aside only on a ``(pid, procid)`` match with ``web.json`` — a pid
+    # alone could be a server in another pid namespace.
+    web_pid: int | None = None
+    web = _web_ui_identity()
+    if web is not None and web[1] in groups and groups[web[1]].pid == web[0]:  # type: ignore[attr-defined]
+        del groups[web[1]]
+        web_pid = web[0]
     if len(groups) < 2:
         return None
     ordered = sorted(groups.values(), key=lambda i: (i.pid, i.procid))  # type: ignore[attr-defined]
@@ -214,6 +239,9 @@ def _collect_concurrent_writers(db_path: Path) -> dict | None:
         "single session it often means one client has two memtomem "
         "registrations (e.g. manual + plugin)."
     )
+    if web_pid is not None:
+        detail += f" The Web UI (pid {web_pid}) also has it open."
+
     warning: dict = {
         "kind": "concurrent_server_writers",
         "detail": detail,

@@ -14,12 +14,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Older servers cannot keep `source_span_hash` alongside line ranges, and they
   cannot hide held or pending sources. The fix has three parts:
   - A process about to move the schema stamp now first checks the instance
-    registry. If another live server has the store open, or the registry
+    registry. If another live process has the store open, or the registry
     cannot be fully read, it migrates nothing and fails. When it found such
-    servers, the message names their pids and says to stop them, then retry.
-    This only happens on the one open that would migrate. Only servers that
+    processes, the message names their pids and says to stop them, then retry.
+    This only happens on the one open that would migrate. Only processes that
     registered can be seen: MCP servers from 0.3.13 on whose registration
-    succeeded, but not `mm web` or short-lived CLI commands.
+    succeeded and `mm web` from this release on (#2574), but not short-lived
+    CLI commands.
   - A running server now re-reads the stamp whenever another connection
     commits a write. If the stamp has moved past this release, the server
     stops serving reads and writes and asks to be restarted. `transaction()`
@@ -29,6 +30,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
     releases that include this change.
   - `_memtomem_meta` records `schema_migrated_at`, `schema_migrated_from` and
     `schema_migrated_by` whenever the stamp moves.
+- **`mm web` now registers in the instance registry, so a schema migration
+  can see it (#2574).** Before, a running Web UI was invisible to the check
+  above and kept writing after a newer release migrated the database. It now
+  registers once its storage is open and releases the registration only after
+  a confirmed close, like the MCP server. What else changes while it runs:
+  - `mm upgrade` recognizes the registration as the Web UI it already stops.
+    `web.json` now records the process's registry identity (`procid`), and a
+    registration is matched to the Web UI only when its pid and `procid` both
+    agree. A Web UI started through the `memtomem-web` entrypoint has no pid
+    lock, so `mm upgrade` now refuses while it runs, as it does for any
+    process it cannot stop.
+  - `mm uninstall` and `mm reset` refuse through the registry check, which
+    `--force` does not override. Before, `mm reset` saw the Web UI only
+    through its pid lock and `mm uninstall` only while it held a database
+    write lock, and `--force` bypassed both.
+  - `mem_status` does not count the Web UI in `concurrent_server_writers`.
+    With one MCP server open beside it there is no warning; beside two or more
+    the warning names its pid separately.
+  - `mm doctor` counts it under "live memtomem processes", which replaces
+    "live server processes".
 - **Web Sources badges no longer count the held or pending sources the tree
   hides, and name them separately (#2561).** In 0.6.5 a root with held or
   pending sources showed more files and chunks than its tree, because the tree

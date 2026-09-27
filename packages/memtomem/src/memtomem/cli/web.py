@@ -15,16 +15,22 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator, Literal, cast
+from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
 import click
 
 from memtomem._process_probe import probe_pid
 
+if TYPE_CHECKING:
+    from memtomem.cli._liveness import ServerState
+
 
 _WEB_MODE_CHOICES = ("prod", "dev")
 _LOOPBACK_BINDS = {"127.0.0.1", "::1", "localhost"}
 _WEB_INFO_NAME = "web.json"
+# ``procid`` in ``web.json`` is the instance registry's per-process identity
+# (``_instance_registry.current_process_id``): 8 lowercase hex characters.
+_PROCID_CHARS = frozenset("0123456789abcdef")
 _ResolvedMode = Literal["prod", "dev"]
 
 
@@ -46,6 +52,7 @@ class _WebMetadata:
     pid: int | None = None
     port: int | None = None
     started: str | None = None
+    procid: str | None = None
 
 
 def _missing_web_deps() -> str | None:
@@ -99,8 +106,14 @@ def _write_web_metadata(
     pid_file.flush()  # type: ignore[attr-defined]
     os.fsync(pid_file.fileno())  # type: ignore[attr-defined]
 
+    from memtomem._instance_registry import current_process_id
+
     info_file = pid_path.with_name(_WEB_INFO_NAME)
-    info_payload = {"pid": pid, "port": port, "started": started}
+    # ``procid`` ties this pid file to the registry sentinel the lifespan
+    # publishes from this same process (#2574), so ``mm upgrade`` and
+    # ``mem_status`` can tell the Web UI's registration from a server's
+    # without trusting a pid alone. An extra key: older readers ignore it.
+    info_payload = {"pid": pid, "port": port, "started": started, "procid": current_process_id()}
     info_file.write_text(json.dumps(info_payload, sort_keys=True) + "\n", encoding="utf-8")
 
 
@@ -124,11 +137,42 @@ def _read_web_metadata(pid_file: Path | None = None) -> _WebMetadata:
         return _WebMetadata()
     pid = data.get("pid")
     port = data.get("port")
+    procid = data.get("procid")
     return _WebMetadata(
         pid=pid if isinstance(pid, int) else None,
         port=port if isinstance(port, int) else None,
         started=data.get("started") if isinstance(data.get("started"), str) else None,
+        procid=procid if _is_procid(procid) else None,
     )
+
+
+def _is_procid(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 8 and set(value) <= _PROCID_CHARS
+
+
+def verified_web_identity(state: ServerState) -> tuple[int, str] | None:
+    """Return the live Web UI's registry identity ``(pid, procid)``, or ``None``.
+
+    ``state`` is a :func:`~memtomem.cli._liveness.check_web_liveness` result.
+    The held ``web.pid`` lock proves a Web UI is running; ``web.json`` beside it
+    names the process. When the locked payload was readable its pid must agree
+    with the sidecar. Windows cannot read a live locked ``web.pid``
+    (``pid=None``), so there the sidecar's pid stands alone.
+
+    This is a claim, not a proof: callers must only honour it when a *live*
+    registry sentinel carries the same ``(pid, procid)``. A stale sidecar from
+    an exited Web UI names a random procid that no live sentinel has, so
+    matching keeps every unproven case attributed to nobody (#2574).
+    """
+    if not state.alive or state.probe_error is not None or state.pid_file is None:
+        return None
+    metadata = _read_web_metadata(state.pid_file)
+    # ``type() is int``: JSON ``true`` parses as a ``bool``, an ``int`` equal to 1.
+    if type(metadata.pid) is not int or metadata.pid <= 0 or metadata.procid is None:
+        return None
+    if state.pid is not None and state.pid != metadata.pid:
+        return None
+    return metadata.pid, metadata.procid
 
 
 def _cleanup_web_files(pid_file: Path, lock_fp: object | None) -> None:
@@ -141,7 +185,11 @@ def _cleanup_web_files(pid_file: Path, lock_fp: object | None) -> None:
             with contextlib.suppress(OSError):
                 path.unlink(missing_ok=True)
     else:
-        for path in (pid_file, info_file):
+        # Sidecar first, while the lock is still held: once ``web.pid`` is
+        # unlinked a replacement can lock a fresh one and write its own
+        # sidecar, which this exit must not delete (#2574 — that sidecar is
+        # how the replacement's registration is attributed).
+        for path in (info_file, pid_file):
             with contextlib.suppress(OSError):
                 path.unlink(missing_ok=True)
         if lock_fp is not None:

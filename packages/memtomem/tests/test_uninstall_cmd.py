@@ -1657,7 +1657,7 @@ class TestInstanceRegistryGateRefuses:
         with _hold_pid_lock(entry):
             result = CliRunner().invoke(cli, ["uninstall", "-y"])
         assert result.exit_code == 2
-        assert "live memtomem-server instance is registered" in result.output
+        assert "live memtomem instance (a memtomem-server or the Web UI) is" in result.output
         assert (state / "memtomem.db").exists()
         assert entry.exists()
 

@@ -15,9 +15,11 @@ process that opened the database under that older stamp. The order matters:
 reading the stamp first would let a same-version peer migrate and register in
 between and be mistaken for an older one.
 
+``mm web`` registers the same way from #2574 on, so it is covered too.
+
 Not covered: an older server that opens the database between this check and
-the migration's commit, and processes that never register (``mm web`` and
-short-lived CLI commands).
+the migration's commit, and processes that never register (short-lived CLI
+commands, and ``mm web`` releases from before #2574).
 """
 
 from __future__ import annotations
@@ -82,9 +84,9 @@ async def refuse_migration_under_live_peers(db: sqlite3.Connection, db_path: Pat
         raise SchemaMigrationBlockedError(
             f"This database is at {current}, and opening it would migrate it to "
             f"schema version {SCHEMA_VERSION}. {len(peers)} running memtomem "
-            f"server(s) (pid {pids}) have it open under the older schema and would "
-            f"keep writing without the newer schema's safeguards. Nothing was "
-            f"migrated. Stop those servers, then retry."
+            f"process(es) (MCP servers or `mm web`; pid {pids}) have it open under "
+            f"the older schema and would keep writing without the newer schema's "
+            f"safeguards. Nothing was migrated. Stop those processes, then retry."
         )
     if not result.complete:
         raise SchemaMigrationBlockedError(

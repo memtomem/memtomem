@@ -17,8 +17,10 @@ came up clean (``embedding_broken is None``) so the recovery banner +
 
 from __future__ import annotations
 
+import asyncio
 import multiprocessing as mp
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,11 +59,20 @@ class _FakePolicyCfg:
 
 
 @dataclass
+class _FakeStorageCfg:
+    # A path that never exists: ``register_instance`` then declines (no inode
+    # to digest) and returns ``None``, so these mocked lifespans publish no
+    # sentinel. Tests that need a real registration pass an existing file.
+    sqlite_path: str = "/nonexistent/memtomem-web-lifespan-test.db"
+
+
+@dataclass
 class _FakeConfig:
     embedding: _FakeEmbeddingCfg
     indexing: _FakeIndexingCfg
     scheduler: _FakeSchedulerCfg = field(default_factory=_FakeSchedulerCfg)
     policy: _FakePolicyCfg = field(default_factory=_FakePolicyCfg)
+    storage: _FakeStorageCfg = field(default_factory=_FakeStorageCfg)
 
 
 def _make_components(
@@ -1125,3 +1136,172 @@ async def test_lifespan_propagates_a_drain_cancel_after_a_clean_body_exit():
 
     assert order == ["close_components"], "the deferred cancel must not skip storage close"
     assert excinfo.value.args == ("during drain",), excinfo.value.args
+
+
+# --- instance registration (#2574) ------------------------------------------
+# The real (autouse-isolated) registry: the claims are that a sentinel exists
+# while the store is open and follows the barrier's release polarity after.
+
+
+def _live_procids(db: Path) -> set[str]:
+    import memtomem._instance_registry as reg
+
+    digest = reg.store_digest_for(db)
+    assert digest is not None
+    return {info.procid for info in reg.enumerate_live_instances(digest).instances}
+
+
+def _registered_components(db: Path) -> MagicMock:
+    db.write_bytes(b"")
+    comp = _make_components(embedding_broken=None, stored_info=None)
+    comp.config.storage = _FakeStorageCfg(sqlite_path=str(db))
+    return comp
+
+
+async def _run_registered_lifespan(
+    comp: MagicMock,
+    *,
+    close_result: Any,
+    on_create=None,
+    in_body=None,
+    expect_exc: type[BaseException] | None = None,
+) -> None:
+    def _create(*_a: object, **_k: object) -> MagicMock:
+        if on_create is not None:
+            on_create()
+        return comp
+
+    fake_watcher = MagicMock()
+    fake_watcher.start = AsyncMock()
+    fake_watcher.stop = AsyncMock()
+    app = FastAPI()
+    with (
+        patch(
+            "memtomem.server.component_factory.create_components", AsyncMock(side_effect=_create)
+        ),
+        patch(
+            "memtomem.server.component_factory.close_components",
+            AsyncMock(return_value=close_result),
+        ),
+        patch("memtomem.search.dedup.DedupScanner", MagicMock()),
+        patch("memtomem.indexing.watcher.FileWatcher", lambda *_a, **_kw: fake_watcher),
+    ):
+        if expect_exc is not None:
+            with pytest.raises(expect_exc):
+                async with _lifespan(app):
+                    pass
+            return
+        async with _lifespan(app):
+            if in_body is not None:
+                in_body()
+
+
+def _release_leftover_registrations() -> None:
+    import memtomem._instance_registry as reg
+
+    for inst in list(reg._active.values()):
+        inst.cleanup()
+
+
+async def test_lifespan_registers_once_storage_is_open_and_releases_on_close(tmp_path):
+    """Registered only after ``create_components`` (the #2564 fence reads a
+    registration as "opened under the stamp it sees"), gone after a confirmed
+    close."""
+    import memtomem._instance_registry as reg
+
+    db = tmp_path / "m.db"
+    comp = _registered_components(db)
+    at_create: list[set[str]] = []
+    in_body: list[set[str]] = []
+
+    await _run_registered_lifespan(
+        comp,
+        close_result=_teardown(storage_closed=True),
+        on_create=lambda: at_create.append(_live_procids(db)),
+        in_body=lambda: in_body.append(_live_procids(db)),
+    )
+
+    assert at_create == [set()], "registered before storage opened"
+    assert in_body == [{reg.current_process_id()}]
+    assert _live_procids(db) == set()
+
+
+async def test_lifespan_retains_registration_on_unconfirmed_close(tmp_path, caplog):
+    import logging
+
+    import memtomem._instance_registry as reg
+
+    db = tmp_path / "m.db"
+    comp = _registered_components(db)
+    try:
+        with caplog.at_level(logging.WARNING, logger="memtomem.web.app"):
+            await _run_registered_lifespan(comp, close_result=_teardown(storage_closed=False))
+        assert _live_procids(db) == {reg.current_process_id()}
+        assert any("retaining instance registration" in r.message for r in caplog.records)
+    finally:
+        _release_leftover_registrations()
+
+
+async def test_lifespan_releases_a_registration_whose_settlement_was_cancelled(
+    tmp_path, monkeypatch
+):
+    """A cancellation caught while registering re-raises only after the handle
+    is kept, so the teardown can still release the published sentinel."""
+    import memtomem.web.app as web_app
+
+    real = web_app._acquire_instance_registration_settled
+
+    async def _cancelled_after_publish(comp):
+        registration, _ = await real(comp)
+        assert registration is not None
+        return registration, asyncio.CancelledError("during registration")
+
+    monkeypatch.setattr(web_app, "_acquire_instance_registration_settled", _cancelled_after_publish)
+    db = tmp_path / "m.db"
+    comp = _registered_components(db)
+    try:
+        await _run_registered_lifespan(
+            comp,
+            close_result=_teardown(storage_closed=True),
+            expect_exc=asyncio.CancelledError,
+        )
+        assert _live_procids(db) == set()
+    finally:
+        _release_leftover_registrations()
+
+
+async def test_registration_helper_returns_the_handle_when_cancelled(tmp_path, monkeypatch):
+    """Cancelling the awaiting task must not abandon a worker that goes on to
+    publish: the helper hands back both the handle and the cancellation."""
+    import memtomem._instance_registry as reg
+    from memtomem.web.app import _acquire_instance_registration_settled
+
+    real = reg.register_instance
+    started = threading.Event()
+    proceed = threading.Event()
+
+    def _held(db_path):
+        # Held until the cancellation has been delivered, so the worker
+        # publishes strictly after the awaiting task was cancelled.
+        started.set()
+        proceed.wait(30)
+        return real(db_path)
+
+    monkeypatch.setattr(reg, "register_instance", _held)
+    db = tmp_path / "m.db"
+    comp = _registered_components(db)
+    try:
+        task = asyncio.ensure_future(_acquire_instance_registration_settled(comp))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        # Let the cancellation reach the task before the worker may finish.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        proceed.set()
+        registration, cancelled = await task
+        assert registration is not None
+        assert isinstance(cancelled, asyncio.CancelledError)
+    finally:
+        proceed.set()
+        _release_leftover_registrations()

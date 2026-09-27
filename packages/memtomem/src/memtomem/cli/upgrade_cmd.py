@@ -209,6 +209,7 @@ def _inventory_problems(server_states: list[ServerState], web_state: ServerState
 def _registry_inventory_problems(
     snapshot: RegistrySnapshot,
     server_states: list[ServerState],
+    web_state: ServerState,
 ) -> list[str]:
     """Return fail-closed findings from the all-process server registry.
 
@@ -218,7 +219,14 @@ def _registry_inventory_problems(
     therefore must block an in-place reinstall.  ``procid`` distinguishes two
     processes with the same pid across pid namespaces, while joining a
     process's presence marker and store sentinel without double-counting it.
+
+    ``mm web`` registers too (#2574). Its entries are attributed to the web
+    pid lock only by ``(pid, procid)`` — the identity ``web.json`` records —
+    never by pid alone: a server in another pid namespace can share the Web
+    UI's pid, and the web pid lock says nothing about it.
     """
+    from memtomem.cli.web import verified_web_identity
+
     problems: list[str] = []
     if snapshot.canonical_error is not None:
         problems.append(
@@ -236,14 +244,21 @@ def _registry_inventory_problems(
         for state in _upgrade_server_stops(server_states)
         if state.alive and state.probe_error is None and state.pid is not None
     }
+    web_identity = verified_web_identity(web_state)
     procids_by_pid: dict[int, set[str]] = {}
     for info in (*snapshot.instances, *snapshot.presence):
         procids_by_pid.setdefault(info.pid, set()).add(info.procid)
     for pid, procids in sorted(procids_by_pid.items()):
-        if pid not in attributed_pids:
+        # A web match explains only its own procid; any other identity on the
+        # same pid still trips the multi-identity refusal below.
+        web_attributed = (
+            web_identity is not None and web_identity[0] == pid and web_identity[1] in procids
+        )
+        if pid not in attributed_pids and not web_attributed:
             problems.append(
-                f"server registry: live server pid {pid} has no authoritative pid lock "
-                "(secondary or startup-only process); stop it manually"
+                f"server registry: live pid {pid} has no authoritative pid lock "
+                "(secondary or startup-only process, or a Web UI started without "
+                "`mm web`); stop it manually"
             )
         elif len(procids) > 1:
             problems.append(
@@ -262,7 +277,7 @@ def _complete_inventory_problems(
 ) -> list[str]:
     """Combine pid-lock and registry evidence into one mutation gate."""
     problems = _inventory_problems(server_states, web_state)
-    problems.extend(_registry_inventory_problems(registry, server_states))
+    problems.extend(_registry_inventory_problems(registry, server_states, web_state))
     if is_windows:
         for state in _upgrade_server_stops(server_states):
             if state.alive and state.probe_error is None:
@@ -1090,7 +1105,9 @@ def upgrade(
         )
         final_registry = snapshot_all_instances()
         cleanup_problems = _inventory_problems(final_servers, final_web)
-        cleanup_problems.extend(_registry_inventory_problems(final_registry, final_servers))
+        cleanup_problems.extend(
+            _registry_inventory_problems(final_registry, final_servers, final_web)
+        )
         for state in _upgrade_server_stops(final_servers):
             if (
                 state.alive

@@ -58,7 +58,8 @@ from memtomem.web.routes import (
 from memtomem.web.routes._sync_phase import register_sync_phase_error_handler
 
 if TYPE_CHECKING:
-    from memtomem._instance_registry import HeldBarrier
+    from memtomem._instance_registry import HeldBarrier, RegisteredInstance
+    from memtomem.server.component_factory import Components
 
 logger = logging.getLogger(__name__)
 
@@ -402,6 +403,32 @@ async def _acquire_lifecycle_barrier_settled() -> HeldBarrier:
     return result
 
 
+async def _acquire_instance_registration_settled(
+    comp: Components,
+) -> tuple[RegisteredInstance | None, asyncio.CancelledError | None]:
+    """Register this Web UI in the instance registry, cancellation-settled (#2574).
+
+    The web-lifespan copy of ``AppContext._acquire_instance_registration``
+    (``server/context.py``). Called only once ``create_components`` has opened
+    storage: the schema fence (``storage/schema_peers.py``) reads a live
+    registration seen while the stamp is still old as a process that opened the
+    file under that stamp, which holds only if registering follows the open.
+
+    ``register_instance`` never raises, so ``settle_shielded_result`` is the
+    right settlement here (unlike the barrier's). The cancellation is returned,
+    not raised: the caller must store a published handle *before* re-raising,
+    or its ``finally`` has nothing to release.
+    """
+    from memtomem._instance_registry import RegisteredInstance, register_instance
+    from memtomem._settlement import settle_shielded_result
+
+    db_path = Path(comp.config.storage.sqlite_path).expanduser().resolve()
+    future = asyncio.ensure_future(asyncio.to_thread(register_instance, db_path))
+    result, cancelled = await settle_shielded_result(future, what="instance registration")
+    registration = result if isinstance(result, RegisteredInstance) else None
+    return registration, cancelled
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     from memtomem._instance_registry import BarrierTimeout
@@ -412,6 +439,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     comp = None
     barrier: HeldBarrier | None = None
+    registration: RegisteredInstance | None = None
     watcher: FileWatcher | None = None
     watcher_started = False
     published = False
@@ -447,6 +475,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             raise
 
         comp = await create_components()
+
+        # Advertise this process in the instance registry once storage is open
+        # (#2574), as the MCP server does (#1935). Without it a newer release
+        # cannot see this Web UI before migrating the schema under it (#2564),
+        # and ``mm uninstall`` / ``mm reset`` see it only through ``web.pid``.
+        # A failed registration is not fatal (``register_instance`` returns
+        # ``None``); the handle is kept before a caught cancellation re-raises
+        # so the ``finally`` below can release it.
+        registration, registration_cancelled = await _acquire_instance_registration_settled(comp)
+        if registration_cancelled is not None:
+            raise registration_cancelled
 
         from memtomem.context.scope_resolver import find_project_root
         from memtomem.embedding.identity import same_embedding_model
@@ -610,6 +649,25 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if comp is not None:
             teardown = await close_components(comp)
             storage_closed = bool(teardown.storage_closed) and fts_settled
+        # The registration follows the barrier's polarity and goes first, as in
+        # ``AppContext.close``: a store that may still be open stays advertised
+        # until process exit frees the sentinel's flock.
+        if registration is not None:
+            if storage_closed:
+                from memtomem._settlement import settle_shielded_result
+
+                cleanup = asyncio.ensure_future(asyncio.to_thread(registration.cleanup))
+                _, cleanup_cancelled = await settle_shielded_result(
+                    cleanup, what="instance-registry cleanup"
+                )
+                if drain_cancelled is None:
+                    drain_cancelled = cleanup_cancelled
+            else:
+                logger.warning(
+                    "storage close unconfirmed — retaining instance registration %s "
+                    "until process exit",
+                    registration.path,
+                )
         if barrier is not None:
             if storage_closed:
                 barrier.release()
