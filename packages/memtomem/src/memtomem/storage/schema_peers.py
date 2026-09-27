@@ -84,6 +84,7 @@ async def refuse_migration_under_live_peers(db: sqlite3.Connection, db_path: Pat
             f"schema version {SCHEMA_VERSION}, but the server registry could not "
             f"be fully read, so it is unknown whether an older memtomem server "
             f"still has it open. Nothing was migrated. Retry once other memtomem "
-            f"processes have finished starting; if it keeps failing, 'mm upgrade' "
-            f"lists the registry problems it finds."
+            f"processes have finished starting; if it keeps failing, "
+            f"'mm upgrade --dry-run' lists the registry problems without stopping "
+            f"or installing anything."
         )

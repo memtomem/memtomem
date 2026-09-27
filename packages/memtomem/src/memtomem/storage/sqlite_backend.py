@@ -621,7 +621,7 @@ class SqliteBackend(
         The open-time fence never runs again for a long-lived process, so a
         newer release migrating the file underneath would leave this one
         reading and writing without the newer invariants. ``data_version``
-        moves exactly when a *different* connection commits (see
+        moves exactly when a *different* connection commits a write (see
         :meth:`_cached_vec_row_count`), so the stamp is re-read only then.
 
         Once tripped the refusal is sticky: the process must restart on the

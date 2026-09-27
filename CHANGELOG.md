@@ -7,26 +7,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
-- **A schema migration no longer strands servers that opened the database
-  under the older schema (#2564).** The downgrade fence ran only when a process
-  opened the database, so an older server that was already connected kept
-  reading and writing after a newer release migrated the file. Older servers
-  cannot keep `source_span_hash` alongside line ranges, and they cannot hide
-  held or pending sources. The fix has three parts:
+- **A schema migration now refuses to strand registered servers that opened
+  the database under the older schema (#2564).** The downgrade fence ran only
+  when a process opened the database, so an older server that was already
+  connected kept reading and writing after a newer release migrated the file.
+  Older servers cannot keep `source_span_hash` alongside line ranges, and they
+  cannot hide held or pending sources. The fix has three parts:
   - A process about to move the schema stamp now first checks the instance
     registry. If another live server has the store open, or the registry
-    cannot be fully read, it migrates nothing and fails. The message names the
-    pids and says to stop those servers, then retry. This only happens
-    on the one open that would migrate. Only servers that registered can be
-    seen: MCP servers from 0.3.13 on whose registration succeeded, but not
-    `mm web` or short-lived CLI commands.
+    cannot be fully read, it migrates nothing and fails. When it found such
+    servers, the message names their pids and says to stop them, then retry.
+    This only happens on the one open that would migrate. Only servers that
+    registered can be seen: MCP servers from 0.3.13 on whose registration
+    succeeded, but not `mm web` or short-lived CLI commands.
   - A running server now re-reads the stamp whenever another connection
-    commits. If the stamp has moved past this release, the server stops
-    serving reads and writes and asks to be restarted. `transaction()` checks
-    under the write lock. Other reads and writes check when they get the
-    connection, so a migration that commits between that check and their
-    statements can still let one read or write through. This protects only releases that include
-    this change.
+    commits a write. If the stamp has moved past this release, the server
+    stops serving reads and writes and asks to be restarted. `transaction()`
+    checks under the write lock. Other reads and writes check when they get
+    the connection, so a migration that commits between that check and their
+    statements can still let one read or write through. This protects only
+    releases that include this change.
   - `_memtomem_meta` records `schema_migrated_at`, `schema_migrated_from` and
     `schema_migrated_by` whenever the stamp moves.
 - **Web Sources badges no longer count the held or pending sources the tree
