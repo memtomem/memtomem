@@ -80,18 +80,19 @@ _UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9a-fA-F]{4}")
 SCHEMA_VERSION = 3
 
 _SCHEMA_VERSION_KEY = "schema_version"
+SCHEMA_MIGRATED_AT_KEY = "schema_migrated_at"
+SCHEMA_MIGRATED_FROM_KEY = "schema_migrated_from"
+SCHEMA_MIGRATED_BY_KEY = "schema_migrated_by"
 
 
-def check_schema_downgrade(db: sqlite3.Connection) -> None:
-    """Raise :class:`SchemaDowngradeError` if the DB records a newer schema version.
+def read_schema_version(db: sqlite3.Connection) -> int | None:
+    """Return the stored schema version, or ``None`` when there is none to trust.
 
-    Read-only — safe to call before any mutating setup (journal-mode PRAGMAs,
-    table creation), so a refused open leaves the DB file untouched. A missing
-    meta table or missing key means a fresh or pre-versioning DB and passes.
-    A non-integer value cannot be a legitimate newer version (all binaries
-    write integers) — it is evidence of corruption or hand-editing, so warn
-    loudly and pass; the stamp at the end of ``create_tables`` overwrites it
-    with the truth.
+    Read-only. ``None`` covers a missing meta table, a missing key (fresh or
+    pre-versioning DB), and non-integer text. That last case cannot be a
+    legitimate newer version (all binaries write integers); it is evidence of
+    corruption or hand-editing, so it is logged loudly and treated as
+    pre-versioning — the stamp at the end of ``create_tables`` overwrites it.
     """
     try:
         row = db.execute(
@@ -99,12 +100,12 @@ def check_schema_downgrade(db: sqlite3.Connection) -> None:
         ).fetchone()
     except sqlite3.OperationalError as e:
         if "no such table" in str(e).lower():
-            return
+            return None
         raise
     if row is None:
-        return
+        return None
     try:
-        stored_ver = int(row[0])
+        return int(row[0])
     except ValueError:
         logger.warning(
             "Non-integer schema_version %r in _memtomem_meta — treating as "
@@ -112,8 +113,18 @@ def check_schema_downgrade(db: sqlite3.Connection) -> None:
             row[0],
             SCHEMA_VERSION,
         )
-        return
-    if stored_ver > SCHEMA_VERSION:
+        return None
+
+
+def check_schema_downgrade(db: sqlite3.Connection) -> None:
+    """Raise :class:`SchemaDowngradeError` if the DB records a newer schema version.
+
+    Read-only — safe to call before any mutating setup (journal-mode PRAGMAs,
+    table creation), so a refused open leaves the DB file untouched. A fresh,
+    pre-versioning, or non-integer stamp passes (see :func:`read_schema_version`).
+    """
+    stored_ver = read_schema_version(db)
+    if stored_ver is not None and stored_ver > SCHEMA_VERSION:
         raise SchemaDowngradeError(
             f"This database has schema version {stored_ver}, but this "
             f"memtomem binary only supports up to {SCHEMA_VERSION}. "
@@ -1058,7 +1069,17 @@ def create_tables(
     # '1.9') that the fence treated as corruption — SQLite CAST alone would
     # read its numeric prefix and leave it in place, disagreeing with the
     # fence's int() rule.
-    db.execute(
+    #
+    # The prior value is read under the write lock so the trace below cannot
+    # record a value another migrator replaced in between (#2564). sqlite3
+    # opens no implicit transaction before a SELECT, so take one if the
+    # migrations above did not.
+    if not db.in_transaction:
+        db.execute("BEGIN IMMEDIATE")
+    prior_row = db.execute(
+        "SELECT value FROM _memtomem_meta WHERE key = ?", (_SCHEMA_VERSION_KEY,)
+    ).fetchone()
+    stamped = db.execute(
         """
         INSERT INTO _memtomem_meta(key, value) VALUES(?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
@@ -1067,10 +1088,31 @@ def create_tables(
         """,
         (_SCHEMA_VERSION_KEY, str(SCHEMA_VERSION)),
     )
+    if stamped.rowcount == 1:
+        _record_schema_migration(db, None if prior_row is None else str(prior_row[0]))
 
     db.commit()
 
     return dimension, dim_mismatch, model_mismatch
+
+
+def _record_schema_migration(db: sqlite3.Connection, prior: str | None) -> None:
+    """Record when, from what, and by which release the schema stamp last moved.
+
+    Without it, a migration done by an unknown process cannot be traced
+    afterwards (#2564). Older binaries ignore meta keys they do not know.
+    """
+    from memtomem import __version__
+
+    db.executemany(
+        "INSERT INTO _memtomem_meta(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [
+            (SCHEMA_MIGRATED_AT_KEY, utc_stamp(datetime.now(timezone.utc))),
+            (SCHEMA_MIGRATED_FROM_KEY, "none" if prior is None else prior),
+            (SCHEMA_MIGRATED_BY_KEY, __version__),
+        ],
+    )
 
 
 def _backfill_chunk_links(db: sqlite3.Connection, meta: MetaManager) -> int:

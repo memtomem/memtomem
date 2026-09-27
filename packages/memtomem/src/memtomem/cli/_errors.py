@@ -54,6 +54,7 @@ def _hint_for(e: Exception) -> str | None:
         EmbeddingError,
         RetryableError,
         SchemaDowngradeError,
+        SchemaMigrationBlockedError,
         StorageError,
     )
 
@@ -73,6 +74,10 @@ def _hint_for(e: Exception) -> str | None:
             "stored and configured embedding settings disagree — `mm status` shows "
             "the mismatch; `mm embedding-reset --mode apply-current` repairs it."
         )
+    if isinstance(e, SchemaMigrationBlockedError):
+        # Ahead of its base class: nothing newer wrote this database — this
+        # binary declined to migrate it under running older servers (#2564).
+        return "an older memtomem server may still have this database open — stop it, then retry."
     if isinstance(e, SchemaDowngradeError):
         return (
             "the database was written by a newer memtomem — upgrade this binary "

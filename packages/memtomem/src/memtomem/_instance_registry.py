@@ -403,6 +403,12 @@ def _process_id_locked() -> str:
     return _procid
 
 
+def current_process_id() -> str:
+    """Return this process's registry identity (the ``procid`` in its sentinels)."""
+    with _state_guard:
+        return _process_id_locked()
+
+
 @contextlib.contextmanager
 def _mutation_lock(deadline: float, *, root: Path | None = None):
     """Two-layer bounded registry mutation lock.

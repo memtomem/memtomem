@@ -109,6 +109,16 @@ class SchemaDowngradeError(StorageError):
     """
 
 
+class SchemaMigrationBlockedError(SchemaDowngradeError):
+    """Raised instead of migrating while an older server may still have the DB open.
+
+    An older binary that keeps its connection past a migration cannot maintain
+    the newer schema's invariants, and the open-time fence never runs again
+    for it (#2564). Nothing is migrated: the DB is left for those servers to
+    be stopped or restarted on this release first.
+    """
+
+
 class EvalCaseError(StorageError):
     """Raised when promoting or mutating a quality-lab evaluation case fails.
 

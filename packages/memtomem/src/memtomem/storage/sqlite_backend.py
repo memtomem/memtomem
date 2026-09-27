@@ -94,6 +94,7 @@ from memtomem.storage.mixins import (
     SessionMixin,
     ShareLinkMixin,
 )
+from memtomem.storage.schema_peers import refuse_migration_under_live_peers
 from memtomem.storage.sqlite_schema import check_schema_downgrade, create_tables
 
 logger = logging.getLogger(__name__)
@@ -452,6 +453,10 @@ class SqliteBackend(
         # ``id(conn)`` and guarded by that connection's ``PRAGMA data_version``
         # — see _cached_vec_row_count for why this is safe to cache at all.
         self._vec_count_cache: dict[int, tuple[int, int]] = {}
+        # Last ``PRAGMA data_version`` at which each connection's schema stamp
+        # was checked, and the refusal once another process migrated past us.
+        self._schema_checked_at: dict[int, int] = {}
+        self._schema_superseded: str | None = None
 
     async def initialize(self) -> None:
         db_path = Path(self._config.sqlite_path).expanduser()
@@ -480,6 +485,9 @@ class SqliteBackend(
             # below mutate the DB file, and a refused open (newer DB, older
             # binary) must leave it byte-identical for the newer release.
             check_schema_downgrade(self._db)
+            # Still read-only: refuse to migrate while an older server has the
+            # file open, before anything below can write to it (#2564).
+            await refuse_migration_under_live_peers(self._db, db_path)
 
             stage = "journal"
             self._db.execute("PRAGMA journal_mode=WAL")
@@ -604,7 +612,44 @@ class SqliteBackend(
             raise TransactionOwnedError(
                 "SQLite transaction is owned by another task; retry after it completes"
             )
+        self._check_schema_current(self._db)
         return self._db
+
+    def _check_schema_current(self, conn: sqlite3.Connection, *, force: bool = False) -> None:
+        """Stop this process once another one has migrated the DB past it (#2564).
+
+        The open-time fence never runs again for a long-lived process, so a
+        newer release migrating the file underneath would leave this one
+        reading and writing without the newer invariants. ``data_version``
+        moves exactly when a *different* connection commits (see
+        :meth:`_cached_vec_row_count`), so the stamp is re-read only then.
+
+        Once tripped the refusal is sticky: the process must restart on the
+        newer release. The check runs when a connection is handed out, not
+        around the statements run on it, so one operation can still race a
+        migration that commits between the check and its statements: a
+        standalone writer can land one write, and a read can be served from
+        the pre-check view. The next handout refuses. ``transaction()``
+        re-checks under the write lock (``force``) and has no such gap.
+        """
+        if self._schema_superseded is not None:
+            raise SchemaDowngradeError(self._schema_superseded)
+        key = id(conn)
+        version: int | None = None
+        if not force:
+            version = conn.execute("PRAGMA data_version").fetchone()[0]
+            if self._schema_checked_at.get(key) == version:
+                return
+        try:
+            check_schema_downgrade(conn)
+        except SchemaDowngradeError as exc:
+            self._schema_superseded = (
+                f"{exc} This process opened the database under the older schema "
+                f"and has stopped using it; restart it on the newer release."
+            )
+            raise SchemaDowngradeError(self._schema_superseded) from exc
+        if version is not None:
+            self._schema_checked_at[key] = version
 
     @staticmethod
     def _current_task() -> asyncio.Task[Any] | None:
@@ -688,6 +733,8 @@ class SqliteBackend(
         with self._read_pool_lock:
             conn = self._read_pool[self._read_pool_idx % len(self._read_pool)]
             self._read_pool_idx += 1
+        # Reads too: an older reader cannot hide held/pending sources (#2498).
+        self._check_schema_current(conn)
         return conn
 
     def _cached_vec_row_count(self, db: sqlite3.Connection) -> int:
@@ -727,6 +774,7 @@ class SqliteBackend(
         if hasattr(self, "_read_pool"):
             self._read_pool.clear()
         self._vec_count_cache.clear()
+        self._schema_checked_at.clear()
         if self._db:
             try:
                 self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -785,6 +833,9 @@ class SqliteBackend(
 
         self._transaction_owner = task
         try:
+            # Under the write lock, so no migration can commit before the
+            # block's writes; inside the ``try`` so a refusal rolls back.
+            self._check_schema_current(db, force=True)
             yield
             if not db.in_transaction:
                 raise StorageError(
@@ -2375,6 +2426,7 @@ class SqliteBackend(
         # this best-effort journal write times out.
         db = sqlite3.connect(str(Path(self._config.sqlite_path).expanduser()), timeout=0.05)
         try:
+            self._check_schema_current(db, force=True)
             db.execute("PRAGMA synchronous=NORMAL")
             if not db.execute(
                 "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (source,)
@@ -2736,6 +2788,7 @@ class SqliteBackend(
         def _run() -> int:
             conn = sqlite3.connect(db_path, timeout=10)
             try:
+                self._check_schema_current(conn, force=True)
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("DELETE FROM chunks_fts")
                 cursor = conn.execute(
