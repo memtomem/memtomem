@@ -262,3 +262,68 @@ async def test_overlapping_reasons_count_whole_and_the_union_once(tmp_path):
     # The nested root's draft is its own, not the parent's.
     assert (sub["hidden_chunk_count"], sub["project_local_chunk_count"]) == (16, 16)
     assert sub["held_chunk_count"] == 0
+
+
+async def test_all_held_project_roots_tell_shared_from_drafts(components, memory_dir):
+    """#2565: the Sources tree adds a project root from its status entry when
+    ``hidden_source_file_count - project_local_source_file_count > 0``, the
+    held sources that are not drafts. Pin that difference on real storage for
+    both project tiers with every source held: positive for
+    ``.memtomem/memories``, zero for ``.memtomem/memories.local``.
+    """
+    storage = components.storage
+    proj = memory_dir.parent / "proj"
+    shared_root = proj / ".memtomem" / "memories"
+    local_root = proj / ".memtomem" / "memories.local"
+    components.config.indexing.memory_dirs = [memory_dir]
+    components.config.indexing.project_memory_dirs = [shared_root, local_root]
+
+    shared = shared_root / "shared.md"
+    draft = local_root / "draft.md"
+    await _index(components, shared, "sharedword")
+    await _index(components, draft, "draftword")
+    assert await storage.hold_source(shared, "source_missing")
+    assert await storage.hold_source(draft, "source_missing")
+
+    # Neither root has a row, so rows alone cannot draw either one.
+    listed = await _client_get(components, "/api/sources?limit=10000")
+    assert listed["sources"] == []
+
+    status = await _client_get(components, "/api/memory-dirs/status")
+    by_path = {Path(d["path"]): d for d in status["dirs"]}
+    shared_entry = by_path[shared_root.resolve()]
+    local_entry = by_path[local_root.resolve()]
+    assert (shared_entry["tier"], local_entry["tier"]) == ("project", "project")
+    assert (
+        shared_entry["hidden_source_file_count"],
+        shared_entry["project_local_source_file_count"],
+    ) == (1, 0)
+    assert (
+        local_entry["hidden_source_file_count"],
+        local_entry["project_local_source_file_count"],
+    ) == (1, 1)
+
+
+async def test_all_held_project_root_owning_drafts_counts_its_other_sources(components, memory_dir):
+    """#2565: a project root registered as ``<proj>`` owns its shared files and
+    its ``memories.local`` drafts at once. With everything held it has no rows,
+    and the difference counts only the non-draft source."""
+    storage = components.storage
+    proj = memory_dir.parent / "proj"
+    components.config.indexing.memory_dirs = [memory_dir]
+    components.config.indexing.project_memory_dirs = [proj]
+
+    shared = proj / ".memtomem" / "memories" / "shared.md"
+    draft = proj / ".memtomem" / "memories.local" / "draft.md"
+    await _index(components, shared, "sharedword")
+    await _index(components, draft, "draftword")
+    assert await storage.hold_source(shared, "source_missing")
+    assert await storage.hold_source(draft, "source_missing")
+
+    listed = await _client_get(components, "/api/sources?limit=10000")
+    assert listed["sources"] == []
+
+    status = await _client_get(components, "/api/memory-dirs/status")
+    entry = {Path(d["path"]): d for d in status["dirs"]}[proj.resolve()]
+    assert entry["tier"] == "project"
+    assert (entry["hidden_source_file_count"], entry["project_local_source_file_count"]) == (2, 1)

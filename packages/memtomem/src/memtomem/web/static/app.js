@@ -4867,10 +4867,21 @@ function _renderMemorySourceTree(sources, list) {
   for (const k of Object.keys(sourcesByDir)) if (k) allDirs.add(k);
   // Read-only roots are configured roots too, so show them before any of
   // their files is indexed (Discovered / empty group), like ``memDirs``.
-  // Project roots stay source-driven: listing them from status would
-  // surface the hidden-by-default ``memories.local`` tier. (#2522)
+  // Project roots stay source-driven, so the hidden-by-default
+  // ``memories.local`` tier stays hidden (#2522), except a root that hides a
+  // source other than a ``project_local`` draft: it has no rows when all of
+  // them are held, and its group is where the hidden note goes (#2565).
+  // ``project_local_*`` is part of ``hidden_*``, so the difference is the
+  // held sources that are not drafts. A response without either field yields
+  // ``NaN`` and adds nothing, where a ``memoryDirVisibleCounts`` fallback
+  // would surface a held draft.
   for (const [path, st] of Object.entries(statusByPath)) {
-    if (st && st.tier === 'read_only') allDirs.add(path);
+    if (!st) continue;
+    if (st.tier === 'read_only') allDirs.add(path);
+    if (st.tier === 'project'
+        && st.hidden_source_file_count - st.project_local_source_file_count > 0) {
+      allDirs.add(path);
+    }
   }
   for (const d of allDirs) {
     const st = statusByPath[d];

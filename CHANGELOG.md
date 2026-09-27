@@ -38,6 +38,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   both `held_*` and `project_local_*`. The badges and the Memory Dirs panel show
   totals minus hidden, and the note names each reason. The list, the body
   filter and the counts now apply one shared visibility rule.
+- **Web Sources shows a project root whose sources are all held (#2565).** A
+  registered project root got its group in the Sources tree only from its
+  listed files, so that the hidden `project_local` tier stays out of the tree.
+  When every source under it was held or pending it listed none, and the tree
+  left the root out without saying why. The tree now also adds a project root
+  whose status reports a hidden source that is not a `project_local` draft.
+  Such a root renders like a user root with all sources held: its group opens
+  with the line naming the hidden sources. A `memories.local` root still does
+  not appear, even when all its drafts are held.
 
 ## [0.6.5] — 2026-09-26
 
