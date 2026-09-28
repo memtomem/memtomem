@@ -1213,6 +1213,13 @@ class TestStatusJson:
                 StorageStartupError(reason_code="storage_locked", stage="open"),
                 "storage backend error",
             ),
+            # The storage layer's catch-all: it wraps every open-time failure,
+            # a defect included, so the envelope is deliberate here — text
+            # mode prints this same wrapped message.
+            (
+                StorageStartupError(reason_code="storage_unavailable", stage="schema"),
+                "storage backend error",
+            ),
         ],
     )
     def test_json_error_when_storage_open_fails(

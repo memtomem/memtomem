@@ -52,8 +52,13 @@ def _is_handled_failure(e: Exception) -> bool:
     Classified failures — a storage open refused by the schema fence, a
     locked or unreachable database — are exactly when a script needs the
     structured answer (#2575). Everything else, including a SQL error in
-    memtomem's own queries, stays a plain Click error so a defect is not
-    dressed up as a handled failure.
+    memtomem's queries once the database is open, stays a plain Click error
+    so a defect is not dressed up as a handled failure.
+
+    A failure while opening storage is the exception: the storage layer
+    already wraps whatever went wrong, defects included, as a path-safe
+    ``StorageStartupError``. Text mode prints that same wrapped message, so
+    the envelope carries nothing text mode would not.
     """
     if isinstance(e, Mem2MemError):
         return True
