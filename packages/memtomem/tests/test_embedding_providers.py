@@ -662,6 +662,8 @@ class TestOnnxEmbedder:
         [
             ("all-MiniLM-L6-v2", _PINNED_MINILM),
             ("sentence-transformers/all-MiniLM-L6-v2", _PINNED_MINILM),
+            # FastEmbed accepts full ids in any case; the pin must too.
+            ("sentence-transformers/ALL-MINILM-L6-V2", _PINNED_MINILM),
             ("bge-small-en-v1.5", None),
         ],
     )

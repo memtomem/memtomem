@@ -36,7 +36,9 @@ def is_e5(model: str) -> bool:
 
 
 def is_minilm(model: str) -> bool:
-    return model in ("all-MiniLM-L6-v2", MINILM_MODEL)
+    # FastEmbed matches model ids case-insensitively, so a differently cased
+    # id must not slip past the pin to the repository head.
+    return model.lower() in ("all-minilm-l6-v2", MINILM_MODEL.lower())
 
 
 @lru_cache(maxsize=8)
