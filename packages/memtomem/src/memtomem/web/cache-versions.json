@@ -21,7 +21,8 @@
         "174": "951207cd93201947a0ad79c056cb13af9650ca0c0166b1ae73d8212e9dc0d0c7",
         "175": "d79d8df6d1cf02567b1c2f1c7a411f469dae09bdbb9aab13ab5207d05b918f73",
         "176": "f2b9ca2ae1a13cbe33ae1187a5b48ba956df1c751f82e001e8e9b0dabc70354a",
-        "177": "9a70e84f1871de8435eee12329524251ebf7ae59ee2905ea08d1ae13759f415c"
+        "177": "9a70e84f1871de8435eee12329524251ebf7ae59ee2905ea08d1ae13759f415c",
+        "178": "d1f4ed0af91bba7c2e57d153c0e1709a9f2291d19fd36646dc7794820985d2d6"
       }
     },
     "/chunk-progress.js": {
@@ -141,7 +142,8 @@
     },
     "/settings-namespaces.js": {
       "versions": {
-        "12": "ebaa7094070bc747aae38492e7765572c4af0515f16f2dc1779d7a84652ada15"
+        "12": "ebaa7094070bc747aae38492e7765572c4af0515f16f2dc1779d7a84652ada15",
+        "13": "7a1c17f5dc494c3245c0996db4f95cd50c95b5de62933a9dee2088c76ed4daaa"
       }
     },
     "/sources-memory-dirs.js": {

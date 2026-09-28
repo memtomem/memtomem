@@ -272,21 +272,86 @@ def test_failed_reload_hides_the_note_until_rows_are_redrawn(page, mm_web_url: s
     assert _header(page)["note"] == expected
 
 
-def test_home_snapshot_clears_the_note(page, mm_web_url: str) -> None:
-    """Home's ``home_sources`` is uncapped. When it replaces the list (a slow
-    dashboard load landing after Sources), nothing is left out any more."""
+def _tree_state(page) -> dict[str, object]:
+    return {
+        **_header(page),
+        "rows": page.evaluate(
+            "() => [...document.querySelectorAll('#sources-list .source-item')].map(e => e.title)"
+        ),
+        "group": page.evaluate(
+            """dir => document.querySelector(
+              `#sources-list details.source-group[data-dir="${dir}"] > summary .source-group-stats`
+            )?.textContent ?? null""",
+            _USER,
+        ),
+    }
+
+
+def test_a_late_home_load_leaves_the_sources_tree_alone(page, mm_web_url: str) -> None:
+    """#2571: a dashboard load landing after Sources must not change what the
+    tree lists or counts. Home's ``home_sources`` also names a held file the
+    Sources list hides, and its ``/api/memory-dirs/status`` answer is older."""
     api = _Api(_TREE_STATUS, _sources_body(_TREE_ROWS, omitted=3))
     _open_tree(page, mm_web_url, api)
-    assert _header(page)["note"] is not None
+    before = _tree_state(page)
+    assert before["rows"] == [f"{_USER}/a.md", f"{_USER}/b.md"]
+    assert before["note"] == _partial_note(page, 2, 5)
 
-    api.stats = {"home_sources": [*_TREE_ROWS, _source(f"{_USER}/c.md", _USER)]}
+    held = f"{_USER}/held.md"
+    api.stats = {"home_sources": [*_TREE_ROWS, _source(held, _USER)]}
+    api.status = [_dir(_USER, 9, 9)]
     page.evaluate("() => loadDashboard()")
-    page.wait_for_function("() => STATE.allSources.length === 3", timeout=5_000)
+    # The late load has landed once Home's snapshot holds all three rows.
+    page.wait_for_function(
+        "dir => STATE.homeSources.length === 3"
+        " && STATE.homeMemoryStatusByPath[dir]?.source_file_count === 9",
+        arg=_USER,
+        timeout=5_000,
+    )
+
+    # The next redraw reads the Sources tab's own state.
     _click_vendor(page, "claude")
     _click_vendor(page, "user")
-    header = _header(page)
-    assert header["stats"] == _t(page, "header.stat_files_chunks", {"files": 3, "chunks": "3"})
-    assert header["note"] is None
+    page.wait_for_function(
+        'dir => !!document.querySelector(`#sources-list details.source-group[data-dir="${dir}"]`)',
+        arg=_USER,
+        timeout=5_000,
+    )
+    after = _tree_state(page)
+    assert after == before
+    assert held not in after["rows"]
+
+
+def test_home_click_before_sources_loads_picks_the_vendor_first(page, mm_web_url: str) -> None:
+    """Home's snapshot still resolves a recent-source click's vendor before
+    the Sources list exists, so the right tree is the first one drawn."""
+    api = _Api(_TREE_STATUS, _sources_body(_TREE_ROWS, omitted=None))
+    api.stats = {"home_sources": _TREE_ROWS}
+    api.install(page)
+    goto_after_i18n_init(page, mm_web_url, probe_key="sources.partial_note")
+    page.evaluate("() => loadDashboard()")
+    page.wait_for_function("() => STATE.homeSources.length === 2", timeout=5_000)
+    assert page.evaluate("() => STATE.allSources.length") == 0
+
+    api.hold_sources = True
+    page.evaluate("() => { STATE.sourcesActiveVendor = 'claude'; }")
+    page.evaluate("p => _navigateToSource(p)", f"{_USER}/b.md")
+    assert page.evaluate("() => STATE.sourcesActiveVendor") == "user"
+
+    for _ in range(50):
+        if api.held:
+            break
+        page.wait_for_timeout(20)
+    assert api.held
+    body = json.dumps(api.sources)
+    for route in api.held:
+        route.fulfill(status=200, content_type="application/json", body=body)
+    api.held.clear()
+    page.wait_for_function(
+        "p => document.querySelector('#sources-list .source-item.active')?.title === p",
+        arg=f"{_USER}/b.md",
+        timeout=5_000,
+    )
 
 
 def test_ko_locale_renders_the_ko_note(page, mm_web_url: str) -> None:
@@ -315,18 +380,16 @@ def test_language_switch_retranslates_the_note(page, mm_web_url: str) -> None:
 
 
 def test_language_switch_after_a_late_home_load_keeps_the_note(page, mm_web_url: str) -> None:
-    """Home can replace the Sources state without redrawing the tree (#2571).
-    A language switch then re-words the note for the capped tree still on
-    screen instead of hiding it."""
+    """A late Home load leaves the Sources state alone (#2571), so a language
+    switch re-words the note for the capped tree still on screen."""
     api = _Api(_TREE_STATUS, _sources_body(_TREE_ROWS, omitted=3))
     page.add_init_script("try { localStorage.setItem('m2m-lang', 'en'); } catch (e) {}")
     _open_tree(page, mm_web_url, api)
 
     api.stats = {"home_sources": [*_TREE_ROWS, _source(f"{_USER}/c.md", _USER)]}
     page.evaluate("() => loadDashboard()")
-    page.wait_for_function(
-        "() => STATE.allSources.length === 3 && STATE.sourcesOmitted === 0", timeout=5_000
-    )
+    page.wait_for_function("() => STATE.homeSources.length === 3", timeout=5_000)
+    assert page.evaluate("() => [STATE.allSources.length, STATE.sourcesOmitted]") == [2, 3]
 
     page.evaluate("() => I18N.setLang('ko')")
     page.wait_for_function("() => I18N.lang() === 'ko'", timeout=5_000)
