@@ -264,9 +264,14 @@ The complete v0.6.5 top-level command catalog is grouped below. Run `mm
 | Import and synchronization | `ingest`, `context`, `wiki`, `sync-doctor` |
 | Interfaces and utilities | `web`, `shell`, `serve` |
 
-For CI, `mm status --json` always produces JSON. Check that the payload has no
-top-level `error` field; an initialization error is reported in the payload and
-does not by itself make the process exit non-zero.
+For CI, use the exit code of `mm status --json` first. A successful report
+exits 0. A failure the command recognizes still prints JSON, a single
+`{"error": "..."}` object, and exits 1. That covers a missing configuration,
+any failure while opening storage, a memtomem storage, configuration or
+embedding error, and a SQLite error caused by the environment once the database
+is open: a locked, read-only or unreachable database, or a full disk. Anything
+else, including a SQL error in memtomem's queries after the database is open,
+exits non-zero with a plain error on stderr and no JSON.
 
 `mm serve` runs the MCP server over stdio, for clients that launch the
 distribution's console script rather than a dedicated one. `memtomem-server` is

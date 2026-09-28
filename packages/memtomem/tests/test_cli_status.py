@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,11 @@ from click.testing import CliRunner
 from memtomem.cli import cli
 from memtomem.cli.status_cmd import _style_status_lines
 from memtomem.config import Mem2MemConfig
+from memtomem.errors import (
+    SchemaDowngradeError,
+    SchemaMigrationBlockedError,
+    StorageStartupError,
+)
 from memtomem.indexing.watcher import effective_watcher_backend
 from memtomem.runtime.project_context import _resolve_project_context_from_dirs
 from memtomem.server.tools.status_config import (
@@ -1168,11 +1174,10 @@ class TestStatusJson:
     def test_json_unexpected_error_keeps_nonzero_exit(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Only CLI-classified failures (ClickException) become the exit-0
-        # {"error": ...} shape; programmer errors must stay loud so
-        # scripts/CI don't read a crash as a successful status report
-        # (CONTRIBUTING: "Unhandled exceptions ... should still surface
-        # through Click").
+        # Only classified failures become the exit-1 {"error": ...} shape;
+        # programmer errors must stay loud so scripts/CI see a crash, not
+        # a handled failure (CONTRIBUTING: "Unhandled exceptions ... also
+        # surface nonzero through Click").
         comp = _mock_components(total_chunks=1, total_sources=1)
         comp.storage.get_stats = AsyncMock(side_effect=RuntimeError("boom"))
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
@@ -1180,7 +1185,197 @@ class TestStatusJson:
         result = runner.invoke(cli, ["status", "--json"])
 
         assert result.exit_code != 0
-        assert "boom" in result.output
+        assert result.stdout == ""
+        assert "boom" in result.stderr
+
+    @staticmethod
+    def _fail_storage_open(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, exc: Exception) -> None:
+        # Drive the real ``cli_components``: a config file exists, then
+        # ``create_components`` raises the way a failed storage open does.
+        config_path = tmp_path / "config.json"
+        config_path.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr("memtomem.cli._bootstrap._CONFIG_PATH", config_path)
+
+        async def fail(*args: object, **kwargs: object) -> None:
+            raise exc
+
+        monkeypatch.setattr("memtomem.server.component_factory.create_components", fail)
+
+    @pytest.mark.parametrize(
+        ("exc", "fragment"),
+        [
+            (SchemaDowngradeError("schema 9 > 8"), "`mm upgrade`"),
+            # Subclass of SchemaDowngradeError with its own hint (#2564).
+            (SchemaMigrationBlockedError("older servers are running"), "older memtomem server"),
+            # The open-time lock shape: _classify_startup_error wraps the
+            # raw SQLite error before it leaves the storage layer.
+            (
+                StorageStartupError(reason_code="storage_locked", stage="open"),
+                "storage backend error",
+            ),
+            # The storage layer's catch-all: it wraps every open-time failure,
+            # a defect included, so the envelope is deliberate here — text
+            # mode prints this same wrapped message.
+            (
+                StorageStartupError(reason_code="storage_unavailable", stage="schema"),
+                "storage backend error",
+            ),
+        ],
+    )
+    def test_json_error_when_storage_open_fails(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        exc: Exception,
+        fragment: str,
+    ) -> None:
+        # #2575: these used to bypass the JSON branch and print a plain
+        # Click error on stderr, leaving stdout empty.
+        self._fail_storage_open(monkeypatch, tmp_path, exc)
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code == 1, result.output
+        data = json.loads(result.stdout)
+        assert set(data) == {"error"}
+        message, hint = data["error"].split("\n  Hint: ")
+        assert message == str(exc)
+        assert fragment in hint
+        assert result.stderr == ""
+
+    def test_format_json_long_form_gets_the_same_envelope(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fail_storage_open(monkeypatch, tmp_path, SchemaDowngradeError("schema 9 > 8"))
+
+        result = runner.invoke(cli, ["status", "--format", "json"])
+
+        assert result.exit_code == 1, result.output
+        assert "`mm upgrade`" in json.loads(result.stdout)["error"]
+
+    def test_text_mode_open_failure_stays_a_click_error(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fail_storage_open(monkeypatch, tmp_path, SchemaDowngradeError("schema 9 > 8"))
+
+        result = runner.invoke(cli, ["status"])
+
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert "Error: schema 9 > 8" in result.stderr
+        assert "Hint:" in result.stderr
+
+    def test_json_error_when_query_hits_locked_db(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The runtime lock shape: storage opened, then a query raised the
+        # raw sqlite3 error. Take a real one (SQLITE_BUSY) from a second
+        # connection. The patched cli_components keeps the mock's teardown
+        # out of the way so it cannot mask the error under test.
+        db_path = tmp_path / "locked.db"
+        holder = sqlite3.connect(db_path, timeout=0)
+        waiter = sqlite3.connect(db_path, timeout=0)
+        try:
+            holder.execute("CREATE TABLE t (x)")
+            holder.commit()
+            holder.execute("BEGIN EXCLUSIVE")
+            with pytest.raises(sqlite3.OperationalError) as info:
+                waiter.execute("SELECT * FROM t")
+        finally:
+            waiter.close()
+            holder.close()
+        assert info.value.sqlite_errorcode == sqlite3.SQLITE_BUSY
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        comp.storage.get_stats = AsyncMock(side_effect=info.value)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code == 1, result.output
+        message, hint = json.loads(result.stdout)["error"].split("\n  Hint: ")
+        assert message == "database is locked"
+        assert hint.startswith("another process is writing")
+
+    def test_json_error_for_a_full_disk(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # SQLITE_FULL is environmental but has no hint; a real one needs a
+        # full filesystem, so stamp the code SQLite would set.
+        exc = sqlite3.OperationalError("database or disk is full")
+        exc.sqlite_errorcode = sqlite3.SQLITE_FULL
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        comp.storage.get_stats = AsyncMock(side_effect=exc)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code == 1, result.output
+        assert json.loads(result.stdout) == {"error": "database or disk is full"}
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT no_such_column FROM sqlite_master",
+            # A defect whose message contains an environmental word must
+            # still stay loud: classification is by result code, not text.
+            "SELECT readonly FROM sqlite_master",
+        ],
+    )
+    def test_sqlite_query_defect_is_not_classified(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, sql: str
+    ) -> None:
+        # SQLite raises OperationalError for query defects too. A real one
+        # (SQLITE_ERROR) must stay loud, unlike the lock above.
+        conn = sqlite3.connect(":memory:")
+        try:
+            with pytest.raises(sqlite3.OperationalError) as info:
+                conn.execute(sql)
+        finally:
+            conn.close()
+        assert info.value.sqlite_errorcode == sqlite3.SQLITE_ERROR
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        comp.storage.get_stats = AsyncMock(side_effect=info.value)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code != 0
+        assert result.stdout == ""
+        assert "no such column" in result.stderr
+
+    def test_sqlite_error_without_a_result_code_is_not_classified(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No result code means no classification, whatever the message says.
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        comp.storage.get_stats = AsyncMock(
+            side_effect=sqlite3.OperationalError("database is locked")
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code != 0
+        assert result.stdout == ""
+        assert "database is locked" in result.stderr
+
+    def test_sqlite_programming_error_is_not_classified(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Only OperationalError is an environmental SQLite failure; a
+        # ProgrammingError is a code defect and must stay loud.
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        comp.storage.get_stats = AsyncMock(
+            side_effect=sqlite3.ProgrammingError("Incorrect number of bindings")
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code != 0
+        assert result.stdout == ""
+        assert "Incorrect number of bindings" in result.stderr
 
 
 class TestConcurrentWriters:

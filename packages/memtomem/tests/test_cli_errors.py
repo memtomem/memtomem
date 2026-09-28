@@ -21,7 +21,7 @@ from click.testing import CliRunner
 
 import memtomem.cli
 from memtomem.cli import cli
-from memtomem.cli._errors import raise_cli_error
+from memtomem.cli._errors import raise_cli_error, to_cli_error
 from memtomem.errors import (
     ConfigError,
     EmbeddingDimensionMismatchError,
@@ -29,6 +29,7 @@ from memtomem.errors import (
     NamespaceMutationBusyError,
     NamespaceResolutionError,
     SchemaDowngradeError,
+    SchemaMigrationBlockedError,
     StorageError,
 )
 
@@ -39,24 +40,26 @@ def _message_of(exc: Exception) -> str:
     return info.value.format_message()
 
 
+_HINT_CASES = [
+    (sqlite3.OperationalError("database is locked"), "another process is writing"),
+    (sqlite3.OperationalError("no such table: chunks"), "run `mm init`"),
+    (EmbeddingDimensionMismatchError("dim 0 vs 1024"), "mm embedding-reset"),
+    (SchemaDowngradeError("schema 2 > 1"), "`mm upgrade`"),
+    # Subclass of SchemaDowngradeError with its own hint (#2564).
+    (SchemaMigrationBlockedError("older servers are running"), "older memtomem server"),
+    (EmbeddingError("model not found"), "docs/guides/embeddings.md"),
+    (ConfigError("bad json"), "mm config show"),
+    (StorageError("disk I/O error"), "run `mm status`"),
+    # The engine's pre-write namespace prepass (issue #2005) raises
+    # instead of returning per-file errors, so this is the only place
+    # a retryable indexing failure keeps its classification on the
+    # direct-CLI path — print_index_errors never sees it.
+    (NamespaceResolutionError("store unreachable"), "retry the same command"),
+]
+
+
 class TestHintMapping:
-    @pytest.mark.parametrize(
-        ("exc", "fragment"),
-        [
-            (sqlite3.OperationalError("database is locked"), "another process is writing"),
-            (sqlite3.OperationalError("no such table: chunks"), "run `mm init`"),
-            (EmbeddingDimensionMismatchError("dim 0 vs 1024"), "mm embedding-reset"),
-            (SchemaDowngradeError("schema 2 > 1"), "`mm upgrade`"),
-            (EmbeddingError("model not found"), "docs/guides/embeddings.md"),
-            (ConfigError("bad json"), "mm config show"),
-            (StorageError("disk I/O error"), "run `mm status`"),
-            # The engine's pre-write namespace prepass (issue #2005) raises
-            # instead of returning per-file errors, so this is the only place
-            # a retryable indexing failure keeps its classification on the
-            # direct-CLI path — print_index_errors never sees it.
-            (NamespaceResolutionError("store unreachable"), "retry the same command"),
-        ],
-    )
+    @pytest.mark.parametrize(("exc", "fragment"), _HINT_CASES)
     def test_known_classes_get_hints(self, exc: Exception, fragment: str) -> None:
         message = _message_of(exc)
         assert str(exc) in message, "original message must be preserved"
@@ -100,6 +103,21 @@ class TestHintMapping:
         with pytest.raises(click.ClickException) as info:
             raise_cli_error(exc)
         assert info.value.__cause__ is exc
+
+
+class TestToCliError:
+    """``to_cli_error`` is the non-raising half of ``raise_cli_error``, for
+    callers that render the error themselves (``mm status --json``, #2575)."""
+
+    @pytest.mark.parametrize(
+        "exc", [exc for exc, _ in _HINT_CASES] + [RuntimeError("boom"), RuntimeError()]
+    )
+    def test_same_message_as_the_raised_form(self, exc: Exception) -> None:
+        assert to_cli_error(exc).format_message() == _message_of(exc)
+
+    def test_click_exception_is_returned_unchanged(self) -> None:
+        original = click.ClickException("already tailored")
+        assert to_cli_error(original) is original
 
 
 class TestNoBareCatchAllRegression:
