@@ -17,6 +17,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   load, as the MiniLM pin does, and so do the earlier setup steps that could
   fail the same way: the FastEmbed import, custom model registration and
   quantized artifact verification.
+- **`mm status --json` now answers in JSON when the database cannot be opened
+  (#2575).** Only a failure that was already a CLI error, such as a missing
+  config, reached the `{"error": ...}` output. A storage failure printed a plain
+  `Error: ...` on stderr and left stdout empty. This covered a database written
+  by a newer release, a migration refused while older servers have the database
+  open (#2564), a locked database, and an embedding or configuration error.
+  memtomem errors, which include every failure while opening storage, and
+  SQLite errors caused by the environment (a locked, read-only or unreachable
+  database, or a full disk, judged by SQLite's result code) now print
+  `{"error": "..."}`, carrying the same text as the plain error, and exit 1, in
+  both `--json` and `--format json`. Text output is unchanged. Any other
+  exception, including a SQL error in memtomem's queries after the database is
+  open, still prints a plain error and no JSON.
 - **The `all-MiniLM-L6-v2` embedder is pinned to a known-good model revision.**
   FastEmbed downloads this model from `qdrant/all-MiniLM-L6-v2-onnx` at the
   repository's latest revision. The newest revision raised the tokenizer's

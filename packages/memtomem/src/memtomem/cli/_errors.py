@@ -33,13 +33,23 @@ def raise_cli_error(e: Exception) -> NoReturn:
     messages keep their wording and exit semantics; everything else
     falls back to the plain ``str(e)`` the call sites used before.
     """
-    if isinstance(e, click.ClickException):
+    converted = to_cli_error(e)
+    if converted is e:
         raise e
+    raise converted from e
+
+
+def to_cli_error(e: Exception) -> click.ClickException:
+    """Build the ``ClickException`` that ``raise_cli_error`` would raise,
+    without raising it — for callers that render the message themselves,
+    such as a ``--json`` error envelope (#2575)."""
+    if isinstance(e, click.ClickException):
+        return e
     message = str(e) or type(e).__name__
     hint = _hint_for(e)
     if hint:
-        raise click.ClickException(f"{message}\n  Hint: {hint}") from e
-    raise click.ClickException(message) from e
+        return click.ClickException(f"{message}\n  Hint: {hint}")
+    return click.ClickException(message)
 
 
 def _hint_for(e: Exception) -> str | None:
