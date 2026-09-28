@@ -19,6 +19,11 @@ _log = logging.getLogger(__name__)
 # literal instead of being parsed as query syntax.
 _FTS5_SPECIAL_RE = re.compile(r"[^\w]", re.UNICODE)
 
+# FTS5 reads these barewords as operators, and only in uppercase (``and``,
+# ``Or``, ``NEAR*`` are plain terms). A bare ``NOT*`` is an operator followed
+# by a stray ``*`` and fails the whole MATCH (#2576), so they are quoted.
+_FTS5_KEYWORDS = frozenset({"AND", "OR", "NOT"})
+
 # Active tokenizer backend: "unicode61" or "kiwipiepy"
 _active_tokenizer: str = "unicode61"
 
@@ -132,4 +137,8 @@ def _format_query_token(word: str) -> str:
     if _FTS5_SPECIAL_RE.search(word):
         safe = word.replace('"', '""')
         return f'"{safe}"'
+    if word in _FTS5_KEYWORDS:
+        # Quoted, the keyword is a literal term; the trailing ``*`` keeps the
+        # same prefix match its lowercase spelling gets.
+        return f'"{word}"*'
     return word + "*"
