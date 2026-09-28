@@ -21,9 +21,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   write (`write_failed`) now exit 1; the JSON they print is unchanged. `mm
   activity log --json` with no active session (`no_active_session`) is a
   no-op and still exits 0, and without `--json` a missing session or a failed
-  write still prints nothing on stdout and exits 0 for hooks. This replaces the exit-0 behavior
-  described for #331, #335 and #338. A script that runs these under `set -e`
-  and expects exit 0 on these errors needs `|| true`.
+  write still prints nothing on stdout and exits 0 for hooks. This replaces
+  the exit-0 behavior described for #331, #335 and #338. A script that runs
+  these under `set -e` and expects exit 0 on these errors needs `|| true`.
 
 ### Fixed
 
@@ -33,7 +33,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `Error: ...` with exit 1. `mm pinned compose`, whose only output is JSON,
   prints `{"error": "..."}` instead. `mm watchdog status --json` prints `{}`
   when there is no health data yet, instead of a sentence.
-
+- **The Web UI's model readiness finds models FastEmbed caches under another
+  repository (#2585).** The probe looked for `models--<model id>`, but FastEmbed
+  downloads some models from a mirror and caches them under that name.
+  `all-MiniLM-L6-v2` lives in `models--qdrant--all-MiniLM-L6-v2-onnx` and
+  `bge-small-en-v1.5` in `models--qdrant--bge-small-en-v1.5-onnx-q`, whose
+  weights are `model_optimized.onnx`. While either model loaded from a full
+  cache, readiness said `downloading` instead of `loading`. The probe now takes
+  the repository and model files from FastEmbed's catalog, and for E5 and
+  MiniLM checks only the revision memtomem pins. A snapshot also counts as
+  complete only with every tokenizer file FastEmbed 0.8.0 opens
+  (`tokenizer_config.json` and `special_tokens_map.json` were not checked), and
+  `bge-m3` needs its `model.onnx_data` before its first load. Registering
+  memtomem's custom models is now serialized, so the readiness poll and a first
+  model load cannot both register one and fail the load.
+- **The default E5 model's first download now shows as a download, and a
+  failed one as an error (#2586).** memtomem fetches the pinned
+  `multilingual-e5-small` snapshot itself. That fetch ran before the embedder
+  marked itself as loading, so while the model downloaded for the first time
+  the Web UI's model readiness showed it as not loaded rather than
+  downloading. A failed download was raised but never recorded, so readiness
+  did not report the error either. The fetch now runs inside the guarded
+  load, as the MiniLM pin does, and so do the earlier setup steps that could
+  fail the same way: the FastEmbed import, custom model registration and
+  quantized artifact verification.
 - **The other `--json` commands answer a storage failure in JSON too
   (#2589).** Following `mm status` (#2575), `search`, `recall`, `index
   --flush`/`--debounce-window`, `mem rescan`, `watchdog status`/`run`,

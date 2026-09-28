@@ -707,6 +707,71 @@ class TestOnnxEmbedder:
         assert embedder._loading is False
         mock_te.assert_not_called()
 
+    @pytest.mark.anyio
+    async def test_e5_snapshot_download_is_part_of_the_guarded_load(self, monkeypatch):
+        """Same contract as MiniLM (#2586): a cold E5 fetch reads as loading,
+        and a failed one is recorded as the load error readiness reports."""
+        from memtomem.embedding import profiles
+
+        embedder = OnnxEmbedder(
+            _onnx_config(model="multilingual-e5-small", dimension=384, max_sequence_tokens=512)
+        )
+        seen_loading: list[bool] = []
+
+        def failing_snapshot():
+            seen_loading.append(embedder._loading)
+            raise OSError("hub unreachable")
+
+        monkeypatch.setattr(profiles, "e5_snapshot", failing_snapshot)
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("fastembed.TextEmbedding") as mock_te,
+            pytest.raises(EmbeddingError),
+        ):
+            await embedder.embed_texts(["hello"])
+
+        assert seen_loading == [True]
+        assert embedder._load_error == "hub unreachable"
+        assert embedder._loading is False
+        mock_te.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_setup_failure_before_the_constructor_is_a_load_error(self):
+        """A failure preparing the load (here, custom model registration)
+        must read as an error in readiness, not as a model never tried."""
+        embedder = OnnxEmbedder(_onnx_config())
+        with (
+            patch(
+                "memtomem.embedding.onnx._register_custom_models_if_needed",
+                side_effect=RuntimeError("registration failed"),
+            ),
+            patch("fastembed.TextEmbedding") as mock_te,
+            pytest.raises(EmbeddingError),
+        ):
+            await embedder.embed_texts(["hello"])
+
+        assert embedder._load_error == "registration failed"
+        assert embedder._loading is False
+        mock_te.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_e5_loads_from_the_pinned_snapshot(self, monkeypatch):
+        from memtomem.embedding import profiles
+
+        monkeypatch.setattr(profiles, "e5_snapshot", lambda: "/pinned/e5-snapshot")
+        model = _make_fake_embedding_model([[0.1] * 384])
+        embedder = OnnxEmbedder(
+            _onnx_config(model="multilingual-e5-small", dimension=384, max_sequence_tokens=512)
+        )
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("memtomem.embedding.onnx._configure_tokenizer_limit", return_value=(None, 512)),
+            patch("fastembed.TextEmbedding", return_value=model) as mock_te,
+        ):
+            await embedder.embed_texts(["hello"])
+
+        assert mock_te.call_args.kwargs.get("specific_model_path") == "/pinned/e5-snapshot"
+
     def test_cpu_mem_arena_false_fails_closed_on_unknown_layout(self):
         with pytest.raises(EmbeddingError, match="refusing unsafe ONNX fallback"):
             _verify_cpu_mem_arena(object(), False)
