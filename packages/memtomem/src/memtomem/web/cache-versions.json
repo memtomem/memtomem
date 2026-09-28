@@ -143,7 +143,8 @@
     "/settings-namespaces.js": {
       "versions": {
         "12": "ebaa7094070bc747aae38492e7765572c4af0515f16f2dc1779d7a84652ada15",
-        "13": "7a1c17f5dc494c3245c0996db4f95cd50c95b5de62933a9dee2088c76ed4daaa"
+        "13": "7a1c17f5dc494c3245c0996db4f95cd50c95b5de62933a9dee2088c76ed4daaa",
+        "14": "fb2c122a90f2d444a04a204ca5bd02aaafc30be2062599e6bd2453d31f2f599a"
       }
     },
     "/sources-memory-dirs.js": {

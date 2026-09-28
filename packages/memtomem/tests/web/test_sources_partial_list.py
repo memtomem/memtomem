@@ -322,6 +322,31 @@ def test_a_late_home_load_leaves_the_sources_tree_alone(page, mm_web_url: str) -
     assert held not in after["rows"]
 
 
+def _palette_sources(page) -> list[str]:
+    return page.evaluate(
+        """() => (_buildCommands().find(g => g.group === t('cmd.group.recent_sources'))
+                   ?.items || []).map(i => i.label)"""
+    )
+
+
+def test_palette_lists_the_latest_home_snapshot(page, mm_web_url: str) -> None:
+    """The palette's recent sources follow each dashboard load, whether or not
+    the Sources tab has loaded its own list."""
+    api = _Api(_TREE_STATUS, _sources_body([], omitted=None))
+    api.stats = {"home_sources": [_source(f"{_USER}/one.md", _USER)]}
+    api.install(page)
+    goto_after_i18n_init(page, mm_web_url, probe_key="sources.partial_note")
+    page.evaluate("() => loadDashboard()")
+    page.wait_for_function("() => STATE.homeSources.length === 1", timeout=5_000)
+    assert _palette_sources(page) == [_t(page, "cmd.open_source", {"name": "one.md"})]
+
+    page.evaluate("() => loadSources()")
+    api.stats = {"home_sources": [_source(f"{_USER}/two.md", _USER)]}
+    page.evaluate("() => loadDashboard()")
+    page.wait_for_function("() => STATE.homeSources[0]?.path.endsWith('/two.md')", timeout=5_000)
+    assert _palette_sources(page) == [_t(page, "cmd.open_source", {"name": "two.md"})]
+
+
 def test_home_click_before_sources_loads_picks_the_vendor_first(page, mm_web_url: str) -> None:
     """Home's snapshot still resolves a recent-source click's vendor before
     the Sources list exists, so the right tree is the first one drawn."""
