@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The Web UI's model readiness finds models FastEmbed caches under another
+  repository (#2585).** The probe looked for `models--<model id>`, but FastEmbed
+  downloads some models from a mirror and caches them under that name.
+  `all-MiniLM-L6-v2` lives in `models--qdrant--all-MiniLM-L6-v2-onnx` and
+  `bge-small-en-v1.5` in `models--qdrant--bge-small-en-v1.5-onnx-q`, whose
+  weights are `model_optimized.onnx`. While either model loaded from a full
+  cache, readiness said `downloading` instead of `loading`. The probe now takes
+  the repository and model files from FastEmbed's catalog, and for E5 and
+  MiniLM checks only the revision memtomem pins. A snapshot also counts as
+  complete only with every tokenizer file FastEmbed 0.8.0 opens
+  (`tokenizer_config.json` and `special_tokens_map.json` were not checked), and
+  `bge-m3` needs its `model.onnx_data` before its first load.
 - **The default E5 model's first download now shows as a download, and a
   failed one as an error (#2586).** memtomem fetches the pinned
   `multilingual-e5-small` snapshot itself. That fetch ran before the embedder
