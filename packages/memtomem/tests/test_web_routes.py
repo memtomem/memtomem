@@ -1421,11 +1421,40 @@ class TestSources:
         resp = await client.get("/api/sources/content-matches", params={"q": "needle"})
 
         assert resp.status_code == 200
-        assert resp.json() == {"query": "needle", "paths": [str(body_match)]}
+        assert resp.json() == {"query": "needle", "paths": [str(body_match)], "truncated": False}
+        # One row past the limit, to tell a full answer from a cut one (#2572).
         app.state.storage.search_source_files_by_content.assert_awaited_once_with(
             "needle",
-            limit=10000,
+            limit=10001,
         )
+
+    @pytest.mark.parametrize(
+        ("body_rows", "summary_rows", "truncated"),
+        [
+            pytest.param(2, 0, False, id="exactly-at-limit"),
+            pytest.param(3, 0, True, id="storage-past-limit"),
+            pytest.param(2, 1, True, id="summary-past-limit"),
+            pytest.param(1, 1, False, id="summary-fills-limit"),
+        ],
+    )
+    async def test_source_content_matches_says_when_it_stopped_at_the_limit(
+        self, app, client: AsyncClient, body_rows: int, summary_rows: int, truncated: bool
+    ):
+        body = [Path(f"/tmp/body-{i}.md") for i in range(body_rows)]
+        summaries = {
+            f"/tmp/summary-{i}.md": {"summary": "a needle here", "language": "en"}
+            for i in range(summary_rows)
+        }
+        app.state.storage.search_source_files_by_content.return_value = body
+        app.state.storage.get_all_ai_summaries.return_value = summaries
+
+        resp = await client.get("/api/sources/content-matches", params={"q": "needle", "limit": 2})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["paths"]) == min(2, body_rows + summary_rows)
+        assert data["truncated"] is truncated
+        app.state.storage.search_source_files_by_content.assert_awaited_once_with("needle", limit=3)
 
     async def test_source_content_matches_includes_ai_summary_text(self, app, client: AsyncClient):
         summary_match = Path("/tmp/summary-match.md")

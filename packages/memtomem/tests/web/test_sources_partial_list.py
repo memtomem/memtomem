@@ -84,8 +84,11 @@ class _Api:
         self.hold_sources = False
         self.held: list[Any] = []
         self.stats: dict[str, object] = {}
+        self.content_matches: dict[str, object] = {"query": "", "paths": [], "truncated": False}
 
     def payload(self, path: str) -> dict[str, object]:
+        if path == "/api/sources/content-matches":
+            return self.content_matches
         if path == "/api/system/ui-mode":
             return {"mode": "prod"}
         if path == "/api/system/model-readiness":
@@ -613,3 +616,161 @@ def test_drill_in_ignores_a_response_from_before_a_reindex(page, mm_web_url: str
     assert again["partial"] == _t(
         page, "sources.memory_dirs.files_partial", {"shown": "1", "total": "3"}
     )
+
+
+# ---------------------------------------------------------------------------
+# Sources body filter and the search source filter (#2572)
+# ---------------------------------------------------------------------------
+
+
+def _body_note(page) -> str | None:
+    return page.evaluate(
+        """() => {
+          const note = document.getElementById('sources-body-filter-note');
+          return note.checkVisibility() ? note.textContent : null;
+        }"""
+    )
+
+
+def _apply_body_filter(page, q: str) -> None:
+    with page.expect_response(lambda r: "/api/sources/content-matches" in r.url):
+        page.locator("#sources-filter").fill(q)
+    page.wait_for_function(
+        "q => STATE.sourcesBodyFilterQuery === q && STATE.sourcesBodyFilterPaths instanceof Set",
+        arg=q,
+        timeout=5_000,
+    )
+
+
+def _body_limit_note(page) -> str:
+    return _t(page, "sources.body_filter_partial", {"limit": f"{10000:,}"})
+
+
+@pytest.mark.parametrize("truncated", [True, False], ids=["stopped", "complete"])
+def test_body_filter_says_when_matches_stopped_at_the_limit(
+    page, mm_web_url: str, truncated: bool
+) -> None:
+    api = _Api(_TREE_STATUS, _sources_body(_TREE_ROWS, omitted=None))
+    api.content_matches = {"query": "zzz", "paths": [f"{_USER}/a.md"], "truncated": truncated}
+    _open_tree(page, mm_web_url, api)
+    assert _body_note(page) is None
+
+    _apply_body_filter(page, "zzz")
+    assert _body_note(page) == (_body_limit_note(page) if truncated else None)
+
+    # Clearing the filter drops the note with it.
+    page.locator("#sources-filter").fill("")
+    page.wait_for_function("() => STATE.sourcesBodyFilterQuery === ''", timeout=5_000)
+    assert _body_note(page) is None
+
+
+def test_body_filter_note_and_partial_list_note_show_together(page, mm_web_url: str) -> None:
+    api = _Api(_TREE_STATUS, _sources_body(_TREE_ROWS, omitted=3))
+    api.content_matches = {"query": "zzz", "paths": [f"{_USER}/a.md"], "truncated": True}
+    _open_tree(page, mm_web_url, api)
+
+    _apply_body_filter(page, "zzz")
+    assert _header(page)["note"] == _partial_note(page, 2, 5)
+    assert _body_note(page) == _body_limit_note(page)
+
+
+def test_body_filter_note_follows_the_current_query(page, mm_web_url: str) -> None:
+    """A new query's answer decides the note, not the previous query's."""
+    api = _Api(_TREE_STATUS, _sources_body(_TREE_ROWS, omitted=None))
+    api.content_matches = {"query": "zzz", "paths": [], "truncated": True}
+    _open_tree(page, mm_web_url, api)
+    _apply_body_filter(page, "zzz")
+    assert _body_note(page) == _body_limit_note(page)
+
+    api.content_matches = {"query": "yyy", "paths": [], "truncated": False}
+    _apply_body_filter(page, "yyy")
+    assert _body_note(page) is None
+
+
+def _source_filter_note(page) -> str | None:
+    return page.evaluate(
+        """() => {
+          const note = document.getElementById('source-filter-partial');
+          return note.checkVisibility() ? note.textContent : null;
+        }"""
+    )
+
+
+def _source_filter_values(page) -> list[str]:
+    return page.evaluate(
+        "() => [...document.querySelectorAll('#source-filter option')].map(o => o.value)"
+    )
+
+
+def _open_advanced(page, base_url: str, api: _Api) -> None:
+    api.install(page)
+    goto_after_i18n_init(page, base_url, probe_key="search.source_filter_partial")
+    page.evaluate("() => activateTab('search')")
+    # The toggle's own handler opens the panel and loads the list; the button
+    # itself can be hidden by the search tab's layout, so dispatch the click.
+    with page.expect_response(lambda r: urlparse(r.url).path == "/api/sources"):
+        page.evaluate("() => document.getElementById('adv-toggle').click()")
+    page.wait_for_function(
+        "() => [...document.querySelectorAll('#source-filter option')].some(o => o.value)",
+        timeout=5_000,
+    )
+
+
+@pytest.mark.parametrize("omitted", [3, 0], ids=["cut", "complete"])
+def test_search_source_filter_says_when_the_list_is_cut(
+    page, mm_web_url: str, omitted: int
+) -> None:
+    api = _Api(_TREE_STATUS, _sources_body(_TREE_ROWS, omitted=omitted))
+    _open_advanced(page, mm_web_url, api)
+
+    expected = _t(page, "search.source_filter_partial", {"shown": "2", "total": str(2 + omitted)})
+    assert _source_filter_note(page) == (expected if omitted else None)
+    assert len(_source_filter_values(page)) == 2
+
+
+def test_search_source_filter_keeps_the_latest_answer(page, mm_web_url: str) -> None:
+    """An older reload answering last must not replace the newer list or note."""
+    api = _Api(_TREE_STATUS, _sources_body(_TREE_ROWS, omitted=None))
+    _open_advanced(page, mm_web_url, api)
+
+    api.hold_sources = True
+    page.evaluate("() => { loadSourceFilter(); loadSourceFilter(); }")
+    for _ in range(50):
+        if len(api.held) == 2:
+            break
+        page.wait_for_timeout(20)
+    assert len(api.held) == 2
+    older, newer = api.held
+    api.held.clear()
+    newer.fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(_sources_body([_source(f"{_USER}/new.md", _USER)], omitted=0)),
+    )
+    page.wait_for_function(
+        "() => [...document.querySelectorAll('#source-filter option')]"
+        ".some(o => o.value.endsWith('/new.md'))",
+        timeout=5_000,
+    )
+    # The older answer, cut short, arrives last. Wait for the page to have
+    # handled it: a probe request queued behind it on the same event loop.
+    older.fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(_sources_body(_TREE_ROWS, omitted=3)),
+    )
+    page.evaluate("() => new Promise(r => setTimeout(r, 50))")
+
+    assert _source_filter_values(page) == [f"{_USER}/new.md"]
+    assert _source_filter_note(page) is None
+
+
+def test_ko_locale_renders_the_ko_source_filter_note(page, mm_web_url: str) -> None:
+    api = _Api(_TREE_STATUS, _sources_body(_TREE_ROWS, omitted=3))
+    page.add_init_script("try { localStorage.setItem('m2m-lang', 'ko'); } catch (e) {}")
+    _open_advanced(page, mm_web_url, api)
+
+    note = _source_filter_note(page)
+    assert page.evaluate("() => I18N.lang()") == "ko"
+    assert note == _t(page, "search.source_filter_partial", {"shown": "2", "total": "5"})
+    assert note is not None and "5개" in note and "2개" in note

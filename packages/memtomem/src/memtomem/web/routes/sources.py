@@ -292,22 +292,32 @@ async def source_content_matches(
         hidden_reasons, _scope = visibility.check(path, target_scope)
         return not hidden_reasons
 
+    # One row past ``limit`` tells a full answer from a cut one (#2572).
+    # Storage cuts before the visibility check below, so an extra row means
+    # the search stopped early, not that a visible match was left out: the
+    # client's note says matches "may" be missing.
+    candidates = await storage.search_source_files_by_content(query, limit=limit + 1)
+    truncated = len(candidates) > limit
     paths: list[Path] = []
-    for candidate in await storage.search_source_files_by_content(query, limit=10000):
-        if len(paths) >= limit:
-            break
+    for candidate in candidates:
         if _visible_for_scope(candidate):
+            if len(paths) >= limit:
+                truncated = True
+                break
             paths.append(candidate)
     seen = {str(p) for p in paths}
     needle = query.casefold()
     for path, record in (await storage.get_all_ai_summaries()).items():
-        if len(paths) >= limit:
-            break
         summary = (record or {}).get("summary") or ""
         if path not in seen and needle in summary.casefold() and _visible_for_scope(path):
+            if len(paths) >= limit:
+                truncated = True
+                break
             paths.append(Path(path))
             seen.add(path)
-    return SourceContentMatchesResponse(query=query, paths=[str(p) for p in paths])
+    return SourceContentMatchesResponse(
+        query=query, paths=[str(p) for p in paths], truncated=truncated
+    )
 
 
 @router.delete("")
