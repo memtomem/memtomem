@@ -242,7 +242,8 @@ def compose(
     """Emit a structured pinned-first context bundle as JSON."""
     from memtomem.cli._errors import exit_json_failure
 
-    # JSON is the only output, so a failure answers in JSON too (#2596).
+    # JSON is the only output, so a handled failure answers in JSON too
+    # (#2596); an unclassified one stays a plain error on stderr.
     try:
         asyncio.run(
             _compose(query, agent_id, max_chars, top_k, rerank=False if no_rerank else None)

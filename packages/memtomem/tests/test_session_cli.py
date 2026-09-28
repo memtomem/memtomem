@@ -477,7 +477,8 @@ class TestSessionEndSummaryProvenance:
 class TestSessionEndJson:
     """``mm session end --json`` is a write ack with an ``ok`` flag (#2596):
     ``{"ok": true, ...}`` on success, ``{"ok": false, "reason": ...}`` with
-    exit 1 on failure. The text path is unchanged."""
+    exit 1 on a handled failure (no session, a Click error, a storage
+    failure). The text path is unchanged."""
 
     @staticmethod
     def _patch(monkeypatch, *, session_id="sess-1", events=None):
