@@ -7,6 +7,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A search containing an uppercase `AND`, `OR` or `NOT` no longer loses
+  its keyword results (#2576).** FTS5 reads these three words as operators
+  when they are uppercase. The query builder appended its prefix wildcard to
+  them as to any word, and FTS5 rejected `NOT*` as a syntax error. The whole
+  BM25 leg then failed, and the search returned semantic results only, with
+  the "keyword index unavailable" note. The words are now quoted, so they are
+  searched as ordinary terms and match like their lowercase spelling. This
+  applies to both the `unicode61` and `kiwipiepy` tokenizers.
 - **The `all-MiniLM-L6-v2` embedder is pinned to a known-good model revision.**
   FastEmbed downloads this model from `qdrant/all-MiniLM-L6-v2-onnx` at the
   repository's latest revision. The newest revision raised the tokenizer's
