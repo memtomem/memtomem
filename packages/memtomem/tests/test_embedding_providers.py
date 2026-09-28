@@ -772,6 +772,37 @@ class TestOnnxEmbedder:
 
         assert mock_te.call_args.kwargs.get("specific_model_path") == "/pinned/e5-snapshot"
 
+    @pytest.mark.parametrize("assign_after", [False, True])
+    @pytest.mark.anyio
+    async def test_e5_in_any_case_loads_the_canonical_id_from_the_pin(
+        self, monkeypatch, assign_after
+    ):
+        """FastEmbed post-processes by the exact registered id, so a cased
+        variant must reach it canonical, from the pin, however ``model`` was
+        set (#2602)."""
+        from memtomem.embedding import profiles
+
+        monkeypatch.setattr(profiles, "e5_snapshot", lambda: "/pinned/e5-snapshot")
+        odd = "intfloat/Multilingual-E5-Small"
+        if assign_after:
+            config = _onnx_config(
+                model="multilingual-e5-small", dimension=384, max_sequence_tokens=512
+            )
+            config.model = odd
+        else:
+            config = _onnx_config(model=odd, dimension=384, max_sequence_tokens=512)
+        model = _make_fake_embedding_model([[0.1] * 384])
+        embedder = OnnxEmbedder(config)
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("memtomem.embedding.onnx._configure_tokenizer_limit", return_value=(None, 512)),
+            patch("fastembed.TextEmbedding", return_value=model) as mock_te,
+        ):
+            await embedder.embed_texts(["hello"])
+
+        assert mock_te.call_args.kwargs["model_name"] == "intfloat/multilingual-e5-small"
+        assert mock_te.call_args.kwargs.get("specific_model_path") == "/pinned/e5-snapshot"
+
     def test_cpu_mem_arena_false_fails_closed_on_unknown_layout(self):
         with pytest.raises(EmbeddingError, match="refusing unsafe ONNX fallback"):
             _verify_cpu_mem_arena(object(), False)

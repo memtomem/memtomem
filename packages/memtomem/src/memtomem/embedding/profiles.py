@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from memtomem.embedding.aliases import resolve_embedder_id
 from memtomem.embedding.hub_telemetry import hub_telemetry_off
 
 if TYPE_CHECKING:
@@ -32,7 +33,9 @@ MINILM_REVISION = "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079"
 
 
 def is_e5(model: str) -> bool:
-    return model in ("multilingual-e5-small", E5_MODEL)
+    # Resolve the way the loader does, so every spelling FastEmbed would load
+    # as E5 gets the E5 profile, fingerprint and pinned snapshot (#2602).
+    return resolve_embedder_id(model) == E5_MODEL
 
 
 def is_minilm(model: str) -> bool:

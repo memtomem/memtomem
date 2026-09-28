@@ -6,7 +6,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from memtomem.config import EmbeddingConfig, Mem2MemConfig, IndexingConfig
+from memtomem.config import (
+    EmbeddingConfig,
+    IndexingConfig,
+    Mem2MemConfig,
+    embedding_policy_fingerprint,
+)
 from memtomem.embedding.profiles import E5_TOKENIZER
 from memtomem.indexing.watcher import FileWatcher, _STOP_SENTINEL
 
@@ -20,6 +25,42 @@ def test_default_e5_budget_contract(provider):
     assert config.indexing.chunk_tokenizer_path == E5_TOKENIZER
     assert config.indexing.chunk_input_prefix == "passage: "
     assert config.indexing.hard_max_chunk_tokens == 384
+
+
+# The E5 policy as stamped before #2602; the canonical spellings must keep it.
+_E5_POLICY = (
+    "onnx:v1:max_sequence_tokens=512"
+    ":e5=614241f622f53c4eeff9890bdc4f31cfecc418b3"
+    ":tokenizer=0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"
+    ":mean:l2:query-passage:v1"
+)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "multilingual-e5-small",
+        "intfloat/multilingual-e5-small",
+        "intfloat/Multilingual-E5-Small",
+        "MULTILINGUAL-E5-SMALL",
+    ],
+)
+def test_e5_profile_and_policy_in_any_case(model):
+    """FastEmbed loads any case of the E5 id, so every case gets its profile (#2602)."""
+    config = Mem2MemConfig(embedding=EmbeddingConfig(provider="onnx", model=model))
+    assert config.embedding.model == model
+    assert (config.embedding.dimension, config.embedding.max_sequence_tokens) == (384, 512)
+    assert (config.embedding.threads, config.embedding.onnx_batch_size) == (2, 4)
+    assert config.indexing.chunk_tokenizer_path == E5_TOKENIZER
+    assert embedding_policy_fingerprint(config.embedding) == _E5_POLICY
+
+
+def test_e5_policy_survives_a_post_construction_model_assignment():
+    """Sections do not validate assignment; revert-to-stored and web startup
+    assign ``model`` directly, so the policy must not depend on the validator."""
+    embedding = EmbeddingConfig(provider="onnx", model="multilingual-e5-small")
+    embedding.model = "intfloat/Multilingual-E5-Small"
+    assert embedding_policy_fingerprint(embedding) == _E5_POLICY
 
 
 def test_existing_bge_config_is_preserved():
