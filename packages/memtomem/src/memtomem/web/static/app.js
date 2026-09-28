@@ -91,6 +91,9 @@ const STATE = {
   sourcesBodyFilterQuery: '',
   sourcesBodyFilterPaths: null,
   sourcesBodyFilterPending: false,
+  // The content-matches lookup for ``sourcesBodyFilterQuery`` stopped at its
+  // limit (#2572). Set only from the answer for the current query.
+  sourcesBodyFilterTruncated: false,
   dedupScanActive: false,
   dedupAbortCtrl: null,
   lastTagsData: [],
@@ -2409,9 +2412,11 @@ window.addEventListener('langchange', () => {
   // cache is ready (and on every later toggle). No-op if no mismatch is
   // showing. See feedback_i18n_init_order_race.
   renderEmbMismatchBanner();
-  // The Sources partial-list note (#2566) is JS-owned text with no
+  // The partial-list notes (#2566, #2572) are JS-owned text with no
   // ``data-i18n``, so ``applyDOM`` leaves it in the old language.
   _retranslateSourcesPartialNote();
+  _retranslateSourcesBodyFilterNote();
+  _retranslateSourceFilterPartial();
   // NOTE: search-results / chunk-browser microcopy keyed in S1.3 is rendered
   // imperatively via t() and localizes on the next render, not on a live
   // language toggle. A safe live repaint needs per-surface state preservation
@@ -4304,6 +4309,8 @@ qs('d-tag-save-btn').addEventListener('click', async () => {
 let _sourcesBodyFilterTimer = null;
 let _sourcesBodyFilterAbort = null;
 let _sourcesBodyFilterSeq = 0;
+// The body filter asks for at most this many matching files.
+const _SOURCES_BODY_MATCH_LIMIT = 10000;
 
 function sortSources(sources) {
   const sorted = [...sources];
@@ -4362,6 +4369,7 @@ function _scheduleSourcesBodyFilter(opts = {}) {
     STATE.sourcesBodyFilterQuery = '';
     STATE.sourcesBodyFilterPaths = null;
     STATE.sourcesBodyFilterPending = false;
+    STATE.sourcesBodyFilterTruncated = false;
     if (_sourcesBodyFilterAbort) _sourcesBodyFilterAbort.abort();
     return;
   }
@@ -4369,6 +4377,7 @@ function _scheduleSourcesBodyFilter(opts = {}) {
   STATE.sourcesBodyFilterQuery = q;
   STATE.sourcesBodyFilterPaths = null;
   STATE.sourcesBodyFilterPending = true;
+  STATE.sourcesBodyFilterTruncated = false;
   const delay = opts.immediate ? 0 : 180;
   _sourcesBodyFilterTimer = setTimeout(() => _loadSourcesBodyMatches(q), delay);
 }
@@ -4380,7 +4389,7 @@ async function _loadSourcesBodyMatches(q) {
   try {
     const resp = await api(
       'GET',
-      `/api/sources/content-matches?q=${encodeURIComponent(q)}&limit=10000`,
+      `/api/sources/content-matches?q=${encodeURIComponent(q)}&limit=${_SOURCES_BODY_MATCH_LIMIT}`,
       undefined,
       { signal: _sourcesBodyFilterAbort.signal },
     );
@@ -4388,10 +4397,15 @@ async function _loadSourcesBodyMatches(q) {
     STATE.sourcesBodyFilterQuery = q;
     STATE.sourcesBodyFilterPaths = new Set((resp && resp.paths) || []);
     STATE.sourcesBodyFilterPending = false;
+    STATE.sourcesBodyFilterTruncated = !!(resp && resp.truncated === true);
     renderSourceTree(_getFilteredSorted());
   } catch (err) {
     if (err && err.name === 'AbortError') return;
+    // A superseded request failing late must not reset the current query's state.
+    if (seq !== _sourcesBodyFilterSeq) return;
     STATE.sourcesBodyFilterPending = false;
+    STATE.sourcesBodyFilterTruncated = false;
+    _renderSourcesBodyFilterNote();
     console.warn('[sources-filter] body match lookup failed', err);
   }
 }
@@ -4710,6 +4724,37 @@ function _sourcesOmitted(resp) {
   return typeof total === 'number' ? Math.max(0, total - rows) : 0;
 }
 
+// The body filter's lookup stops at ``_SOURCES_BODY_MATCH_LIMIT`` files, and
+// the route says when it did (#2572). Files whose text matches past that are
+// missing from the filtered tree, so say so while that filter is applied.
+// Separate from the partial-list note: both can hold at once.
+function _renderSourcesBodyFilterNote() {
+  const note = qs('sources-body-filter-note');
+  if (!note) return;
+  const input = qs('sources-filter');
+  const q = input ? input.value.trim().toLowerCase() : '';
+  const applied = q && STATE.sourcesBodyFilterQuery === q
+    && STATE.sourcesBodyFilterPaths instanceof Set;
+  if (applied && STATE.sourcesBodyFilterTruncated) {
+    note.dataset.limit = String(_SOURCES_BODY_MATCH_LIMIT);
+    _translateSourcesBodyFilterNote(note);
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+  }
+}
+
+function _translateSourcesBodyFilterNote(note) {
+  note.textContent = t('sources.body_filter_partial', {
+    limit: Number(note.dataset.limit).toLocaleString(),
+  });
+}
+
+function _retranslateSourcesBodyFilterNote() {
+  const note = qs('sources-body-filter-note');
+  if (note && !note.hidden && note.dataset.limit) _translateSourcesBodyFilterNote(note);
+}
+
 function renderSourceTree(sources) {
   const list = qs('sources-list');
 
@@ -4761,6 +4806,7 @@ function _renderSourcesStats(activeVendor, vendorOf) {
     statsEl.hidden = true;
   }
   _renderSourcesPartialNote();
+  _renderSourcesBodyFilterNote();
 }
 
 // The stats line above counts only loaded rows. When ``/api/sources`` left
@@ -8450,24 +8496,61 @@ qs('shortcuts-modal').addEventListener('click', e => {
 // Source Multi-Filter (F3)
 // ---------------------------------------------------------------------------
 
+// Several paths reload the list (Advanced toggle, data changes); only the
+// latest request may fill it, so an older answer cannot replace a newer one.
+let _sourceFilterSeq = 0;
+
 async function loadSourceFilter() {
   const sel = qs('source-filter');
   if (!sel) return;
+  const seq = ++_sourceFilterSeq;
   const selected = new Set(_getSelectedSourceFilters());
   try {
     const data = await api('GET', '/api/sources?limit=10000');
+    if (seq !== _sourceFilterSeq) return;
     const sources = Array.isArray(data.sources) ? data.sources : [];
     if (!sources.length) {
       sel.innerHTML = '<option value="" disabled>No sources indexed</option>';
+      _renderSourceFilterPartial(0, 0);
       return;
     }
     sel.innerHTML = sources.map(s =>
       `<option value="${escapeAttr(s.path)}" ${selected.has(s.path) ? 'selected' : ''}>${escapeHtml(basename(s.path))}</option>`
     ).join('');
+    _renderSourceFilterPartial(sources.length, _sourcesOmitted(data));
   } catch (e) {
+    if (seq !== _sourceFilterSeq) return;
     console.warn('[source-filter]', e);
     sel.innerHTML = '<option value="" disabled>Error loading sources</option>';
+    _renderSourceFilterPartial(0, 0);
   }
+}
+
+// ``/api/sources`` stops at 10,000 rows, so past that some sources cannot be
+// picked here (#2572). Numbers are kept on the element for ``langchange``.
+function _renderSourceFilterPartial(shown, omitted) {
+  const note = qs('source-filter-partial');
+  if (!note) return;
+  if (omitted > 0) {
+    note.dataset.shown = String(shown);
+    note.dataset.total = String(shown + omitted);
+    _translateSourceFilterPartial(note);
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+  }
+}
+
+function _translateSourceFilterPartial(note) {
+  note.textContent = t('search.source_filter_partial', {
+    shown: Number(note.dataset.shown).toLocaleString(),
+    total: Number(note.dataset.total).toLocaleString(),
+  });
+}
+
+function _retranslateSourceFilterPartial() {
+  const note = qs('source-filter-partial');
+  if (note && !note.hidden && note.dataset.total) _translateSourceFilterPartial(note);
 }
 
 qs('source-filter').addEventListener('change', () => {

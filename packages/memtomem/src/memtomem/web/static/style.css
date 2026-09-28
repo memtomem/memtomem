@@ -856,6 +856,9 @@ mark {
   font-size: 0.7rem; color: var(--muted);
   padding: 0 10px; margin: -4px 0 8px; text-align: center;
 }
+.source-filter-partial {
+  font-size: 0.7rem; color: var(--muted); margin: 4px 0 0;
+}
 
 /* Sources sort row */
 .sources-sort-row { display: flex; gap: 2px; margin-bottom: 6px; }

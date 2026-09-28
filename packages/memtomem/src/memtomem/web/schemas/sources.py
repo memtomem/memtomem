@@ -83,6 +83,9 @@ class SourcesResponse(BaseModel):
 class SourceContentMatchesResponse(BaseModel):
     query: str
     paths: list[str]
+    # The lookup stopped at ``limit`` with more candidates left, so matches
+    # past it may be missing from ``paths`` (#2572).
+    truncated: bool = False
 
 
 class RegenerateStartResponse(BaseModel):
