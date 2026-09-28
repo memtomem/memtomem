@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import TYPE_CHECKING, Any
+import sqlite3
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import click
 
-from memtomem.cli._errors import raise_cli_error
+from memtomem.cli._errors import raise_cli_error, to_cli_error
+from memtomem.errors import Mem2MemError
 
 if TYPE_CHECKING:
     from memtomem.server.tools.status_config import StatusLine
@@ -36,11 +38,56 @@ def status(fmt: str, *, as_json: bool = False) -> None:
         asyncio.run(_status(fmt))
     except click.ClickException as e:
         if fmt == "json":
-            click.echo(json.dumps({"error": e.format_message()}))
-            raise click.exceptions.Exit(1)
+            _exit_json_error(e)
         raise
     except Exception as e:
+        if fmt == "json" and _is_handled_failure(e):
+            _exit_json_error(to_cli_error(e))
         raise_cli_error(e)
+
+
+def _is_handled_failure(e: Exception) -> bool:
+    """Whether a JSON caller gets the ``{"error": ...}`` envelope for ``e``.
+
+    Classified failures — a storage open refused by the schema fence, a
+    locked or unreachable database — are exactly when a script needs the
+    structured answer (#2575). Everything else, including a SQL error in
+    memtomem's own queries, stays a plain Click error so a defect is not
+    dressed up as a handled failure.
+    """
+    if isinstance(e, Mem2MemError):
+        return True
+    if isinstance(e, sqlite3.OperationalError):
+        # SQLite raises OperationalError for environmental failures and for
+        # query defects (``no such column``, syntax errors: SQLITE_ERROR)
+        # alike, so decide by result code, never by message text — a defect
+        # can name a column ``readonly``. No code means no classification.
+        code = getattr(e, "sqlite_errorcode", None)
+        # Extended codes (SQLITE_IOERR_READ, ...) keep the primary code in
+        # the low byte.
+        return isinstance(code, int) and code & 0xFF in _ENVIRONMENTAL_SQLITE_CODES
+    return False
+
+
+# Primary SQLite result codes for failures of the database's surroundings
+# (another writer, permissions, the filesystem, the disk), as opposed to
+# memtomem's own SQL.
+_ENVIRONMENTAL_SQLITE_CODES = frozenset(
+    {
+        sqlite3.SQLITE_PERM,
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+        sqlite3.SQLITE_READONLY,
+        sqlite3.SQLITE_IOERR,
+        sqlite3.SQLITE_FULL,
+        sqlite3.SQLITE_CANTOPEN,
+    }
+)
+
+
+def _exit_json_error(e: click.ClickException) -> NoReturn:
+    click.echo(json.dumps({"error": e.format_message()}))
+    raise click.exceptions.Exit(1)
 
 
 async def _status(fmt: str) -> None:
