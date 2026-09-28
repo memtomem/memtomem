@@ -180,6 +180,12 @@ def _truncated_input_indexes(
     ]
 
 
+# FastEmbed raises when a model is registered twice, and both the embedder's
+# load (a worker thread) and the readiness probe (the web event loop, #2585)
+# register. Without the lock both can see the model missing and the loser raises.
+_CUSTOM_MODELS_LOCK = threading.Lock()
+
+
 def _register_custom_models_if_needed() -> None:
     """Register models that fastembed >=0.4 dropped from its built-in catalog.
 
@@ -188,6 +194,11 @@ def _register_custom_models_if_needed() -> None:
     it). Re-register it from the official HF ONNX export so existing installs
     keep working without changing the user-facing model name.
     """
+    with _CUSTOM_MODELS_LOCK:
+        _register_custom_models_locked()
+
+
+def _register_custom_models_locked() -> None:
     from fastembed import TextEmbedding  # type: ignore[import-untyped]
     from fastembed.common.model_description import (  # type: ignore[import-untyped]
         ModelSource,

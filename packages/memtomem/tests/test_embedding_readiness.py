@@ -124,6 +124,33 @@ def test_reranker_is_resolved_from_the_cross_encoder_catalog(tmp_path: Path) -> 
     assert model_snapshot_present(tmp_path, model)
 
 
+def test_registration_reads_and_adds_under_the_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The readiness poll and the embedder's first load (a worker thread) both
+    register the custom models, and FastEmbed raises on a second registration
+    (#2585 review). The catalog check and the adds must share one lock."""
+    fastembed = pytest.importorskip("fastembed")
+
+    from memtomem.embedding import onnx
+
+    held: list[bool] = []
+
+    class FakeTextEmbedding:
+        @staticmethod
+        def list_supported_models() -> list[dict[str, object]]:
+            held.append(onnx._CUSTOM_MODELS_LOCK.locked())
+            return []
+
+        @staticmethod
+        def add_custom_model(model: str, **_: object) -> None:
+            held.append(onnx._CUSTOM_MODELS_LOCK.locked())
+
+    monkeypatch.setattr(fastembed, "TextEmbedding", FakeTextEmbedding)
+    onnx._register_custom_models_if_needed()
+
+    assert held == [True, True, True]  # one catalog read, E5 and bge-m3 adds
+    assert not onnx._CUSTOM_MODELS_LOCK.locked()
+
+
 # -- completeness markers ----------------------------------------------------
 
 

@@ -18,7 +18,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   MiniLM checks only the revision memtomem pins. A snapshot also counts as
   complete only with every tokenizer file FastEmbed 0.8.0 opens
   (`tokenizer_config.json` and `special_tokens_map.json` were not checked), and
-  `bge-m3` needs its `model.onnx_data` before its first load.
+  `bge-m3` needs its `model.onnx_data` before its first load. Registering
+  memtomem's custom models is now serialized, so the readiness poll and a first
+  model load cannot both register one and fail the load.
 - **The default E5 model's first download now shows as a download, and a
   failed one as an error (#2586).** memtomem fetches the pinned
   `multilingual-e5-small` snapshot itself. That fetch ran before the embedder
