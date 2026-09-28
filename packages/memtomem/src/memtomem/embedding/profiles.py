@@ -38,6 +38,23 @@ def is_e5(model: str) -> bool:
     return resolve_embedder_id(model) == E5_MODEL
 
 
+def e5_contract_error(model: str, dimension: int, max_sequence_tokens: int) -> str | None:
+    """Why an ONNX E5 configuration cannot load, or ``None`` when it can.
+
+    Shared by ``EmbeddingConfig``'s validator and the loader. Sections do not
+    validate assignment, so a model assigned after construction reaches the
+    loader without the E5 defaults the validator would have applied.
+    """
+    if not is_e5(model):
+        return None
+    spelled = "" if model in ("multilingual-e5-small", E5_MODEL) else f" ({model!r} is {E5_MODEL})"
+    if dimension != 384:
+        return f"multilingual-e5-small requires dimension=384{spelled}"
+    if max_sequence_tokens != 512:
+        return f"multilingual-e5-small requires max_sequence_tokens=512{spelled}"
+    return None
+
+
 def is_minilm(model: str) -> bool:
     # FastEmbed matches model ids case-insensitively, so a differently cased
     # id must not slip past the pin to the repository head.

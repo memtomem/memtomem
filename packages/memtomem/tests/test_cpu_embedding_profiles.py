@@ -63,6 +63,11 @@ def test_e5_policy_survives_a_post_construction_model_assignment():
     assert embedding_policy_fingerprint(embedding) == _E5_POLICY
 
 
+def test_e5_contract_error_names_the_canonical_id_for_another_spelling():
+    with pytest.raises(ValueError, match=r"'intfloat/Multilingual-E5-Small' is intfloat/multi"):
+        EmbeddingConfig(provider="onnx", model="intfloat/Multilingual-E5-Small", dimension=1024)
+
+
 def test_existing_bge_config_is_preserved():
     config = Mem2MemConfig(
         embedding=EmbeddingConfig(provider="onnx", model="bge-m3", dimension=1024)
