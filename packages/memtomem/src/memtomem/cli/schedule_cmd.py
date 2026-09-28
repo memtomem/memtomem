@@ -56,7 +56,14 @@ def schedule_add(cron_expr: str, job_kind: str, params_json: str | None) -> None
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def schedule_list(as_json: bool) -> None:
     """List all registered schedules."""
-    rows = asyncio.run(_list_all())
+    from memtomem.cli._errors import exit_json_failure, raise_cli_error
+
+    try:
+        rows = asyncio.run(_list_all())
+    except Exception as e:
+        if as_json:
+            exit_json_failure(e, shape="error")
+        raise_cli_error(e)
 
     if as_json:
         click.echo(json.dumps(rows, indent=2, default=str))

@@ -17,6 +17,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   load, as the MiniLM pin does, and so do the earlier setup steps that could
   fail the same way: the FastEmbed import, custom model registration and
   quantized artifact verification.
+- **The other `--json` commands answer a storage failure in JSON too
+  (#2589).** Following `mm status` (#2575), `search`, `recall`, `index
+  --flush`/`--debounce-window`, `mem rescan`, `watchdog status`/`run`,
+  `session start`/`list`/`events`, `agent search`/`list`, `quality
+  cases`/`replay`, `pinned list` and `schedule list` print `{"error": "..."}`
+  and exit 1 when the database cannot be opened or SQLite reports a locked,
+  read-only or unreachable database or a full disk. `mm add --json` and
+  `mm purge --json` print `{"ok": false, "reason": "..."}`. A command's own
+  refusal in JSON mode, such as a rejected `--scope`, now uses the same
+  envelope on stdout instead of stderr; usage errors (exit 2) still print on
+  stderr. `index --flush`, `agent list`, `pinned list`,
+  `schedule list` and `purge` printed a traceback for a storage failure even
+  in text mode; they now print a plain error. A database found locked while
+  opening now gets the "another process is writing" hint instead of "run
+  `mm status`".
+- **An interrupted `mm index` exits 130, and a declined `mm add`
+  confirmation prints `Aborted!`.** The CLI's error wrapper caught Click's own
+  exit and abort signals and re-printed them as errors (`Error: 130` with
+  exit 1, `Error: Abort`); an `mm index` run that reported indexing errors
+  also gained a trailing `Error: 1`. The wrapper now lets them through.
 - **The warning logged when the file watcher stops mid-rescan no longer
   recommends a purge first (#2560).** When `stop()` interrupted a rescan
   that dropped events had triggered, the warning told you to run

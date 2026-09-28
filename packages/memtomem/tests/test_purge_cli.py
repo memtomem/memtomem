@@ -263,6 +263,9 @@ class TestIncompleteScan:
             "unclassified": 1,
             "unclassified_sample": [str(self.BAD)],
         }
+        # The refusal's own ``Exit(1)`` passes through the error wrapper; it is
+        # not re-worded as a second error (#2589).
+        assert not [ln for ln in result.stderr.splitlines() if ln.startswith("Error:")]
         comp.storage.delete_by_source.assert_not_called()
 
     @pytest.mark.parametrize("apply_flag", [[], ["--apply"]])
@@ -296,6 +299,7 @@ class TestIncompleteScan:
         assert str(self.BAD) in result.stderr
         assert "Classified matches: 2 chunks across 1 files" in result.stdout
         assert "No stored chunks match" not in result.output
+        assert not [ln for ln in result.stderr.splitlines() if ln.startswith("Error:")]
         comp.storage.delete_by_source.assert_not_called()
 
     def test_find_sources_matching_excluded_raises_rather_than_omitting(self, monkeypatch):

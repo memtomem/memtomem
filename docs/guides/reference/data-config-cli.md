@@ -273,6 +273,16 @@ is open: a locked, read-only or unreachable database, or a full disk. Anything
 else, including a SQL error in memtomem's queries after the database is open,
 exits non-zero with a plain error on stderr and no JSON.
 
+The other commands that open storage answer the same failures the same way
+under `--json` or `--format json`: `search`, `recall`, `index --flush` and
+`--debounce-window`, `mem rescan`, `watchdog status` and `run`, `session
+start`, `list` and `events`, `agent search` and `list`, `quality cases` and
+`replay`, `pinned list` and `schedule list`. `mm add --json` and
+`mm purge --json` answer `{"ok": false, "reason": "..."}` instead, the
+failure form of their `{"ok": true, ...}` acknowledgement. `mm quality
+experiment` keeps its own contract: an input, configuration or storage
+failure exits 2 with a message that names only the failure's type.
+
 `mm serve` runs the MCP server over stdio, for clients that launch the
 distribution's console script rather than a dedicated one. `memtomem-server` is
 the dedicated entry point and stays supported — it is the one to use for network

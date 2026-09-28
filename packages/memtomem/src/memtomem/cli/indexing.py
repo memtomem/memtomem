@@ -16,7 +16,7 @@ import click
 # by TestTheDeclaredClickFloorStillRuns.
 from click.core import ParameterSource
 
-from memtomem.cli._errors import raise_cli_error
+from memtomem.cli._errors import exit_json_failure, raise_cli_error
 
 
 @click.command()
@@ -178,6 +178,13 @@ def index(
             )
             raise click.exceptions.Exit(1) from exc
         raise click.ClickException(f"{exc}\n{remedy}") from exc
+    except Exception as e:
+        # A storage failure while draining (#2589); ``Exit`` from a drain
+        # that reported errors passes through ``exit_json_failure`` /
+        # ``raise_cli_error`` untouched.
+        if as_json:
+            exit_json_failure(e, shape="error")
+        raise_cli_error(e)
 
     _warn_on_implicit_path(path)
 

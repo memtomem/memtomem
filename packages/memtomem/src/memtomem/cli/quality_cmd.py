@@ -70,7 +70,7 @@ async def _promote(run_id: str, name: str | None, allow_unreplayable_filters: bo
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
 def cases(status: str | None, fmt: str) -> None:
     """List evaluation cases (newest first)."""
-    _run(_cases(status, fmt))
+    _run(_cases(status, fmt), as_json=fmt == "json")
 
 
 async def _cases(status: str | None, fmt: str) -> None:
@@ -183,7 +183,7 @@ def replay(case_selectors: tuple[str, ...], as_of: int | None, out: str | None, 
     Exit 2 if selected cases are all excluded; the report is still emitted.
     Partial evaluations and an empty case selection exit 0.
     """
-    _run(_replay(case_selectors, as_of, out, fmt))
+    _run(_replay(case_selectors, as_of, out, fmt), as_json=fmt == "json")
 
 
 async def _replay(
@@ -719,15 +719,19 @@ def _read_json_role(path: str, role: str) -> Any:
 # --------------------------------------------------------------------------- #
 
 
-def _run(coro) -> None:
-    """Run an async command body with the house error-normalization tail."""
-    from memtomem.cli._errors import raise_cli_error
+def _run(coro, *, as_json: bool = False) -> None:
+    """Run an async command body with the house error-normalization tail.
+
+    ``as_json`` puts a handled failure in the ``{"error": ...}`` envelope
+    (#2589); only the read commands with a JSON format pass it.
+    """
+    from memtomem.cli._errors import exit_json_failure, raise_cli_error
 
     try:
         asyncio.run(coro)
-    except click.ClickException:
-        raise
     except Exception as e:  # noqa: BLE001 — normalized to a CLI error
+        if as_json:
+            exit_json_failure(e, shape="error")
         raise_cli_error(e)
 
 

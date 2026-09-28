@@ -12,6 +12,8 @@ command line.
 
 from __future__ import annotations
 
+import json
+
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -124,11 +126,15 @@ class TestRecallScopeVocabulary:
         assert result.exit_code == 0
         assert "This query included: --scope '  user  '" in result.stderr
 
-    def test_json_output_is_refused_on_stderr_too(self, monkeypatch) -> None:
+    def test_json_output_refuses_with_the_error_envelope(self, monkeypatch) -> None:
         """Machine consumers pipe stdout; the refusal must not land there as
-        a bare ``[]`` that reads like a valid empty recall."""
+        a bare ``[]`` that reads like a valid empty recall. It is the
+        ``{"error": ...}`` envelope instead (#2589)."""
         result, _ = _invoke(monkeypatch, "--scope", "User", "--format", "json")
 
-        assert result.exit_code != 0
-        assert "is not a scope tier" in result.stderr
-        assert result.stdout.strip() == ""
+        assert result.exit_code == 1
+        assert result.stdout.startswith("{")
+        data = json.loads(result.stdout)
+        assert set(data) == {"error"}
+        assert "is not a scope tier" in data["error"]
+        assert result.stderr == ""

@@ -222,7 +222,14 @@ def list_agents(as_json: bool) -> None:
     Default output is a table grouped by ``agents`` and ``shared`` —
     machine-readable form via ``--json`` for use in scripts.
     """
-    asyncio.run(_run_list(as_json=as_json))
+    from memtomem.cli._errors import exit_json_failure, raise_cli_error
+
+    try:
+        asyncio.run(_run_list(as_json=as_json))
+    except Exception as e:
+        if as_json:
+            exit_json_failure(e, shape="error")
+        raise_cli_error(e)
 
 
 async def _run_list(as_json: bool) -> None:
@@ -540,7 +547,7 @@ def agent_search(
             validate_namespace(shared_namespace)
     except InvalidNameError as e:
         raise click.ClickException(str(e)) from e
-    from memtomem.cli._errors import raise_cli_error
+    from memtomem.cli._errors import exit_json_failure, raise_cli_error
 
     try:
         asyncio.run(
@@ -553,9 +560,9 @@ def agent_search(
                 fmt=fmt,
             )
         )
-    except click.ClickException:
-        raise
     except Exception as e:
+        if fmt == "json":
+            exit_json_failure(e, shape="error")
         raise_cli_error(e)
 
 

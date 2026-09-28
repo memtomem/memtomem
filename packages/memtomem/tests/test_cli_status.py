@@ -1208,10 +1208,11 @@ class TestStatusJson:
             # Subclass of SchemaDowngradeError with its own hint (#2564).
             (SchemaMigrationBlockedError("older servers are running"), "older memtomem server"),
             # The open-time lock shape: _classify_startup_error wraps the
-            # raw SQLite error before it leaves the storage layer.
+            # raw SQLite error before it leaves the storage layer. It gets the
+            # locked hint, not the generic "run `mm status`" one (#2589).
             (
                 StorageStartupError(reason_code="storage_locked", stage="open"),
-                "storage backend error",
+                "another process is writing",
             ),
             # The storage layer's catch-all: it wraps every open-time failure,
             # a defect included, so the envelope is deliberate here — text

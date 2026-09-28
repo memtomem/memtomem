@@ -8,6 +8,7 @@ catch-all sites used to emit.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from contextlib import asynccontextmanager
@@ -21,7 +22,12 @@ from click.testing import CliRunner
 
 import memtomem.cli
 from memtomem.cli import cli
-from memtomem.cli._errors import raise_cli_error, to_cli_error
+from memtomem.cli._errors import (
+    exit_json_failure,
+    is_handled_failure,
+    raise_cli_error,
+    to_cli_error,
+)
 from memtomem.errors import (
     ConfigError,
     EmbeddingDimensionMismatchError,
@@ -31,6 +37,7 @@ from memtomem.errors import (
     SchemaDowngradeError,
     SchemaMigrationBlockedError,
     StorageError,
+    StorageStartupError,
 )
 
 
@@ -50,6 +57,10 @@ _HINT_CASES = [
     (EmbeddingError("model not found"), "docs/guides/embeddings.md"),
     (ConfigError("bad json"), "mm config show"),
     (StorageError("disk I/O error"), "run `mm status`"),
+    # The open-time lock gets the lock hint, not "run `mm status`" — which
+    # would be the advice inside `mm status` itself (#2589).
+    (StorageStartupError(reason_code="storage_locked", stage="open"), "another process is writing"),
+    (StorageStartupError(reason_code="storage_unavailable", stage="open"), "run `mm status`"),
     # The engine's pre-write namespace prepass (issue #2005) raises
     # instead of returning per-file errors, so this is the only place
     # a retryable indexing failure keeps its classification on the
@@ -120,6 +131,124 @@ class TestToCliError:
         assert to_cli_error(original) is original
 
 
+def _operational_error(code: int | None) -> sqlite3.OperationalError:
+    exc = sqlite3.OperationalError("stamped")
+    if code is not None:
+        exc.sqlite_errorcode = code  # type: ignore[attr-defined]
+    return exc
+
+
+def _real_query_defect() -> sqlite3.OperationalError:
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("SELECT no_such_column")
+    except sqlite3.OperationalError as exc:
+        return exc
+    finally:
+        conn.close()
+    raise AssertionError("expected SQLITE_ERROR")
+
+
+class TestIsHandledFailure:
+    """The classification every ``--json`` envelope shares (#2575, #2589):
+    SQLite errors by result code, never by message text."""
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            sqlite3.SQLITE_PERM,
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_LOCKED,
+            sqlite3.SQLITE_READONLY,
+            sqlite3.SQLITE_IOERR,
+            sqlite3.SQLITE_FULL,
+            sqlite3.SQLITE_CANTOPEN,
+            # Extended code: the primary code sits in the low byte.
+            sqlite3.SQLITE_IOERR_READ,
+        ],
+    )
+    def test_environmental_codes_are_handled(self, code: int) -> None:
+        assert is_handled_failure(_operational_error(code))
+
+    def test_mem2mem_errors_are_handled(self) -> None:
+        assert is_handled_failure(StorageStartupError(reason_code="storage_locked", stage="open"))
+        assert is_handled_failure(ConfigError("bad json"))
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            _real_query_defect(),
+            _operational_error(sqlite3.SQLITE_ERROR),
+            # No code, even with environmental wording: no classification.
+            sqlite3.OperationalError("database is locked"),
+            sqlite3.ProgrammingError("closed database"),
+            RuntimeError("boom"),
+        ],
+    )
+    def test_everything_else_is_not(self, exc: Exception) -> None:
+        assert not is_handled_failure(exc)
+
+
+class TestExitJsonFailure:
+    """``exit_json_failure`` is ``raise_cli_error``'s ``--json`` twin (#2589)."""
+
+    @staticmethod
+    def _run(exc: Exception, shape: str) -> tuple[int, str]:
+        @click.command()
+        def cmd() -> None:
+            try:
+                raise exc
+            except Exception as e:
+                exit_json_failure(e, shape=shape)  # type: ignore[arg-type]
+
+        result = CliRunner().invoke(cmd, [])
+        return result.exit_code, result.stdout
+
+    def test_error_shape(self) -> None:
+        code, out = self._run(ConfigError("bad json"), "error")
+        assert code == 1
+        assert json.loads(out) == {"error": to_cli_error(ConfigError("bad json")).format_message()}
+
+    def test_ok_shape(self) -> None:
+        code, out = self._run(_operational_error(sqlite3.SQLITE_FULL), "ok")
+        assert code == 1
+        assert json.loads(out) == {"ok": False, "reason": "stamped"}
+
+    def test_click_exception_is_enveloped(self) -> None:
+        code, out = self._run(click.ClickException("refused"), "error")
+        assert code == 1
+        assert json.loads(out) == {"error": "refused"}
+
+    def test_usage_error_stays_plain(self) -> None:
+        """Like the usage errors Click raises while parsing, before any wrapper."""
+        code, out = self._run(click.UsageError("bad flag"), "error")
+        assert code == 2
+        assert out == ""
+
+    def test_unhandled_failure_stays_plain(self) -> None:
+        code, out = self._run(RuntimeError("boom"), "error")
+        assert code == 1
+        assert out == ""
+
+    @pytest.mark.parametrize("exc", [click.exceptions.Exit(130), click.Abort()])
+    def test_click_control_flow_passes_through(self, exc: Exception) -> None:
+        with pytest.raises(type(exc)) as info:
+            exit_json_failure(exc, shape="error")
+        assert info.value is exc
+
+
+class TestRaiseCliErrorControlFlow:
+    """``Exit`` and ``Abort`` are ``RuntimeError`` subclasses, so every
+    ``except Exception: raise_cli_error(e)`` wrapper caught them and printed
+    ``Error: 130`` / ``Error: Abort`` with exit 1 (#2589)."""
+
+    @pytest.mark.parametrize("exc", [click.exceptions.Exit(130), click.Abort()])
+    def test_passes_through_untouched(self, exc: Exception) -> None:
+        with pytest.raises(type(exc)) as info:
+            raise_cli_error(exc)
+        assert info.value is exc
+
+
 class TestNoBareCatchAllRegression:
     """#1617 sweep pin: no ``except Exception`` in ``cli/`` may re-wrap
     as a bare ``ClickException(str(e))`` — that's ``raise_cli_error``'s
@@ -167,3 +296,32 @@ class TestWrappedCommandIntegration:
         assert result.exit_code != 0
         assert "database is locked" in result.output
         assert "Hint: another process is writing" in result.output
+
+
+class TestClickControlFlowThroughCommands:
+    """The passthrough reaches the command wrappers that raise these (#2589)."""
+
+    def test_interrupted_index_exits_130(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        async def interrupted(*args: object, **kwargs: object) -> None:
+            raise click.exceptions.Exit(130)
+
+        monkeypatch.setattr("memtomem.cli.indexing._index", interrupted)
+
+        result = CliRunner().invoke(cli, ["index", str(tmp_path)])
+
+        assert result.exit_code == 130
+        assert "Error:" not in result.stderr
+
+    def test_declined_add_prints_aborted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def declined(*args: object, **kwargs: object) -> None:
+            raise click.Abort()
+
+        monkeypatch.setattr("memtomem.cli.memory._add", declined)
+
+        result = CliRunner().invoke(cli, ["add", "a note"])
+
+        assert result.exit_code == 1
+        assert "Aborted!" in result.stderr
+        assert "Error:" not in result.stderr
