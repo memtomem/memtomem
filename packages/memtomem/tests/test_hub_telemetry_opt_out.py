@@ -134,6 +134,24 @@ def test_snapshot_and_tokenizer_use_separate_windows(monkeypatch, tmp_path):
     assert constants.HF_HUB_DISABLE_TELEMETRY is False
 
 
+def test_minilm_snapshot_is_pinned_and_runs_with_telemetry_off(monkeypatch, tmp_path):
+    seen: list[tuple[tuple, dict, bool]] = []
+
+    def snapshot_download(*args, **kwargs):
+        seen.append((args, kwargs, constants.HF_HUB_DISABLE_TELEMETRY))
+        return str(tmp_path / "snapshot")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+    assert profiles.minilm_snapshot() == tmp_path / "snapshot"
+    ((args, kwargs, telemetry_off),) = seen
+    assert args == ("qdrant/all-MiniLM-L6-v2-onnx",)
+    assert kwargs["revision"] == "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079"
+    assert kwargs["cache_dir"] == str(tmp_path / "cache")
+    assert "model.onnx" in kwargs["allow_patterns"]
+    assert telemetry_off is True
+    assert constants.HF_HUB_DISABLE_TELEMETRY is False
+
+
 def test_nested_windows_restore_only_on_the_outer_exit():
     with hub_telemetry_off():
         with hub_telemetry_off():

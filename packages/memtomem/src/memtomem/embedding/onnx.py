@@ -17,7 +17,7 @@ from memtomem.embedding.aliases import resolve_embedder_id
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 from memtomem.embedding.hub_telemetry import hub_telemetry_off
 from memtomem.errors import EmbeddingError
-from memtomem.embedding.profiles import E5_MODEL, is_e5
+from memtomem.embedding.profiles import E5_MODEL, is_e5, is_minilm
 
 logger = logging.getLogger(__name__)
 
@@ -385,6 +385,13 @@ class OnnxEmbedder:
             self._loading = True
             self._load_error = None
             try:
+                if is_minilm(self._config.model) and self._config.onnx_variant == "fp32":
+                    from memtomem.embedding.profiles import minilm_snapshot
+
+                    # Inside the guarded load: FastEmbed used to download
+                    # MiniLM in its constructor below, so a cold fetch must
+                    # still read as loading and a failed one as a load error.
+                    model_options["specific_model_path"] = str(minilm_snapshot())
                 # A cache miss downloads from the Hub inside this constructor (#2552).
                 with hub_telemetry_off():
                     model = TextEmbedding(

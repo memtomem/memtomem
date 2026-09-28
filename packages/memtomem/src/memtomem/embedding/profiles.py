@@ -21,9 +21,22 @@ E5_TOKENIZER_SHA256 = "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14e
 E5_MODEL_SHA256 = "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665"
 CPU_VARIANTS = ("fp32", "int8-arm64", "int8-avx2", "int8-avx512", "int8-avx512-vnni")
 
+MINILM_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# FastEmbed downloads this model from ``MINILM_REPO`` at its current head.
+# The revision after this one raised the tokenizer's truncation to 256 tokens
+# but kept ``padding: Fixed(128)``, so a batch whose texts no longer share one
+# length (any over 128 tokens) comes out ragged and fails inside FastEmbed.
+# Pinning keeps truncation at 128, as MiniLM behaved before that revision.
+MINILM_REPO = "qdrant/all-MiniLM-L6-v2-onnx"
+MINILM_REVISION = "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079"
+
 
 def is_e5(model: str) -> bool:
     return model in ("multilingual-e5-small", E5_MODEL)
+
+
+def is_minilm(model: str) -> bool:
+    return model in ("all-MiniLM-L6-v2", MINILM_MODEL)
 
 
 @lru_cache(maxsize=8)
@@ -93,6 +106,36 @@ def e5_snapshot() -> Path:
     stat = model.stat()
     _verify_file(model, stat.st_mtime_ns, stat.st_size, E5_MODEL_SHA256)
     return snapshot
+
+
+def minilm_snapshot() -> Path:
+    """Download (or reuse) the pinned MiniLM files FastEmbed loads."""
+    try:
+        from huggingface_hub import snapshot_download
+    except ModuleNotFoundError as exc:
+        if exc.name != "huggingface_hub":
+            raise
+        from memtomem.embedding._dependencies import missing_onnx_dependency
+
+        raise missing_onnx_dependency(exc.name) from exc
+
+    from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+
+    with hub_telemetry_off():
+        return Path(
+            snapshot_download(
+                MINILM_REPO,
+                revision=MINILM_REVISION,
+                cache_dir=str(resolve_fastembed_cache_dir()),
+                allow_patterns=[
+                    "model.onnx",
+                    "config.json",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "special_tokens_map.json",
+                ],
+            )
+        )
 
 
 def _e5_tokenizer_path(config: Mem2MemConfig) -> str:
