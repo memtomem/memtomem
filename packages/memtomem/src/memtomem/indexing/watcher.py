@@ -657,8 +657,10 @@ class FileWatcher:
             if unfinished:
                 logger.warning(
                     "File watcher stopped before rescanning %s after dropped events; "
-                    "run `mm index <root>` on each to pick up changes it missed, "
-                    "and `mm gc orphan-sources --apply` to remove files deleted meanwhile",
+                    "run `mm index <root>` on each to pick up changes it missed. "
+                    "A file deleted meanwhile is not purged while its path stays missing: "
+                    "review such files with `mm gc orphan-sources`, and add `--apply` only "
+                    "once the deletions are confirmed",
                     ", ".join(str(r) for r in unfinished),
                 )
             if self._observer:

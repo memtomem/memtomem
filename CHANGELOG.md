@@ -17,6 +17,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   load, as the MiniLM pin does, and so do the earlier setup steps that could
   fail the same way: the FastEmbed import, custom model registration and
   quantized artifact verification.
+- **The warning logged when the file watcher stops mid-rescan no longer
+  recommends a purge first (#2560).** When `stop()` interrupted a rescan
+  that dropped events had triggered, the warning told you to run
+  `mm gc orphan-sources --apply` for files deleted meanwhile. That purges held
+  chunks permanently, including those of a file that is only temporarily
+  unavailable. The warning now says such a file is not purged while its path
+  stays missing, and points to the `mm gc orphan-sources` preview first, with
+  `--apply` only once the deletions are confirmed.
+- **A search containing an uppercase `AND`, `OR` or `NOT` no longer loses
+  its keyword results (#2576).** FTS5 reads these three words as operators
+  when they are uppercase. The query builder appended its prefix wildcard to
+  them as to any word, and FTS5 rejected `NOT*` as a syntax error. The whole
+  BM25 leg then failed, and the search returned semantic results only, with
+  the "keyword index unavailable" note. The words are now quoted, so they are
+  searched as ordinary terms and match like their lowercase spelling. This
+  applies to both the `unicode61` and `kiwipiepy` tokenizers.
 - **`mm status --json` now answers in JSON when the database cannot be opened
   (#2575).** Only a failure that was already a CLI error, such as a missing
   config, reached the `{"error": ...}` output. A storage failure printed a plain

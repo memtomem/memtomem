@@ -288,6 +288,13 @@ async def test_stop_names_a_rescan_it_cancelled(
         r.getMessage() for r in caplog.records if "stopped before rescanning" in r.getMessage()
     ]
     assert len(stopped) == 1 and str(memory_dir) in stopped[0]
+    # The purge is a separate, confirmed step since #2498 (#2560): the warning
+    # leads with the dry run and never offers ``--apply`` as the first command.
+    message = stopped[0]
+    assert "`mm gc orphan-sources`" in message
+    assert "`mm gc orphan-sources --apply`" not in message
+    if "--apply" in message:
+        assert message.index("`mm gc orphan-sources`") < message.index("--apply")
 
 
 async def test_drop_during_a_walk_marks_the_root_again(components, memory_dir):
