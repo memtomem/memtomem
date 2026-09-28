@@ -567,9 +567,11 @@ def _stop_process_snapshot(
             # ``web.json`` is left in place. Once ``web.pid`` is gone a
             # replacement Web UI can lock a fresh one and write its own
             # sidecar, and no probe here can prove the file on disk is the
-            # retired one's (#2587). Leaving it costs nothing: every reader
-            # trusts it only beside a live ``web.pid`` holder, and the next
-            # Web UI overwrites it as soon as it takes the lock. A graceful
+            # retired one's (#2587). A leftover is the state a killed Web UI
+            # already leaves: readers use it only beside a live ``web.pid``
+            # holder, and the next Web UI overwrites it right after taking the
+            # lock; until it has, ``mm web stop`` refuses rather than signal a
+            # leftover's pid (cli/web.py:_web_stop). A graceful
             # stop has already removed it in ``cli/web.py:_cleanup_web_files``.
             if recheck.alive:
                 remaining_web = recheck

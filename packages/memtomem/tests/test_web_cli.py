@@ -582,6 +582,37 @@ def test_web_stop_signals_verified_pid_and_removes_metadata(
     assert not info_file.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX reads the pid from the locked file")
+def test_web_stop_does_not_signal_a_leftover_sidecar_pid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#2587: a Web UI that has locked ``web.pid`` but not yet written its pid,
+    beside a killed predecessor's ``web.json``. That pid may be reused."""
+    import portalocker
+
+    runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
+    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.chmod(0o700)
+    pid_file = runtime_dir / "web.pid"
+    pid_file.write_text("", encoding="utf-8")
+    (runtime_dir / "web.json").write_text('{"pid": 24680, "port": 18080}\n', encoding="utf-8")
+
+    holder = pid_file.open("rb+")
+    portalocker.lock(holder, portalocker.LOCK_EX | portalocker.LOCK_NB)
+    signals: list[int] = []
+    monkeypatch.setattr(web_cmd.os, "kill", lambda pid, _sig: signals.append(pid))
+    try:
+        result = CliRunner().invoke(web, ["stop"])
+    finally:
+        with contextlib.suppress(Exception):
+            portalocker.unlock(holder)
+        holder.close()
+
+    assert signals == []
+    assert result.exit_code != 0
+    assert "No signal was sent" in result.output
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="the SIGKILL escalation is POSIX-only")
 @pytest.mark.parametrize(
     ("probe", "expect_sigkill"),

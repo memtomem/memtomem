@@ -13,10 +13,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   so upgrade removed the new Web UI's file instead. That file is what ties the
   Web UI to its instance registration (#2574), so until the new Web UI restarted,
   `mm upgrade` refused with "has no authoritative pid lock" and `mem_status`
-  counted it as a concurrent server. Upgrade now leaves `web.json` in place. A
-  leftover one is harmless: memtomem reads it only while a Web UI holds
-  `web.pid`, and the next Web UI overwrites it on start. `mm upgrade --json`
-  no longer lists `web.json` under `removed`.
+  counted it as a concurrent server. Upgrade now leaves `web.json` in place,
+  the same leftover a killed Web UI already leaves. memtomem reads it only while
+  a Web UI holds `web.pid`, and the next Web UI overwrites it on start.
+  `mm upgrade --json` no longer lists `web.json` under `removed`. On macOS and
+  Linux, `mm web stop` no longer signals the pid in `web.json` when the running
+  Web UI has locked `web.pid` but not yet written its pid there: that sidecar
+  can be a killed Web UI's, and its pid may belong to another process by then.
+  It now says no signal was sent and asks to retry.
 - **The Web UI's model readiness finds models FastEmbed caches under another
   repository (#2585).** The probe looked for `models--<model id>`, but FastEmbed
   downloads some models from a mirror and caches them under that name.
