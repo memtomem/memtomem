@@ -33,6 +33,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `Error: ...` with exit 1. `mm pinned compose`, whose only output is JSON,
   prints `{"error": "..."}` instead. `mm watchdog status --json` prints `{}`
   when there is no health data yet, instead of a sentence.
+- **`mm upgrade` no longer deletes `web.json` after stopping the Web UI
+  (#2587).** Upgrade removed a leftover `web.json` once a re-probe found no
+  `web.pid` holder. A new Web UI could start between that probe and the delete,
+  so upgrade removed the new Web UI's file instead. That file is what ties the
+  Web UI to its instance registration (#2574), so until the new Web UI restarted,
+  `mm upgrade` refused with "has no authoritative pid lock" and `mem_status`
+  counted it as a concurrent server. Upgrade now leaves `web.json` in place,
+  the same leftover a killed Web UI already leaves. memtomem reads it only while
+  a Web UI holds `web.pid`, and the next Web UI overwrites it on start.
+  `mm upgrade --json` no longer lists `web.json` under `removed`. On macOS and
+  Linux, `mm web stop` no longer signals the pid in `web.json` when the running
+  Web UI has locked `web.pid` but not yet written its pid there: that sidecar
+  can be a killed Web UI's, and its pid may belong to another process by then.
+  It now says no signal was sent and asks to retry.
 - **The Web UI's model readiness finds models FastEmbed caches under another
   repository (#2585).** The probe looked for `models--<model id>`, but FastEmbed
   downloads some models from a mirror and caches them under that name.

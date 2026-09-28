@@ -606,6 +606,16 @@ def _web_stop() -> None:
         raise click.ClickException(
             f"Web UI appears to be running, but the pid is unreadable. Inspect {_web_pid_file()}."
         )
+    if os.name != "nt" and state.pid is None:
+        # POSIX reads the pid from the locked file itself. A held lock with no
+        # pid in it is a Web UI that has locked but not yet written its pid, and
+        # ``web.json`` may still be a killed predecessor's (#2587): its pid
+        # could now be anyone's, so do not signal it. (Windows cannot read a
+        # locked pid file and relies on the sidecar the lock holder wrote.)
+        raise click.ClickException(
+            "Web UI holds its pid file but has not recorded its pid yet (it may be "
+            "starting). No signal was sent; retry in a moment."
+        )
 
     if os.name == "nt":
         try:

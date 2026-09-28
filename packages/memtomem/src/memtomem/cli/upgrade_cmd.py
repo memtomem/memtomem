@@ -504,26 +504,6 @@ def _stop_server(
     return killed, removed, recheck, None
 
 
-def _cleanup_web_sidecar(web_state: ServerState, removed: list[Path]) -> None:
-    """Remove stale ``web.json`` without touching a replacement writer's file."""
-    if web_state.pid_file is None or web_state.pid_file not in removed:
-        return
-
-    from memtomem.cli.web import _WEB_INFO_NAME
-
-    info_file = web_state.pid_file.with_name(_WEB_INFO_NAME)
-    if not info_file.exists():
-        return
-    recheck = probe_pid_file(web_state.pid_file)
-    if recheck.alive:
-        return
-    try:
-        info_file.unlink()
-        removed.append(info_file)
-    except OSError:
-        pass
-
-
 def _stop_process_snapshot(
     server_states: list[ServerState],
     web_state: ServerState,
@@ -584,7 +564,15 @@ def _stop_process_snapshot(
             removed.extend(cleaned)
             if error is not None:
                 problems.append(error)
-            _cleanup_web_sidecar(web_state, removed)
+            # ``web.json`` is left in place. Once ``web.pid`` is gone a
+            # replacement Web UI can lock a fresh one and write its own
+            # sidecar, and no probe here can prove the file on disk is the
+            # retired one's (#2587). A leftover is the state a killed Web UI
+            # already leaves: readers use it only beside a live ``web.pid``
+            # holder, and the next Web UI overwrites it right after taking the
+            # lock; until it has, ``mm web stop`` refuses rather than signal a
+            # leftover's pid (cli/web.py:_web_stop). A graceful
+            # stop has already removed it in ``cli/web.py:_cleanup_web_files``.
             if recheck.alive:
                 remaining_web = recheck
     return killed, removed, problems, remaining_servers, remaining_web
