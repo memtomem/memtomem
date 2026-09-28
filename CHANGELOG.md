@@ -7,6 +7,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The warning logged when the file watcher stops mid-rescan no longer
+  recommends a purge first (#2560).** When `stop()` interrupted a rescan
+  that dropped events had triggered, the warning told you to run
+  `mm gc orphan-sources --apply` for files deleted meanwhile. That purges held
+  chunks permanently, including those of a file that is only temporarily
+  unavailable. The warning now says such a file is not purged while its path
+  stays missing, and points to the `mm gc orphan-sources` preview first, with
+  `--apply` only once the deletions are confirmed.
 - **The `all-MiniLM-L6-v2` embedder is pinned to a known-good model revision.**
   FastEmbed downloads this model from `qdrant/all-MiniLM-L6-v2-onnx` at the
   repository's latest revision. The newest revision raised the tokenizer's
