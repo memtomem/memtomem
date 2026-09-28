@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=147" />
+  <link rel="stylesheet" href="/style.css?v=148" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -281,6 +281,7 @@
         <select id="source-filter" multiple size="4" title="Ctrl/Cmd+click for multi-select">
           <option value="" disabled>Loading…</option>
         </select>
+        <p id="source-filter-partial" class="source-filter-partial" hidden></p>
       </div>
       <div class="adv-row">
         <label class="adv-label">Min Relevance: <span id="score-val">0.0</span> <span class="help-tip" data-help="Minimum normalized relevance (0–1). Reranked results use rank percentile so raw negative model scores do not hide matches." tabindex="0" role="img" aria-label="Minimum normalized relevance (0–1). Reranked results use rank percentile so raw negative model scores do not hide matches.">i</span></label>
@@ -512,6 +513,7 @@
           </div>
           <div id="sources-stats" class="sources-stats" hidden></div>
           <div id="sources-partial-note" class="sources-partial-note" hidden></div>
+          <div id="sources-body-filter-note" class="sources-partial-note" hidden></div>
           <div id="sources-language-drift" class="source-language-drift-banner" hidden></div>
           <div id="sources-list">
             <div class="loading-panel"><div class="spinner-panel"></div></div>
@@ -1931,7 +1933,7 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=7"></script>
-  <script src="/app.js?v=178"></script>
+  <script src="/app.js?v=179"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=28"></script>
   <script src="/sources-memory-dirs.js?v=23"></script>

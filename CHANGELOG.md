@@ -33,6 +33,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `Error: ...` with exit 1. `mm pinned compose`, whose only output is JSON,
   prints `{"error": "..."}` instead. `mm watchdog status --json` prints `{}`
   when there is no health data yet, instead of a sentence.
+- **The Search source filter and the Sources body filter say when they stop at
+  10,000 (#2572).** The Search tab's source multi-select lists at most 10,000
+  sources and ignored `total`, so sources past the cut could not be picked and
+  nothing said so. It now shows "Listing N of M sources" under the control. The
+  Sources tab's body filter asks `/api/sources/content-matches` for at most
+  10,000 files and silently dropped matches past it. The route now returns
+  `truncated: true` when it stopped at the limit, and the filter shows a note
+  while it applies. The search runs before held and pending sources are hidden,
+  so the flag means matches *may* be missing. `truncated` is a new response
+  field with default `false`. The source filter also ignores an older reload's
+  answer that arrives after a newer one.
 - **A late Home dashboard load no longer changes the Sources tree (#2571).**
   Home and the Sources tab shared one source list and one memory-dir status
   map. Home's list lists held and pending sources, which the Sources list
