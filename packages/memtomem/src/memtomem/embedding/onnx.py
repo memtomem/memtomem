@@ -326,71 +326,78 @@ class OnnxEmbedder:
                 # loser sees a consistent state and no orphaned ORT session
                 # survives close (#1792 review, #206).
                 raise EmbeddingError("ONNX embedder is closed")
-            try:
-                from fastembed import TextEmbedding  # type: ignore[import-untyped]
-            except ImportError as exc:
-                raise EmbeddingError(
-                    "fastembed is required for the ONNX embedding provider. "
-                    "Install it with: pip install memtomem[onnx]"
-                ) from exc
-
-            _register_custom_models_if_needed()
-            model_id = resolve_embedder_id(self._config.model)
-            model_options: dict[str, Any] = {}
-            if is_e5(self._config.model) and self._config.onnx_variant == "fp32":
-                from memtomem.embedding.profiles import e5_snapshot
-
-                model_options["specific_model_path"] = str(e5_snapshot())
-            if self._config.onnx_variant != "fp32":
-                from fastembed.common.model_description import ModelSource, PoolingType
-                from memtomem.embedding.profiles import artifact_manifest
-
-                artifact_manifest(
-                    self._config.onnx_artifact_path, model_id, self._config.onnx_variant
-                )
-                custom_id = model_id + ":" + self._config.onnx_variant
-                if custom_id not in {m["model"] for m in TextEmbedding.list_supported_models()}:
-                    TextEmbedding.add_custom_model(
-                        model=custom_id,
-                        pooling=PoolingType.MEAN if is_e5(self._config.model) else PoolingType.CLS,
-                        normalization=True,
-                        sources=ModelSource(hf=model_id),
-                        dim=self.dimension,
-                        model_file="model.onnx",
-                    )
-                model_id = custom_id
-                model_options["specific_model_path"] = str(
-                    Path(self._config.onnx_artifact_path).expanduser().resolve()
-                )
-                # INT8 artifacts are exported and checksum-gated per CPU
-                # architecture (``artifact_manifest`` refuses a variant that
-                # does not match ``platform.machine()``), so handing one to a
-                # GPU provider is never right. FP32 deliberately does *not*
-                # pin a provider: fastembed's ``_load_onnx_model`` only reaches
-                # its ``cuda == Device.AUTO and cuda_available`` branch when
-                # ``providers`` is None, so passing one here would silently
-                # drop an existing onnxruntime-gpu install back to CPU.
-                model_options["providers"] = ["CPUExecutionProvider"]
-            # threads=0 → leave ORT default (all physical cores); threads>0 caps
-            # the intra-op pool so seeding doesn't saturate the machine.
-            threads = self._config.threads or None
-            cache_dir = resolve_fastembed_cache_dir()
-            logger.info(
-                "Loading ONNX embedding model %s (threads=%s, cpu_mem_arena=%s, cache_dir=%s) …",
-                model_id,
-                threads if threads is not None else "ORT default",
-                self._config.onnx_cpu_mem_arena,
-                cache_dir,
-            )
+            # Everything that can fail on the way to a model is inside the
+            # guarded load, so readiness reports it as an error rather than
+            # ``cold`` (#2586): the fastembed import, custom registration,
+            # artifact verification and the pinned snapshot fetches.
             self._loading = True
             self._load_error = None
             try:
+                try:
+                    from fastembed import TextEmbedding  # type: ignore[import-untyped]
+                except ImportError as exc:
+                    raise EmbeddingError(
+                        "fastembed is required for the ONNX embedding provider. "
+                        "Install it with: pip install memtomem[onnx]"
+                    ) from exc
+
+                _register_custom_models_if_needed()
+                model_id = resolve_embedder_id(self._config.model)
+                model_options: dict[str, Any] = {}
+                if self._config.onnx_variant != "fp32":
+                    from fastembed.common.model_description import ModelSource, PoolingType
+                    from memtomem.embedding.profiles import artifact_manifest
+
+                    artifact_manifest(
+                        self._config.onnx_artifact_path, model_id, self._config.onnx_variant
+                    )
+                    custom_id = model_id + ":" + self._config.onnx_variant
+                    if custom_id not in {m["model"] for m in TextEmbedding.list_supported_models()}:
+                        TextEmbedding.add_custom_model(
+                            model=custom_id,
+                            pooling=PoolingType.MEAN
+                            if is_e5(self._config.model)
+                            else PoolingType.CLS,
+                            normalization=True,
+                            sources=ModelSource(hf=model_id),
+                            dim=self.dimension,
+                            model_file="model.onnx",
+                        )
+                    model_id = custom_id
+                    model_options["specific_model_path"] = str(
+                        Path(self._config.onnx_artifact_path).expanduser().resolve()
+                    )
+                    # INT8 artifacts are exported and checksum-gated per CPU
+                    # architecture (``artifact_manifest`` refuses a variant that
+                    # does not match ``platform.machine()``), so handing one to a
+                    # GPU provider is never right. FP32 deliberately does *not*
+                    # pin a provider: fastembed's ``_load_onnx_model`` only reaches
+                    # its ``cuda == Device.AUTO and cuda_available`` branch when
+                    # ``providers`` is None, so passing one here would silently
+                    # drop an existing onnxruntime-gpu install back to CPU.
+                    model_options["providers"] = ["CPUExecutionProvider"]
+                # threads=0 → leave ORT default (all physical cores); threads>0 caps
+                # the intra-op pool so seeding doesn't saturate the machine.
+                threads = self._config.threads or None
+                cache_dir = resolve_fastembed_cache_dir()
+                logger.info(
+                    "Loading ONNX embedding model %s (threads=%s, cpu_mem_arena=%s, cache_dir=%s) …",
+                    model_id,
+                    threads if threads is not None else "ORT default",
+                    self._config.onnx_cpu_mem_arena,
+                    cache_dir,
+                )
+                # The pinned fetches run inside the guarded load: FastEmbed
+                # used to download in its constructor below, so a cold fetch
+                # must still read as loading and a failed one as a load error
+                # (#2586 for E5, #2584 for MiniLM).
+                if is_e5(self._config.model) and self._config.onnx_variant == "fp32":
+                    from memtomem.embedding.profiles import e5_snapshot
+
+                    model_options["specific_model_path"] = str(e5_snapshot())
                 if is_minilm(self._config.model) and self._config.onnx_variant == "fp32":
                     from memtomem.embedding.profiles import minilm_snapshot
 
-                    # Inside the guarded load: FastEmbed used to download
-                    # MiniLM in its constructor below, so a cold fetch must
-                    # still read as loading and a failed one as a load error.
                     model_options["specific_model_path"] = str(minilm_snapshot())
                 # A cache miss downloads from the Hub inside this constructor (#2552).
                 with hub_telemetry_off():
