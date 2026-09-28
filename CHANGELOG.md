@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm upgrade` no longer deletes `web.json` after stopping the Web UI
+  (#2587).** Upgrade removed a leftover `web.json` once a re-probe found no
+  `web.pid` holder. A new Web UI could start between that probe and the delete,
+  so upgrade removed the new Web UI's file instead. That file is what ties the
+  Web UI to its instance registration (#2574), so until the new Web UI restarted,
+  `mm upgrade` refused with "has no authoritative pid lock" and `mem_status`
+  counted it as a concurrent server. Upgrade now leaves `web.json` in place. A
+  leftover one is harmless: memtomem reads it only while a Web UI holds
+  `web.pid`, and the next Web UI overwrites it on start. `mm upgrade --json`
+  no longer lists `web.json` under `removed`.
 - **The Web UI's model readiness finds models FastEmbed caches under another
   repository (#2585).** The probe looked for `models--<model id>`, but FastEmbed
   downloads some models from a mirror and caches them under that name.

@@ -1205,8 +1205,9 @@ def test_running_web_ui_is_stopped(monkeypatch, tmp_path, fake_uv, force_tty):
     assert "Stop running web UI (pid 4242" in result.output
     assert (4242, upgrade_cmd.signal.SIGTERM) in sent
     assert not web_pid_file.exists()
-    # SIGKILL-path leftover metadata sidecar is swept alongside the pid file.
-    assert not web_info_file.exists()
+    # Upgrade never deletes ``web.json`` (#2587): it cannot tell the retired
+    # sidecar from a replacement's, and a stale one is inert.
+    assert web_info_file.exists()
     assert "Stopped pid 4242." in result.output
     assert calls  # uv was invoked
 
@@ -1265,16 +1266,22 @@ def test_dry_run_json_includes_web(monkeypatch, tmp_path, fake_uv, force_tty):
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: exercises the sidecar respawn-detection path; Windows skips kill entirely",
+    reason="POSIX-only: exercises the web stop path; Windows skips kill entirely",
 )
-def test_web_sidecar_kept_if_respawned_after_pid_cleanup(monkeypatch, tmp_path, fake_uv, force_tty):
-    """A web UI respawned between the pid-file cleanup and the sidecar sweep
-    must keep its fresh ``web.json``."""
+def test_replacement_sidecar_written_after_the_stop_is_kept(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    """#2587: a Web UI that starts once the retired one's ``web.pid`` is gone
+    writes its own ``web.json``; upgrade must leave that file alone.
+
+    Every liveness re-probe reports no holder and then lets the replacement
+    write its sidecar, so a probe-then-unlink sweep would delete it."""
     _calls, _configure = fake_uv
     web_pid_file = tmp_path / "web.pid"
     web_pid_file.write_text("4242\n8080\n2026-07-03T00:00:00+00:00\n")
     web_info_file = tmp_path / "web.json"
-    web_info_file.write_text('{"pid": 99999, "port": 8080}')
+    web_info_file.write_text('{"pid": 4242, "port": 8080, "procid": "0000aaaa"}\n')
+    replacement = '{"pid": 99999, "port": 8080, "procid": "1111bbbb"}\n'
     _patch_liveness(
         monkeypatch,
         _DEAD,
@@ -1283,20 +1290,18 @@ def test_web_sidecar_kept_if_respawned_after_pid_cleanup(monkeypatch, tmp_path, 
     monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: None)
     monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda pid: "dead")
 
-    # First re-probe (pid-file unlink guard in _stop_server) sees no holder;
-    # second re-probe (sidecar sweep) sees the respawned web UI.
-    probes = iter(
-        [
-            ServerState(alive=False, pid=None, pid_file=web_pid_file),
-            ServerState(alive=True, pid=99999, pid_file=web_pid_file),
-        ]
-    )
-    monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda p: next(probes))
+    def probe_then_replacement_writes(path):
+        web_info_file.write_text(replacement)
+        return ServerState(alive=False, pid=None, pid_file=path)
 
-    result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "0.1"])
+    monkeypatch.setattr(upgrade_cmd, "probe_pid_file", probe_then_replacement_writes)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "0.1", "--json"])
     assert result.exit_code == 0, result.output
     assert not web_pid_file.exists()
-    assert web_info_file.exists()
+    assert web_info_file.read_text() == replacement
+    payload = json.loads(result.stdout)
+    assert str(web_info_file) not in payload["removed"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX Web UI generation recycle")
