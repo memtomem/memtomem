@@ -48,7 +48,12 @@ def schedule_add(cron_expr: str, job_kind: str, params_json: str | None) -> None
     except Exception as exc:
         raise click.ClickException(f"invalid params: {exc}") from exc
 
-    sched_id = asyncio.run(_insert(cron_expr, job_kind, params))
+    from memtomem.cli._errors import raise_cli_error
+
+    try:
+        sched_id = asyncio.run(_insert(cron_expr, job_kind, params))
+    except Exception as e:
+        raise_cli_error(e)
     click.echo(f"Registered {sched_id}  {cron_expr}  {job_kind}")
 
 
@@ -90,7 +95,12 @@ def schedule_list(as_json: bool) -> None:
 @click.argument("sched_id")
 def schedule_run_now(sched_id: str) -> None:
     """Run a scheduled job synchronously (out-of-band)."""
-    result = asyncio.run(_run_now(sched_id))
+    from memtomem.cli._errors import raise_cli_error
+
+    try:
+        result = asyncio.run(_run_now(sched_id))
+    except Exception as e:
+        raise_cli_error(e)
     if not result["ok"]:
         raise click.ClickException(result["reason"])
     click.echo(f"OK  {sched_id}  {json.dumps(result.get('result', {}))}")
@@ -100,7 +110,12 @@ def schedule_run_now(sched_id: str) -> None:
 @click.argument("sched_id")
 def schedule_delete(sched_id: str) -> None:
     """Delete a schedule by id."""
-    deleted = asyncio.run(_delete(sched_id))
+    from memtomem.cli._errors import raise_cli_error
+
+    try:
+        deleted = asyncio.run(_delete(sched_id))
+    except Exception as e:
+        raise_cli_error(e)
     if not deleted:
         raise click.ClickException(f"schedule {sched_id!r} not found")
     click.echo(f"Deleted {sched_id}")

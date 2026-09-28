@@ -306,7 +306,10 @@ consumers to check by key rather than by a single boolean. An explicit
 The text-path behavior is unchanged by `--json`. No-op / no-session
 cases that are silent under text (hook callers depend on silence)
 should emit the JSON error shape only when `--json` is set, so adding
-the flag never breaks an existing text-path caller.
+the flag never breaks an existing text-path caller. Such a skip is a valid
+no-op and exits 0 even under `--json`, while the same command's real failures
+exit 1: `mm activity log --json` exits 0 for `no_active_session` and 1 for
+`invalid_meta` and `write_failed`.
 
 ## Contributor License Agreement (CLA)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -636,3 +637,42 @@ class TestConfig:
         config = Mem2MemConfig()
         assert hasattr(config, "health_watchdog")
         assert config.health_watchdog.enabled is False
+
+
+# ── CLI tests ──────────────────────────────────────────────────────
+
+
+class TestWatchdogStatusCli:
+    """``mm watchdog status`` with no health data yet (#2596)."""
+
+    @pytest.fixture
+    def invoke(self, tmp_path, monkeypatch):
+        from contextlib import asynccontextmanager
+        from types import SimpleNamespace
+
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        comp = SimpleNamespace(
+            config=SimpleNamespace(storage=SimpleNamespace(sqlite_path=str(tmp_path / "m.db")))
+        )
+
+        @asynccontextmanager
+        async def fake_cli_components():
+            yield comp
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake_cli_components)
+        return lambda argv: CliRunner().invoke(cli, argv)
+
+    def test_json_empty_summary_is_an_empty_object(self, invoke):
+        result = invoke(["watchdog", "status", "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout) == {}
+
+    def test_text_empty_summary_keeps_the_prose(self, invoke):
+        result = invoke(["watchdog", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert result.stdout.startswith("No health check data found.")

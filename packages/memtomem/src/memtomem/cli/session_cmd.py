@@ -318,11 +318,15 @@ async def _start(
 @session.command()
 @click.option("--summary", "-s", default=None, help="Session summary")
 @click.option("--auto", "auto_summary", is_flag=True, help="Generate summary from events")
-def end(summary: str | None, auto_summary: bool) -> None:
+@click.option("--json", "as_json", is_flag=True, help="Output a JSON ack for scripting.")
+def end(summary: str | None, auto_summary: bool, *, as_json: bool = False) -> None:
     """End the current session."""
     session_id = _read_current_session()
     if not session_id:
-        raise click.ClickException("No active session. Run `mm session start` first.")
+        no_session = click.ClickException("No active session. Run `mm session start` first.")
+        if as_json:
+            exit_json_failure(no_session, shape="ok")
+        raise no_session
 
     from memtomem.observability.session_tracing import trace_session
 
@@ -330,6 +334,7 @@ def end(summary: str | None, auto_summary: bool) -> None:
         "session_id": session_id,
         "summary": summary,
         "auto_summary": auto_summary,
+        "as_json": as_json,
     }
 
     with trace_session(
@@ -339,7 +344,9 @@ def end(summary: str | None, auto_summary: bool) -> None:
         initial_payload=initial_payload,
     ) as trace_ctx:
         try:
-            final_summary, event_count = asyncio.run(_end(session_id, summary, auto_summary))
+            final_summary, event_count = asyncio.run(
+                _end(session_id, summary, auto_summary, as_json=as_json)
+            )
             trace_ctx["metadata"] = {
                 "event_count": event_count,
                 "summary": final_summary,
@@ -352,10 +359,14 @@ def end(summary: str | None, auto_summary: bool) -> None:
             )
         except Exception as e:
             trace_ctx["exit_code"] = 1
+            if as_json:
+                exit_json_failure(e, shape="ok")
             raise_cli_error(e)
 
 
-async def _end(session_id: str, summary: str | None, auto_summary: bool) -> tuple[str | None, int]:
+async def _end(
+    session_id: str, summary: str | None, auto_summary: bool, *, as_json: bool = False
+) -> tuple[str | None, int]:
     from memtomem.cli._bootstrap import cli_components
 
     async with cli_components() as comp:
@@ -387,6 +398,18 @@ async def _end(session_id: str, summary: str | None, auto_summary: bool) -> tupl
         await comp.storage.end_session(session_id, summary, metadata)
 
     _clear_current_session()
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "ok": True,
+                    "session_id": session_id,
+                    "summary": summary,
+                    "event_count": len(events),
+                }
+            )
+        )
+        return summary, len(events)
     click.echo(f"Session ended: {session_id}")
     if summary:
         click.echo(f"  Summary: {summary}")
@@ -470,12 +493,13 @@ def events(session_id: str, *, as_json: bool = False) -> None:
     """Show events for a session. Uses current session if no ID given."""
     resolved_session_id = session_id or _read_current_session() or ""
     if not resolved_session_id:
-        # JSON callers get a parseable error shape instead of a Click exit-1
-        # so ``mm session events --json | jq`` doesn't break when no session
-        # is active. Text callers keep the original ClickException path.
+        # JSON callers get a parseable error shape on stdout and exit 1 like
+        # the text path: no session is a handled failure (CONTRIBUTING
+        # "JSON error shape", #2596). The ``no_session`` code stays as-is for
+        # scripts that match on it.
         if as_json:
             click.echo(json.dumps({"error": "no_session"}))
-            return
+            raise click.exceptions.Exit(1)
         raise click.ClickException("No session ID provided and no active session.")
 
     from memtomem.observability.session_tracing import trace_session
@@ -563,10 +587,13 @@ def activity() -> None:
 def log_event(event_type: str, content: str, meta: str | None, *, as_json: bool = False) -> None:
     """Log an activity event to the current session.
 
-    Silent by default so hook callers never fail. ``--json`` emits an ack
-    shape on stdout: ``{"ok": true, ...}`` on success, ``{"ok": false,
-    "reason": ...}`` when there is no active session or the write failed.
-    Exit code is always 0.
+    Silent by default so hook callers never fail: without ``--json`` a
+    missing session or a failed write exits 0 with nothing on stdout (a
+    failed write is still logged as a warning). ``--json``
+    emits an ack shape on stdout: ``{"ok": true, ...}`` on success,
+    ``{"ok": false, "reason": ...}`` otherwise. Under ``--json`` the
+    ``no_active_session`` skip is a valid no-op and exits 0, while
+    ``invalid_meta`` and ``write_failed`` are failures and exit 1 (#2596).
     """
     session_id = _read_current_session()
 
@@ -597,15 +624,15 @@ def log_event(event_type: str, content: str, meta: str | None, *, as_json: bool 
         try:
             metadata = json.loads(meta) if meta else None
         except json.JSONDecodeError:
-            # Malformed --meta: under --json emit the error ack (exit 0) so
+            # Malformed --meta: under --json emit the error ack (exit 1) so
             # scripts can distinguish "bad input" from "write failed". Under
             # text path, let Click surface the traceback — a hook author
             # mistyping meta wants to see why.
             trace_ctx["metadata"] = {"status": "error", "reason": "invalid_meta"}
-            trace_ctx["exit_code"] = 0
+            trace_ctx["exit_code"] = 1
             if as_json:
                 click.echo(json.dumps({"ok": False, "reason": "invalid_meta"}))
-                return
+                raise click.exceptions.Exit(1)
             raise
         try:
             asyncio.run(_log_event(session_id, event_type, content, metadata))
@@ -618,7 +645,11 @@ def log_event(event_type: str, content: str, meta: str | None, *, as_json: bool 
             trace_ctx["metadata"] = {"status": "error", "reason": "write_failed"}
             logger.warning("Activity hook failed", exc_info=True)
             if as_json:
+                # A failed write exits 1 under --json; the text path keeps
+                # stdout empty and exits 0 for hook callers.
+                trace_ctx["exit_code"] = 1
                 click.echo(json.dumps({"ok": False, "reason": "write_failed"}))
+                raise click.exceptions.Exit(1)
             return
 
 

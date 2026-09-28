@@ -132,14 +132,14 @@ class TestSessionEventsJson:
 
     def test_no_session_returns_error_shape(self, runner, monkeypatch):
         """With --json and no session_id argument + no active session, emit a
-        parseable error shape on stdout (exit 0) instead of the text-path
-        ClickException. Lets ``mm session events --json | jq`` degrade
-        gracefully when nothing is active."""
+        parseable error shape on stdout instead of the text-path
+        ClickException, and exit 1 like the text path: no session is a
+        handled failure (#2596; exit 0 before)."""
         monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: None)
 
         result = runner.invoke(cli, ["session", "events", "--json"])
-        assert result.exit_code == 0
-        data = json.loads(result.output)
+        assert result.exit_code == 1
+        data = json.loads(result.stdout)
         assert data == {"error": "no_session"}
 
     def test_no_session_text_path_unchanged(self, runner, monkeypatch):
@@ -159,7 +159,12 @@ class TestActivityLogJson:
     from ``session events --json``'s ``{"error": ...}`` — see the "JSON error
     shape" subsection of ``CONTRIBUTING.md`` for the read/write rule. If you
     change either this class's shape or ``TestSessionEventsJson``'s, update
-    CONTRIBUTING.md in the same PR or the docs and tests will drift."""
+    CONTRIBUTING.md in the same PR or the docs and tests will drift.
+
+    Exit codes under --json (#2596): the ``no_active_session`` skip is a
+    valid no-op (exit 0); ``invalid_meta`` and ``write_failed`` are failures
+    (exit 1). Without --json, no session and a failed write print nothing on
+    stdout and exit 0 for hook callers."""
 
     def test_success_emits_ok_ack(self, runner, monkeypatch):
         comp = _mock_components()
@@ -188,21 +193,36 @@ class TestActivityLogJson:
         comp.storage.add_session_event.assert_not_awaited()
 
     def test_write_failure_emits_error_ack(self, runner, monkeypatch):
-        """Storage exceptions are swallowed (hooks must not fail) but --json
-        surfaces them as ``{ok: false, reason: write_failed}``."""
+        """--json surfaces a storage exception as ``{ok: false, reason:
+        write_failed}`` and exits 1: a failed write must not look successful
+        (#2596; exit 0 before)."""
         failing_add = AsyncMock(side_effect=RuntimeError("db is locked"))
         comp = _mock_components(add_event=failing_add)
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-2")
         # Silence logger.warning so the traceback doesn't bleed into CliRunner
-        # output and break the JSON parse. Hook-silent contract is already
-        # covered by test_text_path_silent_on_success.
+        # output and break the JSON parse.
         monkeypatch.setattr("memtomem.cli.session_cmd.logger.warning", lambda *a, **kw: None)
 
         result = runner.invoke(cli, ["activity", "log", "-c", "boom", "--json"])
-        assert result.exit_code == 0
-        data = json.loads(result.output)
+        assert result.exit_code == 1
+        data = json.loads(result.stdout)
         assert data == {"ok": False, "reason": "write_failed"}
+
+    def test_text_path_quiet_stdout_on_write_failure(self, runner, monkeypatch):
+        """Without --json a failed write prints nothing on stdout and exits 0
+        — the hook contract the --json exit change must not reach. (The
+        warning log on stderr predates #2596 and is silenced here.)"""
+        failing_add = AsyncMock(side_effect=RuntimeError("db is locked"))
+        comp = _mock_components(add_event=failing_add)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-2")
+        monkeypatch.setattr("memtomem.cli.session_cmd.logger.warning", lambda *a, **kw: None)
+
+        result = runner.invoke(cli, ["activity", "log", "-c", "boom"])
+        assert result.exit_code == 0
+        assert result.stdout == ""
+        failing_add.assert_awaited_once()
 
     def test_text_path_silent_on_success(self, runner, monkeypatch):
         """Without --json the silent contract is preserved — no stdout, exit 0."""
@@ -226,15 +246,15 @@ class TestActivityLogJson:
 
     def test_invalid_meta_emits_invalid_meta_ack(self, runner, monkeypatch):
         """Malformed --meta under --json emits {ok: false, reason:
-        invalid_meta} (exit 0). Storage must not be touched — the parse
-        error happens before the async call."""
+        invalid_meta} and exits 1 (#2596; exit 0 before). Storage must not be
+        touched — the parse error happens before the async call."""
         comp = _mock_components()
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-1")
 
         result = runner.invoke(cli, ["activity", "log", "-c", "x", "--meta", "{oops", "--json"])
-        assert result.exit_code == 0
-        data = json.loads(result.output)
+        assert result.exit_code == 1
+        data = json.loads(result.stdout)
         assert data == {"ok": False, "reason": "invalid_meta"}
         comp.storage.add_session_event.assert_not_awaited()
 
@@ -452,6 +472,56 @@ class TestSessionEndSummaryProvenance:
         result = runner.invoke(cli, ["session", "wrap", "--", "true"])
         assert result.exit_code == 0, result.output
         assert self._end_metadata(end_session)["summary_provenance"] == "manual"
+
+
+class TestSessionEndJson:
+    """``mm session end --json`` is a write ack with an ``ok`` flag (#2596):
+    ``{"ok": true, ...}`` on success, ``{"ok": false, "reason": ...}`` with
+    exit 1 on failure. The text path is unchanged."""
+
+    @staticmethod
+    def _patch(monkeypatch, *, session_id="sess-1", events=None):
+        comp, end_session = TestSessionEndSummaryProvenance._end_spy_comp(events=events)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: session_id)
+        monkeypatch.setattr("memtomem.cli.session_cmd._clear_current_session", lambda: None)
+        return end_session
+
+    def test_success_emits_ok_ack(self, runner, monkeypatch):
+        end_session = self._patch(monkeypatch, events=[{"event_type": "add"}])
+
+        result = runner.invoke(cli, ["session", "end", "--summary", "done", "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout) == {
+            "ok": True,
+            "session_id": "sess-1",
+            "summary": "done",
+            "event_count": 1,
+        }
+        end_session.assert_awaited_once()
+
+    def test_no_session_emits_ok_false_and_exits_1(self, runner, monkeypatch):
+        end_session = self._patch(monkeypatch, session_id=None)
+
+        result = runner.invoke(cli, ["session", "end", "--json"])
+
+        assert result.exit_code == 1
+        assert result.stdout.startswith("{"), result.stdout
+        data = json.loads(result.stdout)
+        assert data["ok"] is False
+        assert set(data) == {"ok", "reason"}
+        assert data["reason"].startswith("No active session")
+        assert result.stderr == ""
+        end_session.assert_not_awaited()
+
+    def test_text_path_unchanged(self, runner, monkeypatch):
+        self._patch(monkeypatch)
+
+        result = runner.invoke(cli, ["session", "end", "--summary", "done"])
+
+        assert result.exit_code == 0, result.output
+        assert result.stdout == "Session ended: sess-1\n  Summary: done\n"
 
 
 class TestSessionStartIdempotent:

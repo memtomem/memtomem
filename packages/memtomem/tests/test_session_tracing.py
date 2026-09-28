@@ -556,6 +556,51 @@ class TestCLIIntegration:
         assert "session_id" in data["payload"]
         assert data["payload"]["resumed"] is False
 
+    def test_activity_log_json_write_failure_traces_exit_1(
+        self, runner, tmp_path: Path, monkeypatch
+    ):
+        """``activity log --json`` exits 1 on a failed write by raising
+        ``click.exceptions.Exit(1)`` inside ``trace_session`` (#2596); the
+        trace row records the failure, not a success."""
+        set_home(monkeypatch, tmp_path / "home")
+        jsonl_file = tmp_path / "traces.jsonl"
+
+        class DummyConfig:
+            enabled = True
+            jsonl_enabled = True
+            jsonl_path = jsonl_file
+            sampling_rate = 1.0
+            payload_mode = "full"
+            max_payload_chars = 10000
+            langfuse_enabled = False
+
+        monkeypatch.setattr(
+            "memtomem.observability.session_tracing.get_trace_config",
+            lambda *args, **kwargs: DummyConfig(),
+        )
+        monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-1")
+        monkeypatch.setattr("memtomem.cli.session_cmd.logger.warning", lambda *a, **kw: None)
+        storage = MagicMock()
+        storage.add_session_event = AsyncMock(side_effect=RuntimeError("db is locked"))
+        comp = MagicMock(storage=storage)
+
+        @asynccontextmanager
+        async def fake_cli_components():
+            yield comp
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake_cli_components)
+
+        result = runner.invoke(cli, ["activity", "log", "-c", "x", "--json"])
+        assert result.exit_code == 1
+
+        lines = jsonl_file.read_text(encoding="utf-8").strip().split("\n")
+        assert len(lines) == 1
+        data = json.loads(lines[0])
+        assert data["command"] == "activity_log"
+        assert data["status"] == "error"
+        assert data["exit_code"] == 1
+        assert data["metadata"]["reason"] == "write_failed"
+
     def _trace_with_secret_metadata(self, tmp_path, monkeypatch, mode: str) -> dict:
         """Run one trace whose metadata carries a secret, return the JSONL row."""
         jsonl_file = tmp_path / "traces.jsonl"

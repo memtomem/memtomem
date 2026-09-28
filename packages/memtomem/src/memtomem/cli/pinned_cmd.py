@@ -74,7 +74,12 @@ async def _list_blocks(agent_id: str | None, as_json: bool) -> None:
 @_AGENT_ID_OPTION
 def get_block(block_id: str, scope: TargetScope, agent_id: str | None) -> None:
     """Print one block from an exact scope and agent location."""
-    asyncio.run(_get_block(block_id, scope, agent_id))
+    from memtomem.cli._errors import raise_cli_error
+
+    try:
+        asyncio.run(_get_block(block_id, scope, agent_id))
+    except Exception as e:
+        raise_cli_error(e)
 
 
 async def _get_block(block_id: str, scope: TargetScope, agent_id: str | None) -> None:
@@ -115,18 +120,23 @@ def set_block(
         body = content_file.read_text(encoding="utf-8")
     else:  # guarded by the exactly-one check above
         raise click.UsageError("Provide exactly one of --content or --file")
-    asyncio.run(
-        _set_block(
-            block_id,
-            body,
-            description,
-            priority,
-            scope,
-            agent_id,
-            confirm_project_shared,
-            force_unsafe,
+    from memtomem.cli._errors import raise_cli_error
+
+    try:
+        asyncio.run(
+            _set_block(
+                block_id,
+                body,
+                description,
+                priority,
+                scope,
+                agent_id,
+                confirm_project_shared,
+                force_unsafe,
+            )
         )
-    )
+    except Exception as e:
+        raise_cli_error(e)
 
 
 async def _set_block(
@@ -177,7 +187,12 @@ def delete_block(
     confirm_project_shared: bool,
 ) -> None:
     """Delete one exact Pinned Context block."""
-    asyncio.run(_delete_block(block_id, scope, agent_id, confirm_project_shared))
+    from memtomem.cli._errors import raise_cli_error
+
+    try:
+        asyncio.run(_delete_block(block_id, scope, agent_id, confirm_project_shared))
+    except Exception as e:
+        raise_cli_error(e)
 
 
 async def _delete_block(
@@ -225,7 +240,15 @@ def compose(
     query: str | None, agent_id: str | None, max_chars: int, top_k: int, no_rerank: bool
 ) -> None:
     """Emit a structured pinned-first context bundle as JSON."""
-    asyncio.run(_compose(query, agent_id, max_chars, top_k, rerank=False if no_rerank else None))
+    from memtomem.cli._errors import exit_json_failure
+
+    # JSON is the only output, so a failure answers in JSON too (#2596).
+    try:
+        asyncio.run(
+            _compose(query, agent_id, max_chars, top_k, rerank=False if no_rerank else None)
+        )
+    except Exception as e:
+        exit_json_failure(e, shape="error")
 
 
 async def _compose(

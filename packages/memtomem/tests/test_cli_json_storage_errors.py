@@ -43,18 +43,30 @@ _COMMANDS: list[tuple[list[str], set[str]]] = [
     (["quality", "cases", "--format", "json"], {"error"}),
     (["quality", "replay", "--format", "json"], {"error"}),
     (["pinned", "list", "--json"], {"error"}),
+    # No ``--json`` flag: JSON is the command's only output (#2596).
+    (["pinned", "compose", "q"], {"error"}),
     (["schedule", "list", "--json"], {"error"}),
     (["purge", "--matching-excluded", "--json"], {"ok", "reason"}),
 ]
 
-# The commands that had no error wrapper before #2589: a storage failure
-# escaped as a raw traceback even in text mode.
+# The commands that had no error wrapper before #2589 (the first five) or
+# #2596 (the rest): a storage failure escaped as a raw traceback even in
+# text mode.
 _UNWRAPPED_TEXT: list[list[str]] = [
     ["index", "--flush"],
     ["agent", "list"],
     ["pinned", "list"],
     ["schedule", "list"],
     ["purge", "--matching-excluded"],
+    ["pinned", "get", "b1"],
+    ["pinned", "set", "b1", "--content", "x"],
+    ["pinned", "delete", "b1"],
+    ["schedule", "add", "--cron", "0 * * * *", "--job", "compaction"],
+    ["schedule", "run-now", "s1"],
+    ["schedule", "delete", "s1"],
+    ["agent", "migrate"],
+    ["agent", "register", "planner"],
+    ["agent", "share", "00000000-0000-0000-0000-000000000001"],
 ]
 
 
@@ -126,6 +138,26 @@ def test_text_mode_prints_a_click_error_not_a_traceback(
     assert isinstance(result.exception, SystemExit), result.exception
     assert result.stdout == ""
     assert result.stderr.startswith(f"Error: {_LOCKED}")
+
+
+def test_session_end_json_answers_a_storage_failure_with_the_ok_envelope(
+    runner: CliRunner, opens: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``session end --json`` is a write ack with an ``ok`` flag (#2596), so a
+    refused storage open answers ``{"ok": false, "reason": ...}``. It needs an
+    active session to reach storage at all, hence its own test."""
+    monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-1")
+
+    result = runner.invoke(cli, ["session", "end", "--json"])
+
+    assert opens
+    assert result.exit_code == 1, result.output
+    assert result.stdout.startswith("{"), result.stdout
+    data = json.loads(result.stdout)
+    assert set(data) == {"ok", "reason"}
+    assert data["ok"] is False
+    assert data["reason"].startswith(str(_LOCKED))
+    assert result.stderr == ""
 
 
 def test_an_unclassified_failure_stays_plain_in_json_mode(

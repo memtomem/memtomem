@@ -51,7 +51,12 @@ def migrate(dry_run: bool, assume_yes: bool) -> None:
     to the current ``agent-runtime:{id}`` format. Safe to re-run — rows that
     are already in the new format are left untouched.
     """
-    asyncio.run(_run_migrate(dry_run=dry_run, assume_yes=assume_yes))
+    from memtomem.cli._errors import raise_cli_error
+
+    try:
+        asyncio.run(_run_migrate(dry_run=dry_run, assume_yes=assume_yes))
+    except Exception as e:
+        raise_cli_error(e)
 
 
 async def _run_migrate(dry_run: bool, assume_yes: bool = False) -> None:
@@ -187,7 +192,12 @@ def register(agent_id: str, description: str | None, color: str | None) -> None:
         validate_agent_id(agent_id)
     except InvalidNameError as e:
         raise click.ClickException(str(e)) from e
-    asyncio.run(_run_register(agent_id, description, color))
+    from memtomem.cli._errors import raise_cli_error
+
+    try:
+        asyncio.run(_run_register(agent_id, description, color))
+    except Exception as e:
+        raise_cli_error(e)
 
 
 async def _run_register(agent_id: str, description: str | None, color: str | None) -> None:
@@ -325,7 +335,12 @@ def share(chunk_id: str, target: str, force_unsafe: bool) -> None:
         validate_namespace(target)
     except InvalidNameError as e:
         raise click.ClickException(str(e)) from e
-    asyncio.run(_run_share(chunk_id, target, force_unsafe))
+    from memtomem.cli._errors import raise_cli_error
+
+    try:
+        asyncio.run(_run_share(chunk_id, target, force_unsafe))
+    except Exception as e:
+        raise_cli_error(e)
 
 
 async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> None:
