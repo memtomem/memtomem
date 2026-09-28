@@ -687,6 +687,38 @@ def test_body_filter_note_follows_the_current_query(page, mm_web_url: str) -> No
     assert _body_note(page) is None
 
 
+def test_body_filter_note_survives_a_superseded_request_failing(page, mm_web_url: str) -> None:
+    """An older lookup whose error lands after the current query's answer
+    (it failed before the newer request could abort it) leaves that answer
+    alone (#2572 review)."""
+    api = _Api(_TREE_STATUS, _sources_body(_TREE_ROWS, omitted=None))
+    api.content_matches = {"query": "zzz", "paths": [], "truncated": True}
+    _open_tree(page, mm_web_url, api)
+
+    page.evaluate(
+        """() => {
+          const realApi = api;
+          api = (method, url, body, opts) => url.includes('q=old')
+            ? new Promise((_resolve, reject) => { window.__failOld = reject; })
+            : realApi(method, url, body, opts);
+          qs('sources-filter').value = 'old';
+          _loadSourcesBodyMatches('old');
+          qs('sources-filter').value = 'zzz';
+          _loadSourcesBodyMatches('zzz');
+        }"""
+    )
+    page.wait_for_function(
+        "() => STATE.sourcesBodyFilterQuery === 'zzz' && STATE.sourcesBodyFilterTruncated",
+        timeout=5_000,
+    )
+    assert _body_note(page) == _body_limit_note(page)
+
+    page.evaluate("() => { window.__failOld(new Error('HTTP 500')); }")
+    page.evaluate("() => new Promise(r => setTimeout(r, 0))")
+    assert page.evaluate("() => STATE.sourcesBodyFilterTruncated") is True
+    assert _body_note(page) == _body_limit_note(page)
+
+
 def _source_filter_note(page) -> str | None:
     return page.evaluate(
         """() => {

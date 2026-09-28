@@ -4401,6 +4401,8 @@ async function _loadSourcesBodyMatches(q) {
     renderSourceTree(_getFilteredSorted());
   } catch (err) {
     if (err && err.name === 'AbortError') return;
+    // A superseded request failing late must not reset the current query's state.
+    if (seq !== _sourcesBodyFilterSeq) return;
     STATE.sourcesBodyFilterPending = false;
     STATE.sourcesBodyFilterTruncated = false;
     _renderSourcesBodyFilterNote();
