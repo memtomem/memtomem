@@ -645,8 +645,9 @@ function _buildCommands() {
     { icon: '⌨', label: t('cmd.action.keyboard_shortcuts'), action: () => window.openShortcutsModal(), hint: '?' },
   ];
 
-  // Dynamic: recent sources
-  const sources = (STATE.allSources || []).slice(0, 5).map(s => ({
+  // Dynamic: recent sources, from Home's snapshot, which each dashboard load
+  // refreshes. The Sources tab's list is its own and no longer shared (#2571).
+  const sources = (STATE.homeSources || []).slice(0, 5).map(s => ({
     icon: '📄', label: t('cmd.open_source', { name: basename(s.path) }), action: () => _navigateToSource(s.path), hint: 'source',
   }));
 

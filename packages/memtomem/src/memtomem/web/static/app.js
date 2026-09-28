@@ -49,10 +49,16 @@ const STATE = {
   homeStale: false,
   detailViewSource: '',
   detailViewMode: 'view',
+  // The Sources tab's list, owned by ``loadSources`` (``/api/sources``).
   allSources: [],
   // Rows ``/api/sources`` left out of ``allSources`` (#2566).
   sourcesOmitted: 0,
   memoryStatusByPath: {},
+  // Home's navigation snapshot. Kept apart from ``allSources`` /
+  // ``memoryStatusByPath`` so a late dashboard load cannot redraw the
+  // Sources tree from Home's list, which includes held sources (#2571).
+  homeSources: [],
+  homeMemoryStatusByPath: {},
   sourcesSortBy: 'name',
   sourcesNsFilter: '',
   // Path the next ``_renderMemorySourceTree`` should focus + browse
@@ -2578,18 +2584,17 @@ async function loadDashboard() {
       : null;
     const namespaces = nsData.namespaces || [];
 
-    // Mirror onto STATE so a Home → recent-source click can resolve
-    // the target vendor sub-tab before activating the Sources tab.
-    // The dashboard now uses backend aggregates for complete counts and
-    // distributions, so this snapshot reflects all visible sources.
-    // ``home_sources`` is uncapped, so nothing is left out of it (#2566).
-    STATE.allSources = allSources;
-    STATE.sourcesOmitted = 0;
+    // Kept on STATE so a Home → recent-source click can resolve the target
+    // vendor sub-tab before activating the Sources tab. Only navigation reads
+    // it: ``home_sources`` is uncapped but, unlike ``/api/sources``, still
+    // lists held and pending sources, and this load can land after the
+    // Sources tab's own, so it must not replace that tab's list (#2571).
+    STATE.homeSources = allSources;
     const _memStatusByPath = {};
     for (const entry of (memDirsResp && memDirsResp.dirs) || []) {
       if (entry && typeof entry.path === 'string') _memStatusByPath[entry.path] = entry;
     }
-    STATE.memoryStatusByPath = _memStatusByPath;
+    STATE.homeMemoryStatusByPath = _memStatusByPath;
 
     // A. Stats cards
     qs('home-chunks').textContent = Number(stats.total_chunks || 0).toLocaleString();
@@ -3089,9 +3094,9 @@ function _renderStorageHealth(config, sources, embStatus) {
 
 function _navigateToSource(path, chunkId = '') {
   // Two-phase navigation:
-  //   1. Eager vendor resolve when the dashboard already cached the
-  //      data we need (``loadDashboard`` mirrors /api/sources +
-  //      /api/memory-dirs/status into STATE on Home render). Switching
+  //   1. Eager vendor resolve when a list already names the source:
+  //      the Sources tab's own, else the dashboard's snapshot
+  //      (``STATE.homeSources`` / ``homeMemoryStatusByPath``). Switching
   //      the sub-tab before ``activateTab`` means the right tree shape
   //      lands on first paint instead of flashing the previous vendor.
   //   2. Always set ``pendingActivatePath`` so the actual focus +
@@ -3104,9 +3109,10 @@ function _navigateToSource(path, chunkId = '') {
   //      that card after the source's chunk list renders.
   STATE.pendingActivateChunkId = chunkId || '';
   STATE.pendingActivateChunkSourcePath = chunkId ? path : '';
-  const src = (STATE.allSources || []).find(s => s.path === path);
+  const fromSources = (STATE.allSources || []).find(s => s.path === path);
+  const src = fromSources || (STATE.homeSources || []).find(s => s.path === path);
   const status = src && src.memory_dir
-    ? (STATE.memoryStatusByPath || {})[src.memory_dir]
+    ? ((fromSources ? STATE.memoryStatusByPath : STATE.homeMemoryStatusByPath) || {})[src.memory_dir]
     : null;
   const provider = (status && typeof _SOURCES_VENDORS !== 'undefined'
     && _SOURCES_VENDORS.includes(status.provider))
@@ -4787,9 +4793,7 @@ function _translateSourcesPartialNote(note) {
 }
 
 // ``langchange`` re-words a visible note only. Whether it shows is the
-// tree render's call: Home's dashboard can replace ``STATE.allSources`` and
-// ``sourcesOmitted`` without redrawing the tree (#2571), and the note must
-// keep describing the tree on screen until that tree is redrawn.
+// tree render's call, so the note keeps describing the tree on screen.
 function _retranslateSourcesPartialNote() {
   const note = qs('sources-partial-note');
   if (note && !note.hidden && note.dataset.total) _translateSourcesPartialNote(note);

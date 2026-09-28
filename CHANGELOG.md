@@ -33,6 +33,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `Error: ...` with exit 1. `mm pinned compose`, whose only output is JSON,
   prints `{"error": "..."}` instead. `mm watchdog status --json` prints `{}`
   when there is no health data yet, instead of a sentence.
+- **A late Home dashboard load no longer changes the Sources tree (#2571).**
+  Home and the Sources tab shared one source list and one memory-dir status
+  map. Home's list lists held and pending sources, which the Sources list
+  hides. When a dashboard load landed after the Sources tab had loaded, the
+  next vendor switch, filter or sort redrew the tree from Home's list, so the
+  tree and its header counted files the per-root badges report as hidden,
+  and the partial-list note (#2566) went away. The badges could also fall
+  back to Home's older status. Home now keeps its own copy, which only
+  resolves a recent-source click's vendor before the Sources list exists.
 - **`mm upgrade` no longer deletes `web.json` after stopping the Web UI
   (#2587).** Upgrade removed a leftover `web.json` once a re-probe found no
   `web.pid` holder. A new Web UI could start between that probe and the delete,
