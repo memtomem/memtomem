@@ -29,7 +29,7 @@ from typing import cast, get_args
 
 import click
 
-from memtomem.cli._errors import raise_cli_error
+from memtomem.cli._errors import exit_json_failure, raise_cli_error
 
 from memtomem import privacy
 from memtomem.cli.context_cmd import _append_gitignore_marker, _find_project_root
@@ -296,9 +296,9 @@ def rescan_cmd(
                 project_root=project_root,
             )
         )
-    except click.ClickException:
-        raise
     except Exception as exc:
+        if as_json:
+            exit_json_failure(exc, shape="error")
         raise_cli_error(exc)
 
     scanned, violations = result

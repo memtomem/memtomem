@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from memtomem.cli._errors import raise_cli_error
+from memtomem.cli._errors import exit_json_failure, raise_cli_error
 
 
 @click.group()
@@ -22,9 +22,9 @@ def watchdog_status(as_json: bool) -> None:
     """Show latest health check results."""
     try:
         asyncio.run(_watchdog_status(as_json))
-    except click.ClickException:
-        raise
     except Exception as e:
+        if as_json:
+            exit_json_failure(e, shape="error")
         raise_cli_error(e)
 
 
@@ -34,9 +34,9 @@ def watchdog_run(as_json: bool) -> None:
     """Run all health checks immediately and show results."""
     try:
         asyncio.run(_watchdog_run(as_json))
-    except click.ClickException:
-        raise
     except Exception as e:
+        if as_json:
+            exit_json_failure(e, shape="error")
         raise_cli_error(e)
 
 

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import click
 
-from memtomem.cli._errors import raise_cli_error
+from memtomem.cli._errors import exit_json_failure, raise_cli_error
 
 # Re-exported for this module's own use: the state-file helpers moved to
 # ``cli/_session_state.py`` so ``mm add`` can resolve the active session's
@@ -203,6 +203,8 @@ def start(
             )
         except Exception as e:
             trace_ctx["exit_code"] = 1
+            if as_json:
+                exit_json_failure(e, shape="error")
             raise_cli_error(e)
 
 
@@ -420,6 +422,8 @@ def list_sessions(
             trace_ctx["payload"]["count"] = count
         except Exception as e:
             trace_ctx["exit_code"] = 1
+            if as_json:
+                exit_json_failure(e, shape="error")
             raise_cli_error(e)
 
 
@@ -493,6 +497,8 @@ def events(session_id: str, *, as_json: bool = False) -> None:
             trace_ctx["payload"]["count"] = count
         except Exception as e:
             trace_ctx["exit_code"] = 1
+            if as_json:
+                exit_json_failure(e, shape="error")
             raise_cli_error(e)
 
 

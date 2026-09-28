@@ -144,7 +144,14 @@ def purge(matching_excluded: bool, apply_: bool, sample_size: int, as_json: bool
     """
     if not matching_excluded:
         raise click.UsageError("no selector given. See: mm purge --help")
-    asyncio.run(_run_matching_excluded(apply_=apply_, sample_size=sample_size, as_json=as_json))
+    from memtomem.cli._errors import exit_json_failure, raise_cli_error
+
+    try:
+        asyncio.run(_run_matching_excluded(apply_=apply_, sample_size=sample_size, as_json=as_json))
+    except Exception as e:
+        if as_json:
+            exit_json_failure(e, shape="ok")
+        raise_cli_error(e)
 
 
 async def _report_incomplete_scan(

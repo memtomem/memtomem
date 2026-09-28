@@ -10,7 +10,7 @@ from typing import get_args
 
 import click
 
-from memtomem.cli._errors import raise_cli_error
+from memtomem.cli._errors import exit_json_failure, raise_cli_error
 from memtomem.cli._prompts import confirm as _confirm
 from memtomem.config import TargetScope
 from memtomem.memory_scope import (
@@ -177,12 +177,9 @@ def add(
                 allow_namespace_mix=allow_namespace_mix,
             )
         )
-    except click.ClickException as e:
-        if as_json:
-            click.echo(json.dumps({"ok": False, "reason": e.format_message()}))
-            raise click.exceptions.Exit(1)
-        raise
     except Exception as e:
+        if as_json:
+            exit_json_failure(e, shape="ok")
         raise_cli_error(e)
 
 
@@ -499,9 +496,9 @@ def recall(
     """Recall recent memory chunks."""
     try:
         asyncio.run(_recall(since, until, limit, source_filter, tag_filter, namespace, scope, fmt))
-    except click.ClickException:
-        raise
     except Exception as e:
+        if fmt == "json":
+            exit_json_failure(e, shape="error")
         raise_cli_error(e)
 
 

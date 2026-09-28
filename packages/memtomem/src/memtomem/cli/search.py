@@ -14,7 +14,7 @@ import json
 
 import click
 
-from memtomem.cli._errors import raise_cli_error
+from memtomem.cli._errors import exit_json_failure, raise_cli_error
 from memtomem.services.search_service import run_search
 
 # ADR-0011 §6: re-export the project-context resolver from the MCP tool so
@@ -157,9 +157,9 @@ def search(
                 rerank=False if no_rerank else None,
             )
         )
-    except click.ClickException:
-        raise
     except Exception as e:
+        if fmt == "json":
+            exit_json_failure(e, shape="error")
         raise_cli_error(e)
 
 

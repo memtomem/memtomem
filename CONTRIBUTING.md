@@ -284,6 +284,18 @@ valid no-op results exit 0; an explicit user interrupt exits 130. Unhandled
 exceptions (programmer errors, not expected failure modes) also surface
 nonzero through Click.
 
+The success payload decides the shape, not the verb: a command that writes
+but acknowledges without an `ok` flag (`mm session start`, `mm watchdog run`,
+`mm index --flush`) answers failures with `{"error": ...}`. Route a
+command's failures through `exit_json_failure(e, shape="error" | "ok")` in
+`cli/_errors.py`, the `--json` twin of `raise_cli_error`. It puts a Click
+error or a handled failure in the envelope. A handled failure is any
+memtomem error, or a SQLite `OperationalError` whose result code blames the
+environment: a locked, read-only or unreachable database, or a full disk.
+Anything else stays a plain error with nothing on stdout, and so does a
+usage error (exit 2): Click raises most of those while parsing options,
+before the command runs.
+
 Rationale: read success payloads (`events: [...]`, `sessions: [...]`)
 are naturally disambiguated from `{error: ...}` by presence-of-key, so
 an explicit `ok` flag is redundant noise. Write acks have no such

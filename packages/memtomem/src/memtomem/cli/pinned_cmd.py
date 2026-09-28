@@ -45,7 +45,14 @@ async def _store_context():
 @click.option("--json", "as_json", is_flag=True)
 def list_blocks(agent_id: str | None, as_json: bool) -> None:
     """List effective blocks after agent and scope shadowing."""
-    asyncio.run(_list_blocks(agent_id, as_json))
+    from memtomem.cli._errors import exit_json_failure, raise_cli_error
+
+    try:
+        asyncio.run(_list_blocks(agent_id, as_json))
+    except Exception as e:
+        if as_json:
+            exit_json_failure(e, shape="error")
+        raise_cli_error(e)
 
 
 async def _list_blocks(agent_id: str | None, as_json: bool) -> None:
