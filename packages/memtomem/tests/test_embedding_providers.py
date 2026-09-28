@@ -35,6 +35,18 @@ from memtomem.errors import ConfigError, EmbeddingError, RetryableEmbeddingError
 # ---------------------------------------------------------------------------
 
 
+_PINNED_MINILM = "/pinned/minilm-snapshot"
+
+
+@pytest.fixture(autouse=True)
+def _no_minilm_download(monkeypatch):
+    """These tests stand in for FastEmbed, so the pinned MiniLM snapshot
+    (the default model below) must not be fetched from the Hub either."""
+    from memtomem.embedding import profiles
+
+    monkeypatch.setattr(profiles, "minilm_snapshot", lambda: _PINNED_MINILM)
+
+
 def _ollama_config(**overrides) -> EmbeddingConfig:
     defaults = dict(
         provider="ollama",
@@ -644,6 +656,56 @@ class TestOnnxEmbedder:
             await embedder.embed_texts(["hello"])
 
         assert mock_te.call_args.kwargs["enable_cpu_mem_arena"] is requested
+
+    @pytest.mark.parametrize(
+        ("model_name", "expected_path"),
+        [
+            ("all-MiniLM-L6-v2", _PINNED_MINILM),
+            ("sentence-transformers/all-MiniLM-L6-v2", _PINNED_MINILM),
+            # FastEmbed accepts full ids in any case; the pin must too.
+            ("sentence-transformers/ALL-MINILM-L6-V2", _PINNED_MINILM),
+            ("bge-small-en-v1.5", None),
+        ],
+    )
+    @pytest.mark.anyio
+    async def test_minilm_loads_from_the_pinned_snapshot(self, model_name, expected_path):
+        """FastEmbed would otherwise fetch MiniLM at the repo head, whose
+        tokenizer pads to 128 but truncates at 256 (ragged batches)."""
+        model = _make_fake_embedding_model([[0.1, 0.2, 0.3]])
+        embedder = OnnxEmbedder(_onnx_config(model=model_name, dimension=3))
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("fastembed.TextEmbedding", return_value=model) as mock_te,
+        ):
+            await embedder.embed_texts(["hello"])
+
+        assert mock_te.call_args.kwargs.get("specific_model_path") == expected_path
+
+    @pytest.mark.anyio
+    async def test_minilm_snapshot_download_is_part_of_the_guarded_load(self, monkeypatch):
+        """The pinned fetch replaces the download FastEmbed's constructor did,
+        so readiness must see it as loading and a failure as a load error."""
+        from memtomem.embedding import profiles
+
+        embedder = OnnxEmbedder(_onnx_config())
+        seen_loading: list[bool] = []
+
+        def failing_snapshot():
+            seen_loading.append(embedder._loading)
+            raise OSError("hub unreachable")
+
+        monkeypatch.setattr(profiles, "minilm_snapshot", failing_snapshot)
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("fastembed.TextEmbedding") as mock_te,
+            pytest.raises(EmbeddingError),
+        ):
+            await embedder.embed_texts(["hello"])
+
+        assert seen_loading == [True]
+        assert embedder._load_error == "hub unreachable"
+        assert embedder._loading is False
+        mock_te.assert_not_called()
 
     def test_cpu_mem_arena_false_fails_closed_on_unknown_layout(self):
         with pytest.raises(EmbeddingError, match="refusing unsafe ONNX fallback"):

@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The `all-MiniLM-L6-v2` embedder is pinned to a known-good model revision.**
+  FastEmbed downloads this model from `qdrant/all-MiniLM-L6-v2-onnx` at the
+  repository's latest revision. The newest revision raised the tokenizer's
+  truncation limit to 256 tokens but still pads to 128. On a new download,
+  a batch whose texts ran past 128 tokens to different lengths failed with
+  "ONNX embedding failed: … inhomogeneous shape". memtomem now downloads
+  revision `5f1b8cd7`, which truncates at 128 tokens, as MiniLM did before
+  the upstream change. A cache that already holds the newer revision keeps it
+  on disk, but memtomem no longer loads it. A text over 128 tokens that the
+  newer revision did manage to embed keeps that vector until
+  `mm index --force` re-embeds it. The default `multilingual-e5-small` was
+  already pinned and is not affected.
 - **A schema migration now refuses to strand registered servers that opened
   the database under the older schema (#2564).** The downgrade fence ran only
   when a process opened the database, so an older server that was already

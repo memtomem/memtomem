@@ -9,7 +9,12 @@ import pytest
 from memtomem import __version__
 from memtomem.chunking.bounded import _tokenizer
 from memtomem.config import EmbeddingConfig, Mem2MemConfig
-from memtomem.embedding.profiles import E5_TOKENIZER, e5_snapshot, resolve_tokenizer
+from memtomem.embedding.profiles import (
+    E5_TOKENIZER,
+    e5_snapshot,
+    minilm_snapshot,
+    resolve_tokenizer,
+)
 from memtomem.errors import ConfigError
 from memtomem.server.context import AppContext
 from memtomem.server.tools.status_config import mem_status
@@ -33,6 +38,7 @@ def block_import(monkeypatch, module, missing=None):
     [
         ("huggingface_hub", lambda: resolve_tokenizer(E5_TOKENIZER)),
         ("huggingface_hub", e5_snapshot),
+        ("huggingface_hub", minilm_snapshot),
         ("tokenizers", lambda: _tokenizer("missing-dependency-tokenizer.json", 0, 0)),
     ],
 )
@@ -53,6 +59,7 @@ def test_missing_optional_module_has_server_environment_guidance(monkeypatch, mo
     [
         ("huggingface_hub", lambda: resolve_tokenizer(E5_TOKENIZER)),
         ("huggingface_hub", e5_snapshot),
+        ("huggingface_hub", minilm_snapshot),
         ("tokenizers", lambda: _tokenizer("unrelated-missing-tokenizer.json", 0, 0)),
     ],
 )
