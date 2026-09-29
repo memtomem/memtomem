@@ -3400,6 +3400,90 @@ class SqliteBackend(
             return 0
         return int(self._cached_vec_row_count(self._get_read_db()))
 
+    @staticmethod
+    def _vec_rows_on_disk(db: sqlite3.Connection) -> int:
+        """Rows in ``chunks_vec`` as the file has them now, 0 without the table."""
+        exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_vec'"
+        ).fetchone()
+        if exists is None:
+            return 0
+        return int(db.execute("SELECT count(*) FROM chunks_vec").fetchone()[0] or 0)
+
+    async def count_vectors_fresh(self) -> int:
+        """Count ``chunks_vec`` rows from the file, for decisions that protect vectors.
+
+        :meth:`get_vector_count` answers from this instance's ``_has_vec_table``
+        flag, which only this instance's own resets update, and memoizes the
+        count per connection. Another process can create and fill the table
+        without either noticing. Revert-to-stored decides whether a store holds
+        vectors worth protecting (#2617), so it reads ``sqlite_master`` and the
+        row count directly.
+        """
+        return self._vec_rows_on_disk(self._get_read_db())
+
+    def adopt_embedding_policy_if_empty(
+        self, policy_fingerprint: str, max_sequence_tokens: int | None
+    ) -> bool:
+        """Record *policy_fingerprint* as the store's policy if it holds no vectors.
+
+        The policy row of an empty store may have been backfilled from whichever
+        config first opened it (#2617). A revert that runs a different policy
+        over such a store would otherwise index new vectors under the old row.
+        The emptiness check and the write share one ``BEGIN IMMEDIATE``
+        transaction, so a vector another process commits first makes this
+        return False with nothing written. Provider, model and dimension rows,
+        the tables, and ``_has_vec_table`` are left alone.
+
+        Synchronous on purpose, like :meth:`reset_embedding_meta`: the revert
+        calls it inside a phase that must not yield to the event loop (#2433).
+        """
+        assert self._meta is not None
+        self._require_transaction_idle("adopt_embedding_policy_if_empty")
+        task = self._current_task()
+        if task is None:
+            raise StorageError("adopt_embedding_policy_if_empty requires a running asyncio task")
+        db = self._get_db()
+        if db.in_transaction:
+            raise StorageError(
+                "adopt_embedding_policy_if_empty refused: the connection already has an "
+                "open transaction this task does not own"
+            )
+        prior_state = (self._embedding_policy_fingerprint, self._embedding_max_sequence_tokens)
+        try:
+            db.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error as exc:
+            raise StorageError(
+                f"adopt_embedding_policy_if_empty could not take the write lock: {exc}"
+            ) from exc
+        self._transaction_owner = task
+        try:
+            if self._vec_rows_on_disk(db):
+                db.rollback()
+                return False
+            self._meta.set_meta("embedding_policy_fingerprint", policy_fingerprint)
+            if max_sequence_tokens is not None:
+                self._meta.set_meta("embedding_max_sequence_tokens", str(max_sequence_tokens))
+            self._embedding_policy_fingerprint = policy_fingerprint
+            if max_sequence_tokens is not None:
+                self._embedding_max_sequence_tokens = max_sequence_tokens
+            db.commit()
+            return True
+        except BaseException:
+            self._embedding_policy_fingerprint, self._embedding_max_sequence_tokens = prior_state
+            if db.in_transaction:
+                try:
+                    db.rollback()
+                except Exception:
+                    logger.error(
+                        "rollback after a failed policy adoption raised; the transaction "
+                        "may still be open on the shared connection (#2167)",
+                        exc_info=True,
+                    )
+            raise
+        finally:
+            self._transaction_owner = None
+
     async def count_chunks_missing_vectors(self, chunk_ids: Sequence[str]) -> int:
         """Count how many of ``chunk_ids`` currently have no dense vector.
 

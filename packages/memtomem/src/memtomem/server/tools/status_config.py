@@ -33,7 +33,7 @@ from memtomem.secret_masking import is_secret_key, mask_secrets
 from memtomem.storage.orphan_detect import orphan_candidate_sources
 
 if TYPE_CHECKING:
-    from memtomem.config import Mem2MemConfig, SaveReceipt, SearchConfig
+    from memtomem.config import EmbeddingConfig, Mem2MemConfig, SaveReceipt, SearchConfig
     from memtomem.server.context import AppContext
 
 logger = logging.getLogger(__name__)
@@ -1012,7 +1012,16 @@ def _adopt_section(live: BaseModel, rebuilt: BaseModel) -> None:
     live.__pydantic_fields_set__.update(rebuilt.model_fields_set)
 
 
-async def _revert_candidate(config: Mem2MemConfig, stored: dict) -> tuple[BaseModel, BaseModel]:
+def _revert_refusal(reason: str) -> ValueError:
+    return ValueError(
+        f"Cannot revert to the stored embedding: {reason}. Nothing was changed; "
+        "remove the conflicting setting and retry."
+    )
+
+
+async def _revert_candidate(
+    config: Mem2MemConfig, stored: dict, *, vector_count: int
+) -> tuple[EmbeddingConfig, BaseModel]:
     """Build and check the sections a revert to *stored* would run, off to the side.
 
     Returns ``(embedding, indexing)`` candidates; the live config is not
@@ -1027,23 +1036,21 @@ async def _revert_candidate(config: Mem2MemConfig, stored: dict) -> tuple[BaseMo
       startup builder and validator. Keeping the running model's budget left,
       after a bge-m3 to E5 revert, 8192-token chunks under a 512-token cap.
 
-    A kept ``onnx_variant`` / ``onnx_artifact_path`` is not compared with the
-    variant the store was built with: only the stored policy fingerprint
-    records it, and storage init backfills that fingerprint from whichever
-    config first opened the store, so it cannot prove provenance (#2617).
+    * when the store holds vectors (*vector_count*), the kept
+      ``onnx_variant`` / ``onnx_artifact_path`` must be the variant they were
+      built with (#2617). Only the variant component of the stored policy is
+      read: the rest may have been backfilled by whichever config first
+      opened the store. An empty store is not checked; the caller records
+      the rebuilt policy on it instead.
     """
     from pydantic import ValidationError
 
     from memtomem.chunking.bounded import validate_budget_configuration
-    from memtomem.config import validation_error_message
+    from memtomem.config import stored_policy_variant_conflict, validation_error_message
     from memtomem.config_signature import restamp_embedding
     from memtomem.embedding.profiles import apply_e5_defaults
 
-    def refuse(reason: str) -> ValueError:
-        return ValueError(
-            f"Cannot revert to the stored embedding: {reason}. Nothing was changed; "
-            "remove the conflicting setting and retry."
-        )
+    refuse = _revert_refusal
 
     def observed() -> tuple[object, ...]:
         embedding, indexing = config.embedding, config.indexing
@@ -1061,6 +1068,10 @@ async def _revert_candidate(config: Mem2MemConfig, stored: dict) -> tuple[BaseMo
         embedding = restamp_embedding(config.embedding, stored)
     except ValidationError as exc:
         raise refuse(validation_error_message(exc)) from exc
+    if vector_count:
+        conflict = stored_policy_variant_conflict(stored.get("policy_fingerprint"), embedding)
+        if conflict:
+            raise refuse(conflict)
     candidate = config.model_copy(deep=True)
     candidate.embedding = embedding.model_copy(deep=True)
     try:
@@ -1263,6 +1274,7 @@ async def _revert_to_stored(app: AppContext) -> str:
 async def _revert_to_stored_locked(
     app: AppContext, create_embedder, IndexEngine, DedupScanner, create_search_pipeline
 ) -> str:
+    from memtomem.config import embedding_policy_fingerprint
     from memtomem.embedding.identity import require_complete_embedding_identity
     from memtomem.embedding.profiles import PROFILE_INDEXING_FIELDS
     from memtomem.runtime.components import _close_resource
@@ -1281,7 +1293,26 @@ async def _revert_to_stored_locked(
 
     stored = mismatch["stored"]
     require_complete_embedding_identity(stored["provider"], stored["model"])
-    restamped, restamped_indexing = await _revert_candidate(config, stored)
+    # Read from the file, not this instance's flags: another process may have
+    # filled the table since startup (#2617).
+    vector_count = await storage.count_vectors_fresh()
+    restamped, restamped_indexing = await _revert_candidate(
+        config, stored, vector_count=vector_count
+    )
+    stored_policy = stored.get("policy_fingerprint", "")
+    stored_max_tokens = stored.get("max_sequence_tokens")
+    # An empty store's policy row may be a backfill from another config. Left
+    # in place, the vectors this revert goes on to index would sit under it, so
+    # the store records the policy the revert runs instead (#2617).
+    adopt_policy: str | None = None
+    if not vector_count:
+        try:
+            rebuilt_policy = embedding_policy_fingerprint(restamped)
+        except ValueError as exc:
+            raise _revert_refusal(str(exc)) from exc
+        if rebuilt_policy != stored_policy:
+            adopt_policy = rebuilt_policy
+            stored_policy, stored_max_tokens = rebuilt_policy, restamped.max_sequence_tokens
 
     # ``app.embedder`` / ``app.search_pipeline`` / ``app.index_engine`` are
     # read-only properties that proxy to ``app._components.<name>`` (#399
@@ -1338,8 +1369,8 @@ async def _revert_to_stored_locked(
     _adopt_section(embedding, restamped)
     for name in PROFILE_INDEXING_FIELDS:
         object.__setattr__(indexing, name, getattr(restamped_indexing, name))
-    storage._embedding_policy_fingerprint = stored.get("policy_fingerprint", "")
-    storage._embedding_max_sequence_tokens = stored.get("max_sequence_tokens")
+    storage._embedding_policy_fingerprint = stored_policy
+    storage._embedding_max_sequence_tokens = stored_max_tokens
     # What ``configure_chunk_budget`` stores, set here so the rollback below
     # can undo it without an await; the budget was validated above.
     storage._chunk_budget_config = indexing.model_copy(deep=True)
@@ -1375,6 +1406,13 @@ async def _revert_to_stored_locked(
         new_dedup_scanner = (
             DedupScanner(storage=storage) if runtime_app.dedup_scanner is not None else None
         )
+        # Last, so every constructor that can fail has run: once this commits,
+        # nothing below undoes it. It proves the store is still empty in the
+        # same transaction as the write.
+        if adopt_policy is not None and not storage.adopt_embedding_policy_if_empty(
+            adopt_policy, stored_max_tokens
+        ):
+            raise _revert_refusal("the store gained vectors while the revert was being checked")
     except BaseException:
         prior_embedding.restore()
         prior_indexing.restore()

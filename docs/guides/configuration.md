@@ -397,6 +397,14 @@ To resolve it, pick **one** of:
   retains the existing string fields, using `""` for unknown values and
   `model_mismatch: true`. A stored `none` provider with no model is valid.
 
+  Revert keeps `embedding.onnx_variant` and `embedding.onnx_artifact_path`
+  from the running config. When the database holds vectors, revert refuses
+  without changing the runtime unless the stored policy records that same
+  variant and artifact. A policy with no variant recorded counts as `fp32`. To
+  proceed, set `onnx_variant` (and its artifact path) to what the store was
+  built with, or reset with `apply_current` and re-index. An empty database
+  instead records the policy the revert runs.
+
   Partial identities are never filled from configuration, even when the
   recorded half matches it or the database is empty. Restore the identity
   from a known-good backup, or explicitly use `apply-current`, then run

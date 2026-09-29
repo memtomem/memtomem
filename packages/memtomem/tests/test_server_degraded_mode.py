@@ -842,6 +842,273 @@ async def test_revert_refuses_an_explicit_budget_the_stored_model_rejects(tmp_pa
         await close_components(comp)
 
 
+def _artifact(tmp_path: Path, name: str = "artifact") -> Path:
+    directory = tmp_path / name
+    directory.mkdir()
+    # The policy fingerprint hashes the manifest; its content is not read here.
+    (directory / "manifest.json").write_text("{}", encoding="utf-8")
+    return directory
+
+
+async def _seed_store(config: Mem2MemConfig, *, vectors: int, **section: object) -> None:
+    """Stamp *section* on the fixture DB and store *vectors* vectors built under it."""
+    from helpers import make_chunk
+    from memtomem.config import EmbeddingConfig, StorageConfig, embedding_policy_fingerprint
+    from memtomem.storage.sqlite_backend import SqliteBackend
+
+    _restamp_db(config, **section)
+    stamped = EmbeddingConfig(**section)
+    storage = SqliteBackend(
+        StorageConfig(sqlite_path=config.storage.sqlite_path),
+        dimension=stamped.dimension,
+        embedding_provider=stamped.provider,
+        embedding_model=stamped.model,
+        embedding_policy_fingerprint=embedding_policy_fingerprint(stamped),
+        embedding_max_sequence_tokens=stamped.max_sequence_tokens,
+    )
+    await storage.initialize()
+    try:
+        if vectors:
+            vector = [1.0] + [0.0] * (stamped.dimension - 1)
+            await storage.upsert_chunks(
+                [make_chunk(f"stored {n}", embedding=vector) for n in range(vectors)]
+            )
+    finally:
+        await storage.close()
+
+
+def _set_meta(config: Mem2MemConfig, **rows: str | None) -> None:
+    """Write raw meta rows; ``None`` deletes the row."""
+    db = sqlite3.connect(str(config.storage.sqlite_path))
+    try:
+        for key, value in rows.items():
+            if value is None:
+                db.execute("DELETE FROM _memtomem_meta WHERE key=?", (key,))
+            else:
+                db.execute(
+                    "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+                    (key, value),
+                )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _stored_meta(config: Mem2MemConfig, key: str) -> str | None:
+    db = sqlite3.connect(str(config.storage.sqlite_path))
+    try:
+        row = db.execute("SELECT value FROM _memtomem_meta WHERE key=?", (key,)).fetchone()
+    finally:
+        db.close()
+    return row[0] if row else None
+
+
+def _keep_quantized(config: Mem2MemConfig, artifact: Path) -> None:
+    config.embedding.onnx_variant = "int8-arm64"
+    config.embedding.onnx_artifact_path = str(artifact)
+
+
+async def _assert_revert_refused(config: Mem2MemConfig, *fragments: str) -> None:
+    """Revert must refuse before anything changes, in memory or on disk."""
+    comp = await create_components(config)
+    # Read after the open, which may backfill it.
+    policy_row = _stored_meta(config, "embedding_policy_fingerprint")
+    try:
+        app = _make_app(comp)
+        watcher = MagicMock(name="watcher")
+        app._watcher = watcher
+        before = _revert_visible_state(app)
+        assert before["mismatch"] is not None, "fixture must start degraded"
+
+        with pytest.raises(ValueError, match="Nothing was changed") as raised:
+            await _revert_recording_embedder_config(app)
+
+        for fragment in fragments:
+            assert fragment in str(raised.value)
+        _assert_revert_state_unchanged(app, before)
+        watcher.rebind.assert_not_called()
+    finally:
+        await close_components(comp)
+    assert _stored_meta(config, "embedding_policy_fingerprint") == policy_row
+
+
+async def test_revert_refuses_a_quantized_variant_onto_a_populated_fp32_store(
+    tmp_path, monkeypatch, budget_checks
+):
+    """#2617: a quantized bge-m3 config reverted onto an fp32 E5 store kept its
+    variant and ran quantized E5 over fp32 vectors, clearing the mismatch."""
+    config = _degraded_config(tmp_path, monkeypatch)
+    _keep_quantized(config, _artifact(tmp_path))
+    await _seed_store(config, vectors=1, **_E5_STAMP)
+
+    await _assert_revert_refused(config, "keeps onnx_variant='int8-arm64'", "onnx_variant='fp32'")
+
+
+async def test_revert_refuses_fp32_onto_a_populated_store_stamped_quantized(
+    tmp_path, monkeypatch, budget_checks
+):
+    config = _degraded_config(tmp_path, monkeypatch)
+    artifact = _artifact(tmp_path)
+    await _seed_store(
+        config,
+        vectors=1,
+        **_E5_STAMP,
+        onnx_variant="int8-arm64",
+        onnx_artifact_path=str(artifact),
+    )
+
+    await _assert_revert_refused(config, "built with onnx_variant='int8-arm64'", "keeps fp32")
+
+
+@pytest.mark.parametrize("quantized", [True, False], ids=["quantized", "fp32"])
+async def test_a_populated_onnx_store_backfilled_as_none(
+    tmp_path, monkeypatch, budget_checks, quantized
+):
+    """A populated ONNX store once opened under ``provider=none`` carries the
+    ``none:v1`` backfill. That is not a quantized policy, so it is fp32."""
+    config = _degraded_config(tmp_path, monkeypatch)
+    if quantized:
+        _keep_quantized(config, _artifact(tmp_path))
+    await _seed_store(config, vectors=1, **_E5_STAMP)
+    _set_meta(config, embedding_policy_fingerprint="none:v1")
+
+    if quantized:
+        await _assert_revert_refused(config, "stored policy 'none:v1'")
+        return
+    comp = await create_components(config)
+    try:
+        app = _make_app(comp)
+        await _revert_recording_embedder_config(app)
+        assert app.storage.embedding_mismatch is None
+        # A populated store keeps its row: vectors exist to be described by it.
+        assert _stored_meta(config, "embedding_policy_fingerprint") == "none:v1"
+    finally:
+        await close_components(comp)
+
+
+async def test_revert_allows_the_variant_the_store_was_built_with(
+    tmp_path, monkeypatch, budget_checks
+):
+    from memtomem.config import EmbeddingConfig, embedding_policy_fingerprint
+
+    config = _degraded_config(tmp_path, monkeypatch)
+    artifact = _artifact(tmp_path)
+    _keep_quantized(config, artifact)
+    section = {**_E5_STAMP, "onnx_variant": "int8-arm64", "onnx_artifact_path": str(artifact)}
+    await _seed_store(config, vectors=1, **section)
+    comp = await create_components(config)
+    try:
+        app = _make_app(comp)
+
+        await _revert_recording_embedder_config(app)
+
+        assert app.storage.embedding_mismatch is None
+        assert app.config.embedding.model == "intfloat/multilingual-e5-small"
+        assert app.config.embedding.onnx_variant == "int8-arm64"
+        assert _stored_meta(config, "embedding_policy_fingerprint") == (
+            embedding_policy_fingerprint(EmbeddingConfig(**section))
+        )
+    finally:
+        await close_components(comp)
+
+
+async def _empty_backfilled_bge_store(tmp_path: Path, monkeypatch) -> tuple[Mem2MemConfig, Path]:
+    """An empty bge-m3 store whose policy row the quantized opener backfills.
+
+    ``chunks_vec`` exists but holds no rows, and the policy row is missing, as
+    in a store created before policies were recorded. Storage init keys the
+    legacy backfill on the table existing, not on it holding vectors.
+    """
+    config = _degraded_config(tmp_path, monkeypatch)
+    artifact = _artifact(tmp_path)
+    _keep_quantized(config, artifact)
+    await _seed_store(config, vectors=0, **_BGE_STAMP)
+    _set_meta(config, embedding_policy_fingerprint=None, embedding_max_sequence_tokens=None)
+    return config, artifact
+
+
+async def test_revert_onto_an_empty_store_ignores_the_backfilled_policy(
+    tmp_path, monkeypatch, budget_checks
+):
+    """#2617 acceptance: the backfilled row says nothing about vectors, since
+    there are none, so it must not refuse the revert."""
+    from memtomem.config import EmbeddingConfig, StorageConfig, embedding_policy_fingerprint
+    from memtomem.embedding.profiles import variant_identity
+    from memtomem.storage.sqlite_backend import SqliteBackend
+
+    config, artifact = await _empty_backfilled_bge_store(tmp_path, monkeypatch)
+    comp = await create_components(config)
+    try:
+        app = _make_app(comp)
+        storage = app.storage
+        # The real backfill, not a seeded string.
+        assert _stored_meta(config, "embedding_policy_fingerprint") == (
+            "onnx:v1:max_sequence_tokens=0"
+        )
+        assert storage.embedding_mismatch is not None
+
+        await _revert_recording_embedder_config(app)
+
+        assert storage.embedding_mismatch is None
+        reverted = app.config.embedding
+        assert reverted.onnx_variant == "int8-arm64"
+        # The store now records the policy the revert runs, so the vectors it
+        # indexes next are described by it (round-1 review of #2617).
+        expected = embedding_policy_fingerprint(reverted)
+        assert expected.endswith(f":int8-arm64:{variant_identity(str(artifact))}")
+        assert _stored_meta(config, "embedding_policy_fingerprint") == expected
+        assert _stored_meta(config, "embedding_max_sequence_tokens") == str(
+            reverted.max_sequence_tokens
+        )
+        assert storage._embedding_policy_fingerprint == expected
+        assert storage._embedding_max_sequence_tokens == reverted.max_sequence_tokens
+        await storage.upsert_chunks([_chunk_1024("indexed after the revert")])
+        assert await storage.count_vectors_fresh() == 1
+        section = EmbeddingConfig.model_validate(reverted.model_dump())
+    finally:
+        await close_components(comp)
+
+    reopened = SqliteBackend(
+        StorageConfig(sqlite_path=config.storage.sqlite_path),
+        dimension=section.dimension,
+        embedding_provider=section.provider,
+        embedding_model=section.model,
+        embedding_policy_fingerprint=embedding_policy_fingerprint(section),
+        embedding_max_sequence_tokens=section.max_sequence_tokens,
+    )
+    await reopened.initialize()
+    try:
+        assert reopened.embedding_mismatch is None
+    finally:
+        await reopened.close()
+
+
+def _chunk_1024(content: str):
+    from helpers import make_chunk
+
+    return make_chunk(content, embedding=[1.0] + [0.0] * 1023)
+
+
+async def test_revert_refuses_when_the_store_gains_vectors_during_the_revert(
+    tmp_path, monkeypatch, budget_checks
+):
+    """The emptiness check and the policy write share one transaction; a
+    vector committed first by another process refuses the revert."""
+    from memtomem.storage.sqlite_backend import SqliteBackend
+
+    config, _artifact_dir = await _empty_backfilled_bge_store(tmp_path, monkeypatch)
+    adopt_calls: list = []
+
+    def _lost_the_race(self, policy, max_tokens) -> bool:
+        adopt_calls.append(policy)
+        return False
+
+    monkeypatch.setattr(SqliteBackend, "adopt_embedding_policy_if_empty", _lost_the_race)
+
+    await _assert_revert_refused(config, "gained vectors while the revert")
+    assert len(adopt_calls) == 1
+
+
 def _revert_visible_state(app: AppContext) -> dict[str, object]:
     """Everything a failed revert must leave as it found it (#2428)."""
     comp = app._components

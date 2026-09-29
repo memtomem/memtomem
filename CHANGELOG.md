@@ -42,8 +42,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `chunk_model_tokens` above E5's 512), or when a config edit lands while it
   checks the chunk budget. When building the new embedder, search pipeline or
   index engine fails, every embedding and chunk-budget field is restored, not
-  only the four it assigned. A kept quantized `onnx_variant` is still not
-  checked against the variant the store was built with (#2617).
+  only the four it assigned.
+- **Revert-to-stored checks the kept ONNX variant against the store's vectors
+  (#2617).** `mem_embedding_reset(mode="revert_to_stored")` restores the stored
+  provider, model, dimension and token cap, but keeps `onnx_variant` and
+  `onnx_artifact_path` from the running config. A quantized bge-m3 config
+  reverted onto an fp32 E5 store therefore ran quantized E5 over fp32 vectors
+  and cleared the mismatch. On a store that holds vectors the revert now
+  refuses, before changing anything, unless the stored policy fingerprint
+  records the same variant and artifact; fp32 onto a quantized store is
+  refused the same way. A policy without a variant suffix counts as fp32,
+  because variants shipped after policies were first recorded. The rest of the
+  stored policy is not compared, since storage init backfills it from whichever
+  config first opens the store. An empty store skips the variant check and,
+  once the rest of the revert validates, records the policy the revert runs,
+  so the vectors indexed next are described by it.
 - **`mm init` and the quantized-variant check accept an ONNX model name in any
   case (#2608).** After #2602 two places still compared the name exactly.
   `mm init --preset minimal --provider onnx --model

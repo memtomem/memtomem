@@ -11,6 +11,7 @@ from memtomem.config import (
     IndexingConfig,
     Mem2MemConfig,
     embedding_policy_fingerprint,
+    stored_policy_variant_conflict,
 )
 from memtomem.embedding.profiles import E5_TOKENIZER
 from memtomem.indexing.watcher import FileWatcher, _STOP_SENTINEL
@@ -61,6 +62,113 @@ def test_e5_policy_survives_a_post_construction_model_assignment():
     embedding = EmbeddingConfig(provider="onnx", model="multilingual-e5-small")
     embedding.model = "intfloat/Multilingual-E5-Small"
     assert embedding_policy_fingerprint(embedding) == _E5_POLICY
+
+
+def _quantized_e5(artifact: Path, variant: str = "int8-arm64") -> EmbeddingConfig:
+    return EmbeddingConfig(
+        provider="onnx",
+        model="multilingual-e5-small",
+        onnx_variant=variant,
+        onnx_artifact_path=str(artifact),
+    )
+
+
+@pytest.fixture
+def artifact(tmp_path: Path) -> Path:
+    directory = tmp_path / "artifact"
+    directory.mkdir()
+    # The policy hashes the manifest bytes; nothing reads its content here.
+    (directory / "manifest.json").write_text('{"a": 1}', encoding="utf-8")
+    return directory
+
+
+@pytest.mark.parametrize(
+    "stored_policy",
+    [
+        None,
+        "",
+        "stored-policy",
+        "none:v1",
+        "onnx:v1:max_sequence_tokens=0",
+        # E5 stamped before the E5 extra existed.
+        "onnx:v1:max_sequence_tokens=1024",
+        _E5_POLICY,
+    ],
+)
+def test_an_fp32_revert_accepts_every_policy_without_a_variant_suffix(stored_policy):
+    """#2617: variants and their suffix postdate the policy row, so a policy
+    without one was written for fp32 vectors, backfills included."""
+    fp32 = EmbeddingConfig(provider="onnx", model="multilingual-e5-small")
+    assert stored_policy_variant_conflict(stored_policy, fp32) is None
+
+
+def test_an_fp32_revert_refuses_a_store_built_quantized(artifact):
+    stored = embedding_policy_fingerprint(_quantized_e5(artifact))
+    fp32 = EmbeddingConfig(provider="onnx", model="multilingual-e5-small")
+
+    reason = stored_policy_variant_conflict(stored, fp32)
+
+    assert reason is not None
+    assert "onnx_variant='int8-arm64'" in reason and "keeps fp32" in reason
+
+
+def test_a_quantized_revert_accepts_the_variant_and_artifact_the_store_was_built_with(artifact):
+    rebuilt = _quantized_e5(artifact)
+    assert stored_policy_variant_conflict(embedding_policy_fingerprint(rebuilt), rebuilt) is None
+
+
+@pytest.mark.parametrize(
+    "stored_policy",
+    [
+        None,
+        "",
+        "stored-policy",
+        # A populated ONNX store once opened under ``provider=none`` (#2617).
+        "none:v1",
+        "onnx:v1:max_sequence_tokens=0",
+        "onnx:v1:max_sequence_tokens=1024",
+        _E5_POLICY,
+    ],
+)
+def test_a_quantized_revert_refuses_every_policy_without_its_suffix(artifact, stored_policy):
+    reason = stored_policy_variant_conflict(stored_policy, _quantized_e5(artifact))
+    assert reason is not None
+    assert "onnx_variant='fp32'" in reason
+
+
+def test_a_quantized_revert_refuses_another_variant(artifact):
+    stored = embedding_policy_fingerprint(_quantized_e5(artifact, "int8-avx2"))
+
+    reason = stored_policy_variant_conflict(stored, _quantized_e5(artifact))
+
+    assert reason is not None
+    assert "onnx_variant='int8-avx2'" in reason
+    assert "different artifact" not in reason
+
+
+def test_a_quantized_revert_refuses_the_same_variant_from_another_artifact(artifact, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "manifest.json").write_text('{"b": 2}', encoding="utf-8")
+    stored = embedding_policy_fingerprint(_quantized_e5(other))
+
+    reason = stored_policy_variant_conflict(stored, _quantized_e5(artifact))
+
+    assert reason is not None
+    assert "different artifact" in reason
+    # The variant already matches; only the artifact path resolves it.
+    assert "embedding.onnx_artifact_path" in reason
+
+
+def test_a_quantized_revert_whose_manifest_is_gone_is_refused(artifact):
+    rebuilt = _quantized_e5(artifact)
+    stored = embedding_policy_fingerprint(rebuilt)
+    (artifact / "manifest.json").unlink()
+
+    reason = stored_policy_variant_conflict(stored, rebuilt)
+
+    assert reason is not None
+    assert "manifest is unreadable" in reason
 
 
 def test_e5_contract_error_names_the_canonical_id_for_another_spelling():

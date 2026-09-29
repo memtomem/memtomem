@@ -224,6 +224,54 @@ def embedding_policy_fingerprint(config: EmbeddingConfig) -> str:
     return f"{provider}:v1"
 
 
+def stored_policy_variant_conflict(
+    stored_policy: str | None, rebuilt: EmbeddingConfig
+) -> str | None:
+    """Why *rebuilt* cannot run over vectors stamped with *stored_policy*, or None.
+
+    Reads only the ONNX variant component of a policy written by
+    :func:`embedding_policy_fingerprint`: a quantized variant appends
+    ``:{variant}:{manifest sha256}``. The rest of a stored policy cannot be
+    trusted for this, because storage init backfills a missing policy from
+    whichever config first opens the store (``none:v1`` included). The
+    variant component can: variants and their suffix shipped together, after
+    the policy row itself, so a policy without the suffix was written for fp32
+    vectors, and a backfill never writes one. Callers check only stores that
+    hold vectors; an empty store has nothing to protect.
+    """
+    from memtomem.embedding.profiles import CPU_VARIANTS, variant_identity
+
+    quantized = frozenset(CPU_VARIANTS[1:])
+    policy = stored_policy or ""
+    parts = policy.split(":")
+    stored_variant = parts[-2] if len(parts) >= 2 and parts[-2] in quantized else "fp32"
+    variant = rebuilt.onnx_variant
+    if variant == "fp32":
+        if stored_variant == "fp32":
+            return None
+        return (
+            f"the stored vectors were built with onnx_variant={stored_variant!r} "
+            f"(stored policy {policy!r}) but the running config keeps fp32; set "
+            f"embedding.onnx_variant={stored_variant!r} with its onnx_artifact_path, "
+            "or run apply_current to re-embed"
+        )
+    try:
+        identity = variant_identity(rebuilt.onnx_artifact_path)
+    except ValueError as exc:
+        return str(exc)
+    if policy.startswith("onnx:") and policy.endswith(f":{variant}:{identity}"):
+        return None
+    return (
+        f"the running config keeps onnx_variant={variant!r} from "
+        f"{rebuilt.onnx_artifact_path!r}, but the stored vectors were built with "
+        f"onnx_variant={stored_variant!r}"
+        + (" from a different artifact" if stored_variant == variant else "")
+        + f" (stored policy {policy!r}); set embedding.onnx_variant and "
+        "embedding.onnx_artifact_path to what the store was built with, or run "
+        "apply_current to re-embed"
+    )
+
+
 class StorageConfig(ConfigModel):
     backend: str = "sqlite"
     sqlite_path: Path = Path("~/.memtomem/memtomem.db")
