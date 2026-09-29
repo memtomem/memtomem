@@ -169,7 +169,7 @@ def test_holder_longer_than_the_budget_reads_as_live(tmp_path: Path, clock, open
     """The mitigation is bounded: a holder that keeps the lock for the whole
     budget (a live owner, or a probe suspended that long) reads as live."""
     pid_file = tmp_path / "server.pid"
-    pid_file.write_text("777\n", encoding="utf-8")
+    pid_file.write_bytes(b"777\n")  # bytes: write_text would write CRLF on Windows
     owner = _Rival(pid_file)
     try:
         result = _pid_lock.lock_pid_file(pid_file, label="server pid")
