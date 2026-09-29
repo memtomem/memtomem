@@ -40,6 +40,7 @@ from typing import Literal
 import click
 import portalocker
 
+from memtomem._lock_errors import is_lock_contention, raise_lock_io_failure
 from memtomem._runtime_paths import (
     RuntimeDirValidationError,
     candidate_runtime_dirs,
@@ -62,6 +63,10 @@ _BINARY = getattr(os, "O_BINARY", 0)
 
 class _UnsafeProbePathError(Exception):
     """A pid/metadata path could not be proven to be one stable regular file."""
+
+
+# Public name for callers outside this module (``unlink_stale_pid_file``).
+UnsafeProbePathError = _UnsafeProbePathError
 
 
 def _exception_detail(exc: BaseException) -> str:
@@ -108,9 +113,21 @@ def _verify_opened_regular(
     parent_stat: os.stat_result,
 ) -> None:
     """Require *fd*, *path*, and its parent to retain one no-follow identity."""
+    _verify_descriptor_and_parent(fd, path, path_stat, parent_stat)
+    _verify_path_names(path, path_stat)
+
+
+def _verify_descriptor_and_parent(
+    fd: int,
+    path: Path,
+    path_stat: os.stat_result,
+    parent_stat: os.stat_result,
+) -> None:
+    """Require *fd* to be the regular file first seen at *path*, and the
+    parent to be the same real directory. Says nothing about what *path*
+    names now; :func:`_verify_path_names` checks that."""
     try:
         descriptor_stat = os.fstat(fd)
-        current_path_stat = os.stat(path, follow_symlinks=False)
         current_parent_stat = os.stat(path.parent, follow_symlinks=False)
         parent_is_junction = path.parent.is_junction()
     except OSError as exc:
@@ -120,15 +137,7 @@ def _verify_opened_regular(
 
     if not stat.S_ISREG(descriptor_stat.st_mode):
         raise _UnsafeProbePathError(f"pid path {path} is not a regular file")
-    if not stat.S_ISREG(current_path_stat.st_mode):
-        raise _UnsafeProbePathError(f"pid path {path} is not a regular file")
-    if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
-        path_stat.st_dev,
-        path_stat.st_ino,
-    ) or (current_path_stat.st_dev, current_path_stat.st_ino) != (
-        path_stat.st_dev,
-        path_stat.st_ino,
-    ):
+    if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
         raise _UnsafeProbePathError(f"pid path {path} changed identity during probe")
     if not stat.S_ISDIR(current_parent_stat.st_mode) or parent_is_junction:
         raise _UnsafeProbePathError(f"pid parent {path.parent} is redirected or not a directory")
@@ -137,6 +146,23 @@ def _verify_opened_regular(
         parent_stat.st_ino,
     ):
         raise _UnsafeProbePathError(f"pid parent {path.parent} changed identity during probe")
+
+
+def _verify_path_names(path: Path, path_stat: os.stat_result) -> None:
+    """Require *path* to still name the regular file first seen there."""
+    try:
+        current_path_stat = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise _UnsafeProbePathError(
+            f"pid path changed during probe ({type(exc).__name__}: {exc})"
+        ) from exc
+    if not stat.S_ISREG(current_path_stat.st_mode):
+        raise _UnsafeProbePathError(f"pid path {path} is not a regular file")
+    if (current_path_stat.st_dev, current_path_stat.st_ino) != (
+        path_stat.st_dev,
+        path_stat.st_ino,
+    ):
+        raise _UnsafeProbePathError(f"pid path {path} changed identity during probe")
 
 
 def _open_verified_regular(
@@ -434,6 +460,107 @@ def probe_pid_file(pid_file: Path) -> ServerState:
         portalocker.unlock(fp)
         lock_owned = False
         return ServerState(alive=False, pid=pid, pid_file=pid_file, port=port, started=started)
+    finally:
+        if lock_owned:
+            with contextlib.suppress(Exception):
+                portalocker.unlock(fp)
+        fp.close()
+
+
+StalePidUnlink = Literal["removed", "held", "replaced", "missing"]
+
+
+def unlink_stale_pid_file(pid_file: Path) -> StalePidUnlink:
+    """Delete *pid_file* only while holding its lock, and only the file locked.
+
+    A probe releases its lock before it returns, so deleting the path after a
+    "not running" probe can delete a file a replacement has locked since
+    (#2595). This takes the lock itself and deletes the path while still
+    holding it, after checking the path still names the locked file.
+
+    Returns ``"removed"`` when it deleted the file, ``"held"`` when another
+    process holds the lock, ``"replaced"`` when the path no longer names the
+    file it locked (deleted, or a new file in its place), and ``"missing"``
+    when there was no file. Nothing is deleted except in the ``"removed"``
+    case. Raises :class:`UnsafeProbePathError` when the path or its parent
+    cannot be proven safe (a symlink, a non-regular file, a parent directory
+    that changed), ``OSError`` when the lock call or the delete fails, and
+    :class:`~memtomem._instance_registry.BarrierTimeout` when the lifecycle
+    barrier is held exclusive (``mm uninstall`` or ``mm reset`` is writing).
+
+    POSIX only. Windows cannot delete a file with an open handle, so the lock
+    would have to be released before the delete, which reopens the race this
+    closes. ``mm upgrade`` never stops processes on Windows.
+
+    POSIX cannot delete a name only if it still names a given file, so the
+    identity check and the delete are two steps. A new file can take the name
+    between them only if something moves or deletes the name without holding
+    this file's lock and a new file is then created there. Every pid-file
+    owner deletes only while holding its lock. ``mm uninstall`` moves server
+    pid files into its staging directory without that lock, but only while it
+    holds the lifecycle barrier exclusive, so this helper holds the barrier
+    shared from before the lock until after the delete (#2595 review). The
+    remaining lock-less remover is ``cli/web.py:_remove_stale_web_files``,
+    which deletes by path after a probe, and is the next thing to move onto
+    this helper.
+    """
+    if os.name == "nt":
+        raise NotImplementedError("unlink_stale_pid_file is POSIX-only")
+
+    from memtomem._instance_registry import acquire_server_lifecycle_barrier
+
+    # Shared, like a running server: it only excludes the destructive CLIs.
+    barrier = acquire_server_lifecycle_barrier()
+    try:
+        return _unlink_locked_pid_file(pid_file)
+    finally:
+        barrier.release()
+
+
+def _unlink_locked_pid_file(pid_file: Path) -> StalePidUnlink:
+    opened = _open_verified_regular(pid_file, writable=True)
+    if opened is None:
+        return "missing"
+    fd, path_stat, parent_stat = opened
+    try:
+        fp = os.fdopen(fd, "rb+", buffering=0)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
+
+    lock_owned = False
+    try:
+        try:
+            portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            lock_owned = True
+        except (portalocker.LockException, OSError) as exc:
+            if is_lock_contention(exc):
+                return "held"
+            raise_lock_io_failure(exc, pid_file, label="stale pid")
+
+        # The descriptor and the parent directory must still be the ones
+        # first seen; if not, fail closed rather than read it as "replaced".
+        _verify_descriptor_and_parent(fp.fileno(), pid_file, path_stat, parent_stat)
+        try:
+            current = os.stat(pid_file, follow_symlinks=False)
+        except FileNotFoundError:
+            return "replaced"
+        except OSError as exc:
+            raise _UnsafeProbePathError(
+                f"cannot inspect pid path {pid_file} ({type(exc).__name__}: {exc})"
+            ) from exc
+        if (current.st_dev, current.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+            return "replaced"
+
+        # Delete while the lock is held. Once it is released, a replacement
+        # can open and lock this same file before the delete, and the delete
+        # would then remove the file it holds.
+        try:
+            os.unlink(pid_file)
+        except FileNotFoundError:
+            return "replaced"
+        return "removed"
     finally:
         if lock_owned:
             with contextlib.suppress(Exception):

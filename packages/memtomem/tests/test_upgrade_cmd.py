@@ -1304,6 +1304,226 @@ def test_replacement_sidecar_written_after_the_stop_is_kept(
     assert str(web_info_file) not in payload["removed"]
 
 
+def _lock_as_replacement(path: Path):
+    """Open and lock *path* the way a starting ``mm web`` or MCP server does."""
+    import portalocker
+
+    holder = open(path, "rb+")
+    portalocker.lock(holder, portalocker.LOCK_EX | portalocker.LOCK_NB)
+    return holder
+
+
+def _still_locked(path: Path) -> bool:
+    import portalocker
+
+    with open(path, "rb+") as rival:
+        try:
+            portalocker.lock(rival, portalocker.LOCK_EX | portalocker.LOCK_NB)
+        except (portalocker.AlreadyLocked, BlockingIOError):
+            return True
+        portalocker.unlock(rival)
+        return False
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: exercises the stop path; Windows skips kill entirely",
+)
+@pytest.mark.parametrize("which", ["web", "server"])
+def test_pid_file_locked_after_the_reprobe_is_kept(
+    monkeypatch, tmp_path, fake_uv, force_tty, which
+):
+    """#2595: a replacement that locks the pid file after the re-probe
+    released it keeps its file. Deleting it would leave the replacement
+    holding a lock on a file no probe can find."""
+    _calls, _configure = fake_uv
+    web_pid_file = tmp_path / "web.pid"
+    web_pid_file.write_text("4242\n8080\n2026-07-03T00:00:00+00:00\n")
+    server_pid_file = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
+    server_pid_file.write_text("12345")
+    target = web_pid_file if which == "web" else server_pid_file
+    _patch_liveness(
+        monkeypatch,
+        ServerState(alive=True, pid=12345, pid_file=server_pid_file),
+        web=ServerState(alive=True, pid=4242, pid_file=web_pid_file, port=8080),
+    )
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda pid: "dead")
+
+    holders: list[object] = []
+
+    def probe_then_replacement_locks(path):
+        # The re-probe sees no holder; the replacement locks right after.
+        if path == target and not holders:
+            holders.append(_lock_as_replacement(path))
+        return ServerState(alive=False, pid=None, pid_file=path)
+
+    monkeypatch.setattr(upgrade_cmd, "probe_pid_file", probe_then_replacement_locks)
+    try:
+        result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "0.1", "--json"])
+        assert holders, "the replacement never locked the pid file"
+        assert result.exit_code == 0, result.output
+        assert target.exists()
+        assert _still_locked(target)
+        payload = json.loads(result.stdout)
+        assert str(target) not in payload["removed"]
+        other = server_pid_file if which == "web" else web_pid_file
+        assert str(other) in payload["removed"]
+        assert not other.exists()
+        assert f"Skipping pid-file unlink — {target} was locked after the re-probe" in (
+            result.stderr
+        )
+    finally:
+        for holder in holders:
+            holder.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: exercises the stop path; Windows skips kill entirely",
+)
+def test_pid_file_replaced_after_the_lock_is_kept(monkeypatch, tmp_path, fake_uv, force_tty):
+    """#2595: when the path names a new file by the time upgrade has locked
+    the old one, upgrade leaves the new file alone."""
+    import portalocker
+
+    from memtomem.cli import _liveness
+
+    _calls, _configure = fake_uv
+    web_pid_file = tmp_path / "web.pid"
+    web_pid_file.write_text("4242\n8080\n2026-07-03T00:00:00+00:00\n")
+    _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        web=ServerState(alive=True, pid=4242, pid_file=web_pid_file, port=8080),
+    )
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda pid: "dead")
+    monkeypatch.setattr(
+        upgrade_cmd,
+        "probe_pid_file",
+        lambda path: ServerState(alive=False, pid=None, pid_file=path),
+    )
+    real_lock = portalocker.lock
+    replacement = "99999\n8080\n2026-07-03T00:00:01+00:00\n"
+
+    def lock_then_replace(fp, flags):
+        real_lock(fp, flags)
+        if str(getattr(fp, "name", "")).endswith("lifecycle.lock"):
+            return  # the shared lifecycle barrier, taken first
+        web_pid_file.unlink()
+        web_pid_file.write_text(replacement)
+
+    monkeypatch.setattr(_liveness.portalocker, "lock", lock_then_replace)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "0.1", "--json"])
+    assert result.exit_code == 0, result.output
+    assert web_pid_file.read_text() == replacement
+    payload = json.loads(result.stdout)
+    assert str(web_pid_file) not in payload["removed"]
+    assert f"Skipping pid-file unlink — {web_pid_file} was replaced after the re-probe" in (
+        result.stderr
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: exercises the stop path; Windows skips kill entirely",
+)
+def test_pid_file_gone_before_the_delete_is_still_reported_removed(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    """A clean SIGTERM teardown deletes its own pid file; upgrade keeps
+    listing it under ``removed`` as before #2595."""
+    _calls, _configure = fake_uv
+    web_pid_file = tmp_path / "web.pid"
+    _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        web=ServerState(alive=True, pid=4242, pid_file=web_pid_file, port=8080),
+    )
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda pid: "dead")
+    monkeypatch.setattr(
+        upgrade_cmd,
+        "probe_pid_file",
+        lambda path: ServerState(alive=False, pid=None, pid_file=path),
+    )
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "0.1", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert str(web_pid_file) in payload["removed"]
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: exercises the stop path; Windows skips kill entirely",
+)
+def test_pid_file_delete_failure_is_reported(monkeypatch, tmp_path, fake_uv, force_tty):
+    _calls, _configure = fake_uv
+    web_pid_file = tmp_path / "web.pid"
+    web_pid_file.write_text("4242\n8080\n2026-07-03T00:00:00+00:00\n")
+    _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        web=ServerState(alive=True, pid=4242, pid_file=web_pid_file, port=8080),
+    )
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda pid: "dead")
+    monkeypatch.setattr(
+        upgrade_cmd,
+        "probe_pid_file",
+        lambda path: ServerState(alive=False, pid=None, pid_file=path),
+    )
+
+    def refuse(path):
+        raise upgrade_cmd.UnsafeProbePathError(f"pid parent {path.parent} changed identity")
+
+    monkeypatch.setattr(upgrade_cmd, "unlink_stale_pid_file", refuse)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "0.1", "--json"])
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert f"failed to remove stale pid file {web_pid_file}" in payload["error"]
+    assert web_pid_file.exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: exercises the stop path; Windows skips kill entirely",
+)
+def test_pid_file_is_not_removed_during_an_uninstall(monkeypatch, tmp_path, fake_uv, force_tty):
+    """#2595 review: ``mm uninstall`` moves server pid files without their
+    locks while it holds the lifecycle barrier exclusive. Upgrade must not
+    delete a pid file then; it reports the failure instead."""
+    from memtomem import _instance_registry
+
+    _calls, _configure = fake_uv
+    server_pid_file = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
+    server_pid_file.write_text("12345")
+    _patch_liveness(monkeypatch, ServerState(alive=True, pid=12345, pid_file=server_pid_file))
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda pid: "dead")
+    monkeypatch.setattr(
+        upgrade_cmd,
+        "probe_pid_file",
+        lambda path: ServerState(alive=False, pid=None, pid_file=path),
+    )
+    monkeypatch.setattr(_instance_registry, "_BARRIER_TIMEOUT_S", 0.2)
+
+    uninstall = _instance_registry.acquire_uninstall_lifecycle_barrier()
+    try:
+        result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "0.1", "--json"])
+    finally:
+        uninstall.release()
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert f"failed to remove stale pid file {server_pid_file}" in payload["error"]
+    assert "lifecycle barrier busy" in payload["error"]
+    assert server_pid_file.read_text() == "12345"
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX Web UI generation recycle")
 def test_web_auto_respawn_is_recycled_after_install(monkeypatch, tmp_path, fake_uv, force_tty):
     calls, _configure = fake_uv

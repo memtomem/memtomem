@@ -124,6 +124,20 @@ def _take_debounce_lock(queue_path_str: str, q) -> None:
         q.put(("acquired", time.monotonic()))
 
 
+def _hold_pid_lock_until_released(pid_file_str: str, release, q) -> None:
+    """Hold an exclusive lock on the pid file until the parent sets *release*,
+    so the parent's assertion cannot race a timed release."""
+    import portalocker
+
+    pid_file = Path(pid_file_str)
+    pid_file.write_text("4242", encoding="utf-8")
+    with open(pid_file, "rb+") as fp:
+        portalocker.lock(fp, portalocker.LOCK_EX)
+        q.put("locked")
+        release.wait(30)
+        portalocker.unlock(fp)
+
+
 def _hold_pid_lock_via_portalocker(pid_file_str: str, hold_seconds: float, q) -> None:
     """Stand in for ``server/__init__.py:main`` — hold an exclusive
     portalocker lock on the pid file so ``probe_pid_file`` sees a writer."""
@@ -1210,3 +1224,254 @@ class TestPortalockerVerifiedRange:
             "comment above CONTENTION_ERRNOS must move together with "
             "VERIFIED_PORTALOCKER_RELEASES."
         )
+
+
+_POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="unlink_stale_pid_file is POSIX-only")
+
+
+def _is_lifecycle_barrier(fp: object) -> bool:
+    """The helper takes the shared lifecycle barrier through the same
+    ``portalocker.lock`` before it locks the pid file."""
+    return str(getattr(fp, "name", "")).endswith("lifecycle.lock")
+
+
+class TestUnlinkStalePidFile:
+    """``unlink_stale_pid_file`` deletes a pid file only while holding its lock,
+    and only the file it locked (#2595)."""
+
+    @_POSIX_ONLY
+    def test_unlocked_file_is_removed(self, tmp_path: Path) -> None:
+        from memtomem.cli._liveness import unlink_stale_pid_file
+
+        pid_file = tmp_path / "web.pid"
+        pid_file.write_text("4242\n")
+        assert unlink_stale_pid_file(pid_file) == "removed"
+        assert not pid_file.exists()
+
+    @_POSIX_ONLY
+    def test_missing_file(self, tmp_path: Path) -> None:
+        from memtomem.cli._liveness import unlink_stale_pid_file
+
+        assert unlink_stale_pid_file(tmp_path / "web.pid") == "missing"
+        assert unlink_stale_pid_file(tmp_path / "absent-dir" / "web.pid") == "missing"
+
+    @_POSIX_ONLY
+    def test_file_locked_by_another_process_is_kept(self, tmp_path: Path) -> None:
+        from memtomem.cli._liveness import unlink_stale_pid_file
+
+        pid_file = tmp_path / "server.pid"
+        q = _CTX.Queue()
+        release = _CTX.Event()
+        p = _CTX.Process(target=_hold_pid_lock_until_released, args=(str(pid_file), release, q))
+        p.start()
+        try:
+            assert q.get(timeout=10) == "locked"
+            assert unlink_stale_pid_file(pid_file) == "held"
+            assert pid_file.read_text() == "4242"
+        finally:
+            release.set()
+            p.join(timeout=10)
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=5)
+        assert p.exitcode == 0
+
+    @_POSIX_ONLY
+    def test_holds_the_lifecycle_barrier_while_deleting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mm uninstall`` moves server pid files away while it holds the
+        lifecycle barrier exclusive, without their locks. Holding the barrier
+        shared across the check and the delete keeps that move, and a new file
+        at the same name, out of the gap between them."""
+        from memtomem import _instance_registry
+        from memtomem.cli import _liveness
+
+        pid_file = tmp_path / "server.pid"
+        pid_file.write_text("4242\n")
+        real_unlink = os.unlink
+        excluded: list[bool] = []
+
+        def unlink_and_try_the_barrier(path: object, *args: object, **kwargs: object) -> None:
+            if Path(os.fspath(path)) == pid_file:  # type: ignore[arg-type]
+                try:
+                    held = _instance_registry.acquire_uninstall_lifecycle_barrier(timeout_s=0)
+                except _instance_registry.BarrierTimeout:
+                    excluded.append(True)
+                else:
+                    held.release()
+                    excluded.append(False)
+            real_unlink(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        with monkeypatch.context() as m:
+            m.setattr(_liveness.os, "unlink", unlink_and_try_the_barrier)
+            outcome = _liveness.unlink_stale_pid_file(pid_file)
+
+        assert outcome == "removed"
+        assert excluded == [True]
+
+    @_POSIX_ONLY
+    def test_waits_out_an_uninstall_then_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem import _instance_registry
+        from memtomem.cli import _liveness
+
+        pid_file = tmp_path / "server.pid"
+        pid_file.write_text("4242\n")
+        monkeypatch.setattr(_instance_registry, "_BARRIER_TIMEOUT_S", 0.2)
+        uninstall = _instance_registry.acquire_uninstall_lifecycle_barrier()
+        try:
+            with pytest.raises(_instance_registry.BarrierTimeout):
+                _liveness.unlink_stale_pid_file(pid_file)
+        finally:
+            uninstall.release()
+        assert pid_file.read_text() == "4242\n"
+
+    @_POSIX_ONLY
+    def test_unlinks_while_still_holding_the_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The delete must happen before the lock is released. Once released,
+        a replacement can lock this same file, and the delete would remove the
+        file it holds. At the moment of the delete, a second lock attempt must
+        still be refused."""
+        import portalocker
+
+        from memtomem.cli import _liveness
+
+        pid_file = tmp_path / "web.pid"
+        pid_file.write_text("4242\n")
+        real_unlink = os.unlink
+        refused: list[bool] = []
+
+        def unlink_and_try_to_lock(path: object, *args: object, **kwargs: object) -> None:
+            if Path(os.fspath(path)) == pid_file:  # type: ignore[arg-type]
+                with open(pid_file, "rb+") as rival:
+                    try:
+                        portalocker.lock(rival, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                    except (portalocker.AlreadyLocked, BlockingIOError):
+                        refused.append(True)
+                    else:
+                        portalocker.unlock(rival)
+                        refused.append(False)
+            real_unlink(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        with monkeypatch.context() as m:
+            m.setattr(_liveness.os, "unlink", unlink_and_try_to_lock)
+            outcome = _liveness.unlink_stale_pid_file(pid_file)
+
+        assert outcome == "removed"
+        assert refused == [True]
+        assert not pid_file.exists()
+
+    @_POSIX_ONLY
+    @pytest.mark.parametrize("recreate", [True, False], ids=["recreated", "deleted"])
+    def test_path_that_changed_after_the_lock_is_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recreate: bool
+    ) -> None:
+        """A replacement deleted the locked file and (maybe) created its own
+        before this checked. Only the replacement's file may remain."""
+        import portalocker
+
+        from memtomem.cli import _liveness
+
+        pid_file = tmp_path / "web.pid"
+        pid_file.write_text("4242\n")
+        real_lock = portalocker.lock
+
+        def lock_then_replace(fp: object, flags: object) -> None:
+            real_lock(fp, flags)  # type: ignore[arg-type]
+            if _is_lifecycle_barrier(fp):
+                return
+            pid_file.unlink()
+            if recreate:
+                pid_file.write_text("5151\n")
+
+        monkeypatch.setattr(_liveness.portalocker, "lock", lock_then_replace)
+        assert _liveness.unlink_stale_pid_file(pid_file) == "replaced"
+        if recreate:
+            assert pid_file.read_text() == "5151\n"
+        else:
+            assert not pid_file.exists()
+
+    @_POSIX_ONLY
+    @pytest.mark.parametrize("with_pid_file", [False, True], ids=["empty", "own-pid-file"])
+    def test_swapped_parent_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_pid_file: bool
+    ) -> None:
+        """A parent directory swapped after the lock must raise, not read as
+        "replaced": the caller would then trust the new directory."""
+        import portalocker
+
+        from memtomem.cli import _liveness
+
+        runtime = tmp_path / "runtime"
+        runtime.mkdir()
+        pid_file = runtime / "web.pid"
+        pid_file.write_text("4242\n")
+        moved = tmp_path / "moved"
+        real_lock = portalocker.lock
+
+        def lock_then_swap_parent(fp: object, flags: object) -> None:
+            real_lock(fp, flags)  # type: ignore[arg-type]
+            if _is_lifecycle_barrier(fp):
+                return
+            runtime.rename(moved)
+            runtime.mkdir()
+            if with_pid_file:
+                pid_file.write_text("5151\n")
+
+        monkeypatch.setattr(_liveness.portalocker, "lock", lock_then_swap_parent)
+        with pytest.raises(_liveness.UnsafeProbePathError):
+            _liveness.unlink_stale_pid_file(pid_file)
+        assert (moved / "web.pid").read_text() == "4242\n"
+        if with_pid_file:
+            assert pid_file.read_text() == "5151\n"
+
+    @_POSIX_ONLY
+    def test_symlink_is_refused_and_its_target_kept(self, tmp_path: Path) -> None:
+        from memtomem.cli._liveness import UnsafeProbePathError, unlink_stale_pid_file
+
+        target = tmp_path / "elsewhere"
+        target.write_text("keep\n")
+        pid_file = tmp_path / "web.pid"
+        pid_file.symlink_to(target)
+        with pytest.raises(UnsafeProbePathError):
+            unlink_stale_pid_file(pid_file)
+        assert pid_file.is_symlink()
+        assert target.read_text() == "keep\n"
+
+    @_POSIX_ONLY
+    def test_lock_call_failure_raises_oserror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import portalocker
+
+        from memtomem.cli import _liveness
+
+        pid_file = tmp_path / "web.pid"
+        pid_file.write_text("4242\n")
+
+        real_lock = portalocker.lock
+
+        def failing_lock(fp: object, flags: object) -> None:
+            if _is_lifecycle_barrier(fp):
+                real_lock(fp, flags)  # type: ignore[arg-type]
+                return
+            raise portalocker.LockException("backend failure")
+
+        monkeypatch.setattr(_liveness.portalocker, "lock", failing_lock)
+        with pytest.raises(OSError):
+            _liveness.unlink_stale_pid_file(pid_file)
+        assert pid_file.read_text() == "4242\n"
+
+    @pytest.mark.skipif(os.name != "nt", reason="the Windows refusal only runs on Windows")
+    def test_windows_refuses(self, tmp_path: Path) -> None:
+        from memtomem.cli._liveness import unlink_stale_pid_file
+
+        pid_file = tmp_path / "web.pid"
+        pid_file.write_text("4242\n")
+        with pytest.raises(NotImplementedError):
+            unlink_stale_pid_file(pid_file)
+        assert pid_file.exists()

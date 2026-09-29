@@ -67,6 +67,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Web UI has locked `web.pid` but not yet written its pid there: that sidecar
   can be a killed Web UI's, and its pid may belong to another process by then.
   It now says no signal was sent and asks to retry.
+- **`mm upgrade` no longer deletes a pid file that a restarted server or Web
+  UI has just locked (#2595).** After stopping a server or the Web UI, upgrade
+  checked that nothing held its pid file and then deleted it. That check
+  releases the lock before returning, so an MCP client's auto-restarted server
+  or a new `mm web` could lock the file in between, and upgrade deleted the
+  file it held. The replacement kept running, but checks that read the pid
+  file, such as `mm web status` and `mm upgrade`, could no longer see it, and a
+  second Web UI could start. Upgrade now takes the lock itself and deletes the
+  file only while holding it, after checking the path still names the file it
+  locked. A file locked in the meantime is left in place and reported as
+  skipped. While `mm uninstall` or `mm reset` is writing, upgrade waits for it
+  briefly and then stops with an error instead of deleting.
 - **The Web UI's model readiness finds models FastEmbed caches under another
   repository (#2585).** The probe looked for `models--<model id>`, but FastEmbed
   downloads some models from a mirror and caches them under that name.

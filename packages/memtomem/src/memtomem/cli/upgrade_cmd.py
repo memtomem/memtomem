@@ -37,7 +37,7 @@ from typing import NoReturn
 
 import click
 
-from memtomem._instance_registry import RegistrySnapshot, snapshot_all_instances
+from memtomem._instance_registry import BarrierTimeout, RegistrySnapshot, snapshot_all_instances
 from memtomem._process_probe import probe_pid
 from memtomem._runtime_paths import legacy_server_pid_path
 from memtomem.cli._db_lock import check_db_lock
@@ -46,8 +46,10 @@ from memtomem.cli._liveness import (
     check_web_liveness,
     enumerate_server_liveness_inventory,
     probe_legacy_pid_file,
+    UnsafeProbePathError,
     probe_pid_file,
     record_narrowed_inventory_warning,
+    unlink_stale_pid_file,
 )
 from memtomem.cli._prompts import confirm as _confirm
 
@@ -465,10 +467,11 @@ def _stop_server(
             time.sleep(0.5)
 
     # Clean the stale pid file. Clean SIGTERM teardown usually removes it
-    # itself, but the SIGKILL path leaves it behind. Re-probe immediately
-    # before unlink so we don't accidentally delete a fresh lockfile that
-    # an MCP client just respawned at the same path during the SIGKILL
-    # settle window.
+    # itself, but the SIGKILL path leaves it behind. The re-probe reports a
+    # writer that respawned at the same path during the SIGKILL settle window
+    # (an MCP client auto-restart, a new ``mm web``) and reads its metadata.
+    # It releases its lock before returning, so the delete itself takes the
+    # lock again and only deletes while holding it (#2595).
     if state.pid_file is not None:
         recheck = _reprobe_process_state(state)
         if recheck.probe_error is not None:
@@ -479,25 +482,43 @@ def _stop_server(
                 f"cannot verify {_format_path(state.pid_file)} after stopping pid "
                 f"{state.pid}: {recheck.probe_error}",
             )
-        if recheck.alive:
-            click.secho(
-                f"  Skipping pid-file unlink — {state.pid_file} is now held by a "
-                "freshly started writer (likely an auto-restart from your MCP "
-                "client). Leaving its live lock intact.",
-                fg="yellow",
-                err=warnings_to_stderr,
-            )
-        else:
+        skipped = "is now held by" if recheck.alive else None
+        if skipped is None:
             try:
-                state.pid_file.unlink(missing_ok=True)
-                removed.append(state.pid_file)
-            except OSError as exc:
+                outcome = unlink_stale_pid_file(state.pid_file)
+            except (OSError, UnsafeProbePathError, BarrierTimeout) as exc:
                 return (
                     killed,
                     removed,
                     recheck,
                     f"failed to remove stale pid file {state.pid_file}: {exc}",
                 )
+            if outcome in ("removed", "missing"):
+                removed.append(state.pid_file)
+            else:
+                skipped = (
+                    "was locked after the re-probe by"
+                    if outcome == "held"
+                    else "was replaced after the re-probe by"
+                )
+                # Report the newcomer's pid and start time, not the dead one's.
+                recheck = _reprobe_process_state(state)
+                if recheck.probe_error is not None:
+                    return (
+                        killed,
+                        removed,
+                        recheck,
+                        f"cannot verify {_format_path(state.pid_file)} after stopping pid "
+                        f"{state.pid}: {recheck.probe_error}",
+                    )
+        if skipped is not None:
+            click.secho(
+                f"  Skipping pid-file unlink — {state.pid_file} {skipped} a "
+                "freshly started writer (likely an auto-restart from your MCP "
+                "client). Leaving its live lock intact.",
+                fg="yellow",
+                err=warnings_to_stderr,
+            )
     else:
         recheck = ServerState(alive=False, pid=None, pid_file=None)
 
