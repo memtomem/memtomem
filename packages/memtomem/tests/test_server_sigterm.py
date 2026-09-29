@@ -948,10 +948,13 @@ class TestContentionWarningScope:
             fp.close()
 
     def test_same_store_holder_warns(self, tmp_path, monkeypatch, caplog) -> None:
+        from memtomem import _pid_lock
         from memtomem._runtime_paths import store_pid_digest
 
         store = tmp_path / "store" / "memtomem.db"
         held = tmp_path / "runtime" / f"server-{store_pid_digest(store)}.pid"
+        # A lifetime owner outlasts any budget; keep the wait short here.
+        monkeypatch.setattr(_pid_lock, "_PID_LOCK_RETRY_S", 0.05)
 
         with self._hold(held), caplog.at_level("WARNING", logger="memtomem.server"):
             self._run_main(tmp_path, monkeypatch, store=store)
@@ -959,6 +962,49 @@ class TestContentionWarningScope:
         assert any(self._MSG in r.getMessage() for r in caplog.records), (
             f"same-store contention must warn; records={[r.getMessage() for r in caplog.records]}"
         )
+
+    def test_transient_holder_does_not_warn(self, tmp_path, monkeypatch, caplog) -> None:
+        """A liveness probe that holds the lock at the server's first attempt
+        and lets go a moment later must not leave the server lockless (#2611).
+
+        The holder is released from the helper's first retry sleep, so the
+        test is deterministic. The server then owns the pid file: its atexit
+        cleanup (run by ``_run_main``) deletes it. On the warning path no
+        cleanup is registered and the file would survive.
+        """
+        import portalocker
+
+        from memtomem import _pid_lock
+        from memtomem._runtime_paths import store_pid_digest
+
+        store = tmp_path / "store" / "memtomem.db"
+        held = tmp_path / "runtime" / f"server-{store_pid_digest(store)}.pid"
+        held.parent.mkdir(parents=True, exist_ok=True)
+        held.write_text("", encoding="utf-8")
+        probe = open(held, "rb+")
+        portalocker.lock(probe, portalocker.LOCK_EX | portalocker.LOCK_NB)
+        sleeps: list[float] = []
+
+        def release_probe(seconds: float) -> None:
+            sleeps.append(seconds)
+            if not probe.closed:
+                portalocker.unlock(probe)
+                probe.close()
+
+        monkeypatch.setattr(_pid_lock.time, "sleep", release_probe)
+        try:
+            with caplog.at_level("WARNING", logger="memtomem.server"):
+                self._run_main(tmp_path, monkeypatch, store=store)
+        finally:
+            if not probe.closed:
+                probe.close()
+
+        assert sleeps, "the probe must have been holding the lock at the first attempt"
+        assert not any(self._MSG in r.getMessage() for r in caplog.records), (
+            "a probe's brief hold must not read as another server; "
+            f"records={[r.getMessage() for r in caplog.records]}"
+        )
+        assert not held.exists(), "the server must have owned (and cleaned up) its pid file"
 
     def test_foreign_store_holder_is_silent(self, tmp_path, monkeypatch, caplog) -> None:
         """The foreign server's lock is held under *both* names it could

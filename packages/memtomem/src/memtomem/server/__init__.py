@@ -277,7 +277,9 @@ def _sigterm_deferred():
     it is the whole reason the handler exists — so the two steps are made
     indivisible rather than made fast. Blocking, not ignoring: a SIGTERM that
     arrives here is delivered the instant the mask lifts, so this defers
-    shutdown by microseconds and never swallows it.
+    shutdown and never swallows it. Uncontended, the deferral is
+    microseconds; when the pid lock is contended it also covers the lock's
+    retry budget (up to 0.5 s, ``_pid_lock._PID_LOCK_RETRY_S``, #2611).
 
     The previous mask is *restored*, not unblocked: an embedder may have
     entered with SIGTERM already blocked on this thread, and unblocking
@@ -338,9 +340,10 @@ def _install_sigterm_handler(*paths: Path | list[Path]) -> None:
     thread that holds it) and the marker's per-registration nonce already
     makes its name unrepeatable, so there is no other inode to hit.
 
-    Pass the pid file only after its flock succeeds, so we never unlink
-    one another primary owns. ``atexit`` still handles the normal
-    stdin-EOF shutdown path.
+    Pass the pid file only after its flock succeeds and the path is
+    confirmed to still name the locked file (``_pid_lock.lock_pid_file``,
+    #2611), so we never unlink one another primary owns. ``atexit`` still
+    handles the normal stdin-EOF shutdown path.
 
     What ``os._exit(0)`` intentionally abandons (#1574 item 8): the
     ``app_lifespan`` ``finally`` (``server/lifespan.py``) never runs on
@@ -711,8 +714,6 @@ def main(argv: list[str] | None = None) -> None:
     """Run the MCP server."""
     import atexit
 
-    import portalocker
-
     from memtomem._runtime_paths import ensure_runtime_dir, server_pid_path
 
     # Capture this before configuration and lock setup. ``mm upgrade`` uses
@@ -779,12 +780,22 @@ def main(argv: list[str] | None = None) -> None:
     # ``MsvcrtLocker`` backend calls ``msvcrt.locking``, which the C runtime
     # rejects on read-only handles with ``EACCES``. ``cli/_liveness.py`` uses
     # ``"rb+"`` for the same reason. Don't simplify this to ``"w"``.
+    #
+    # The open and lock live in ``memtomem._pid_lock.lock_pid_file`` (#2611),
+    # shared with the Web UI. It retries contention for up to 0.5 s, because
+    # every liveness probe and the stale-file remover take this lock for a
+    # moment, and a server that started in that moment used to run without a
+    # pid lock for its whole life. It also re-opens when the path no longer
+    # names the file it locked. A holder that keeps the lock past the budget
+    # still reads as another server.
     # SIGTERM is held for this whole span (#2230). Each file below exists on
     # disk before the handler that unlinks it is installed, and a signal
     # landing in that gap kills the process by default disposition and leaves
     # the file behind — the residue the handler exists to prevent. Deferring
     # delivery until the handler covers both targets makes create-and-cover
-    # indivisible instead of merely quick.
+    # indivisible instead of merely quick. On a contended start the span
+    # includes the pid lock's retry budget (up to 0.5 s); the signal is
+    # blocked, not dropped, and is delivered when the span ends.
     with _sigterm_deferred():
         # Install the process-wide handler before any presence marker can be
         # published.  ``register_server_presence`` reserves its unique path in
@@ -830,30 +841,19 @@ def main(argv: list[str] | None = None) -> None:
                 pid_file.parent,
             )
 
-        _lock_fp = open(pid_file, "a+")
+        from memtomem._pid_lock import lock_pid_file
+
         try:
-            portalocker.lock(_lock_fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
-        except (portalocker.LockException, BlockingIOError, OSError) as exc:
-            from memtomem._lock_errors import is_lock_contention, raise_lock_io_failure
-
-            if not is_lock_contention(exc):
-                _lock_fp.close()
-                if _presence is not None:
-                    _presence.cleanup()
-                raise_lock_io_failure(exc, pid_file, label="server pid")
-            # Another server already holds the lock — proceed anyway (the editor
-            # expects the process to stay alive), but log a warning. Don't register
-            # atexit unlink or the SIGTERM handler: either would yank the primary
-            # server's pid file out from under it.
-            #
-            # Exception tuple matches ``cli/_liveness.py:probe_pid_file`` (#817):
-            # POSIX raises ``BlockingIOError``; portalocker's Windows backend
-            # wraps Win32 errors as ``LockException``. Keep all three explicit so
-            # a future reader doesn't narrow this and accidentally swallow the
-            # wrong exception.
-            _lock_fp.close()
-            import logging
-
+            _lock_fp = lock_pid_file(pid_file, label="server pid")
+        except OSError:
+            if _presence is not None:
+                _presence.cleanup()
+            raise
+        if _lock_fp is None:
+            # Another server still holds the lock after the retry budget —
+            # proceed anyway (the editor expects the process to stay alive), but
+            # log a warning. Don't register atexit unlink or the SIGTERM handler:
+            # either would yank the primary server's pid file out from under it.
             logging.getLogger(__name__).warning(
                 "Another memtomem-server is already writing to this store (pid file: %s). "
                 "Concurrent writes may be slow.",

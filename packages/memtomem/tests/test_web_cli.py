@@ -8,8 +8,10 @@ extra wasn't installed — because the old error handler only caught missing
 
 from __future__ import annotations
 
-import sys
 import contextlib
+import json
+import os
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -739,3 +741,91 @@ def test_web_status_discards_oversized_metadata_sidecar(
     assert result.exit_code == 0
     assert "pid=?" in result.output
     assert "24680" not in result.output
+
+
+# ── _web_pid_lock owner side (#2611) ─────────────────────────────────
+
+
+@contextlib.contextmanager
+def _rival_web_lock():
+    """Hold ``web.pid``'s lock from a second handle, as a probe would."""
+    import portalocker
+
+    from memtomem._runtime_paths import ensure_runtime_dir
+
+    pid_file = ensure_runtime_dir() / "web.pid"
+    pid_file.write_text("", encoding="utf-8")
+    fp = open(pid_file, "rb+")
+    portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+
+    def release() -> None:
+        if not fp.closed:
+            portalocker.unlock(fp)
+            fp.close()
+
+    try:
+        yield pid_file, release
+    finally:
+        release()
+
+
+def _quiet_web_pid_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ``_web_pid_lock``'s process-wide hooks out of the test process."""
+    import atexit
+
+    monkeypatch.setattr(atexit, "register", lambda fn, *a, **kw: fn)
+    monkeypatch.setattr(web_cmd.signal, "signal", lambda *a, **kw: None)
+
+
+def test_web_pid_lock_waits_out_a_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memtomem import _pid_lock
+
+    _quiet_web_pid_lock(monkeypatch)
+    with _rival_web_lock() as (pid_file, release):
+        monkeypatch.setattr(_pid_lock.time, "sleep", lambda _s: release())
+        with web_cmd._web_pid_lock(port=0):
+            # web.json, not web.pid: on Windows a second handle cannot read a
+            # range the owner has locked.
+            info = json.loads(pid_file.with_name("web.json").read_text(encoding="utf-8"))
+            assert info["pid"] == os.getpid()
+            if os.name != "nt":
+                assert pid_file.read_text(encoding="utf-8").splitlines()[0] == str(os.getpid())
+    assert not pid_file.exists(), "the owner's exit removes its own pid file"
+
+
+def test_web_pid_lock_reports_a_live_holder_after_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import click
+
+    from memtomem import _pid_lock
+
+    _quiet_web_pid_lock(monkeypatch)
+    monkeypatch.setattr(_pid_lock, "_PID_LOCK_RETRY_S", 0)
+    with _rival_web_lock() as (pid_file, _release):
+        with pytest.raises(click.ClickException, match="already running"):
+            with web_cmd._web_pid_lock(port=0):
+                pytest.fail("the lock must not be taken while another Web UI holds it")
+        assert pid_file.exists()
+
+
+def test_web_pid_lock_io_failure_is_not_reported_as_already_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import click
+    import portalocker
+
+    from memtomem import _pid_lock
+
+    _quiet_web_pid_lock(monkeypatch)
+
+    def broken_lock(fp, flags):
+        raise portalocker.LockException("backend failure")
+
+    monkeypatch.setattr(_pid_lock.portalocker, "lock", broken_lock)
+    with pytest.raises(click.ClickException) as info:
+        with web_cmd._web_pid_lock(port=0):
+            pytest.fail("a failed lock call must not enter the context")
+    message = info.value.format_message()
+    assert "cannot lock the Web UI pid file" in message
+    assert "already running" not in message

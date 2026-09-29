@@ -199,19 +199,20 @@ def _cleanup_web_files(pid_file: Path, lock_fp: object | None) -> None:
 
 @contextlib.contextmanager
 def _web_pid_lock(port: int) -> Iterator[None]:
-    import portalocker
-
+    from memtomem._pid_lock import lock_pid_file
     from memtomem._runtime_paths import ensure_runtime_dir
 
     pid_file = ensure_runtime_dir() / "web.pid"
-    lock_fp = open(pid_file, "a+")
+    # Waits out a liveness probe's brief hold and re-opens a file deleted
+    # between the open and the lock (#2611). Only a holder that outlasts the
+    # retry budget reads as a running Web UI; a lock-call I/O failure is
+    # reported as itself, not as "already running".
     try:
-        portalocker.lock(lock_fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
-    except (portalocker.LockException, BlockingIOError, OSError) as exc:
-        lock_fp.close()
-        raise click.ClickException(
-            f"memtomem Web UI is already running (pid file: {pid_file})"
-        ) from exc
+        lock_fp = lock_pid_file(pid_file, label="web pid")
+    except OSError as exc:
+        raise click.ClickException(f"cannot lock the Web UI pid file {pid_file}: {exc}") from exc
+    if lock_fp is None:
+        raise click.ClickException(f"memtomem Web UI is already running (pid file: {pid_file})")
 
     started = datetime.now(UTC).isoformat()
     _write_web_metadata(pid_file, lock_fp, pid=os.getpid(), port=port, started=started)

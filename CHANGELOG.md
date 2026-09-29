@@ -27,6 +27,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A starting server or Web UI no longer loses its pid lock to a passing
+  status check (#2611).** Every liveness probe (`mm status`, `mm web status`,
+  `mm upgrade`, `mm reset`, `mm uninstall`, the release poll in
+  `mm web stop`) and `mm upgrade`'s stale pid-file cleanup take a pid file's
+  lock for a moment. A server that an MCP client started at that moment logged
+  "Another memtomem-server is already writing to this store" and ran for its
+  whole life without a pid lock. The pid-file probes did not see it, and
+  `mm upgrade` refused with "live pid N has no authoritative pid lock".
+  `mm web` said "already running" when only a probe held the lock. Both now
+  retry a held lock for up to 0.5 s before treating the holder as a live
+  process. A holder that keeps the lock longer, such as a
+  probe suspended in a debugger, still reads as live. On POSIX they also check
+  after locking that the pid file's path still names the file they locked, and
+  lock the path again if a cleanup deleted or replaced it in between; before,
+  the lock could land on a file no path named, and every probe then reported
+  the process as not running. `mm web` now reports a failed lock call as
+  itself ("cannot lock the Web UI pid file …") instead of "already running".
+  A pid file that is a symbolic link is now refused at startup instead of
+  followed, as the liveness probes already refuse it; following it truncated
+  the link's target.
+
 - **An ONNX E5 model name in another case now loads the pinned E5 profile
   (#2602).** FastEmbed finds a model id in any case, but memtomem compared the
   E5 name exactly, so `intfloat/Multilingual-E5-Small` got dimension 0, a
