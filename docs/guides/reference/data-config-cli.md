@@ -277,9 +277,17 @@ The other commands that open storage answer the same failures the same way
 under `--json` or `--format json`: `search`, `recall`, `index --flush` and
 `--debounce-window`, `mem rescan`, `watchdog status` and `run`, `session
 start`, `list` and `events`, `agent search` and `list`, `quality cases` and
-`replay`, `pinned list` and `schedule list`. `mm add --json` and
-`mm purge --json` answer `{"ok": false, "reason": "..."}` instead, the
-failure form of their `{"ok": true, ...}` acknowledgement. `mm quality
+`replay`, `pinned list` and `schedule list`, and so does `pinned compose`,
+whose only output is JSON. `mm add --json`, `mm purge --json` and
+`mm session end --json` answer `{"ok": false, "reason": "..."}` instead, the
+failure form of their `{"ok": true, ...}` acknowledgement.
+
+`mm session events --json` with no session prints `{"error": "no_session"}`
+and exits 1. `mm activity log --json` prints `{"ok": false, "reason": ...}`
+and exits 1 for `invalid_meta` and `write_failed`, but exits 0 for
+`no_active_session`, which is a skip rather than a failure. Without `--json`,
+`mm activity log` prints nothing on stdout and exits 0 when there is no
+session or the write fails, so a hook that calls it never fails. `mm quality
 experiment` keeps its own contract: an input, configuration or storage
 failure exits 2 with a message that names only the failure's type.
 
@@ -514,7 +522,7 @@ mm session list                                               # list sessions
 mm session events <id>                                        # show events for a session
 mm session wrap -- CMD                                        # wrap a command with session lifecycle
 mm activity log                                               # log agent activity event
-# Scripting: list/events/log support --json (see CONTRIBUTING.md → CLI output convention)
+# Scripting: start/end/list/events/log support --json (see CONTRIBUTING.md → CLI output convention)
 # Write routing: `mm session start --agent-id X` sends subsequent `mm add` writes to
 # `agent-runtime:X` (override per call with `mm add --namespace`, or read them back with
 # `mm search -n agent-runtime:X`). A session started without `--agent-id` binds no agent

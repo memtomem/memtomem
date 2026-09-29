@@ -69,12 +69,14 @@ async def _watchdog_status(as_json: bool) -> None:
         finally:
             store.close()
 
-    if not summary:
-        click.echo("No health check data found. Enable the watchdog or run: mm watchdog run")
-        return
-
+    # JSON first: an empty summary is a valid empty read, answered as ``{}``
+    # rather than the text-path prose (#2596).
     if as_json:
         click.echo(json.dumps(summary, indent=2, default=str))
+        return
+
+    if not summary:
+        click.echo("No health check data found. Enable the watchdog or run: mm watchdog run")
         return
 
     _print_summary(summary)

@@ -5,6 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mm session end --json` (#2596).** It prints `{"ok": true, "session_id":
+  ..., "summary": ..., "event_count": N}` on success and `{"ok": false,
+  "reason": "..."}` with exit 1 when there is no active session or storage
+  fails. Without `--json` the output is unchanged.
+
+### Changed
+
+- **`mm session events --json` and `mm activity log --json` exit 1 on a
+  handled failure (#2596).** They printed their JSON error and exited 0.
+  `mm session events --json` with no session (`{"error": "no_session"}`) and
+  `mm activity log --json` with malformed `--meta` (`invalid_meta`) or a failed
+  write (`write_failed`) now exit 1; the JSON they print is unchanged. `mm
+  activity log --json` with no active session (`no_active_session`) is a
+  no-op and still exits 0, and without `--json` a missing session or a failed
+  write still prints nothing on stdout and exits 0 for hooks. This replaces
+  the exit-0 behavior described for #331, #335 and #338. A script that runs
+  these under `set -e` and expects exit 0 on these errors needs `|| true`.
+
 ### Fixed
 
 - **An ONNX E5 model name in another case now loads the pinned E5 profile
@@ -28,6 +48,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `dimension: 384` it reports a policy mismatch, which
   `mm embedding-reset --mode apply-current` clears without losing anything,
   since the store holds no vectors.
+- **More commands print a plain error instead of a traceback when storage
+  fails (#2596).** `mm pinned get`/`set`/`delete`, `mm schedule
+  add`/`run-now`/`delete` and `mm agent register`/`share`/`migrate` now print
+  `Error: ...` with exit 1. `mm pinned compose`, whose only output is JSON,
+  prints `{"error": "..."}` instead. `mm watchdog status --json` prints `{}`
+  when there is no health data yet, instead of a sentence.
 - **The Search source filter and the Sources body filter say when they stop at
   10,000 (#2572).** The Search tab's source multi-select lists at most 10,000
   sources and ignored `total`, so sources past the cut could not be picked and
