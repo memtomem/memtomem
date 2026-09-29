@@ -403,7 +403,9 @@ To resolve it, pick **one** of:
   variant and artifact. A policy with no variant recorded counts as `fp32`. To
   proceed, set `onnx_variant` (and its artifact path) to what the store was
   built with, or reset with `apply_current` and re-index. An empty database
-  instead records the policy the revert runs.
+  instead records the policy the revert runs. Revert also refuses when another
+  process has changed the recorded embedding since this server started;
+  restart the server so it reads the current one.
 
   Partial identities are never filled from configuration, even when the
   recorded half matches it or the database is empty. Restore the identity

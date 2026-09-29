@@ -148,12 +148,12 @@ OWNED_TRANSACTION_WRITERS: dict[tuple[str, str], tuple[str, str]] = {
         "BEGIN IMMEDIATE; an owner's rollback would restore the old schema "
         "while the in-memory fields kept pointing at the new config.",
     ),
-    ("sqlite_backend.py", "SqliteBackend.adopt_embedding_policy_if_empty"): (
+    ("sqlite_backend.py", "SqliteBackend.confirm_embedding_stamp"): (
         REFUSES,
-        "Proves chunks_vec empty and rewrites the policy rows under one BEGIN "
-        "IMMEDIATE, so a vector another process commits first cannot land "
-        "under the new policy; a caller's transaction would split the check "
-        "from the write (#2617).",
+        "Re-reads the embedding stamp and vector presence a revert decided on, "
+        "and rewrites the policy rows, under one BEGIN IMMEDIATE, so another "
+        "process cannot restamp or fill the store between the check and the "
+        "write; a caller's transaction would split them (#2617).",
     ),
     ("sqlite_backend.py", "SqliteBackend.reset_all"): (
         BORROWS,

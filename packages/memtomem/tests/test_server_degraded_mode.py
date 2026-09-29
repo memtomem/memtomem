@@ -1063,7 +1063,7 @@ async def test_revert_onto_an_empty_store_ignores_the_backfilled_policy(
         assert storage._embedding_policy_fingerprint == expected
         assert storage._embedding_max_sequence_tokens == reverted.max_sequence_tokens
         await storage.upsert_chunks([_chunk_1024("indexed after the revert")])
-        assert await storage.count_vectors_fresh() == 1
+        assert (await storage.read_embedding_stamp_fresh())["vectors"] == 1
         section = EmbeddingConfig.model_validate(reverted.model_dump())
     finally:
         await close_components(comp)
@@ -1089,24 +1089,95 @@ def _chunk_1024(content: str):
     return make_chunk(content, embedding=[1.0] + [0.0] * 1023)
 
 
-async def test_revert_refuses_when_the_store_gains_vectors_during_the_revert(
+async def test_revert_checks_the_policy_on_disk_not_the_one_read_at_open(
     tmp_path, monkeypatch, budget_checks
 ):
-    """The emptiness check and the policy write share one transaction; a
-    vector committed first by another process refuses the revert."""
+    """PR #2621 review: another server reverted this empty fp32 E5 store to
+    quantized E5 and indexed, after this server opened it. The variant check
+    must read that policy from the file, not the fp32 one cached at open."""
+    from memtomem.config import EmbeddingConfig, embedding_policy_fingerprint
+
+    config = _degraded_config(tmp_path, monkeypatch)
+    artifact = _artifact(tmp_path)
+    await _seed_store(config, vectors=0, **_E5_STAMP)
+    comp = await create_components(config)
+    try:
+        app = _make_app(comp)
+        cached = app.storage.embedding_mismatch["stored"]["policy_fingerprint"]
+        assert ":int8-arm64:" not in cached
+        # The other server: the E5 policy it adopted, and one vector under it.
+        quantized = EmbeddingConfig(
+            **_E5_STAMP, onnx_variant="int8-arm64", onnx_artifact_path=str(artifact)
+        )
+        _set_meta(config, embedding_policy_fingerprint=embedding_policy_fingerprint(quantized))
+        other = sqlite3.connect(str(config.storage.sqlite_path))
+        other.enable_load_extension(True)
+        sqlite_vec.load(other)
+        try:
+            other.execute(
+                "INSERT INTO chunks_vec(rowid, embedding) VALUES (1, ?)",
+                (sqlite_vec.serialize_float32([1.0] + [0.0] * 383),),
+            )
+            other.commit()
+        finally:
+            other.close()
+        watcher = MagicMock(name="watcher")
+        app._watcher = watcher
+        before = _revert_visible_state(app)
+
+        with pytest.raises(ValueError, match="Nothing was changed") as raised:
+            await _revert_recording_embedder_config(app)
+
+        assert "onnx_variant='int8-arm64'" in str(raised.value)
+        assert "keeps fp32" in str(raised.value)
+        _assert_revert_state_unchanged(app, before)
+        watcher.rebind.assert_not_called()
+    finally:
+        await close_components(comp)
+
+
+async def test_revert_refuses_when_another_process_restamped_the_identity(
+    tmp_path, monkeypatch, budget_checks
+):
+    """The identity this server read at open is what it would revert to; if
+    the file now records another model, reverting to the old one is wrong."""
+    config = _degraded_config(tmp_path, monkeypatch)
+    await _seed_store(config, vectors=0, **_E5_STAMP)
+    comp = await create_components(config)
+    try:
+        app = _make_app(comp)
+        assert "e5" in app.storage.embedding_mismatch["stored"]["model"].lower()
+        _set_meta(config, embedding_model="all-MiniLM-L6-v2")
+
+        with pytest.raises(ValueError, match="Nothing was changed") as raised:
+            await _revert_recording_embedder_config(app)
+
+        assert "all-MiniLM-L6-v2" in str(raised.value)
+        assert "restart the server" in str(raised.value)
+        assert app.storage.embedding_mismatch is not None
+    finally:
+        await close_components(comp)
+
+
+async def test_revert_refuses_when_the_stamp_moves_before_it_publishes(
+    tmp_path, monkeypatch, budget_checks
+):
+    """The checks run on a read that is not a snapshot. The last step re-reads
+    under the write lock: here the first read missed the store's vector, so
+    the revert planned to adopt a quantized policy over fp32 vectors."""
     from memtomem.storage.sqlite_backend import SqliteBackend
 
-    config, _artifact_dir = await _empty_backfilled_bge_store(tmp_path, monkeypatch)
-    adopt_calls: list = []
+    config = _degraded_config(tmp_path, monkeypatch)
+    _keep_quantized(config, _artifact(tmp_path))
+    await _seed_store(config, vectors=1, **_E5_STAMP)
+    real_read = SqliteBackend.read_embedding_stamp_fresh
 
-    def _lost_the_race(self, policy, max_tokens) -> bool:
-        adopt_calls.append(policy)
-        return False
+    async def _read_missing_the_vector(self):
+        return {**(await real_read(self)), "vectors": 0}
 
-    monkeypatch.setattr(SqliteBackend, "adopt_embedding_policy_if_empty", _lost_the_race)
+    monkeypatch.setattr(SqliteBackend, "read_embedding_stamp_fresh", _read_missing_the_vector)
 
-    await _assert_revert_refused(config, "gained vectors while the revert")
-    assert len(adopt_calls) == 1
+    await _assert_revert_refused(config, "another process changed the stored embedding")
 
 
 def _revert_visible_state(app: AppContext) -> dict[str, object]:
@@ -1659,6 +1730,14 @@ async def test_second_revert_leaves_the_older_leased_generation_pinned(degraded_
         # ``embedding_mismatch`` is derived from these raw tuples
         # (stored provider, stored model, configured provider, configured model).
         app.storage._model_mismatch = ("onnx", "bge-m3", "onnx", "bge-large")
+        # The revert reads the stamp from the file too (#2617), so the file
+        # has to record the identity the re-armed mismatch names.
+        db = app.storage._get_db()
+        db.executemany(
+            "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+            [("embedding_provider", "onnx"), ("embedding_model", "bge-m3")],
+        )
+        db.commit()
         gen2 = degraded_components.generation
         gen2_embedder = app.embedder
         gen2_pipeline = app.search_pipeline

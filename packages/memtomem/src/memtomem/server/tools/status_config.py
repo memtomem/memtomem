@@ -1012,6 +1012,26 @@ def _adopt_section(live: BaseModel, rebuilt: BaseModel) -> None:
     live.__pydantic_fields_set__.update(rebuilt.model_fields_set)
 
 
+def _stored_identity_changed(snapshot: dict, on_disk: dict) -> bool:
+    """Whether the file's stamp names another embedding than *snapshot* does.
+
+    *snapshot* is ``embedding_mismatch["stored"]`` from this server's open;
+    *on_disk* is ``read_embedding_stamp_fresh()``. A row missing on disk says
+    nothing, and ONNX model aliases are one identity.
+    """
+    from memtomem.embedding.identity import same_embedding_model
+
+    if on_disk["dimension"] is not None and on_disk["dimension"] != snapshot["dimension"]:
+        return True
+    if not (on_disk["provider"] or on_disk["model"]):
+        return False
+    if on_disk["provider"].lower() != (snapshot["provider"] or "").lower():
+        return True
+    return not same_embedding_model(
+        snapshot["provider"], snapshot["model"], on_disk["provider"], on_disk["model"]
+    )
+
+
 def _revert_refusal(reason: str) -> ValueError:
     return ValueError(
         f"Cannot revert to the stored embedding: {reason}. Nothing was changed; "
@@ -1293,14 +1313,33 @@ async def _revert_to_stored_locked(
 
     stored = mismatch["stored"]
     require_complete_embedding_identity(stored["provider"], stored["model"])
-    # Read from the file, not this instance's flags: another process may have
-    # filled the table since startup (#2617).
-    vector_count = await storage.count_vectors_fresh()
+    # ``stored`` is the stamp as this server saw it at open. Another process
+    # may have restamped or filled the store since, so what the vectors were
+    # built with is read from the file (#2617), and re-checked under the write
+    # lock just before publishing (``confirm_embedding_stamp`` below).
+    on_disk = await storage.read_embedding_stamp_fresh()
+    if _stored_identity_changed(stored, on_disk):
+        raise _revert_refusal(
+            "the database now records "
+            f"{on_disk['provider'] or 'unknown'}/{on_disk['model'] or 'unknown'} "
+            f"({on_disk['dimension']}d), not the embedding this server read when it "
+            "opened it; restart the server so it reads the current one"
+        )
+    stored = {
+        **stored,
+        "policy_fingerprint": on_disk["policy_fingerprint"],
+        "max_sequence_tokens": (
+            on_disk["max_sequence_tokens"]
+            if on_disk["max_sequence_tokens"] is not None
+            else stored.get("max_sequence_tokens")
+        ),
+    }
+    vector_count = on_disk["vectors"]
     restamped, restamped_indexing = await _revert_candidate(
         config, stored, vector_count=vector_count
     )
-    stored_policy = stored.get("policy_fingerprint", "")
-    stored_max_tokens = stored.get("max_sequence_tokens")
+    stored_policy = stored["policy_fingerprint"]
+    stored_max_tokens = stored["max_sequence_tokens"]
     # An empty store's policy row may be a backfill from another config. Left
     # in place, the vectors this revert goes on to index would sit under it, so
     # the store records the policy the revert runs instead (#2617).
@@ -1407,12 +1446,18 @@ async def _revert_to_stored_locked(
             DedupScanner(storage=storage) if runtime_app.dedup_scanner is not None else None
         )
         # Last, so every constructor that can fail has run: once this commits,
-        # nothing below undoes it. It proves the store is still empty in the
-        # same transaction as the write.
-        if adopt_policy is not None and not storage.adopt_embedding_policy_if_empty(
-            adopt_policy, stored_max_tokens
+        # nothing below undoes it. Under the write lock it re-reads what the
+        # checks above were decided on, and records the adopted policy in the
+        # same transaction.
+        if not storage.confirm_embedding_stamp(
+            on_disk,
+            adopt_policy=adopt_policy,
+            max_sequence_tokens=stored_max_tokens if adopt_policy is not None else None,
         ):
-            raise _revert_refusal("the store gained vectors while the revert was being checked")
+            raise _revert_refusal(
+                "another process changed the stored embedding or its vectors while "
+                "the revert was being checked; retry"
+            )
     except BaseException:
         prior_embedding.restore()
         prior_indexing.restore()

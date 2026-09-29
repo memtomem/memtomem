@@ -56,7 +56,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   stored policy is not compared, since storage init backfills it from whichever
   config first opens the store. An empty store skips the variant check and,
   once the rest of the revert validates, records the policy the revert runs,
-  so the vectors indexed next are described by it.
+  so the vectors indexed next are described by it. The revert reads the stored
+  policy and vectors from the database file rather than from what the server
+  saw when it opened the store, refuses when another process has since
+  recorded a different model there, and re-checks all of it under the write
+  lock just before it takes effect.
 - **`mm init` and the quantized-variant check accept an ONNX model name in any
   case (#2608).** After #2602 two places still compared the name exactly.
   `mm init --preset minimal --provider onnx --model

@@ -1586,9 +1586,9 @@ async def test_get_chunks_batch_survives_an_input_past_every_sqlite_ceiling(stor
     assert set(found) == {stored[0].id}
 
 
-class TestRevertVectorClassification:
-    """#2617: revert-to-stored protects stored vectors, so it must see vectors
-    another process wrote, and must record a policy only on a proven-empty store."""
+class TestRevertStampConfirmation:
+    """#2617: revert-to-stored protects stored vectors, so it reads the stamp
+    and vectors from the file, and re-checks them under the write lock."""
 
     @staticmethod
     def _backend(db_path: Path) -> SqliteBackend:
@@ -1609,14 +1609,15 @@ class TestRevertVectorClassification:
             row = db.execute("SELECT value FROM _memtomem_meta WHERE key=?", (key,)).fetchone()
         return row[0] if row else None
 
-    async def test_vectors_another_backend_wrote_are_counted_and_block_adoption(self, tmp_path):
+    async def test_vectors_another_backend_wrote_are_seen_and_block_adoption(self, tmp_path):
         db_path = tmp_path / "shared.db"
         reverting = self._backend(db_path)
         await reverting.initialize()
         writer = self._backend(db_path)
         await writer.initialize()
         try:
-            assert await reverting.count_vectors_fresh() == 0
+            before = await reverting.read_embedding_stamp_fresh()
+            assert before["vectors"] == 0
             await writer.reset_embedding_meta(
                 dimension=1024, provider="onnx", model="bge-m3", policy_fingerprint="written"
             )
@@ -1624,10 +1625,18 @@ class TestRevertVectorClassification:
 
             # The flag-based count cannot see a table this instance did not create.
             assert await reverting.get_vector_count() == 0
-            assert await reverting.count_vectors_fresh() == 1
-            assert reverting.adopt_embedding_policy_if_empty("adopted", 512) is False
+            after = await reverting.read_embedding_stamp_fresh()
+            assert (after["vectors"], after["policy_fingerprint"], after["dimension"]) == (
+                1,
+                "written",
+                1024,
+            )
+            # Confirming the stamp read before the other process wrote fails,
+            # and writes nothing.
+            assert reverting.confirm_embedding_stamp(before, adopt_policy="adopted") is False
             assert self._meta(db_path, "embedding_policy_fingerprint") == "written"
             assert reverting._embedding_policy_fingerprint == "none:v1"
+            assert reverting._get_db().in_transaction is False
         finally:
             await writer.close()
             await reverting.close()
@@ -1640,9 +1649,15 @@ class TestRevertVectorClassification:
             await storage.reset_embedding_meta(
                 dimension=1024, provider="onnx", model="bge-m3", policy_fingerprint="backfilled"
             )
-            assert await storage.count_vectors_fresh() == 0
+            stamp = await storage.read_embedding_stamp_fresh()
+            assert stamp["vectors"] == 0
 
-            assert storage.adopt_embedding_policy_if_empty("adopted", 512) is True
+            assert (
+                storage.confirm_embedding_stamp(
+                    stamp, adopt_policy="adopted", max_sequence_tokens=512
+                )
+                is True
+            )
 
             assert self._meta(db_path, "embedding_policy_fingerprint") == "adopted"
             assert self._meta(db_path, "embedding_max_sequence_tokens") == "512"
@@ -1650,5 +1665,36 @@ class TestRevertVectorClassification:
             assert storage._embedding_max_sequence_tokens == 512
             assert self._meta(db_path, "embedding_model") == "bge-m3"
             assert storage._get_db().in_transaction is False
+        finally:
+            await storage.close()
+
+    async def test_a_restamped_store_is_not_confirmed(self, tmp_path):
+        import sqlite3
+
+        db_path = tmp_path / "restamped.db"
+        storage = self._backend(db_path)
+        await storage.initialize()
+        try:
+            stamp = await storage.read_embedding_stamp_fresh()
+            with sqlite3.connect(db_path) as db:
+                db.execute(
+                    "UPDATE _memtomem_meta SET value='changed' "
+                    "WHERE key='embedding_policy_fingerprint'"
+                )
+
+            assert storage.confirm_embedding_stamp(stamp) is False
+            assert (
+                storage.confirm_embedding_stamp(await storage.read_embedding_stamp_fresh()) is True
+            )
+        finally:
+            await storage.close()
+
+    async def test_adopting_requires_an_empty_expected_stamp(self, tmp_path):
+        storage = self._backend(tmp_path / "guard.db")
+        await storage.initialize()
+        try:
+            stamp = {**(await storage.read_embedding_stamp_fresh()), "vectors": 3}
+            with pytest.raises(ValueError, match="no vectors"):
+                storage.confirm_embedding_stamp(stamp, adopt_policy="adopted")
         finally:
             await storage.close()
