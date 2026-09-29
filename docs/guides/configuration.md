@@ -126,6 +126,15 @@ The Web UI server re-reads `config.json` and `config.d/*.json` on every
   config, surfaces a red banner on the Config tab, and refuses to save
   (HTTP 409) until the file is fixed. Run `mm init --fresh` or edit
   the file by hand to recover.
+- A section that parses but fails its cross-field validation, such as a
+  stale `"dimension": 1024` left under an E5 model, is treated the same way
+  by the Web UI: the running config stays, the banner names the section and
+  the reason, and saves are refused until it is fixed. Other loads (MCP
+  startup, `mm status`, `mem_status`, `mm config show` on stderr, and
+  `GET /api/config`) keep running on the values the section would have
+  replaced and report the rejected section and its reason; `mem_status`
+  lists it as a `config_section_rejected` warning. An out-of-range value or
+  an unknown field is still skipped quietly in both cases.
 
 Change detection is a cheap `os.stat` on `config.json` plus every
 fragment in `config.d/`, so GET latency is effectively unchanged. No
@@ -393,6 +402,12 @@ To resolve it, pick **one** of:
     `mem_embedding_reset(mode="revert_to_stored")` on the running MCP server.
     That server swaps its embedder to match the DB. This affects only the
     server handling the call and does not persist settings to `config.json`.
+    It rebuilds the embedding section the way startup does, so values you
+    set yourself are kept and values the previous model generated (threads,
+    ONNX batch size, the chunk token budget) are derived again for the
+    stored model. It refuses before changing anything when a setting you
+    keep does not fit the stored model, such as a quantized `onnx_variant`
+    under MiniLM or an explicit `chunk_model_tokens` above E5's 512.
 
   CLI `status` and `revert-to-stored` do not migrate or write `config.json`.
   They still initialize storage and may create or initialize the database;
@@ -530,11 +545,13 @@ For exact limits, code context, generic exclusions and migration previews, see
 
 `indexing.memory_dirs` is the source-of-truth list for the file watcher
 that the running MCP server (`memtomem-server`) starts on boot. The
-watcher is **reactive only** — it
+watcher is **reactive** — it
 reindexes files when the filesystem emits modify / create / move events
-for paths under these directories. Pre-existing files on disk at the
-time the watcher starts are **NOT auto-scanned**; you seed them once
-with either
+for paths under these directories. When a burst of events overflows its
+1,000-event queue, it rescans that root once the burst settles and replays
+the dropped deletes, so no changed file is left stale. Pre-existing files
+on disk at the time the watcher starts are **NOT auto-scanned**; you seed
+them once with either
 
 - `mm index <dir>` from the CLI, or
 - the **Reindex** button per memory_dir in `mm web`.
@@ -561,6 +578,17 @@ blocks. Writes that need the user-tier base directory (`mem_add`
 without a project scope, `mem_pinned_set`, approving a review
 candidate) refuse with a configuration error naming
 `indexing.memory_dirs` instead of writing anywhere else.
+
+Source paths are stored as written on Linux and Windows. Only macOS folds a
+path's Unicode form to NFC, because there an NFC and an NFD spelling name one
+directory. Before 0.6.5 every platform folded, so on ext4 or NTFS a file
+under an NFD-named directory (such as a `café/` typed with a combining
+accent) was keyed by a path that does not exist. After upgrading on those
+platforms, preview the stale rows with `mm gc orphan-sources`, remove them
+with `mm gc orphan-sources --apply`, and re-index the directory so each file
+is added under its own path. Where NFC and NFD siblings had been merged into
+one row, that row belongs to the NFC file and may keep the NFD file's
+namespace; delete that source and index it again to reset it.
 
 ### `read_only_memory_dirs` — index it, never write it
 
@@ -1557,9 +1585,16 @@ The E5 defaults are 384 body tokens, 96 description tokens, soft target 320,
 minimum 96, overlap 0, two inference threads, batch four, and CPU arena off.
 Changing from BGE-M3 requires a separate 384-dimensional index and reindexing.
 
+ONNX model names are matched without regard to case, and a short alias and its
+full id (`multilingual-e5-small` and `intfloat/multilingual-e5-small`, `bge-m3`
+and `BAAI/bge-m3`) name one model. Changing only the spelling therefore keeps
+the same profile, dimension and pinned snapshot, and is not a model switch.
+Ollama and OpenAI model names are still compared exactly, because those
+providers receive them as written.
+
 | Environment variable | Default | Meaning |
 |---|---|---|
-| `MEMTOMEM_EMBEDDING__ONNX_VARIANT` | `fp32` | `fp32`, `int8-arm64`, `int8-avx2`, `int8-avx512`, or `int8-avx512-vnni`; restart and explicit index migration required when changed |
+| `MEMTOMEM_EMBEDDING__ONNX_VARIANT` | `fp32` | `fp32`, `int8-arm64`, `int8-avx2`, `int8-avx512`, or `int8-avx512-vnni`; the quantized variants are accepted for E5-small and BGE-M3 only; restart and explicit index migration required when changed |
 | `MEMTOMEM_EMBEDDING__ONNX_ARTIFACT_PATH` | empty | Local exported quantized artifact directory with checksummed `manifest.json`; no automatic fallback |
 | `MEMTOMEM_INDEXING__CHUNK_INPUT_PREFIX` | empty; E5 `passage: ` | Exact model-role prefix included in final input token accounting; restart required |
 | `MEMTOMEM_INDEXING__INDEX_MASKING_MANIFEST_PATH` | empty (disabled) | Owner-only reviewed masking manifest for exact source paths, content SHA-256, and complete-block line spans. Changed sources or invalid manifests use the normal privacy guard; masked chunks are read-only. Does not enable automatic masking. |

@@ -314,6 +314,13 @@ Use an existing path with `mm index /absolute/path`. If a managed write is
 outside the configured roots, add it through `mm init`, the Web UI, or the
 documented config surfaces before retrying.
 
+A bare `mm index` with no path walks the current directory and says so on
+stderr (`Indexing <dir> (no PATH given, so the current directory).`). Run
+inside a code checkout, it pulls in tooling and fixture files, the redaction
+gate refuses the ones that look like they carry secrets, and the command
+exits 1, which can look like a broken install. Name your memory directory
+instead.
+
 ### "Ollama not found" or "not running"
 
 Run `ollama list`, pull the configured model, or switch to the Minimal/ONNX
@@ -351,6 +358,14 @@ than the latest release right after installing, re-run the installation
 command with `--refresh`. pipx, project, and source installs use their own
 package-manager workflow. Detailed recovery commands live in
 [Data, config & CLI](reference/data-config-cli.md#cli-reference).
+
+0.6.5 migrates the database to schema version 3 the first time it opens it,
+and older releases cannot open it afterwards: an older `mm`, or a server an
+MCP entry pins to an older version, stops with `only supports up to 2`.
+Upgrade every copy to the same release. If the upgrade reports that running
+memtomem processes have the store open under the older schema, stop the
+processes it names and retry. See
+[Schema version errors after an upgrade](reference/operations.md#schema-version-errors-after-an-upgrade).
 
 ## Optional: Share rules, skills, sub-agents, and commands across editors
 

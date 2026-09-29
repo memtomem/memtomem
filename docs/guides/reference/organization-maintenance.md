@@ -272,11 +272,15 @@ checks held files in batches of 100 every five minutes. In degraded mode or
 CLI-only use, run `mm index <file>` after restoring a source to make it
 searchable again.
 
+One case is still removed without a hold: when a source path now holds a
+directory or another non-regular file, its chunks are deleted on the next
+event for that path, because it is known not to be an indexable file.
+
 ### Runtime health — `mm doctor`
 
-`mm doctor` checks the memtomem *runtime on this machine*: the server processes
-registered in the instance registry, and the runtime directory they coordinate
-through. It needs no configured store and answers even when none exists. Note
+`mm doctor` checks the memtomem *runtime on this machine*: the memtomem
+processes registered in the instance registry (MCP servers and the Web UI),
+and the runtime directory they coordinate through. It needs no configured store and answers even when none exists. Note
 "registered", not "running" — the difference is explained under "Reading the
 output" below, and it can be large.
 
@@ -284,7 +288,7 @@ Which doctor to run:
 
 | To check | Run |
 |---|---|
-| server processes, runtime directory | `mm doctor` |
+| server and Web UI processes, runtime directory | `mm doctor` |
 | a store's disk / index / DB drift | `mm memory doctor` |
 | the private multi-device sync repo | `mm sync-doctor` |
 | client hook settings across tiers & unportable commands | `mm context settings-doctor` |
@@ -332,10 +336,11 @@ Reading the output:
   occurs on POSIX; it means the server was launched by init directly (a service
   or a deliberately daemonized process) *or* that its original parent exited and
   it was reparented — the recorded value alone does not distinguish the two.
-- **The report covers successfully registered servers, not every server
-  running.** A server registers after it opens its store, which happens on the
-  first request that needs it — a memory tool call or a resource read — or at
-  startup when `warmup.enabled` is set. Two things therefore keep a running
+- **The report covers successfully registered servers and Web UIs, not every
+  process running.** A server or Web UI registers after it opens its store.
+  For an MCP server that happens on the first request that needs it — a
+  memory tool call or a resource read — or at startup when `warmup.enabled`
+  is set. Two things therefore keep a running
   server out of the report: it never opened the store (a client that connects,
   lists tools, and asks for nothing else), or it opened the store but its
   registration failed — that step is best-effort by design, so a coordination

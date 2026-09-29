@@ -24,6 +24,12 @@ mem_export(output_file="~/recent.json", since="2026-03-01")
 ```
 
 Exports chunks with content, metadata, tags, and embeddings as a JSON bundle.
+Sources that are held because their file is unavailable (missing, unreadable,
+or waiting for an availability check) are left out, and the result reports
+`N held or pending source(s) omitted`. For a complete backup, restore those
+files, re-index them, and export again. Purging them with
+`mm gc orphan-sources --apply` deletes their chunks instead; see
+[Orphan cleanup](organization-maintenance.md#orphan-cleanup).
 
 ### Restore
 
@@ -191,7 +197,7 @@ uptime probes and dashboards can pattern-match on the keys:
 
 | Key | Description |
 |-----|-------------|
-| `kind` | Open enum; current values include `embedding_dim_mismatch` (consumers must tolerate unknown kinds). |
+| `kind` | Open enum; current values include `embedding_dim_mismatch` and `config_section_rejected` (a `config.json` or `config.d/` section that failed validation and was ignored; see [External edits](../configuration.md#external-edits-while-the-web-ui-is-running)). Consumers must tolerate unknown kinds. |
 | `stored` / `configured` | Present for embedding-mismatch entries; echoes the DB vs runtime provider/model/dimension. |
 | `chunks` | Present for embedding-mismatch entries; chunk rows in the store. |
 | `vectors` | Present for embedding-mismatch entries; raw `chunks_vec` rows the reset drops, orphans included (`0` when the table is absent, `null` when the count is unavailable). |
@@ -228,7 +234,7 @@ Key settings:
 ```
 mem_embedding_reset()                       # check status (default)
 mem_embedding_reset(mode="apply_current")   # reset DB to current model (needs `mm index --force`)
-mem_embedding_reset(mode="revert_to_stored") # switch runtime to match DB
+mem_embedding_reset(mode="revert_to_stored") # switch runtime to match DB, re-deriving the stored model's CPU profile and chunk budget
 ```
 
 **CLI:**
@@ -244,7 +250,14 @@ or a running server. For a persistent correction, update
 reported `embedding.max_sequence_tokens`, check environment overrides and
 policy settings, restart affected servers, and verify with CLI `status`.
 The MCP call changes only the runtime of the server handling it and does not
-persist settings. See [the reset flow](../configuration.md#reset-flow).
+persist settings. It rebuilds the embedding settings the way startup does:
+values you set yourself are kept, and values the previous model generated,
+such as threads, ONNX batch size and the chunk token budget, are derived again
+for the stored model. It refuses before changing anything when a setting you
+keep does not fit the stored model, such as a quantized `onnx_variant` under
+MiniLM or an explicit `chunk_model_tokens` above E5's 512, or when the kept
+ONNX variant differs from the one the store's vectors were built with. See
+[the reset flow](../configuration.md#reset-flow).
 CLI `status` and `revert-to-stored` do not write or migrate `config.json`, but
 all modes initialize storage and may create or initialize the database.
 
@@ -310,6 +323,7 @@ mm mem rescan-files                    # read-only scan of historical imported/f
 mm search "deployment"                 # hybrid search (keywords + meaning)
 mm search --as-of 2024-Q3 "deploy"     # temporal-validity query (date-only or YYYY-QN)
 mm index ~/notes                       # manual one-shot index (seed pre-existing files)
+mm index                               # no PATH: walks the current directory and says so on stderr
 mm index --debounce-window 5 PATH      # record PATH; drain entries silent ≥5s (hook callers)
 mm index --flush                       # synchronously drain queue (correctness primitive)
 mm index --status                      # snapshot queue depth + oldest entry
@@ -333,6 +347,7 @@ mm upgrade                             # uv-tool installs: on POSIX stop every M
 mm upgrade --version 0.6.5 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
 # upgrade re-passes the extras in uv's tool receipt; if it is missing or unreadable, --dry-run shows "Extras: none detected" — pass --extras (e.g. all or onnx,web)
 # upgrade --json: dry runs add inventory_complete/warnings; a post-install partial failure adds cleanup_complete:false
+# upgrade refuses while a Web UI started through the memtomem-web entry point runs (it has no pid lock to stop it by); stop it first
 # warnings is additive on Windows, where processes are never killed automatically; db_lock_warning still requests a manual restart
 
 # Tags — bulk tag maintenance (mutations are dry-run unless --apply; --yes skips the prompt)

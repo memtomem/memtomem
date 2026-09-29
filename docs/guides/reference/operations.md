@@ -8,6 +8,7 @@ STM proactive surfacing, and uninstalling.
 **On this page**
 
 - [Web UI](#web-ui)
+- [Sources tab](#sources-tab)
 - [Web API and readiness](#web-api-and-readiness)
 - [Privacy audits](#privacy-audits)
 - [Troubleshooting](#troubleshooting)
@@ -33,6 +34,30 @@ mm web --mode {prod,dev}       # explicit mode (mutually exclusive with --dev)
 `mm web` opens in **Simple** mode by default, showing the Home, Search, Sources, Gateway, Index, and Settings tabs. The **Gateway** tab is the Context Gateway surface (Overview, Projects, Skills, Commands, Subagents, MCP Servers, Hooks, Wiki); the **Settings** tab holds Config, Namespaces, and Reset Database. Flip the header's **Advanced** toggle to reveal the Tags and Timeline tabs, plus the Dedup, Age-out, and Export/Import sections inside Settings. `mm web --dev` — or setting `MEMTOMEM_WEB__MODE=dev` in your shell profile — extends the surface with maintainer pages (Sessions, Search Runs, Quality Lab, Working Memory, Procedures, Health Report, Redaction) and unlocks structural namespace verbs (rename, delete) that are dev-only by ADR-0007.
 
 Tab classification changes over time — run `mm web --dev` against your installed version to see the complete surface. The API endpoints backing dev-only pages return 404 in `prod` mode; scripts that hit `/api/sessions`, `/api/scratch`, `/api/namespaces/{ns}/rename`, `DELETE /api/namespaces/{ns}`, etc. need `dev` mode. `GET /api/namespaces` (list) and `PATCH /api/namespaces/{ns}` (cosmetic edit — color, description) are prod-tier and respond in both modes.
+
+### Sources tab
+
+The **Sources** tab groups indexed files under the configured root that owns
+them. `memory_dirs`, `project_memory_dirs` and `indexing.read_only_memory_dirs`
+each get their own group, and a file under nested roots counts only for the
+most specific one. Only files outside every configured root land under
+"Other (unregistered)". The tree hides unavailable sources (a missing or
+unreadable file, or one waiting for an availability check) and `project_local`
+drafts, but they stay in the index. A root's counts leave them out and its
+group's first line says how many are hidden. The Memory Dirs panel shows the
+same as "N hidden".
+
+| What you see | Meaning |
+|---|---|
+| *read-only* / *project* pill | The root comes from `read_only_memory_dirs` or `project_memory_dirs`. It has no **Remove** button, because Remove only edits `memory_dirs`. |
+| *Discovered* | The root has files on disk but nothing indexed yet, and offers **Index**. A root whose indexed sources are all unavailable is not *Discovered*; its group opens with the hidden-count line and offers **Reindex**. |
+| "Also delete this directory's indexed chunks" in the Remove dialog | The count is what the remove would delete. Files that a still-configured root contains, nested or enclosing, are kept and not counted. When nothing would be deleted, the checkbox is replaced by a note that another directory keeps the files indexed. |
+| "N files · M chunks" header | The indexed files the tree shows for the selected vendor, "Other (unregistered)" included. It ignores the filter box. |
+
+Three notices mark a list that stopped at 10,000 entries. "Loaded N of M
+indexed files across all tabs" appears under the Sources header. "Text matches
+stop at N files" appears while the Sources text filter applies. "Listing N of M
+sources" appears under the Search tab's source filter.
 
 ### Web API and readiness
 
@@ -179,12 +204,39 @@ SQLite allows only one writer at a time. If the MCP server and Web UI server bot
 2. Retry the operation — the lock is typically brief
 3. For production, use a single server process
 
+### Schema version errors after an upgrade
+
+0.6.5 moves the database to schema version 3. The first 0.6.5 process to open
+the store migrates it, and the migration is one way. An earlier binary then
+stops with `This database has schema version 3, but this memtomem binary only
+supports up to 2` and exits 1 without touching the data. Upgrade that copy with
+`mm upgrade`. A client that launches its own server, such as an MCP entry
+pinned to an earlier `memtomem==` version, has to move to the same release.
+
+The migration also checks for servers that already have the store open. If a
+registered MCP server or `mm web` has it open, the process that would migrate
+changes nothing and fails with a message naming their pids: stop those
+processes, then retry. Only registered processes are seen. Short-lived CLI
+commands are not, and neither is a Web UI started from a release before the
+Web UI registered. A running server re-reads the schema stamp when another
+connection writes, and stops serving once the stamp has moved past its
+release. Only releases that include that check stop this way, so stop older
+servers yourself before upgrading.
+
 ### Concurrent MCP + Web server
 
 Running both `memtomem-server` (MCP) and `memtomem-web` simultaneously is supported but has caveats:
 
 - **File watcher overlap**: both servers watch `memory_dirs`. A file created by one server may be re-indexed by the other, causing duplicate chunks. Restart the server that has stale data, or force a full re-index (`mem_index(force=True)`) to reconcile.
 - **Orphaned index entries**: interrupted concurrent writes could previously leave orphaned FTS/vec entries causing `constraint failed` errors on subsequent indexing. This is now handled automatically — `upsert_chunks` defensively cleans orphans before INSERT.
+- **Lifecycle commands see the Web UI**: the Web UI registers in the instance
+  registry like an MCP server once its storage is open. `mm uninstall` and
+  `mm reset` refuse while it runs; `--force` does not override that check.
+  On macOS and Linux, `mm upgrade` stops a Web UI started with `mm web`. One
+  started through the `memtomem-web` entry point has no pid lock for it to
+  use, so `mm upgrade` refuses while it runs. On Windows, `mm upgrade` never
+  stops processes itself and refuses while any Web UI or server runs. In those
+  cases, stop them yourself first.
 - **Recommendation**: for typical usage, run only the MCP server. Launch the Web UI on-demand when you need visual browsing.
 
 ### "swap_recovery_pending" when writing a skill

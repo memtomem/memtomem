@@ -173,7 +173,10 @@ applies.
 
 For *single-machine backup*, use `mem_export` / `mem_import`
 ([Reference](reference/data-config-cli.md#6-data--mem_export-mem_import)). The bundle format
-embeds absolute paths and is not designed for cross-device restore.
+embeds absolute paths and is not designed for cross-device restore. It also
+leaves out sources held because their file is missing or unreadable, and
+reports how many; restore and re-index them first if the bundle should be
+complete.
 
 That caveat is about *memory* bundles. A single **context artifact** — one
 skill, command, or agent — does have a cross-device format: `mm context export`
@@ -294,7 +297,10 @@ Why per category:
   derived state. Rebuilds from markdown via `mem_index`. Embedding model
   versions can diverge across machines; tracking the DB makes that worse,
   not better. SQLite WAL/SHM are inherently process-local; copying them
-  mid-write corrupts.
+  mid-write corrupts. The schema is versioned too: 0.6.5 migrates a store to
+  schema version 3 the first time it opens it, and an earlier release then
+  refuses it (`only supports up to 2`). Keep every machine on the same
+  release, or rebuild from markdown.
 - **`.server.pid`, `.current_session`** — process / session state.
   Nonsensical on a different machine.
 - **`uploads/`, `config.json.bak*`** — transient. No long-term value
@@ -308,6 +314,14 @@ Why per category:
   and rely on `config.d/` for shared policy. See
   [Moving config.json between machines](configuration.md#moving-configjson-between-machines)
   for the cross-machine semantics.
+
+File names with accents or Hangul can reach two machines in different Unicode
+forms. macOS treats the NFC and NFD spellings as one path; Linux and Windows
+treat them as two. Since 0.6.5 memtomem folds paths to NFC only on macOS, so
+on Linux and Windows the index keys each file by the name it has on disk. A
+Linux or Windows store indexed before 0.6.5 may hold rows keyed by the folded
+spelling: preview them with `mm gc orphan-sources`, remove them with
+`mm gc orphan-sources --apply`, then re-index with `mm index <dir>`.
 
 ## Post-pull workflow
 

@@ -45,7 +45,13 @@ Oversized JSON containers are divided by JSON Pointer. Long string values are
 decoded and split at their internal lines where possible. Their line references
 continue to identify the original serialized value; decoded newlines are not
 reported as physical file lines. The rule applies to any JSON source, including
-fixtures, execution records and user documents. Markdown long lines, code fences
+fixtures, execution records and user documents. Neighbouring members too small
+to stand alone are packed into one bounded chunk, labelled with the parent and
+its first and last member. Object keys give stable boundaries, so inserting a
+key changes few later chunks; array boundaries stay positional. A chunk whose
+content changes through packing gets a new ID and is embedded again on the next
+reindex, while unchanged chunks keep their ID and vector, so no forced reindex
+is needed. Markdown long lines, code fences
 and tables receive the same final ceiling even when their usual chunker treats
 them as indivisible.
 

@@ -50,8 +50,8 @@ use them; without a provider it searches by keyword (BM25). See the
 for smaller bundles. If `mm` is not on PATH, run `uv tool update-shell` and
 open a new shell. If an install appears stale, re-run it with `--refresh`.
 To upgrade an existing uv tool install, run `mm upgrade` rather than
-`uv tool install` again: it keeps the extras it detects and stops running
-servers first (see the
+`uv tool install` again: it keeps the extras it detects and, on macOS and
+Linux, stops running servers first (see the
 [CLI reference](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/data-config-cli.md#cli-reference)).
 
 > memtomem is the long-term-memory store. [memtomem-stm](https://github.com/memtomem/memtomem-stm) is a separate, optional MCP proxy for automatic surfacing, compression, and caching.
