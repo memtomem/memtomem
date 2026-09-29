@@ -69,9 +69,27 @@ def test_minilm_case_variant_resolves_to_the_pin(tmp_path: Path) -> None:
     assert model_snapshot_present(tmp_path, MINILM_ID.upper())
 
 
+def _catalog_hf_repo(model_id: str) -> str:
+    """The ``sources.hf`` repository fastembed's catalog downloads ``model_id`` from.
+
+    Read from the installed catalog rather than written out, because its
+    casing is fastembed's to change: 0.8.1 renamed
+    ``qdrant/bge-small-en-v1.5-onnx-q`` to ``Qdrant/bge-small-en-v1.5-onnx-Q``,
+    and on a case-sensitive filesystem the old spelling is another directory.
+    """
+    from fastembed import TextEmbedding  # type: ignore[import-untyped]
+
+    for desc in TextEmbedding.list_supported_models():
+        if desc["model"] == model_id:
+            return str(desc["sources"]["hf"])
+    raise AssertionError(f"{model_id} is not in fastembed's catalog")
+
+
 def test_bge_small_is_found_under_the_qdrant_repo_with_its_model_file(tmp_path: Path) -> None:
     pytest.importorskip("fastembed")
-    _make_snapshot(tmp_path, "qdrant/bge-small-en-v1.5-onnx-q", ("model_optimized.onnx",))
+    repo = _catalog_hf_repo(BGE_SMALL_ID)
+    assert repo.lower() == "qdrant/bge-small-en-v1.5-onnx-q"
+    _make_snapshot(tmp_path, repo, ("model_optimized.onnx",))
     assert model_snapshot_present(tmp_path, BGE_SMALL_ID)
 
 
