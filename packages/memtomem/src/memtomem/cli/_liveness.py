@@ -25,6 +25,12 @@ servers take none), and such a server is gated by its own
 Current runtime pid files use one environment-independent per-user anchor
 (#2037). During transition, probes also inspect every safe pre-#2037 location
 the caller can derive, so common XDG-vs-temp launches remain discoverable.
+
+A probe releases its lock before it returns, so "not running" can be out of
+date by the time the caller acts on it. Deleting a stale pid file therefore
+goes through :func:`unlink_stale_pid_file`, which takes the lock itself and
+deletes only the file it locked (#2595). ``mm upgrade`` and ``mm web`` both
+use it (#2610).
 """
 
 from __future__ import annotations
@@ -40,7 +46,11 @@ from typing import Literal
 import click
 import portalocker
 
-from memtomem._lock_errors import is_lock_contention, raise_lock_io_failure
+from memtomem._lock_errors import (
+    LOCK_CALL_ERRORS_WIDE,
+    is_lock_contention,
+    raise_lock_io_failure,
+)
 from memtomem._runtime_paths import (
     RuntimeDirValidationError,
     candidate_runtime_dirs,
@@ -471,7 +481,10 @@ StalePidUnlink = Literal["removed", "held", "replaced", "missing"]
 
 
 def unlink_stale_pid_file(pid_file: Path) -> StalePidUnlink:
-    """Delete *pid_file* only while holding its lock, and only the file locked.
+    """Delete *pid_file* only after locking it, and only the file locked.
+
+    On POSIX the delete happens while the lock is held; on Windows just after
+    it is released, under the sharing rule described below.
 
     A probe releases its lock before it returns, so deleting the path after a
     "not running" probe can delete a file a replacement has locked since
@@ -488,25 +501,24 @@ def unlink_stale_pid_file(pid_file: Path) -> StalePidUnlink:
     :class:`~memtomem._instance_registry.BarrierTimeout` when the lifecycle
     barrier is held exclusive (``mm uninstall`` or ``mm reset`` is writing).
 
-    POSIX only. Windows cannot delete a file with an open handle, so the lock
-    would have to be released before the delete, which reopens the race this
-    closes. ``mm upgrade`` never stops processes on Windows.
-
     POSIX cannot delete a name only if it still names a given file, so the
     identity check and the delete are two steps. A new file can take the name
     between them only if something moves or deletes the name without holding
     this file's lock and a new file is then created there. Every pid-file
-    owner deletes only while holding its lock. ``mm uninstall`` moves server
-    pid files into its staging directory without that lock, but only while it
-    holds the lifecycle barrier exclusive, so this helper holds the barrier
-    shared from before the lock until after the delete (#2595 review). The
-    remaining lock-less remover is ``cli/web.py:_remove_stale_web_files``,
-    which deletes by path after a probe, and is the next thing to move onto
-    this helper.
-    """
-    if os.name == "nt":
-        raise NotImplementedError("unlink_stale_pid_file is POSIX-only")
+    owner deletes only while holding its lock, and so do the stale-file
+    cleanups in ``mm upgrade`` and ``mm web`` (#2610), through this helper.
+    ``mm uninstall`` moves server pid files into its staging directory without
+    that lock, but only while it holds the lifecycle barrier exclusive, so this
+    helper holds the barrier shared from before the lock until after the
+    delete (#2595 review).
 
+    Windows cannot delete a file that has an open handle, so there the lock is
+    released just before the delete. The operating system closes the gap
+    instead: CPython opens files without ``FILE_SHARE_DELETE``, so if a new
+    owner has opened the file since, the delete fails with a sharing
+    violation and the result is ``"held"``. Every other ``PermissionError``
+    (an ACL, a read-only file) propagates.
+    """
     from memtomem._instance_registry import acquire_server_lifecycle_barrier
 
     # Shared, like a running server: it only excludes the destructive CLIs.
@@ -534,7 +546,9 @@ def _unlink_locked_pid_file(pid_file: Path) -> StalePidUnlink:
         try:
             portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
             lock_owned = True
-        except (portalocker.LockException, OSError) as exc:
+        # Wide: on Windows a portalocker 3.x backend can raise a raw
+        # ``pywintypes.error``, which callers only handle once normalized.
+        except LOCK_CALL_ERRORS_WIDE as exc:
             if is_lock_contention(exc):
                 return "held"
             raise_lock_io_failure(exc, pid_file, label="stale pid")
@@ -553,6 +567,14 @@ def _unlink_locked_pid_file(pid_file: Path) -> StalePidUnlink:
         if (current.st_dev, current.st_ino) != (path_stat.st_dev, path_stat.st_ino):
             return "replaced"
 
+        if os.name == "nt":
+            # NTFS refuses to delete a file with an open handle, our own
+            # included, so release first; see the docstring for why a new
+            # owner's open handle still makes this safe.
+            portalocker.unlock(fp)
+            lock_owned = False
+            fp.close()
+            return _delete_released_pid_file(pid_file)
         # Delete while the lock is held. Once it is released, a replacement
         # can open and lock this same file before the delete, and the delete
         # would then remove the file it holds.
@@ -566,6 +588,28 @@ def _unlink_locked_pid_file(pid_file: Path) -> StalePidUnlink:
             with contextlib.suppress(Exception):
                 portalocker.unlock(fp)
         fp.close()
+
+
+# Windows ``ERROR_SHARING_VIOLATION``: the file is open in another handle
+# that did not allow deletion.
+_ERROR_SHARING_VIOLATION = 32
+
+
+def _delete_released_pid_file(pid_file: Path) -> StalePidUnlink:
+    """Delete a verified pid file after its lock was released (Windows).
+
+    A new owner that opened the file in the gap still has it open, and the
+    delete then fails with a sharing violation: ``"held"``, file kept.
+    """
+    try:
+        os.unlink(pid_file)
+    except FileNotFoundError:
+        return "replaced"
+    except PermissionError as exc:
+        if getattr(exc, "winerror", None) == _ERROR_SHARING_VIOLATION:
+            return "held"
+        raise
+    return "removed"
 
 
 def probe_legacy_pid_file(pid_file: Path | None = None) -> ServerState:

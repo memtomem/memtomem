@@ -391,6 +391,17 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return target
 
 
+def _registry_snapshot(
+    monkeypatch: pytest.MonkeyPatch, *, live: list[tuple[int, str]], complete: bool = True
+) -> None:
+    """Stand in for the instance registry that ``mm web stop`` consults on Windows."""
+    from types import SimpleNamespace
+
+    instances = tuple(SimpleNamespace(pid=pid, procid=procid) for pid, procid in live)
+    snapshot = SimpleNamespace(instances=instances, presence=(), complete=complete)
+    monkeypatch.setattr("memtomem._instance_registry.snapshot_all_instances", lambda: snapshot)
+
+
 def test_liveness_parses_web_pid_payload() -> None:
     pid, port, started = _parse_pid_payload("12345\n18080\n2026-05-13T10:15:32Z\n")
     assert pid == 12345
@@ -505,7 +516,11 @@ def test_web_status_reports_unverified_state_without_error_exit(
     assert "running (unverified: simulated lock failure)" in result.output
 
 
-def test_web_stop_removes_stale_pid_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_web_stop_removes_stale_pid_file_and_keeps_sidecar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``web.pid`` is removed under its lock; ``web.json`` is its owner's to
+    remove (#2610) and is read only beside a live ``web.pid`` holder."""
     runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
     runtime_dir.mkdir(mode=0o700)
     runtime_dir.chmod(0o700)
@@ -519,10 +534,10 @@ def test_web_stop_removes_stale_pid_file(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert result.exit_code == 2
     assert "removed stale pid file" in result.output
     assert not pid_file.exists()
-    assert not info_file.exists()
+    assert info_file.exists()
 
 
-def test_web_stop_removes_stale_files_from_transition_root(
+def test_web_stop_removes_stale_pid_file_from_transition_root_and_keeps_sidecar(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     canonical = _isolate_runtime(monkeypatch, tmp_path)
@@ -543,10 +558,10 @@ def test_web_stop_removes_stale_files_from_transition_root(
     assert result.exit_code == 2
     assert "removed stale pid file" in result.output
     assert not pid_file.exists()
-    assert not info_file.exists()
+    assert info_file.exists()
 
 
-def test_web_stop_signals_verified_pid_and_removes_metadata(
+def test_web_stop_signals_verified_pid_and_keeps_sidecar(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import portalocker
@@ -557,7 +572,9 @@ def test_web_stop_signals_verified_pid_and_removes_metadata(
     pid_file = runtime_dir / "web.pid"
     info_file = runtime_dir / "web.json"
     pid_file.write_text("24680\n18080\n2026-05-13T10:15:32+00:00\n", encoding="utf-8")
-    info_file.write_text('{"pid": 24680, "port": 18080}\n', encoding="utf-8")
+    info_file.write_text('{"pid": 24680, "port": 18080, "procid": "0123abcd"}\n', encoding="utf-8")
+    # Windows reads the pid from the sidecar and needs the registry to confirm it.
+    _registry_snapshot(monkeypatch, live=[(24680, "0123abcd")])
     signals: list[int] = []
 
     holder = pid_file.open("rb+")
@@ -581,7 +598,7 @@ def test_web_stop_signals_verified_pid_and_removes_metadata(
     assert signals == [24680]
     assert "stopped pid=24680" in result.output
     assert not pid_file.exists()
-    assert not info_file.exists()
+    assert info_file.exists()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX reads the pid from the locked file")
@@ -829,3 +846,368 @@ def test_web_pid_lock_io_failure_is_not_reported_as_already_running(
     message = info.value.format_message()
     assert "cannot lock the Web UI pid file" in message
     assert "already running" not in message
+
+
+# ── stale web.pid removal under its lock (#2610) ─────────────────────
+
+
+def _stale_web_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
+    runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
+    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.chmod(0o700)
+    pid_file = runtime_dir / "web.pid"
+    info_file = runtime_dir / "web.json"
+    pid_file.write_text("999999\n18080\n2026-05-13T10:15:32+00:00\n", encoding="utf-8")
+    info_file.write_text('{"pid": 999999, "port": 18080}\n', encoding="utf-8")
+    return pid_file, info_file
+
+
+def _lock(path: Path):
+    """Open and lock *path* the way a starting ``mm web`` does."""
+    import portalocker
+
+    holder = open(path, "rb+")
+    portalocker.lock(holder, portalocker.LOCK_EX | portalocker.LOCK_NB)
+    return holder
+
+
+def _release(holder) -> None:
+    import portalocker
+
+    if not holder.closed:
+        with contextlib.suppress(Exception):
+            portalocker.unlock(holder)
+        holder.close()
+
+
+def _still_locked(path: Path) -> bool:
+    import portalocker
+
+    with open(path, "rb+") as rival:
+        try:
+            portalocker.lock(rival, portalocker.LOCK_EX | portalocker.LOCK_NB)
+        except (portalocker.AlreadyLocked, BlockingIOError):
+            return True
+        portalocker.unlock(rival)
+        return False
+
+
+def test_web_stop_not_running_leaves_sidecar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pid_file, info_file = _stale_web_files(monkeypatch, tmp_path)
+    pid_file.unlink()
+
+    result = CliRunner().invoke(web, ["stop"])
+
+    assert result.exit_code == 0, result.output
+    assert "not running" in result.output
+    assert info_file.exists()
+
+
+def test_web_stop_keeps_a_pid_file_locked_after_the_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A new ``mm web`` locks ``web.pid`` after ``mm web stop``'s probe found it
+    stale. The stop must not delete it: a delete by path would leave the new
+    Web UI on a file no path names, invisible to every pid-file probe.
+
+    This is also step 2 of #2610's interleaving with ``mm upgrade``: with the
+    stop unable to delete a file another process has locked, the upgrade's
+    locked delete cannot land on a newcomer's file.
+    """
+    from memtomem.cli import _liveness
+
+    pid_file, info_file = _stale_web_files(monkeypatch, tmp_path)
+    real_check = _liveness.check_web_liveness
+    holders: list = []
+
+    def probe_then_newcomer_locks():
+        state = real_check()
+        holders.append(_lock(pid_file))
+        return state
+
+    monkeypatch.setattr(_liveness, "check_web_liveness", probe_then_newcomer_locks)
+    try:
+        result = CliRunner().invoke(web, ["stop"])
+        assert result.exit_code == 1, result.output
+        assert "locked" in result.output and "Nothing was removed" in result.output
+        assert pid_file.exists()
+        assert _still_locked(pid_file)
+        assert info_file.exists()
+    finally:
+        for holder in holders:
+            _release(holder)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="replacing an open file is POSIX-only")
+def test_web_stop_keeps_a_replaced_pid_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import portalocker
+
+    from memtomem.cli import _liveness
+
+    pid_file, _info = _stale_web_files(monkeypatch, tmp_path)
+    real_lock = portalocker.lock
+    pid_locks = {"n": 0}
+
+    def lock_then_replace(fp, flags):
+        real_lock(fp, flags)
+        if str(getattr(fp, "name", "")).endswith("lifecycle.lock"):
+            return
+        pid_locks["n"] += 1
+        if pid_locks["n"] == 2:  # the cleanup's lock; the first is the stop's probe
+            pid_file.unlink()
+            pid_file.write_text("5151\n", encoding="utf-8")
+
+    monkeypatch.setattr(_liveness.portalocker, "lock", lock_then_replace)
+
+    result = CliRunner().invoke(web, ["stop"])
+
+    assert result.exit_code == 1, result.output
+    assert "changed after the liveness check" in result.output
+    assert pid_file.read_text(encoding="utf-8") == "5151\n"
+
+
+def _stale_unlink_error(kind: str) -> BaseException:
+    from memtomem._instance_registry import BarrierTimeout
+    from memtomem.cli._liveness import UnsafeProbePathError
+
+    return {
+        "unsafe": UnsafeProbePathError("pid path is a symlink"),
+        "barrier": BarrierTimeout("lifecycle barrier busy after 2.0s"),
+        "oserror": OSError(5, "Input/output error"),
+    }[kind]
+
+
+@pytest.mark.parametrize("kind", ["unsafe", "barrier", "oserror"])
+def test_web_stop_stale_unlink_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+) -> None:
+    pid_file, _info = _stale_web_files(monkeypatch, tmp_path)
+
+    def refuse(_pid_file=None):
+        raise _stale_unlink_error(kind)
+
+    monkeypatch.setattr(web_cmd, "_remove_stale_web_pid_file", refuse)
+
+    result = CliRunner().invoke(web, ["stop"])
+
+    assert result.exit_code == 1, result.output
+    assert "Cannot remove the stale pid file" in result.output
+    assert "Nothing was removed" in result.output
+    assert ("`mm uninstall` or `mm reset` is running" in result.output) == (kind == "barrier")
+    assert pid_file.exists()
+
+
+def _running_web_ui(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """A Web UI holding ``web.pid``; ``os.kill`` makes it exit (releases the lock)."""
+    pid_file, info_file = _stale_web_files(monkeypatch, tmp_path)
+    pid_file.write_text("24680\n18080\n2026-05-13T10:15:32+00:00\n", encoding="utf-8")
+    info_file.write_text('{"pid": 24680, "port": 18080, "procid": "0123abcd"}\n', encoding="utf-8")
+    _registry_snapshot(monkeypatch, live=[(24680, "0123abcd")])
+    holder = _lock(pid_file)
+    signals: list[int] = []
+
+    def fake_kill(pid: int, _sig: int) -> None:
+        signals.append(pid)
+        _release(holder)
+
+    monkeypatch.setattr(web_cmd.os, "kill", fake_kill)
+    return pid_file, info_file, holder, signals
+
+
+def test_web_stop_post_stop_reports_a_newcomer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A new Web UI locks ``web.pid`` after the stop's final probe and before
+    the cleanup takes the lock. The stop succeeded; the newcomer's file stays."""
+    from memtomem import _instance_registry
+
+    pid_file, _info, holder, signals = _running_web_ui(monkeypatch, tmp_path)
+    real_barrier = _instance_registry.acquire_server_lifecycle_barrier
+    newcomers: list = []
+
+    def barrier_then_newcomer(*args, **kwargs):
+        held = real_barrier(*args, **kwargs)
+        newcomers.append(_lock(pid_file))
+        return held
+
+    monkeypatch.setattr(
+        _instance_registry, "acquire_server_lifecycle_barrier", barrier_then_newcomer
+    )
+    try:
+        result = CliRunner().invoke(web, ["stop"])
+        assert result.exit_code == 0, result.output
+        assert signals == [24680]
+        assert "stopped pid=24680" in result.stdout
+        assert "has since locked" in result.stderr
+        assert pid_file.exists()
+        assert _still_locked(pid_file)
+    finally:
+        _release(holder)
+        for newcomer in newcomers:
+            _release(newcomer)
+
+
+def test_web_stop_post_stop_cleanup_failure_still_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pid_file, _info, holder, signals = _running_web_ui(monkeypatch, tmp_path)
+
+    def refuse(_pid_file=None):
+        raise _stale_unlink_error("barrier")
+
+    monkeypatch.setattr(web_cmd, "_remove_stale_web_pid_file", refuse)
+    try:
+        result = CliRunner().invoke(web, ["stop"])
+    finally:
+        _release(holder)
+
+    assert result.exit_code == 0, result.output
+    assert signals == [24680]
+    assert "stopped pid=24680" in result.stdout
+    assert "Cannot remove the stale pid file" in result.stderr
+    assert pid_file.exists()
+
+
+def test_failed_background_start_keeps_a_live_holders_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The background child can fail *because* another Web UI holds
+    ``web.pid``. The failed start must not delete that Web UI's files."""
+    pid_file, info_file = _stale_web_files(monkeypatch, tmp_path)
+    holder = _lock(pid_file)
+
+    class FakeChild:
+        pid = 13579
+
+        def poll(self) -> int:
+            return 1
+
+    monkeypatch.setattr(web_cmd.subprocess, "Popen", lambda argv, **kwargs: FakeChild())
+    monkeypatch.setattr(web_cmd, "_wait_for_readiness", lambda *args, **kwargs: False)
+    try:
+        with patch("memtomem.cli.web._missing_web_deps", return_value=None):
+            result = CliRunner().invoke(
+                web,
+                ["-b", "--port", "18080", "--log-file", str(tmp_path / "web.log")],
+            )
+        assert result.exit_code == 1, result.output
+        assert "Another Web UI holds" in result.output
+        assert pid_file.exists()
+        assert info_file.exists()
+        assert _still_locked(pid_file)
+    finally:
+        _release(holder)
+
+
+def test_failed_background_start_removes_an_unheld_pid_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pid_file, info_file = _stale_web_files(monkeypatch, tmp_path)
+
+    class FakeChild:
+        pid = 13579
+
+        def poll(self) -> int:
+            return 1
+
+    monkeypatch.setattr(web_cmd.subprocess, "Popen", lambda argv, **kwargs: FakeChild())
+    monkeypatch.setattr(web_cmd, "_wait_for_readiness", lambda *args, **kwargs: False)
+    with patch("memtomem.cli.web._missing_web_deps", return_value=None):
+        result = CliRunner().invoke(
+            web, ["-b", "--port", "18080", "--log-file", str(tmp_path / "web.log")]
+        )
+
+    assert result.exit_code == 1, result.output
+    assert "did not start" in result.output
+    assert "left in place" not in result.output
+    assert not pid_file.exists()
+    assert info_file.exists()
+
+
+# ── Windows: a sidecar pid is signalled only with registry proof (#2610) ──
+
+
+def _sidecar_only_web_ui(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """A held ``web.pid`` whose payload the probe cannot use (as on Windows),
+    beside a ``web.json`` naming pid 24680 / procid 0123abcd."""
+    pid_file, info_file = _stale_web_files(monkeypatch, tmp_path)
+    pid_file.write_text("", encoding="utf-8")
+    info_file.write_text('{"pid": 24680, "port": 18080, "procid": "0123abcd"}\n', encoding="utf-8")
+    monkeypatch.setattr(web_cmd, "_stop_reads_pid_from_sidecar", lambda: True)
+    holder = _lock(pid_file)
+    signals: list[int] = []
+
+    def fake_kill(pid: int, _sig: int) -> None:
+        signals.append(pid)
+        _release(holder)
+
+    monkeypatch.setattr(web_cmd.os, "kill", fake_kill)
+    return holder, signals
+
+
+def test_sidecar_pid_without_a_live_sentinel_is_not_signalled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A new Web UI has locked ``web.pid`` but not yet rewritten ``web.json``,
+    which still names a predecessor whose pid may now be anyone's."""
+    holder, signals = _sidecar_only_web_ui(monkeypatch, tmp_path)
+    _registry_snapshot(monkeypatch, live=[(24680, "ffffffff")])
+    try:
+        result = CliRunner().invoke(web, ["stop"])
+    finally:
+        _release(holder)
+
+    assert result.exit_code == 1, result.output
+    assert signals == []
+    assert "No signal was sent" in result.output
+    assert "no live registration" in result.output
+
+
+def test_sidecar_pid_with_a_live_sentinel_is_signalled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    holder, signals = _sidecar_only_web_ui(monkeypatch, tmp_path)
+    _registry_snapshot(monkeypatch, live=[(24680, "0123abcd")])
+    try:
+        result = CliRunner().invoke(web, ["stop"])
+    finally:
+        _release(holder)
+
+    assert result.exit_code == 0, result.output
+    assert signals == [24680]
+
+
+def test_sidecar_pid_with_an_incomplete_registry_is_not_signalled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    holder, signals = _sidecar_only_web_ui(monkeypatch, tmp_path)
+    _registry_snapshot(monkeypatch, live=[(24680, "0123abcd")], complete=False)
+    try:
+        result = CliRunner().invoke(web, ["stop"])
+    finally:
+        _release(holder)
+
+    assert result.exit_code == 1, result.output
+    assert signals == []
+    assert "could not be read completely" in result.output
+
+
+def test_stale_unlink_failure_escapes_control_characters(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stale_web_files(monkeypatch, tmp_path)
+
+    def refuse(_pid_file=None):
+        raise OSError(5, "bad\x1b]0;retitled\x07 path")
+
+    monkeypatch.setattr(web_cmd, "_remove_stale_web_pid_file", refuse)
+
+    result = CliRunner().invoke(web, ["stop"])
+
+    assert result.exit_code == 1, result.output
+    assert "\x1b" not in result.output and "\x07" not in result.output
+    assert "\\x1b" in result.output

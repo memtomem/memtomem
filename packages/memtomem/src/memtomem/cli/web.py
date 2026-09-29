@@ -22,7 +22,8 @@ import click
 from memtomem._process_probe import probe_pid
 
 if TYPE_CHECKING:
-    from memtomem.cli._liveness import ServerState
+    from memtomem._instance_registry import RegistrySnapshot
+    from memtomem.cli._liveness import ServerState, StalePidUnlink
 
 
 _WEB_MODE_CHOICES = ("prod", "dev")
@@ -86,10 +87,6 @@ def _web_pid_file() -> Path:
     from memtomem._runtime_paths import web_pid_path
 
     return web_pid_path()
-
-
-def _web_info_file() -> Path:
-    return _web_pid_file().with_name(_WEB_INFO_NAME)
 
 
 def _default_web_log_path() -> Path:
@@ -177,21 +174,25 @@ def verified_web_identity(state: ServerState) -> tuple[int, str] | None:
 
 def _cleanup_web_files(pid_file: Path, lock_fp: object | None) -> None:
     info_file = pid_file.with_name(_WEB_INFO_NAME)
+    # Sidecar first, on every platform, while the lock is still held: once the
+    # lock is gone a replacement can lock ``web.pid`` and write its own
+    # sidecar, which this exit must not delete (#2574 on POSIX, #2610 on
+    # Windows — that sidecar is how the replacement's registration is
+    # attributed, and ``mm web`` itself never deletes it).
+    with contextlib.suppress(OSError):
+        info_file.unlink(missing_ok=True)
     if os.name == "nt":
+        # NTFS refuses to delete a file with an open handle, so close first. A
+        # replacement that opens ``web.pid`` in between keeps it: the delete
+        # then fails with a sharing violation and is ignored.
         if lock_fp is not None:
             with contextlib.suppress(OSError):
                 lock_fp.close()  # type: ignore[attr-defined]
-        for path in (pid_file, info_file):
-            with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            pid_file.unlink(missing_ok=True)
     else:
-        # Sidecar first, while the lock is still held: once ``web.pid`` is
-        # unlinked a replacement can lock a fresh one and write its own
-        # sidecar, which this exit must not delete (#2574 — that sidecar is
-        # how the replacement's registration is attributed).
-        for path in (info_file, pid_file):
-            with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            pid_file.unlink(missing_ok=True)
         if lock_fp is not None:
             with contextlib.suppress(OSError):
                 lock_fp.close()  # type: ignore[attr-defined]
@@ -521,8 +522,12 @@ def _spawn_background(config: _WebRunConfig, log_file: Path | None) -> None:
                     child.kill()
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     child.wait(timeout=2)
-        _remove_stale_web_files()
+        # The child may have failed *because* another Web UI holds web.pid,
+        # so only a file nobody holds is removed (#2610).
+        cleanup_note = _cleanup_after_failed_start()
         message = f"Web UI did not start within {timeout:g}s. See log: {log_path}"
+        if cleanup_note:
+            message = f"{message}\n{cleanup_note}"
         if tail:
             message = f"{message}\n\nLast log output:\n{tail.rstrip()}"
         raise click.ClickException(message)
@@ -545,11 +550,104 @@ def _wait_for_pid_file_release(timeout: float) -> bool:
     return not check_web_liveness().alive
 
 
-def _remove_stale_web_files(pid_file: Path | None = None) -> None:
-    target = pid_file or _web_pid_file()
-    for path in (target, target.with_name(_WEB_INFO_NAME)):
-        with contextlib.suppress(OSError):
-            path.unlink(missing_ok=True)
+def _remove_stale_web_pid_file(pid_file: Path | None = None) -> StalePidUnlink:
+    """Delete ``web.pid`` only while holding its lock, and only that file (#2610).
+
+    A liveness probe releases its lock before it returns, so a new ``mm web``
+    can lock ``web.pid`` between a "not running" answer and the delete. A
+    delete by path would then remove the file the new Web UI holds, and every
+    pid-file probe would stop seeing it. ``web.json`` is left alone: its
+    contents are used only beside a live ``web.pid`` holder (see
+    :func:`verified_web_identity`), and the owner's exit
+    (:func:`_cleanup_web_files`) or the next start's
+    :func:`_write_web_metadata` replaces it.
+
+    Raises what :func:`~memtomem.cli._liveness.unlink_stale_pid_file` raises.
+    """
+    from memtomem.cli._liveness import unlink_stale_pid_file
+
+    return unlink_stale_pid_file(pid_file or _web_pid_file())
+
+
+def _stale_unlink_errors() -> tuple[type[BaseException], ...]:
+    from memtomem._instance_registry import BarrierTimeout
+    from memtomem.cli._liveness import UnsafeProbePathError
+
+    return (UnsafeProbePathError, BarrierTimeout, OSError)
+
+
+def _shown(value: object) -> str:
+    """Render a path or an exception for the terminal (control characters escaped)."""
+    from memtomem._runtime_paths import scrub_text
+
+    return scrub_text(str(value))
+
+
+def _stale_unlink_failure(pid_file: Path, exc: BaseException) -> str:
+    from memtomem._instance_registry import BarrierTimeout
+
+    message = f"Cannot remove the stale pid file at {_shown(pid_file)}: {_shown(exc)}."
+    if isinstance(exc, BarrierTimeout):
+        message += " `mm uninstall` or `mm reset` is running; retry when it finishes."
+    return message
+
+
+def _cleanup_after_failed_start() -> str | None:
+    """Remove a stale ``web.pid`` after a failed background start.
+
+    Returns a line for the error message when something was left in place.
+    """
+    pid_file = _web_pid_file()
+    try:
+        outcome = _remove_stale_web_pid_file(pid_file)
+    except _stale_unlink_errors() as exc:
+        return f"Could not clean up {_shown(pid_file)}: {_shown(exc)}"
+    if outcome == "held":
+        return f"Another Web UI holds {_shown(pid_file)}; its files were left in place."
+    if outcome == "replaced":
+        return f"{_shown(pid_file)} changed while cleaning up; it was left in place."
+    return None
+
+
+def _stop_reads_pid_from_sidecar() -> bool:
+    """Whether ``mm web stop`` must take the pid from ``web.json``.
+
+    Windows cannot read a locked ``web.pid``, so the probe returns no pid
+    there and the sidecar is the only source. POSIX reads the locked file.
+    A function, not an inline ``os.name`` check, so both shards test both arms.
+    """
+    return os.name == "nt"
+
+
+def _registry_confirms(identity: tuple[int, str], snapshot: RegistrySnapshot) -> bool:
+    """Whether a live registry sentinel carries this ``(pid, procid)``."""
+    live = {(info.pid, info.procid) for info in (*snapshot.instances, *snapshot.presence)}
+    return identity in live
+
+
+def _sidecar_pid_to_signal(state: ServerState) -> int:
+    """Return the sidecar's pid only when the instance registry confirms it.
+
+    ``web.json`` may be a previous Web UI's: a new one locks ``web.pid``
+    before it rewrites the sidecar, and ``mm web`` never deletes the sidecar
+    by path (#2610). Its pid may since have been reused by another process, so
+    it is signalled only when a live registry sentinel carries the same
+    ``(pid, procid)``, the proof :func:`verified_web_identity` asks for.
+    """
+    from memtomem._instance_registry import snapshot_all_instances
+
+    identity = verified_web_identity(state)
+    snapshot = snapshot_all_instances()
+    if identity is not None and snapshot.complete and _registry_confirms(identity, snapshot):
+        return identity[0]
+    if not snapshot.complete:
+        reason = "the instance registry could not be read completely"
+    else:
+        reason = "its pid has no live registration yet (it may be starting)"
+    raise click.ClickException(
+        f"Web UI holds its pid file, but {reason}. No signal was sent; retry in a "
+        "moment, or stop it through your operating system's process tools."
+    )
 
 
 def _web_status() -> None:
@@ -596,27 +694,26 @@ def _web_stop() -> None:
     pid = state.pid if state.pid is not None else metadata.pid
     if not state.alive:
         if state.pid_file is not None:
-            _remove_stale_web_files(state.pid_file)
-            click.echo("stopped  (removed stale pid file)")
-            raise SystemExit(2)
-        with contextlib.suppress(OSError):
-            _web_info_file().unlink(missing_ok=True)
+            _stop_remove_stale_pid_file(state.pid_file)
         click.echo("not running")
         raise SystemExit(0)
     if pid is None:
         raise click.ClickException(
             f"Web UI appears to be running, but the pid is unreadable. Inspect {_web_pid_file()}."
         )
-    if os.name != "nt" and state.pid is None:
+    if state.pid is None and not _stop_reads_pid_from_sidecar():
         # POSIX reads the pid from the locked file itself. A held lock with no
         # pid in it is a Web UI that has locked but not yet written its pid, and
         # ``web.json`` may still be a killed predecessor's (#2587): its pid
-        # could now be anyone's, so do not signal it. (Windows cannot read a
-        # locked pid file and relies on the sidecar the lock holder wrote.)
+        # could now be anyone's, so do not signal it.
         raise click.ClickException(
             "Web UI holds its pid file but has not recorded its pid yet (it may be "
             "starting). No signal was sent; retry in a moment."
         )
+    if state.pid is None:
+        # Windows cannot read a locked pid file, so the pid comes from the
+        # sidecar, which may be a predecessor's: require registry proof.
+        pid = _sidecar_pid_to_signal(state)
 
     if os.name == "nt":
         try:
@@ -644,10 +741,53 @@ def _web_stop() -> None:
 
     final_state = check_web_liveness()
     if not final_state.alive:
-        _remove_stale_web_files(state.pid_file)
         click.echo(f"stopped pid={pid}")
+        # The stop itself succeeded; a cleanup that could not run is a warning.
+        if state.pid_file is not None:
+            try:
+                outcome = _remove_stale_web_pid_file(state.pid_file)
+            except _stale_unlink_errors() as exc:
+                click.echo(_stale_unlink_failure(state.pid_file, exc), err=True)
+            else:
+                if outcome == "held":
+                    click.echo(
+                        f"A new Web UI has since locked {_shown(state.pid_file)}; left in place.",
+                        err=True,
+                    )
+                elif outcome == "replaced":
+                    click.echo(
+                        f"{_shown(state.pid_file)} changed after the stop; left in place.", err=True
+                    )
         return
     raise click.ClickException(f"failed to stop pid {pid}")
+
+
+def _stop_remove_stale_pid_file(pid_file: Path) -> None:
+    """``mm web stop`` found no holder: remove the stale ``web.pid`` or explain.
+
+    Exits 2 after removing it and 0 when it was already gone. Fails without
+    removing anything when a Web UI locked it after the probe (``held``) or
+    the path changed (``replaced``), or when the removal cannot run.
+    """
+    try:
+        outcome = _remove_stale_web_pid_file(pid_file)
+    except _stale_unlink_errors() as exc:
+        raise click.ClickException(
+            f"{_stale_unlink_failure(pid_file, exc)} Nothing was removed."
+        ) from exc
+    if outcome == "removed":
+        click.echo("stopped  (removed stale pid file)")
+        raise SystemExit(2)
+    if outcome == "held":
+        raise click.ClickException(
+            f"A Web UI locked {_shown(pid_file)} after the liveness check (it may be starting). "
+            "Nothing was removed; run `mm web stop` again to stop it."
+        )
+    if outcome == "replaced":
+        raise click.ClickException(
+            f"The pid file at {_shown(pid_file)} changed after the liveness check. Nothing was "
+            "removed; run `mm web status` and retry."
+        )
 
 
 @click.group("web", invoke_without_command=True)
