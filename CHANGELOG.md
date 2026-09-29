@@ -27,6 +27,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm init` and the quantized-variant check accept an ONNX model name in any
+  case (#2608).** After #2602 two places still compared the name exactly.
+  `mm init --preset minimal --provider onnx --model
+  intfloat/Multilingual-E5-Small` wrote dimension 0, which the config then
+  rejected; it now writes 384. A BGE-M3 name such as `baai/BGE-M3` with a
+  quantized `onnx_variant` was refused with "quantized CPU profiles support
+  ONNX E5-small and BGE-M3 only"; it is now accepted, since the loader already
+  resolves that spelling to `BAAI/bge-m3`. Both look the name up by the id it
+  loads. Ollama and OpenAI model names
+  still match exactly, since those providers send them verbatim.
 - **A starting server or Web UI no longer loses its pid lock to a passing
   status check (#2611).** Every liveness probe (`mm status`, `mm web status`,
   `mm upgrade`, `mm reset`, `mm uninstall`, the release poll in

@@ -4353,6 +4353,89 @@ class TestPresetSelection:
         assert data["embedding"]["dimension"] == 384
         assert data["search"]["tokenizer"] == "kiwipiepy"
 
+    @pytest.mark.parametrize(
+        ("model", "dimension"),
+        [
+            ("intfloat/Multilingual-E5-Small", 384),
+            ("MULTILINGUAL-E5-SMALL", 384),
+            ("baai/BGE-M3", 1024),
+            ("BAAI/bge-m3", 1024),
+            ("Sentence-Transformers/All-MiniLM-L6-v2", 384),
+        ],
+    )
+    def test_onnx_model_dimension_resolves_any_spelling(self, model: str, dimension: int) -> None:
+        """#2608: an ONNX name is looked up by the id the loader resolves it
+        to, so a cased alias or full id gets its dimension, not the fallback."""
+        from memtomem.cli.init_cmd import _model_dimension
+
+        assert _model_dimension("onnx", model, 0) == dimension
+
+    @pytest.mark.parametrize(
+        ("provider", "model"),
+        [("openai", "Text-Embedding-3-Small"), ("ollama", "BGE-M3"), ("ollama", "baai/bge-m3")],
+    )
+    def test_non_onnx_model_dimension_stays_exact(self, provider: str, model: str) -> None:
+        """Other providers send the name verbatim, so a spelling
+        ``_MODEL_DIMS`` does not hold keeps the fallback."""
+        from memtomem.cli.init_cmd import _model_dimension
+
+        assert _model_dimension(provider, model, 7) == 7
+
+    @pytest.mark.parametrize(
+        ("provider", "model", "dimension"),
+        [
+            ("ollama", "bge-m3", 1024),
+            ("ollama", "nomic-embed-text", 768),
+            ("openai", "text-embedding-3-small", 1536),
+        ],
+    )
+    def test_non_onnx_model_dimension_keeps_exact_hits(
+        self, provider: str, model: str, dimension: int
+    ) -> None:
+        """The exact ``_MODEL_DIMS`` spellings still resolve for other providers."""
+        from memtomem.cli.init_cmd import _model_dimension
+
+        assert _model_dimension(provider, model, 7) == dimension
+
+    def test_minimal_preset_with_cased_onnx_model_writes_its_dimension(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2608 acceptance: from the minimal preset (dimension 0),
+        ``--provider onnx --model intfloat/Multilingual-E5-Small`` writes 384
+        and keeps the model as typed."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+
+        result = CliRunner().invoke(
+            init,
+            [
+                "--non-interactive",
+                "--preset",
+                "minimal",
+                "--provider",
+                "onnx",
+                "--model",
+                "intfloat/Multilingual-E5-Small",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--mcp",
+                "skip",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert data["embedding"]["provider"] == "onnx"
+        assert data["embedding"]["model"] == "intfloat/Multilingual-E5-Small"
+        assert data["embedding"]["dimension"] == 384
+
     def test_preset_plus_explicit_flag_override_interactive(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

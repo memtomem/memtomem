@@ -22,6 +22,8 @@ E5_TOKENIZER_SHA256 = "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14e
 E5_MODEL_SHA256 = "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665"
 CPU_VARIANTS = ("fp32", "int8-arm64", "int8-avx2", "int8-avx512", "int8-avx512-vnni")
 
+BGE_M3_MODEL = "BAAI/bge-m3"
+
 MINILM_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 # FastEmbed downloads this model from ``MINILM_REPO`` at its current head.
 # The revision after this one raised the tokenizer's truncation to 256 tokens
@@ -36,6 +38,12 @@ def is_e5(model: str) -> bool:
     # Resolve the way the loader does, so every spelling FastEmbed would load
     # as E5 gets the E5 profile, fingerprint and pinned snapshot (#2602).
     return resolve_embedder_id(model) == E5_MODEL
+
+
+def is_bge_m3(model: str) -> bool:
+    # Same fold as ``is_e5``: every spelling the loader resolves to BGE-M3 may
+    # use its quantized CPU profiles (#2608).
+    return resolve_embedder_id(model) == BGE_M3_MODEL
 
 
 def e5_contract_error(model: str, dimension: int, max_sequence_tokens: int) -> str | None:

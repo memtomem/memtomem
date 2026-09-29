@@ -222,6 +222,31 @@ def test_quantized_e5_budget_uses_local_artifact_tokenizer(tmp_path):
     assert config.indexing.chunk_input_prefix == "passage: "
 
 
+@pytest.mark.parametrize("model", ["bge-m3", "BAAI/bge-m3", "baai/BGE-M3", "BGE-M3"])
+def test_quantized_bge_m3_accepted_in_any_case(tmp_path, model):
+    # #2608: the allowlist resolves the name as the loader does.
+    config = EmbeddingConfig(
+        provider="onnx",
+        model=model,
+        dimension=1024,
+        onnx_variant="int8-arm64",
+        onnx_artifact_path=str(tmp_path),
+    )
+    assert config.model == model
+
+
+@pytest.mark.parametrize("model", ["all-MiniLM-L6-v2", "bge-small-en-v1.5", "bge-m3-extra"])
+def test_quantized_profile_still_refuses_other_models(tmp_path, model):
+    with pytest.raises(ValueError, match="quantized CPU profiles support ONNX E5-small and BGE-M3"):
+        EmbeddingConfig(
+            provider="onnx",
+            model=model,
+            dimension=384,
+            onnx_variant="int8-arm64",
+            onnx_artifact_path=str(tmp_path),
+        )
+
+
 def test_local_artifact_validation_needs_no_hub_cache(tmp_path, monkeypatch):
     import hashlib
     import json

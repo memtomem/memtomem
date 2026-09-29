@@ -3008,7 +3008,9 @@ def _override_from_flags(
                     state["dimension"] = default_dim
     if model is not None:
         state["model"] = model
-        state["dimension"] = _MODEL_DIMS.get(model, state.get("dimension", 0))
+        state["dimension"] = _model_dimension(
+            state.get("provider"), model, state.get("dimension", 0)
+        )
     if tokenizer is not None:
         state["tokenizer"] = tokenizer
     if memory_dir is not None:
@@ -3042,6 +3044,23 @@ _MODEL_DIMS: dict[str, int] = {
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
 }
+
+
+def _model_dimension(provider: str | None, model: str, fallback: int) -> int:
+    """The dimension of *model* under *provider*, or *fallback* if unknown.
+
+    An ONNX name is looked up by the fastembed id it loads, so any alias or
+    case the loader accepts gets its dimension (#2608). Other providers send
+    the name to their API verbatim, so their lookup stays exact.
+    """
+    if (provider or "").strip().lower() == "onnx":
+        from memtomem.embedding.aliases import ONNX_EMBEDDER_MODELS, resolve_embedder_id
+
+        resolved = resolve_embedder_id(model)
+        for full_id, dimension, _size_mb in ONNX_EMBEDDER_MODELS.values():
+            if full_id == resolved:
+                return dimension
+    return _MODEL_DIMS.get(model, fallback)
 
 
 @click.command("init")

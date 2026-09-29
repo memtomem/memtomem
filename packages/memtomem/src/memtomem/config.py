@@ -140,7 +140,7 @@ class EmbeddingConfig(ConfigModel):
 
     @model_validator(mode="after")
     def cpu_model_defaults(self) -> "EmbeddingConfig":
-        from memtomem.embedding.profiles import e5_contract_error, is_e5
+        from memtomem.embedding.profiles import e5_contract_error, is_bge_m3, is_e5
 
         if self.provider.lower() == "onnx" and not self.model:
             object.__setattr__(self, "model", "multilingual-e5-small")
@@ -159,9 +159,7 @@ class EmbeddingConfig(ConfigModel):
         if self.onnx_variant == "fp32" and self.onnx_artifact_path:
             raise ValueError("onnx_artifact_path is only used for explicit quantized variants")
         if self.onnx_variant != "fp32":
-            if self.provider.lower() != "onnx" or not (
-                is_e5(self.model) or self.model in {"bge-m3", "BAAI/bge-m3"}
-            ):
+            if self.provider.lower() != "onnx" or not (is_e5(self.model) or is_bge_m3(self.model)):
                 raise ValueError("quantized CPU profiles support ONNX E5-small and BGE-M3 only")
             if not self.onnx_artifact_path:
                 raise ValueError("quantized ONNX requires a verified onnx_artifact_path")
