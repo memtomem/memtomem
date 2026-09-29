@@ -553,6 +553,295 @@ async def test_a_stored_provider_the_factory_rejects_leaves_the_runtime_untouche
         await close_components(comp)
 
 
+def _restamp_db(config: Mem2MemConfig, **section: object) -> None:
+    """Stamp the fixture DB with the identity and policy *section* would write."""
+    from memtomem.config import EmbeddingConfig, embedding_policy_fingerprint
+
+    stamped = EmbeddingConfig(**section)
+    db = sqlite3.connect(str(config.storage.sqlite_path))
+    try:
+        db.executemany(
+            "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+            [
+                ("embedding_dimension", str(stamped.dimension)),
+                ("embedding_provider", stamped.provider),
+                ("embedding_model", stamped.model),
+                ("embedding_policy_fingerprint", embedding_policy_fingerprint(stamped)),
+                ("embedding_max_sequence_tokens", str(stamped.max_sequence_tokens)),
+            ],
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+async def _revert_recording_embedder_config(app: AppContext, **overrides: object) -> list:
+    """Run the revert with a stub factory that records the section it is given."""
+    from memtomem.indexing.engine import IndexEngine
+    from memtomem.runtime.components import create_search_pipeline
+    from memtomem.search.dedup import DedupScanner
+    from memtomem.server.tools.status_config import _revert_to_stored_locked
+
+    seen: list = []
+
+    def _recording_factory(section):
+        seen.append((section is app.config.embedding, section.threads, section.onnx_batch_size))
+        return _FakeEmbedder()
+
+    constructors = {
+        "IndexEngine": IndexEngine,
+        "DedupScanner": DedupScanner,
+        "SearchPipeline": create_search_pipeline,
+        **overrides,
+    }
+    await _revert_to_stored_locked(
+        app,
+        _recording_factory,
+        constructors["IndexEngine"],
+        constructors["DedupScanner"],
+        constructors["SearchPipeline"],
+    )
+    return seen
+
+
+@pytest.fixture
+def budget_checks(monkeypatch) -> list:
+    """Record chunk-budget validation instead of running it.
+
+    For E5 it resolves the pinned chunk tokenizer, which downloads on a cold
+    cache. Records ``(model, chunk_model_tokens)`` per call.
+    """
+    from memtomem.chunking import bounded
+
+    calls: list = []
+
+    def _record(config, previous=None) -> None:
+        calls.append((config.embedding.model, config.indexing.chunk_model_tokens))
+
+    monkeypatch.setattr(bounded, "validate_budget_configuration", _record)
+    return calls
+
+
+_E5_STAMP = {"provider": "onnx", "model": "intfloat/multilingual-e5-small"}
+_BGE_STAMP = {"provider": "onnx", "model": "BAAI/bge-m3", "dimension": 1024}
+
+
+async def test_revert_to_e5_applies_the_e5_cpu_profile(tmp_path, monkeypatch, budget_checks):
+    """#2609: reverting a bge-m3 config to an E5 store used to assign the
+    identity and keep bge-m3's generated threads=4 / onnx_batch_size=8. The
+    embedder must be built from the live section with E5's 2 / 4."""
+    config = _degraded_config(tmp_path, monkeypatch)
+    assert (config.embedding.threads, config.embedding.onnx_batch_size) == (4, 8)
+    _restamp_db(config, **_E5_STAMP)
+    comp = await create_components(config)
+    try:
+        from memtomem.embedding.profiles import E5_TOKENIZER, PROFILE_INDEXING_FIELDS
+
+        app = _make_app(comp)
+        embedding_object = app.config.embedding
+        indexing_object = app.config.indexing
+        memory_dirs_object = indexing_object.memory_dirs
+        assert indexing_object.chunk_model_tokens == 8192
+        # Storage starts on the live section by reference; a config hot reload
+        # leaves it holding a copy, which the revert must replace as well.
+        await app.storage.configure_chunk_budget(indexing_object)
+        assert app.storage._chunk_budget_config is not indexing_object
+
+        seen = await _revert_recording_embedder_config(app)
+
+        assert seen == [(True, 2, 4)]
+        assert app.config.embedding is embedding_object
+        assert app.config.embedding.model == "intfloat/multilingual-e5-small"
+        assert (app.config.embedding.dimension, app.config.embedding.max_sequence_tokens) == (
+            384,
+            512,
+        )
+        # Regenerated, not pinned: a later profile change can still replace them.
+        assert {"threads", "onnx_batch_size"}.isdisjoint(app.config.embedding.model_fields_set)
+        assert app.storage.embedding_mismatch is None
+        # The indexing budget follows the stored model too: bge-m3's generic
+        # 8192-token chunks under E5's 512-token cap are refused at startup.
+        indexing = app.config.indexing
+        assert indexing is indexing_object
+        assert indexing.memory_dirs is memory_dirs_object
+        assert (indexing.hard_max_chunk_tokens, indexing.chunk_model_tokens) == (384, 512)
+        assert (indexing.chunk_tokenizer_path, indexing.chunk_input_prefix) == (
+            E5_TOKENIZER,
+            "passage: ",
+        )
+        assert set(PROFILE_INDEXING_FIELDS).isdisjoint(indexing.model_fields_set)
+        assert budget_checks[-1] == ("intfloat/multilingual-e5-small", 512)
+        assert app.storage._chunk_budget_config.chunk_model_tokens == 512
+    finally:
+        await close_components(comp)
+
+
+async def test_revert_to_e5_keeps_explicit_threads_and_batch(tmp_path, monkeypatch, budget_checks):
+    config = _degraded_config(tmp_path, monkeypatch)
+    config.embedding.threads = 3
+    config.embedding.onnx_batch_size = 16
+    _restamp_db(config, **_E5_STAMP)
+    comp = await create_components(config)
+    try:
+        app = _make_app(comp)
+
+        seen = await _revert_recording_embedder_config(app)
+
+        assert seen == [(True, 3, 16)]
+        assert {"threads", "onnx_batch_size"} <= app.config.embedding.model_fields_set
+    finally:
+        await close_components(comp)
+
+
+async def test_revert_from_e5_to_bge_m3_drops_the_e5_profile(tmp_path, monkeypatch, budget_checks):
+    from memtomem.config import EmbeddingConfig
+
+    config = _degraded_config(tmp_path, monkeypatch)
+    config.embedding = EmbeddingConfig(provider="onnx", model="multilingual-e5-small")
+    assert (config.embedding.threads, config.embedding.onnx_batch_size) == (2, 4)
+    _restamp_db(config, **_BGE_STAMP)
+    comp = await create_components(config)
+    try:
+        app = _make_app(comp)
+
+        seen = await _revert_recording_embedder_config(app)
+
+        assert seen == [(True, 4, 8)]
+        assert (app.config.embedding.model, app.config.embedding.dimension) == (
+            "BAAI/bge-m3",
+            1024,
+        )
+        assert (
+            app.config.indexing.hard_max_chunk_tokens,
+            app.config.indexing.chunk_model_tokens,
+        ) == (0, 8192)
+    finally:
+        await close_components(comp)
+
+
+async def test_failed_revert_to_e5_restores_the_profile_and_explicit_fields(
+    tmp_path, monkeypatch, budget_checks
+):
+    """The rollback must undo the rebuilt profile, and it must leave the
+    generated fields unmarked: restoring values by assignment alone marks
+    them explicit, so a later profile change could no longer replace them."""
+
+    config = _degraded_config(tmp_path, monkeypatch)
+    _restamp_db(config, **_E5_STAMP)
+    comp = await create_components(config)
+    try:
+        app = _make_app(comp)
+        embedding_object = app.config.embedding
+        dump_before = embedding_object.model_dump()
+        fields_before = set(embedding_object.model_fields_set)
+        assert "threads" not in fields_before
+        indexing_before = app.config.indexing.model_dump()
+        indexing_fields_before = set(app.config.indexing.model_fields_set)
+        budget_before = app.storage._chunk_budget_config
+
+        def _raising(*_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("injected IndexEngine failure")
+
+        with pytest.raises(RuntimeError, match="injected IndexEngine failure"):
+            await _revert_recording_embedder_config(app, IndexEngine=_raising)
+
+        assert app.config.embedding is embedding_object
+        assert embedding_object.model_dump() == dump_before
+        assert set(embedding_object.model_fields_set) == fields_before
+        assert app.config.indexing.model_dump() == indexing_before
+        assert app.config.indexing.chunk_model_tokens == 8192, "fixture must move the budget"
+        assert set(app.config.indexing.model_fields_set) == indexing_fields_before
+        assert app.storage._chunk_budget_config is budget_before
+        assert app.storage.embedding_mismatch is not None
+    finally:
+        await close_components(comp)
+
+
+async def test_revert_refused_by_the_validator_changes_nothing(tmp_path, monkeypatch):
+    """An explicit quantized variant cannot sit under a MiniLM stamp. The
+    rebuild refuses before the live section or storage is touched."""
+    config = _degraded_config(tmp_path, monkeypatch)
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    # The policy fingerprint hashes the manifest; its content is not read here.
+    (artifact / "manifest.json").write_text("{}", encoding="utf-8")
+    config.embedding.onnx_variant = "int8-arm64"
+    config.embedding.onnx_artifact_path = str(artifact)
+    _restamp_db(config, provider="onnx", model="all-MiniLM-L6-v2", dimension=384)
+    comp = await create_components(config)
+    try:
+        app = _make_app(comp)
+        watcher = MagicMock(name="watcher")
+        app._watcher = watcher
+        before = _revert_visible_state(app)
+        fields_before = set(app.config.embedding.model_fields_set)
+
+        with pytest.raises(ValueError, match="Nothing was changed") as raised:
+            await _revert_recording_embedder_config(app)
+
+        assert "quantized CPU profiles support" in str(raised.value)
+        _assert_revert_state_unchanged(app, before)
+        assert set(app.config.embedding.model_fields_set) == fields_before
+        watcher.rebind.assert_not_called()
+    finally:
+        await close_components(comp)
+
+
+async def test_revert_refuses_when_a_config_edit_lands_during_its_budget_check(
+    tmp_path, monkeypatch
+):
+    """``mem_config`` edits sections without ``_config_lock``. An edit that
+    lands while the revert awaits its budget check must survive: the revert
+    refuses instead of adopting candidates built from the older sections."""
+    from memtomem.chunking import bounded
+
+    config = _degraded_config(tmp_path, monkeypatch)
+    _restamp_db(config, **_E5_STAMP)
+    comp = await create_components(config)
+    try:
+        app = _make_app(comp)
+        watcher = MagicMock(name="watcher")
+        app._watcher = watcher
+
+        def _edit_during_check(candidate, previous=None) -> None:
+            # What ``mem_config`` does, landing inside the revert's await.
+            app.config.embedding.onnx_batch_size = 16
+
+        monkeypatch.setattr(bounded, "validate_budget_configuration", _edit_during_check)
+
+        with pytest.raises(ValueError, match="configuration changed while") as raised:
+            await _revert_recording_embedder_config(app)
+
+        assert "Nothing was changed" in str(raised.value)
+        assert app.config.embedding.onnx_batch_size == 16
+        assert app.config.embedding.model == "bge-m3"
+        assert app.storage.embedding_mismatch is not None
+        watcher.rebind.assert_not_called()
+    finally:
+        await close_components(comp)
+
+
+async def test_revert_refuses_an_explicit_budget_the_stored_model_rejects(tmp_path, monkeypatch):
+    """An explicit ``chunk_model_tokens=8192`` fits bge-m3 but not E5; the
+    revert refuses before touching the running config, as startup would."""
+    config = _degraded_config(tmp_path, monkeypatch)
+    config.indexing.chunk_model_tokens = 8192
+    _restamp_db(config, **_E5_STAMP)
+    comp = await create_components(config)
+    try:
+        app = _make_app(comp)
+        before = _revert_visible_state(app)
+        indexing_before = app.config.indexing.model_dump()
+
+        with pytest.raises(ValueError, match="E5 requires exact chunk budgets"):
+            await _revert_recording_embedder_config(app)
+
+        _assert_revert_state_unchanged(app, before)
+        assert app.config.indexing.model_dump() == indexing_before
+    finally:
+        await close_components(comp)
+
+
 def _revert_visible_state(app: AppContext) -> dict[str, object]:
     """Everything a failed revert must leave as it found it (#2428)."""
     comp = app._components

@@ -27,6 +27,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Revert-to-stored applies the stored model's CPU profile and chunk budget
+  (#2609).** `mem_embedding_reset(mode="revert_to_stored")` assigned the stored
+  provider, model, dimension and token cap onto the running config, which
+  skips the config's validator. Reverting a bge-m3 config to an E5 store
+  therefore ran E5 with bge-m3's `threads=4` and `onnx_batch_size=8` instead of
+  E5's 2 and 4, and kept bge-m3's 8192-token chunk budget under E5's 512-token
+  cap, a combination startup refuses. The revert now rebuilds the embedding
+  section through the validator and the chunk budget through the same builder
+  and check startup uses: values you set yourself are kept, and values the
+  previous model generated are derived again for the stored one. It refuses,
+  before changing anything, when a setting you keep does not fit the stored
+  model (a quantized `onnx_variant` under MiniLM, an explicit
+  `chunk_model_tokens` above E5's 512), or when a config edit lands while it
+  checks the chunk budget. When building the new embedder, search pipeline or
+  index engine fails, every embedding and chunk-budget field is restored, not
+  only the four it assigned. A kept quantized `onnx_variant` is still not
+  checked against the variant the store was built with (#2617).
 - **`mm init` and the quantized-variant check accept an ONNX model name in any
   case (#2608).** After #2602 two places still compared the name exactly.
   `mm init --preset minimal --provider onnx --model

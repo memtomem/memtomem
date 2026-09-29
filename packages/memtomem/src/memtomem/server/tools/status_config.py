@@ -1000,6 +1000,89 @@ class _ConfigSectionSnapshot:
         self._section.__pydantic_fields_set__.update(self._fields_set)
 
 
+def _adopt_section(live: BaseModel, rebuilt: BaseModel) -> None:
+    """Copy *rebuilt*'s values and explicit-field set onto *live* in place.
+
+    Components hold the live section by reference, so it is updated rather
+    than replaced. Pair with :class:`_ConfigSectionSnapshot` to undo.
+    """
+    for name in type(live).model_fields:
+        setattr(live, name, getattr(rebuilt, name))
+    live.__pydantic_fields_set__.clear()
+    live.__pydantic_fields_set__.update(rebuilt.model_fields_set)
+
+
+async def _revert_candidate(config: Mem2MemConfig, stored: dict) -> tuple[BaseModel, BaseModel]:
+    """Build and check the sections a revert to *stored* would run, off to the side.
+
+    Returns ``(embedding, indexing)`` candidates; the live config is not
+    touched. Everything that can refuse the revert runs here, so a refusal
+    leaves nothing to roll back:
+
+    * the embedding section is rebuilt through the validator, so the stored
+      model gets its own generated CPU profile and a kept explicit field it
+      cannot take is refused (#2609);
+    * the indexing budget the stored model generates (E5's 384/512-token
+      chunks, or the generic ones for any other model) goes through the
+      startup builder and validator. Keeping the running model's budget left,
+      after a bge-m3 to E5 revert, 8192-token chunks under a 512-token cap.
+
+    A kept ``onnx_variant`` / ``onnx_artifact_path`` is not compared with the
+    variant the store was built with: only the stored policy fingerprint
+    records it, and storage init backfills that fingerprint from whichever
+    config first opened the store, so it cannot prove provenance (#2617).
+    """
+    from pydantic import ValidationError
+
+    from memtomem.chunking.bounded import validate_budget_configuration
+    from memtomem.config import validation_error_message
+    from memtomem.config_signature import restamp_embedding
+    from memtomem.embedding.profiles import apply_e5_defaults
+
+    def refuse(reason: str) -> ValueError:
+        return ValueError(
+            f"Cannot revert to the stored embedding: {reason}. Nothing was changed; "
+            "remove the conflicting setting and retry."
+        )
+
+    def observed() -> tuple[object, ...]:
+        embedding, indexing = config.embedding, config.indexing
+        return (
+            id(embedding),
+            embedding.model_dump(),
+            frozenset(embedding.model_fields_set),
+            id(indexing),
+            indexing.model_dump(),
+            frozenset(indexing.model_fields_set),
+        )
+
+    before = observed()
+    try:
+        embedding = restamp_embedding(config.embedding, stored)
+    except ValidationError as exc:
+        raise refuse(validation_error_message(exc)) from exc
+    candidate = config.model_copy(deep=True)
+    candidate.embedding = embedding.model_copy(deep=True)
+    try:
+        apply_e5_defaults(candidate)
+        # Resolves the chunk tokenizer, which can download; startup runs the
+        # same check off the loop.
+        await asyncio.to_thread(validate_budget_configuration, candidate)
+    except ValidationError as exc:
+        raise refuse(validation_error_message(exc)) from exc
+    except ValueError as exc:
+        raise refuse(str(exc)) from exc
+    # ``mem_config`` edits sections without ``_config_lock``, so one can land
+    # during the await above. The candidates were built from the sections as
+    # they were; adopting them now would silently undo that edit.
+    if observed() != before:
+        raise ValueError(
+            "Cannot revert to the stored embedding: the configuration changed while "
+            "the revert was being checked. Nothing was changed; retry."
+        )
+    return embedding, candidate.indexing
+
+
 @mcp.tool()
 @tool_handler
 @register("advanced")
@@ -1181,6 +1264,7 @@ async def _revert_to_stored_locked(
     app: AppContext, create_embedder, IndexEngine, DedupScanner, create_search_pipeline
 ) -> str:
     from memtomem.embedding.identity import require_complete_embedding_identity
+    from memtomem.embedding.profiles import PROFILE_INDEXING_FIELDS
     from memtomem.runtime.components import _close_resource
     from memtomem.search.reranker.factory import create_reranker
 
@@ -1197,6 +1281,7 @@ async def _revert_to_stored_locked(
 
     stored = mismatch["stored"]
     require_complete_embedding_identity(stored["provider"], stored["model"])
+    restamped, restamped_indexing = await _revert_candidate(config, stored)
 
     # ``app.embedder`` / ``app.search_pipeline`` / ``app.index_engine`` are
     # read-only properties that proxy to ``app._components.<name>`` (#399
@@ -1241,17 +1326,23 @@ async def _revert_to_stored_locked(
     new_reranker = None
     new_pipeline = None
     embedding = config.embedding
-    prior_embedding = embedding.model_dump(
-        include={"provider", "model", "dimension", "max_sequence_tokens"}
-    )
+    indexing = config.indexing
+    # The candidates were built and checked above (``_revert_candidate``).
+    # Adopt them in place: components hold both sections by reference. Only
+    # the profile-derived indexing fields move, written without marking them
+    # explicit, so ``memory_dirs`` and the other lists keep their identity.
+    prior_embedding = _ConfigSectionSnapshot(embedding)
+    prior_indexing = _ConfigSectionSnapshot(indexing)
     prior_policy = (storage._embedding_policy_fingerprint, storage._embedding_max_sequence_tokens)
-    embedding.provider = stored["provider"]
-    embedding.model = stored["model"]
-    embedding.dimension = stored["dimension"]
-    if stored.get("max_sequence_tokens") is not None:
-        embedding.max_sequence_tokens = stored["max_sequence_tokens"]
+    prior_budget = storage._chunk_budget_config
+    _adopt_section(embedding, restamped)
+    for name in PROFILE_INDEXING_FIELDS:
+        object.__setattr__(indexing, name, getattr(restamped_indexing, name))
     storage._embedding_policy_fingerprint = stored.get("policy_fingerprint", "")
     storage._embedding_max_sequence_tokens = stored.get("max_sequence_tokens")
+    # What ``configure_chunk_budget`` stores, set here so the rollback below
+    # can undo it without an await; the budget was validated above.
+    storage._chunk_budget_config = indexing.model_copy(deep=True)
     try:
         new_embedder = create_embedder(embedding)
         if config.rerank.enabled:
@@ -1285,9 +1376,10 @@ async def _revert_to_stored_locked(
             DedupScanner(storage=storage) if runtime_app.dedup_scanner is not None else None
         )
     except BaseException:
-        for field, value in prior_embedding.items():
-            setattr(embedding, field, value)
+        prior_embedding.restore()
+        prior_indexing.restore()
         storage._embedding_policy_fingerprint, storage._embedding_max_sequence_tokens = prior_policy
+        storage._chunk_budget_config = prior_budget
         # Only unpublished resources belong to this rollback. The pipeline
         # owns its reranker once built; closing both would double-close it.
         # Match startup cleanup: attempt every close and retain the original

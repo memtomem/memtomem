@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import logging
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from memtomem import config as _config_module
 from memtomem.config import (
@@ -186,6 +188,27 @@ def rebase_embedding(identity: EmbeddingConfig, pins: EmbeddingConfig) -> Embedd
     inputs.update(
         {key: value for key, value in pins.model_dump(exclude_unset=True).items() if key in mutable}
     )
+    return EmbeddingConfig.model_validate(inputs)
+
+
+def restamp_embedding(section: EmbeddingConfig, stored: Mapping[str, Any]) -> EmbeddingConfig:
+    """Rebuild *section* on a stored embedding identity (revert-to-stored).
+
+    The stored provider, model and dimension (and the token cap when the stamp
+    records one) replace the section's; every other field the section holds
+    explicitly (``model_fields_set``: config.json, config.d, env, or an earlier
+    edit) is kept. Values the validator generated for the previous identity,
+    such as E5's ``threads`` and ``onnx_batch_size``, are not inputs, so they
+    are regenerated for the stored model instead of carried over (#2609).
+    Raises ``ValidationError`` when the kept fields do not fit the stored
+    identity (a quantized variant under a model without one).
+    """
+    inputs = section.model_dump(exclude_unset=True)
+    inputs["provider"] = stored["provider"]
+    inputs["model"] = stored["model"]
+    inputs["dimension"] = stored["dimension"]
+    if stored.get("max_sequence_tokens") is not None:
+        inputs["max_sequence_tokens"] = stored["max_sequence_tokens"]
     return EmbeddingConfig.model_validate(inputs)
 
 

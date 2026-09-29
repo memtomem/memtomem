@@ -176,6 +176,22 @@ def _e5_tokenizer_path(config: Mem2MemConfig) -> str:
     )
 
 
+# The indexing fields a model profile derives. ``fill_e5_defaults`` sets them
+# for E5 and restores the generic values for any other identity; every other
+# indexing field is independent of the embedding identity.
+PROFILE_INDEXING_FIELDS = (
+    "hard_max_chunk_tokens",
+    "chunk_context_tokens",
+    "chunk_model_tokens",
+    "chunk_tokenizer_path",
+    "max_chunk_tokens",
+    "target_chunk_tokens",
+    "min_chunk_tokens",
+    "chunk_overlap_tokens",
+    "chunk_input_prefix",
+)
+
+
 def e5_indexing_defaults(config: Mem2MemConfig) -> dict[str, object]:
     """The indexing values the E5 profile generates for *config*'s identity.
 
@@ -224,17 +240,7 @@ def fill_e5_defaults(config: Mem2MemConfig) -> None:
         from memtomem.config import IndexingConfig
 
         baseline = IndexingConfig()
-        for key in (
-            "hard_max_chunk_tokens",
-            "chunk_context_tokens",
-            "chunk_model_tokens",
-            "chunk_tokenizer_path",
-            "max_chunk_tokens",
-            "target_chunk_tokens",
-            "min_chunk_tokens",
-            "chunk_overlap_tokens",
-            "chunk_input_prefix",
-        ):
+        for key in PROFILE_INDEXING_FIELDS:
             if key not in config.indexing.model_fields_set:
                 object.__setattr__(config.indexing, key, getattr(baseline, key))
         return

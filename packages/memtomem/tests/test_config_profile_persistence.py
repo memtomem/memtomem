@@ -643,3 +643,49 @@ def test_budget_accepted_under_e5_fails_loudly_when_a_later_layer_leaves_e5(home
         build_fresh_config(migrate=False)
     view = build_fresh_config(migrate=False, strict_overrides=False, validate_profile=False)
     assert view.indexing.max_chunk_tokens == 320
+
+
+@pytest.mark.parametrize(
+    ("section", "stored", "expected"),
+    [
+        # bge-m3's generated 4 / 8 / 1024 give way to E5's 2 / 4 / 512 (#2609).
+        (
+            {"provider": "onnx", "model": "bge-m3", "dimension": 1024},
+            {"provider": "onnx", "model": "multilingual-e5-small", "dimension": 384},
+            (2, 4, 512),
+        ),
+        # Defensive: storage init backfills the cap on every stamp, so revert
+        # always passes one; a mapping without it still regenerates the stored
+        # model's default rather than keeping the cap E5 generated.
+        (
+            {"provider": "onnx", "model": "multilingual-e5-small"},
+            {"provider": "onnx", "model": "bge-m3", "dimension": 1024},
+            (4, 8, 1024),
+        ),
+        # Explicit values are the user's and survive the rebuild.
+        (
+            {"provider": "onnx", "model": "bge-m3", "dimension": 1024, "threads": 3},
+            {
+                "provider": "onnx",
+                "model": "multilingual-e5-small",
+                "dimension": 384,
+                "max_sequence_tokens": 512,
+            },
+            (3, 4, 512),
+        ),
+    ],
+)
+def test_restamp_embedding_regenerates_only_generated_fields(section, stored, expected):
+    from memtomem.config import EmbeddingConfig
+    from memtomem.config_signature import restamp_embedding
+
+    live = EmbeddingConfig(**section)
+    rebuilt = restamp_embedding(live, stored)
+
+    assert (rebuilt.threads, rebuilt.onnx_batch_size, rebuilt.max_sequence_tokens) == expected
+    assert (rebuilt.provider, rebuilt.model, rebuilt.dimension) == (
+        stored["provider"],
+        stored["model"],
+        stored["dimension"],
+    )
+    assert live.model_dump() == EmbeddingConfig(**section).model_dump(), "input is not mutated"
