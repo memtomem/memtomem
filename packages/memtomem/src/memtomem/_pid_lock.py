@@ -69,8 +69,10 @@ def lock_pid_file(pid_file: Path, *, label: str, timeout_s: float | None = None)
     another process still holds the lock after ``timeout_s`` (default
     :data:`_PID_LOCK_RETRY_S`) of retries.
 
-    A symlinked pid path is refused (``O_NOFOLLOW``), as the liveness probes
-    refuse it: following it would let the caller truncate the link's target.
+    On POSIX a symlinked pid path is refused (``O_NOFOLLOW``), as the
+    liveness probes refuse it: following it would let the caller truncate the
+    link's target. Windows has no ``O_NOFOLLOW`` and still follows it, as
+    before; refusing it there is a separate hardening.
 
     On POSIX the returned handle is the file the path names at return time:
     if the path was deleted or replaced between the open and the lock, the
@@ -81,7 +83,7 @@ def lock_pid_file(pid_file: Path, *, label: str, timeout_s: float | None = None)
     Raises ``OSError`` when the open fails, when the lock call fails for a
     reason other than contention (normalized by
     :func:`~memtomem._lock_errors.raise_lock_io_failure`, with *label* in the
-    message), when the path is a symlink, or when the path is replaced more than
+    message), on POSIX when the path is a symlink, or when the path is replaced more than
     :data:`_PID_LOCK_REOPENS` times. Never reports those as a live holder.
     """
     budget = _PID_LOCK_RETRY_S if timeout_s is None else timeout_s
@@ -126,7 +128,8 @@ def lock_pid_file(pid_file: Path, *, label: str, timeout_s: float | None = None)
             )
 
 
-# ``O_NOFOLLOW`` does not exist on Windows; there the flag is 0.
+# ``O_NOFOLLOW`` does not exist on Windows; there the flag is 0 and a
+# symlinked pid path is still followed (see ``lock_pid_file``).
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 

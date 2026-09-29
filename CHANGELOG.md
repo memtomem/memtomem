@@ -44,9 +44,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the lock could land on a file no path named, and every probe then reported
   the process as not running. `mm web` now reports a failed lock call as
   itself ("cannot lock the Web UI pid file …") instead of "already running".
-  A pid file that is a symbolic link is now refused at startup instead of
-  followed, as the liveness probes already refuse it; following it truncated
-  the link's target.
+  On POSIX, a pid file that is a symbolic link is now refused at startup
+  instead of followed, as the liveness probes already refuse it; following it
+  truncated the link's target. Windows still follows it.
 
 - **An ONNX E5 model name in another case now loads the pinned E5 profile
   (#2602).** FastEmbed finds a model id in any case, but memtomem compared the
