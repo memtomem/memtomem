@@ -34,7 +34,7 @@ flowchart LR
 |---------|------------------------|
 | AI forgets everything between sessions | Index your notes once, search them in every session |
 | Keyword search misses related content | Hybrid search: exact keywords + meaning-based similarity |
-| Notes scattered across tools | One searchable index for markdown, JSON, YAML, Python, JS/TS |
+| Notes scattered across tools | One searchable index for markdown, JSON, YAML, TOML, Python, JS/TS |
 | Vendor lock-in | Your `.md` files are the source of truth. The DB is a rebuildable cache |
 | Hidden automation is hard to reason about | Core memory operations run only when you call them; optional client hooks are explicit, removable integrations |
 
@@ -147,7 +147,7 @@ uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 claude mcp add memtomem -s user -- uvx --isolated --from "memtomem[all]==0.6.5" memtomem-server
 ```
 
-See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor / Windsurf / Claude Desktop / Gemini CLI / Kimi Code.
+See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor / Antigravity / Windsurf / Claude Desktop / Gemini CLI / Kimi Code.
 
 </details>
 
@@ -177,33 +177,41 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor
 | Package | Description |
 |---------|-------------|
 | [**memtomem**](https://pypi.org/project/memtomem/) | Core — MCP server, CLI, Web UI, hybrid search, storage |
+| [**Claude Code plugin**](packages/memtomem-claude-plugin/) | Exact-pinned MCP server and seven slash-command workflows |
+| [**Claude Code automation plugin**](packages/memtomem-claude-automation-plugin/) | Optional hooks for prompt-time search and write-time indexing |
+| [**Codex plugin**](plugins/memtomem/) | Exact-pinned MCP server and seven workflows for Codex CLI |
 | [**opencode-memtomem**](packages/opencode-memtomem/) | OpenCode — exact-pinned MCP, commands, read skills, safe permissions |
+| [**Kimi Code skills**](packages/memtomem-kimi-skills/) | Skill bundle for Kimi Code (not a plugin) |
 | [**memtomem-stm**](https://github.com/memtomem/memtomem-stm) | STM proxy — proactive memory surfacing via tool interception |
 
 ---
 
 ## Documentation
 
-Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdown in this repo. New to memtomem? The guides have a [suggested reading order](docs/guides/README.md). The table below follows it:
+Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdown in this repo. New to memtomem? The guides have a [suggested reading order](docs/guides/README.md). The table below follows it, with the two runnable examples placed after the first-run guides:
 
 | Guide | Description |
 |-------|-------------|
 | [Getting Started](docs/guides/getting-started.md) | Install, configure, save and find your first memory |
 | [한국어 바이브코딩 빠른 시작](docs/guides/vibe-coding-getting-started-ko.md) | Claude Code·Codex CLI에서 10~15분 안에 기억 저장·검색 |
-| [Example notebooks](examples/notebooks/) | Start with 00: recover decisions, code, and settings across 150 synthetic files without a model (Korean); 01–04 teach APIs, 05–06 teach LangGraph |
-| [Coding-agent sample](examples/onboarding/retry-policy/) | Recover a decision and its ADR source across sessions; isolated CLI proof and copyable prompts |
-| [프로젝트 업무별 체험](docs/guides/workflow-packages-ko.md) | 개발 작업 인계·제품 의사결정·온보딩: 모델 없는 체험, 기록 양식, 2주 파일럿 |
 | [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
 | [Cross-runtime handoff](docs/guides/integrations/cross-runtime-handoff.md) | Claude Code·Codex CLI·Kimi Code 순차 공동 개발 |
+| [Use cases](docs/guides/use-cases.md) | Nine runnable scenarios for multi-tool developers, personal knowledge bases, and teams |
+| [프로젝트 업무별 체험](docs/guides/workflow-packages-ko.md) | 개발 작업 인계·제품 의사결정·온보딩: 모델 없는 체험, 기록 양식, 2주 파일럿 |
+| [Example notebooks](examples/notebooks/) and [coding-agent sample](examples/onboarding/retry-policy/) | Notebooks: start with 00 to recover decisions, code, and settings across 150 synthetic files without a model (Korean); 01–04 teach APIs, 05–06 teach LangGraph. Sample: recover a decision and its ADR source across sessions, with an isolated CLI proof and copyable prompts |
 | [Core memory tools](docs/guides/reference/core-memory-tools.md) | Index existing notes, search, and manage memories |
-| [Configuration](docs/guides/configuration.md) | Supported config files, precedence, and `MEMTOMEM_*` variables |
+| [Data, config & CLI](docs/guides/reference/data-config-cli.md) | Export and import, importers, `mm config`, and the full CLI reference |
+| [Organization & maintenance](docs/guides/reference/organization-maintenance.md) | Namespaces, deduplication, decay, tagging, orphan cleanup, and `mm doctor` |
+| [Automation](docs/guides/reference/automation.md) | Policies and scheduled jobs |
+| [Pinned Context](docs/guides/pinned-context.md) | Pinned-first composition, the approval queue, and LangGraph stores |
 | [Embeddings](docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI embedding providers |
 | [LLM Providers](docs/guides/llm-providers.md) | Ollama, OpenAI, Anthropic, and compatible endpoints |
+| [Configuration](docs/guides/configuration.md) | Supported config files, precedence, and `MEMTOMEM_*` variables |
 | [Context Gateway](docs/guides/context-gateway.md) | Share Skills, Commands, and Subagents across your AI tools from one Store |
 | [Multi-device sync](docs/guides/multi-device-sync.md) | Sync markdown memories across personal devices via a private git repo |
 | [Operations & troubleshooting](docs/guides/reference/operations.md) | Web UI, privacy audits, diagnostics, and recovery |
-| [Reference](docs/guides/reference.md) | Complete tool and workflow reference |
 | [Uninstalling memtomem](docs/guides/uninstall.md) | Clean removal steps |
+| [Reference](docs/guides/reference.md) | Complete tool and workflow reference |
 
 ---
 

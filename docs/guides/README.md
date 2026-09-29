@@ -52,6 +52,9 @@ guides are organized by outcome rather than by feature name.
   extraction, auto-tagging, and summaries.
 - **[Configuration](configuration.md)** — understand config files,
   precedence, environment variables, and advanced tuning.
+- **[Bounded chunking](bounded-chunking.md)** — exact token budgets from a
+  local tokenizer, contextual chunk descriptions, and how each file type is
+  split.
 
 <a id="power-features"></a>
 ## Share and sync
@@ -68,6 +71,8 @@ guides are organized by outcome rather than by feature name.
   safely.
 - **[Uninstalling memtomem](uninstall.md)** — remove the runtime while keeping
   or deleting stored data explicitly.
+- **[Refreshing AnyIO](anyio-security-update.md)** — update an existing
+  install after the AnyIO security advisories fixed in the lockfile.
 
 <a id="reference--lifecycle"></a>
 ## Reference
