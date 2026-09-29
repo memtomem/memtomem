@@ -114,6 +114,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `bge-m3` needs its `model.onnx_data` before its first load. Registering
   memtomem's custom models is now serialized, so the readiness poll and a first
   model load cannot both register one and fail the load.
+- **The Web UI's model readiness sees a model FastEmbed unpacked from its
+  tarball fallback, when running offline (#2594).** Some FastEmbed catalog
+  entries, such as `BAAI/bge-base-en-v1.5` and
+  `intfloat/multilingual-e5-large`, also list a tarball. When the Hugging Face
+  download fails, FastEmbed unpacks that tarball into `fast-<name>` in the
+  cache directory. With `HF_HUB_OFFLINE` set, later loads read it from there,
+  but readiness said `downloading` instead of `loading`. Readiness now accepts
+  that directory offline, with the same tokenizer and model file checks.
+  Online it still says `downloading`, because FastEmbed retries the Hugging
+  Face download before it uses the tarball. The default E5 and MiniLM models
+  are unaffected, because memtomem loads them from a pinned Hugging Face
+  snapshot.
 - **The default E5 model's first download now shows as a download, and a
   failed one as an error (#2586).** memtomem fetches the pinned
   `multilingual-e5-small` snapshot itself. That fetch ran before the embedder

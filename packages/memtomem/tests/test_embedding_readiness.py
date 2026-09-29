@@ -124,6 +124,227 @@ def test_reranker_is_resolved_from_the_cross_encoder_catalog(tmp_path: Path) -> 
     assert model_snapshot_present(tmp_path, model)
 
 
+# -- fastembed's GCS tarball fallback (#2594) ---------------------------------
+
+BGE_BASE_ID = "BAAI/bge-base-en-v1.5"
+
+
+@pytest.fixture
+def hf_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fastembed reads the tarball directory straight away only offline;
+    online it downloads from Hugging Face first."""
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
+
+@pytest.fixture
+def hf_online(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+
+
+def _make_gcs_dir(
+    cache_dir: Path, name: str, model_files: tuple[str, ...], *, drop: str | None = None
+) -> Path:
+    """Lay down a model the way fastembed unpacks its GCS tarball: flat, in
+    ``cache_dir/<name>``, with no ``models--`` or ``snapshots`` level."""
+    model_dir = cache_dir / name
+    model_dir.mkdir(parents=True)
+    for file_name in (*MARKERS, *model_files):
+        if file_name == drop:
+            continue
+        (model_dir / file_name).parent.mkdir(parents=True, exist_ok=True)
+        (model_dir / file_name).write_text("")
+    return model_dir
+
+
+def _catalog_entry(model: str) -> dict[str, object]:
+    fastembed = pytest.importorskip("fastembed")
+    entry: dict[str, object] = next(
+        d for d in fastembed.TextEmbedding.list_supported_models() if d["model"] == model
+    )
+    return entry
+
+
+def _gcs_layout(model: str) -> tuple[str, tuple[str, ...]]:
+    """The directory and files the catalog says the tarball unpacks to."""
+    entry = _catalog_entry(model)
+    sources = entry["sources"]
+    assert isinstance(sources, dict) and sources.get("url"), f"{model} has no GCS fallback"
+    prefix = "fast-" if sources.get("_deprecated_tar_struct") else ""
+    extra = tuple(entry.get("additional_files") or ())  # type: ignore[call-overload]
+    return prefix + model.split("/")[-1], (str(entry["model_file"]), *extra)
+
+
+def test_model_unpacked_from_the_gcs_tarball_is_present(tmp_path: Path, hf_offline: None) -> None:
+    name, files = _gcs_layout(BGE_BASE_ID)
+    assert name == "fast-bge-base-en-v1.5"
+    _make_gcs_dir(tmp_path, name, files)
+    assert model_snapshot_present(tmp_path, BGE_BASE_ID)
+
+
+def test_gcs_dir_is_found_for_a_lowercased_id(tmp_path: Path, hf_offline: None) -> None:
+    name, files = _gcs_layout(BGE_BASE_ID)
+    _make_gcs_dir(tmp_path, name, files)
+    assert model_snapshot_present(tmp_path, BGE_BASE_ID.lower())
+
+
+@pytest.mark.parametrize("missing", [*MARKERS, "model_optimized.onnx"])
+def test_incomplete_gcs_dir_is_not_present(tmp_path: Path, hf_offline: None, missing: str) -> None:
+    name, files = _gcs_layout(BGE_BASE_ID)
+    assert "model_optimized.onnx" in files
+    _make_gcs_dir(tmp_path, name, files, drop=missing)
+    assert not model_snapshot_present(tmp_path, BGE_BASE_ID)
+
+
+def test_gcs_dir_needs_additional_files(tmp_path: Path, hf_offline: None) -> None:
+    model = "intfloat/multilingual-e5-large"
+    name, files = _gcs_layout(model)
+    assert len(files) > 1, "expected model.onnx_data alongside model.onnx"
+    _make_gcs_dir(tmp_path, name, files, drop=files[-1])
+    assert not model_snapshot_present(tmp_path, model)
+
+
+def test_gcs_dir_without_the_prefix_is_not_the_deprecated_layout(
+    tmp_path: Path, hf_offline: None
+) -> None:
+    name, files = _gcs_layout(BGE_BASE_ID)
+    _make_gcs_dir(tmp_path, name.removeprefix("fast-"), files)
+    assert not model_snapshot_present(tmp_path, BGE_BASE_ID)
+
+
+def test_gcs_dir_is_not_cached_while_online(tmp_path: Path, hf_online: None) -> None:
+    """Online, fastembed downloads from Hugging Face again before it would
+    read the tarball directory, so the next load is a download."""
+    name, files = _gcs_layout(BGE_BASE_ID)
+    _make_gcs_dir(tmp_path, name, files)
+    assert not model_snapshot_present(tmp_path, BGE_BASE_ID)
+
+
+@pytest.mark.parametrize("offline", ["1", "true", " ON ", "yes"])
+def test_offline_values_fastembed_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offline: str
+) -> None:
+    monkeypatch.setenv("HF_HUB_OFFLINE", offline)
+    name, files = _gcs_layout(BGE_BASE_ID)
+    _make_gcs_dir(tmp_path, name, files)
+    assert model_snapshot_present(tmp_path, BGE_BASE_ID)
+
+
+def test_offline_order_matches_fastembed() -> None:
+    """Readiness copies how fastembed's loader parses ``HF_HUB_OFFLINE``,
+    that a local Hugging Face snapshot is tried before the tarball
+    directory, and that offline the directory is tried for an entry without
+    a url too. Pin those lines so a change there fails here."""
+    pytest.importorskip("fastembed")
+    import inspect
+
+    from fastembed.common.model_management import ModelManagement
+
+    load_source = inspect.getsource(ModelManagement.download_model)
+    assert 'os.environ.get("HF_HUB_OFFLINE", "").strip().upper()' in load_source
+    assert 'hf_offline in {"1", "TRUE", "YES", "ON"}' in load_source
+    assert load_source.index('cache_kwargs["local_files_only"] = True') < load_source.index(
+        "retrieve_model_gcs("
+    )
+    assert "if url_source or local_files_only:" in load_source
+
+
+@pytest.fixture(params=["with-url", "without-url"])
+def plain_tarball_catalog(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> str:
+    """A catalog holding one tarball entry without ``_deprecated_tar_struct``.
+
+    fastembed 0.8 marks every tarball entry with the flag, so the plain
+    ``<name>`` layout needs a fake entry. Its id is mixed-case so a test can
+    tell the catalog's id from a lowercased one on any filesystem. Offline,
+    fastembed looks for the directory whether or not the entry has a ``url``,
+    so the fixture runs both ways.
+    """
+    fastembed = pytest.importorskip("fastembed")
+    from memtomem.embedding import onnx
+
+    entry = {
+        "model": "Example/Plain-Tarball-Model",
+        "sources": {
+            "hf": "example/plain-tarball-model-onnx",
+            "url": "https://example.invalid/plain-tarball-model.tar.gz",
+            "_deprecated_tar_struct": False,
+        },
+        "model_file": "model.onnx",
+        "additional_files": [],
+    }
+    if request.param == "without-url":
+        entry["sources"] = {"hf": "example/plain-tarball-model-onnx", "url": None}
+
+    class FakeTextEmbedding:
+        @staticmethod
+        def list_supported_models() -> list[dict[str, object]]:
+            return [entry]
+
+        @staticmethod
+        def add_custom_model(model: str, **_: object) -> None:
+            return None
+
+    monkeypatch.setattr(fastembed, "TextEmbedding", FakeTextEmbedding)
+    monkeypatch.setattr(onnx, "_register_custom_models_if_needed", lambda: None)
+    return str(entry["model"])
+
+
+def test_gcs_dir_of_an_entry_without_the_deprecated_flag(
+    tmp_path: Path, plain_tarball_catalog: str, hf_offline: None
+) -> None:
+    _make_gcs_dir(tmp_path, "fast-Plain-Tarball-Model", ("model.onnx",))
+    assert not model_snapshot_present(tmp_path, plain_tarball_catalog)
+    _make_gcs_dir(tmp_path, "Plain-Tarball-Model", ("model.onnx",))
+    assert model_snapshot_present(tmp_path, plain_tarball_catalog)
+
+
+def test_gcs_dir_takes_the_catalog_ids_case(plain_tarball_catalog: str) -> None:
+    """fastembed names the directory from its own entry, so a lowercased
+    request must still resolve to ``Plain-Tarball-Model``. Checked on the
+    resolved name, because a case-insensitive filesystem would find the
+    directory under either spelling."""
+    from memtomem.embedding.readiness import _cache_spec
+
+    spec = _cache_spec(plain_tarball_catalog.lower())
+    assert spec.gcs_dir == "Plain-Tarball-Model"
+
+
+@pytest.mark.parametrize(
+    ("model_id", "gcs_name", "model_file"),
+    [
+        (MINILM_ID, "fast-all-MiniLM-L6-v2", "model.onnx"),
+        (E5_ID, "fast-multilingual-e5-small", "onnx/model.onnx"),
+    ],
+)
+def test_pinned_models_ignore_a_gcs_dir(
+    tmp_path: Path, model_id: str, gcs_name: str, model_file: str
+) -> None:
+    """memtomem loads E5 and MiniLM from a pinned Hugging Face snapshot, and
+    fastembed returns that path before trying any source."""
+    _make_gcs_dir(tmp_path, gcs_name, (model_file,))
+    assert not model_snapshot_present(tmp_path, model_id)
+
+
+def test_gcs_dir_name_matches_fastembed() -> None:
+    """``readiness._gcs_dir_name`` copies an inline computation from
+    fastembed. Pin the upstream lines it copies, including where the
+    directory sits, so a change there fails here."""
+    pytest.importorskip("fastembed")
+    import inspect
+
+    from fastembed.common.model_management import ModelManagement
+
+    from memtomem.embedding.readiness import _gcs_dir_name
+
+    source = inspect.getsource(ModelManagement.retrieve_model_gcs)
+    assert (
+        "fast_model_name = f\"{'fast-' if deprecated_tar_struct else ''}"
+        "{model_name.split('/')[-1]}\"" in source
+    )
+    assert "model_dir = Path(cache_dir) / fast_model_name" in source
+    assert _gcs_dir_name("BAAI/bge-base-en-v1.5", True) == "fast-bge-base-en-v1.5"
+    assert _gcs_dir_name("Org/Plain", False) == "Plain"
+
+
 def test_registration_reads_and_adds_under_the_lock(monkeypatch: pytest.MonkeyPatch) -> None:
     """The readiness poll and the embedder's first load (a worker thread) both
     register the custom models, and FastEmbed raises on a second registration
