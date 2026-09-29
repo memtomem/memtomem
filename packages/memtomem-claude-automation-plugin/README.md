@@ -14,6 +14,11 @@ The hooks use the memtomem CLI, pinned to the same reviewed core release:
 uv tool install 'memtomem==0.6.5'
 ```
 
+That command installs no extras. If your store uses a local ONNX model (the
+`mm init` English and Korean presets do), install `'memtomem[onnx]==0.6.5'`
+or `'memtomem[all]==0.6.5'` instead; a base-only `mm` reports the missing
+ONNX dependencies rather than indexing.
+
 Already have memtomem installed as a uv tool? Run `mm upgrade --version 0.6.5`
 instead of reinstalling; the
 [CLI reference](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/data-config-cli.md#cli-reference)

@@ -31,8 +31,9 @@ guides are organized by outcome rather than by feature name.
 - **Save and search** — [Core memory tools](reference/core-memory-tools.md)
   covers `mm add`, `mm index`, `mm search`, `mem_add`, and `mem_search`.
 - **Bring in existing tool memory** — [Data, config & CLI](reference/data-config-cli.md)
-  covers `mm ingest` for Claude, Codex, Gemini/Antigravity, Obsidian, and
-  Notion sources.
+  covers `mm ingest` for Claude, Codex, and Gemini/Antigravity memory, and
+  the `import_obsidian` / `import_notion` actions of `mem_do` for Obsidian
+  and Notion.
 - **Organize and maintain** — [Organization & maintenance](reference/organization-maintenance.md)
   covers namespaces, deduplication, decay, tagging, and memory health.
 - **Automate upkeep** — [Automation](reference/automation.md) covers policies

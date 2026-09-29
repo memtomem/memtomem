@@ -33,9 +33,9 @@ Supported files and their chunking strategies:
 | File Type | Strategy |
 |-----------|----------|
 | `.md` | Heading-aware split (`#`, `##`, `###`) |
-| `.json` / `.yaml` / `.toml` | Top-level key split |
+| `.json` / `.yaml` / `.yml` / `.toml` | Top-level key split |
 | `.py` | Functions and classes (tree-sitter) |
-| `.js` / `.ts` / `.tsx` | Functions and classes (tree-sitter) |
+| `.js` / `.jsx` / `.ts` / `.tsx` | Functions and classes (tree-sitter) |
 
 ### Incremental re-indexing
 
@@ -253,6 +253,7 @@ Combines keyword matching (exact words) with meaning-based search (similar conce
 | `bm25_weight` / `dense_weight` | Override RRF weights (default `1.0`) | `2.0` |
 | `context_window` | Expand each result with ±N adjacent chunks (`0` = disabled). Neighbours inherit the visibility filters — hidden system namespaces, the project-scope boundary, temporal validity — but not the selection filters (`tag_filter`, chunk types, created-date bounds), so a hidden neighbour shrinks the window instead of surfacing | `1` |
 | `output_format` | `"compact"` (default), `"verbose"`, or `"structured"` (JSON with `hints` field) | `"structured"` |
+| `verbose` | Deprecated: use `output_format="verbose"`. A non-default `output_format` overrides it | `true` |
 | `scope` | Memory tier filter: one value, comma list, or glob; omitted uses user plus current-project tiers | `"user,project_local"`, `"project_*"` |
 | `rerank` | Per-call rerank control: `false` skips the cross-encoder rerank stage (fast path for latency-bounded callers); omitted/`true` follows server config — `true` cannot enable reranking the server has disabled | `false` |
 | `record` | Per-call replay control (default `true`): `false` makes the search a background read for fan-out callers — no access-count increments, no query history, caches neither read nor written, and dense retrieval runs exhaustive, so results can differ | `false` |
@@ -440,6 +441,7 @@ mem_add(content="Redis LRU→LFU migration reduced cache misses by 40%", tags=["
 | `confirm_project_shared` | Required `true` consent for Git-tracked shared writes; each confirmed call is audit-logged (`project_shared.confirmed_via=mem_add`) so the opt-in is reviewable afterwards |
 | `force_unsafe` | Bypass a reviewed false-positive privacy match; forbidden for shared-tier writes |
 | `idempotency_key` | Optional client key (max 256 chars) preventing duplicate successful writes for 24 hours |
+| `allow_namespace_mix` | Append even when `file` already holds entries in another namespace. Refused by default, because re-chunking the file restamps the merged chunks with this write's namespace and moves the earlier entry |
 
 ```
 mem_add(content="New rate limit: 1000 req/min", file="api-notes.md", tags=["api"])
@@ -545,7 +547,7 @@ whether the deletion survives:
 - `source_file=` and `namespace=` remove **index rows only** — the `.md` files
   stay exactly as they are. Because the content is still on disk inside an
   indexed directory, the next indexing pass puts the chunks back: a watcher
-  event when the file is next written, an explicit `mm mem rescan`, or any
+  event when the file is next written, an explicit `mm index <dir>`, or any
   discovery walk. Use them to clear stale rows, not to make a memory stay gone.
 - `chunk_id=` is the outlier: it removes the chunk's line range from the
   markdown file itself and re-indexes. The content is gone from disk, so

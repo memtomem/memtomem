@@ -13,14 +13,17 @@ environment variable is set. memtomem `0.4.0` and later write that path, so
 Releases up to and including `0.3.14` wrote the legacy `~/.kimi/mcp.json`
 layout, which current Kimi Code does not read — move the entry if you
 registered with one of those. To write the file by hand instead, it needs
-exactly one `memtomem` entry:
+exactly one `memtomem` entry. Its launch matches what `mm init` writes when
+run through `uvx` — the `[all]` extras let the server open a store
+configured for a local ONNX model. `mm init` writes no `env` block; the one
+below only states the default `core` tool mode explicitly:
 
 ```json
 {
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--from", "memtomem==0.6.5", "memtomem-server"],
+      "args": ["--isolated", "--from", "memtomem[all]==0.6.5", "memtomem-server"],
       "env": {"MEMTOMEM_TOOL_MODE": "core"}
     }
   }

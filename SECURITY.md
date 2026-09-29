@@ -168,4 +168,6 @@ docs, and the bind-time banner to keep the misconfiguration probability low.
 - Use MCP client `env` blocks for configuration
 - Default storage is local SQLite — no network exposure
 - Web UI binds to `127.0.0.1` by default — not publicly accessible
-- Set `MEMTOMEM_TOOL_MODE=standard` to reduce tool surface area for AI agents
+- Keep the default `MEMTOMEM_TOOL_MODE=core` (9 tools) for the smallest tool
+  surface an AI agent sees; `standard` (38) and `full` (100) expose more tools
+  individually

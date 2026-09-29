@@ -27,7 +27,12 @@ uv run mypy packages/memtomem/src
 ## Project Structure
 
 - `packages/memtomem/` — Core: MCP server, CLI, web UI, search, storage, indexing
-- `packages/memtomem-claude-plugin/` — Claude Code plugin (experimental)
+- `packages/memtomem-claude-plugin/` — Claude Code plugin: exact-pinned MCP server and slash-command workflows
+- `packages/memtomem-claude-automation-plugin/` — optional Claude Code hooks plugin (prompt search, write-time indexing)
+- `plugins/memtomem/` — Codex plugin
+- `packages/opencode-memtomem/` — OpenCode npm plugin
+- `packages/memtomem-kimi-skills/` — Kimi Code skill bundle (not a plugin)
+- `packages/memtomem-plugin-assets/` — shared plugin contract (`contract.toml`) and workflow sources rendered into the plugins by `tools/render_plugin_assets.py`
 
 The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](https://github.com/memtomem/memtomem-stm).
 
@@ -254,8 +259,9 @@ command:
 
 Examples in the current CLI:
 
-- `--json` — `mm watchdog status`, `mm watchdog run`, `mm config show`,
-  `mm status` (aliases of `--format json`).
+- `--json` — `mm watchdog status`, `mm watchdog run` (JSON is their only
+  alternative output); `mm config show` and `mm status` (aliases of
+  `--format json`).
 - `--format` — `mm search` (has `context`, `smart`), `mm recall` (has
   `plain`), `mm config show` and `mm status` (keep the original option
   alongside `--json`).

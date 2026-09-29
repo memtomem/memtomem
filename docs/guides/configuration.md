@@ -6,9 +6,12 @@ variables use the `MEMTOMEM_` prefix with nested sections separated by `__`
 (double underscore). A whole section can also be given as one JSON object —
 `MEMTOMEM_EMBEDDING='{"onnx_batch_size": 7}'` sets the same field as
 `MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=7` — and both shapes rank the same way
-against the file layers. Unprefixed names are never read, with one documented
-exception: the Langfuse SDK credentials described in
-[Session Trace](#session-trace).
+against the file layers. memtomem settings are never read from unprefixed
+names. The unprefixed variables it does honour belong to other tools: the
+Langfuse SDK credentials described in [Session Trace](#session-trace),
+fastembed's `FASTEMBED_CACHE_PATH` and Hugging Face's `HF_HUB_OFFLINE` for
+local models, and `CLAUDE_CONFIG_DIR`, `KIMI_CODE_HOME` and `KIMI_SHARE_DIR`
+to find those clients' configuration.
 
 ```bash
 # Example: switch from Ollama to OpenAI
@@ -92,12 +95,15 @@ top of the default:
 | Field | Strategy | Notes |
 |-------|----------|-------|
 | `indexing.memory_dirs` | APPEND | Each fragment contributes more roots, dedup by path string |
+| `indexing.project_memory_dirs` | APPEND | Same, for project-scoped roots |
 | `indexing.read_only_memory_dirs` | APPEND | Same, for roots that are indexed but never rewritten; must stay disjoint from the writable roots |
 | `indexing.exclude_patterns` | APPEND | Multiple denylists merge cleanly |
 | `search.system_namespace_prefixes` | APPEND | Integrations can add further hidden namespaces on top of the `archive:` / `agent-runtime:` defaults |
+| `namespace.rules` | APPEND | Fragments can add path-to-namespace rules |
 | `webhook.events` | APPEND | Fragments can subscribe to additional event types |
 | `search.rrf_weights` | REPLACE | Positional tuning knob — appending would misalign `[BM25, Dense]` slots |
 | `importance.weights` | REPLACE | Same positional constraint |
+| `entity_boost.query_entity_types` | REPLACE | A fragment's list is the whole set of entity types to boost, not an addition |
 
 `config.json` always replaces, regardless of strategy — it's the
 explicit-user-override layer. Use a fragment in `config.d/` if you want
@@ -197,9 +203,10 @@ accepted even though either one alone would break the invariant.
 
 ### Moving `config.json` between machines
 
-Path-typed fields (`storage.sqlite_path`, `indexing.memory_dirs`)
-under `$HOME` serialize as `~/...` on write, so a config copied to a
-machine with a different `$HOME` resolves correctly via
+Path-typed fields (`storage.sqlite_path`, `session_trace.jsonl_path`,
+`indexing.memory_dirs`, `indexing.project_memory_dirs`) under `$HOME`
+serialize as `~/...` on write, so a config copied to a machine with a
+different `$HOME` resolves correctly via
 `Path.expanduser()` on read. Paths *outside* `$HOME` (`/var/...`,
 `/opt/...`) stay absolute because their meaning is genuinely
 machine-specific.
@@ -577,7 +584,7 @@ What refuses, and what does not:
   refuse a destination under a read-only root, the same way they already
   refuse one that indexing would skip.
 - **Writers that replace a whole file** — Notion and Obsidian imports,
-  `mem_fetch_url`, uploads and session archives refuse the target and
+  `mem_fetch`, uploads and session archives refuse the target and
   report it (the import tools count it as *"under a read-only index
   root"*, separately from an excluded or symlinked target, because the
   remedy differs).
@@ -1245,7 +1252,7 @@ depend on `policy_type`:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `max_age_days` | int | _(required)_ | Chunks older than this are archived |
+| `max_age_days` | int | `30` | Chunks older than this are archived |
 | `archive_namespace` | str | `"archive"` | Destination namespace |
 | `age_field` | str | `"created_at"` | `"created_at"` or `"last_accessed_at"` |
 | `min_access_count` | int\|null | null | Only archive if `access_count ≤` this |
@@ -1262,6 +1269,12 @@ depend on `policy_type`:
 | `min_importance_score` | float\|null | null | Minimum importance score (AND with access count) |
 | `recency_days` | int\|null | null | Only promote if accessed within this many days |
 
+**`auto_expire`** (deletes; preview with a dry run first)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `max_age_days` | int | `90` | Delete chunks created longer ago than this that were never accessed (`access_count = 0`) |
+
 **`auto_consolidate`**
 
 | Key | Type | Default | Description |
@@ -1271,6 +1284,12 @@ depend on `policy_type`:
 | `max_bullets` | int | `20` | Maximum bullet points in heuristic summary |
 | `keep_originals` | bool | `true` | Keep original chunks after consolidation (recommended) |
 | `summary_namespace` | str | `"archive:summary"` | Namespace for generated summary chunks |
+
+**`auto_tag`**
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `max_tags` | int | `5` | Maximum tags added to each untagged chunk; chunks that already have tags are left alone |
 
 ## Webhook
 
@@ -1427,7 +1446,7 @@ badges — *recorded* (exact), *inferred* (fallback), *provided* (manual), plus
 
 When `MEMTOMEM_SESSION_TRACE__LANGFUSE_ENABLED=true` is set, both public and secret keys must be supplied, and the `langfuse` Python package must be installed (e.g., via `pip install 'memtomem[langfuse]'` or `uv tool install 'memtomem[all]'` which includes it).
 
-The keys may come either from the config surface above or from the Langfuse SDK's own standard variables — `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and optionally `LANGFUSE_HOST`. This is the only place memtomem honours env vars without the `MEMTOMEM_` prefix, and it is credentials-only: the values are read by the Langfuse SDK itself, never copied into memtomem config, and `LANGFUSE_ENABLED` alone never turns tracing on — enabling always requires the explicit `MEMTOMEM_SESSION_TRACE__LANGFUSE_ENABLED=true` (or `config.json`) opt-in.
+The keys may come either from the config surface above or from the Langfuse SDK's own standard variables — `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and optionally `LANGFUSE_HOST`. Like the other unprefixed variables listed at the top of this page, these configure another tool rather than memtomem, and they are credentials-only: the values are read by the Langfuse SDK itself, never copied into memtomem config, and `LANGFUSE_ENABLED` alone never turns tracing on — enabling always requires the explicit `MEMTOMEM_SESSION_TRACE__LANGFUSE_ENABLED=true` (or `config.json`) opt-in.
 
 ## Tool Mode
 
@@ -1435,15 +1454,15 @@ The keys may come either from the config surface above or from the Langfuse SDK'
 |----------|---------|-------------|
 | `MEMTOMEM_TOOL_MODE` | `core` | Which MCP names are exposed: `core` (9), `standard` (38 incl. `mem_do`), `full` (100 tools) |
 
-In `core` mode, use `mem_do(action="...", params={...})` to access any of the 70+ non-core actions. Fewer tools means less context usage for AI agents.
+In `core` mode, use `mem_do(action="...", params={...})` to access any of the 94 non-core actions. Fewer tools means less context usage for AI agents.
 
 ## Web UI Mode
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_WEB__MODE` | `prod` | Web UI surface: `prod` shows the polished page set; `dev` adds opt-in maintainer pages |
-| `MEMTOMEM_WEB__HOST` | `127.0.0.1` | Bind address for `mm web` (overridden by `--host`) |
-| `MEMTOMEM_WEB__PORT` | `8080` | Bind port for `mm web` (overridden by `--port`) |
+| `MEMTOMEM_WEB__HOST` | `127.0.0.1` | Bind address for the `memtomem-web` entry point (overridden by its `--host`). `mm web` does not read it; pass `mm web --host` |
+| `MEMTOMEM_WEB__PORT` | `8080` | Bind port for the `memtomem-web` entry point (overridden by its `--port`). `mm web` does not read it; pass `mm web --port` |
 | `MEMTOMEM_WEB__CSRF_ENFORCE` | `true` | CSRF protection for the Web UI's mutating endpoints; set `0`/`false`/`no` only for emergency rollback |
 
 `mm web --mode {prod,dev}` overrides the env. `mm web --dev` is a shortcut for `--mode dev` and is mutually exclusive with `--mode`. An invalid value fails fast rather than silently falling back.
@@ -1510,8 +1529,8 @@ carry the `MEMTOMEM_` prefix.
 | `MEMTOMEM_LOG_LEVEL` | `INFO` | `memtomem-server` log level (`DEBUG`, `INFO`, `WARNING`, ...) |
 | `MEMTOMEM_LOG_FORMAT` | `text` | `memtomem-server` log format: `text` or `json` |
 | `MEMTOMEM_WIKI_PATH` | `~/.memtomem-wiki` | Override the wiki store location (ADR-0008) |
-| `MEMTOMEM_FASTEMBED_CACHE` | _(platform cache dir)_ | Select ONNX / `fastembed` model snapshot storage (also selectable with `FASTEMBED_CACHE_PATH`). Xet cache data stays at `HF_XET_CACHE` (default `HF_HOME/xet/`), with logs normally in its `logs/` directory; memtomem preserves Hugging Face defaults. See [Embeddings](embeddings.md#onnx-local-no-server) for log-only relocation. |
-| `MEMTOMEM_INDEX_DEBOUNCE_QUEUE` | _(state dir)_ | Override the file-watcher debounce queue file path |
+| `MEMTOMEM_FASTEMBED_CACHE` | `~/.memtomem/cache/fastembed` | Select ONNX / `fastembed` model snapshot storage (also selectable with `FASTEMBED_CACHE_PATH`). Xet cache data stays at `HF_XET_CACHE` (default `HF_HOME/xet/`), with logs normally in its `logs/` directory; memtomem preserves Hugging Face defaults. See [Embeddings](embeddings.md#onnx-local-no-server) for log-only relocation. |
+| `MEMTOMEM_INDEX_DEBOUNCE_QUEUE` | `~/.memtomem/index_debounce_queue.json` | Test-only override of the file-watcher debounce queue file path; not meant for normal use |
 
 ## Querying and Modifying at Runtime
 

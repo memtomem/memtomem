@@ -906,9 +906,9 @@ equivalent — which memtomem does not have today.
 
 ### One server at a time
 
-`memtomem-server` takes a per-user pid lock regardless of transport.
-Run **either** the stdio server (spawned by your editor) **or** a network
-server, not both — a second launch logs a warning about concurrent writes
+`memtomem-server` takes a pid lock per store (keyed by its database path)
+regardless of transport. Against one store, run **either** the stdio server
+(spawned by your editor) **or** a network server, not both — a second launch logs a warning about concurrent writes
 and leaves the primary server's pid file in place. If you need both MCP
 and Web UI access concurrently, see the [Concurrent MCP + Web server]
 section in the reference guide.

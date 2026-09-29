@@ -44,6 +44,9 @@ uv tool install --reinstall 'memtomem[web]'   # or 'memtomem[all]'
 A search-only minimal install (without the `web` extra) has the CLI but no
 `mm web`. Either path operates on the same Store, so you can mix them.
 
+`--reinstall` replaces the whole extra set: if you already use other extras
+(such as `onnx`), list them too, for example `'memtomem[onnx,web]'`.
+
 Run project-scoped commands from the project they should manage:
 
 ```bash

@@ -67,8 +67,9 @@ for `memtomem` and both resolve to `memtomem.cli:cli`.
   `mem_add`, `mem_index`, `mem_recall`, `mem_status`, `mem_stats`, `mem_list`,
   `mem_read`, `mem_do`) are registered directly via `@mcp.tool()` by design;
   everything else MUST use `@register`. Add imports in `server/__init__.py`
-  and classify the tool into `_CORE_TOOLS` / `_STANDARD_TOOLS` / full; the
-  `mem_do` meta-tool routes non-core actions. Don't change the default mode
+  and give the tool a `@register` category — `standard` mode exposes the
+  categories listed in `_STANDARD_PACKS`, `full` exposes all; the `mem_do`
+  meta-tool routes non-core actions. Don't change the default mode
   (`core` = 9 tools).
 - **Line length 100**, target `py312` (`tool.ruff`, `tool.mypy` in root
   `pyproject.toml`). `.claude/`, `scripts/`, and `CLAUDE.local.md` are

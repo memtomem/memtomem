@@ -23,6 +23,16 @@ Enabling an LLM upgrades four features. Each degrades gracefully — if a call f
 | Auto-tagging (`mem_auto_tag`) | LLM semantic tagging | Keyword frequency heuristic |
 | Consolidation (`auto_consolidate`) | LLM summary | Bullet-point extraction |
 
+Three more features call an LLM only when their setting is on. Without a
+provider, or when a call fails, no LLM text is produced and what the feature
+shows falls back as noted:
+
+| Feature | Turned on by | What the LLM produces |
+|---------|--------------|-----------------------|
+| Source summaries | `indexing.auto_summarize` (off by default) | A short summary per indexed file for the Web UI Sources tab, one call per changed file; without one the tab shows its heuristic excerpt |
+| Chunk context | `indexing.enrich_chunk_context` (off by default; needs `indexing.hard_max_chunk_tokens`) | A 1–2 sentence description of each chunk's purpose, embedded with the chunk alongside its structural context; the structural context alone is kept when no description is produced |
+| Session summaries | `session_summary.auto` (on by default) | A summary chunk written when `mem_session_end` is called without a `summary` and the session wrote at least `session_summary.min_chunks` chunks (5 by default); a session too large for `session_summary.max_input_chars` is skipped. `mm session end --auto` does not use the LLM: it writes an event-count line |
+
 ## Supported Providers
 
 ### Ollama (local, default)

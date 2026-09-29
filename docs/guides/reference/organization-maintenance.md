@@ -288,6 +288,7 @@ Which doctor to run:
 | a store's disk / index / DB drift | `mm memory doctor` |
 | the private multi-device sync repo | `mm sync-doctor` |
 | client hook settings across tiers & unportable commands | `mm context settings-doctor` |
+| Claude Code MCP registrations and plugin conflicts | `mm doctor --claude-mcp` — exits 0 when clear, 1 on a risk, 2 when the check was incomplete; see [Claude Code](../integrations/claude-code.md#option-a-install-the-safe-base-plugin) |
 
 The problem it exists for is accumulation. Every MCP client that starts memtomem
 gets its own `memtomem-server`, and that server lives as long as the client

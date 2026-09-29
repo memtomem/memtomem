@@ -62,7 +62,9 @@ installed or removed separately.
 | An AI editor | Optional for the terminal first success | — |
 
 The Quickstart installs the `all` extra so every documented path is available.
-For the smallest BM25-only installation, omit `[all]`.
+For the smallest installation, omit `[all]`: it searches by keyword (BM25)
+until you configure an embedding provider, and Ollama or OpenAI need no
+extra.
 
 ## Install
 
@@ -76,7 +78,8 @@ uv tool install 'memtomem[all]'       # or: pipx install 'memtomem[all]'
 mm --version
 ```
 
-`[all]` includes every bundle below. For BM25-only search without optional downloads:
+`[all]` includes every bundle below. For an install without optional downloads
+(keyword search until you configure Ollama or OpenAI):
 
 ```bash
 uv tool install memtomem
@@ -87,6 +90,11 @@ Add features later with a reinstall such as:
 ```bash
 uv tool install --reinstall 'memtomem[onnx,web]'
 ```
+
+`--reinstall` replaces the whole extra set, so list every extra you want to
+keep: an `[onnx]` install reinstalled as `'memtomem[web]'` loses ONNX. A plain
+`mm upgrade` keeps the extras it detects from the current install; an explicit
+`mm upgrade --extras` list must also name the complete set.
 
 <a id="optional-extras"></a>
 

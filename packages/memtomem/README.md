@@ -9,7 +9,7 @@ Markdown-first long-term memory infrastructure for AI agents. Core usage is hook
 **Core philosophy**: `.md` files are the source of truth and the vector database is a derived cache. Manage memories as plain text files — memtomem makes them instantly searchable.
 
 **Built for:**
-- AI agents (Claude Code, Cursor, Windsurf, Claude Desktop, Kimi CLI) that need to *remember* between sessions
+- AI agents (Claude Code, Codex CLI, Cursor, Windsurf, Claude Desktop, OpenCode, Kimi Code) that need to *remember* between sessions
 - Developers who want a searchable knowledge base built from their existing markdown notes — no proprietary database, no vendor lock-in
 - Multilingual content (English, Korean, Japanese, Chinese) via local `multilingual-e5-small` embeddings, the ONNX default (`bge-m3` remains available)
 
@@ -42,12 +42,17 @@ mm index /path/to/your/notes
 
 If `mm init` registered an MCP client, ask it to `Call the mem_status tool`. See [Getting Started](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md) for install alternatives, the [Korean Claude Code/Codex quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md) for a plugin-first path, and [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) for manual registration.
 
-`[all]` includes ONNX, Ollama and OpenAI integrations, Korean tokenization,
-code chunking, the Web UI, Langfuse tracing, and LangGraph Store support.
-Install bare `memtomem` for BM25-only usage. See the
+`[all]` includes local ONNX embeddings, Korean tokenization, code chunking,
+the Web UI, Langfuse tracing, and LangGraph Store support. The Ollama and
+OpenAI embedding providers need no extra, so a bare `memtomem` install can
+use them; without a provider it searches by keyword (BM25). See the
 [optional extras table](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md#optional-extras)
 for smaller bundles. If `mm` is not on PATH, run `uv tool update-shell` and
 open a new shell. If an install appears stale, re-run it with `--refresh`.
+To upgrade an existing uv tool install, run `mm upgrade` rather than
+`uv tool install` again: it keeps the extras it detects and stops running
+servers first (see the
+[CLI reference](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/data-config-cli.md#cli-reference)).
 
 > memtomem is the long-term-memory store. [memtomem-stm](https://github.com/memtomem/memtomem-stm) is a separate, optional MCP proxy for automatic surfacing, compression, and caching.
 
@@ -61,7 +66,7 @@ open a new shell. If an install appears stale, re-run it with `--refresh`.
 - **🔄 Export / import** — JSON bundle backup and restore with re-embedding
 - **🌐 Web UI** — polished SPA dashboard for search, sources, indexing, tags, and timeline (`mm web --dev` unlocks the full maintainer surface including Sessions, Working Memory, and Health Report)
 - **🧭 Context Gateway** — keep canonical Skills, Commands, and Subagents in a project or user Store, optionally install reusable Wiki assets, then push them to supported runtimes
-- **⚙️ Scriptable CLI** — `--json` output on `mm status` and write commands (`mm add` / `mm reset` / `mm purge`); `mm warmup` pre-loads local models so the first query skips cold-start
+- **⚙️ Scriptable CLI** — JSON output for scripts: `--json` on `mm status`, the write commands (`mm add` / `mm reset` / `mm purge`), `mm session start` / `end` / `list` / `events`, `mm schedule list`, `mm watchdog status` / `run` and `mm doctor`, and `--format json` on `mm search` and `mm recall`; `mm warmup` pre-loads local models so the first query skips cold-start
 - **🛠️ 9-tool core mode** — a compact default surface, with `mem_do` routing the full feature set without loading every tool into agent context
 - **📌 Pinned Context** — small file-backed user/project/agent blocks are composed before retrieved memory
 - **🕸️ LangGraph Store** — optional `MemtomemBaseStore` supplies tuple-namespace JSON persistence and search

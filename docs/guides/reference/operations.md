@@ -22,6 +22,8 @@ STM proactive surfacing, and uninstalling.
 mm web                         # http://localhost:8080 (prod surface)
 mm web --port 3000             # custom port
 mm web -b --port 3000          # run in the background
+mm web -b --log-file /tmp/web.log  # background, logging somewhere other than ~/.memtomem/logs/web.log
+mm web --open                  # open the browser once the server is up (--timeout N bounds the wait; 0 = none)
 mm web status                  # show pid/port/start time
 mm web stop                    # stop the tracked Web UI process
 mm web --dev                   # adds opt-in maintainer pages

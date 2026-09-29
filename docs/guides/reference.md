@@ -97,7 +97,7 @@ memtomem provides **100 MCP tools** organized into categories:
 | **Namespace** | `mem_ns_list/set/get/assign/update/rename/delete` | Organize memories into groups |
 | **Maintenance** | `mem_dedup_scan/merge`, `mem_decay_scan/expire`, `mem_auto_tag` | Keep the index clean |
 | **Data** | `mem_export`, `mem_import` | Backup and restore |
-| **Ask** | `mem_ask` | Natural-language Q&A over indexed memories (requires LLM) |
+| **Ask** | `mem_ask` | Natural-language Q&A over indexed memories: builds a cited prompt for the calling agent to answer, so no answer-generating LLM is required |
 | **Health** | `mem_watchdog`, `mem_cleanup_orphans` | System health checks and orphan cleanup |
 | **Relations** | `mem_link`, `mem_unlink`, `mem_related` | Cross-reference links between chunks |
 | **Working Memory** | `mem_scratch_set/get/promote` | Ephemeral key-value scratch space |
@@ -142,7 +142,7 @@ search rounds scores to four decimals, whereas compose carries raw scores.
 
 The `mem_context_*` tools (CLI: `mm context`) push canonical artifacts — skills, sub-agents, commands, MCP-server definitions — out to AI runtimes. See the [Context Gateway](context-gateway.md) guide for the Store → Push → Runtime model, and [Moving artifacts between tiers and projects](reference/data-config-cli.md#moving-artifacts-between-tiers-and-projects) for the `move`/`copy`/`migrate` transfer verbs. The parameter surface:
 
-- **All context tools** accept `include="skills,agents,commands"` to scope a canonical artifact workflow.
+- **`init`, `detect`, `generate`, `diff`, `sync`** accept `include="skills,agents,commands"` to scope a canonical artifact workflow.
 - **`init`, `generate`, `sync`, `diff`, `version`, `promote`** accept `scope="project_shared|user|project_local"` — the canonical **tier** (ADR-0016 §2).
 - **`generate` / `sync`** also accept `on_drop="ignore|warn|error"` (the legacy alias `strict=True` ≡ `on_drop="error"`) to control how dropped sub-agent or command fields are reported, and `label="latest|v1|production"` to deploy from a specific version snapshot (agents/commands only).
 - **`version`** manages snapshots via `action="list"|"create"|"enable"` — `enable` adopts a flat-layout artifact into directory layout (a byte-identical, same-scope move) so it can be versioned, mirroring `mm context version enable` and the web `POST …/versions/enable` route (`confirm_project_shared=True` for the git-tracked tier).
@@ -152,7 +152,7 @@ The `mem_context_*` tools (CLI: `mm context`) push canonical artifacts — skill
 - **`artifact_transfer`** moves or copies one canonical artifact between tiers and/or registered projects — `mode="move"|"copy"`, `to_project_scope_id` (from `mm context projects list`), `as_name` for a renamed copy, and `asset_type="mcp-servers"` for cross-project MCP-server definition copies (`apply=True` to execute, `confirm_project_shared=True` for the git-tracked tier, `allow_host_writes=True` for a user-tier landing).
 - **`pull`** brings one runtime's copy of a `kind="skills|agents|commands"` artifact (`name=…`) back into the canonical Store — the reverse of `sync`/push. Dry-run preview by default; `apply=True` executes. `from_runtime` selects the source (required when runtime copies diverge — ADR-0030 §5), `scope="user|project_shared"` the destination tier (explicit for the git-tracked tier — ADR-0030 §11; `project_local` is rejected), `overwrite=True` replaces an existing Store entry, snapshotting the current canonical first (agents/commands into `versions/vN.md`; skills into a `versions/vN/` tree, preserving Store-owned `overrides/` and `versions/` — ADR-0030 §10), `confirm_project_shared=True` / `allow_host_writes=True` for the git-tracked / user-tier landing, and `force_unsafe_import=True` (literal) to bypass Gate A for a reviewed false positive on the user tier only. Mirrors `mm context pull` and the web Pull route.
 
-> **CLI/web-only (no MCP verb).** Wiki→project install/update (`mm context install`/`update`) and the projects registry (`mm context projects {list, add, resume}`) are intentionally not exposed as `mem_context_*` tools — they write into a project's `.memtomem/` tree or mutate cross-project enrollment state, so they run from the CLI or the dev-tier Web UI only (ADR-0008). A headless agent that hits an `artifact_transfer` refusal naming one of these (unknown / paused / discovery-only destination) must run the printed `mm context projects …` command at a terminal; there is no MCP equivalent to retry with.
+> **CLI/web-only (no MCP verb).** Wiki→project install/update (`mm context install`/`update`) and the projects registry (`mm context projects {list, add, remove, pause, resume}`) are intentionally not exposed as `mem_context_*` tools — they write into a project's `.memtomem/` tree or mutate cross-project enrollment state, so they run from the CLI or the dev-tier Web UI only (ADR-0008). A headless agent that hits an `artifact_transfer` refusal naming one of these (unknown / paused / discovery-only destination) must run the printed `mm context projects …` command at a terminal; there is no MCP equivalent to retry with.
 
 ---
 
@@ -161,7 +161,7 @@ The `mem_context_*` tools (CLI: `mm context`) push canonical artifacts — skill
 - [한국어 바이브코딩 빠른 시작](vibe-coding-getting-started-ko.md) — Claude Code·Codex CLI plugin-first onboarding
 - [Configuration](configuration.md) — All `MEMTOMEM_*` environment variables
 - [Embeddings](embeddings.md) — ONNX, Ollama, OpenAI providers
-- [LLM Providers](llm-providers.md) — Optional LLM features (auto-tag, entity extraction, ask)
+- [LLM Providers](llm-providers.md) — Optional LLM features (query expansion, auto-tag, entity extraction, consolidation, source and session summaries)
 - [MCP Client Setup](mcp-clients.md) — Editor-specific configuration
 - [memtomem-stm](https://github.com/memtomem/memtomem-stm) — Proactive surfacing, compression, caching (separate package)
 - [Package README](../../packages/memtomem/README.md) — Installation, feature overview, and documentation entry points

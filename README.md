@@ -49,7 +49,7 @@ uv tool install 'memtomem[all]'       # or: pipx install 'memtomem[all]'
 mm --version                          # verify install
 ```
 
-`[all]` bundles the features the sections below describe — ONNX dense embeddings, Korean tokenizer, Ollama / OpenAI providers, code chunker, and the Web UI. For a BM25-only install without those downloads (~40 MB vs ~250 MB), see the [minimal install option](docs/guides/getting-started.md#option-a-from-pypi-recommended-for-most-users) in the Getting Started guide.
+`[all]` bundles the features the sections below describe — ONNX dense embeddings, Korean tokenizer, code chunker, and the Web UI. The Ollama and OpenAI embedding providers need no extra; they work on any install. For a smaller install without those downloads (about 50 MB installed instead of about 340 MB, before any model download), see the [minimal install option](docs/guides/getting-started.md#option-a-from-pypi-recommended-for-most-users) in the Getting Started guide.
 
 > If `mm --version` shows an older version than the [latest release](https://github.com/memtomem/memtomem/releases) right after installing, `uv` is likely serving cached PyPI metadata — re-run with `uv tool install 'memtomem[all]' --refresh`, or clear the cache first: `uv cache clean memtomem`. To upgrade an existing uv tool install, use `mm upgrade` rather than re-running `uv tool install`; see the [CLI reference](docs/guides/reference/data-config-cli.md#cli-reference) for what it preserves and stops.
 
@@ -125,17 +125,17 @@ mm web --dev          # maintainer surface (adds opt-in pages)
 
 `mm web` shows the polished page set by default. Pass `--dev` (or set
 `MEMTOMEM_WEB__MODE=dev` in your shell profile) to expose maintainer pages
-like Namespaces, Sessions, Working Memory, and Health Report.
+like Sessions, Working Memory, and Health Report.
 
 <details>
 <summary><b>Other install options</b></summary>
 
 <a id="minimal-install"></a>
-**Minimal** (BM25-only, ~40 MB):
+**Minimal** (no bundled model, about 50 MB):
 ```bash
-uv tool install memtomem             # no extras — dense search, web UI, Korean tokenizer unavailable until you add them
+uv tool install memtomem             # no extras — no local ONNX model, Web UI or Korean tokenizer until you add them; Ollama/OpenAI embeddings still work
 ```
-Opt in later per-feature: `uv tool install --reinstall 'memtomem[onnx,web]'` (see the [extras table](docs/guides/getting-started.md#optional-extras)).
+Opt in later per-feature: `uv tool install --reinstall 'memtomem[onnx,web]'` (see the [extras table](docs/guides/getting-started.md#optional-extras)). List every extra you want to keep, because `--reinstall` replaces the whole set. A plain `mm upgrade` keeps the extras it detects from the current install, but an explicit `mm upgrade --extras` list must name the complete set too.
 
 **Project-scoped** (per-project isolation):
 ```bash
@@ -164,7 +164,7 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor
 - **Context Gateway** — keep canonical Skills, Commands, and Subagents in a project or user Store, optionally install reusable assets from a separate Wiki, then push them to supported AI runtimes. See [Context Gateway](docs/guides/context-gateway.md).
 - **MCP tools** — `mem_do` meta-tool routes all non-core actions in `core` mode for minimal context usage
 - **Predictable core** — memory operations run on explicit CLI/MCP calls (`mm add`, `mem_add`, `mem_index`, etc.). Optional client hooks are installed and removed separately rather than being a hidden runtime default.
-- **Scriptable CLI** — `--json` output on `mm status` and write commands (`mm add` / `mm reset` / `mm purge`); `mm warmup` pre-loads local models so the first query skips the cold-start cost
+- **Scriptable CLI** — JSON output for scripts: `--json` on `mm status`, the write commands (`mm add` / `mm reset` / `mm purge`), `mm session start` / `end` / `list` / `events`, `mm schedule list`, `mm watchdog status` / `run` and `mm doctor`, and `--format json` on `mm search` and `mm recall`; `mm warmup` pre-loads local models so the first query skips the cold-start cost
 - **Scheduled jobs** — `mm schedule add/list/run-now/delete` (or `mem_do(action="schedule_*")`) for cron-driven compaction, importance decay, dead-link cleanup, and dedup scans
 - **Pinned Context** — keep small user/project/agent Markdown blocks ahead of retrieved results with `mm pinned compose`
 - **LangGraph Store** — optional `MemtomemBaseStore` implements LangGraph's tuple-namespace long-term-memory contract
