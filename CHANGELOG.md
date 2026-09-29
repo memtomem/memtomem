@@ -27,6 +27,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm web stop` and a failed `mm web -b` no longer delete a pid file a new
+  Web UI has just locked (#2610).** Both removed `web.pid` and `web.json` by
+  path after a liveness check whose lock was already released, and a failed
+  background start did so without any check. A Web UI that locked `web.pid`
+  in between, or that was the reason the start failed, kept running on a file
+  no path named: `mm web status` and `mm upgrade` stopped seeing it, and the
+  delete could also undo `mm upgrade`'s locked cleanup (#2595). `web.pid` is
+  now deleted only by the helper `mm upgrade` uses, which locks it and checks
+  it is still the same file first. On POSIX it deletes while holding the lock;
+  on Windows it deletes just after, and a file another process has opened
+  meanwhile cannot be deleted there. If a Web UI locks it after `mm web stop` found it stale, the stop exits
+  1 and deletes nothing. After a successful stop it is left in place with a
+  note, and a failed start says which file it left in place.
+  `mm web stop` no longer deletes `web.json` at all: its contents are used
+  only beside a live `web.pid` holder, and the Web UI's own exit or next start
+  replaces it. On Windows that exit now deletes `web.json` before it releases
+  `web.pid`, as POSIX already did, so it cannot delete a sidecar a new Web UI
+  wrote in between.
+  On Windows, where the helper now works too, `mm web stop` reads the pid from
+  `web.json`, which can be a previous Web UI's. It now signals that pid only
+  when a live instance-registry entry carries the same pid and registry
+  identity.
+
 - **An ONNX E5 model name in another case now loads the pinned E5 profile
   (#2602).** FastEmbed finds a model id in any case, but memtomem compared the
   E5 name exactly, so `intfloat/Multilingual-E5-Small` got dimension 0, a

@@ -125,10 +125,21 @@ class TestWebMetadataIdentity:
         state = _web_state(tmp_path, pid=pid, sidecar=sidecar, **extra)
         assert web_cli.verified_web_identity(state) is None
 
-    @pytest.mark.skipif(os.name == "nt", reason="POSIX unlink-while-locked ordering")
-    def test_cleanup_unlinks_the_sidecar_before_the_pid_file(self, tmp_path, monkeypatch) -> None:
-        """While ``web.pid`` exists the exiting process still holds its lock, so
-        no replacement can have written a sidecar yet; after, one may have."""
+    @pytest.mark.parametrize(
+        ("platform", "expected"),
+        [
+            ("posix", ["unlink web.json", "unlink web.pid", "close"]),
+            ("nt", ["unlink web.json", "close", "unlink web.pid"]),
+        ],
+    )
+    def test_cleanup_unlinks_the_sidecar_while_the_lock_is_held(
+        self, tmp_path, monkeypatch, platform: str, expected: list[str]
+    ) -> None:
+        """The sidecar goes first, before the lock is released on either
+        platform: once released, a replacement can lock ``web.pid`` and write
+        its own sidecar, which this exit must not delete (#2574, #2610).
+        Windows must close before deleting ``web.pid`` (NTFS refuses to delete
+        an open file); POSIX deletes it while still holding the lock."""
         pid_file = tmp_path / "web.pid"
         pid_file.write_text("", encoding="utf-8")
         (tmp_path / "web.json").write_text("{}", encoding="utf-8")
@@ -136,12 +147,18 @@ class TestWebMetadataIdentity:
         real_unlink = Path.unlink
 
         def spy(self: Path, missing_ok: bool = False) -> None:
-            order.append(self.name)
+            order.append(f"unlink {self.name}")
             real_unlink(self, missing_ok=missing_ok)
 
+        class FakeLock:
+            def close(self) -> None:
+                order.append("close")
+
         monkeypatch.setattr(Path, "unlink", spy)
-        web_cli._cleanup_web_files(pid_file, None)
-        assert order == ["web.json", "web.pid"]
+        with monkeypatch.context() as m:
+            m.setattr(web_cli.os, "name", platform)
+            web_cli._cleanup_web_files(pid_file, FakeLock())
+        assert order == expected
 
 
 # --- mm upgrade attribution --------------------------------------------------

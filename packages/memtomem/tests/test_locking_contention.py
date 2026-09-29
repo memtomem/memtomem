@@ -1226,7 +1226,9 @@ class TestPortalockerVerifiedRange:
         )
 
 
-_POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="unlink_stale_pid_file is POSIX-only")
+_POSIX_ONLY = pytest.mark.skipif(
+    os.name == "nt", reason="deletes or replaces a file another handle has open"
+)
 
 
 def _is_lifecycle_barrier(fp: object) -> bool:
@@ -1236,10 +1238,10 @@ def _is_lifecycle_barrier(fp: object) -> bool:
 
 
 class TestUnlinkStalePidFile:
-    """``unlink_stale_pid_file`` deletes a pid file only while holding its lock,
-    and only the file it locked (#2595)."""
+    """``unlink_stale_pid_file`` deletes a pid file only after locking it, and
+    only the file it locked (#2595). POSIX deletes while the lock is held;
+    Windows just after releasing it (#2610)."""
 
-    @_POSIX_ONLY
     def test_unlocked_file_is_removed(self, tmp_path: Path) -> None:
         from memtomem.cli._liveness import unlink_stale_pid_file
 
@@ -1248,14 +1250,12 @@ class TestUnlinkStalePidFile:
         assert unlink_stale_pid_file(pid_file) == "removed"
         assert not pid_file.exists()
 
-    @_POSIX_ONLY
     def test_missing_file(self, tmp_path: Path) -> None:
         from memtomem.cli._liveness import unlink_stale_pid_file
 
         assert unlink_stale_pid_file(tmp_path / "web.pid") == "missing"
         assert unlink_stale_pid_file(tmp_path / "absent-dir" / "web.pid") == "missing"
 
-    @_POSIX_ONLY
     def test_file_locked_by_another_process_is_kept(self, tmp_path: Path) -> None:
         from memtomem.cli._liveness import unlink_stale_pid_file
 
@@ -1267,7 +1267,7 @@ class TestUnlinkStalePidFile:
         try:
             assert q.get(timeout=10) == "locked"
             assert unlink_stale_pid_file(pid_file) == "held"
-            assert pid_file.read_text() == "4242"
+            assert pid_file.exists()
         finally:
             release.set()
             p.join(timeout=10)
@@ -1275,6 +1275,8 @@ class TestUnlinkStalePidFile:
                 p.terminate()
                 p.join(timeout=5)
         assert p.exitcode == 0
+        # Read after the holder let go: Windows blocks reads through a locked range.
+        assert pid_file.read_text() == "4242"
 
     @_POSIX_ONLY
     def test_holds_the_lifecycle_barrier_while_deleting(
@@ -1429,7 +1431,7 @@ class TestUnlinkStalePidFile:
         if with_pid_file:
             assert pid_file.read_text() == "5151\n"
 
-    @_POSIX_ONLY
+    @pytest.mark.requires_symlinks
     def test_symlink_is_refused_and_its_target_kept(self, tmp_path: Path) -> None:
         from memtomem.cli._liveness import UnsafeProbePathError, unlink_stale_pid_file
 
@@ -1442,7 +1444,6 @@ class TestUnlinkStalePidFile:
         assert pid_file.is_symlink()
         assert target.read_text() == "keep\n"
 
-    @_POSIX_ONLY
     def test_lock_call_failure_raises_oserror(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1466,12 +1467,102 @@ class TestUnlinkStalePidFile:
             _liveness.unlink_stale_pid_file(pid_file)
         assert pid_file.read_text() == "4242\n"
 
-    @pytest.mark.skipif(os.name != "nt", reason="the Windows refusal only runs on Windows")
-    def test_windows_refuses(self, tmp_path: Path) -> None:
+    def test_raw_non_oserror_lock_failure_is_normalized(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """portalocker 3.x can re-raise a raw ``pywintypes.error`` on Windows
+        (``_lock_errors.LOCK_CALL_ERRORS_WIDE``). It must reach callers as
+        ``OSError``, which ``mm web`` and ``mm upgrade`` handle."""
+        import portalocker
+
+        from memtomem.cli import _liveness
+
+        class RawWin32Error(Exception):
+            winerror = 5  # ERROR_ACCESS_DENIED, not a lock violation
+
+        pid_file = tmp_path / "web.pid"
+        pid_file.write_text("4242\n")
+        real_lock = portalocker.lock
+
+        def raw_failure(fp: object, flags: object) -> None:
+            if _is_lifecycle_barrier(fp):
+                real_lock(fp, flags)  # type: ignore[arg-type]
+                return
+            raise RawWin32Error("access denied")
+
+        monkeypatch.setattr(
+            _liveness, "LOCK_CALL_ERRORS_WIDE", (*_liveness.LOCK_CALL_ERRORS_WIDE, RawWin32Error)
+        )
+        monkeypatch.setattr(_liveness.portalocker, "lock", raw_failure)
+        with pytest.raises(OSError, match="stale pid lock failed"):
+            _liveness.unlink_stale_pid_file(pid_file)
+        assert pid_file.read_text() == "4242\n"
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows sharing-violation semantics")
+    def test_windows_file_opened_after_the_release_reads_as_held(self, tmp_path: Path) -> None:
+        """On Windows the lock is released just before the delete. A new owner
+        that has the file open by then makes the delete fail with a sharing
+        violation; the file must be kept and reported as ``held``."""
         from memtomem.cli._liveness import unlink_stale_pid_file
 
         pid_file = tmp_path / "web.pid"
         pid_file.write_text("4242\n")
-        with pytest.raises(NotImplementedError):
-            unlink_stale_pid_file(pid_file)
-        assert pid_file.exists()
+        with open(pid_file, "rb+"):  # open, not locked: our lock succeeds
+            assert unlink_stale_pid_file(pid_file) == "held"
+        assert pid_file.read_text() == "4242\n"
+
+
+class _SharingViolation(PermissionError):
+    """``PermissionError`` shaped like Windows ``ERROR_SHARING_VIOLATION``."""
+
+    winerror = 32
+
+
+class TestDeleteReleasedPidFile:
+    """The Windows delete step of ``unlink_stale_pid_file`` (#2610), which runs
+    after the lock is released. Mapped on every platform through a stand-in
+    ``os.unlink``, because only the Windows shard can raise the real errors."""
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (None, "removed"),
+            (FileNotFoundError(2, "No such file or directory"), "replaced"),
+            (_SharingViolation(13, "The process cannot access the file"), "held"),
+        ],
+        ids=["deleted", "gone", "sharing-violation"],
+    )
+    def test_outcomes(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        error: BaseException | None,
+        expected: str,
+    ) -> None:
+        from memtomem.cli import _liveness
+
+        calls: list[object] = []
+
+        def fake_unlink(path: object) -> None:
+            calls.append(path)
+            if error is not None:
+                raise error
+
+        monkeypatch.setattr(_liveness.os, "unlink", fake_unlink)
+        pid_file = tmp_path / "web.pid"
+        assert _liveness._delete_released_pid_file(pid_file) == expected
+        assert calls == [pid_file]
+
+    def test_other_permission_errors_propagate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An ACL or read-only refusal is not a new owner: it must not read as
+        ``held``, which would tell the user a Web UI is starting."""
+        from memtomem.cli import _liveness
+
+        def denied(path: object) -> None:
+            raise PermissionError(13, "Access is denied")
+
+        monkeypatch.setattr(_liveness.os, "unlink", denied)
+        with pytest.raises(PermissionError):
+            _liveness._delete_released_pid_file(tmp_path / "web.pid")
