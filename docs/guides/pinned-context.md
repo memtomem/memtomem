@@ -132,6 +132,13 @@ Canonical records are inspectable JSON files under the configured memory root;
 semantic projections are derived. TTL is deliberately unsupported and raises
 an explicit error.
 
+A `root=` you pass is classified rather than trusted: a root inside a
+registered project's Git-tracked (`project_shared`) tier needs
+`confirm_project_shared=True` on the constructor, even if you declared
+`scope="user"`. A declared scope can be stricter than the path, never weaker.
+`MemtomemStore.add()` and `delete()` take the same `confirm_project_shared=True`
+when the target file or chunk is in `project_shared`, and refuse without it.
+
 `MemtomemStore` is the higher-level async adapter for memtomem search, writes,
 sessions, and working memory. Its `config_overrides` are applied after
 `config.d/` and `~/.memtomem/config.json`, so constructor values win over the

@@ -33,7 +33,7 @@ Supported files and their chunking strategies:
 | File Type | Strategy |
 |-----------|----------|
 | `.md` | Heading-aware split (`#`, `##`, `###`) |
-| `.json` / `.yaml` / `.yml` / `.toml` | Top-level key split |
+| `.json` / `.yaml` / `.yml` / `.toml` | Top-level key split; an oversized JSON container is divided by JSON Pointer, with small neighbouring members packed together (see [Bounded chunking](../bounded-chunking.md)) |
 | `.py` | Functions and classes (tree-sitter) |
 | `.js` / `.jsx` / `.ts` / `.tsx` | Functions and classes (tree-sitter) |
 
@@ -171,9 +171,13 @@ mem_index(path="~/personal/notes", namespace="personal")
 ### Auto-watch vs manual seed
 
 `MEMTOMEM_INDEXING__MEMORY_DIRS` feeds a file watcher that runs inside
-the `memtomem-server` (MCP) process. The watcher is **reactive only** — it
+the `memtomem-server` (MCP) process. The watcher is **reactive** — it
 reindexes files when the filesystem emits modify / create / move events.
-Two cases it does NOT cover:
+Its queue holds 1,000 events. When a burst overflows it, the watcher rescans
+that root once the burst settles and replays the dropped deletes and move
+sources, so a changed or removed file is not left stale. That rescan walks
+only files that exist; it does not reconcile the whole root. Two cases the
+watcher does NOT cover:
 
 - **Pre-existing files on disk** when you first configure a `memory_dir`.
   Run `mm index <dir>` (or `mem_index(path="<dir>")`) once to seed them;
@@ -287,7 +291,9 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > scale — or skip score gating for a scale you don't recognize — instead of
 > inferring the scale from the value range. Both keys are omitted when there
 > are no results. `mm search --format json` carries the same values as
-> per-item `score_scale` / `reranker` keys.
+> per-item `score_scale` / `reranker` keys. The `mm search` table prints a
+> `Score:` caption under the leg footer naming the base scale and noting
+> that modifiers can rescale it; results on the `none` scale get no caption.
 
 > **Quality Lab run ID**: every ranked search persisted by the local SQLite
 > backend receives a `query_run_id`. MCP structured output and the Web search
@@ -531,6 +537,28 @@ Without it the call is refused and the file is left alone. The scope is read
 from the chunk itself, not from an argument — you do not say which tier it is
 in, and passing the flag for a `user` or `project_local` chunk changes nothing.
 
+Four other refusals write nothing. The Web UI's chunk edit and delete answer
+them with HTTP 409:
+
+- `source_read_only` — the chunk's file is under
+  `indexing.read_only_memory_dirs`, or the chunk is a source fragment with no
+  safe whole-line rewrite. Edit the original file and re-index it.
+- `masked_projection_read_only` — an edit of a masked projection from a
+  reviewed masking manifest. Edit the original source and re-index it. A
+  delete of such a chunk is refused as `source_read_only`.
+- `source_excluded` — indexing now skips the file (an exclude pattern, a
+  built-in rule, or a nested git worktree), so the edit would not reach the
+  index.
+- "Chunk source-line provenance is stale" — the index keeps a hash of each
+  chunk's line range, and a rewrite needs it to match the file as it is now.
+  Rows indexed before 0.6.0 carry none. Re-index the source
+  (`mm index <path>` or `mem_index(path="<path>")`), take the chunk ID from
+  a fresh search, and retry.
+
+A chunk whose file has gone missing is held outside search but can still be
+reached by ID with `mem_read`, `mem_edit`, `mem_delete` and `mem_related`.
+See [Orphan cleanup](organization-maintenance.md#orphan-cleanup).
+
 > **Note**: After editing, the chunk gets a new UUID (the old one is replaced during re-indexing). If you need to reference it again, search for the updated content.
 
 ### `mem_delete` — Delete
@@ -556,7 +584,9 @@ whether the deletion survives:
 All three forms take `confirm_project_shared=True` when the deletion would
 touch `project_shared` chunks — the same gate `mem_edit` takes above. The
 `source_file=` and `namespace=` forms are all-or-nothing: one `project_shared`
-chunk in the set requires the confirmation for the whole call.
+chunk in the set requires the confirmation for the whole call. The
+`chunk_id=` form rewrites the file, so it is refused for the same reasons
+as `mem_edit`.
 
 > **Note**: to keep a file out of the index for good, exclude it and then
 > reclaim the rows it already has — add a matching glob to

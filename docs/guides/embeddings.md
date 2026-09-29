@@ -29,6 +29,13 @@ Switch any time with `mm init` (interactive) or `mm embedding-reset` (handles th
 
 You can switch models via `mm init` (interactive wizard) or `mm embedding-reset` (handles the dimension migration safely).
 
+For the ONNX provider, model names are matched without regard to case, and a
+short name and its full id (`bge-m3` and `BAAI/bge-m3`) name one model, so
+changing only the spelling is not a model switch and needs no reset. The
+quantized `onnx_variant` values are accepted for `multilingual-e5-small` and
+`bge-m3` only. Ollama and OpenAI model names are compared exactly, because
+those providers receive them as written.
+
 ## ONNX (local, no server)
 
 Install the optional dependency:
@@ -111,6 +118,15 @@ models, when an input is longer, the dense vector represents its prefix while
 stored content and BM25 still cover the complete chunk. Set the cap to `0` to
 restore the model's own limit. Changing the cap requires a restart and a
 force-reindex of existing ONNX content to keep vector generation consistent.
+
+`all-MiniLM-L6-v2` is loaded from a pinned revision of
+`qdrant/all-MiniLM-L6-v2-onnx` whose tokenizer truncates at 128 tokens, so for
+that model the effective cap is at most 128 tokens, even when the setting
+above is higher. A newer
+upstream revision truncated at 256 but still padded to 128, which made batches
+of mixed-length texts fail. If your cache had that revision, a text over 128
+tokens it managed to embed keeps its vector until `mm index --force`
+re-embeds it.
 
 `multilingual-e5-small` does not truncate passages: its chunker keeps
 indexed chunks inside 512 tokens, and embedding a passage that still exceeds

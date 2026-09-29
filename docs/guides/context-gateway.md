@@ -407,6 +407,16 @@ verbs documented in
 [`reference/data-config-cli.md#moving-artifacts-between-tiers-and-projects`](reference/data-config-cli.md#moving-artifacts-between-tiers-and-projects)
 — this guide doesn't repeat that matrix.
 
+In the Web UI's Advanced view, you can also drag an artifact card onto a
+project group or onto a store chip in the Gateway control bar. The drop opens
+the **Move / Copy** dialog with that destination chosen and its preview
+running; nothing moves until you confirm. Dropping on a project keeps the
+artifact's store, except that a user-level artifact is aimed at that
+project's shared store, which Git tracks. Dropping on a store chip keeps the
+current project, unless the chip is the user store, which belongs to no
+project. A project that cannot receive the artifact refuses the drop. The card's **Move / Copy**
+button remains the keyboard route.
+
 ## Privacy and git safety
 
 memtomem scans artifacts for likely secrets (API keys and similar) before writing
