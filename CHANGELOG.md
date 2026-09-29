@@ -27,6 +27,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **An ONNX E5 model name in another case now loads the pinned E5 profile
+  (#2602).** FastEmbed finds a model id in any case, but memtomem compared the
+  E5 name exactly, so `intfloat/Multilingual-E5-Small` got dimension 0, a
+  1024-token budget and no pinned snapshot. `mm index` then refused with
+  "Embedder reports dimension=0". A store configured with `dimension: 384`
+  failed to load the model in FastEmbed instead: it raised a `KeyError` on that
+  spelling, or, offline, could not find the model. Known ONNX model names now
+  resolve to their canonical id in any case wherever memtomem loads the model,
+  applies the E5 profile and compares stamps. The spelling therefore gets the
+  E5 dimension, budget, policy fingerprint and pinned snapshot, compares equal
+  to a stamp in another case, and is probed under the canonical id by the Web
+  UI's model readiness. A model assigned after the config loads, such as by
+  revert-to-stored, skips the validator; it still loads from the pinned snapshot
+  under the canonical id, and when it keeps another model's dimension or token
+  budget the load is refused with the validator's error, which names the
+  canonical id for another spelling. The two canonical spellings keep their
+  policy fingerprint. A store stamped with such a spelling before this fix and
+  still empty is adopted when it was stamped dimension 0. With an explicit
+  `dimension: 384` it reports a policy mismatch, which
+  `mm embedding-reset --mode apply-current` clears without losing anything,
+  since the store holds no vectors.
 - **More commands print a plain error instead of a traceback when storage
   fails (#2596).** `mm pinned get`/`set`/`delete`, `mm schedule
   add`/`run-now`/`delete` and `mm agent register`/`share`/`migrate` now print

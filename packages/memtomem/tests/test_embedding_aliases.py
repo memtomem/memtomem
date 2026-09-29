@@ -36,6 +36,20 @@ def test_resolve_passthrough_on_unknown() -> None:
     assert resolve_embedder_id(raw) == raw
 
 
+@pytest.mark.parametrize("fold", [str.upper, str.lower, str.title])
+def test_resolve_folds_case_like_fastembed(fold) -> None:
+    """FastEmbed finds a model with ``str.lower()`` but post-processes it by
+    the exact id it registered, so any case must resolve to that id (#2602)."""
+    for short, (full, _dim, _mb) in ONNX_EMBEDDER_MODELS.items():
+        assert resolve_embedder_id(fold(short)) == full, short
+        assert resolve_embedder_id(fold(full)) == full, full
+
+
+def test_resolve_passthrough_keeps_unknown_spelling() -> None:
+    raw = "Custom-Org/My-Model"
+    assert resolve_embedder_id(raw) == raw
+
+
 def test_approx_size_by_short_alias() -> None:
     for short, (_full, _dim, expected_mb) in ONNX_EMBEDDER_MODELS.items():
         assert approx_size_mb(short) == expected_mb, short

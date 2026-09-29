@@ -166,6 +166,20 @@ def test_embedder_approx_size_for_known_model(fake_cache_absent):
     assert body["embedder"]["approx_size_mb"] == 2300
 
 
+def test_embedder_probe_and_size_use_the_canonical_id_in_any_case(fake_cache_absent):
+    """A cased E5 id loads as ``intfloat/multilingual-e5-small`` (#2602), so the
+    cache probe and the size lookup must ask about that id too."""
+    embedder = _StubLoader(_loading=True)
+    app = _make_app(
+        _config(embedder_model="intfloat/Multilingual-E5-Small"), embedder, reranker=None
+    )
+    with TestClient(app) as c:
+        resp = c.get("/api/system/model-readiness")
+    body = resp.json()
+    assert fake_cache_absent.call_args.args[1] == "intfloat/multilingual-e5-small"
+    assert body["embedder"]["approx_size_mb"] == 490
+
+
 # ─── Reranker states ─────────────────────────────────────────────────
 
 

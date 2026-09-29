@@ -27,6 +27,7 @@ from .helpers import make_chunk
 
 E5_SHORT = "multilingual-e5-small"
 E5_FULL = "intfloat/multilingual-e5-small"
+E5_ODD = "intfloat/Multilingual-E5-Small"
 
 
 def _backend(db_path: Path, embedding: EmbeddingConfig) -> SqliteBackend:
@@ -88,6 +89,9 @@ async def _reopen_mismatch(db_path: Path, embedding: EmbeddingConfig, vector: li
         ("onnx", "bge-m3", "BAAI/bge-m3", 1024),
         ("onnx", "BAAI/bge-m3", "bge-m3", 1024),
         ("ONNX", E5_SHORT, E5_FULL, 384),
+        # FastEmbed loads an id in any case, so case is spelling too (#2602).
+        ("onnx", E5_ODD, E5_SHORT, 384),
+        ("onnx", E5_FULL, E5_ODD, 384),
     ],
 )
 async def test_legacy_stamp_in_either_spelling_matches_the_other(
@@ -215,6 +219,9 @@ async def test_new_and_reset_stamps_keep_the_configured_spelling(tmp_path, embed
         ("ollama", "bge-m3", "ollama", "BAAI/bge-m3", False),
         ("ollama", "bge-m3", "onnx", "bge-m3", True),  # same spelling: unchanged
         ("onnx", E5_SHORT, "onnx", "bge-m3", False),
+        ("onnx", E5_ODD, "onnx", E5_SHORT, True),
+        ("onnx", "baai/BGE-M3", "onnx", "bge-m3", True),
+        ("ollama", E5_ODD, "ollama", E5_FULL, False),  # other providers: exact
     ],
 )
 def test_same_embedding_model(provider_a, model_a, provider_b, model_b, expected) -> None:
@@ -223,5 +230,7 @@ def test_same_embedding_model(provider_a, model_a, provider_b, model_b, expected
 
 def test_canonical_embedding_model_is_onnx_only() -> None:
     assert canonical_embedding_model("onnx", E5_SHORT) == E5_FULL
+    assert canonical_embedding_model("onnx", E5_ODD) == E5_FULL
+    assert canonical_embedding_model("ollama", E5_ODD) == E5_ODD
     assert canonical_embedding_model("ollama", E5_SHORT) == E5_SHORT
     assert canonical_embedding_model("onnx", None) == ""

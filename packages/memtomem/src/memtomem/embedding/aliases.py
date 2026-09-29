@@ -59,10 +59,24 @@ FASTEMBED_RERANKER_SIZES: dict[str, int] = {
 }
 
 
+# Lower-cased short alias or full id → canonical fastembed id. FastEmbed
+# finds a model with ``str.lower()`` on both sides, but indexes its
+# custom-model post-processing by the exact id it was given, so a differently
+# cased id loads the catalog entry and then fails (#2602). Folding here, with
+# FastEmbed's own rule, hands every consumer the one spelling it registered.
+_CANONICAL_EMBEDDER_IDS: dict[str, str] = {
+    **{alias.lower(): entry[0] for alias, entry in ONNX_EMBEDDER_MODELS.items()},
+    **{entry[0].lower(): entry[0] for entry in ONNX_EMBEDDER_MODELS.values()},
+}
+
+
 def resolve_embedder_id(model: str) -> str:
-    """Translate a memtomem short-name to its fastembed id, or pass through."""
-    entry = ONNX_EMBEDDER_MODELS.get(model)
-    return entry[0] if entry else model
+    """Translate a memtomem short-name to its fastembed id, or pass through.
+
+    A known short name or full id matches in any case and comes back spelled
+    as fastembed registers it; an unknown id passes through verbatim.
+    """
+    return _CANONICAL_EMBEDDER_IDS.get(model.lower(), model)
 
 
 def approx_size_mb(model_id: str) -> int | None:

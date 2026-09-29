@@ -583,3 +583,102 @@ def test_embedding_reset_status_does_not_adopt(tmp_path: Path, monkeypatch) -> N
 
     assert result.exit_code == 0, result.output
     assert _meta(db_path) == _STAMP_DIM0
+
+
+class TestPreCaseFoldStamps:
+    """Stores stamped with a cased E5 id before #2602.
+
+    Before the fix that spelling skipped the E5 profile, so its stamp carries
+    the generic ONNX policy. Seed exactly that stamp; building from the fixed
+    fingerprint would not reproduce the state a user's store is in.
+    """
+
+    _ODD = "intfloat/Multilingual-E5-Small"
+    _PRE_FIX_POLICY = "onnx:v1:max_sequence_tokens=1024"
+
+    async def _stamp_pre_fix(self, db_path: Path, *, dimension: int) -> None:
+        """Open the way pre-fix ``create_storage`` did for that config."""
+        storage = SqliteBackend(
+            StorageConfig(sqlite_path=db_path),
+            dimension=dimension,
+            embedding_provider="onnx",
+            embedding_model=self._ODD,
+            embedding_policy_fingerprint=self._PRE_FIX_POLICY,
+            embedding_max_sequence_tokens=1024,
+        )
+        if dimension:
+            await storage.initialize()
+            await storage.close()
+        else:
+            # Without the profile the dimension was 0: the first open stamps
+            # the store, then refuses it.
+            with pytest.raises(EmbeddingDimensionMismatchError):
+                await storage.initialize()
+        assert _meta(db_path) == {
+            "embedding_dimension": str(dimension),
+            "embedding_provider": "onnx",
+            "embedding_model": self._ODD,
+            "embedding_policy_fingerprint": self._PRE_FIX_POLICY,
+            "embedding_max_sequence_tokens": "1024",
+        }
+
+    async def test_an_empty_dim0_stamp_is_adopted_with_the_e5_policy(self, tmp_path: Path) -> None:
+        from memtomem.config import embedding_policy_fingerprint
+
+        db_path = tmp_path / "m.db"
+        await self._stamp_pre_fix(db_path, dimension=0)
+
+        cfg = _config(db_path, model=self._ODD)
+        storage = create_storage(cfg)
+        await storage.initialize()
+        try:
+            assert storage.embedding_mismatch is None
+            policy = _meta(db_path)["embedding_policy_fingerprint"]
+            assert policy == embedding_policy_fingerprint(cfg.embedding)
+            assert ":e5=" in policy
+            assert _meta(db_path)["embedding_dimension"] == "384"
+            assert "chunks_vec" in _tables(db_path)
+        finally:
+            await storage.close()
+
+    async def test_an_explicit_384_stamp_is_a_policy_mismatch_until_apply_current(
+        self, tmp_path: Path
+    ) -> None:
+        """The model now matches, but the stored policy predates the E5 profile.
+        Adoption stays dim=0-only (#2423); ``apply-current`` clears it, and on
+        an empty store deletes nothing."""
+        from types import SimpleNamespace
+
+        from memtomem.config import embedding_policy_fingerprint
+        from memtomem.server.helpers import _check_embedding_mismatch
+
+        db_path = tmp_path / "m.db"
+        await self._stamp_pre_fix(db_path, dimension=384)
+
+        cfg = _config(db_path, model=self._ODD)
+        storage = create_storage(cfg)
+        await storage.initialize()
+        try:
+            mismatch = storage.embedding_mismatch
+            assert mismatch is not None
+            assert mismatch["model_mismatch"] is False
+            assert mismatch["policy_mismatch"] is True
+            gate = SimpleNamespace(storage=SimpleNamespace(embedding_mismatch=mismatch))
+            assert _check_embedding_mismatch(gate) is not None
+            # What ``mm embedding-reset --mode apply-current`` calls.
+            await storage.reset_embedding_meta(
+                dimension=cfg.embedding.dimension,
+                provider=cfg.embedding.provider,
+                model=cfg.embedding.model,
+                policy_fingerprint=embedding_policy_fingerprint(cfg.embedding),
+                max_sequence_tokens=cfg.embedding.max_sequence_tokens,
+            )
+        finally:
+            await storage.close()
+
+        storage = create_storage(cfg)
+        await storage.initialize()
+        try:
+            assert storage.embedding_mismatch is None
+        finally:
+            await storage.close()

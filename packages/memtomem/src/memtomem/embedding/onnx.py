@@ -17,7 +17,7 @@ from memtomem.embedding.aliases import resolve_embedder_id
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 from memtomem.embedding.hub_telemetry import hub_telemetry_off
 from memtomem.errors import EmbeddingError
-from memtomem.embedding.profiles import E5_MODEL, is_e5, is_minilm
+from memtomem.embedding.profiles import E5_MODEL, e5_contract_error, is_e5, is_minilm
 
 logger = logging.getLogger(__name__)
 
@@ -344,6 +344,14 @@ class OnnxEmbedder:
             self._loading = True
             self._load_error = None
             try:
+                # The validator enforces this at construction; a field
+                # assigned afterwards skips it and must not load E5 under
+                # another model's dimension or budget (#2602).
+                contract_error = e5_contract_error(
+                    self._config.model, self._config.dimension, self._config.max_sequence_tokens
+                )
+                if contract_error:
+                    raise EmbeddingError(contract_error)
                 try:
                     from fastembed import TextEmbedding  # type: ignore[import-untyped]
                 except ImportError as exc:

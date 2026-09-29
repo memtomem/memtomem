@@ -140,7 +140,7 @@ class EmbeddingConfig(ConfigModel):
 
     @model_validator(mode="after")
     def cpu_model_defaults(self) -> "EmbeddingConfig":
-        from memtomem.embedding.profiles import is_e5
+        from memtomem.embedding.profiles import e5_contract_error, is_e5
 
         if self.provider.lower() == "onnx" and not self.model:
             object.__setattr__(self, "model", "multilingual-e5-small")
@@ -153,10 +153,9 @@ class EmbeddingConfig(ConfigModel):
             }.items():
                 if key not in self.model_fields_set:
                     object.__setattr__(self, key, value)
-            if self.dimension != 384:
-                raise ValueError("multilingual-e5-small requires dimension=384")
-            if self.max_sequence_tokens != 512:
-                raise ValueError("multilingual-e5-small requires max_sequence_tokens=512")
+            error = e5_contract_error(self.model, self.dimension, self.max_sequence_tokens)
+            if error:
+                raise ValueError(error)
         if self.onnx_variant == "fp32" and self.onnx_artifact_path:
             raise ValueError("onnx_artifact_path is only used for explicit quantized variants")
         if self.onnx_variant != "fp32":
