@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Render the shipped Claude, Codex, Kimi, and OpenCode assets from one contract."""
+"""Render the shipped Claude, Codex, Kimi, OpenCode, and Hermes assets from one contract."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -17,6 +18,57 @@ CLAUDE_ROOT = ROOT / "packages" / "memtomem-claude-plugin"
 CODEX_ROOT = ROOT / "plugins" / "memtomem"
 KIMI_ROOT = ROOT / "packages" / "memtomem-kimi-skills"
 OPENCODE_ROOT = ROOT / "packages" / "opencode-memtomem"
+HERMES_ROOT = ROOT / "packages" / "memtomem-hermes-plugin"
+
+# Workflow sources may carry scope variants: a host that starts the server inside the
+# user's project renders the `project` blocks, one that starts it elsewhere (no project
+# context) renders the `user` blocks. Text outside a block is shared by both.
+SCOPES = ("project", "user")
+_SCOPE_OPEN = re.compile(r"<!-- scope:([a-z]+) -->")
+_SCOPE_CLOSE = "<!-- /scope -->"
+# Each line with its own terminator; the last may have none.
+_LINES = re.compile(r"[^\n]*\n|[^\n]+\Z")
+
+
+def _select_scope(text: str, scope: str) -> str:
+    """Keep the shared text and the ``scope`` blocks of a workflow source.
+
+    Marker lines are dropped together with their own line ending and every other
+    line is kept byte for byte, so a source without markers renders unchanged.
+    Lines end at ``\\n`` only: ``str.splitlines`` also breaks on U+0085 and friends.
+    Workflow sources use HTML comments for markers only, so any other ``<!--`` or
+    ``-->`` (a misspelt or multi-line marker) is an error rather than shipped text.
+    """
+    if scope not in SCOPES:
+        raise ValueError(f"unknown render scope {scope!r}")
+    kept: list[str] = []
+    current: str | None = None
+    for number, line in enumerate(_LINES.findall(text), 1):
+        bare = line.rstrip("\r\n")
+        if match := _SCOPE_OPEN.fullmatch(bare):
+            if current is not None:
+                raise ValueError(f"line {number}: nested scope block")
+            if match.group(1) not in SCOPES:
+                raise ValueError(f"line {number}: unknown scope {match.group(1)!r}")
+            current = match.group(1)
+            continue
+        if bare == _SCOPE_CLOSE:
+            if current is None:
+                raise ValueError(f"line {number}: /scope without an open block")
+            current = None
+            continue
+        if "<!--" in line or "-->" in line:
+            raise ValueError(f"line {number}: malformed scope marker or stray HTML comment")
+        if current is None or current == scope:
+            kept.append(line)
+    if current is not None:
+        raise ValueError(f"unterminated scope:{current} block")
+    return "".join(kept)
+
+
+def _workflow_body(workflow_id: str, scope: str) -> str:
+    source = ASSETS / "workflows" / f"{workflow_id}.md"
+    return _select_scope(source.read_text(encoding="utf-8"), scope)
 
 
 def _q(value: str) -> str:
@@ -131,7 +183,7 @@ def _opencode_skill(workflow: dict, body: str, version_range: str) -> str:
 def _opencode_generated(contract: dict) -> str:
     commands = {}
     for workflow in contract["workflows"]:
-        body = (ASSETS / "workflows" / f"{workflow['id']}.md").read_text(encoding="utf-8")
+        body = _workflow_body(workflow["id"], "project")
         prompt = _opencode_body(body, workflow["tools"]).strip()
         prefix = f"Use the memtomem {workflow['id']} workflow."
         if workflow["id"] != "status":
@@ -181,6 +233,48 @@ def _mcp_config(core: dict) -> str:
     return json.dumps(payload, indent=2) + "\n"
 
 
+def _hermes_mcp_config(contract: dict) -> str:
+    core = contract["core"]
+    payload = {
+        "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+        "mcpServers": {
+            "memtomem": {
+                "type": "stdio",
+                "command": "uvx",
+                # Without --python, uv falls back to whatever Python it finds first; on a
+                # Mac with only the Command Line Tools 3.9 the server never starts.
+                "args": [
+                    "--python",
+                    contract["hermes"]["python"],
+                    "--from",
+                    _mcp_requirement(core),
+                    "memtomem-server",
+                ],
+                "env": {"MEMTOMEM_TOOL_MODE": core["tool_mode"]},
+            }
+        },
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def _hermes_plugin_manifest(contract: dict) -> str:
+    payload = {
+        "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+        "name": "memtomem",
+        "version": contract["plugins"]["hermes_version"],
+        "description": (
+            "Markdown-first long-term memory shared across your coding agents: one local "
+            "memtomem store, searchable from Hermes, Claude Code, Codex CLI and Kimi Code."
+        ),
+        "author": {"name": "memtomem"},
+        "homepage": "https://github.com/memtomem/memtomem",
+        "repository": "https://github.com/memtomem/memtomem",
+        "license": "Apache-2.0",
+        "keywords": ["memory", "mcp", "long-term-memory", "local-first"],
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
 def expected_files() -> dict[Path, str]:
     contract = tomllib.loads(CONTRACT.read_text(encoding="utf-8"))
     files: dict[Path, str] = {
@@ -194,16 +288,22 @@ def expected_files() -> dict[Path, str]:
         CODEX_ROOT / ".mcp.json": _mcp_config(contract["core"]),
         KIMI_ROOT / "VERSION": contract["plugins"]["kimi_version"] + "\n",
         OPENCODE_ROOT / "src" / "generated.ts": _opencode_generated(contract),
+        HERMES_ROOT / "mcp.json": _hermes_mcp_config(contract),
+        HERMES_ROOT / "plugin.json": _hermes_plugin_manifest(contract),
     }
     for workflow in contract["workflows"]:
-        body = (ASSETS / "workflows" / f"{workflow['id']}.md").read_text(encoding="utf-8")
+        body = _workflow_body(workflow["id"], "project")
         # Optional Claude-only appendix: workflows/<id>.claude.md is appended to the
         # Claude skill body only, so plugin-namespace guidance never leaks into the
         # Codex/OpenCode renders (guarded by test_plugin_assets leak checks).
         claude_body = body
         sidecar = ASSETS / "workflows" / f"{workflow['id']}.claude.md"
         if sidecar.is_file():
-            claude_body = body.strip() + "\n\n" + sidecar.read_text(encoding="utf-8")
+            claude_body = (
+                body.strip()
+                + "\n\n"
+                + _select_scope(sidecar.read_text(encoding="utf-8"), "project")
+            )
         files[CLAUDE_ROOT / "skills" / workflow["id"] / "SKILL.md"] = _claude_skill(
             workflow, claude_body
         )
@@ -215,6 +315,14 @@ def expected_files() -> dict[Path, str]:
         if workflow["implicit"] and workflow["effect"] == "read":
             files[OPENCODE_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _opencode_skill(
                 workflow, body, contract["opencode"]["version_range"]
+            )
+        # Hermes starts the server in the plugin directory, so it renders the user-scope
+        # variant and skips workflows that need a project root.
+        if "user" in workflow.get("scopes", SCOPES):
+            hermes = dict(workflow)
+            hermes["description"] = workflow.get("user_scope_description", workflow["description"])
+            files[HERMES_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _portable_skill(
+                hermes, _workflow_body(workflow["id"], "user")
             )
     return files
 

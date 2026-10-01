@@ -9,11 +9,17 @@ codex_version = "0.3.7"
 automation_version = "0.3.6"
 opencode_version = "0.3.7"
 kimi_version = "0.2.6"
+hermes_version = "0.1.0"
 
 [opencode]
 package = "opencode-memtomem"
 version_range = ">=1.17.18 <2"
 mcp_timeout_ms = 60000
+
+[hermes]
+# uvx run-environment interpreter. A pinned minor, not ">=3.12": the open range picked a
+# Python newer than memtomem's classifiers and source-built a dependency.
+python = "3.12"
 
 [[workflows]]
 id = "search"
@@ -28,6 +34,7 @@ input_kind = "search query"
 ui_name = "memtomem Search"
 ui_description = "Search indexed memories by topic"
 default_prompt = "Use $memtomem-search to find past decisions about authentication."
+user_scope_description = "Search indexed memtomem memories by topic. Use for past decisions, notes, findings, or context saved by this or another agent that shares the same memtomem store."
 
 [[workflows]]
 id = "recall"
@@ -105,6 +112,8 @@ title = "Hand off project work"
 description = "Explicitly save or resume a compact project handoff shared by Claude Code, Codex CLI, Kimi Code, and other compatible runtimes."
 tools = ["mem_status", "mem_recall", "mem_add"]
 claude_host_tools = ["Bash(git rev-parse:*)", "Bash(git status:*)"]
+# Needs a project root, which a user-scope host does not have.
+scopes = ["project"]
 effect = "write"
 implicit = false
 argument_hint = "[save|resume] [target runtime or handoff id]"

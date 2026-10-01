@@ -18,6 +18,7 @@ _ROOT = Path(__file__).resolve().parents[3]
 _CONTRACT = _ROOT / "packages/memtomem-plugin-assets/contract.toml"
 _DISPATCHER = _ROOT / "packages/memtomem-claude-automation-plugin/bin/hook_dispatch.py"
 _RENDERER = _ROOT / "tools/render_plugin_assets.py"
+_HERMES_SKILLS = _ROOT / "packages/memtomem-hermes-plugin/skills"
 
 
 def _contract() -> dict:
@@ -35,6 +36,15 @@ def _renderer() -> object:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _user_scope_workflows(workflows: list[dict]) -> list[dict]:
+    return [row for row in workflows if "user" in row.get("scopes", ["project", "user"])]
+
+
+def _flat_body(path: Path) -> str:
+    # Past frontmatter, prose reflow collapsed so clause asserts survive rewrapping.
+    return " ".join(path.read_text(encoding="utf-8").split("---", 2)[2].split())
 
 
 def _opencode_commands(generated: str) -> dict:
@@ -62,6 +72,11 @@ def test_workflow_contract_is_safe_and_matches_runtime_assets() -> None:
     assert {path.parent.name for path in opencode} == {
         row["codex_name"] for row in workflows if row["effect"] == "read" and row["implicit"]
     }
+    hermes = _skill_files(_HERMES_SKILLS)
+    assert {path.parent.name for path in hermes} == {
+        row["codex_name"] for row in _user_scope_workflows(workflows)
+    }
+    assert "memtomem-handoff" not in {path.parent.name for path in hermes}
 
 
 def test_generated_assets_have_no_cross_runtime_or_legacy_leaks() -> None:
@@ -104,6 +119,25 @@ def test_generated_assets_have_no_cross_runtime_or_legacy_leaks() -> None:
         encoding="utf-8"
     )
     assert "mcp__" not in generated_ts
+
+    hermes_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in _skill_files(_HERMES_SKILLS)
+    )
+    assert "TODO" not in hermes_text
+    assert "mem_do" not in hermes_text
+    assert "$ARGUMENTS" not in hermes_text
+    assert "mcp__" not in hermes_text
+    # Scope variants stay on their side: the markers never ship, project-tier guidance
+    # never reaches the user-scope host, and user-scope rules never reach the others.
+    project_rendered = combined + opencode_text + generated_ts
+    for text in (project_rendered, hermes_text):
+        assert re.search(r"<!--\s*/?\s*scope", text, re.IGNORECASE) is None
+    for project_only in ("mm mem init --scope project_local", "confirm_project_shared=true"):
+        assert project_only in project_rendered
+        assert project_only not in hermes_text
+    for user_only in ("unsupported_scope", "never pass a relative path"):
+        assert user_only in hermes_text
+        assert user_only not in project_rendered
     sidecars = sorted((_ROOT / "packages/memtomem-plugin-assets/workflows").glob("*.claude.md"))
     assert sidecars, "expected at least the setup.claude.md Claude-only appendix"
     for sidecar in sidecars:
@@ -189,10 +223,12 @@ def test_every_input_taking_surface_carries_the_non_interactive_fallback() -> No
         surfaces.append((f"OPENCODE_COMMANDS[{name}]", workflow["input_kind"], command["template"]))
 
     # Every non-status workflow renders to four SKILL.md surfaces except the
-    # OpenCode skills, which carry only the implicit read workflows.
+    # OpenCode skills, which carry only the implicit read workflows, and the Hermes
+    # skills, which carry only the user-scope ones.
     non_status = [row for row in contract["workflows"] if row["id"] != "status"]
     opencode_skills = [row for row in non_status if row["implicit"] and row["effect"] == "read"]
-    assert len(surfaces) == len(non_status) * 4 + len(opencode_skills)
+    hermes_skills = _user_scope_workflows(non_status)
+    assert len(surfaces) == len(non_status) * 4 + len(opencode_skills) + len(hermes_skills)
 
     for label, input_kind, content in surfaces:
         flat = " ".join(content.split())
@@ -204,6 +240,108 @@ def test_every_input_taking_surface_carries_the_non_interactive_fallback() -> No
         # own sentence it reads as unconditional, and a subagent that *was*
         # given the input stops anyway.
         assert f"A request that does specify the {input_kind} proceeds normally" in flat, label
+
+
+def test_hermes_skills_carry_the_user_scope_rules() -> None:
+    """The user-scope host has no project: each rule that says so must survive.
+
+    The server starts in the plugin directory, so a relative path points inside the
+    plugin and project tiers do not exist. One assertion per clause: deleting any one
+    of them from the shared source's user block must fail here.
+    """
+    index = _flat_body(_HERMES_SKILLS / "memtomem-index/SKILL.md")
+    assert "Require an explicit absolute file or directory path" in index
+    assert "never pass a relative path" in index
+    assert "this server's working directory is the plugin directory" in index
+
+    remember = _flat_body(_HERMES_SKILLS / "memtomem-remember/SKILL.md")
+    assert 'Call `mem_add` with `scope="user"`' in remember
+    assert "without a `file` argument" in remember
+    assert "never pass `project_local` or `project_shared`" in remember
+    assert "If the user explicitly asked for a project-only destination" in remember
+    assert "do not write" in remember
+    assert "save there only if they then agree" in remember
+    assert "stop without writing and report `unsupported_scope`" in remember
+    assert "name the project in the content or a tag" in remember
+    assert "Choose the destination from the user's context" not in remember
+
+    setup = _flat_body(_HERMES_SKILLS / "memtomem-setup/SKILL.md")
+    no_bootstrap = setup.find("Do not suggest `mm init`")
+    absolute = setup.find("The path must be absolute")
+    index_call = setup.find("Call `mem_index`")
+    assert no_bootstrap != -1 and absolute != -1 and index_call != -1
+    assert no_bootstrap < index_call and absolute < index_call
+    assert "bootstrap command from the plugin README" not in setup
+
+    by_name = {row["codex_name"]: row for row in _contract()["workflows"]}
+    search = (_HERMES_SKILLS / "memtomem-search/SKILL.md").read_text(encoding="utf-8")
+    expected = by_name["memtomem-search"]["user_scope_description"]
+    assert f"\ndescription: {expected}\n" in search
+    assert expected != by_name["memtomem-search"]["description"]
+
+
+_SHARED = "head\n"
+_BLOCKS = (
+    "<!-- scope:project -->\nproject line\n<!-- /scope -->\n"
+    "<!-- scope:user -->\n  user line\n\nuser tail\n<!-- /scope -->\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [
+        ("project", "head\nproject line\ntail\n"),
+        ("user", "head\n  user line\n\nuser tail\ntail\n"),
+    ],
+)
+def test_scope_selector_keeps_shared_text_and_the_chosen_block(scope: str, expected: str) -> None:
+    module = _renderer()
+    rendered = module._select_scope(_SHARED + _BLOCKS + "tail\n", scope)  # type: ignore[attr-defined]
+    assert rendered == expected
+
+
+def test_scope_selector_passes_unmarked_text_through_byte_for_byte() -> None:
+    module = _renderer()
+    text = "a\r\n\n  b\u0085c\nno trailing newline"
+    assert module._select_scope(text, "project") == text  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A marker on the last line, with no newline after it, takes only its own
+        # line: the kept line before it keeps its terminator.
+        ("<!-- scope:project -->\nx\n<!-- /scope -->", "x\n"),
+        ("<!-- scope:project -->\r\nx\r\n<!-- /scope -->", "x\r\n"),
+        ("<!-- scope:project -->\r\nx\r\n<!-- /scope -->\r\ny\r\n", "x\r\ny\r\n"),
+        ("<!-- scope:user -->\nx\n<!-- /scope -->", ""),
+    ],
+)
+def test_scope_selector_drops_each_marker_with_only_its_own_line_ending(
+    text: str, expected: str
+) -> None:
+    module = _renderer()
+    assert module._select_scope(text, "project") == expected  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("<!-- scope:project -->\nx\n", "unterminated"),
+        ("<!-- scope:project -->\n<!-- scope:user -->\n<!-- /scope -->\n", "nested"),
+        ("<!-- scope:team -->\nx\n<!-- /scope -->\n", "unknown scope"),
+        ("x\n<!-- /scope -->\n", "without an open block"),
+        ("<!-- scope:project -->\nx <!-- scope:user -->\n<!-- /scope -->\n", "malformed"),
+        # Excluded variants are parsed too: a typo there must not hide until it is selected.
+        ("<!-- scope:user -->\n<!--scope:user-->\n<!-- /scope -->\n", "malformed"),
+        # A marker wrapped over two lines is neither marker form; it must not ship.
+        ("<!--\n scope:user -->\nuser-only\n<!--\n /scope -->\n", "malformed"),
+    ],
+)
+def test_scope_selector_rejects_malformed_markers(text: str, message: str) -> None:
+    module = _renderer()
+    with pytest.raises(ValueError, match=message):
+        module._select_scope(text, "project")  # type: ignore[attr-defined]
 
 
 def test_handoff_workflow_pins_sequential_project_local_contract() -> None:

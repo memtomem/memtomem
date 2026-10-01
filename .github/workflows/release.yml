@@ -19,7 +19,7 @@ name: Publish
 #   Step 2 is "version-only" in the sense that it changes no behaviour — but it
 #   is NOT just pyproject. It also moves uv.lock, the `## [X.Y.Z]` changelog
 #   heading, BOTH server.json version fields, contract.toml's core version and
-#   all five plugin delivery versions, hook_dispatch.py's CORE_VERSION, the
+#   all six plugin delivery versions, hook_dispatch.py's CORE_VERSION, the
 #   documentation and example pins, and the static cache manifest — then
 #   re-renders with tools/render_plugin_assets.py.
 #   test_core_version_is_single_sourced_across_automation_assets pins

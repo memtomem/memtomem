@@ -165,6 +165,46 @@ def test_kimi_skill_bundle_matches_contract() -> None:
     )
 
 
+def test_hermes_plugin_matches_contract() -> None:
+    contract = _contract()
+    core = contract["core"]
+    root = _ROOT / "packages/memtomem-hermes-plugin"
+    # Decision pinned here independently of the renderer: a pinned minor that uv can
+    # download, not ">=3.12" (which picked a Python newer than the classifiers list).
+    assert contract["hermes"]["python"] == "3.12"
+    requirement = f"memtomem[{','.join(core['mcp_extras'])}]=={core['version']}"
+
+    manifest = _json("packages/memtomem-hermes-plugin/plugin.json")
+    assert manifest["$schema"] == "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+    assert manifest["name"] == "memtomem"
+    assert manifest["version"] == contract["plugins"]["hermes_version"]
+    assert _json("packages/memtomem-hermes-plugin/mcp.json") == {
+        "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+        "mcpServers": {
+            "memtomem": {
+                "type": "stdio",
+                "command": "uvx",
+                "args": ["--python", "3.12", "--from", requirement, "memtomem-server"],
+                "env": {"MEMTOMEM_TOOL_MODE": core["tool_mode"]},
+            }
+        },
+    }
+
+    # Per launch line, not per file: a stale pin or a dropped --python beside a correct
+    # one elsewhere passes a whole-file `in`. Tokens run to the next quote, space or
+    # bracket, so `0.6.5rc1` is captured whole rather than matching `0.6.5`.
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    launches = [line for line in readme.splitlines() if "memtomem[" in line]
+    assert len(launches) == 2, launches  # requirements line + manual config.yaml args
+    for line in launches:
+        assert re.findall(r"memtomem\[[^\]]*\]==[^\s'\"\],]*", line) == [requirement], line
+        assert re.findall(r"""--python["']?,?\s*["']?([^\s'",\]]+)""", line) == ["3.12"], line
+    # Both launch examples run uvx: the requirements line spells it, the manual entry
+    # sets it as `command:` right above its `args:` line.
+    assert launches[0].lstrip(" -`").startswith("uvx --python"), launches[0]
+    assert re.findall(r"^ *command: *(\S+)\n *args: \[\"--python\"", readme, re.M) == ["uvx"]
+
+
 def test_opencode_plugin_matches_contract() -> None:
     contract = _contract()
     package = _json("packages/opencode-memtomem/package.json")

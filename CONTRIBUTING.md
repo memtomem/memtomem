@@ -32,6 +32,7 @@ uv run mypy packages/memtomem/src
 - `plugins/memtomem/` — Codex plugin
 - `packages/opencode-memtomem/` — OpenCode npm plugin
 - `packages/memtomem-kimi-skills/` — Kimi Code skill bundle (not a plugin)
+- `packages/memtomem-hermes-plugin/` — Hermes Agent portable plugin (user scope: MCP server + six workflow skills)
 - `packages/memtomem-plugin-assets/` — shared plugin contract (`contract.toml`) and workflow sources rendered into the plugins by `tools/render_plugin_assets.py`
 
 The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](https://github.com/memtomem/memtomem-stm).
