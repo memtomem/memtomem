@@ -28,13 +28,14 @@ Install from this repository, pinned to the commit of a memtomem release tag. He
 `v<version>`, so look the commit up first:
 
 ```bash
-git ls-remote https://github.com/memtomem/memtomem "refs/tags/v<version>" "refs/tags/v<version>^{}"
+git ls-remote --exit-code https://github.com/memtomem/memtomem "refs/tags/v<version>" "refs/tags/v<version>^{}"
 ```
 
 `<version>` is a memtomem release that includes this directory and is listed on
 [PyPI](https://pypi.org/project/memtomem/#history). The command prints one line for a
-lightweight tag and two for an annotated one. Copy the SHA at the start of the line that
-ends in `^{}` if there is one, otherwise of the only line, and install at it:
+lightweight tag and two for an annotated one; no output and exit status 2 mean there is no
+such tag. Copy the SHA at the start of the line that ends in `^{}` if there is one,
+otherwise of the only line, and install at it:
 
 ```bash
 hermes plugins install "https://github.com/memtomem/memtomem#packages/memtomem-hermes-plugin" --ref <commit-sha> --enable
@@ -43,9 +44,16 @@ hermes plugins install "https://github.com/memtomem/memtomem#packages/memtomem-h
 At a release commit, `mcp.json` pins that same memtomem version, so the server installs
 the release you picked. Hermes marks a direct Git install as a custom (unreviewed) source.
 
-Leaving out `--ref` installs the tip of `main`. Use that only for development: right after
-a version bump is merged, `main` can pin a memtomem version that is not published yet, and
-the server then fails to start until it is.
+Hermes records that commit as the plugin's pin. To move to a later release, look up its
+commit the same way and reinstall with `--force --ref <new-commit-sha>`. A `--force`
+reinstall without `--ref` installs the pinned commit again, and `hermes plugins update
+memtomem` refuses to move a pinned plugin.
+
+An install without `--ref` takes the tip of `main`, unless Hermes still holds a pin for this
+source from an earlier install; then it installs that pinned commit, even if the plugin
+directory was deleted. Use `main` only for development: right after a version bump is
+merged, `main` can pin a memtomem version that is not published yet, and the server then
+fails to start until it is.
 
 Once memtomem is listed in the Hermes plugin catalog, `hermes plugins install memtomem`
 installs the catalog's pinned commit instead.

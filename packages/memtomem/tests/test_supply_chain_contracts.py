@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shlex
 import tomllib
 from pathlib import Path
 
@@ -206,23 +207,44 @@ def test_hermes_plugin_matches_contract() -> None:
 
     # Hermes 0.21.5 refuses a `--ref` that is not a full 40-character commit SHA, so the
     # install example takes a commit placeholder and the README shows how to resolve a
-    # release tag to one. Asserted positively: deleting the command, dropping `--ref`, or
-    # putting a tag or branch name there all fail.
-    install = [
-        line
-        for line in readme.splitlines()
-        if line.startswith(
-            'hermes plugins install "https://github.com/memtomem/memtomem'
-            '#packages/memtomem-hermes-plugin"'
-        )
-    ]
+    # release tag to one. Compared as shell tokens, so quoting and spacing are free, while
+    # deleting the command, dropping `--ref`, adding a second `--ref`/`--ref=`, or putting
+    # a tag or branch name there all fail.
+    def commands(prefix: str) -> list[list[str]]:
+        parsed = []
+        for line in readme.splitlines():
+            if line.startswith(prefix):
+                try:
+                    parsed.append(shlex.split(line))
+                except ValueError as exc:
+                    pytest.fail(f"README command does not parse ({exc}): {line}")
+        return parsed
+
+    install = commands("hermes plugins install ")
     assert len(install) == 1, install
-    assert re.findall(r"--ref (\S+)", install[0]) == ["<commit-sha>"], install[0]
-    lookup = [line for line in readme.splitlines() if line.startswith("git ls-remote ")]
-    assert lookup == [
-        "git ls-remote https://github.com/memtomem/memtomem"
-        ' "refs/tags/v<version>" "refs/tags/v<version>^{}"'
-    ], lookup
+    assert install[0][:4] == [
+        "hermes",
+        "plugins",
+        "install",
+        "https://github.com/memtomem/memtomem#packages/memtomem-hermes-plugin",
+    ], install[0]
+    argv = install[0] + [""]  # a trailing bare `--ref` reads as an empty value, not IndexError
+    refs = [
+        token.removeprefix("--ref=") if token.startswith("--ref=") else argv[i + 1]
+        for i, token in enumerate(install[0])
+        if token == "--ref" or token.startswith("--ref=")
+    ]
+    assert refs == ["<commit-sha>"], install[0]
+    assert commands("git ls-remote ") == [
+        [
+            "git",
+            "ls-remote",
+            "--exit-code",
+            "https://github.com/memtomem/memtomem",
+            "refs/tags/v<version>",
+            "refs/tags/v<version>^{}",
+        ]
+    ]
 
 
 def test_opencode_plugin_matches_contract() -> None:
