@@ -10,7 +10,12 @@ from `packages/memtomem-plugin-assets/`; edit the sources there, not the files h
 
 ## Requirements
 
-- Hermes Agent 0.21.5 or later (the version this package was verified against).
+- Hermes Agent 0.21.5 or later (the version this package was verified against), installed
+  with MCP support: the `mcp` Python package in Hermes's environment, which the
+  `hermes-agent[mcp]` extra provides and the official install scripts normally include.
+  Without it Hermes loads the six skills but starts no MCP server, so the memory tools are
+  missing, and it logs why only at debug level ("mcp package not installed"). Add the `mcp`
+  extra to Hermes's environment to fix it.
 - Git on `PATH`, for the commit lookup under [Install](#install).
 - `uv` on `PATH`. The server is started with
   `uvx --python 3.12 --from 'memtomem[onnx]==0.6.6' memtomem-server`.
