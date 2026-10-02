@@ -11,6 +11,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   ..., "summary": ..., "event_count": N}` on success and `{"ok": false,
   "reason": "..."}` with exit 1 when there is no active session or storage
   fails. Without `--json` the output is unchanged.
+- **A plugin package for Hermes Agent (#2630, #2632).**
+  `packages/memtomem-hermes-plugin/` is an Agent Plugins v1 package —
+  `plugin.json`, `mcp.json` and six memory skills (index, recall, remember,
+  search, setup, status) — that Hermes installs from a Git subdirectory of this
+  repository. Install it at the commit of a release tag: Hermes 0.21.5 takes
+  only a full 40-character commit SHA for `--ref` and refuses a tag name, so
+  the package README shows how to look the commit up with `git ls-remote` and
+  how to move a pinned install to a later release. The server starts with
+  `uvx --python 3.12` and runs at user scope only, because Hermes starts it in
+  the plugin directory, which gives it no project context; the handoff
+  workflow, which needs a project root, is left out. The package is not listed
+  in the Hermes plugin catalog yet.
 
 ### Changed
 
@@ -126,11 +138,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   applies the E5 profile and compares stamps. The spelling therefore gets the
   E5 dimension, budget, policy fingerprint and pinned snapshot, compares equal
   to a stamp in another case, and is probed under the canonical id by the Web
-  UI's model readiness. A model assigned after the config loads, such as by
-  revert-to-stored, skips the validator; it still loads from the pinned snapshot
-  under the canonical id, and when it keeps another model's dimension or token
-  budget the load is refused with the validator's error, which names the
-  canonical id for another spelling. The two canonical spellings keep their
+  UI's model readiness. Revert-to-stored rebuilds the embedding section through
+  the same validator (#2609, above), so a stored spelling in another case gets
+  the same treatment. The two canonical spellings keep their
   policy fingerprint. A store stamped with such a spelling before this fix and
   still empty is adopted when it was stamped dimension 0. With an explicit
   `dimension: 384` it reports a policy mismatch, which
@@ -184,15 +194,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   file it held. The replacement kept running, but checks that read the pid
   file, such as `mm web status` and `mm upgrade`, could no longer see it, and a
   second Web UI could start. Upgrade now takes the lock itself and deletes the
-  file only while holding it, after checking the path still names the file it
-  locked. A file locked in the meantime is left in place and reported as
-  skipped. While `mm uninstall` or `mm reset` is writing, upgrade waits for it
+  file only after checking the path still names the file it locked: on POSIX
+  while holding the lock, on Windows just after releasing it, where a file
+  another process has opened meanwhile cannot be deleted. A file locked in the
+  meantime is left in place and reported as skipped. While `mm uninstall` or `mm reset` is writing, upgrade waits for it
   briefly and then stops with an error instead of deleting.
 - **The Web UI's model readiness finds models FastEmbed caches under another
   repository (#2585).** The probe looked for `models--<model id>`, but FastEmbed
   downloads some models from a mirror and caches them under that name.
   `all-MiniLM-L6-v2` lives in `models--qdrant--all-MiniLM-L6-v2-onnx` and
-  `bge-small-en-v1.5` in `models--qdrant--bge-small-en-v1.5-onnx-q`, whose
+  `bge-small-en-v1.5` in `models--qdrant--bge-small-en-v1.5-onnx-q` under
+  FastEmbed 0.8.0 (`models--Qdrant--bge-small-en-v1.5-onnx-Q` under 0.8.1), whose
   weights are `model_optimized.onnx`. While either model loaded from a full
   cache, readiness said `downloading` instead of `loading`. The probe now takes
   the repository and model files from FastEmbed's catalog, and for E5 and
@@ -273,7 +285,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   both `--json` and `--format json`. Text output is unchanged. Any other
   exception, including a SQL error in memtomem's queries after the database is
   open, still prints a plain error and no JSON.
-- **The `all-MiniLM-L6-v2` embedder is pinned to a known-good model revision.**
+- **The `all-MiniLM-L6-v2` embedder is pinned to a known-good model revision
+  (#2584).**
   FastEmbed downloads this model from `qdrant/all-MiniLM-L6-v2-onnx` at the
   repository's latest revision. The newest revision raised the tokenizer's
   truncation limit to 256 tokens but still pads to 128. On a new download,
@@ -335,7 +348,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `GET /api/memory-dirs/status` now also reports `held_source_file_count` and
   `held_chunk_count`, under the rule the Sources list uses to hide them.
   `chunk_count` and `source_file_count` stay totals. The Sources tree and the
-  Memory Dirs panel show totals minus held. The tree explains the held part in
+  Memory Dirs panel show totals minus held; #2567, below, widens that to every
+  source the list hides. The tree explains the held part in
   the first line of the root's group and in the count's tooltip; the panel
   adds "N hidden" to the root's line. So where the tree groups files under a
   root header, a root whose sources are all held no longer renders as an empty
@@ -373,6 +387,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   per-root badges count all of a root's listed sources. Above the cap the tree
   was shorter than the badges with no sign of it. It now shows how many of the
   indexed files were loaded, across all tabs, under its header.
+
+### Security
+
+- Update the vendored DOMPurify used by the Web UI from 3.4.13 to 3.4.16
+  (#2631) for
+  [GHSA-p98j-92pf-mc4p](https://osv.dev/vulnerability/GHSA-p98j-92pf-mc4p)
+  (DOM XSS: in `IN_PLACE` mode, an `afterSanitize` hook that removes a node
+  leaves event handlers armed in the detached subtree). The Web UI's own code
+  sanitizes rendered Markdown strings with this copy's `DOMPurify.sanitize`,
+  without hooks and never in `IN_PLACE` mode, so it did not use the affected
+  path; the update moves the shipped copy out of the affected range. The
+  file's cache key advanced, so browsers load the new copy. The DOMPurify
+  built into the vendored Swagger UI bundle is 3.4.0, outside the affected
+  range.
 
 ## [0.6.5] — 2026-09-26
 
