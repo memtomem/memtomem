@@ -11,6 +11,7 @@ from `packages/memtomem-plugin-assets/`; edit the sources there, not the files h
 ## Requirements
 
 - Hermes Agent 0.21.5 or later (the version this package was verified against).
+- Git on `PATH`, for the commit lookup under [Install](#install).
 - `uv` on `PATH`. The server is started with
   `uvx --python 3.12 --from 'memtomem[onnx]==0.6.5' memtomem-server`.
   Without `uv` the plugin still installs and enables, and the server fails at start with
@@ -22,16 +23,25 @@ from `packages/memtomem-plugin-assets/`; edit the sources there, not the files h
 
 ## Install
 
-Install from this repository, pinned to a memtomem release tag:
+Install from this repository, pinned to the commit of a memtomem release tag. Hermes
+(0.21.5) takes a full 40-character commit SHA for `--ref` and refuses a tag name such as
+`v<version>`, so look the commit up first:
 
 ```bash
-hermes plugins install "https://github.com/memtomem/memtomem#packages/memtomem-hermes-plugin" --ref v<version> --enable
+git ls-remote https://github.com/memtomem/memtomem "refs/tags/v<version>" "refs/tags/v<version>^{}"
 ```
 
 `<version>` is a memtomem release that includes this directory and is listed on
-[PyPI](https://pypi.org/project/memtomem/#history). At a release tag, `mcp.json` pins that
-same memtomem version, so the server installs the release you picked. Hermes marks a
-direct Git install as a custom (unreviewed) source.
+[PyPI](https://pypi.org/project/memtomem/#history). The command prints one line for a
+lightweight tag and two for an annotated one. Copy the SHA at the start of the line that
+ends in `^{}` if there is one, otherwise of the only line, and install at it:
+
+```bash
+hermes plugins install "https://github.com/memtomem/memtomem#packages/memtomem-hermes-plugin" --ref <commit-sha> --enable
+```
+
+At a release commit, `mcp.json` pins that same memtomem version, so the server installs
+the release you picked. Hermes marks a direct Git install as a custom (unreviewed) source.
 
 Leaving out `--ref` installs the tip of `main`. Use that only for development: right after
 a version bump is merged, `main` can pin a memtomem version that is not published yet, and

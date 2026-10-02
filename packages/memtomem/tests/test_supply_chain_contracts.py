@@ -204,6 +204,26 @@ def test_hermes_plugin_matches_contract() -> None:
     assert launches[0].lstrip(" -`").startswith("uvx --python"), launches[0]
     assert re.findall(r"^ *command: *(\S+)\n *args: \[\"--python\"", readme, re.M) == ["uvx"]
 
+    # Hermes 0.21.5 refuses a `--ref` that is not a full 40-character commit SHA, so the
+    # install example takes a commit placeholder and the README shows how to resolve a
+    # release tag to one. Asserted positively: deleting the command, dropping `--ref`, or
+    # putting a tag or branch name there all fail.
+    install = [
+        line
+        for line in readme.splitlines()
+        if line.startswith(
+            'hermes plugins install "https://github.com/memtomem/memtomem'
+            '#packages/memtomem-hermes-plugin"'
+        )
+    ]
+    assert len(install) == 1, install
+    assert re.findall(r"--ref (\S+)", install[0]) == ["<commit-sha>"], install[0]
+    lookup = [line for line in readme.splitlines() if line.startswith("git ls-remote ")]
+    assert lookup == [
+        "git ls-remote https://github.com/memtomem/memtomem"
+        ' "refs/tags/v<version>" "refs/tags/v<version>^{}"'
+    ], lookup
+
 
 def test_opencode_plugin_matches_contract() -> None:
     contract = _contract()
