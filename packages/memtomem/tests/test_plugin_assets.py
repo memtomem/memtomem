@@ -485,7 +485,7 @@ from pathlib import Path
 with Path(os.environ["FAKE_MM_LOG"]).open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(sys.argv[1:]) + "\\n")
 if sys.argv[1:] == ["--version"]:
-    print(os.environ.get("FAKE_MM_VERSION", "mm, version 0.6.5"))
+    print(os.environ.get("FAKE_MM_VERSION", "mm, version 0.6.6"))
 elif sys.argv[1:2] == ["search"]:
     if os.environ.get("FAKE_MM_SEARCH_FAIL"):
         print(sys.argv[2], file=sys.stderr)
@@ -602,7 +602,7 @@ def test_automation_reports_incompatible_dependency(fake_mm: tuple[dict[str, str
     result = _dispatch("SessionStart", {"hook_event_name": "SessionStart"}, env)
     assert result.returncode == 0
     output = json.loads(result.stdout)
-    assert "requires mm 0.6.5" in output["hookSpecificOutput"]["additionalContext"]
+    assert "requires mm 0.6.6" in output["hookSpecificOutput"]["additionalContext"]
     _dispatch(
         "UserPromptSubmit",
         {"hook_event_name": "UserPromptSubmit", "prompt": "A sufficiently long prompt"},
