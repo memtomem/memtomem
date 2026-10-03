@@ -300,7 +300,9 @@ and exits 1. `mm activity log --json` prints `{"ok": false, "reason": ...}`
 and exits 1 for `invalid_meta` and `write_failed`, but exits 0 for
 `no_active_session`, which is a skip rather than a failure. Without `--json`,
 `mm activity log` prints nothing on stdout and exits 0 when there is no
-session or the write fails, so a hook that calls it never fails. `mm quality
+session or the write fails, so a hook that calls it never fails; a failed
+write leaves one warning on stderr naming the error, without a traceback.
+`mm quality
 experiment` keeps its own contract: an input, configuration or storage
 failure exits 2 with a message that names only the failure's type.
 

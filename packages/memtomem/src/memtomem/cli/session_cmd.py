@@ -641,9 +641,12 @@ def log_event(event_type: str, content: str, meta: str | None, *, as_json: bool 
                 click.echo(
                     json.dumps({"ok": True, "session_id": session_id, "event_type": event_type})
                 )
-        except Exception:
+        except Exception as exc:
             trace_ctx["metadata"] = {"status": "error", "reason": "write_failed"}
-            logger.warning("Activity hook failed", exc_info=True)
+            # One line for hook runners that surface stderr on every call; the
+            # traceback is for whoever turns on debug logging (#2605).
+            logger.warning("Activity hook failed: %s", str(exc) or type(exc).__name__)
+            logger.debug("Activity hook failure detail", exc_info=True)
             if as_json:
                 # A failed write exits 1 under --json; the text path keeps
                 # stdout empty and exits 0 for hook callers.

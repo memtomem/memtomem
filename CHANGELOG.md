@@ -14,6 +14,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   example) matched it, though indexing then skipped it. Those surfaces now
   report no files for it, matching what a walk of its directory finds for
   those rules.
+- **`mm activity log` no longer prints a traceback when a write fails
+  (#2605).** A hook that runs it on every tool call got the full traceback on
+  stderr each time storage was locked or unavailable. The warning is now one
+  message naming the error; the traceback moved to debug logging. Stdout and
+  exit codes are unchanged.
 
 ## [0.6.6] — 2026-10-02
 

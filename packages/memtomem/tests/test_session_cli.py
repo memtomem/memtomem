@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -152,6 +153,28 @@ class TestSessionEventsJson:
         assert "No session ID provided" in result.output
 
 
+def _assert_one_warning_without_traceback(
+    caplog: pytest.LogCaptureFixture, result, expected: str = "db is locked"
+) -> None:
+    """A failed activity write logs one WARNING naming the error, no traceback.
+
+    Pinned on the record, not on stderr lines: the console handler wraps a
+    long message across lines at narrow widths (#2605).
+    """
+    warnings = [
+        r
+        for r in caplog.records
+        if r.name == "memtomem.cli.session_cmd" and r.levelno >= logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert expected in warnings[0].getMessage()
+    assert warnings[0].exc_info is None
+    # Non-empty first, so the traceback check is not passing on a stream
+    # that captured nothing.
+    assert result.stderr.strip()
+    assert "Traceback" not in result.stderr
+
+
 class TestActivityLogJson:
     """``mm activity log --json`` is write-side, so the ack shape uses an
     explicit ``ok`` discriminator (the success payload has no natural
@@ -192,7 +215,7 @@ class TestActivityLogJson:
         assert data == {"ok": False, "reason": "no_active_session"}
         comp.storage.add_session_event.assert_not_awaited()
 
-    def test_write_failure_emits_error_ack(self, runner, monkeypatch):
+    def test_write_failure_emits_error_ack(self, runner, monkeypatch, caplog):
         """--json surfaces a storage exception as ``{ok: false, reason:
         write_failed}`` and exits 1: a failed write must not look successful
         (#2596; exit 0 before)."""
@@ -200,29 +223,41 @@ class TestActivityLogJson:
         comp = _mock_components(add_event=failing_add)
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-2")
-        # Silence logger.warning so the traceback doesn't bleed into CliRunner
-        # output and break the JSON parse.
-        monkeypatch.setattr("memtomem.cli.session_cmd.logger.warning", lambda *a, **kw: None)
 
-        result = runner.invoke(cli, ["activity", "log", "-c", "boom", "--json"])
+        with caplog.at_level("WARNING", logger="memtomem.cli.session_cmd"):
+            result = runner.invoke(cli, ["activity", "log", "-c", "boom", "--json"])
         assert result.exit_code == 1
         data = json.loads(result.stdout)
         assert data == {"ok": False, "reason": "write_failed"}
+        _assert_one_warning_without_traceback(caplog, result)
 
-    def test_text_path_quiet_stdout_on_write_failure(self, runner, monkeypatch):
+    def test_text_path_quiet_stdout_on_write_failure(self, runner, monkeypatch, caplog):
         """Without --json a failed write prints nothing on stdout and exits 0
-        — the hook contract the --json exit change must not reach. (The
-        warning log on stderr predates #2596 and is silenced here.)"""
+        — the hook contract the --json exit change must not reach. The one
+        warning names the error without a traceback (#2605)."""
         failing_add = AsyncMock(side_effect=RuntimeError("db is locked"))
         comp = _mock_components(add_event=failing_add)
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-2")
-        monkeypatch.setattr("memtomem.cli.session_cmd.logger.warning", lambda *a, **kw: None)
 
-        result = runner.invoke(cli, ["activity", "log", "-c", "boom"])
+        with caplog.at_level("WARNING", logger="memtomem.cli.session_cmd"):
+            result = runner.invoke(cli, ["activity", "log", "-c", "boom"])
         assert result.exit_code == 0
         assert result.stdout == ""
         failing_add.assert_awaited_once()
+        _assert_one_warning_without_traceback(caplog, result)
+
+    def test_write_failure_without_a_message_names_the_exception(self, runner, monkeypatch, caplog):
+        """With the traceback gone, an empty ``str(exc)`` must still say what failed."""
+        failing_add = AsyncMock(side_effect=TimeoutError())
+        comp = _mock_components(add_event=failing_add)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        monkeypatch.setattr("memtomem.cli.session_cmd._read_current_session", lambda: "sess-2")
+
+        with caplog.at_level("WARNING", logger="memtomem.cli.session_cmd"):
+            result = runner.invoke(cli, ["activity", "log", "-c", "boom"])
+        assert result.exit_code == 0
+        _assert_one_warning_without_traceback(caplog, result, "TimeoutError")
 
     def test_text_path_silent_on_success(self, runner, monkeypatch):
         """Without --json the silent contract is preserved — no stdout, exit 0."""
