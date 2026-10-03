@@ -5733,3 +5733,112 @@ class TestPartialPersistReadBack:
         assert result["indexed"] > 0
         assert result["new_chunk_ids"]
         assert result["mutated"] is True
+
+
+class TestDefaultChunkerRegistry:
+    """#2622 — an engine built without a registry chunks like the server does.
+
+    ``IndexEngine(registry=None)`` is what revert-to-stored rebuilds and what
+    ``mm memory doctor`` constructs. Without a hard chunk budget its own
+    chunker list dropped the code chunkers and built ``MarkdownChunker``
+    without the configured sizes, so those paths skipped code files the server
+    indexes and chunked Markdown differently.
+    """
+
+    # Two paragraphs per section, so the Markdown chunker emits more than one
+    # chunk per section and a configured overlap has somewhere to show.
+    _SAMPLE = "".join(
+        f"# {title}\n\n"
+        + " ".join(f"{title}{i} lorem ipsum dolor sit amet consectetur" for i in range(40))
+        + "\n\n"
+        + " ".join(f"{title}b{i} lorem ipsum dolor sit amet consectetur" for i in range(40))
+        + "\n\n"
+        for title in ("alpha", "beta")
+    )
+
+    @staticmethod
+    def _sized_config():
+        from memtomem.config import Mem2MemConfig
+
+        config = Mem2MemConfig()
+        # Non-default values, set before anything copies them: MarkdownChunker
+        # reads the config once, in its constructor.
+        config.indexing.min_chunk_tokens = 16
+        config.indexing.chunk_overlap_tokens = 32
+        return config
+
+    @staticmethod
+    def _shape(chunks: list[Chunk]) -> list[tuple]:
+        # Content and the retrieval metadata; ids and timestamps are generated.
+        return [(c.content, c.metadata.heading_hierarchy, c.metadata.chunk_type) for c in chunks]
+
+    def test_engine_without_registry_registers_the_code_chunkers(self) -> None:
+        from memtomem.config import Mem2MemConfig
+
+        config = Mem2MemConfig().indexing
+        assert not config.hard_max_chunk_tokens, "premise: the default has no hard budget"
+        engine = IndexEngine(storage=None, embedder=None, config=config)  # type: ignore[arg-type]
+        supported = engine._registry.supported_extensions()
+        assert {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs"} <= supported, supported
+        # Every default discovery extension has a chunker, so a scan selects all of them.
+        assert config.supported_extensions <= supported, config.supported_extensions - supported
+
+    def test_an_explicit_registry_is_kept(self) -> None:
+        from memtomem.chunking.registry import ChunkerRegistry
+        from memtomem.config import Mem2MemConfig
+
+        registry = ChunkerRegistry([])
+        engine = IndexEngine(
+            storage=None,  # type: ignore[arg-type]
+            embedder=None,  # type: ignore[arg-type]
+            config=Mem2MemConfig().indexing,
+            registry=registry,
+        )
+        assert engine._registry is registry
+
+    def test_engine_without_registry_applies_the_configured_markdown_sizes(self) -> None:
+        # An expectation independent of any other registry: both sides of the
+        # parity test below come from one builder, so a builder that dropped
+        # the config would keep them equal while both ignored it.
+        config = self._sized_config()
+        engine = IndexEngine(storage=None, embedder=None, config=config.indexing)  # type: ignore[arg-type]
+        chunks = engine._registry.chunk_file(Path("sample.md"), self._SAMPLE)
+        assert len(chunks) == 4, [len(c.content) for c in chunks]
+        first, second = chunks[0].content, chunks[1].content
+        shared = max(
+            (k for k in range(1, min(len(first), len(second))) if first.endswith(second[:k])),
+            default=0,
+        )
+        # 32 overlap tokens carry a tail of the first chunk into the second; the
+        # unconfigured chunker carries none.
+        assert shared >= 64, (shared, second[:80])
+
+    @pytest.mark.asyncio
+    async def test_engine_without_registry_matches_the_startup_components(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from memtomem.server.component_factory import close_components, create_components
+
+        from .helpers import isolate_memtomem_env
+
+        isolate_memtomem_env(monkeypatch)
+        config = self._sized_config()
+        config.storage.sqlite_path = tmp_path / "parity.db"
+        config.indexing.memory_dirs = [tmp_path]
+        config.embedding.dimension = 1024
+        config.search.enable_dense = False
+        comp = await create_components(config)
+        try:
+            startup = comp.index_engine._registry
+            fallback = IndexEngine(
+                storage=None,  # type: ignore[arg-type]
+                embedder=None,  # type: ignore[arg-type]
+                config=config.indexing,
+            )._registry
+            assert startup.supported_extensions() == fallback.supported_extensions()
+            path = Path("sample.md")
+            assert self._shape(startup.chunk_file(path, self._SAMPLE)) == self._shape(
+                fallback.chunk_file(path, self._SAMPLE)
+            )
+        finally:
+            await close_components(comp)

@@ -421,11 +421,12 @@ class TestLockSidecarDocs:
         """Extensions a real directory scan selects, measured not reasoned.
 
         The guide's list is the overlap of ``supported_extensions`` with the
-        registered chunkers, and that overlap is not the config set: the code
-        chunkers are only registered when a hard chunk budget is configured.
-        Driving ``discover_indexable_files`` over a tree with one file per
-        configured extension is what makes this pin measure the promise a
-        reader acts on rather than restate a constant.
+        registered chunkers. That overlap used to differ from the config set,
+        because an engine built without a registry registered the code
+        chunkers only under a hard chunk budget (#2622). Driving
+        ``discover_indexable_files`` over a tree with one file per configured
+        extension is what makes this pin measure the promise a reader acts on
+        rather than restate a constant.
         """
         from memtomem.indexing.engine import IndexEngine
 
@@ -443,33 +444,33 @@ class TestLockSidecarDocs:
 
     def test_guide_lists_the_extensions_a_default_scan_really_selects(self, tmp_path: Path) -> None:
         default = self._discovered_extensions(tmp_path / "a")
-        extra = self._discovered_extensions(tmp_path / "b", hard_max_chunk_tokens=256) - default
+        budgeted = self._discovered_extensions(tmp_path / "b", hard_max_chunk_tokens=256)
         section = _unwrapped(self._section())
-        # Exact sets, both directions: the guide previously promised sidecars
-        # next to every configured extension, which no default scan produces.
-        assert default == {".md", ".json", ".yaml", ".yml", ".toml"}, default
-        assert extra == {".py", ".js", ".ts", ".jsx", ".tsx"}, extra
+        # Exact sets: a default scan selects every configured extension, code
+        # included, and a hard chunk budget no longer changes which (#2622).
+        expected = {".md", ".json", ".yaml", ".yml", ".toml", ".py", ".js", ".ts", ".jsx", ".tsx"}
+        assert default == expected, default
+        assert budgeted == default, budgeted ^ default
         # Sentence boundaries, not bare lists: without the trailing punctuation
-        # an appended extension keeps the substring, and without the enabling
-        # clause the guide could invert the condition ("without configuring a
-        # hard chunk budget") and still satisfy every assertion here.
+        # an appended extension keeps the substring.
         assert (
-            "With the default settings that overlap is "
-            "`.md`, `.json`, `.yaml`, `.yml` and `.toml`;" in section
+            "With the default settings that overlap is the whole default list, "
+            "`.md`, `.json`, `.yaml`, `.yml`, `.toml`, "
+            "`.py`, `.js`, `.ts`, `.jsx` and `.tsx`, so an indexed code repository "
+            "picks up sidecars next to its source files too." in section
         ), "the guide's default-overlap list no longer matches discovery"
-        assert (
-            "configuring a hard chunk budget (`indexing.hard_max_chunk_tokens`) "
-            "registers the code chunkers as well" in section
-        ), "the guide no longer states the condition that adds the code chunkers"
-        assert (
-            "picks up sidecars next to its "
-            "`.py`, `.js`, `.ts`, `.jsx` and `.tsx` files too." in section
-        ), "the guide's hard-budget list no longer matches discovery"
+        assert "The code chunkers are always registered:" in section, (
+            "the guide no longer says the code chunkers need no configuration"
+        )
+        assert "hard_max_chunk_tokens" not in section, (
+            "the guide ties sidecar placement to a hard chunk budget again"
+        )
 
     def test_guide_warns_that_a_named_file_locks_before_the_chunker_check(self) -> None:
-        # Measured: `mm index mod.py` on a default config leaves `.mod.py.lock`
-        # even though no Python chunker is registered, because the L2 acquire in
-        # ``_locked_index`` runs above the registry check in ``_index_file``.
+        # `mm index mod.txt` leaves `.mod.txt.lock` even though no chunker
+        # handles `.txt`, because the L2 acquire in ``_locked_index`` runs above
+        # the registry check in ``_index_file``. Pinned by behaviour in
+        # test_memory_crud_cross_process.py.
         assert (
             "Naming a single file directly (`mm index <file>`) locks it before that check"
             in _unwrapped(self._section())

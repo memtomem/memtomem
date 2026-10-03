@@ -842,10 +842,10 @@ async def test_named_file_takes_its_sidecar_before_the_chunker_check(bm25_only_c
     standing while making it false, so pin the behaviour here. (#2387)
     """
     comp, mem_dir = bm25_only_components
-    # State the premise instead of assuming it. Which extensions lack a
-    # chunker depends on configuration — this fixture enables a hard chunk
-    # budget, so ``.py`` HAS one here — and a test that silently drifts onto
-    # a chunkable file would exercise the ordinary path while still passing.
+    # State the premise instead of assuming it. The code chunkers are always
+    # registered (#2622), so ``.py`` HAS one here, and a test that silently
+    # drifts onto a chunkable file would exercise the ordinary path while
+    # still passing.
     ext = next(
         (e for e in (".txt", ".csv", ".ini", ".cfg") if comp.index_engine._registry.get(e) is None),
         None,
