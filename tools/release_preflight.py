@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import tarfile
 import time
@@ -439,6 +440,128 @@ def validate_contract(tag: str, repo_root: Path, *, require_registry_manifest: b
     return expected
 
 
+_HERMES_PACKAGE = "packages/memtomem-hermes-plugin"
+_HERMES_MANIFEST = f"{_HERMES_PACKAGE}/plugin.json"
+_PLUGIN_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def _git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run git and hand back the result; callers decide what each exit code means."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ReleaseCheckError(f"cannot run git {args[0]}: {exc}") from exc
+
+
+def _git_ok(repo_root: Path, *args: str) -> str:
+    result = _git(repo_root, *args)
+    if result.returncode != 0:
+        raise ReleaseCheckError(
+            f"git {' '.join(args)} failed ({result.returncode}): {result.stderr.strip()}"
+        )
+    return result.stdout
+
+
+def _hermes_manifest_version(repo_root: Path, rev: str, label: str) -> str:
+    raw = _git_ok(repo_root, "show", f"{rev}:{_HERMES_MANIFEST}")
+    try:
+        version = json.loads(raw).get("version")
+    except (ValueError, AttributeError) as exc:
+        raise ReleaseCheckError(f"{_HERMES_MANIFEST} at {label} is not a JSON object") from exc
+    if not isinstance(version, str) or not _PLUGIN_VERSION_RE.fullmatch(version):
+        raise ReleaseCheckError(f"{_HERMES_MANIFEST} at {label} has invalid version {version!r}")
+    return version
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def validate_hermes_version_bump(tag: str, repo_root: Path) -> str | None:
+    """Refuse a Hermes package that changed since the last release under the same version.
+
+    Hermes installs the package at a commit SHA and its catalog entry pins the
+    manifest version, so changed content under an unchanged version is invisible
+    to anyone reading that version. The comparison is the *delivered* manifest,
+    committed HEAD against the previous release commit; contract-to-manifest
+    parity is the supply-chain tests' job. A version-only bump is allowed.
+
+    Returns the baseline tag, or None when the baseline predates the package.
+    """
+    expected = _version_tuple(version_from_tag(tag))
+    # The verdict speaks for HEAD, so a package directory that differs from HEAD
+    # would make it describe something other than what is on disk.
+    dirty = _git_ok(
+        repo_root, "status", "--porcelain", "--untracked-files=all", "--", _HERMES_PACKAGE
+    )
+    if dirty.strip():
+        raise ReleaseCheckError(
+            f"{_HERMES_PACKAGE} has uncommitted changes; commit them before the release check"
+        )
+
+    candidates = []
+    for line in _git_ok(repo_root, "tag", "--list").splitlines():
+        match = _PROD_TAG_RE.fullmatch(line.strip())
+        if match and _version_tuple(match.group("version")) < expected:
+            candidates.append((_version_tuple(match.group("version")), match.group(0)))
+    if not candidates:
+        raise ReleaseCheckError(
+            f"no production tag older than {tag} to compare the Hermes package against "
+            "(a shallow clone or a checkout without tags has none)"
+        )
+    baseline = max(candidates)[1]
+    base_commit = _git_ok(repo_root, "rev-parse", "--verify", f"refs/tags/{baseline}^{{commit}}")
+    base_commit = base_commit.strip()
+
+    ancestry = _git(repo_root, "merge-base", "--is-ancestor", base_commit, "HEAD")
+    if ancestry.returncode == 1:
+        raise ReleaseCheckError(
+            f"previous release {baseline} is not an ancestor of HEAD; cannot tell what the "
+            "Hermes package changed since it"
+        )
+    if ancestry.returncode != 0:
+        raise ReleaseCheckError(
+            f"git merge-base failed ({ancestry.returncode}): {ancestry.stderr.strip()}"
+        )
+
+    # Only a successful, empty listing establishes absence; a failed one refuses.
+    if not _git_ok(repo_root, "ls-tree", base_commit, "--", _HERMES_PACKAGE).strip():
+        return None
+
+    # A configured external diff or textconv driver can report "no difference" for
+    # changed bytes, so both are switched off: the question is about the blobs.
+    diff = _git(
+        repo_root,
+        "diff",
+        "--quiet",
+        "--no-ext-diff",
+        "--no-textconv",
+        base_commit,
+        "HEAD",
+        "--",
+        _HERMES_PACKAGE,
+    )
+    if diff.returncode == 0:
+        return baseline
+    if diff.returncode != 1:
+        raise ReleaseCheckError(f"git diff failed ({diff.returncode}): {diff.stderr.strip()}")
+    previous = _hermes_manifest_version(repo_root, base_commit, baseline)
+    current = _hermes_manifest_version(repo_root, "HEAD", "HEAD")
+    if _version_tuple(current) <= _version_tuple(previous):
+        raise ReleaseCheckError(
+            f"{_HERMES_PACKAGE} changed since {baseline} but its version is {current} "
+            f"(was {previous}); bump [plugins] hermes_version in "
+            "packages/memtomem-plugin-assets/contract.toml and re-render"
+        )
+    return baseline
+
+
 def _metadata_from_wheel(path: Path) -> email.message.Message:
     with zipfile.ZipFile(path) as archive:
         for name in archive.namelist():
@@ -694,6 +817,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "backfills can validate historical tags that predate the manifest."
         ),
     )
+    contract.add_argument(
+        "--require-hermes-version-bump",
+        action="store_true",
+        help=(
+            "Also refuse a Hermes plugin package that changed since the previous "
+            "release tag without a version bump. Needs full tag history."
+        ),
+    )
 
     artifacts = subparsers.add_parser("artifacts")
     artifacts.add_argument("--dist", type=Path, required=True)
@@ -726,6 +857,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.repo_root.resolve(),
                 require_registry_manifest=args.require_registry_manifest,
             )
+            if args.require_hermes_version_bump:
+                validate_hermes_version_bump(args.tag, args.repo_root.resolve())
             _write_github_output(args.github_output, "version", version)
             print(version)
         elif args.command == "artifacts":

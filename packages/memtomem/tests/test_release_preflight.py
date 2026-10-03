@@ -8,6 +8,7 @@ import http.client
 import io
 import json
 import shlex
+import subprocess
 import tarfile
 import urllib.error
 import zipfile
@@ -480,6 +481,254 @@ def test_sbom_workflow_does_not_require_the_registry_manifest() -> None:
             scanned += 1
             assert "--require-registry-manifest" not in run, (job_name, step.get("name"))
     assert scanned, "release-sbom.yml no longer runs release_preflight.py at all"
+
+
+def test_release_workflow_opts_into_the_hermes_version_bump_check() -> None:
+    """Only the preflight job: it is the one checkout carrying the full tag history."""
+    document = _workflow("release.yml")
+    assert _parsed_contract_args(document, "preflight", "contract").require_hermes_version_bump
+    checkout = next(
+        step
+        for step in document["jobs"]["preflight"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/checkout@")
+    )
+    assert checkout["with"]["fetch-depth"] == 0
+
+
+def test_sbom_workflow_does_not_require_the_hermes_version_bump() -> None:
+    """Backfills validate one historical tag; its predecessor is not this gate's business."""
+    runs = [
+        step["run"]
+        for job in _workflow("release-sbom.yml")["jobs"].values()
+        for step in job.get("steps", [])
+        if isinstance(step.get("run"), str) and "release_preflight.py" in step["run"]
+    ]
+    assert runs, "release-sbom.yml no longer runs release_preflight.py at all"
+    assert all("--require-hermes-version-bump" not in run for run in runs)
+
+
+_HERMES = "packages/memtomem-hermes-plugin"
+
+
+def _git(repo: Path, *args: str) -> str:
+    # ``-c`` beats the developer's global config: no signing prompt, a fixed identity.
+    return subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            *args,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def _write_hermes(repo: Path, version: str | None, skill: str = "search") -> None:
+    package = repo / _HERMES
+    (package / "skills").mkdir(parents=True, exist_ok=True)
+    manifest = {"name": "memtomem"} if version is None else {"name": "memtomem", "version": version}
+    (package / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "skills" / "SKILL.md").write_text(skill, encoding="utf-8")
+
+
+def _commit(repo: Path, message: str, tag: str | None = None, *, annotated: bool = False) -> None:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--allow-empty", "-q", "-m", message)
+    if tag and annotated:
+        _git(repo, "tag", "-a", tag, "-m", tag)
+    elif tag:
+        _git(repo, "tag", tag)
+
+
+def _hermes_repo(
+    tmp_path: Path, *, baseline_version: str = "0.1.1", annotated: bool = False
+) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "README.md").write_text("x", encoding="utf-8")
+    _commit(repo, "before hermes", "v0.6.5")
+    _write_hermes(repo, baseline_version)
+    _commit(repo, "release", "v0.6.6", annotated=annotated)
+    return repo
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+def test_hermes_change_with_a_bump_passes(tmp_path: Path, annotated: bool) -> None:
+    repo = _hermes_repo(tmp_path, annotated=annotated)
+    _write_hermes(repo, "0.1.2", skill="changed")
+    _commit(repo, "change")
+    assert rp.validate_hermes_version_bump("v0.6.7", repo) == "v0.6.6"
+
+
+@pytest.mark.parametrize("version", ["0.1.1", "0.1.0", "0.0.9"])
+def test_hermes_change_without_a_higher_version_is_refused(tmp_path: Path, version: str) -> None:
+    repo = _hermes_repo(tmp_path)
+    _write_hermes(repo, version, skill="changed")
+    _commit(repo, "change")
+    with pytest.raises(rp.ReleaseCheckError, match=rf"version is {version} \(was 0\.1\.1\)"):
+        rp.validate_hermes_version_bump("v0.6.7", repo)
+
+
+def test_hermes_version_comparison_is_numeric_not_lexical(tmp_path: Path) -> None:
+    repo = _hermes_repo(tmp_path, baseline_version="0.1.9")
+    _write_hermes(repo, "0.1.10", skill="changed")
+    _commit(repo, "change")
+    assert rp.validate_hermes_version_bump("v0.6.7", repo) == "v0.6.6"
+
+
+def test_unchanged_hermes_package_passes(tmp_path: Path) -> None:
+    repo = _hermes_repo(tmp_path)
+    (repo / "README.md").write_text("unrelated", encoding="utf-8")
+    _commit(repo, "unrelated")
+    assert rp.validate_hermes_version_bump("v0.6.7", repo) == "v0.6.6"
+
+
+def test_a_version_only_hermes_bump_is_allowed(tmp_path: Path) -> None:
+    repo = _hermes_repo(tmp_path)
+    _write_hermes(repo, "0.1.2")
+    _commit(repo, "bump only")
+    assert rp.validate_hermes_version_bump("v0.6.7", repo) == "v0.6.6"
+
+
+def test_baseline_without_the_hermes_package_is_a_first_release(tmp_path: Path) -> None:
+    repo = _hermes_repo(tmp_path)
+    assert rp.validate_hermes_version_bump("v0.6.6", repo) is None
+
+
+def test_test_tag_compares_against_the_highest_lower_production_tag(tmp_path: Path) -> None:
+    repo = _hermes_repo(tmp_path)
+    _write_hermes(repo, "0.1.1", skill="changed")
+    _commit(repo, "change", "v0.6.7")  # the tag being re-run is not its own baseline
+    _git(repo, "tag", "v0.7.0")  # nor is a higher one
+    _git(repo, "tag", "test-v0.6.6a1")  # test tags are never a baseline
+    with pytest.raises(rp.ReleaseCheckError, match="since v0.6.6"):
+        rp.validate_hermes_version_bump("test-v0.6.7a1", repo)
+
+
+@pytest.mark.parametrize(
+    "dirty", ["modify", "untracked", "staged"], ids=["modified", "untracked", "staged"]
+)
+def test_dirty_hermes_package_is_refused(tmp_path: Path, dirty: str) -> None:
+    repo = _hermes_repo(tmp_path)
+    if dirty == "modify":
+        (repo / _HERMES / "skills" / "SKILL.md").write_text("edited", encoding="utf-8")
+    else:
+        (repo / _HERMES / "skills" / "NEW.md").write_text("new", encoding="utf-8")
+        if dirty == "staged":
+            _git(repo, "add", "-A")
+    with pytest.raises(rp.ReleaseCheckError, match="uncommitted changes"):
+        rp.validate_hermes_version_bump("v0.6.7", repo)
+
+
+def test_baseline_off_the_release_lineage_is_refused(tmp_path: Path) -> None:
+    repo = _hermes_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "side")
+    _commit(repo, "side release", "v0.6.9")
+    _git(repo, "checkout", "-q", "main")
+    with pytest.raises(rp.ReleaseCheckError, match="v0.6.9 is not an ancestor of HEAD"):
+        rp.validate_hermes_version_bump("v0.7.0", repo)
+
+
+def test_no_older_production_tag_is_refused(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _write_hermes(repo, "0.1.0")
+    _commit(repo, "only", "test-v0.1.0a1")
+    with pytest.raises(rp.ReleaseCheckError, match="no production tag older than v0.1.0"):
+        rp.validate_hermes_version_bump("v0.1.0", repo)
+
+
+def test_a_configured_external_diff_cannot_hide_a_change(tmp_path: Path) -> None:
+    """A trusted external diff exiting 0 made ``--quiet`` report "unchanged" for edits."""
+    repo = _hermes_repo(tmp_path)
+    _git(repo, "config", "diff.external", "true")
+    _git(repo, "config", "diff.trustExitCode", "true")
+    _write_hermes(repo, "0.1.1", skill="changed")
+    _commit(repo, "change")
+    with pytest.raises(rp.ReleaseCheckError, match="changed since v0.6.6"):
+        rp.validate_hermes_version_bump("v0.6.7", repo)
+
+
+def test_a_failing_git_diff_is_refused_not_read_as_a_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exit codes other than 0/1 are errors; only ``--quiet``'s own 1 means "changed"."""
+    repo = _hermes_repo(tmp_path)
+    _write_hermes(repo, "0.1.2", skill="changed")
+    _commit(repo, "change")
+    real = rp._git
+
+    def broken_diff(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        if args[0] == "diff":
+            return subprocess.CompletedProcess(["git", *args], 128, "", "fatal: bad object")
+        return real(root, *args)
+
+    monkeypatch.setattr(rp, "_git", broken_diff)
+    with pytest.raises(rp.ReleaseCheckError, match=r"git diff failed \(128\): fatal: bad object"):
+        rp.validate_hermes_version_bump("v0.6.7", repo)
+
+
+def test_a_non_repository_is_refused_not_skipped(tmp_path: Path) -> None:
+    with pytest.raises(rp.ReleaseCheckError, match="git status"):
+        rp.validate_hermes_version_bump("v0.6.7", tmp_path)
+
+
+@pytest.mark.parametrize("side", ["baseline", "head"])
+@pytest.mark.parametrize("version", [None, 7, "0.1", "0.1.2-rc1"])
+def test_malformed_hermes_manifest_version_is_refused(
+    tmp_path: Path, side: str, version: object
+) -> None:
+    repo = _hermes_repo(tmp_path, baseline_version="0.1.1")
+    if side == "baseline":
+        _write_hermes(repo, None)
+        manifest = {"name": "memtomem"} if version is None else {"version": version}
+        (repo / _HERMES / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+        _commit(repo, "bad baseline", "v0.6.8")
+        _write_hermes(repo, "0.1.5", skill="changed")
+        tag = "v0.6.9"
+    else:
+        manifest = {"name": "memtomem"} if version is None else {"version": version}
+        (repo / _HERMES / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (repo / _HERMES / "skills" / "SKILL.md").write_text("changed", encoding="utf-8")
+        tag = "v0.6.7"
+    _commit(repo, "change")
+    with pytest.raises(rp.ReleaseCheckError, match="has invalid version"):
+        rp.validate_hermes_version_bump(tag, repo)
+
+
+def test_the_flag_is_what_makes_the_contract_check_refuse_an_unbumped_hermes_change(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Wiring pin, and the refusal lands before any success output is written."""
+    repo = _repo(tmp_path, version="0.6.7")
+    _git(repo, "init", "-q", "-b", "main")
+    _commit(repo, "before hermes", "v0.6.5")
+    _write_hermes(repo, "0.1.1")
+    _commit(repo, "release", "v0.6.6")
+    _write_hermes(repo, "0.1.1", skill="changed")
+    _commit(repo, "change")
+    output = tmp_path / "github-output"
+    output.write_bytes(b"before\n")
+    argv = ["contract", "--tag", "v0.6.7", "--repo-root", str(repo), "--github-output", str(output)]
+
+    assert rp.main([*argv, "--require-hermes-version-bump"]) == 1
+    assert output.read_bytes() == b"before\n"
+    assert capsys.readouterr().out == ""
+    assert rp.main(argv) == 0
+    # Text mode: the success line ends in CRLF on Windows.
+    assert output.read_text(encoding="utf-8").splitlines() == ["before", "version=0.6.7"]
 
 
 # Every counterexample three review rounds and one design debate produced.
