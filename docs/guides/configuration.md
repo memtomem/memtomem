@@ -745,10 +745,11 @@ a `mm index <path>` run, or a Reindex from the Web UI — including your own
 source repositories. A directory scan leaves one next to each file it selects
 for indexing, which is the overlap between `indexing.supported_extensions` and
 the extensions a chunker is registered for. With the default settings that
-overlap is `.md`, `.json`, `.yaml`, `.yml` and `.toml`; configuring a hard
-chunk budget (`indexing.hard_max_chunk_tokens`) registers the code chunkers as
-well, and an indexed code repository then picks up sidecars next to its `.py`,
-`.js`, `.ts`, `.jsx` and `.tsx` files too. Naming a single file directly
+overlap is the whole default list, `.md`, `.json`, `.yaml`, `.yml`, `.toml`,
+`.py`, `.js`, `.ts`, `.jsx` and `.tsx`, so an indexed code repository picks up
+sidecars next to its source files too. The code chunkers are always
+registered: without the `memtomem[code]` extra a code file is still indexed,
+and gets its sidecar, but is split differently. Naming a single file directly
 (`mm index <file>`) locks it before that check, so it leaves a sidecar even for
 an extension no chunker handles. Sidecars are never indexed themselves:
 `.lock` is not a supported extension.

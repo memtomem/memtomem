@@ -53,6 +53,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Every indexing engine uses the server's chunker set (#2622).** Without a
+  hard chunk budget (the default), an engine built without an explicit chunker
+  registry left out the Python and JavaScript/TypeScript chunkers and chunked
+  Markdown without the configured sizes. That engine is what
+  `mem_embedding_reset(mode="revert_to_stored")` builds, so after a revert a
+  running server skipped `.py`, `.js`, `.ts`, `.jsx` and `.tsx` files until it
+  restarted, and `mm memory doctor` left code files out of its coverage checks.
+  Every engine now shares one builder with the startup components. The
+  configuration guide's lock-sidecar section said the code extensions need a
+  hard chunk budget; it now says a default scan selects all ten default
+  extensions.
+
 - **Revert-to-stored applies the stored model's CPU profile and chunk budget
   (#2609).** `mem_embedding_reset(mode="revert_to_stored")` assigned the stored
   provider, model, dimension and token cap onto the running config, which
