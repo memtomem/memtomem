@@ -3080,10 +3080,11 @@ def _config_label_fields() -> dict[str, list[str]]:
 
 
 def _config_guide_sections() -> dict[str, dict]:
-    """Parse ``_CONFIG_GUIDES`` -> {section: {items: [...], warn: bool}} from JS.
+    """Parse ``_CONFIG_GUIDES`` -> {section: {items, warn, envs}} from JS.
 
     Each section literal opens with its ``items:`` array (id slugs, not prose);
-    ``warn: true`` marks the sections whose how-to carries a localized warning.
+    ``warn: true`` marks the sections whose how-to carries a localized warning;
+    ``envs`` is the copyable env-var block, kept verbatim including blank lines.
     """
     block = _balanced_object(
         _SETTINGS_CONFIG_JS.read_text(encoding="utf-8"), "const _CONFIG_GUIDES"
@@ -3094,11 +3095,70 @@ def _config_guide_sections() -> dict[str, dict]:
     for (name, pos), (_, nxt) in zip(heads, heads[1:]):
         seg = block[pos:nxt]
         im = re.search(r"items:\s*\[(.*?)\]", seg, re.DOTALL)
+        em = re.search(r"envs:\s*\[(.*?)\]", seg, re.DOTALL)
         out[name] = {
             "items": re.findall(r"'([^']+)'", im.group(1)) if im else [],
             "warn": "warn: true" in seg,
+            "envs": re.findall(r"'([^']*)'", em.group(1)) if em else [],
         }
     return out
+
+
+# Knobs each embedding provider actually reads (embedding/onnx.py, ollama.py,
+# openai.py). A copied example must not carry a knob its provider ignores.
+_ONNX_ONLY_KNOBS = ("ONNX_BATCH_SIZE", "MAX_SEQUENCE_TOKENS", "ONNX_CPU_MEM_ARENA", "THREADS")
+_NOT_ONNX_KNOBS = ("BASE_URL", "API_KEY", "BATCH_SIZE")
+
+
+class TestEmbeddingGuideEnvExample:
+    """#2466 — the Settings > Embedding env example is one block per provider."""
+
+    @staticmethod
+    def _groups() -> dict[str, list[str]]:
+        envs = _config_guide_sections()["embedding"]["envs"]
+        assert envs, "could not parse the embedding guide's envs block"
+        groups: dict[str, list[str]] = {}
+        current: list[str] | None = None
+        for line in envs:
+            if line.startswith("#"):
+                current = []
+                continue
+            if not line:
+                continue
+            assert current is not None, f"env line before any provider heading: {line!r}"
+            current.append(line)
+            if line.startswith("MEMTOMEM_EMBEDDING__PROVIDER="):
+                provider = line.split("=", 1)[1]
+                assert provider not in groups, f"two blocks select provider {provider!r}"
+                groups[provider] = current
+        return groups
+
+    @staticmethod
+    def _knobs(lines: list[str]) -> set[str]:
+        return {line.split("=", 1)[0].removeprefix("MEMTOMEM_EMBEDDING__") for line in lines}
+
+    def test_each_block_selects_exactly_one_provider(self) -> None:
+        groups = self._groups()
+        assert set(groups) == {"onnx", "ollama"}, sorted(groups)
+        for provider, lines in groups.items():
+            selects = [ln for ln in lines if ln.startswith("MEMTOMEM_EMBEDDING__PROVIDER=")]
+            assert len(selects) == 1, (provider, selects)
+
+    def test_onnx_block_carries_only_knobs_onnx_reads(self) -> None:
+        knobs = self._knobs(self._groups()["onnx"])
+        assert set(_ONNX_ONLY_KNOBS) <= knobs, knobs
+        assert not knobs & set(_NOT_ONNX_KNOBS), knobs & set(_NOT_ONNX_KNOBS)
+
+    def test_onnx_block_leaves_the_dimension_to_the_model(self) -> None:
+        # ONNX does read DIMENSION, but E5-small sets 384 itself and any other
+        # value is refused, so a copyable example is safer without it (#2462).
+        assert "DIMENSION" not in self._knobs(self._groups()["onnx"])
+
+    def test_ollama_block_carries_no_onnx_or_openai_knob(self) -> None:
+        knobs = self._knobs(self._groups()["ollama"])
+        assert not knobs & set(_ONNX_ONLY_KNOBS), knobs & set(_ONNX_ONLY_KNOBS)
+        # Ollama builds an unauthenticated client; only the OpenAI provider reads it.
+        assert "API_KEY" not in knobs, knobs
 
 
 class TestConfigPanelI18n:
