@@ -20,10 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 import pathspec
 
-from memtomem.chunking.markdown import MarkdownChunker
-from memtomem.chunking.registry import ChunkerRegistry
-from memtomem.chunking.restructured_text import ReStructuredTextChunker
-from memtomem.chunking.structured import StructuredChunker
+from memtomem.chunking.registry import ChunkerRegistry, build_chunker_registry
 from memtomem.config import (
     IndexingConfig,
     NamespaceConfig,
@@ -1084,26 +1081,7 @@ class IndexEngine:
         # is restart-guarded so resolving once is correct; the digest at that
         # path is not, and is re-taken per call.
         self._chunk_tokenizer_path: Path | None = None
-        self._registry = registry or ChunkerRegistry(
-            [
-                MarkdownChunker(),
-                StructuredChunker(indexing_config=config),
-                ReStructuredTextChunker(),
-            ]
-        )
-        if registry is None and config.hard_max_chunk_tokens:
-            from memtomem.chunking.javascript import JavaScriptChunker
-            from memtomem.chunking.python_code import PythonChunker
-
-            self._registry = ChunkerRegistry(
-                [
-                    MarkdownChunker(indexing_config=config),
-                    StructuredChunker(indexing_config=config),
-                    ReStructuredTextChunker(),
-                    PythonChunker(),
-                    JavaScriptChunker(),
-                ]
-            )
+        self._registry = registry or build_chunker_registry(config)
         # Level L3 of the memory-file lock order (see ``context._atomic``
         # module docstring): the per-file sidecar (L2) is acquired ABOVE this
         # lock, never below, so no path ever waits on a sidecar while holding
