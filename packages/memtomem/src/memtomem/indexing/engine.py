@@ -1496,7 +1496,9 @@ class IndexEngine:
         if path_scope == "configured" and not self._is_within_memory_dirs(path):
             return []
         if path.is_file():
-            return [path]
+            # The indexer refuses an excluded file whatever the scope, so a
+            # preview that listed it would promise a row that never lands.
+            return [] if self.is_excluded(path) else [path]
         if path.is_dir():
             return self._discover_files(path, recursive)
         return []
@@ -3346,7 +3348,7 @@ class IndexEngine:
             # Same bound for the per-file guard as for the walk (#2486).
             stream_walk_root: Path | None = None
             if path.is_file():
-                files = [path]
+                files = [] if self.is_excluded(path) else [path]
             elif path.is_dir():
                 files = self._discover_files(path, recursive)
                 stream_walk_root = path

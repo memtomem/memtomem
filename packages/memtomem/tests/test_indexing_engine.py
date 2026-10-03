@@ -362,13 +362,12 @@ class TestExcludePatterns:
         assert stats.indexed_chunks == 0
 
     async def test_index_path_stream_single_file_blocks_excluded(self, components, memory_dir):
-        """REGRESSION: ``index_path_stream`` has a single-file branch
-        (``if path.is_file(): files = [path]``) that skips ``_discover_files``
-        and calls guard-free ``_index_file`` directly. Exposed via the Web UI
-        ``GET /api/index/stream?path=...`` endpoint. The primary guard at
-        ``_index_file`` closes this entry point; a chunker spy proves the
-        guard fires *before* parsing so ``stored==0`` alone is not relied on
-        (NoopEmbedder's sqlite-vec insert can roll back and mask a bypass).
+        """REGRESSION: ``index_path_stream`` has a single-file branch that
+        skips ``_discover_files``. Exposed via the Web UI
+        ``GET /api/index/stream?path=...`` endpoint. That branch now drops an
+        excluded file before ``_index_file`` is reached (#2483); a chunker spy
+        proves the file is never parsed, so ``stored==0`` alone is not relied
+        on (NoopEmbedder's sqlite-vec insert can roll back and mask a bypass).
         """
         creds_path = memory_dir / "oauth_creds.json"
         creds_path.write_text('{"token": "secret"}')
@@ -1508,6 +1507,42 @@ class TestPreviewHelpers:
 
         files = engine.discover_indexable_files(fp)
         assert files == [fp.resolve()]
+
+    @pytest.mark.parametrize("path_scope", ["configured", "explicit"])
+    async def test_single_file_preview_skips_an_excluded_file(
+        self, components, memory_dir, path_scope
+    ):
+        """The file branch applies the same exclusion as the directory walk.
+
+        Indexing refuses an excluded file in either scope, so listing it in
+        the preview promised a row that never lands (#2483).
+        """
+        engine = components.index_engine
+        engine._config.exclude_patterns = ["**/draft.md"]
+        draft = memory_dir / "draft.md"
+        draft.write_text("# Draft", encoding="utf-8")
+        (memory_dir / "final.md").write_text("# Final", encoding="utf-8")
+
+        walked = engine.discover_indexable_files(memory_dir, path_scope=path_scope)
+        assert {f.name for f in walked} == {"final.md"}
+        assert engine.discover_indexable_files(draft, path_scope=path_scope) == []
+
+    async def test_excluded_single_file_reports_no_files_on_both_index_paths(
+        self, components, memory_dir
+    ):
+        """``index_path`` and ``index_path_stream`` count what the preview lists."""
+        engine = components.index_engine
+        engine._config.exclude_patterns = ["**/draft.md"]
+        draft = memory_dir / "draft.md"
+        draft.write_text("# Draft\n\nBody.\n", encoding="utf-8")
+
+        stats = await engine.index_path(draft)
+        events = [ev async for ev in engine.index_path_stream(draft, recursive=False)]
+        complete = next(e for e in events if e.get("type") == "complete")
+
+        assert stats.total_files == 0
+        assert complete["total_files"] == 0
+        assert complete["resolved_namespaces"] == []
 
     async def test_discover_indexable_files_handles_directory(self, components, memory_dir):
         engine = components.index_engine

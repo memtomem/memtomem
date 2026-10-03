@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **An excluded file named on its own no longer shows up as one to index
+  (#2483).** Passing a single file to the Web index and namespace previews,
+  `index_path` or the streaming index listed it even when an exclusion rule
+  (the built-in secret/noise denylist or `indexing.exclude_patterns`, for
+  example) matched it, though indexing then skipped it. Those surfaces now
+  report no files for it, matching what a walk of its directory finds for
+  those rules.
+
 ## [0.6.6] — 2026-10-02
 
 ### Upgrading
