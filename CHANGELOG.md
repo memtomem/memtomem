@@ -53,6 +53,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The Settings > Embedding env example is split by provider (#2466).** It
+  selected Ollama and also listed `ONNX_BATCH_SIZE`, `MAX_SEQUENCE_TOKENS`,
+  `ONNX_CPU_MEM_ARENA` and `THREADS`, which only the ONNX provider reads, plus
+  `API_KEY`, which only the OpenAI provider reads. It now shows one ONNX block
+  with `multilingual-e5-small` and one Ollama block, each with only the knobs
+  that provider uses.
+
 - **Revert-to-stored applies the stored model's CPU profile and chunk budget
   (#2609).** `mem_embedding_reset(mode="revert_to_stored")` assigned the stored
   provider, model, dimension and token cap onto the running config, which

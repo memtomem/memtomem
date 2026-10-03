@@ -643,17 +643,23 @@ const _CONFIG_GUIDES = {
   embedding: {
     items: ['provider', 'model', 'dimension', 'base_url', 'batch_size', 'onnx_batch_size',
             'max_sequence_tokens', 'onnx_cpu_mem_arena', 'api_key', 'threads', 'onnx_variant', 'onnx_artifact_path'],
+    // One block per provider: each provider reads only its own knobs, so a
+    // mixed block copied whole leaves half of it without effect (#2466).
     envs: [
-      'MEMTOMEM_EMBEDDING__PROVIDER=ollama',
-      'MEMTOMEM_EMBEDDING__MODEL=bge-m3',
-      'MEMTOMEM_EMBEDDING__DIMENSION=1024',
-      'MEMTOMEM_EMBEDDING__BASE_URL=http://localhost:11434',
-      'MEMTOMEM_EMBEDDING__API_KEY=sk-...',
-      'MEMTOMEM_EMBEDDING__BATCH_SIZE=64',
+      '# ONNX (local CPU)',
+      'MEMTOMEM_EMBEDDING__PROVIDER=onnx',
+      'MEMTOMEM_EMBEDDING__MODEL=multilingual-e5-small',
       'MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=4',
       'MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS=512',
       'MEMTOMEM_EMBEDDING__ONNX_CPU_MEM_ARENA=false',
       'MEMTOMEM_EMBEDDING__THREADS=2',
+      '',
+      '# Ollama',
+      'MEMTOMEM_EMBEDDING__PROVIDER=ollama',
+      'MEMTOMEM_EMBEDDING__MODEL=bge-m3',
+      'MEMTOMEM_EMBEDDING__DIMENSION=1024',
+      'MEMTOMEM_EMBEDDING__BASE_URL=http://localhost:11434',
+      'MEMTOMEM_EMBEDDING__BATCH_SIZE=64',
     ],
     howto: {
       restart: true,
