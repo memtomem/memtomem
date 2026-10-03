@@ -13,11 +13,7 @@ import asyncio
 import inspect
 import logging
 
-from memtomem.chunking.base import Chunker
-from memtomem.chunking.markdown import MarkdownChunker
-from memtomem.chunking.registry import ChunkerRegistry
-from memtomem.chunking.restructured_text import ReStructuredTextChunker
-from memtomem.chunking.structured import StructuredChunker
+from memtomem.chunking.registry import build_chunker_registry
 from memtomem.config import Mem2MemConfig, embedding_policy_fingerprint
 from memtomem.embedding.factory import create_embedder
 from memtomem.errors import EmbeddingDimensionMismatchError
@@ -282,31 +278,7 @@ async def create_components(
                     "entity backfill failed — continuing startup without it", exc_info=True
                 )
 
-        # Build chunker registry with optional code chunkers
-        chunkers: list[Chunker] = [
-            MarkdownChunker(indexing_config=config.indexing),
-            StructuredChunker(indexing_config=config.indexing),
-            ReStructuredTextChunker(),
-        ]
-        try:
-            from memtomem.chunking.python_code import PythonChunker
-
-            chunkers.append(PythonChunker())
-        except Exception:
-            _log.warning(
-                "PythonChunker unavailable — install memtomem[all] to enable tree-sitter code chunking",
-                exc_info=True,
-            )
-        try:
-            from memtomem.chunking.javascript import JavaScriptChunker
-
-            chunkers.append(JavaScriptChunker())
-        except Exception:
-            _log.warning(
-                "JavaScriptChunker unavailable — install memtomem[all] to enable tree-sitter code chunking",
-                exc_info=True,
-            )
-        registry = ChunkerRegistry(chunkers)
+        registry = build_chunker_registry(config.indexing)
 
         if config.rerank.enabled:
             from memtomem.search.reranker.factory import create_reranker
