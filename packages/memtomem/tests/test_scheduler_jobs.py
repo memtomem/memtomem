@@ -40,6 +40,18 @@ class TestJobRegistryShape:
         instance = spec.params_model()
         assert spec.params_model.model_validate(instance.model_dump()) == instance
 
+    def test_compaction_description_matches_its_runner(self):
+        # Phase B hands these descriptions to a model choosing jobs, so the
+        # compaction line must say what ``_run_compaction`` does: it holds
+        # sources outside search and never deletes (#2498). The old "Delete
+        # chunks whose source files no longer exist" told it the opposite.
+        # Positive phrases, not "delete" absent: the honest wording names the
+        # deletion it does *not* do.
+        description = JOB_KINDS["compaction"].description
+        assert description.startswith("Hold chunks of missing sources"), description
+        assert "never deletes" in description, description
+        assert "mm gc orphan-sources --apply" in description, description
+
 
 class TestRunners:
     @pytest.mark.asyncio
