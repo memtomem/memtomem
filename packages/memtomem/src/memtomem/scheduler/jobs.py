@@ -198,7 +198,11 @@ async def _run_dedup_scan(
 JOB_KINDS: dict[str, JobSpec] = {
     "compaction": JobSpec(
         name="compaction",
-        description=("Delete chunks whose source files no longer exist on disk."),
+        description=(
+            "Hold chunks of missing sources, or sources whose availability cannot be"
+            " checked, outside search for recovery; never deletes (purge"
+            " confirmed-missing sources with mm gc orphan-sources --apply)."
+        ),
         params_model=CompactionParams,
         runner=_run_compaction,
     ),
