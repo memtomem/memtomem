@@ -5100,6 +5100,10 @@ def settings_doctor_cmd(json_out: bool, scope_flag: str | None) -> None:
             status = "malformed"
         elif unscanned:
             status = "incomplete"
+        elif unportable:
+            # Advisory like ``incomplete`` (exit 0), but a script reading
+            # ``status`` must not see "clean" beside findings (#2482).
+            status = "advisory"
         else:
             status = "clean"
         payload = {

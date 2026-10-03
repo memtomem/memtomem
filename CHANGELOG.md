@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **`mm context settings-doctor --json` reports `"status": "advisory"` for
+  unportable hook commands (#2482).** It reported `"clean"` while the same
+  payload listed unportable-command findings, so a script that gated on
+  `status == "clean"` never saw them. `clean` now means every axis is empty.
+  The exit code is unchanged (0); a script that treats any status other than
+  `clean` as a failure will now see `advisory` where it saw `clean`.
+
 ### Fixed
 
 - **An excluded file named on its own no longer shows up as one to index

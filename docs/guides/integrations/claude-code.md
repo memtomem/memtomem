@@ -396,7 +396,8 @@ it is part of a longer path such as `/opt/home/x`, `./home/x`, or
 `$HOME/home/x`. Rewrite such commands with `$HOME`, `~`, or a repo-relative
 path. JSON output includes an `unportable_commands` array with the source,
 tier, path, event, rule/hook index, command, and the root as
-`unportable_literal`.
+`unportable_literal`, and reports `"status": "advisory"` when nothing else was
+found; the exit code stays 0.
 
 A clean result does not mean the hooks are portable: paths assembled at run
 time, other absolute paths (`/opt/homebrew` vs `/usr/local`), and scripts that
@@ -408,6 +409,9 @@ object, unreadable, not a file, or a broken symlink) is not silently treated as 
 lists it under `unscanned_settings` with a reason, `--json` reports
 `"status": "incomplete"` when no duplicates or malformed matchers were found,
 and the exit code stays 0.
+`--json` `status` names the first axis with findings, in the order
+`duplicates`, `malformed`, `incomplete`, `advisory`; it is `clean` only when
+every axis is empty.
 The same warning rides the sync and MCP warning surfaces.
 
 > [!NOTE]

@@ -935,7 +935,8 @@ class TestSettingsDoctorCli:
         result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
-        assert payload["status"] == "clean"
+        # Unportable commands alone are advisory: exit 0, but not "clean" (#2482).
+        assert payload["status"] == "advisory"
         assert len(payload["unportable_commands"]) == 1
         item = payload["unportable_commands"][0]
         assert item["source"] == "canonical"
@@ -992,6 +993,45 @@ class TestSettingsDoctorCli:
         json_result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
         assert json_result.exit_code == 0, json_result.output
         assert "/home/alice/private-credential" in json_result.output
+
+    def test_settings_doctor_json_clean_when_nothing_is_found(
+        self, project_root, fake_home, monkeypatch
+    ):
+        _write_canonical(project_root, _bundled_hook())
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "project_local")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["unportable_commands"] == []
+        assert payload["unscanned_settings"] == []
+        assert payload["status"] == "clean"
+
+    def test_settings_doctor_json_incomplete_outranks_advisory(
+        self, project_root, fake_home, monkeypatch
+    ):
+        """An unscanned file is the stronger advisory: what was not read may hide more."""
+        _write_canonical(
+            project_root,
+            {"PostToolUse": [_rule("", "/Users/alice/hook.sh")]},
+        )
+        user_path = fake_home / ".claude" / "settings.json"
+        user_path.parent.mkdir(parents=True, exist_ok=True)
+        user_path.write_text("{broken json", encoding="utf-8")
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "project_local")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert len(payload["unportable_commands"]) == 1
+        assert len(payload["unscanned_settings"]) == 1
+        assert payload["status"] == "incomplete"
 
     def test_settings_doctor_unscanned_file_is_incomplete_not_clean(
         self, project_root, fake_home, monkeypatch
