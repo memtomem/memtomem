@@ -297,7 +297,12 @@ def _check_runtime_dir(snapshot: RegistrySnapshot) -> CheckResult:
 
 
 def _check_server_instances(snapshot: RegistrySnapshot, rows: list[InstanceRow]) -> CheckResult:
-    """How many servers are live on this host, and how long have they been up?
+    """How many memtomem processes are live on this host, and for how long?
+
+    Counts every process in the instance registry: MCP servers and, since
+    #2574, ``mm web``, which registers a store sentinel too. The check name
+    ``server-instances`` predates that and is a machine contract, so it keeps
+    the old word while the message and the JSON keys say "processes".
 
     Reported unconditionally rather than only when something looks wrong. The
     field data is the reason: on one host all 29 servers had live parents, so
