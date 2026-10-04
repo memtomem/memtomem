@@ -261,6 +261,49 @@ def _collect_concurrent_writers(db_path: Path) -> dict | None:
     return warning
 
 
+def _tokenizer_fallback_warning(configured: str) -> dict | None:
+    """Warn while a ``kiwipiepy`` store is being tokenized as ``unicode61`` (#2647).
+
+    Without ``kiwipiepy`` the tokenizer switches this process to ``unicode61``
+    on first use and keeps writing, so one FTS index ends up holding two token
+    representations and Korean BM25 queries miss rows across them. Two
+    signals, either sufficient: the process already fell back (sticky — a
+    later install does not undo it), or the module cannot be found (the
+    fallback is pending; status never tokenizes, so it would not trip it).
+    Neither imports Kiwi. Rows written during a fallback stay damaged after
+    the extra is installed, so the fix ends with a rebuild.
+    """
+    if configured != "kiwipiepy":
+        return None
+    from memtomem.storage.fts_tokenizer import get_tokenizer
+
+    active = get_tokenizer()
+    installed = bool(_dependency_state("kiwipiepy")["available"])
+    if active == "kiwipiepy" and installed:
+        return None
+    if active != "kiwipiepy":
+        state = f"this process is tokenizing with {active}"
+    else:
+        state = "kiwipiepy is not installed here, so this process will fall back to unicode61"
+    return {
+        "kind": "tokenizer_fallback",
+        "configured": configured,
+        "active": active,
+        "detail": f"search.tokenizer=kiwipiepy but {state}. Rows it indexes are "
+        "tokenized differently from kiwipiepy rows, so Korean keyword search misses "
+        "notes across the two.",
+        # The rebuild runs under the CLI's own tokenizer and config, so it has to
+        # run where the server does: a bare ``mm`` may lack the extra (and rebuild
+        # as unicode61), be absent on a uvx-only install, or resolve another
+        # store. Naming the launcher, not a pinned command, covers all three.
+        "fix": "install the korean extra wherever memtomem runs (launch "
+        "memtomem[onnx,korean] instead of memtomem[onnx]), restart every memtomem "
+        "server on this store, then rebuild its keyword index with the server's own "
+        "launcher and environment, running `mm config set search.tokenizer "
+        "kiwipiepy` in place of `memtomem-server`",
+    }
+
+
 async def collect_status_report(app: AppContext) -> dict:
     """Gather the status report as a structured dict.
 
@@ -417,6 +460,9 @@ async def collect_status_report(app: AppContext) -> dict:
                 "doc": "docs/guides/configuration.md#reset-flow",
             }
         )
+    tokenizer_warning = _tokenizer_fallback_warning(config.search.tokenizer)
+    if tokenizer_warning is not None:
+        warnings.append(tokenizer_warning)
     # #1619: an explicitly enabled MMR silently does nothing without dense
     # retrieval (no vectors to diversify over) — surface the mismatch where
     # BM25-only operators will see it. MMR defaults to disabled, so this
