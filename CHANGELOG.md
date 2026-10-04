@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **The Korean-optimized `mm init` preset no longer enables a reranker.** It
+  keeps ONNX `multilingual-e5-small` and the `kiwipiepy` tokenizer but drops
+  `jinaai/jina-reranker-v2-base-multilingual`, a 1.1 GB download that added
+  about a second of CPU time to every search and whose model license
+  (CC-BY-NC-4.0) does not allow commercial use. Re-running the preset on an
+  existing config keeps a reranker it already enables and lists it under
+  "Preserved from existing config"; `mm config set rerank.enabled false`
+  turns it off. To opt in on a new setup, pick the multilingual reranker in
+  the Advanced wizard or set `MEMTOMEM_RERANK__ENABLED=true` and
+  `MEMTOMEM_RERANK__MODEL=jinaai/jina-reranker-v2-base-multilingual`.
 - **`mm context settings-doctor --json` reports `"status": "advisory"` for
   unportable hook commands (#2482).** It reported `"clean"` while the same
   payload listed unportable-command findings, so a script that gated on

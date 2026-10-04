@@ -4197,9 +4197,9 @@ class TestPresetSelection:
         assert state["tokenizer"] == "unicode61"
         assert state["enable_auto_ns"] is True
 
-    def test_korean_preset_applies_bge_m3_and_kiwipiepy(self) -> None:
-        """Korean preset: ONNX multilingual-e5-small + kiwipiepy tokenizer + multilingual
-        reranker (the Korean-optimized bundle)."""
+    def test_korean_preset_applies_e5_and_kiwipiepy_without_rerank(self) -> None:
+        """Korean preset: ONNX multilingual-e5-small + kiwipiepy tokenizer, reranker
+        off (the Korean-optimized bundle)."""
         from memtomem.cli.init_cmd import _apply_preset
 
         state: dict = {}
@@ -4208,8 +4208,8 @@ class TestPresetSelection:
         assert state["provider"] == "onnx"
         assert state["model"] == "multilingual-e5-small"
         assert state["dimension"] == 384
-        assert state["rerank_enabled"] is True
-        assert state["rerank_model"] == "jinaai/jina-reranker-v2-base-multilingual"
+        assert state["rerank_enabled"] is False
+        assert "rerank_model" not in state
         assert state["tokenizer"] == "kiwipiepy"
         assert state["enable_auto_ns"] is True
 
@@ -4247,9 +4247,54 @@ class TestPresetSelection:
         assert data["embedding"]["provider"] == "onnx"
         assert data["embedding"]["model"] == "multilingual-e5-small"
         assert data["embedding"]["dimension"] == 384
-        assert data["rerank"]["model"] == "jinaai/jina-reranker-v2-base-multilingual"
+        assert "rerank" not in data
         assert data["search"]["tokenizer"] == "kiwipiepy"
         assert data["namespace"]["enable_auto_ns"] is True
+
+    def test_korean_preset_rerun_keeps_an_enabled_reranker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-running the rerank-less Korean preset over a config written by the
+        old preset keeps that reranker and says so — the preset leaves
+        ``rerank`` unwritten, so read-merge-write preserves it."""
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        existing = {
+            "enabled": True,
+            "provider": "fastembed",
+            "model": "jinaai/jina-reranker-v2-base-multilingual",
+        }
+        (config_dir / "config.json").write_text(json.dumps({"rerank": existing}), encoding="utf-8")
+
+        result = CliRunner().invoke(
+            init,
+            [
+                "--non-interactive",
+                "--preset",
+                "korean",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--mcp",
+                "skip",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        data = json.loads((config_dir / "config.json").read_text(encoding="utf-8"))
+        assert data["rerank"] == existing
+        assert data["search"]["tokenizer"] == "kiwipiepy"
+        preserved = result.output.split("Preserved from existing config", 1)
+        assert len(preserved) == 2, result.output
+        assert "rerank.model = jinaai/jina-reranker-v2-base-multilingual" in preserved[1]
 
     def test_preset_flag_rejects_unknown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4731,6 +4776,9 @@ class TestPresetWizardBackNav:
         # Korean re-pick, not the initial English pick.
         assert data["embedding"]["model"] == "multilingual-e5-small"
         assert data["search"]["tokenizer"] == "kiwipiepy"
+        # English's reranker must not survive the Korean re-pick.
+        assert "rerank" not in data, data.get("rerank")
+        assert "Reranker:" not in result.output
 
     def test_advanced_from_picker_routes_to_full_wizard(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4884,7 +4932,7 @@ class TestPresetWizardBackNav:
         """End-to-end: pick english → "b" → korean → "b" → minimal, then
         proceed. Exercises multiple back-cycles; the final preset must
         fully replace every previous partial application (provider flips
-        onnx → onnx → none, rerank flips True → True → False, etc.). If
+        onnx → onnx → none, rerank flips True → False → False, etc.). If
         any field from english/korean leaked past the final minimal pick
         this assertion would see it."""
         from click.testing import CliRunner

@@ -156,7 +156,7 @@ The picker offers four paths:
 |---|---|---|
 | **Minimal** | BM25 keyword search | You want no model download or external service |
 | **English (Recommended)** | Local ONNX `multilingual-e5-small` embedding + English reranker | Most notes are English |
-| **Korean-optimized** | Local ONNX `multilingual-e5-small` embedding + Korean tokenizer + multilingual reranker | Notes include Korean, Chinese, or Japanese |
+| **Korean-optimized** | Local ONNX `multilingual-e5-small` embedding + Korean tokenizer, no reranker | Notes include Korean, Chinese, or Japanese |
 | **Advanced** | Full ten-step wizard | You need to choose every provider and path |
 
 For the most deterministic first proof, choose **Minimal**. It needs no model
