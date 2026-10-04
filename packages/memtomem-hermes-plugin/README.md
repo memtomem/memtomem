@@ -60,8 +60,10 @@ directory was deleted. Use `main` only for development: right after a version bu
 merged, `main` can pin a memtomem version that is not published yet, and the server then
 fails to start until it is.
 
-Once memtomem is listed in the Hermes plugin catalog, `hermes plugins install memtomem`
-installs the catalog's pinned commit instead.
+memtomem is also listed in the Hermes plugin catalog, so `hermes plugins install memtomem`
+installs without a commit lookup. It installs the commit the catalog pins, which moves only
+when the catalog entry is updated and can trail the newest memtomem release; to install a
+later release, use the commit lookup above.
 
 ## First run
 
