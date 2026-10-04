@@ -56,8 +56,9 @@ def _get_kiwi():
             _log.info("kiwipiepy tokenizer loaded successfully")
         except ImportError:
             _log.warning(
-                "kiwipiepy not installed — falling back to unicode61. "
-                "Install with: pip install kiwipiepy"
+                "kiwipiepy not installed — falling back to unicode61. Install the "
+                "korean extra where memtomem runs (memtomem[korean]) and restart; "
+                "mem_status shows how to rebuild the rows written meanwhile"
             )
             set_tokenizer("unicode61")
             return None
