@@ -127,6 +127,118 @@ def _hash_json(value: Any) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _build_config(
+    *,
+    tmp: Path,
+    memory_root: Path,
+    embedding_model: str,
+    embedding_dimension: int,
+    tokenizer: str,
+    reranker_model: str | None,
+    reranker_pool: int,
+    rrf_k: int,
+    candidate_k: int,
+) -> Any:
+    """Build one track's config through the product validators, ambient-free.
+
+    Every section is passed at construction so ``EmbeddingConfig``'s profile
+    validator and ``apply_e5_defaults`` run: assigning fields onto a built
+    config skips both, which leaves an E5 track without its ``passage:``
+    prefix, chunk budgets and 512-token sequence limit. The subclass reads
+    only these arguments, so ``MEMTOMEM_*`` variables cannot change a
+    benchmark run (``MEMTOMEM_FASTEMBED_CACHE`` is read from the environment
+    by the cache resolver, not by this model, and still applies).
+    """
+    from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
+
+    from memtomem.config import Mem2MemConfig
+
+    class _BenchmarkConfig(Mem2MemConfig):
+        @classmethod
+        def settings_customise_sources(
+            cls,
+            settings_cls: type[BaseSettings],
+            init_settings: PydanticBaseSettingsSource,
+            env_settings: PydanticBaseSettingsSource,
+            dotenv_settings: PydanticBaseSettingsSource,
+            file_secret_settings: PydanticBaseSettingsSource,
+        ) -> tuple[PydanticBaseSettingsSource, ...]:
+            return (init_settings,)
+
+    rerank: dict[str, Any] = {"enabled": False}
+    if reranker_model is not None:
+        rerank = {
+            "enabled": True,
+            "provider": "fastembed",
+            "model": reranker_model,
+            "oversample": 2.0,
+            "min_pool": reranker_pool,
+            "max_pool": reranker_pool,
+        }
+    return _BenchmarkConfig(
+        storage={"sqlite_path": tmp / "benchmark.db"},
+        indexing={"memory_dirs": [memory_root]},
+        embedding={
+            "provider": "onnx",
+            "model": embedding_model,
+            "dimension": embedding_dimension,
+        },
+        search={
+            "cache_ttl": 0.0,
+            "rrf_k": rrf_k,
+            "bm25_candidates": candidate_k,
+            "dense_candidates": candidate_k,
+            "tokenizer": tokenizer,
+        },
+        rerank=rerank,
+    )
+
+
+def _resolved_settings(config: Any) -> dict[str, Any]:
+    """The profile-derived values a track actually ran with."""
+    return {
+        "max_sequence_tokens": config.embedding.max_sequence_tokens,
+        "threads": config.embedding.threads,
+        "chunk_input_prefix": config.indexing.chunk_input_prefix,
+        "max_chunk_tokens": config.indexing.max_chunk_tokens,
+        "target_chunk_tokens": config.indexing.target_chunk_tokens,
+        "chunk_model_tokens": config.indexing.chunk_model_tokens,
+        "tokenizer": config.search.tokenizer,
+    }
+
+
+def _check_rerank_coverage(
+    observed: list[tuple[str | None, str | None, bool]], reranker_model: str | None
+) -> int:
+    """Refuse a track whose searches were not all reranked as requested.
+
+    ``observed`` holds ``(score_scale, reranker_model, cache_hit)`` per
+    search. A rerank timeout or failure falls back to the fused order with
+    only a log warning, and ``rerank_applied`` still reads True, so only
+    ``score_scale == "rerank"`` with the requested model proves a search was
+    reranked. Without a reranker, no search may report one. Returns the
+    number of reranked searches.
+    """
+    cached = sum(cache_hit for _, _, cache_hit in observed)
+    if cached:
+        raise RuntimeError(f"{cached}/{len(observed)} searches were served from the search cache")
+    reranked = [(scale, model) == ("rerank", reranker_model) for scale, model, _ in observed]
+    if reranker_model is None:
+        stray = [row for row in observed if row[0] == "rerank" or row[1] is not None]
+        if stray:
+            raise RuntimeError(
+                f"{len(stray)}/{len(observed)} searches were reranked without a reranker: "
+                f"{stray[:3]}"
+            )
+        return 0
+    if not all(reranked):
+        missed = [row for row, ok in zip(observed, reranked, strict=True) if not ok]
+        raise RuntimeError(
+            f"{len(missed)}/{len(observed)} searches not reranked by {reranker_model}: {missed[:3]}"
+        )
+    return len(reranked)
+
+
 def _load_ir_metrics() -> Any:
     path = Path("packages/memtomem/tests/ir_metrics.py")
     spec = importlib.util.spec_from_file_location("retrieval_v2_ir_metrics", path)
@@ -146,15 +258,15 @@ async def _evaluate_track(
     weights: tuple[float, float],
     embedding_model: str,
     embedding_dimension: int,
+    tokenizer: str,
     reranker_model: str | None,
     reranker_pool: int,
     top_k: int,
     rrf_k: int,
     candidate_k: int,
 ) -> dict[str, Any]:
-    from memtomem.config import Mem2MemConfig
-    import memtomem.config as config_module
     from memtomem.runtime import close_components, create_components
+    from memtomem.storage.fts_tokenizer import get_tokenizer, set_tokenizer
 
     tmp = Path(mkdtemp(prefix=f"retrieval_v2_{track}_"))
     memory_root = tmp / "memories"
@@ -162,45 +274,48 @@ async def _evaluate_track(
     for language in languages:
         shutil.copytree(FIXTURE_ROOT / language, memory_root / language)
 
-    config = Mem2MemConfig()
-    config.storage.sqlite_path = tmp / "benchmark.db"
-    config.indexing.memory_dirs = [memory_root]
-    config.embedding.provider = "onnx"
-    config.embedding.model = embedding_model
-    config.embedding.dimension = embedding_dimension
-    config.search.cache_ttl = 0.0
-    config.search.rrf_k = rrf_k
-    config.search.bm25_candidates = candidate_k
-    config.search.dense_candidates = candidate_k
-    if reranker_model is not None:
-        config.rerank.enabled = True
-        config.rerank.provider = "fastembed"
-        config.rerank.model = reranker_model
-        config.rerank.oversample = 2.0
-        config.rerank.min_pool = reranker_pool
-        config.rerank.max_pool = reranker_pool
+    config = _build_config(
+        tmp=tmp,
+        memory_root=memory_root,
+        embedding_model=embedding_model,
+        embedding_dimension=embedding_dimension,
+        tokenizer=tokenizer,
+        reranker_model=reranker_model,
+        reranker_pool=reranker_pool,
+        rrf_k=rrf_k,
+        candidate_k=candidate_k,
+    )
 
-    original_loader = config_module.load_config_overrides
-    config_module.load_config_overrides = lambda config: None
-    components = await create_components(config)
-    ir_metrics = _load_ir_metrics()
+    # The FTS tokenizer is module-global and create_components only sets a
+    # non-default one, so set it here (unicode61 included) and reset it in
+    # the finally below; otherwise a kiwipiepy track leaks into later tracks.
+    set_tokenizer(tokenizer)
+    components = None
     try:
-        stats = await components.index_engine.index_path(memory_root, recursive=True)
+        components = await create_components(
+            config, load_ambient_config=False, entity_backfill=False
+        )
+        ir_metrics = _load_ir_metrics()
+        index_stats = await components.index_engine.index_path(memory_root, recursive=True)
         expected = (24 * len(languages), 96 * len(languages), 96 * len(languages), 0, 0)
         observed = (
-            stats.total_files,
-            stats.total_chunks,
-            stats.indexed_chunks,
-            stats.blocked_files,
-            len(stats.errors),
+            index_stats.total_files,
+            index_stats.total_chunks,
+            index_stats.indexed_chunks,
+            index_stats.blocked_files,
+            len(index_stats.errors),
         )
         if observed != expected:
             raise RuntimeError(
                 f"incomplete {track} index: expected {expected}, observed {observed}"
             )
+        # kiwipiepy failing to import silently falls back to unicode61.
+        if get_tokenizer() != tokenizer:
+            raise RuntimeError(f"{track} indexed with {get_tokenizer()}, not {tokenizer}")
 
         rows: list[dict[str, Any]] = []
         latencies: list[float] = []
+        rerank_observed: list[tuple[str | None, str | None, bool]] = []
         for query in queries:
             qrels = build_qrels(query, all_chunks)
             allowed_primary = {
@@ -222,12 +337,15 @@ async def _evaluate_track(
                 raise RuntimeError(f"query has no primary qrel in {track}: {query.query_id}")
 
             started = time.perf_counter()
-            results, _ = await components.search_pipeline.search(
+            results, search_stats = await components.search_pipeline.search(
                 query.text,
                 top_k=top_k,
                 rrf_weights=list(weights),
             )
             latencies.append((time.perf_counter() - started) * 1000)
+            rerank_observed.append(
+                (search_stats.score_scale, search_stats.reranker_model, search_stats.cache_hit)
+            )
             retrieved = [_portable_result_key(result, memory_root) for result in results]
             recall = ir_metrics.recall_at_k(retrieved, allowed_primary, top_k)
             mrr = ir_metrics.reciprocal_rank_at_k(retrieved, allowed_primary, top_k)
@@ -285,6 +403,10 @@ async def _evaluate_track(
                 )
             rows.append(row)
 
+        if get_tokenizer() != tokenizer:
+            raise RuntimeError(f"{track} searched with {get_tokenizer()}, not {tokenizer}")
+        searches_reranked = _check_rerank_coverage(rerank_observed, reranker_model)
+
         aggregate: dict[str, float] = {}
         samples: dict[str, list[float]] = defaultdict(list)
         for row in rows:
@@ -319,11 +441,14 @@ async def _evaluate_track(
                 "provider": "fastembed" if reranker_model is not None else None,
                 "model": reranker_model,
                 "pool": reranker_pool if reranker_model is not None else None,
+                "searches": len(rerank_observed),
+                "searches_reranked": searches_reranked,
             },
+            "resolved": _resolved_settings(config),
             "index": {
-                "files": stats.total_files,
-                "chunks": stats.indexed_chunks,
-                "duration_ms": round(stats.duration_ms, 3),
+                "files": index_stats.total_files,
+                "chunks": index_stats.indexed_chunks,
+                "duration_ms": round(index_stats.duration_ms, 3),
             },
             "latency_ms": {
                 "p50": round(_percentile(latencies, 0.50), 3),
@@ -334,8 +459,9 @@ async def _evaluate_track(
             "per_query": rows,
         }
     finally:
-        config_module.load_config_overrides = original_loader
-        await close_components(components)
+        if components is not None:
+            await close_components(components)
+        set_tokenizer("unicode61")
         shutil.rmtree(tmp)
 
 
@@ -362,6 +488,13 @@ def _combine_track_runs(reports: list[dict[str, Any]]) -> dict[str, Any]:
     combined["latency_ms"] = {
         metric: max(report["latency_ms"][metric] for report in reports) for metric in ("p50", "p95")
     }
+    # Each run already refused unreranked searches; these totals cover all runs.
+    combined["latency_runs_ms"] = [report["latency_ms"] for report in reports]
+    combined["reranker"] = {
+        **reports[-1]["reranker"],
+        "searches": sum(report["reranker"]["searches"] for report in reports),
+        "searches_reranked": sum(report["reranker"]["searches_reranked"] for report in reports),
+    }
     return combined
 
 
@@ -374,6 +507,7 @@ async def benchmark(
     *,
     runs: int = 1,
     embedding_models: dict[str, tuple[str, int]] | None = None,
+    tokenizer: str = "unicode61",
     reranker_model: str | None = None,
     reranker_pool: int = 20,
     top_k: int = 10,
@@ -409,6 +543,7 @@ async def benchmark(
         weights=weights,
         embedding_model=models["english"][0],
         embedding_dimension=models["english"][1],
+        tokenizer=tokenizer,
         reranker_model=reranker_model,
         reranker_pool=reranker_pool,
         top_k=top_k,
@@ -424,6 +559,7 @@ async def benchmark(
         weights=weights,
         embedding_model=models["korean"][0],
         embedding_dimension=models["korean"][1],
+        tokenizer=tokenizer,
         reranker_model=reranker_model,
         reranker_pool=reranker_pool,
         top_k=top_k,
@@ -439,6 +575,7 @@ async def benchmark(
         weights=weights,
         embedding_model=models["cross_language"][0],
         embedding_dimension=models["cross_language"][1],
+        tokenizer=tokenizer,
         reranker_model=reranker_model,
         reranker_pool=reranker_pool,
         top_k=top_k,
@@ -468,6 +605,7 @@ async def benchmark(
             "rrf_k": rrf_k,
             "bm25_candidates": candidate_k,
             "dense_candidates": candidate_k,
+            "tokenizer": tokenizer,
             "reranker_model": reranker_model,
             "reranker_pool": reranker_pool if reranker_model is not None else None,
         },

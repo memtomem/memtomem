@@ -8,8 +8,7 @@ so naive prefix-truncation may degrade recall — this offline benchmark measure
 on the same bilingual v2 holdout the rest of ``tools/retrieval-eval`` uses.
 
 The sweep reuses ``benchmark_v2.benchmark`` unchanged and intercepts the embedder
-via a monkeypatch on ``memtomem.runtime.components.create_embedder`` (the same seam
-``benchmark_v2._evaluate_track`` uses for ``load_config_overrides``). Each track's
+via a monkeypatch on ``memtomem.runtime.components.create_embedder``. Each track's
 embedder is wrapped in ``TruncatingEmbedder``, which slices every vector to the
 configured dimension and re-normalizes to unit L2 (sqlite-vec ranks by L2 distance,
 so a raw prefix of a unit vector — which is no longer unit length — would distort

@@ -1,0 +1,2493 @@
+{
+  "corpus": {
+    "chunks": 192,
+    "corpus_sha256": "a596371238e18205f6d59ab8aebb759441d95dabfcba1c70ff5f22ce8cfa3630",
+    "files": 48
+  },
+  "deltas": {
+    "gte_on_e5_kiwipiepy": {
+      "cross_language": {
+        "macro": {
+          "mrr@10": 0.043369,
+          "ndcg@10": 0.045525,
+          "recall@10": 0.042924
+        },
+        "p95_latency_ms": 2005.487,
+        "slices": {
+          "en|direct|cross_language_relevant@10": 0.9,
+          "en|direct|mrr@10": 0.0,
+          "en|direct|ndcg@10": 0.043275,
+          "en|direct|recall@10": 0.072619,
+          "en|direct|same_language_precision@10": -0.14,
+          "en|genre_primary|cross_language_relevant@10": 0.9,
+          "en|genre_primary|genre_hit@1": 0.1,
+          "en|genre_primary|genre_mrr@10": 0.113215,
+          "en|genre_primary|mrr@10": 0.113215,
+          "en|genre_primary|ndcg@10": 0.110553,
+          "en|genre_primary|recall@10": 0.1125,
+          "en|genre_primary|same_language_precision@10": -0.14,
+          "en|multi_topic|cross_language_relevant@10": 1.2,
+          "en|multi_topic|intent_coverage@10": -0.1,
+          "en|multi_topic|mrr@10": -0.177381,
+          "en|multi_topic|ndcg@10": -0.01699,
+          "en|multi_topic|recall@10": 0.016667,
+          "en|multi_topic|same_language_precision@10": -0.2,
+          "en|negation|constraint_success@10": 0.2,
+          "en|negation|cross_language_relevant@10": 0.0,
+          "en|negation|hard_negative_hits@10": 0.8,
+          "en|negation|mrr@10": 0.125,
+          "en|negation|ndcg@10": 0.069027,
+          "en|negation|recall@10": 0.0,
+          "en|negation|same_language_precision@10": -0.09,
+          "en|paraphrase|cross_language_relevant@10": 0.1,
+          "en|paraphrase|mrr@10": 0.122381,
+          "en|paraphrase|ndcg@10": 0.033599,
+          "en|paraphrase|recall@10": -0.0225,
+          "en|paraphrase|same_language_precision@10": -0.03,
+          "en|underspecified|cross_language_relevant@10": 0.7,
+          "en|underspecified|mrr@10": 0.094286,
+          "en|underspecified|ndcg@10": 0.109703,
+          "en|underspecified|recall@10": 0.134285,
+          "en|underspecified|same_language_precision@10": -0.15,
+          "ko|direct|cross_language_relevant@10": 0.3,
+          "ko|direct|mrr@10": 0.116667,
+          "ko|direct|ndcg@10": 0.096851,
+          "ko|direct|recall@10": 0.1,
+          "ko|direct|same_language_precision@10": -0.03,
+          "ko|genre_primary|cross_language_relevant@10": 0.1,
+          "ko|genre_primary|genre_hit@1": 0.0,
+          "ko|genre_primary|genre_mrr@10": 0.046666,
+          "ko|genre_primary|mrr@10": 0.046666,
+          "ko|genre_primary|ndcg@10": 0.072294,
+          "ko|genre_primary|recall@10": 0.025,
+          "ko|genre_primary|same_language_precision@10": -0.01,
+          "ko|multi_topic|cross_language_relevant@10": 0.0,
+          "ko|multi_topic|intent_coverage@10": -0.1,
+          "ko|multi_topic|mrr@10": -0.014286,
+          "ko|multi_topic|ndcg@10": 0.001943,
+          "ko|multi_topic|recall@10": 0.002949,
+          "ko|multi_topic|same_language_precision@10": 0.0,
+          "ko|negation|constraint_success@10": 0.1,
+          "ko|negation|cross_language_relevant@10": 0.1,
+          "ko|negation|hard_negative_hits@10": 0.5,
+          "ko|negation|mrr@10": -0.119048,
+          "ko|negation|ndcg@10": -0.040088,
+          "ko|negation|recall@10": 0.0,
+          "ko|negation|same_language_precision@10": -0.03,
+          "ko|paraphrase|cross_language_relevant@10": 0.0,
+          "ko|paraphrase|mrr@10": 0.288889,
+          "ko|paraphrase|ndcg@10": 0.068989,
+          "ko|paraphrase|recall@10": 0.046786,
+          "ko|paraphrase|same_language_precision@10": 0.0,
+          "ko|underspecified|cross_language_relevant@10": 0.0,
+          "ko|underspecified|mrr@10": -0.075952,
+          "ko|underspecified|ndcg@10": -0.002846,
+          "ko|underspecified|recall@10": 0.026786,
+          "ko|underspecified|same_language_precision@10": 0.0
+        },
+        "zero_hit_count": 1
+      },
+      "english": {
+        "macro": {
+          "mrr@10": 0.045179,
+          "ndcg@10": 0.035039,
+          "recall@10": 0.046369
+        },
+        "p95_latency_ms": 638.237,
+        "slices": {
+          "en|direct|mrr@10": -0.091667,
+          "en|direct|ndcg@10": -0.070724,
+          "en|direct|recall@10": -0.05,
+          "en|genre_primary|genre_hit@1": 0.1,
+          "en|genre_primary|genre_mrr@10": 0.141508,
+          "en|genre_primary|mrr@10": 0.141508,
+          "en|genre_primary|ndcg@10": 0.143618,
+          "en|genre_primary|recall@10": 0.19,
+          "en|multi_topic|intent_coverage@10": 0.0,
+          "en|multi_topic|mrr@10": -0.085714,
+          "en|multi_topic|ndcg@10": -0.035253,
+          "en|multi_topic|recall@10": 0.006548,
+          "en|negation|constraint_success@10": 0.2,
+          "en|negation|hard_negative_hits@10": 0.1,
+          "en|negation|mrr@10": 0.139445,
+          "en|negation|ndcg@10": 0.148248,
+          "en|negation|recall@10": 0.2,
+          "en|paraphrase|mrr@10": 0.1375,
+          "en|paraphrase|ndcg@10": 0.0097,
+          "en|paraphrase|recall@10": -0.083334,
+          "en|underspecified|mrr@10": 0.03,
+          "en|underspecified|ndcg@10": 0.014645,
+          "en|underspecified|recall@10": 0.015
+        },
+        "zero_hit_count": -2
+      },
+      "korean": {
+        "macro": {
+          "mrr@10": 0.0141,
+          "ndcg@10": 0.013504,
+          "recall@10": 0.003174
+        },
+        "p95_latency_ms": 1135.149,
+        "slices": {
+          "ko|direct|mrr@10": 0.116667,
+          "ko|direct|ndcg@10": 0.063565,
+          "ko|direct|recall@10": 0.025,
+          "ko|genre_primary|genre_hit@1": 0.0,
+          "ko|genre_primary|genre_mrr@10": 0.035714,
+          "ko|genre_primary|mrr@10": 0.035714,
+          "ko|genre_primary|ndcg@10": 0.071289,
+          "ko|genre_primary|recall@10": 0.0,
+          "ko|multi_topic|intent_coverage@10": -0.1,
+          "ko|multi_topic|mrr@10": -0.0125,
+          "ko|multi_topic|ndcg@10": 0.008039,
+          "ko|multi_topic|recall@10": 0.027381,
+          "ko|negation|constraint_success@10": 0.1,
+          "ko|negation|hard_negative_hits@10": 0.2,
+          "ko|negation|mrr@10": -0.101547,
+          "ko|negation|ndcg@10": -0.099991,
+          "ko|negation|recall@10": -0.1,
+          "ko|paraphrase|mrr@10": 0.113889,
+          "ko|paraphrase|ndcg@10": 0.043478,
+          "ko|paraphrase|recall@10": 0.008334,
+          "ko|underspecified|mrr@10": -0.067619,
+          "ko|underspecified|ndcg@10": -0.005352,
+          "ko|underspecified|recall@10": 0.058334
+        },
+        "zero_hit_count": 2
+      }
+    },
+    "jina_int8_on_e5_kiwipiepy": {
+      "cross_language": {
+        "macro": {
+          "mrr@10": 0.054656,
+          "ndcg@10": 0.068507,
+          "recall@10": 0.062993
+        },
+        "p95_latency_ms": 2584.975,
+        "slices": {
+          "en|direct|cross_language_relevant@10": 1.0,
+          "en|direct|mrr@10": -0.016667,
+          "en|direct|ndcg@10": 0.099178,
+          "en|direct|recall@10": 0.153572,
+          "en|direct|same_language_precision@10": -0.13,
+          "en|genre_primary|cross_language_relevant@10": 0.8,
+          "en|genre_primary|genre_hit@1": 0.1,
+          "en|genre_primary|genre_mrr@10": 0.073215,
+          "en|genre_primary|mrr@10": 0.073215,
+          "en|genre_primary|ndcg@10": 0.082192,
+          "en|genre_primary|recall@10": 0.1,
+          "en|genre_primary|same_language_precision@10": -0.12,
+          "en|multi_topic|cross_language_relevant@10": 1.2,
+          "en|multi_topic|intent_coverage@10": -0.1,
+          "en|multi_topic|mrr@10": -0.083333,
+          "en|multi_topic|ndcg@10": 0.031069,
+          "en|multi_topic|recall@10": 0.040476,
+          "en|multi_topic|same_language_precision@10": -0.18,
+          "en|negation|constraint_success@10": 0.3,
+          "en|negation|cross_language_relevant@10": 0.0,
+          "en|negation|hard_negative_hits@10": 0.6,
+          "en|negation|mrr@10": 0.065833,
+          "en|negation|ndcg@10": 0.028934,
+          "en|negation|recall@10": 0.0,
+          "en|negation|same_language_precision@10": -0.08,
+          "en|paraphrase|cross_language_relevant@10": 0.2,
+          "en|paraphrase|mrr@10": 0.183334,
+          "en|paraphrase|ndcg@10": 0.089788,
+          "en|paraphrase|recall@10": 0.033452,
+          "en|paraphrase|same_language_precision@10": -0.07,
+          "en|underspecified|cross_language_relevant@10": 0.5,
+          "en|underspecified|mrr@10": 0.074444,
+          "en|underspecified|ndcg@10": 0.102857,
+          "en|underspecified|recall@10": 0.097619,
+          "en|underspecified|same_language_precision@10": -0.12,
+          "ko|direct|cross_language_relevant@10": 0.5,
+          "ko|direct|mrr@10": 0.166667,
+          "ko|direct|ndcg@10": 0.123965,
+          "ko|direct|recall@10": 0.1375,
+          "ko|direct|same_language_precision@10": -0.07,
+          "ko|genre_primary|cross_language_relevant@10": 0.2,
+          "ko|genre_primary|genre_hit@1": 0.1,
+          "ko|genre_primary|genre_mrr@10": 0.096666,
+          "ko|genre_primary|mrr@10": 0.096666,
+          "ko|genre_primary|ndcg@10": 0.103253,
+          "ko|genre_primary|recall@10": 0.075,
+          "ko|genre_primary|same_language_precision@10": -0.04,
+          "ko|multi_topic|cross_language_relevant@10": 0.0,
+          "ko|multi_topic|intent_coverage@10": 0.0,
+          "ko|multi_topic|mrr@10": 0.085714,
+          "ko|multi_topic|ndcg@10": 0.079881,
+          "ko|multi_topic|recall@10": 0.023901,
+          "ko|multi_topic|same_language_precision@10": -0.01,
+          "ko|negation|constraint_success@10": 0.1,
+          "ko|negation|cross_language_relevant@10": 0.1,
+          "ko|negation|hard_negative_hits@10": 0.3,
+          "ko|negation|mrr@10": -0.047222,
+          "ko|negation|ndcg@10": 0.000867,
+          "ko|negation|recall@10": 0.0,
+          "ko|negation|same_language_precision@10": -0.03,
+          "ko|paraphrase|cross_language_relevant@10": 0.0,
+          "ko|paraphrase|mrr@10": 0.063175,
+          "ko|paraphrase|ndcg@10": 0.066739,
+          "ko|paraphrase|recall@10": 0.080119,
+          "ko|paraphrase|same_language_precision@10": 0.0,
+          "ko|underspecified|cross_language_relevant@10": 0.0,
+          "ko|underspecified|mrr@10": -0.005952,
+          "ko|underspecified|ndcg@10": 0.01336,
+          "ko|underspecified|recall@10": 0.014286,
+          "ko|underspecified|same_language_precision@10": -0.01
+        },
+        "zero_hit_count": 0
+      },
+      "english": {
+        "macro": {
+          "mrr@10": 0.066515,
+          "ndcg@10": 0.062161,
+          "recall@10": 0.072064
+        },
+        "p95_latency_ms": 596.167,
+        "slices": {
+          "en|direct|mrr@10": -0.066667,
+          "en|direct|ndcg@10": -0.00715,
+          "en|direct|recall@10": 0.0,
+          "en|genre_primary|genre_hit@1": 0.2,
+          "en|genre_primary|genre_mrr@10": 0.15873,
+          "en|genre_primary|mrr@10": 0.15873,
+          "en|genre_primary|ndcg@10": 0.122321,
+          "en|genre_primary|recall@10": 0.165,
+          "en|multi_topic|intent_coverage@10": 0.05,
+          "en|multi_topic|mrr@10": -0.05,
+          "en|multi_topic|ndcg@10": -0.015207,
+          "en|multi_topic|recall@10": 0.002381,
+          "en|negation|constraint_success@10": 0.2,
+          "en|negation|hard_negative_hits@10": 0.1,
+          "en|negation|mrr@10": 0.082738,
+          "en|negation|ndcg@10": 0.105145,
+          "en|negation|recall@10": 0.2,
+          "en|paraphrase|mrr@10": 0.198453,
+          "en|paraphrase|ndcg@10": 0.094521,
+          "en|paraphrase|recall@10": -0.008334,
+          "en|underspecified|mrr@10": 0.075833,
+          "en|underspecified|ndcg@10": 0.073338,
+          "en|underspecified|recall@10": 0.073334
+        },
+        "zero_hit_count": -2
+      },
+      "korean": {
+        "macro": {
+          "mrr@10": 0.04246,
+          "ndcg@10": 0.04842,
+          "recall@10": 0.027083
+        },
+        "p95_latency_ms": 1246.016,
+        "slices": {
+          "ko|direct|mrr@10": 0.166667,
+          "ko|direct|ndcg@10": 0.090741,
+          "ko|direct|recall@10": 0.05,
+          "ko|genre_primary|genre_hit@1": 0.1,
+          "ko|genre_primary|genre_mrr@10": 0.069048,
+          "ko|genre_primary|mrr@10": 0.069048,
+          "ko|genre_primary|ndcg@10": 0.096713,
+          "ko|genre_primary|recall@10": 0.05,
+          "ko|multi_topic|intent_coverage@10": -0.05,
+          "ko|multi_topic|mrr@10": 0.0875,
+          "ko|multi_topic|ndcg@10": 0.099592,
+          "ko|multi_topic|recall@10": 0.070834,
+          "ko|negation|constraint_success@10": 0.1,
+          "ko|negation|hard_negative_hits@10": 0.2,
+          "ko|negation|mrr@10": -0.013055,
+          "ko|negation|ndcg@10": -0.033196,
+          "ko|negation|recall@10": -0.1,
+          "ko|paraphrase|mrr@10": -0.066111,
+          "ko|paraphrase|ndcg@10": 0.026928,
+          "ko|paraphrase|recall@10": 0.058334,
+          "ko|underspecified|mrr@10": 0.010714,
+          "ko|underspecified|ndcg@10": 0.00974,
+          "ko|underspecified|recall@10": 0.033334
+        },
+        "zero_hit_count": 1
+      }
+    },
+    "jina_int8_vs_jina_on_e5_kiwipiepy": {
+      "cross_language": {
+        "macro": {
+          "mrr@10": 0.001042,
+          "ndcg@10": 0.000442,
+          "recall@10": -0.000199
+        },
+        "p95_latency_ms": 1572.992,
+        "slices": {
+          "en|direct|cross_language_relevant@10": 0.0,
+          "en|direct|mrr@10": 0.0,
+          "en|direct|ndcg@10": 0.000535,
+          "en|direct|recall@10": 0.0,
+          "en|direct|same_language_precision@10": 0.01,
+          "en|genre_primary|cross_language_relevant@10": 0.0,
+          "en|genre_primary|genre_hit@1": 0.1,
+          "en|genre_primary|genre_mrr@10": 0.048889,
+          "en|genre_primary|mrr@10": 0.048889,
+          "en|genre_primary|ndcg@10": 0.001548,
+          "en|genre_primary|recall@10": -0.0125,
+          "en|genre_primary|same_language_precision@10": -0.01,
+          "en|multi_topic|cross_language_relevant@10": 0.2,
+          "en|multi_topic|intent_coverage@10": 0.0,
+          "en|multi_topic|mrr@10": 0.0,
+          "en|multi_topic|ndcg@10": 0.0035,
+          "en|multi_topic|recall@10": 0.007143,
+          "en|multi_topic|same_language_precision@10": -0.02,
+          "en|negation|constraint_success@10": 0.0,
+          "en|negation|cross_language_relevant@10": 0.0,
+          "en|negation|hard_negative_hits@10": 0.0,
+          "en|negation|mrr@10": 0.0,
+          "en|negation|ndcg@10": 0.0,
+          "en|negation|recall@10": 0.0,
+          "en|negation|same_language_precision@10": 0.0,
+          "en|paraphrase|cross_language_relevant@10": 0.0,
+          "en|paraphrase|mrr@10": 0.0,
+          "en|paraphrase|ndcg@10": -0.002274,
+          "en|paraphrase|recall@10": 0.0,
+          "en|paraphrase|same_language_precision@10": 0.0,
+          "en|underspecified|cross_language_relevant@10": 0.0,
+          "en|underspecified|mrr@10": 0.0,
+          "en|underspecified|ndcg@10": -0.00083,
+          "en|underspecified|recall@10": -0.004166,
+          "en|underspecified|same_language_precision@10": 0.0,
+          "ko|direct|cross_language_relevant@10": 0.0,
+          "ko|direct|mrr@10": 0.0,
+          "ko|direct|ndcg@10": 0.00361,
+          "ko|direct|recall@10": 0.0,
+          "ko|direct|same_language_precision@10": 0.0,
+          "ko|genre_primary|cross_language_relevant@10": 0.0,
+          "ko|genre_primary|genre_hit@1": -0.1,
+          "ko|genre_primary|genre_mrr@10": -0.05,
+          "ko|genre_primary|mrr@10": -0.05,
+          "ko|genre_primary|ndcg@10": -0.011797,
+          "ko|genre_primary|recall@10": 0.0,
+          "ko|genre_primary|same_language_precision@10": 0.0,
+          "ko|multi_topic|cross_language_relevant@10": 0.0,
+          "ko|multi_topic|intent_coverage@10": 0.0,
+          "ko|multi_topic|mrr@10": 0.0,
+          "ko|multi_topic|ndcg@10": -0.002009,
+          "ko|multi_topic|recall@10": -0.007143,
+          "ko|multi_topic|same_language_precision@10": 0.0,
+          "ko|negation|constraint_success@10": 0.0,
+          "ko|negation|cross_language_relevant@10": 0.0,
+          "ko|negation|hard_negative_hits@10": -0.1,
+          "ko|negation|mrr@10": 0.006945,
+          "ko|negation|ndcg@10": 0.003365,
+          "ko|negation|recall@10": 0.0,
+          "ko|negation|same_language_precision@10": 0.0,
+          "ko|paraphrase|cross_language_relevant@10": 0.0,
+          "ko|paraphrase|mrr@10": 0.01,
+          "ko|paraphrase|ndcg@10": 0.004471,
+          "ko|paraphrase|recall@10": 0.0,
+          "ko|paraphrase|same_language_precision@10": 0.0,
+          "ko|underspecified|cross_language_relevant@10": 0.0,
+          "ko|underspecified|mrr@10": -0.003333,
+          "ko|underspecified|ndcg@10": 0.005179,
+          "ko|underspecified|recall@10": 0.014286,
+          "ko|underspecified|same_language_precision@10": 0.0
+        },
+        "zero_hit_count": -1
+      },
+      "english": {
+        "macro": {
+          "mrr@10": 0.015271,
+          "ndcg@10": 0.007768,
+          "recall@10": 0.010715
+        },
+        "p95_latency_ms": -116.957,
+        "slices": {
+          "en|direct|mrr@10": 0.0,
+          "en|direct|ndcg@10": -0.000785,
+          "en|direct|recall@10": 0.0,
+          "en|genre_primary|genre_hit@1": 0.2,
+          "en|genre_primary|genre_mrr@10": 0.089841,
+          "en|genre_primary|mrr@10": 0.089841,
+          "en|genre_primary|ndcg@10": 0.033629,
+          "en|genre_primary|recall@10": 0.025,
+          "en|multi_topic|intent_coverage@10": 0.0,
+          "en|multi_topic|mrr@10": 0.0,
+          "en|multi_topic|ndcg@10": 0.006645,
+          "en|multi_topic|recall@10": 0.014286,
+          "en|negation|constraint_success@10": 0.0,
+          "en|negation|hard_negative_hits@10": 0.1,
+          "en|negation|mrr@10": 0.001785,
+          "en|negation|ndcg@10": 0.001787,
+          "en|negation|recall@10": 0.0,
+          "en|paraphrase|mrr@10": 0.0,
+          "en|paraphrase|ndcg@10": -0.004074,
+          "en|paraphrase|recall@10": 0.0,
+          "en|underspecified|mrr@10": 0.0,
+          "en|underspecified|ndcg@10": 0.009408,
+          "en|underspecified|recall@10": 0.025
+        },
+        "zero_hit_count": -1
+      },
+      "korean": {
+        "macro": {
+          "mrr@10": -0.007176,
+          "ndcg@10": 2e-06,
+          "recall@10": -0.002778
+        },
+        "p95_latency_ms": 197.232,
+        "slices": {
+          "ko|direct|mrr@10": 0.0,
+          "ko|direct|ndcg@10": 0.005591,
+          "ko|direct|recall@10": 0.0,
+          "ko|genre_primary|genre_hit@1": -0.1,
+          "ko|genre_primary|genre_mrr@10": -0.05,
+          "ko|genre_primary|mrr@10": -0.05,
+          "ko|genre_primary|ndcg@10": -0.01739,
+          "ko|genre_primary|recall@10": 0.0,
+          "ko|multi_topic|intent_coverage@10": 0.0,
+          "ko|multi_topic|mrr@10": 0.0,
+          "ko|multi_topic|ndcg@10": -0.002425,
+          "ko|multi_topic|recall@10": -0.016666,
+          "ko|negation|constraint_success@10": 0.0,
+          "ko|negation|hard_negative_hits@10": -0.1,
+          "ko|negation|mrr@10": 0.006945,
+          "ko|negation|ndcg@10": 0.005489,
+          "ko|negation|recall@10": 0.0,
+          "ko|paraphrase|mrr@10": 0.0,
+          "ko|paraphrase|ndcg@10": -0.001782,
+          "ko|paraphrase|recall@10": -0.033333,
+          "ko|underspecified|mrr@10": 0.0,
+          "ko|underspecified|ndcg@10": 0.010525,
+          "ko|underspecified|recall@10": 0.033334
+        },
+        "zero_hit_count": 0
+      }
+    },
+    "jina_on_e5_kiwipiepy": {
+      "cross_language": {
+        "macro": {
+          "mrr@10": 0.053614,
+          "ndcg@10": 0.068065,
+          "recall@10": 0.063192
+        },
+        "p95_latency_ms": 1011.983,
+        "slices": {
+          "en|direct|cross_language_relevant@10": 1.0,
+          "en|direct|mrr@10": -0.016667,
+          "en|direct|ndcg@10": 0.098643,
+          "en|direct|recall@10": 0.153572,
+          "en|direct|same_language_precision@10": -0.14,
+          "en|genre_primary|cross_language_relevant@10": 0.8,
+          "en|genre_primary|genre_hit@1": 0.0,
+          "en|genre_primary|genre_mrr@10": 0.024326,
+          "en|genre_primary|mrr@10": 0.024326,
+          "en|genre_primary|ndcg@10": 0.080644,
+          "en|genre_primary|recall@10": 0.1125,
+          "en|genre_primary|same_language_precision@10": -0.11,
+          "en|multi_topic|cross_language_relevant@10": 1.0,
+          "en|multi_topic|intent_coverage@10": -0.1,
+          "en|multi_topic|mrr@10": -0.083333,
+          "en|multi_topic|ndcg@10": 0.027569,
+          "en|multi_topic|recall@10": 0.033333,
+          "en|multi_topic|same_language_precision@10": -0.16,
+          "en|negation|constraint_success@10": 0.3,
+          "en|negation|cross_language_relevant@10": 0.0,
+          "en|negation|hard_negative_hits@10": 0.6,
+          "en|negation|mrr@10": 0.065833,
+          "en|negation|ndcg@10": 0.028934,
+          "en|negation|recall@10": 0.0,
+          "en|negation|same_language_precision@10": -0.08,
+          "en|paraphrase|cross_language_relevant@10": 0.2,
+          "en|paraphrase|mrr@10": 0.183334,
+          "en|paraphrase|ndcg@10": 0.092062,
+          "en|paraphrase|recall@10": 0.033452,
+          "en|paraphrase|same_language_precision@10": -0.07,
+          "en|underspecified|cross_language_relevant@10": 0.5,
+          "en|underspecified|mrr@10": 0.074444,
+          "en|underspecified|ndcg@10": 0.103687,
+          "en|underspecified|recall@10": 0.101785,
+          "en|underspecified|same_language_precision@10": -0.12,
+          "ko|direct|cross_language_relevant@10": 0.5,
+          "ko|direct|mrr@10": 0.166667,
+          "ko|direct|ndcg@10": 0.120355,
+          "ko|direct|recall@10": 0.1375,
+          "ko|direct|same_language_precision@10": -0.07,
+          "ko|genre_primary|cross_language_relevant@10": 0.2,
+          "ko|genre_primary|genre_hit@1": 0.2,
+          "ko|genre_primary|genre_mrr@10": 0.146666,
+          "ko|genre_primary|mrr@10": 0.146666,
+          "ko|genre_primary|ndcg@10": 0.11505,
+          "ko|genre_primary|recall@10": 0.075,
+          "ko|genre_primary|same_language_precision@10": -0.04,
+          "ko|multi_topic|cross_language_relevant@10": 0.0,
+          "ko|multi_topic|intent_coverage@10": 0.0,
+          "ko|multi_topic|mrr@10": 0.085714,
+          "ko|multi_topic|ndcg@10": 0.08189,
+          "ko|multi_topic|recall@10": 0.031044,
+          "ko|multi_topic|same_language_precision@10": -0.01,
+          "ko|negation|constraint_success@10": 0.1,
+          "ko|negation|cross_language_relevant@10": 0.1,
+          "ko|negation|hard_negative_hits@10": 0.4,
+          "ko|negation|mrr@10": -0.054167,
+          "ko|negation|ndcg@10": -0.002498,
+          "ko|negation|recall@10": 0.0,
+          "ko|negation|same_language_precision@10": -0.03,
+          "ko|paraphrase|cross_language_relevant@10": 0.0,
+          "ko|paraphrase|mrr@10": 0.053175,
+          "ko|paraphrase|ndcg@10": 0.062268,
+          "ko|paraphrase|recall@10": 0.080119,
+          "ko|paraphrase|same_language_precision@10": 0.0,
+          "ko|underspecified|cross_language_relevant@10": 0.0,
+          "ko|underspecified|mrr@10": -0.002619,
+          "ko|underspecified|ndcg@10": 0.008181,
+          "ko|underspecified|recall@10": 0.0,
+          "ko|underspecified|same_language_precision@10": -0.01
+        },
+        "zero_hit_count": 1
+      },
+      "english": {
+        "macro": {
+          "mrr@10": 0.051244,
+          "ndcg@10": 0.054393,
+          "recall@10": 0.061349
+        },
+        "p95_latency_ms": 713.124,
+        "slices": {
+          "en|direct|mrr@10": -0.066667,
+          "en|direct|ndcg@10": -0.006365,
+          "en|direct|recall@10": 0.0,
+          "en|genre_primary|genre_hit@1": 0.0,
+          "en|genre_primary|genre_mrr@10": 0.068889,
+          "en|genre_primary|mrr@10": 0.068889,
+          "en|genre_primary|ndcg@10": 0.088692,
+          "en|genre_primary|recall@10": 0.14,
+          "en|multi_topic|intent_coverage@10": 0.05,
+          "en|multi_topic|mrr@10": -0.05,
+          "en|multi_topic|ndcg@10": -0.021852,
+          "en|multi_topic|recall@10": -0.011905,
+          "en|negation|constraint_success@10": 0.2,
+          "en|negation|hard_negative_hits@10": 0.0,
+          "en|negation|mrr@10": 0.080953,
+          "en|negation|ndcg@10": 0.103358,
+          "en|negation|recall@10": 0.2,
+          "en|paraphrase|mrr@10": 0.198453,
+          "en|paraphrase|ndcg@10": 0.098595,
+          "en|paraphrase|recall@10": -0.008334,
+          "en|underspecified|mrr@10": 0.075833,
+          "en|underspecified|ndcg@10": 0.06393,
+          "en|underspecified|recall@10": 0.048334
+        },
+        "zero_hit_count": -1
+      },
+      "korean": {
+        "macro": {
+          "mrr@10": 0.049636,
+          "ndcg@10": 0.048418,
+          "recall@10": 0.029861
+        },
+        "p95_latency_ms": 1048.784,
+        "slices": {
+          "ko|direct|mrr@10": 0.166667,
+          "ko|direct|ndcg@10": 0.08515,
+          "ko|direct|recall@10": 0.05,
+          "ko|genre_primary|genre_hit@1": 0.2,
+          "ko|genre_primary|genre_mrr@10": 0.119048,
+          "ko|genre_primary|mrr@10": 0.119048,
+          "ko|genre_primary|ndcg@10": 0.114103,
+          "ko|genre_primary|recall@10": 0.05,
+          "ko|multi_topic|intent_coverage@10": -0.05,
+          "ko|multi_topic|mrr@10": 0.0875,
+          "ko|multi_topic|ndcg@10": 0.102017,
+          "ko|multi_topic|recall@10": 0.0875,
+          "ko|negation|constraint_success@10": 0.1,
+          "ko|negation|hard_negative_hits@10": 0.3,
+          "ko|negation|mrr@10": -0.02,
+          "ko|negation|ndcg@10": -0.038685,
+          "ko|negation|recall@10": -0.1,
+          "ko|paraphrase|mrr@10": -0.066111,
+          "ko|paraphrase|ndcg@10": 0.02871,
+          "ko|paraphrase|recall@10": 0.091667,
+          "ko|underspecified|mrr@10": 0.010714,
+          "ko|underspecified|ndcg@10": -0.000785,
+          "ko|underspecified|recall@10": 0.0
+        },
+        "zero_hit_count": 1
+      }
+    }
+  },
+  "environment": {
+    "fastembed": "0.8.1",
+    "memtomem": "0.6.6",
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "python": "3.13.2"
+  },
+  "methodology": "retrieval-v2-model-reranker-comparison",
+  "portfolio": {
+    "pairs": 60,
+    "qrel_sha256": "80a2588c624ae4d74ca8da7713ca645f43355f8ade3caa285679855641b88cc6",
+    "queries": 120,
+    "query_sha256": "d7adbe5a91f49d2a7311a5aa3582522282f1f1e854e427f6cacfddb86a785081"
+  },
+  "profiles": {
+    "e5_kiwipiepy": {
+      "cost": {
+        "peak_rss_bytes": 2705686528,
+        "reranker_footprint": null,
+        "wall_s": 48.7
+      },
+      "license": null,
+      "model_card": null,
+      "search": {
+        "bm25_candidates": 50,
+        "dense_candidates": 50,
+        "reranker_model": null,
+        "reranker_pool": null,
+        "rrf_k": 60,
+        "rrf_weights": [
+          1.0,
+          1.0
+        ],
+        "tokenizer": "kiwipiepy",
+        "top_k": 10
+      },
+      "tracks": {
+        "cross_language": {
+          "aggregate": {
+            "en|direct|cross_language_relevant@10": 1.9,
+            "en|direct|mrr@10": 0.85,
+            "en|direct|ndcg@10": 0.78671,
+            "en|direct|recall@10": 0.752976,
+            "en|direct|same_language_precision@10": 0.73,
+            "en|genre_primary|cross_language_relevant@10": 0.3,
+            "en|genre_primary|genre_hit@1": 0.3,
+            "en|genre_primary|genre_mrr@10": 0.478452,
+            "en|genre_primary|mrr@10": 0.478452,
+            "en|genre_primary|ndcg@10": 0.266446,
+            "en|genre_primary|recall@10": 0.25,
+            "en|genre_primary|same_language_precision@10": 0.94,
+            "en|multi_topic|cross_language_relevant@10": 1.0,
+            "en|multi_topic|intent_coverage@10": 1.0,
+            "en|multi_topic|mrr@10": 0.9,
+            "en|multi_topic|ndcg@10": 0.704313,
+            "en|multi_topic|recall@10": 0.379945,
+            "en|multi_topic|same_language_precision@10": 0.86,
+            "en|negation|constraint_success@10": 0.2,
+            "en|negation|cross_language_relevant@10": 0.2,
+            "en|negation|hard_negative_hits@10": 1.9,
+            "en|negation|mrr@10": 0.366667,
+            "en|negation|ndcg@10": 0.30185,
+            "en|negation|recall@10": 0.4,
+            "en|negation|same_language_precision@10": 0.89,
+            "en|paraphrase|cross_language_relevant@10": 0.1,
+            "en|paraphrase|mrr@10": 0.280952,
+            "en|paraphrase|ndcg@10": 0.199389,
+            "en|paraphrase|recall@10": 0.214167,
+            "en|paraphrase|same_language_precision@10": 0.98,
+            "en|underspecified|cross_language_relevant@10": 0.7,
+            "en|underspecified|mrr@10": 0.72,
+            "en|underspecified|ndcg@10": 0.461882,
+            "en|underspecified|recall@10": 0.389405,
+            "en|underspecified|same_language_precision@10": 0.91,
+            "ko|direct|cross_language_relevant@10": 0.5,
+            "ko|direct|mrr@10": 0.733333,
+            "ko|direct|ndcg@10": 0.518096,
+            "ko|direct|recall@10": 0.455357,
+            "ko|direct|same_language_precision@10": 0.92,
+            "ko|genre_primary|cross_language_relevant@10": 0.0,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.686667,
+            "ko|genre_primary|mrr@10": 0.686667,
+            "ko|genre_primary|ndcg@10": 0.377737,
+            "ko|genre_primary|recall@10": 0.3625,
+            "ko|genre_primary|same_language_precision@10": 1.0,
+            "ko|multi_topic|cross_language_relevant@10": 0.0,
+            "ko|multi_topic|intent_coverage@10": 0.95,
+            "ko|multi_topic|mrr@10": 0.764286,
+            "ko|multi_topic|ndcg@10": 0.483291,
+            "ko|multi_topic|recall@10": 0.257564,
+            "ko|multi_topic|same_language_precision@10": 1.0,
+            "ko|negation|constraint_success@10": 0.4,
+            "ko|negation|cross_language_relevant@10": 0.0,
+            "ko|negation|hard_negative_hits@10": 1.2,
+            "ko|negation|mrr@10": 0.375,
+            "ko|negation|ndcg@10": 0.278905,
+            "ko|negation|recall@10": 0.35,
+            "ko|negation|same_language_precision@10": 1.0,
+            "ko|paraphrase|cross_language_relevant@10": 0.0,
+            "ko|paraphrase|mrr@10": 0.561111,
+            "ko|paraphrase|ndcg@10": 0.319949,
+            "ko|paraphrase|recall@10": 0.245952,
+            "ko|paraphrase|same_language_precision@10": 1.0,
+            "ko|underspecified|cross_language_relevant@10": 0.0,
+            "ko|underspecified|mrr@10": 0.517619,
+            "ko|underspecified|ndcg@10": 0.310575,
+            "ko|underspecified|recall@10": 0.256071,
+            "ko|underspecified|same_language_precision@10": 0.99
+          },
+          "embedding": {
+            "dimension": 384,
+            "model": "intfloat/multilingual-e5-small",
+            "provider": "onnx"
+          },
+          "index": {
+            "chunks": 192,
+            "duration_ms": 3360.981,
+            "files": 48
+          },
+          "latency_ms": {
+            "p50": 4.839,
+            "p95": 6.372
+          },
+          "latency_runs_ms": [
+            {
+              "p50": 4.71,
+              "p95": 6.207
+            },
+            {
+              "p50": 4.839,
+              "p95": 6.234
+            },
+            {
+              "p50": 4.721,
+              "p95": 6.372
+            },
+            {
+              "p50": 4.724,
+              "p95": 6.247
+            },
+            {
+              "p50": 4.662,
+              "p95": 6.123
+            }
+          ],
+          "macro": {
+            "mrr@10": 0.602841,
+            "ndcg@10": 0.417429,
+            "recall@10": 0.359495
+          },
+          "max_run_spread": 0.014285,
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null,
+            "searches": 600,
+            "searches_reranked": 0
+          },
+          "resolved": {
+            "chunk_input_prefix": "passage: ",
+            "chunk_model_tokens": 512,
+            "max_chunk_tokens": 384,
+            "max_sequence_tokens": 512,
+            "target_chunk_tokens": 320,
+            "threads": 2,
+            "tokenizer": "kiwipiepy"
+          },
+          "run_spreads": {
+            "en|direct|cross_language_relevant@10": 0.0,
+            "en|direct|mrr@10": 0.0,
+            "en|direct|ndcg@10": 0.0,
+            "en|direct|recall@10": 0.0,
+            "en|direct|same_language_precision@10": 0.0,
+            "en|genre_primary|cross_language_relevant@10": 0.0,
+            "en|genre_primary|genre_hit@1": 0.0,
+            "en|genre_primary|genre_mrr@10": 0.0,
+            "en|genre_primary|mrr@10": 0.0,
+            "en|genre_primary|ndcg@10": 0.001031,
+            "en|genre_primary|recall@10": 0.0,
+            "en|genre_primary|same_language_precision@10": 0.0,
+            "en|multi_topic|cross_language_relevant@10": 0.0,
+            "en|multi_topic|intent_coverage@10": 0.0,
+            "en|multi_topic|mrr@10": 0.0,
+            "en|multi_topic|ndcg@10": 0.0,
+            "en|multi_topic|recall@10": 0.0,
+            "en|multi_topic|same_language_precision@10": 0.0,
+            "en|negation|constraint_success@10": 0.0,
+            "en|negation|cross_language_relevant@10": 0.0,
+            "en|negation|hard_negative_hits@10": 0.0,
+            "en|negation|mrr@10": 0.0,
+            "en|negation|ndcg@10": 0.0,
+            "en|negation|recall@10": 0.0,
+            "en|negation|same_language_precision@10": 0.0,
+            "en|paraphrase|cross_language_relevant@10": 0.0,
+            "en|paraphrase|mrr@10": 0.0,
+            "en|paraphrase|ndcg@10": 0.008274,
+            "en|paraphrase|recall@10": 0.014285,
+            "en|paraphrase|same_language_precision@10": 0.0,
+            "en|underspecified|cross_language_relevant@10": 0.0,
+            "en|underspecified|mrr@10": 0.0,
+            "en|underspecified|ndcg@10": 0.0,
+            "en|underspecified|recall@10": 0.0,
+            "en|underspecified|same_language_precision@10": 0.0,
+            "ko|direct|cross_language_relevant@10": 0.0,
+            "ko|direct|mrr@10": 0.0,
+            "ko|direct|ndcg@10": 0.0,
+            "ko|direct|recall@10": 0.0,
+            "ko|direct|same_language_precision@10": 0.0,
+            "ko|genre_primary|cross_language_relevant@10": 0.0,
+            "ko|genre_primary|genre_hit@1": 0.0,
+            "ko|genre_primary|genre_mrr@10": 0.0,
+            "ko|genre_primary|mrr@10": 0.0,
+            "ko|genre_primary|ndcg@10": 0.000578,
+            "ko|genre_primary|recall@10": 0.0,
+            "ko|genre_primary|same_language_precision@10": 0.0,
+            "ko|multi_topic|cross_language_relevant@10": 0.0,
+            "ko|multi_topic|intent_coverage@10": 0.0,
+            "ko|multi_topic|mrr@10": 0.0,
+            "ko|multi_topic|ndcg@10": 0.0,
+            "ko|multi_topic|recall@10": 0.0,
+            "ko|multi_topic|same_language_precision@10": 0.0,
+            "ko|negation|constraint_success@10": 0.0,
+            "ko|negation|cross_language_relevant@10": 0.0,
+            "ko|negation|hard_negative_hits@10": 0.0,
+            "ko|negation|mrr@10": 0.0,
+            "ko|negation|ndcg@10": 0.0,
+            "ko|negation|recall@10": 0.0,
+            "ko|negation|same_language_precision@10": 0.0,
+            "ko|paraphrase|cross_language_relevant@10": 0.0,
+            "ko|paraphrase|mrr@10": 0.0,
+            "ko|paraphrase|ndcg@10": 0.0,
+            "ko|paraphrase|recall@10": 0.0,
+            "ko|paraphrase|same_language_precision@10": 0.0,
+            "ko|underspecified|cross_language_relevant@10": 0.0,
+            "ko|underspecified|mrr@10": 0.0,
+            "ko|underspecified|ndcg@10": 0.000917,
+            "ko|underspecified|recall@10": 0.0,
+            "ko|underspecified|same_language_precision@10": 0.0
+          },
+          "runs": 5,
+          "zero_hit_count": 14
+        },
+        "english": {
+          "aggregate": {
+            "en|direct|mrr@10": 0.85,
+            "en|direct|ndcg@10": 0.889263,
+            "en|direct|recall@10": 0.95,
+            "en|genre_primary|genre_hit@1": 0.3,
+            "en|genre_primary|genre_mrr@10": 0.442222,
+            "en|genre_primary|mrr@10": 0.442222,
+            "en|genre_primary|ndcg@10": 0.337305,
+            "en|genre_primary|recall@10": 0.385,
+            "en|multi_topic|intent_coverage@10": 0.95,
+            "en|multi_topic|mrr@10": 0.85,
+            "en|multi_topic|ndcg@10": 0.739271,
+            "en|multi_topic|recall@10": 0.625,
+            "en|negation|constraint_success@10": 0.3,
+            "en|negation|hard_negative_hits@10": 1.8,
+            "en|negation|mrr@10": 0.358333,
+            "en|negation|ndcg@10": 0.419254,
+            "en|negation|recall@10": 0.6,
+            "en|paraphrase|mrr@10": 0.215833,
+            "en|paraphrase|ndcg@10": 0.257017,
+            "en|paraphrase|recall@10": 0.366667,
+            "en|underspecified|mrr@10": 0.72,
+            "en|underspecified|ndcg@10": 0.629947,
+            "en|underspecified|recall@10": 0.693333
+          },
+          "embedding": {
+            "dimension": 384,
+            "model": "intfloat/multilingual-e5-small",
+            "provider": "onnx"
+          },
+          "index": {
+            "chunks": 96,
+            "duration_ms": 2045.94,
+            "files": 24
+          },
+          "latency_ms": {
+            "p50": 4.894,
+            "p95": 5.811
+          },
+          "latency_runs_ms": [
+            {
+              "p50": 4.579,
+              "p95": 5.78
+            },
+            {
+              "p50": 4.517,
+              "p95": 5.457
+            },
+            {
+              "p50": 4.636,
+              "p95": 5.491
+            },
+            {
+              "p50": 4.894,
+              "p95": 5.811
+            },
+            {
+              "p50": 4.637,
+              "p95": 5.468
+            }
+          ],
+          "macro": {
+            "mrr@10": 0.572731,
+            "ndcg@10": 0.545343,
+            "recall@10": 0.603333
+          },
+          "max_run_spread": 0.025,
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null,
+            "searches": 300,
+            "searches_reranked": 0
+          },
+          "resolved": {
+            "chunk_input_prefix": "passage: ",
+            "chunk_model_tokens": 512,
+            "max_chunk_tokens": 384,
+            "max_sequence_tokens": 512,
+            "target_chunk_tokens": 320,
+            "threads": 2,
+            "tokenizer": "kiwipiepy"
+          },
+          "run_spreads": {
+            "en|direct|mrr@10": 0.0,
+            "en|direct|ndcg@10": 0.0,
+            "en|direct|recall@10": 0.0,
+            "en|genre_primary|genre_hit@1": 0.0,
+            "en|genre_primary|genre_mrr@10": 0.0,
+            "en|genre_primary|mrr@10": 0.0,
+            "en|genre_primary|ndcg@10": 0.011284,
+            "en|genre_primary|recall@10": 0.025,
+            "en|multi_topic|intent_coverage@10": 0.0,
+            "en|multi_topic|mrr@10": 0.0,
+            "en|multi_topic|ndcg@10": 0.0,
+            "en|multi_topic|recall@10": 0.0,
+            "en|negation|constraint_success@10": 0.0,
+            "en|negation|hard_negative_hits@10": 0.0,
+            "en|negation|mrr@10": 0.0,
+            "en|negation|ndcg@10": 0.0,
+            "en|negation|recall@10": 0.0,
+            "en|paraphrase|mrr@10": 0.0,
+            "en|paraphrase|ndcg@10": 0.0,
+            "en|paraphrase|recall@10": 0.0,
+            "en|underspecified|mrr@10": 0.0,
+            "en|underspecified|ndcg@10": 0.010927,
+            "en|underspecified|recall@10": 0.025
+          },
+          "runs": 5,
+          "zero_hit_count": 9
+        },
+        "korean": {
+          "aggregate": {
+            "ko|direct|mrr@10": 0.733333,
+            "ko|direct|ndcg@10": 0.739224,
+            "ko|direct|recall@10": 0.85,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.697619,
+            "ko|genre_primary|mrr@10": 0.697619,
+            "ko|genre_primary|ndcg@10": 0.600781,
+            "ko|genre_primary|recall@10": 0.75,
+            "ko|multi_topic|intent_coverage@10": 0.95,
+            "ko|multi_topic|mrr@10": 0.7625,
+            "ko|multi_topic|ndcg@10": 0.565888,
+            "ko|multi_topic|recall@10": 0.500833,
+            "ko|negation|constraint_success@10": 0.3,
+            "ko|negation|hard_negative_hits@10": 1.4,
+            "ko|negation|mrr@10": 0.340833,
+            "ko|negation|ndcg@10": 0.426392,
+            "ko|negation|recall@10": 0.7,
+            "ko|paraphrase|mrr@10": 0.686111,
+            "ko|paraphrase|ndcg@10": 0.547802,
+            "ko|paraphrase|recall@10": 0.558333,
+            "ko|underspecified|mrr@10": 0.509286,
+            "ko|underspecified|ndcg@10": 0.45413,
+            "ko|underspecified|recall@10": 0.483333
+          },
+          "embedding": {
+            "dimension": 384,
+            "model": "intfloat/multilingual-e5-small",
+            "provider": "onnx"
+          },
+          "index": {
+            "chunks": 96,
+            "duration_ms": 2361.304,
+            "files": 24
+          },
+          "latency_ms": {
+            "p50": 5.601,
+            "p95": 8.034
+          },
+          "latency_runs_ms": [
+            {
+              "p50": 5.309,
+              "p95": 7.608
+            },
+            {
+              "p50": 5.542,
+              "p95": 7.425
+            },
+            {
+              "p50": 5.601,
+              "p95": 8.034
+            },
+            {
+              "p50": 5.367,
+              "p95": 7.711
+            },
+            {
+              "p50": 5.536,
+              "p95": 7.708
+            }
+          ],
+          "macro": {
+            "mrr@10": 0.621614,
+            "ndcg@10": 0.555703,
+            "recall@10": 0.640417
+          },
+          "max_run_spread": 0.001478,
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null,
+            "searches": 300,
+            "searches_reranked": 0
+          },
+          "resolved": {
+            "chunk_input_prefix": "passage: ",
+            "chunk_model_tokens": 512,
+            "max_chunk_tokens": 384,
+            "max_sequence_tokens": 512,
+            "target_chunk_tokens": 320,
+            "threads": 2,
+            "tokenizer": "kiwipiepy"
+          },
+          "run_spreads": {
+            "ko|direct|mrr@10": 0.0,
+            "ko|direct|ndcg@10": 0.0,
+            "ko|direct|recall@10": 0.0,
+            "ko|genre_primary|genre_hit@1": 0.0,
+            "ko|genre_primary|genre_mrr@10": 0.0,
+            "ko|genre_primary|mrr@10": 0.0,
+            "ko|genre_primary|ndcg@10": 0.0,
+            "ko|genre_primary|recall@10": 0.0,
+            "ko|multi_topic|intent_coverage@10": 0.0,
+            "ko|multi_topic|mrr@10": 0.0,
+            "ko|multi_topic|ndcg@10": 0.0,
+            "ko|multi_topic|recall@10": 0.0,
+            "ko|negation|constraint_success@10": 0.0,
+            "ko|negation|hard_negative_hits@10": 0.0,
+            "ko|negation|mrr@10": 0.0,
+            "ko|negation|ndcg@10": 0.0,
+            "ko|negation|recall@10": 0.0,
+            "ko|paraphrase|mrr@10": 0.0,
+            "ko|paraphrase|ndcg@10": 0.0,
+            "ko|paraphrase|recall@10": 0.0,
+            "ko|underspecified|mrr@10": 0.0,
+            "ko|underspecified|ndcg@10": 0.001478,
+            "ko|underspecified|recall@10": 0.0
+          },
+          "runs": 5,
+          "zero_hit_count": 6
+        }
+      }
+    },
+    "e5_kiwipiepy_gte": {
+      "cost": {
+        "peak_rss_bytes": 5125226496,
+        "reranker_footprint": {
+          "bytes": 357945081,
+          "files": {
+            "config.json": 1578,
+            "onnx/model_int8.onnx": 340858200,
+            "special_tokens_map.json": 964,
+            "tokenizer.json": 17082999,
+            "tokenizer_config.json": 1340
+          },
+          "repo": "onnx-community/gte-multilingual-reranker-base",
+          "revision": "ee64367e35a2db0da46bb6497e13a18f8bd585cb"
+        },
+        "wall_s": 1069.9
+      },
+      "license": "apache-2.0 (base model; ONNX export declares none)",
+      "model_card": "https://huggingface.co/Alibaba-NLP/gte-multilingual-reranker-base",
+      "search": {
+        "bm25_candidates": 50,
+        "dense_candidates": 50,
+        "reranker_model": "onnx-community/gte-multilingual-reranker-base:int8",
+        "reranker_pool": 20,
+        "rrf_k": 60,
+        "rrf_weights": [
+          1.0,
+          1.0
+        ],
+        "tokenizer": "kiwipiepy",
+        "top_k": 10
+      },
+      "tracks": {
+        "cross_language": {
+          "aggregate": {
+            "en|direct|cross_language_relevant@10": 2.8,
+            "en|direct|mrr@10": 0.85,
+            "en|direct|ndcg@10": 0.829985,
+            "en|direct|recall@10": 0.825595,
+            "en|direct|same_language_precision@10": 0.59,
+            "en|genre_primary|cross_language_relevant@10": 1.2,
+            "en|genre_primary|genre_hit@1": 0.4,
+            "en|genre_primary|genre_mrr@10": 0.591667,
+            "en|genre_primary|mrr@10": 0.591667,
+            "en|genre_primary|ndcg@10": 0.376999,
+            "en|genre_primary|recall@10": 0.3625,
+            "en|genre_primary|same_language_precision@10": 0.8,
+            "en|multi_topic|cross_language_relevant@10": 2.2,
+            "en|multi_topic|intent_coverage@10": 0.9,
+            "en|multi_topic|mrr@10": 0.722619,
+            "en|multi_topic|ndcg@10": 0.687323,
+            "en|multi_topic|recall@10": 0.396612,
+            "en|multi_topic|same_language_precision@10": 0.66,
+            "en|negation|constraint_success@10": 0.4,
+            "en|negation|cross_language_relevant@10": 0.2,
+            "en|negation|hard_negative_hits@10": 2.7,
+            "en|negation|mrr@10": 0.491667,
+            "en|negation|ndcg@10": 0.370877,
+            "en|negation|recall@10": 0.4,
+            "en|negation|same_language_precision@10": 0.8,
+            "en|paraphrase|cross_language_relevant@10": 0.2,
+            "en|paraphrase|mrr@10": 0.403333,
+            "en|paraphrase|ndcg@10": 0.232988,
+            "en|paraphrase|recall@10": 0.191667,
+            "en|paraphrase|same_language_precision@10": 0.95,
+            "en|underspecified|cross_language_relevant@10": 1.4,
+            "en|underspecified|mrr@10": 0.814286,
+            "en|underspecified|ndcg@10": 0.571585,
+            "en|underspecified|recall@10": 0.52369,
+            "en|underspecified|same_language_precision@10": 0.76,
+            "ko|direct|cross_language_relevant@10": 0.8,
+            "ko|direct|mrr@10": 0.85,
+            "ko|direct|ndcg@10": 0.614947,
+            "ko|direct|recall@10": 0.555357,
+            "ko|direct|same_language_precision@10": 0.89,
+            "ko|genre_primary|cross_language_relevant@10": 0.1,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.733333,
+            "ko|genre_primary|mrr@10": 0.733333,
+            "ko|genre_primary|ndcg@10": 0.450031,
+            "ko|genre_primary|recall@10": 0.3875,
+            "ko|genre_primary|same_language_precision@10": 0.99,
+            "ko|multi_topic|cross_language_relevant@10": 0.0,
+            "ko|multi_topic|intent_coverage@10": 0.85,
+            "ko|multi_topic|mrr@10": 0.75,
+            "ko|multi_topic|ndcg@10": 0.485234,
+            "ko|multi_topic|recall@10": 0.260513,
+            "ko|multi_topic|same_language_precision@10": 1.0,
+            "ko|negation|constraint_success@10": 0.5,
+            "ko|negation|cross_language_relevant@10": 0.1,
+            "ko|negation|hard_negative_hits@10": 1.7,
+            "ko|negation|mrr@10": 0.255952,
+            "ko|negation|ndcg@10": 0.238817,
+            "ko|negation|recall@10": 0.35,
+            "ko|negation|same_language_precision@10": 0.97,
+            "ko|paraphrase|cross_language_relevant@10": 0.0,
+            "ko|paraphrase|mrr@10": 0.85,
+            "ko|paraphrase|ndcg@10": 0.388938,
+            "ko|paraphrase|recall@10": 0.292738,
+            "ko|paraphrase|same_language_precision@10": 1.0,
+            "ko|underspecified|cross_language_relevant@10": 0.0,
+            "ko|underspecified|mrr@10": 0.441667,
+            "ko|underspecified|ndcg@10": 0.307729,
+            "ko|underspecified|recall@10": 0.282857,
+            "ko|underspecified|same_language_precision@10": 0.99
+          },
+          "embedding": {
+            "dimension": 384,
+            "model": "intfloat/multilingual-e5-small",
+            "provider": "onnx"
+          },
+          "index": {
+            "chunks": 192,
+            "duration_ms": 5285.479,
+            "files": 48
+          },
+          "latency_ms": {
+            "p50": 1082.327,
+            "p95": 2011.859
+          },
+          "latency_runs_ms": [
+            {
+              "p50": 896.593,
+              "p95": 1547.234
+            },
+            {
+              "p50": 906.467,
+              "p95": 1279.002
+            },
+            {
+              "p50": 933.345,
+              "p95": 1370.795
+            },
+            {
+              "p50": 910.308,
+              "p95": 1302.346
+            },
+            {
+              "p50": 1082.327,
+              "p95": 2011.859
+            }
+          ],
+          "macro": {
+            "mrr@10": 0.64621,
+            "ndcg@10": 0.462954,
+            "recall@10": 0.402419
+          },
+          "max_run_spread": 0.0,
+          "reranker": {
+            "enabled": true,
+            "model": "onnx-community/gte-multilingual-reranker-base:int8",
+            "pool": 20,
+            "provider": "fastembed",
+            "searches": 600,
+            "searches_reranked": 600
+          },
+          "resolved": {
+            "chunk_input_prefix": "passage: ",
+            "chunk_model_tokens": 512,
+            "max_chunk_tokens": 384,
+            "max_sequence_tokens": 512,
+            "target_chunk_tokens": 320,
+            "threads": 2,
+            "tokenizer": "kiwipiepy"
+          },
+          "run_spreads": {
+            "en|direct|cross_language_relevant@10": 0.0,
+            "en|direct|mrr@10": 0.0,
+            "en|direct|ndcg@10": 0.0,
+            "en|direct|recall@10": 0.0,
+            "en|direct|same_language_precision@10": 0.0,
+            "en|genre_primary|cross_language_relevant@10": 0.0,
+            "en|genre_primary|genre_hit@1": 0.0,
+            "en|genre_primary|genre_mrr@10": 0.0,
+            "en|genre_primary|mrr@10": 0.0,
+            "en|genre_primary|ndcg@10": 0.0,
+            "en|genre_primary|recall@10": 0.0,
+            "en|genre_primary|same_language_precision@10": 0.0,
+            "en|multi_topic|cross_language_relevant@10": 0.0,
+            "en|multi_topic|intent_coverage@10": 0.0,
+            "en|multi_topic|mrr@10": 0.0,
+            "en|multi_topic|ndcg@10": 0.0,
+            "en|multi_topic|recall@10": 0.0,
+            "en|multi_topic|same_language_precision@10": 0.0,
+            "en|negation|constraint_success@10": 0.0,
+            "en|negation|cross_language_relevant@10": 0.0,
+            "en|negation|hard_negative_hits@10": 0.0,
+            "en|negation|mrr@10": 0.0,
+            "en|negation|ndcg@10": 0.0,
+            "en|negation|recall@10": 0.0,
+            "en|negation|same_language_precision@10": 0.0,
+            "en|paraphrase|cross_language_relevant@10": 0.0,
+            "en|paraphrase|mrr@10": 0.0,
+            "en|paraphrase|ndcg@10": 0.0,
+            "en|paraphrase|recall@10": 0.0,
+            "en|paraphrase|same_language_precision@10": 0.0,
+            "en|underspecified|cross_language_relevant@10": 0.0,
+            "en|underspecified|mrr@10": 0.0,
+            "en|underspecified|ndcg@10": 0.0,
+            "en|underspecified|recall@10": 0.0,
+            "en|underspecified|same_language_precision@10": 0.0,
+            "ko|direct|cross_language_relevant@10": 0.0,
+            "ko|direct|mrr@10": 0.0,
+            "ko|direct|ndcg@10": 0.0,
+            "ko|direct|recall@10": 0.0,
+            "ko|direct|same_language_precision@10": 0.0,
+            "ko|genre_primary|cross_language_relevant@10": 0.0,
+            "ko|genre_primary|genre_hit@1": 0.0,
+            "ko|genre_primary|genre_mrr@10": 0.0,
+            "ko|genre_primary|mrr@10": 0.0,
+            "ko|genre_primary|ndcg@10": 0.0,
+            "ko|genre_primary|recall@10": 0.0,
+            "ko|genre_primary|same_language_precision@10": 0.0,
+            "ko|multi_topic|cross_language_relevant@10": 0.0,
+            "ko|multi_topic|intent_coverage@10": 0.0,
+            "ko|multi_topic|mrr@10": 0.0,
+            "ko|multi_topic|ndcg@10": 0.0,
+            "ko|multi_topic|recall@10": 0.0,
+            "ko|multi_topic|same_language_precision@10": 0.0,
+            "ko|negation|constraint_success@10": 0.0,
+            "ko|negation|cross_language_relevant@10": 0.0,
+            "ko|negation|hard_negative_hits@10": 0.0,
+            "ko|negation|mrr@10": 0.0,
+            "ko|negation|ndcg@10": 0.0,
+            "ko|negation|recall@10": 0.0,
+            "ko|negation|same_language_precision@10": 0.0,
+            "ko|paraphrase|cross_language_relevant@10": 0.0,
+            "ko|paraphrase|mrr@10": 0.0,
+            "ko|paraphrase|ndcg@10": 0.0,
+            "ko|paraphrase|recall@10": 0.0,
+            "ko|paraphrase|same_language_precision@10": 0.0,
+            "ko|underspecified|cross_language_relevant@10": 0.0,
+            "ko|underspecified|mrr@10": 0.0,
+            "ko|underspecified|ndcg@10": 0.0,
+            "ko|underspecified|recall@10": 0.0,
+            "ko|underspecified|same_language_precision@10": 0.0
+          },
+          "runs": 5,
+          "zero_hit_count": 15
+        },
+        "english": {
+          "aggregate": {
+            "en|direct|mrr@10": 0.758333,
+            "en|direct|ndcg@10": 0.818539,
+            "en|direct|recall@10": 0.9,
+            "en|genre_primary|genre_hit@1": 0.4,
+            "en|genre_primary|genre_mrr@10": 0.58373,
+            "en|genre_primary|mrr@10": 0.58373,
+            "en|genre_primary|ndcg@10": 0.480923,
+            "en|genre_primary|recall@10": 0.575,
+            "en|multi_topic|intent_coverage@10": 0.95,
+            "en|multi_topic|mrr@10": 0.764286,
+            "en|multi_topic|ndcg@10": 0.704018,
+            "en|multi_topic|recall@10": 0.631548,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|hard_negative_hits@10": 1.9,
+            "en|negation|mrr@10": 0.497778,
+            "en|negation|ndcg@10": 0.567502,
+            "en|negation|recall@10": 0.8,
+            "en|paraphrase|mrr@10": 0.353333,
+            "en|paraphrase|ndcg@10": 0.266717,
+            "en|paraphrase|recall@10": 0.283333,
+            "en|underspecified|mrr@10": 0.75,
+            "en|underspecified|ndcg@10": 0.644592,
+            "en|underspecified|recall@10": 0.708333
+          },
+          "embedding": {
+            "dimension": 384,
+            "model": "intfloat/multilingual-e5-small",
+            "provider": "onnx"
+          },
+          "index": {
+            "chunks": 96,
+            "duration_ms": 2076.756,
+            "files": 24
+          },
+          "latency_ms": {
+            "p50": 557.72,
+            "p95": 644.048
+          },
+          "latency_runs_ms": [
+            {
+              "p50": 549.846,
+              "p95": 626.903
+            },
+            {
+              "p50": 557.72,
+              "p95": 644.048
+            },
+            {
+              "p50": 553.603,
+              "p95": 629.702
+            },
+            {
+              "p50": 545.315,
+              "p95": 603.346
+            },
+            {
+              "p50": 544.3,
+              "p95": 629.778
+            }
+          ],
+          "macro": {
+            "mrr@10": 0.61791,
+            "ndcg@10": 0.580382,
+            "recall@10": 0.649702
+          },
+          "max_run_spread": 0.0,
+          "reranker": {
+            "enabled": true,
+            "model": "onnx-community/gte-multilingual-reranker-base:int8",
+            "pool": 20,
+            "provider": "fastembed",
+            "searches": 300,
+            "searches_reranked": 300
+          },
+          "resolved": {
+            "chunk_input_prefix": "passage: ",
+            "chunk_model_tokens": 512,
+            "max_chunk_tokens": 384,
+            "max_sequence_tokens": 512,
+            "target_chunk_tokens": 320,
+            "threads": 2,
+            "tokenizer": "kiwipiepy"
+          },
+          "run_spreads": {
+            "en|direct|mrr@10": 0.0,
+            "en|direct|ndcg@10": 0.0,
+            "en|direct|recall@10": 0.0,
+            "en|genre_primary|genre_hit@1": 0.0,
+            "en|genre_primary|genre_mrr@10": 0.0,
+            "en|genre_primary|mrr@10": 0.0,
+            "en|genre_primary|ndcg@10": 0.0,
+            "en|genre_primary|recall@10": 0.0,
+            "en|multi_topic|intent_coverage@10": 0.0,
+            "en|multi_topic|mrr@10": 0.0,
+            "en|multi_topic|ndcg@10": 0.0,
+            "en|multi_topic|recall@10": 0.0,
+            "en|negation|constraint_success@10": 0.0,
+            "en|negation|hard_negative_hits@10": 0.0,
+            "en|negation|mrr@10": 0.0,
+            "en|negation|ndcg@10": 0.0,
+            "en|negation|recall@10": 0.0,
+            "en|paraphrase|mrr@10": 0.0,
+            "en|paraphrase|ndcg@10": 0.0,
+            "en|paraphrase|recall@10": 0.0,
+            "en|underspecified|mrr@10": 0.0,
+            "en|underspecified|ndcg@10": 0.0,
+            "en|underspecified|recall@10": 0.0
+          },
+          "runs": 5,
+          "zero_hit_count": 7
+        },
+        "korean": {
+          "aggregate": {
+            "ko|direct|mrr@10": 0.85,
+            "ko|direct|ndcg@10": 0.802789,
+            "ko|direct|recall@10": 0.875,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.733333,
+            "ko|genre_primary|mrr@10": 0.733333,
+            "ko|genre_primary|ndcg@10": 0.67207,
+            "ko|genre_primary|recall@10": 0.75,
+            "ko|multi_topic|intent_coverage@10": 0.85,
+            "ko|multi_topic|mrr@10": 0.75,
+            "ko|multi_topic|ndcg@10": 0.573927,
+            "ko|multi_topic|recall@10": 0.528214,
+            "ko|negation|constraint_success@10": 0.4,
+            "ko|negation|hard_negative_hits@10": 1.6,
+            "ko|negation|mrr@10": 0.239286,
+            "ko|negation|ndcg@10": 0.326401,
+            "ko|negation|recall@10": 0.6,
+            "ko|paraphrase|mrr@10": 0.8,
+            "ko|paraphrase|ndcg@10": 0.59128,
+            "ko|paraphrase|recall@10": 0.566667,
+            "ko|underspecified|mrr@10": 0.441667,
+            "ko|underspecified|ndcg@10": 0.448778,
+            "ko|underspecified|recall@10": 0.541667
+          },
+          "embedding": {
+            "dimension": 384,
+            "model": "intfloat/multilingual-e5-small",
+            "provider": "onnx"
+          },
+          "index": {
+            "chunks": 96,
+            "duration_ms": 2323.543,
+            "files": 24
+          },
+          "latency_ms": {
+            "p50": 901.753,
+            "p95": 1143.183
+          },
+          "latency_runs_ms": [
+            {
+              "p50": 882.117,
+              "p95": 928.769
+            },
+            {
+              "p50": 888.661,
+              "p95": 918.651
+            },
+            {
+              "p50": 889.749,
+              "p95": 931.796
+            },
+            {
+              "p50": 873.672,
+              "p95": 919.718
+            },
+            {
+              "p50": 901.753,
+              "p95": 1143.183
+            }
+          ],
+          "macro": {
+            "mrr@10": 0.635714,
+            "ndcg@10": 0.569207,
+            "recall@10": 0.643591
+          },
+          "max_run_spread": 0.0,
+          "reranker": {
+            "enabled": true,
+            "model": "onnx-community/gte-multilingual-reranker-base:int8",
+            "pool": 20,
+            "provider": "fastembed",
+            "searches": 300,
+            "searches_reranked": 300
+          },
+          "resolved": {
+            "chunk_input_prefix": "passage: ",
+            "chunk_model_tokens": 512,
+            "max_chunk_tokens": 384,
+            "max_sequence_tokens": 512,
+            "target_chunk_tokens": 320,
+            "threads": 2,
+            "tokenizer": "kiwipiepy"
+          },
+          "run_spreads": {
+            "ko|direct|mrr@10": 0.0,
+            "ko|direct|ndcg@10": 0.0,
+            "ko|direct|recall@10": 0.0,
+            "ko|genre_primary|genre_hit@1": 0.0,
+            "ko|genre_primary|genre_mrr@10": 0.0,
+            "ko|genre_primary|mrr@10": 0.0,
+            "ko|genre_primary|ndcg@10": 0.0,
+            "ko|genre_primary|recall@10": 0.0,
+            "ko|multi_topic|intent_coverage@10": 0.0,
+            "ko|multi_topic|mrr@10": 0.0,
+            "ko|multi_topic|ndcg@10": 0.0,
+            "ko|multi_topic|recall@10": 0.0,
+            "ko|negation|constraint_success@10": 0.0,
+            "ko|negation|hard_negative_hits@10": 0.0,
+            "ko|negation|mrr@10": 0.0,
+            "ko|negation|ndcg@10": 0.0,
+            "ko|negation|recall@10": 0.0,
+            "ko|paraphrase|mrr@10": 0.0,
+            "ko|paraphrase|ndcg@10": 0.0,
+            "ko|paraphrase|recall@10": 0.0,
+            "ko|underspecified|mrr@10": 0.0,
+            "ko|underspecified|ndcg@10": 0.0,
+            "ko|underspecified|recall@10": 0.0
+          },
+          "runs": 5,
+          "zero_hit_count": 8
+        }
+      }
+    },
+    "e5_kiwipiepy_jina": {
+      "cost": {
+        "peak_rss_bytes": 5723684864,
+        "reranker_footprint": {
+          "bytes": 1131126171,
+          "files": {
+            "config.json": 1102,
+            "onnx/model.onnx": 1114040223,
+            "special_tokens_map.json": 964,
+            "tokenizer.json": 17082734,
+            "tokenizer_config.json": 1148
+          },
+          "repo": "jinaai/jina-reranker-v2-base-multilingual",
+          "revision": "9cfeff2df7d40d1b78e75e5e9cebec92a99813c9"
+        },
+        "wall_s": 1042.9
+      },
+      "license": "cc-by-nc-4.0",
+      "model_card": "https://huggingface.co/jinaai/jina-reranker-v2-base-multilingual",
+      "search": {
+        "bm25_candidates": 50,
+        "dense_candidates": 50,
+        "reranker_model": "jinaai/jina-reranker-v2-base-multilingual",
+        "reranker_pool": 20,
+        "rrf_k": 60,
+        "rrf_weights": [
+          1.0,
+          1.0
+        ],
+        "tokenizer": "kiwipiepy",
+        "top_k": 10
+      },
+      "tracks": {
+        "cross_language": {
+          "aggregate": {
+            "en|direct|cross_language_relevant@10": 2.9,
+            "en|direct|mrr@10": 0.833333,
+            "en|direct|ndcg@10": 0.885353,
+            "en|direct|recall@10": 0.906548,
+            "en|direct|same_language_precision@10": 0.59,
+            "en|genre_primary|cross_language_relevant@10": 1.1,
+            "en|genre_primary|genre_hit@1": 0.3,
+            "en|genre_primary|genre_mrr@10": 0.502778,
+            "en|genre_primary|mrr@10": 0.502778,
+            "en|genre_primary|ndcg@10": 0.34709,
+            "en|genre_primary|recall@10": 0.3625,
+            "en|genre_primary|same_language_precision@10": 0.83,
+            "en|multi_topic|cross_language_relevant@10": 2.0,
+            "en|multi_topic|intent_coverage@10": 0.9,
+            "en|multi_topic|mrr@10": 0.816667,
+            "en|multi_topic|ndcg@10": 0.731882,
+            "en|multi_topic|recall@10": 0.413278,
+            "en|multi_topic|same_language_precision@10": 0.7,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|cross_language_relevant@10": 0.2,
+            "en|negation|hard_negative_hits@10": 2.5,
+            "en|negation|mrr@10": 0.4325,
+            "en|negation|ndcg@10": 0.330784,
+            "en|negation|recall@10": 0.4,
+            "en|negation|same_language_precision@10": 0.81,
+            "en|paraphrase|cross_language_relevant@10": 0.3,
+            "en|paraphrase|mrr@10": 0.464286,
+            "en|paraphrase|ndcg@10": 0.291451,
+            "en|paraphrase|recall@10": 0.247619,
+            "en|paraphrase|same_language_precision@10": 0.91,
+            "en|underspecified|cross_language_relevant@10": 1.2,
+            "en|underspecified|mrr@10": 0.794444,
+            "en|underspecified|ndcg@10": 0.565569,
+            "en|underspecified|recall@10": 0.49119,
+            "en|underspecified|same_language_precision@10": 0.79,
+            "ko|direct|cross_language_relevant@10": 1.0,
+            "ko|direct|mrr@10": 0.9,
+            "ko|direct|ndcg@10": 0.638451,
+            "ko|direct|recall@10": 0.592857,
+            "ko|direct|same_language_precision@10": 0.85,
+            "ko|genre_primary|cross_language_relevant@10": 0.2,
+            "ko|genre_primary|genre_hit@1": 0.7,
+            "ko|genre_primary|genre_mrr@10": 0.833333,
+            "ko|genre_primary|mrr@10": 0.833333,
+            "ko|genre_primary|ndcg@10": 0.492787,
+            "ko|genre_primary|recall@10": 0.4375,
+            "ko|genre_primary|same_language_precision@10": 0.96,
+            "ko|multi_topic|cross_language_relevant@10": 0.0,
+            "ko|multi_topic|intent_coverage@10": 0.95,
+            "ko|multi_topic|mrr@10": 0.85,
+            "ko|multi_topic|ndcg@10": 0.565181,
+            "ko|multi_topic|recall@10": 0.288608,
+            "ko|multi_topic|same_language_precision@10": 0.99,
+            "ko|negation|constraint_success@10": 0.5,
+            "ko|negation|cross_language_relevant@10": 0.1,
+            "ko|negation|hard_negative_hits@10": 1.6,
+            "ko|negation|mrr@10": 0.320833,
+            "ko|negation|ndcg@10": 0.276407,
+            "ko|negation|recall@10": 0.35,
+            "ko|negation|same_language_precision@10": 0.97,
+            "ko|paraphrase|cross_language_relevant@10": 0.0,
+            "ko|paraphrase|mrr@10": 0.614286,
+            "ko|paraphrase|ndcg@10": 0.382217,
+            "ko|paraphrase|recall@10": 0.326071,
+            "ko|paraphrase|same_language_precision@10": 1.0,
+            "ko|underspecified|cross_language_relevant@10": 0.0,
+            "ko|underspecified|mrr@10": 0.515,
+            "ko|underspecified|ndcg@10": 0.318756,
+            "ko|underspecified|recall@10": 0.256071,
+            "ko|underspecified|same_language_precision@10": 0.98
+          },
+          "embedding": {
+            "dimension": 384,
+            "model": "intfloat/multilingual-e5-small",
+            "provider": "onnx"
+          },
+          "index": {
+            "chunks": 192,
+            "duration_ms": 3400.761,
+            "files": 48
+          },
+          "latency_ms": {
+            "p50": 927.834,
+            "p95": 1018.355
+          },
+          "latency_runs_ms": [
+            {
+              "p50": 921.429,
+              "p95": 1018.355
+            },
+            {
+              "p50": 927.834,
+              "p95": 1009.719
+            },
+            {
+              "p50": 915.779,
+              "p95": 1014.462
+            },
+            {
+              "p50": 922.075,
+              "p95": 1015.671
+            },
+            {
+              "p50": 922.602,
+              "p95": 1011.291
+            }
+          ],
+          "macro": {
+            "mrr@10": 0.656455,
+            "ndcg@10": 0.485494,
+            "recall@10": 0.422687
+          },
+          "max_run_spread": 0.0,
+          "reranker": {
+            "enabled": true,
+            "model": "jinaai/jina-reranker-v2-base-multilingual",
+            "pool": 20,
+            "provider": "fastembed",
+            "searches": 600,
+            "searches_reranked": 600
+          },
+          "resolved": {
+            "chunk_input_prefix": "passage: ",
+            "chunk_model_tokens": 512,
+            "max_chunk_tokens": 384,
+            "max_sequence_tokens": 512,
+            "target_chunk_tokens": 320,
+            "threads": 2,
+            "tokenizer": "kiwipiepy"
+          },
+          "run_spreads": {
+            "en|direct|cross_language_relevant@10": 0.0,
+            "en|direct|mrr@10": 0.0,
+            "en|direct|ndcg@10": 0.0,
+            "en|direct|recall@10": 0.0,
+            "en|direct|same_language_precision@10": 0.0,
+            "en|genre_primary|cross_language_relevant@10": 0.0,
+            "en|genre_primary|genre_hit@1": 0.0,
+            "en|genre_primary|genre_mrr@10": 0.0,
+            "en|genre_primary|mrr@10": 0.0,
+            "en|genre_primary|ndcg@10": 0.0,
+            "en|genre_primary|recall@10": 0.0,
+            "en|genre_primary|same_language_precision@10": 0.0,
+            "en|multi_topic|cross_language_relevant@10": 0.0,
+            "en|multi_topic|intent_coverage@10": 0.0,
+            "en|multi_topic|mrr@10": 0.0,
+            "en|multi_topic|ndcg@10": 0.0,
+            "en|multi_topic|recall@10": 0.0,
+            "en|multi_topic|same_language_precision@10": 0.0,
+            "en|negation|constraint_success@10": 0.0,
+            "en|negation|cross_language_relevant@10": 0.0,
+            "en|negation|hard_negative_hits@10": 0.0,
+            "en|negation|mrr@10": 0.0,
+            "en|negation|ndcg@10": 0.0,
+            "en|negation|recall@10": 0.0,
+            "en|negation|same_language_precision@10": 0.0,
+            "en|paraphrase|cross_language_relevant@10": 0.0,
+            "en|paraphrase|mrr@10": 0.0,
+            "en|paraphrase|ndcg@10": 0.0,
+            "en|paraphrase|recall@10": 0.0,
+            "en|paraphrase|same_language_precision@10": 0.0,
+            "en|underspecified|cross_language_relevant@10": 0.0,
+            "en|underspecified|mrr@10": 0.0,
+            "en|underspecified|ndcg@10": 0.0,
+            "en|underspecified|recall@10": 0.0,
+            "en|underspecified|same_language_precision@10": 0.0,
+            "ko|direct|cross_language_relevant@10": 0.0,
+            "ko|direct|mrr@10": 0.0,
+            "ko|direct|ndcg@10": 0.0,
+            "ko|direct|recall@10": 0.0,
+            "ko|direct|same_language_precision@10": 0.0,
+            "ko|genre_primary|cross_language_relevant@10": 0.0,
+            "ko|genre_primary|genre_hit@1": 0.0,
+            "ko|genre_primary|genre_mrr@10": 0.0,
+            "ko|genre_primary|mrr@10": 0.0,
+            "ko|genre_primary|ndcg@10": 0.0,
+            "ko|genre_primary|recall@10": 0.0,
+            "ko|genre_primary|same_language_precision@10": 0.0,
+            "ko|multi_topic|cross_language_relevant@10": 0.0,
+            "ko|multi_topic|intent_coverage@10": 0.0,
+            "ko|multi_topic|mrr@10": 0.0,
+            "ko|multi_topic|ndcg@10": 0.0,
+            "ko|multi_topic|recall@10": 0.0,
+            "ko|multi_topic|same_language_precision@10": 0.0,
+            "ko|negation|constraint_success@10": 0.0,
+            "ko|negation|cross_language_relevant@10": 0.0,
+            "ko|negation|hard_negative_hits@10": 0.0,
+            "ko|negation|mrr@10": 0.0,
+            "ko|negation|ndcg@10": 0.0,
+            "ko|negation|recall@10": 0.0,
+            "ko|negation|same_language_precision@10": 0.0,
+            "ko|paraphrase|cross_language_relevant@10": 0.0,
+            "ko|paraphrase|mrr@10": 0.0,
+            "ko|paraphrase|ndcg@10": 0.0,
+            "ko|paraphrase|recall@10": 0.0,
+            "ko|paraphrase|same_language_precision@10": 0.0,
+            "ko|underspecified|cross_language_relevant@10": 0.0,
+            "ko|underspecified|mrr@10": 0.0,
+            "ko|underspecified|ndcg@10": 0.0,
+            "ko|underspecified|recall@10": 0.0,
+            "ko|underspecified|same_language_precision@10": 0.0
+          },
+          "runs": 5,
+          "zero_hit_count": 15
+        },
+        "english": {
+          "aggregate": {
+            "en|direct|mrr@10": 0.783333,
+            "en|direct|ndcg@10": 0.882898,
+            "en|direct|recall@10": 0.95,
+            "en|genre_primary|genre_hit@1": 0.3,
+            "en|genre_primary|genre_mrr@10": 0.511111,
+            "en|genre_primary|mrr@10": 0.511111,
+            "en|genre_primary|ndcg@10": 0.425997,
+            "en|genre_primary|recall@10": 0.525,
+            "en|multi_topic|intent_coverage@10": 1.0,
+            "en|multi_topic|mrr@10": 0.8,
+            "en|multi_topic|ndcg@10": 0.717419,
+            "en|multi_topic|recall@10": 0.613095,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|hard_negative_hits@10": 1.8,
+            "en|negation|mrr@10": 0.439286,
+            "en|negation|ndcg@10": 0.522612,
+            "en|negation|recall@10": 0.8,
+            "en|paraphrase|mrr@10": 0.414286,
+            "en|paraphrase|ndcg@10": 0.355612,
+            "en|paraphrase|recall@10": 0.358333,
+            "en|underspecified|mrr@10": 0.795833,
+            "en|underspecified|ndcg@10": 0.693877,
+            "en|underspecified|recall@10": 0.741667
+          },
+          "embedding": {
+            "dimension": 384,
+            "model": "intfloat/multilingual-e5-small",
+            "provider": "onnx"
+          },
+          "index": {
+            "chunks": 96,
+            "duration_ms": 2046.519,
+            "files": 24
+          },
+          "latency_ms": {
+            "p50": 630.755,
+            "p95": 718.935
+          },
+          "latency_runs_ms": [
+            {
+              "p50": 618.31,
+              "p95": 718.935
+            },
+            {
+              "p50": 630.755,
+              "p95": 705.173
+            },
+            {
+              "p50": 628.468,
+              "p95": 707.765
+            },
+            {
+              "p50": 617.707,
+              "p95": 706.091
+            },
+            {
+              "p50": 612.935,
+              "p95": 699.396
+            }
+          ],
+          "macro": {
+            "mrr@10": 0.623975,
+            "ndcg@10": 0.599736,
+            "recall@10": 0.664682
+          },
+          "max_run_spread": 0.0,
+          "reranker": {
+            "enabled": true,
+            "model": "jinaai/jina-reranker-v2-base-multilingual",
+            "pool": 20,
+            "provider": "fastembed",
+            "searches": 300,
+            "searches_reranked": 300
+          },
+          "resolved": {
+            "chunk_input_prefix": "passage: ",
+            "chunk_model_tokens": 512,
+            "max_chunk_tokens": 384,
+            "max_sequence_tokens": 512,
+            "target_chunk_tokens": 320,
+            "threads": 2,
+            "tokenizer": "kiwipiepy"
+          },
+          "run_spreads": {
+            "en|direct|mrr@10": 0.0,
+            "en|direct|ndcg@10": 0.0,
+            "en|direct|recall@10": 0.0,
+            "en|genre_primary|genre_hit@1": 0.0,
+            "en|genre_primary|genre_mrr@10": 0.0,
+            "en|genre_primary|mrr@10": 0.0,
+            "en|genre_primary|ndcg@10": 0.0,
+            "en|genre_primary|recall@10": 0.0,
+            "en|multi_topic|intent_coverage@10": 0.0,
+            "en|multi_topic|mrr@10": 0.0,
+            "en|multi_topic|ndcg@10": 0.0,
+            "en|multi_topic|recall@10": 0.0,
+            "en|negation|constraint_success@10": 0.0,
+            "en|negation|hard_negative_hits@10": 0.0,
+            "en|negation|mrr@10": 0.0,
+            "en|negation|ndcg@10": 0.0,
+            "en|negation|recall@10": 0.0,
+            "en|paraphrase|mrr@10": 0.0,
+            "en|paraphrase|ndcg@10": 0.0,
+            "en|paraphrase|recall@10": 0.0,
+            "en|underspecified|mrr@10": 0.0,
+            "en|underspecified|ndcg@10": 0.0,
+            "en|underspecified|recall@10": 0.0
+          },
+          "runs": 5,
+          "zero_hit_count": 8
+        },
+        "korean": {
+          "aggregate": {
+            "ko|direct|mrr@10": 0.9,
+            "ko|direct|ndcg@10": 0.824374,
+            "ko|direct|recall@10": 0.9,
+            "ko|genre_primary|genre_hit@1": 0.7,
+            "ko|genre_primary|genre_mrr@10": 0.816667,
+            "ko|genre_primary|mrr@10": 0.816667,
+            "ko|genre_primary|ndcg@10": 0.714884,
+            "ko|genre_primary|recall@10": 0.8,
+            "ko|multi_topic|intent_coverage@10": 0.9,
+            "ko|multi_topic|mrr@10": 0.85,
+            "ko|multi_topic|ndcg@10": 0.667905,
+            "ko|multi_topic|recall@10": 0.588333,
+            "ko|negation|constraint_success@10": 0.4,
+            "ko|negation|hard_negative_hits@10": 1.7,
+            "ko|negation|mrr@10": 0.320833,
+            "ko|negation|ndcg@10": 0.387707,
+            "ko|negation|recall@10": 0.6,
+            "ko|paraphrase|mrr@10": 0.62,
+            "ko|paraphrase|ndcg@10": 0.576512,
+            "ko|paraphrase|recall@10": 0.65,
+            "ko|underspecified|mrr@10": 0.52,
+            "ko|underspecified|ndcg@10": 0.453345,
+            "ko|underspecified|recall@10": 0.483333
+          },
+          "embedding": {
+            "dimension": 384,
+            "model": "intfloat/multilingual-e5-small",
+            "provider": "onnx"
+          },
+          "index": {
+            "chunks": 96,
+            "duration_ms": 2338.509,
+            "files": 24
+          },
+          "latency_ms": {
+            "p50": 1005.794,
+            "p95": 1056.818
+          },
+          "latency_runs_ms": [
+            {
+              "p50": 998.605,
+              "p95": 1047.488
+            },
+            {
+              "p50": 1005.794,
+              "p95": 1056.818
+            },
+            {
+              "p50": 979.367,
+              "p95": 1014.828
+            },
+            {
+              "p50": 982.477,
+              "p95": 1029.561
+            },
+            {
+              "p50": 978.933,
+              "p95": 1033.312
+            }
+          ],
+          "macro": {
+            "mrr@10": 0.67125,
+            "ndcg@10": 0.604121,
+            "recall@10": 0.670278
+          },
+          "max_run_spread": 0.0,
+          "reranker": {
+            "enabled": true,
+            "model": "jinaai/jina-reranker-v2-base-multilingual",
+            "pool": 20,
+            "provider": "fastembed",
+            "searches": 300,
+            "searches_reranked": 300
+          },
+          "resolved": {
+            "chunk_input_prefix": "passage: ",
+            "chunk_model_tokens": 512,
+            "max_chunk_tokens": 384,
+            "max_sequence_tokens": 512,
+            "target_chunk_tokens": 320,
+            "threads": 2,
+            "tokenizer": "kiwipiepy"
+          },
+          "run_spreads": {
+            "ko|direct|mrr@10": 0.0,
+            "ko|direct|ndcg@10": 0.0,
+            "ko|direct|recall@10": 0.0,
+            "ko|genre_primary|genre_hit@1": 0.0,
+            "ko|genre_primary|genre_mrr@10": 0.0,
+            "ko|genre_primary|mrr@10": 0.0,
+            "ko|genre_primary|ndcg@10": 0.0,
+            "ko|genre_primary|recall@10": 0.0,
+            "ko|multi_topic|intent_coverage@10": 0.0,
+            "ko|multi_topic|mrr@10": 0.0,
+            "ko|multi_topic|ndcg@10": 0.0,
+            "ko|multi_topic|recall@10": 0.0,
+            "ko|negation|constraint_success@10": 0.0,
+            "ko|negation|hard_negative_hits@10": 0.0,
+            "ko|negation|mrr@10": 0.0,
+            "ko|negation|ndcg@10": 0.0,
+            "ko|negation|recall@10": 0.0,
+            "ko|paraphrase|mrr@10": 0.0,
+            "ko|paraphrase|ndcg@10": 0.0,
+            "ko|paraphrase|recall@10": 0.0,
+            "ko|underspecified|mrr@10": 0.0,
+            "ko|underspecified|ndcg@10": 0.0,
+            "ko|underspecified|recall@10": 0.0
+          },
+          "runs": 5,
+          "zero_hit_count": 7
+        }
+      }
+    },
+    "e5_kiwipiepy_jina_int8": {
+      "cost": {
+        "peak_rss_bytes": 4293820416,
+        "reranker_footprint": {
+          "bytes": 296663100,
+          "files": {
+            "config.json": 1102,
+            "onnx/model_int8.onnx": 279577152,
+            "special_tokens_map.json": 964,
+            "tokenizer.json": 17082734,
+            "tokenizer_config.json": 1148
+          },
+          "repo": "jinaai/jina-reranker-v2-base-multilingual",
+          "revision": "9cfeff2df7d40d1b78e75e5e9cebec92a99813c9"
+        },
+        "wall_s": 1075.9
+      },
+      "license": "cc-by-nc-4.0",
+      "model_card": "https://huggingface.co/jinaai/jina-reranker-v2-base-multilingual",
+      "search": {
+        "bm25_candidates": 50,
+        "dense_candidates": 50,
+        "reranker_model": "jinaai/jina-reranker-v2-base-multilingual:int8",
+        "reranker_pool": 20,
+        "rrf_k": 60,
+        "rrf_weights": [
+          1.0,
+          1.0
+        ],
+        "tokenizer": "kiwipiepy",
+        "top_k": 10
+      },
+      "tracks": {
+        "cross_language": {
+          "aggregate": {
+            "en|direct|cross_language_relevant@10": 2.9,
+            "en|direct|mrr@10": 0.833333,
+            "en|direct|ndcg@10": 0.885888,
+            "en|direct|recall@10": 0.906548,
+            "en|direct|same_language_precision@10": 0.6,
+            "en|genre_primary|cross_language_relevant@10": 1.1,
+            "en|genre_primary|genre_hit@1": 0.4,
+            "en|genre_primary|genre_mrr@10": 0.551667,
+            "en|genre_primary|mrr@10": 0.551667,
+            "en|genre_primary|ndcg@10": 0.348638,
+            "en|genre_primary|recall@10": 0.35,
+            "en|genre_primary|same_language_precision@10": 0.82,
+            "en|multi_topic|cross_language_relevant@10": 2.2,
+            "en|multi_topic|intent_coverage@10": 0.9,
+            "en|multi_topic|mrr@10": 0.816667,
+            "en|multi_topic|ndcg@10": 0.735382,
+            "en|multi_topic|recall@10": 0.420421,
+            "en|multi_topic|same_language_precision@10": 0.68,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|cross_language_relevant@10": 0.2,
+            "en|negation|hard_negative_hits@10": 2.5,
+            "en|negation|mrr@10": 0.4325,
+            "en|negation|ndcg@10": 0.330784,
+            "en|negation|recall@10": 0.4,
+            "en|negation|same_language_precision@10": 0.81,
+            "en|paraphrase|cross_language_relevant@10": 0.3,
+            "en|paraphrase|mrr@10": 0.464286,
+            "en|paraphrase|ndcg@10": 0.289177,
+            "en|paraphrase|recall@10": 0.247619,
+            "en|paraphrase|same_language_precision@10": 0.91,
+            "en|underspecified|cross_language_relevant@10": 1.2,
+            "en|underspecified|mrr@10": 0.794444,
+            "en|underspecified|ndcg@10": 0.564739,
+            "en|underspecified|recall@10": 0.487024,
+            "en|underspecified|same_language_precision@10": 0.79,
+            "ko|direct|cross_language_relevant@10": 1.0,
+            "ko|direct|mrr@10": 0.9,
+            "ko|direct|ndcg@10": 0.642061,
+            "ko|direct|recall@10": 0.592857,
+            "ko|direct|same_language_precision@10": 0.85,
+            "ko|genre_primary|cross_language_relevant@10": 0.2,
+            "ko|genre_primary|genre_hit@1": 0.6,
+            "ko|genre_primary|genre_mrr@10": 0.783333,
+            "ko|genre_primary|mrr@10": 0.783333,
+            "ko|genre_primary|ndcg@10": 0.48099,
+            "ko|genre_primary|recall@10": 0.4375,
+            "ko|genre_primary|same_language_precision@10": 0.96,
+            "ko|multi_topic|cross_language_relevant@10": 0.0,
+            "ko|multi_topic|intent_coverage@10": 0.95,
+            "ko|multi_topic|mrr@10": 0.85,
+            "ko|multi_topic|ndcg@10": 0.563172,
+            "ko|multi_topic|recall@10": 0.281465,
+            "ko|multi_topic|same_language_precision@10": 0.99,
+            "ko|negation|constraint_success@10": 0.5,
+            "ko|negation|cross_language_relevant@10": 0.1,
+            "ko|negation|hard_negative_hits@10": 1.5,
+            "ko|negation|mrr@10": 0.327778,
+            "ko|negation|ndcg@10": 0.279772,
+            "ko|negation|recall@10": 0.35,
+            "ko|negation|same_language_precision@10": 0.97,
+            "ko|paraphrase|cross_language_relevant@10": 0.0,
+            "ko|paraphrase|mrr@10": 0.624286,
+            "ko|paraphrase|ndcg@10": 0.386688,
+            "ko|paraphrase|recall@10": 0.326071,
+            "ko|paraphrase|same_language_precision@10": 1.0,
+            "ko|underspecified|cross_language_relevant@10": 0.0,
+            "ko|underspecified|mrr@10": 0.511667,
+            "ko|underspecified|ndcg@10": 0.323935,
+            "ko|underspecified|recall@10": 0.270357,
+            "ko|underspecified|same_language_precision@10": 0.98
+          },
+          "embedding": {
+            "dimension": 384,
+            "model": "intfloat/multilingual-e5-small",
+            "provider": "onnx"
+          },
+          "index": {
+            "chunks": 192,
+            "duration_ms": 3383.283,
+            "files": 48
+          },
+          "latency_ms": {
+            "p50": 1691.801,
+            "p95": 2591.347
+          },
+          "latency_runs_ms": [
+            {
+              "p50": 1691.801,
+              "p95": 2591.347
+            },
+            {
+              "p50": 915.989,
+              "p95": 2235.439
+            },
+            {
+              "p50": 777.598,
+              "p95": 923.6
+            },
+            {
+              "p50": 798.371,
+              "p95": 936.306
+            },
+            {
+              "p50": 807.314,
+              "p95": 932.622
+            }
+          ],
+          "macro": {
+            "mrr@10": 0.657497,
+            "ndcg@10": 0.485936,
+            "recall@10": 0.422488
+          },
+          "max_run_spread": 0.0,
+          "reranker": {
+            "enabled": true,
+            "model": "jinaai/jina-reranker-v2-base-multilingual:int8",
+            "pool": 20,
+            "provider": "fastembed",
+            "searches": 600,
+            "searches_reranked": 600
+          },
+          "resolved": {
+            "chunk_input_prefix": "passage: ",
+            "chunk_model_tokens": 512,
+            "max_chunk_tokens": 384,
+            "max_sequence_tokens": 512,
+            "target_chunk_tokens": 320,
+            "threads": 2,
+            "tokenizer": "kiwipiepy"
+          },
+          "run_spreads": {
+            "en|direct|cross_language_relevant@10": 0.0,
+            "en|direct|mrr@10": 0.0,
+            "en|direct|ndcg@10": 0.0,
+            "en|direct|recall@10": 0.0,
+            "en|direct|same_language_precision@10": 0.0,
+            "en|genre_primary|cross_language_relevant@10": 0.0,
+            "en|genre_primary|genre_hit@1": 0.0,
+            "en|genre_primary|genre_mrr@10": 0.0,
+            "en|genre_primary|mrr@10": 0.0,
+            "en|genre_primary|ndcg@10": 0.0,
+            "en|genre_primary|recall@10": 0.0,
+            "en|genre_primary|same_language_precision@10": 0.0,
+            "en|multi_topic|cross_language_relevant@10": 0.0,
+            "en|multi_topic|intent_coverage@10": 0.0,
+            "en|multi_topic|mrr@10": 0.0,
+            "en|multi_topic|ndcg@10": 0.0,
+            "en|multi_topic|recall@10": 0.0,
+            "en|multi_topic|same_language_precision@10": 0.0,
+            "en|negation|constraint_success@10": 0.0,
+            "en|negation|cross_language_relevant@10": 0.0,
+            "en|negation|hard_negative_hits@10": 0.0,
+            "en|negation|mrr@10": 0.0,
+            "en|negation|ndcg@10": 0.0,
+            "en|negation|recall@10": 0.0,
+            "en|negation|same_language_precision@10": 0.0,
+            "en|paraphrase|cross_language_relevant@10": 0.0,
+            "en|paraphrase|mrr@10": 0.0,
+            "en|paraphrase|ndcg@10": 0.0,
+            "en|paraphrase|recall@10": 0.0,
+            "en|paraphrase|same_language_precision@10": 0.0,
+            "en|underspecified|cross_language_relevant@10": 0.0,
+            "en|underspecified|mrr@10": 0.0,
+            "en|underspecified|ndcg@10": 0.0,
+            "en|underspecified|recall@10": 0.0,
+            "en|underspecified|same_language_precision@10": 0.0,
+            "ko|direct|cross_language_relevant@10": 0.0,
+            "ko|direct|mrr@10": 0.0,
+            "ko|direct|ndcg@10": 0.0,
+            "ko|direct|recall@10": 0.0,
+            "ko|direct|same_language_precision@10": 0.0,
+            "ko|genre_primary|cross_language_relevant@10": 0.0,
+            "ko|genre_primary|genre_hit@1": 0.0,
+            "ko|genre_primary|genre_mrr@10": 0.0,
+            "ko|genre_primary|mrr@10": 0.0,
+            "ko|genre_primary|ndcg@10": 0.0,
+            "ko|genre_primary|recall@10": 0.0,
+            "ko|genre_primary|same_language_precision@10": 0.0,
+            "ko|multi_topic|cross_language_relevant@10": 0.0,
+            "ko|multi_topic|intent_coverage@10": 0.0,
+            "ko|multi_topic|mrr@10": 0.0,
+            "ko|multi_topic|ndcg@10": 0.0,
+            "ko|multi_topic|recall@10": 0.0,
+            "ko|multi_topic|same_language_precision@10": 0.0,
+            "ko|negation|constraint_success@10": 0.0,
+            "ko|negation|cross_language_relevant@10": 0.0,
+            "ko|negation|hard_negative_hits@10": 0.0,
+            "ko|negation|mrr@10": 0.0,
+            "ko|negation|ndcg@10": 0.0,
+            "ko|negation|recall@10": 0.0,
+            "ko|negation|same_language_precision@10": 0.0,
+            "ko|paraphrase|cross_language_relevant@10": 0.0,
+            "ko|paraphrase|mrr@10": 0.0,
+            "ko|paraphrase|ndcg@10": 0.0,
+            "ko|paraphrase|recall@10": 0.0,
+            "ko|paraphrase|same_language_precision@10": 0.0,
+            "ko|underspecified|cross_language_relevant@10": 0.0,
+            "ko|underspecified|mrr@10": 0.0,
+            "ko|underspecified|ndcg@10": 0.0,
+            "ko|underspecified|recall@10": 0.0,
+            "ko|underspecified|same_language_precision@10": 0.0
+          },
+          "runs": 5,
+          "zero_hit_count": 14
+        },
+        "english": {
+          "aggregate": {
+            "en|direct|mrr@10": 0.783333,
+            "en|direct|ndcg@10": 0.882113,
+            "en|direct|recall@10": 0.95,
+            "en|genre_primary|genre_hit@1": 0.5,
+            "en|genre_primary|genre_mrr@10": 0.600952,
+            "en|genre_primary|mrr@10": 0.600952,
+            "en|genre_primary|ndcg@10": 0.459626,
+            "en|genre_primary|recall@10": 0.55,
+            "en|multi_topic|intent_coverage@10": 1.0,
+            "en|multi_topic|mrr@10": 0.8,
+            "en|multi_topic|ndcg@10": 0.724064,
+            "en|multi_topic|recall@10": 0.627381,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|hard_negative_hits@10": 1.9,
+            "en|negation|mrr@10": 0.441071,
+            "en|negation|ndcg@10": 0.524399,
+            "en|negation|recall@10": 0.8,
+            "en|paraphrase|mrr@10": 0.414286,
+            "en|paraphrase|ndcg@10": 0.351538,
+            "en|paraphrase|recall@10": 0.358333,
+            "en|underspecified|mrr@10": 0.795833,
+            "en|underspecified|ndcg@10": 0.703285,
+            "en|underspecified|recall@10": 0.766667
+          },
+          "embedding": {
+            "dimension": 384,
+            "model": "intfloat/multilingual-e5-small",
+            "provider": "onnx"
+          },
+          "index": {
+            "chunks": 96,
+            "duration_ms": 2100.407,
+            "files": 24
+          },
+          "latency_ms": {
+            "p50": 516.231,
+            "p95": 601.978
+          },
+          "latency_runs_ms": [
+            {
+              "p50": 483.436,
+              "p95": 578.228
+            },
+            {
+              "p50": 494.15,
+              "p95": 600.689
+            },
+            {
+              "p50": 516.231,
+              "p95": 598.8
+            },
+            {
+              "p50": 495.977,
+              "p95": 601.978
+            },
+            {
+              "p50": 502.954,
+              "p95": 599.234
+            }
+          ],
+          "macro": {
+            "mrr@10": 0.639246,
+            "ndcg@10": 0.607504,
+            "recall@10": 0.675397
+          },
+          "max_run_spread": 0.0,
+          "reranker": {
+            "enabled": true,
+            "model": "jinaai/jina-reranker-v2-base-multilingual:int8",
+            "pool": 20,
+            "provider": "fastembed",
+            "searches": 300,
+            "searches_reranked": 300
+          },
+          "resolved": {
+            "chunk_input_prefix": "passage: ",
+            "chunk_model_tokens": 512,
+            "max_chunk_tokens": 384,
+            "max_sequence_tokens": 512,
+            "target_chunk_tokens": 320,
+            "threads": 2,
+            "tokenizer": "kiwipiepy"
+          },
+          "run_spreads": {
+            "en|direct|mrr@10": 0.0,
+            "en|direct|ndcg@10": 0.0,
+            "en|direct|recall@10": 0.0,
+            "en|genre_primary|genre_hit@1": 0.0,
+            "en|genre_primary|genre_mrr@10": 0.0,
+            "en|genre_primary|mrr@10": 0.0,
+            "en|genre_primary|ndcg@10": 0.0,
+            "en|genre_primary|recall@10": 0.0,
+            "en|multi_topic|intent_coverage@10": 0.0,
+            "en|multi_topic|mrr@10": 0.0,
+            "en|multi_topic|ndcg@10": 0.0,
+            "en|multi_topic|recall@10": 0.0,
+            "en|negation|constraint_success@10": 0.0,
+            "en|negation|hard_negative_hits@10": 0.0,
+            "en|negation|mrr@10": 0.0,
+            "en|negation|ndcg@10": 0.0,
+            "en|negation|recall@10": 0.0,
+            "en|paraphrase|mrr@10": 0.0,
+            "en|paraphrase|ndcg@10": 0.0,
+            "en|paraphrase|recall@10": 0.0,
+            "en|underspecified|mrr@10": 0.0,
+            "en|underspecified|ndcg@10": 0.0,
+            "en|underspecified|recall@10": 0.0
+          },
+          "runs": 5,
+          "zero_hit_count": 7
+        },
+        "korean": {
+          "aggregate": {
+            "ko|direct|mrr@10": 0.9,
+            "ko|direct|ndcg@10": 0.829965,
+            "ko|direct|recall@10": 0.9,
+            "ko|genre_primary|genre_hit@1": 0.6,
+            "ko|genre_primary|genre_mrr@10": 0.766667,
+            "ko|genre_primary|mrr@10": 0.766667,
+            "ko|genre_primary|ndcg@10": 0.697494,
+            "ko|genre_primary|recall@10": 0.8,
+            "ko|multi_topic|intent_coverage@10": 0.9,
+            "ko|multi_topic|mrr@10": 0.85,
+            "ko|multi_topic|ndcg@10": 0.66548,
+            "ko|multi_topic|recall@10": 0.571667,
+            "ko|negation|constraint_success@10": 0.4,
+            "ko|negation|hard_negative_hits@10": 1.6,
+            "ko|negation|mrr@10": 0.327778,
+            "ko|negation|ndcg@10": 0.393196,
+            "ko|negation|recall@10": 0.6,
+            "ko|paraphrase|mrr@10": 0.62,
+            "ko|paraphrase|ndcg@10": 0.57473,
+            "ko|paraphrase|recall@10": 0.616667,
+            "ko|underspecified|mrr@10": 0.52,
+            "ko|underspecified|ndcg@10": 0.46387,
+            "ko|underspecified|recall@10": 0.516667
+          },
+          "embedding": {
+            "dimension": 384,
+            "model": "intfloat/multilingual-e5-small",
+            "provider": "onnx"
+          },
+          "index": {
+            "chunks": 96,
+            "duration_ms": 2523.942,
+            "files": 24
+          },
+          "latency_ms": {
+            "p50": 1052.543,
+            "p95": 1254.05
+          },
+          "latency_runs_ms": [
+            {
+              "p50": 842.498,
+              "p95": 910.705
+            },
+            {
+              "p50": 852.567,
+              "p95": 913.161
+            },
+            {
+              "p50": 861.634,
+              "p95": 936.087
+            },
+            {
+              "p50": 897.761,
+              "p95": 966.88
+            },
+            {
+              "p50": 1052.543,
+              "p95": 1254.05
+            }
+          ],
+          "macro": {
+            "mrr@10": 0.664074,
+            "ndcg@10": 0.604123,
+            "recall@10": 0.6675
+          },
+          "max_run_spread": 0.0,
+          "reranker": {
+            "enabled": true,
+            "model": "jinaai/jina-reranker-v2-base-multilingual:int8",
+            "pool": 20,
+            "provider": "fastembed",
+            "searches": 300,
+            "searches_reranked": 300
+          },
+          "resolved": {
+            "chunk_input_prefix": "passage: ",
+            "chunk_model_tokens": 512,
+            "max_chunk_tokens": 384,
+            "max_sequence_tokens": 512,
+            "target_chunk_tokens": 320,
+            "threads": 2,
+            "tokenizer": "kiwipiepy"
+          },
+          "run_spreads": {
+            "ko|direct|mrr@10": 0.0,
+            "ko|direct|ndcg@10": 0.0,
+            "ko|direct|recall@10": 0.0,
+            "ko|genre_primary|genre_hit@1": 0.0,
+            "ko|genre_primary|genre_mrr@10": 0.0,
+            "ko|genre_primary|mrr@10": 0.0,
+            "ko|genre_primary|ndcg@10": 0.0,
+            "ko|genre_primary|recall@10": 0.0,
+            "ko|multi_topic|intent_coverage@10": 0.0,
+            "ko|multi_topic|mrr@10": 0.0,
+            "ko|multi_topic|ndcg@10": 0.0,
+            "ko|multi_topic|recall@10": 0.0,
+            "ko|negation|constraint_success@10": 0.0,
+            "ko|negation|hard_negative_hits@10": 0.0,
+            "ko|negation|mrr@10": 0.0,
+            "ko|negation|ndcg@10": 0.0,
+            "ko|negation|recall@10": 0.0,
+            "ko|paraphrase|mrr@10": 0.0,
+            "ko|paraphrase|ndcg@10": 0.0,
+            "ko|paraphrase|recall@10": 0.0,
+            "ko|underspecified|mrr@10": 0.0,
+            "ko|underspecified|ndcg@10": 0.0,
+            "ko|underspecified|recall@10": 0.0
+          },
+          "runs": 5,
+          "zero_hit_count": 7
+        }
+      }
+    }
+  },
+  "queries": 120,
+  "reranker_pool": 20,
+  "runs": 5,
+  "schema_version": 2
+}

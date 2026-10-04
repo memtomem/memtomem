@@ -24,6 +24,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   The exit code is unchanged (0); a script that treats any status other than
   `clean` as a failure will now see `advisory` where it saw `clean`.
 
+### Added
+
+- **The retrieval benchmark measures the Korean-optimized preset's stack
+  (#2651).** `tools/retrieval-eval/compare_models_v2.py` compares rerankers on
+  ONNX `multilingual-e5-small` with the `kiwipiepy` tokenizer over five runs.
+  It records peak RSS and each reranker's disk size, and labels the jina
+  reranker's CC-BY-NC-4.0 license. jina v2 raised Korean nDCG@10 from 0.5557 to
+  0.6041 at a median of about 1.0 s per Korean search, which is the evidence
+  for #2652. The benchmark now builds E5 configs through their validators and
+  ignores ambient `MEMTOMEM_*` settings. It refuses a run in which any search
+  was not reranked by the requested model, or in which `kiwipiepy` fell back
+  to `unicode61`.
+
 ### Fixed
 
 - **An excluded file named on its own no longer shows up as one to index
