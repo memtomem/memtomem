@@ -5,12 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Scripts that read `mm context settings-doctor --json`: expect
+  `"status": "advisory"` (#2482).** A settings tree whose only findings are
+  unportable hook commands reported `clean` and now reports `advisory`, still
+  with exit code 0. A script that passes only on `clean` now fails there; to
+  keep treating these as warnings, accept `advisory` as well, or read the
+  findings themselves.
+
 ### Changed
 
-- **The Korean-optimized `mm init` preset no longer enables a reranker.** It
+- **The Korean-optimized `mm init` preset no longer enables a reranker
+  (#2652).** It
   keeps ONNX `multilingual-e5-small` and the `kiwipiepy` tokenizer but drops
-  `jinaai/jina-reranker-v2-base-multilingual`, a 1.1 GB download that added
-  about a second of CPU time to every search and whose model license
+  `jinaai/jina-reranker-v2-base-multilingual`, a 1.1 GB download that made
+  each Korean search about a second slower on CPU (median latency in #2651's
+  benchmark) and whose model license
   (CC-BY-NC-4.0) does not allow commercial use. Re-running the preset on an
   existing config keeps a reranker it already enables and lists it under
   "Preserved from existing config"; `mm config set rerank.enabled false`
@@ -30,8 +41,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   unportable hook commands (#2482).** It reported `"clean"` while the same
   payload listed unportable-command findings, so a script that gated on
   `status == "clean"` never saw them. `clean` now means every axis is empty.
-  The exit code is unchanged (0); a script that treats any status other than
-  `clean` as a failure will now see `advisory` where it saw `clean`.
+  `advisory` applies only when nothing ranks higher; the order is
+  `duplicates`, `malformed`, `incomplete`, `advisory`, `clean`. The exit code
+  is unchanged (0); a script that treats any status other than `clean` as a
+  failure will now see `advisory` where it saw `clean`.
+- **The Hermes package README covers Hermes's MCP requirement and the plugin
+  catalog (#2635, #2649).** The package needs Hermes with MCP support: the
+  `mcp` Python package, which the `hermes-agent[mcp]` extra provides. Without
+  it Hermes loads the six skills but starts no MCP server, and it logs why only
+  at debug level. memtomem is now listed in the Hermes plugin catalog, which
+  the 0.6.6 notes said it was not; `hermes plugins install memtomem` installs
+  the commit the catalog pins, which can trail the newest release.
 
 ### Added
 
@@ -71,6 +91,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   found. Syncing into an
   unsearchable target tier, or from an unsearchable canonical directory, still
   fails, and the Web settings sync does not yet list skipped files (#2644).
+- **`mm status` and `mem_status` warn when a `kiwipiepy` store is tokenized
+  as `unicode61` (#2647).** With `search.tokenizer` set to `kiwipiepy` and the
+  `kiwipiepy` package missing, a process falls back to `unicode61` and keeps
+  indexing, so one keyword index holds rows tokenized two ways and Korean
+  keyword search misses notes across them. Status did not report it. Both
+  surfaces now list a `tokenizer_fallback` warning when the process has
+  already fallen back or the package cannot be found, with the fix: install
+  the `korean` extra wherever memtomem runs, restart its servers, then rebuild
+  the keyword index. Rows indexed during the fallback stay as they are until
+  that rebuild. The server's fallback log line now names the `korean` extra
+  instead of `pip install kiwipiepy`.
+- **The Settings > Embedding env example is split by provider (#2466).** It
+  selected Ollama and also listed `ONNX_BATCH_SIZE`, `MAX_SEQUENCE_TOKENS`,
+  `ONNX_CPU_MEM_ARENA` and `THREADS`, which only the ONNX provider reads, plus
+  `API_KEY`, which only the OpenAI provider reads. It now shows one ONNX block
+  with `multilingual-e5-small` and one Ollama block, each with only the knobs
+  that provider uses.
+- **Every indexing engine uses the server's chunker set (#2622).** Without a
+  hard chunk budget (the default), an engine built without an explicit chunker
+  registry left out the Python and JavaScript/TypeScript chunkers and chunked
+  Markdown without the configured sizes. That engine is what
+  `mem_embedding_reset(mode="revert_to_stored")` builds, so after a revert a
+  running server skipped `.py`, `.js`, `.ts`, `.jsx` and `.tsx` files until it
+  restarted, and `mm memory doctor` left code files out of its coverage checks.
+  Every engine now shares one builder with the startup components. The
+  configuration guide's lock-sidecar section said the code extensions need a
+  hard chunk budget; it now says a default scan selects all ten default
+  extensions.
 
 ## [0.6.6] — 2026-10-02
 
@@ -119,25 +167,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   these under `set -e` and expects exit 0 on these errors needs `|| true`.
 
 ### Fixed
-
-- **The Settings > Embedding env example is split by provider (#2466).** It
-  selected Ollama and also listed `ONNX_BATCH_SIZE`, `MAX_SEQUENCE_TOKENS`,
-  `ONNX_CPU_MEM_ARENA` and `THREADS`, which only the ONNX provider reads, plus
-  `API_KEY`, which only the OpenAI provider reads. It now shows one ONNX block
-  with `multilingual-e5-small` and one Ollama block, each with only the knobs
-  that provider uses.
-
-- **Every indexing engine uses the server's chunker set (#2622).** Without a
-  hard chunk budget (the default), an engine built without an explicit chunker
-  registry left out the Python and JavaScript/TypeScript chunkers and chunked
-  Markdown without the configured sizes. That engine is what
-  `mem_embedding_reset(mode="revert_to_stored")` builds, so after a revert a
-  running server skipped `.py`, `.js`, `.ts`, `.jsx` and `.tsx` files until it
-  restarted, and `mm memory doctor` left code files out of its coverage checks.
-  Every engine now shares one builder with the startup components. The
-  configuration guide's lock-sidecar section said the code extensions need a
-  hard chunk budget; it now says a default scan selects all ten default
-  extensions.
 
 - **Revert-to-stored applies the stored model's CPU profile and chunk budget
   (#2609).** `mem_embedding_reset(mode="revert_to_stored")` assigned the stored
