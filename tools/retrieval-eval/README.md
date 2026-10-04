@@ -36,7 +36,14 @@ PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
 
 PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
   tools/retrieval-eval/compare_models_v2.py \
+  --profiles language_specific,language_specific_reranked,bge_m3,bge_m3_reranked \
   --reranker-pool 20 --output tools/retrieval-eval/model_comparison_v2.json
+
+PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
+  tools/retrieval-eval/compare_models_v2.py \
+  --profiles e5_kiwipiepy,e5_kiwipiepy_jina,e5_kiwipiepy_jina_int8,e5_kiwipiepy_gte \
+  --runs 5 --reranker-pool 20 \
+  --output tools/retrieval-eval/model_comparison_e5_v2.json
 
 PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
   tools/retrieval-eval/sweep_k_v2.py --runs 1 --stage all \
@@ -206,6 +213,19 @@ versions, commands, pass/fail evidence, result tables, and limitations:
 These results support retaining the small English model for English-only use,
 considering BGE-M3 for Korean/cross-language quality profiles, and keeping the
 reranker opt-in where its latency and ~1.1 GB model cost are acceptable.
+
+`model_comparison_e5_v2.json` records five runs on the Korean-optimized preset
+stack, `multilingual-e5-small` with the `kiwipiepy` tokenizer, without a
+reranker and with three rerankers. On that stack:
+- jina v2 (fp32) raised Korean nDCG@10 from `0.5557` to `0.6041` at a median
+  p50 of about `1.0 s` per Korean search.
+- Its int8 graph matched that quality with a quarter of the disk.
+- `gte-multilingual-reranker-base` (int8) reached `0.5692`.
+
+The jina reranker is CC-BY-NC-4.0, non-commercial use only, in both
+precisions. The report's
+[E5 + kiwipiepy section](./MODEL_COMPARISON_REPORT.md#e5--kiwipiepy-korean-optimized-preset-stack)
+has the full tables, peak RSS, disk size and license notes.
 
 ## Staged k-sweep
 

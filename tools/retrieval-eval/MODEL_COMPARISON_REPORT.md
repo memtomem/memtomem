@@ -60,6 +60,13 @@ read separately from the quality metrics.
 | BGE-M3 | `BAAI/bge-m3` (1024) | `BAAI/bge-m3` (1024) | none |
 | BGE-M3 + reranker | `BAAI/bge-m3` (1024) | `BAAI/bge-m3` (1024) | `jina-reranker-v2-base-multilingual`, pool 20 |
 
+> **License:** `jinaai/jina-reranker-v2-base-multilingual` is licensed
+> CC-BY-NC-4.0 — non-commercial use only
+> ([model card](https://huggingface.co/jinaai/jina-reranker-v2-base-multilingual)).
+> It is measured here for comparison. See
+> [E5 + kiwipiepy](#e5--kiwipiepy-korean-optimized-preset-stack) for where it
+> was checked.
+
 ## Run procedure
 
 The corpus, existing baseline, model comparison, and implementation regression
@@ -89,6 +96,11 @@ jq -e \
 
 git diff --check
 ```
+
+With the current `compare_models_v2.py`, pass
+`--profiles language_specific,language_specific_reranked,bge_m3,bge_m3_reranked`
+to rerun only these four profiles; its output is `schema_version` 2, so the `jq`
+check above applies to the July artifact only.
 
 ## Results
 
@@ -204,7 +216,10 @@ cross-language tracks separately.
    combination; top combinations run 5 times, and final candidates and the
    current default run 10 times.
 5. **Operational cost measurement**: record run-to-run quality/latency variance,
-   cold/warm cache, model-load time, peak RSS, and disk-cache size.
+   cold/warm cache, model-load time, peak RSS, and disk-cache size. Run-to-run
+   variance, peak RSS and reranker disk size are now recorded for the E5 +
+   kiwipiepy profiles (see the section below). Cold/warm cache and model-load
+   time are not.
 
 ### Selection rules
 
@@ -221,3 +236,163 @@ cross-language tracks separately.
   quality profile separate from non-rerank configurations.
 - Only propose a product default change when 10 confirmation runs hold the same
   conclusion.
+
+## E5 + kiwipiepy (Korean-optimized preset stack)
+
+Verified: 2026-10-04 (Asia/Seoul)
+
+> **License — read before reusing any jina row.**
+> `jinaai/jina-reranker-v2-base-multilingual` is licensed **CC-BY-NC-4.0:
+> non-commercial use only**
+> ([model card](https://huggingface.co/jinaai/jina-reranker-v2-base-multilingual)).
+> This covers both the fp32 and the int8 graph: int8 is a quantized export in
+> the same repository, which changes size and speed, not the license. The jina
+> rows are measured as the reranker the Korean-optimized preset enabled before
+> #2652, and for comparison only. They are not a recommendation.
+> `onnx-community/gte-multilingual-reranker-base` declares no license; its base
+> model,
+> [`Alibaba-NLP/gte-multilingual-reranker-base`](https://huggingface.co/Alibaba-NLP/gte-multilingual-reranker-base),
+> is Apache-2.0. Licenses were read from each repository's Hugging Face
+> metadata (`cardData.license`) on 2026-10-04. The gte export's metadata has
+> no `cardData.license` field. fastembed 0.8.1's built-in catalog also lists
+> the jina model as `cc-by-nc-4.0`; it does not ship the gte export.
+
+This section measures rerankers on the stack the Korean-optimized `mm init`
+preset installs: ONNX `intfloat/multilingual-e5-small` (384 dimensions) with
+the `kiwipiepy` FTS tokenizer. #2652 removed the reranker from that preset, and
+this run records the evidence for it in the repository (#2651). Raw results:
+[`model_comparison_e5_v2.json`](./model_comparison_e5_v2.json).
+
+### What changed in the tools
+
+- `benchmark_v2.py` builds each track's config through the product validators,
+  so the E5 profile applies the `passage: ` prefix, the 384/320/96 chunk
+  budgets and the 512-token sequence limit. Earlier it assigned fields onto a
+  built config, which skips those validators. The config ignores `MEMTOMEM_*`
+  variables, `config.d` and `config.json`.
+- A track is refused unless every search was reranked by the requested model
+  (`score_scale == "rerank"` with that model). A rerank timeout or failure
+  otherwise falls back to the fused order with only a log warning. Without a
+  reranker, no search may report one.
+- The FTS tokenizer is set for each track and reset afterwards. A track is
+  refused if it indexed or searched with a different tokenizer, which catches
+  `kiwipiepy` falling back to `unicode61` when it fails to import.
+- `compare_models_v2.py` runs each profile in its own process. That process's
+  peak RSS and the reranker's on-disk files are recorded with the results.
+
+### Measurement environment
+
+| Item | Value |
+| --- | --- |
+| Machine | MacBook Pro (Mac16,5), Apple M4 Max, 16 cores (12P + 4E), 64 GB |
+| OS | macOS 26.6.2 (build 25G83), Darwin 25.6.0, arm64 |
+| Python / uv | 3.13.2 / 0.12.13 |
+| fastembed / onnxruntime / kiwipiepy | 0.8.1 / 1.24.4 / 0.23.2 |
+| Base Git commit | `e0006fcc` plus this change |
+| Model revisions | jina `9cfeff2d`, gte export `ee64367e` (from the fastembed cache; also in the artifact's `reranker_footprint`) |
+| Machine load | other sessions were running: 1-minute load average median 12.2, max 73.1 (54 `uptime` samples taken once a minute during the run; not stored in the artifact) |
+
+Machine, OS and tool versions were read with `system_profiler`, `sw_vers`,
+`uv --version` and the installed package metadata. The artifact's
+`environment` block records the memtomem, fastembed and Python versions and
+the platform string.
+
+### Run procedure
+
+```bash
+PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
+  tools/retrieval-eval/compare_models_v2.py \
+  --profiles e5_kiwipiepy,e5_kiwipiepy_jina,e5_kiwipiepy_jina_int8,e5_kiwipiepy_gte \
+  --runs 5 --reranker-pool 20 \
+  --output tools/retrieval-eval/model_comparison_e5_v2.json
+```
+
+It uses the same corpus, 120 queries, tracks, `top_k=10`, RRF weights
+`[1.0, 1.0]` and pool of 20 as the sections above, with **5 runs** per profile.
+Quality metrics are means over the runs. The `p50`/`p95` columns in the first
+table are the largest value from any run, as in `benchmark_v2.py`.
+
+Checks on the recorded artifact:
+- Every reranked profile reranked all of its searches (300 per same-language
+  track, 600 for cross-language).
+- Every track resolved to `kiwipiepy`, `passage: ` and a 512-token limit, and
+  indexed the full 96 (192 for cross-language) chunks.
+
+### Results
+
+| Reranker | License | Track | Recall@10 | MRR@10 | nDCG@10 | zero-hit | p50 | p95 | max run spread |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| none | — | English | 0.6033 | 0.5727 | 0.5453 | 9 | 4.9 ms | 5.8 ms | 0.0250 |
+| none | — | Korean | 0.6404 | 0.6216 | 0.5557 | 6 | 5.6 ms | 8.0 ms | 0.0015 |
+| none | — | Cross-language | 0.3595 | 0.6028 | 0.4174 | 14 | 4.8 ms | 6.4 ms | 0.0143 |
+| jina v2 fp32 | CC-BY-NC-4.0 | English | 0.6647 | 0.6240 | 0.5997 | 8 | 630.8 ms | 718.9 ms | 0.0000 |
+| jina v2 fp32 | CC-BY-NC-4.0 | Korean | 0.6703 | 0.6713 | 0.6041 | 7 | 1005.8 ms | 1056.8 ms | 0.0000 |
+| jina v2 fp32 | CC-BY-NC-4.0 | Cross-language | 0.4227 | 0.6565 | 0.4855 | 15 | 927.8 ms | 1018.4 ms | 0.0000 |
+| jina v2 int8 | CC-BY-NC-4.0 | English | 0.6754 | 0.6392 | 0.6075 | 7 | 516.2 ms | 602.0 ms | 0.0000 |
+| jina v2 int8 | CC-BY-NC-4.0 | Korean | 0.6675 | 0.6641 | 0.6041 | 7 | 1052.5 ms | 1254.0 ms | 0.0000 |
+| jina v2 int8 | CC-BY-NC-4.0 | Cross-language | 0.4225 | 0.6575 | 0.4859 | 14 | 1691.8 ms | 2591.3 ms | 0.0000 |
+| gte-multilingual int8 | Apache-2.0 (base model) | English | 0.6497 | 0.6179 | 0.5804 | 7 | 557.7 ms | 644.0 ms | 0.0000 |
+| gte-multilingual int8 | Apache-2.0 (base model) | Korean | 0.6436 | 0.6357 | 0.5692 | 8 | 901.8 ms | 1143.2 ms | 0.0000 |
+| gte-multilingual int8 | Apache-2.0 (base model) | Cross-language | 0.4024 | 0.6462 | 0.4630 | 15 | 1082.3 ms | 2011.9 ms | 0.0000 |
+
+"max run spread" is the largest range across the 5 runs of any per-language,
+per-query-type metric. Every reranked profile had identical metrics on all 5
+runs.
+
+### Change from no reranker
+
+| Reranker | License | Track | Recall@10 | MRR@10 | nDCG@10 | zero-hit |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| jina v2 fp32 | CC-BY-NC-4.0 | English | +0.0613 | +0.0512 | +0.0544 | -1 |
+| jina v2 fp32 | CC-BY-NC-4.0 | Korean | +0.0299 | +0.0496 | +0.0484 | +1 |
+| jina v2 fp32 | CC-BY-NC-4.0 | Cross-language | +0.0632 | +0.0536 | +0.0681 | +1 |
+| jina v2 int8 | CC-BY-NC-4.0 | English | +0.0721 | +0.0665 | +0.0622 | -2 |
+| jina v2 int8 | CC-BY-NC-4.0 | Korean | +0.0271 | +0.0425 | +0.0484 | +1 |
+| jina v2 int8 | CC-BY-NC-4.0 | Cross-language | +0.0630 | +0.0547 | +0.0685 | +0 |
+| gte-multilingual int8 | Apache-2.0 (base model) | English | +0.0464 | +0.0452 | +0.0350 | -2 |
+| gte-multilingual int8 | Apache-2.0 (base model) | Korean | +0.0032 | +0.0141 | +0.0135 | +2 |
+| gte-multilingual int8 | Apache-2.0 (base model) | Cross-language | +0.0429 | +0.0434 | +0.0455 | +1 |
+
+The reranker only reorders the top 20 fused results. It can push a track's only
+relevant result below rank 10, which is how a reranker can add a zero-hit query
+while improving the averages.
+
+### Cost
+
+Latency is the median over the 5 runs of each run's p50 / p95, which is less
+sensitive to the load spikes above than the largest-run values in the results
+table. Peak RSS is the whole profile process (model loads, indexing and every
+track and run), not the reranker's own memory. Disk is the reranker files
+fastembed downloads (graph, tokenizer and config) in the fastembed cache.
+
+| Reranker | License | English p50 / p95 | Korean p50 / p95 | Cross-language p50 / p95 | Peak RSS | Disk |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| none | — | 5 / 5 ms | 6 / 8 ms | 5 / 6 ms | 2.71 GB | — |
+| jina v2 fp32 | CC-BY-NC-4.0 | 618 / 706 ms | 982 / 1033 ms | 922 / 1014 ms | 5.72 GB | 1131 MB |
+| jina v2 int8 | CC-BY-NC-4.0 | 496 / 599 ms | 862 / 936 ms | 807 / 936 ms | 4.29 GB | 297 MB |
+| gte-multilingual int8 | Apache-2.0 (base model) | 550 / 630 ms | 889 / 929 ms | 910 / 1371 ms | 5.13 GB | 358 MB |
+
+The largest-run values are dominated by a few runs:
+- jina int8's cross-language p95 was 2591 and 2235 ms in two runs and 924–936 ms
+  in the other three.
+- Its Korean p95 was 1254 ms in one run and 911–967 ms in the others.
+- gte's cross-language p95 ranged from 1279 to 2012 ms across the runs.
+
+### Findings
+
+- **jina v2 adds about one second per Korean search.** Its median p50 is
+  982 ms on Korean, 922 ms on cross-language and 618 ms on English, against
+  5–6 ms without a reranker. This supports the "about a second" in #2652's
+  CHANGELOG entry for Korean and mixed content. What was measured is the
+  latency of the search call on CPU, not CPU time.
+- **jina gains +0.048 Korean nDCG@10** (0.5557 → 0.6041) and +0.068
+  cross-language. On this stack that is a smaller Korean gain than the
+  language-specific baseline's +0.147 in the July section.
+- **int8 keeps jina's Korean nDCG@10 and its license.** jina int8 matched fp32
+  to four decimal places on Korean nDCG@10 (0.6041); Korean MRR@10 was 0.007
+  lower. Its nDCG@10 was within
+  +0.008 of fp32 on the other tracks. It used 1.4 GB less peak RSS and a quarter
+  of the disk, and its median p50 was 12–20% lower. It is still CC-BY-NC-4.0.
+- **gte-multilingual int8 recovers 28% of jina's Korean gain**
+  (+0.0135 of +0.0484 nDCG@10) and 67% of its cross-language gain. Its Korean
+  latency is close to jina's, and it adds two Korean zero-hit queries.
