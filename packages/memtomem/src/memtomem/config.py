@@ -785,7 +785,9 @@ class RerankConfig(ConfigModel):
       CC-BY-NC-4.0 non-commercial license),
       ``jinaai/jina-reranker-v1-tiny-en`` (EN, 8K context). memtomem also
       registers ``onnx-community/gte-multilingual-reranker-base``
-      (multilingual, 341 MB INT8, Apache-2.0) itself, so it needs no setup.
+      (multilingual, 341 MB INT8; its base model is Apache-2.0, and the
+      community export declares no license of its own) itself, so it needs
+      no setup.
       Other ONNX exports can be registered via
       ``TextCrossEncoder.add_custom_model()`` before the server starts.
     - ``cohere``: Cohere Rerank API model (e.g. ``rerank-english-v3.0``,

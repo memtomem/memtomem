@@ -1039,7 +1039,7 @@ Latency-bounded callers can also skip reranking **per call** without touching se
 
 ### Provider-specific models
 
-- **`fastembed`** (default): local ONNX via the `memtomem[onnx]` extra — no external service, no PyTorch. Built-in catalog includes `Xenova/ms-marco-MiniLM-L-6-v2` (EN, ~80 MB), `jinaai/jina-reranker-v2-base-multilingual` (multilingual, ~1.1 GB, CC-BY-NC-4.0 non-commercial license), `jinaai/jina-reranker-v1-tiny-en` (EN, 8K context). memtomem registers `onnx-community/gte-multilingual-reranker-base` (multilingual, ~341 MB INT8, Apache-2.0) itself, so it works without setup. Other ONNX exports must be registered via `TextCrossEncoder.add_custom_model()` before the server starts.
+- **`fastembed`** (default): local ONNX via the `memtomem[onnx]` extra — no external service, no PyTorch. Built-in catalog includes `Xenova/ms-marco-MiniLM-L-6-v2` (EN, ~80 MB), `jinaai/jina-reranker-v2-base-multilingual` (multilingual, ~1.1 GB, CC-BY-NC-4.0 non-commercial license), `jinaai/jina-reranker-v1-tiny-en` (EN, 8K context). memtomem registers `onnx-community/gte-multilingual-reranker-base` (multilingual, ~341 MB INT8) itself, so it works without setup. Its base model, `Alibaba-NLP/gte-multilingual-reranker-base`, is Apache-2.0; the community export repository declares no license of its own. Other ONNX exports must be registered via `TextCrossEncoder.add_custom_model()` before the server starts.
 - **`cohere`**: Cohere Rerank API (`rerank-english-v3.0`, `rerank-multilingual-v3.0`). Requires `MEMTOMEM_RERANK__API_KEY`.
 - **`local`**: sentence-transformers `CrossEncoder` (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`). Requires `sentence-transformers` to be installed separately — the `fastembed` provider is usually preferable.
 

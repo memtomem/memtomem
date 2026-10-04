@@ -271,6 +271,13 @@ def test_registration_adds_gte_int8_export(custom_registry: list) -> None:
     assert [d.model for d in custom_registry] == [GTE]
     assert custom_registry[0].model_file == "onnx/model_int8.onnx"
     assert custom_registry[0].sources.hf == GTE
+    # The export repository declares no license, so the catalog entry claims
+    # none; the description keeps the base model's license apart from it.
+    assert custom_registry[0].license == ""
+    assert custom_registry[0].description == (
+        "INT8 export of Alibaba-NLP/gte-multilingual-reranker-base. Base model: "
+        "Apache-2.0. The onnx-community export repository declares no license."
+    )
 
 
 def test_registration_is_idempotent_and_case_insensitive(custom_registry: list) -> None:

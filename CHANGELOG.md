@@ -19,8 +19,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `MEMTOMEM_RERANK__MODEL=onnx-community/gte-multilingual-reranker-base`.
 - **The `mm init` wizard's multilingual reranker is now
   `onnx-community/gte-multilingual-reranker-base` (#2650).** It replaces
-  `jinaai/jina-reranker-v2-base-multilingual`: a 341 MB INT8 export of an
-  Apache-2.0 model, which memtomem registers with fastembed itself, so the
+  `jinaai/jina-reranker-v2-base-multilingual`: a 341 MB community INT8 export
+  of the Apache-2.0 `Alibaba-NLP/gte-multilingual-reranker-base` (the export
+  repository declares no license of its own), which memtomem registers with
+  fastembed itself, so the
   model id works with the `fastembed` provider without setup. It is smaller
   than jina but reranks Korean notes less accurately; #2650 records the
   measurements. A config that names jina keeps working.

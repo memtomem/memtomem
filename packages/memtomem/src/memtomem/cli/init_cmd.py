@@ -691,6 +691,14 @@ def _step_reranker(state: dict) -> None:
     click.echo(f"    [1] English (Xenova/ms-marco-MiniLM-L-6-v2) — {_en_size}")
     click.echo(f"    [2] Multilingual ({GTE_MULTILINGUAL_RERANKER}) — {_multi_size}")
     click.echo("        Recommended for Korean/Chinese/Japanese/mixed content.")
+    # #2650: gte replaced jina here for size and license, at a measured cost in
+    # Korean accuracy — say so where the choice is made.
+    click.echo("        Smaller than jinaai/jina-reranker-v2-base-multilingual (1.1 GB,")
+    click.echo("        non-commercial license) but less accurate on Korean in memtomem's")
+    click.echo("        retrieval benchmark. To use jina instead, set rerank.model in")
+    click.echo("        config.json or MEMTOMEM_RERANK__MODEL.")
+    click.echo("        License: the base model is Apache-2.0; this community export")
+    click.echo("        declares no license of its own.")
     choice = nav_prompt("  Select", type=click.IntRange(1, 2), default=1)
 
     models = {

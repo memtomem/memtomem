@@ -554,7 +554,8 @@ class TestRerankerStep:
 
     def test_wizard_multilingual_choice_selects_gte(self) -> None:
         """Option [2] of the reranker step picks the gte multilingual reranker
-        and shows the size of the INT8 file it downloads (#2650)."""
+        and shows the size of the INT8 file it downloads (#2650). The option
+        states its Korean accuracy cost against jina and how to pick jina."""
         import click
         from click.testing import CliRunner
 
@@ -574,6 +575,21 @@ class TestRerankerStep:
         assert "[2] Multilingual (onnx-community/gte-multilingual-reranker-base) — 341 MB" in (
             result.output
         )
+        # The disclosure wraps across lines; compare it with whitespace folded.
+        shown = " ".join(result.output.split())
+        assert (
+            "Smaller than jinaai/jina-reranker-v2-base-multilingual (1.1 GB, non-commercial "
+            "license) but less accurate on Korean in memtomem's retrieval benchmark."
+        ) in shown
+        assert (
+            "To use jina instead, set rerank.model in config.json or MEMTOMEM_RERANK__MODEL."
+            in (shown)
+        )
+        # The export's license is not the base model's: say both, claim neither.
+        assert (
+            "License: the base model is Apache-2.0; this community export declares no "
+            "license of its own."
+        ) in shown
 
     def test_rerank_disabled_preserves_existing_rerank_fields(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

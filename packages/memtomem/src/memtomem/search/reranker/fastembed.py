@@ -19,14 +19,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Multilingual reranker the ``mm init`` wizard offers (#2650). fastembed does
-# not ship it, so memtomem registers it: the INT8 ONNX export (341 MB) of the
-# Apache-2.0 ``Alibaba-NLP/gte-multilingual-reranker-base``.
+# not ship it, so memtomem registers it: onnx-community's INT8 ONNX export
+# (341 MB) of ``Alibaba-NLP/gte-multilingual-reranker-base``. The base model is
+# Apache-2.0; the export repository declares no license of its own, so the
+# catalog entry leaves ``license`` empty and states both facts instead.
 GTE_MULTILINGUAL_RERANKER = "onnx-community/gte-multilingual-reranker-base"
 
-# id -> (Hugging Face repo, model file, size in GB). Sizes mirror
+# id -> (Hugging Face repo, model file, size in GB, description). Sizes mirror
 # ``embedding/aliases.py:FASTEMBED_RERANKER_SIZES``.
-_CUSTOM_RERANKERS: dict[str, tuple[str, str, float]] = {
-    GTE_MULTILINGUAL_RERANKER: (GTE_MULTILINGUAL_RERANKER, "onnx/model_int8.onnx", 0.34),
+_CUSTOM_RERANKERS: dict[str, tuple[str, str, float, str]] = {
+    GTE_MULTILINGUAL_RERANKER: (
+        GTE_MULTILINGUAL_RERANKER,
+        "onnx/model_int8.onnx",
+        0.34,
+        "INT8 export of Alibaba-NLP/gte-multilingual-reranker-base. Base model: "
+        "Apache-2.0. The onnx-community export repository declares no license.",
+    ),
 }
 
 # fastembed raises when a model is registered twice, and both the reranker's
@@ -49,7 +57,7 @@ def ensure_custom_reranker_registered(model_id: str) -> None:
     )
     if entry is None:
         return
-    name, (repo, model_file, size_gb) = entry
+    name, (repo, model_file, size_gb, description) = entry
     # The defining module, not the package attribute: tests replace
     # ``fastembed.rerank.cross_encoder.TextCrossEncoder`` with a constructor
     # double, and registration must still reach the real catalog.
@@ -68,7 +76,7 @@ def ensure_custom_reranker_registered(model_id: str) -> None:
             model=name,
             sources=ModelSource(hf=repo),
             model_file=model_file,
-            license="apache-2.0",
+            description=description,
             size_in_gb=size_gb,
         )
 
