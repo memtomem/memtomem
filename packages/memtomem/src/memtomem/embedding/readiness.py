@@ -139,12 +139,16 @@ def _catalog_spec(model_id: str) -> _CacheSpec | None:
         )
 
         from memtomem.embedding.onnx import _register_custom_models_if_needed
+        from memtomem.search.reranker.fastembed import ensure_custom_reranker_registered
     except ImportError:
         return None
 
     # The embedder registers E5 and bge-m3 on first load; until then the
     # catalog lacks them, and bge-m3's ``model.onnx_data`` would go unchecked.
+    # A reranker memtomem registers is likewise absent until its first load,
+    # and without its entry the probe looks for the wrong model file (#2650).
     _register_custom_models_if_needed()
+    ensure_custom_reranker_registered(model_id)
     wanted = model_id.lower()
     for cls in (TextEmbedding, TextCrossEncoder):
         for desc in cls.list_supported_models():

@@ -18,6 +18,60 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Multilingual reranker the ``mm init`` wizard offers (#2650). fastembed does
+# not ship it, so memtomem registers it: the INT8 ONNX export (341 MB) of the
+# Apache-2.0 ``Alibaba-NLP/gte-multilingual-reranker-base``.
+GTE_MULTILINGUAL_RERANKER = "onnx-community/gte-multilingual-reranker-base"
+
+# id -> (Hugging Face repo, model file, size in GB). Sizes mirror
+# ``embedding/aliases.py:FASTEMBED_RERANKER_SIZES``.
+_CUSTOM_RERANKERS: dict[str, tuple[str, str, float]] = {
+    GTE_MULTILINGUAL_RERANKER: (GTE_MULTILINGUAL_RERANKER, "onnx/model_int8.onnx", 0.34),
+}
+
+# fastembed raises when a model is registered twice, and both the reranker's
+# load (a worker thread) and the readiness probe (the web event loop) register.
+# The check and the add happen under one lock so neither can lose that race.
+_CUSTOM_RERANKERS_LOCK = threading.Lock()
+
+
+def ensure_custom_reranker_registered(model_id: str) -> None:
+    """Register ``model_id`` with fastembed if it is a reranker memtomem adds.
+
+    Any other id returns without touching fastembed, so built-in models load
+    exactly as before. An id fastembed already knows — including one a later
+    fastembed ships natively — is left as it is.
+    """
+    wanted = model_id.lower()
+    entry = next(
+        ((name, spec) for name, spec in _CUSTOM_RERANKERS.items() if name.lower() == wanted),
+        None,
+    )
+    if entry is None:
+        return
+    name, (repo, model_file, size_gb) = entry
+    # The defining module, not the package attribute: tests replace
+    # ``fastembed.rerank.cross_encoder.TextCrossEncoder`` with a constructor
+    # double, and registration must still reach the real catalog.
+    from fastembed.common.model_description import (  # type: ignore[import-untyped]
+        ModelSource,
+    )
+    from fastembed.rerank.cross_encoder.text_cross_encoder import (  # type: ignore[import-untyped]
+        TextCrossEncoder,
+    )
+
+    with _CUSTOM_RERANKERS_LOCK:
+        known = {str(m.get("model", "")).lower() for m in TextCrossEncoder.list_supported_models()}
+        if wanted in known:
+            return
+        TextCrossEncoder.add_custom_model(
+            model=name,
+            sources=ModelSource(hf=repo),
+            model_file=model_file,
+            license="apache-2.0",
+            size_in_gb=size_gb,
+        )
+
 
 class FastEmbedReranker:
     """Cross-encoder reranking via ``fastembed.rerank.cross_encoder.TextCrossEncoder``.
@@ -93,6 +147,7 @@ class FastEmbedReranker:
                     "Install it with: pip install memtomem[onnx]"
                 ) from exc
 
+            ensure_custom_reranker_registered(self._config.model)
             cache_dir = resolve_fastembed_cache_dir()
             logger.info(
                 "Loading fastembed reranker %s (cache_dir=%s) …",
@@ -113,9 +168,9 @@ class FastEmbedReranker:
                 raise ValueError(
                     f"fastembed reranker model {self._config.model!r} is not supported. "
                     f"Built-in options: {', '.join(sorted(s for s in supported if s))}. "
-                    "For Korean/Chinese/Japanese try "
-                    "'jinaai/jina-reranker-v2-base-multilingual' (1.1 GB); for lightweight "
-                    "English 'Xenova/ms-marco-MiniLM-L-6-v2' (80 MB). Custom ONNX exports "
+                    f"For Korean/Chinese/Japanese try '{GTE_MULTILINGUAL_RERANKER}' "
+                    "(341 MB, registered by memtomem); for lightweight "
+                    "English 'Xenova/ms-marco-MiniLM-L-6-v2' (80 MB). Other ONNX exports "
                     "must be registered via TextCrossEncoder.add_custom_model() before the "
                     "reranker is invoked."
                 ) from exc

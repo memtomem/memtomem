@@ -92,6 +92,10 @@ async def test_unknown_model_error_surfaces_supported_hint() -> None:
     assert "not supported" in msg
     assert "Xenova/ms-marco-MiniLM-L-6-v2" in msg
     assert "jinaai/jina-reranker-v2-base-multilingual" in msg
+    assert (
+        "For Korean/Chinese/Japanese try 'onnx-community/gte-multilingual-reranker-base' "
+        "(341 MB, registered by memtomem)"
+    ) in msg
     assert "add_custom_model" in msg
 
 
@@ -236,3 +240,165 @@ async def test_close_during_construction_does_not_publish_model(
 
     assert reranker._model is None  # the finished model was not published
     assert errors and "closed" in str(errors[0])
+
+
+# -- memtomem-registered rerankers (#2650) -----------------------------------
+
+GTE = "onnx-community/gte-multilingual-reranker-base"
+
+
+@pytest.fixture
+def custom_registry(monkeypatch: pytest.MonkeyPatch) -> list:
+    """An empty fastembed custom-reranker registry for one test.
+
+    fastembed keeps custom entries in a class-level list for the life of the
+    process, so without this an earlier registration would satisfy the test.
+    """
+    from fastembed.rerank.cross_encoder.custom_text_cross_encoder import (
+        CustomTextCrossEncoder,
+    )
+
+    registry: list = []
+    monkeypatch.setattr(CustomTextCrossEncoder, "SUPPORTED_MODELS", registry)
+    return registry
+
+
+def test_registration_adds_gte_int8_export(custom_registry: list) -> None:
+    from memtomem.search.reranker.fastembed import ensure_custom_reranker_registered
+
+    ensure_custom_reranker_registered(GTE)
+
+    assert [d.model for d in custom_registry] == [GTE]
+    assert custom_registry[0].model_file == "onnx/model_int8.onnx"
+    assert custom_registry[0].sources.hf == GTE
+
+
+def test_registration_is_idempotent_and_case_insensitive(custom_registry: list) -> None:
+    from memtomem.search.reranker.fastembed import ensure_custom_reranker_registered
+
+    ensure_custom_reranker_registered(GTE)
+    ensure_custom_reranker_registered(GTE)
+    ensure_custom_reranker_registered(GTE.upper())
+
+    assert [d.model for d in custom_registry] == [GTE]
+
+
+def test_registration_leaves_other_ids_untouched(
+    custom_registry: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Built-in and unknown ids never reach fastembed's catalog."""
+    from fastembed.rerank.cross_encoder.text_cross_encoder import TextCrossEncoder
+
+    from memtomem.search.reranker.fastembed import ensure_custom_reranker_registered
+
+    def _refuse(*args, **kwargs):
+        raise AssertionError("fastembed catalog touched")
+
+    monkeypatch.setattr(TextCrossEncoder, "list_supported_models", _refuse)
+    monkeypatch.setattr(TextCrossEncoder, "add_custom_model", _refuse)
+
+    ensure_custom_reranker_registered("Xenova/ms-marco-MiniLM-L-6-v2")
+    ensure_custom_reranker_registered("nonexistent/definitely-not-a-real-model")
+
+    assert custom_registry == []
+
+
+def test_registration_keeps_an_existing_entry(custom_registry: list) -> None:
+    """An id fastembed already knows is not re-registered or replaced."""
+    from fastembed.common.model_description import BaseModelDescription, ModelSource
+
+    from memtomem.search.reranker.fastembed import ensure_custom_reranker_registered
+
+    existing = BaseModelDescription(
+        model=GTE,
+        sources=ModelSource(hf="someone/else"),
+        model_file="onnx/model.onnx",
+        description="",
+        license="",
+        size_in_GB=1.0,
+    )
+    custom_registry.append(existing)
+
+    ensure_custom_reranker_registered(GTE)
+
+    assert custom_registry == [existing]
+
+
+def test_concurrent_registration_adds_once(custom_registry: list) -> None:
+    import threading
+
+    from memtomem.search.reranker.fastembed import ensure_custom_reranker_registered
+
+    start = threading.Barrier(8)
+    errors: list[BaseException] = []
+
+    def _register() -> None:
+        start.wait()
+        try:
+            ensure_custom_reranker_registered(GTE)
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assert below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_register) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+
+    assert errors == []
+    assert [d.model for d in custom_registry] == [GTE]
+
+
+def test_get_model_registers_before_constructing(
+    custom_registry: list, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The load path registers gte itself; nothing else has to run first."""
+    import memtomem.search.reranker.fastembed as fe_mod
+    from memtomem.config import RerankConfig
+
+    seen: dict[str, object] = {}
+
+    class _Constructor:
+        def __init__(self, model_name: str, cache_dir: str) -> None:
+            seen["model_name"] = model_name
+            seen["registered"] = [d.model for d in custom_registry]
+
+    monkeypatch.setattr("fastembed.rerank.cross_encoder.TextCrossEncoder", _Constructor)
+    monkeypatch.setattr(fe_mod, "resolve_fastembed_cache_dir", lambda: tmp_path)
+
+    reranker = fe_mod.FastEmbedReranker(RerankConfig(enabled=True, provider="fastembed", model=GTE))
+    try:
+        reranker._get_model()
+    finally:
+        reranker._close_sync()
+
+    assert seen == {"model_name": GTE, "registered": [GTE]}
+
+
+def test_registration_checks_and_adds_under_the_lock(
+    custom_registry: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The catalog check and the add both run under one lock, so a concurrent
+    load and readiness probe cannot both see gte missing and both add it."""
+    from fastembed.rerank.cross_encoder.text_cross_encoder import TextCrossEncoder
+
+    import memtomem.search.reranker.fastembed as fe_mod
+
+    held: list[tuple[str, bool]] = []
+    real_list = TextCrossEncoder.list_supported_models
+    real_add = TextCrossEncoder.add_custom_model
+
+    def _list(*args, **kwargs):
+        held.append(("list", fe_mod._CUSTOM_RERANKERS_LOCK.locked()))
+        return real_list(*args, **kwargs)
+
+    def _add(*args, **kwargs):
+        held.append(("add", fe_mod._CUSTOM_RERANKERS_LOCK.locked()))
+        return real_add(*args, **kwargs)
+
+    monkeypatch.setattr(TextCrossEncoder, "list_supported_models", _list)
+    monkeypatch.setattr(TextCrossEncoder, "add_custom_model", _add)
+
+    fe_mod.ensure_custom_reranker_registered(GTE)
+
+    assert held == [("list", True), ("add", True)]

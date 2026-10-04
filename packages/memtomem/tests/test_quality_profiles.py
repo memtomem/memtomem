@@ -260,6 +260,7 @@ def test_mmr_without_dense_warns():
     [
         ("cohere", "Xenova/ms-marco-MiniLM-L-6-v2"),
         ("local", "jinaai/jina-reranker-v2-base-multilingual"),
+        ("local", "onnx-community/gte-multilingual-reranker-base"),
         ("fastembed", "rerank-english-v3.0"),
         ("fastembed", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
         ("cohere", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
@@ -279,6 +280,7 @@ def test_recognized_rerank_provider_model_mismatch_warns(provider, model):
     ("provider", "model"),
     [
         ("fastembed", "Xenova/ms-marco-MiniLM-L-6-v2"),
+        ("fastembed", "onnx-community/gte-multilingual-reranker-base"),
         ("cohere", "rerank-english-v3.0"),
         ("local", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
     ],

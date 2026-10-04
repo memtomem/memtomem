@@ -142,6 +142,34 @@ def test_reranker_is_resolved_from_the_cross_encoder_catalog(tmp_path: Path) -> 
     assert model_snapshot_present(tmp_path, model)
 
 
+GTE_RERANKER = "onnx-community/gte-multilingual-reranker-base"
+
+
+@pytest.fixture
+def empty_custom_rerankers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start with no custom rerankers, so only the probe can register gte."""
+    pytest.importorskip("fastembed")
+    from fastembed.rerank.cross_encoder.custom_text_cross_encoder import (
+        CustomTextCrossEncoder,
+    )
+
+    monkeypatch.setattr(CustomTextCrossEncoder, "SUPPORTED_MODELS", [])
+
+
+@pytest.mark.usefixtures("empty_custom_rerankers")
+def test_memtomem_registered_reranker_is_present_with_its_int8_file(tmp_path: Path) -> None:
+    """The probe registers gte itself and looks for the INT8 file it loads (#2650)."""
+    _make_snapshot(tmp_path, GTE_RERANKER, ("onnx/model_int8.onnx",))
+    assert model_snapshot_present(tmp_path, GTE_RERANKER)
+
+
+@pytest.mark.usefixtures("empty_custom_rerankers")
+def test_memtomem_registered_reranker_is_absent_without_its_int8_file(tmp_path: Path) -> None:
+    """An fp32 ``onnx/model.onnx`` is not what the reranker loads."""
+    _make_snapshot(tmp_path, GTE_RERANKER, ("onnx/model.onnx",))
+    assert not model_snapshot_present(tmp_path, GTE_RERANKER)
+
+
 # -- fastembed's GCS tarball fallback (#2594) ---------------------------------
 
 BGE_BASE_ID = "BAAI/bge-base-en-v1.5"

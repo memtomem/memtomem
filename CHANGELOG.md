@@ -16,7 +16,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   "Preserved from existing config"; `mm config set rerank.enabled false`
   turns it off. To opt in on a new setup, pick the multilingual reranker in
   the Advanced wizard or set `MEMTOMEM_RERANK__ENABLED=true` and
-  `MEMTOMEM_RERANK__MODEL=jinaai/jina-reranker-v2-base-multilingual`.
+  `MEMTOMEM_RERANK__MODEL=onnx-community/gte-multilingual-reranker-base`.
+- **The `mm init` wizard's multilingual reranker is now
+  `onnx-community/gte-multilingual-reranker-base` (#2650).** It replaces
+  `jinaai/jina-reranker-v2-base-multilingual`: a 341 MB INT8 export of an
+  Apache-2.0 model, which memtomem registers with fastembed itself, so the
+  model id works with the `fastembed` provider without setup. It is smaller
+  than jina but reranks Korean notes less accurately; #2650 records the
+  measurements. A config that names jina keeps working.
 - **`mm context settings-doctor --json` reports `"status": "advisory"` for
   unportable hook commands (#2482).** It reported `"clean"` while the same
   payload listed unportable-command findings, so a script that gated on

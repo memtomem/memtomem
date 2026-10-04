@@ -56,6 +56,9 @@ FASTEMBED_RERANKER_SIZES: dict[str, int] = {
     "jinaai/jina-reranker-v1-tiny-en": 130,
     "jinaai/jina-reranker-v1-turbo-en": 150,
     "jinaai/jina-reranker-v2-base-multilingual": 1110,
+    # Registered by memtomem, not fastembed: the INT8 file named in
+    # ``search/reranker/fastembed.py:_CUSTOM_RERANKERS``.
+    "onnx-community/gte-multilingual-reranker-base": 341,
 }
 
 

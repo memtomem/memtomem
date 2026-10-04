@@ -1039,11 +1039,11 @@ Latency-bounded callers can also skip reranking **per call** without touching se
 
 ### Provider-specific models
 
-- **`fastembed`** (default): local ONNX via the `memtomem[onnx]` extra — no external service, no PyTorch. Built-in catalog includes `Xenova/ms-marco-MiniLM-L-6-v2` (EN, ~80 MB), `jinaai/jina-reranker-v2-base-multilingual` (multilingual, ~1.1 GB), `jinaai/jina-reranker-v1-tiny-en` (EN, 8K context). Custom ONNX exports must be registered via `TextCrossEncoder.add_custom_model()` before the server starts.
+- **`fastembed`** (default): local ONNX via the `memtomem[onnx]` extra — no external service, no PyTorch. Built-in catalog includes `Xenova/ms-marco-MiniLM-L-6-v2` (EN, ~80 MB), `jinaai/jina-reranker-v2-base-multilingual` (multilingual, ~1.1 GB, CC-BY-NC-4.0 non-commercial license), `jinaai/jina-reranker-v1-tiny-en` (EN, 8K context). memtomem registers `onnx-community/gte-multilingual-reranker-base` (multilingual, ~341 MB INT8, Apache-2.0) itself, so it works without setup. Other ONNX exports must be registered via `TextCrossEncoder.add_custom_model()` before the server starts.
 - **`cohere`**: Cohere Rerank API (`rerank-english-v3.0`, `rerank-multilingual-v3.0`). Requires `MEMTOMEM_RERANK__API_KEY`.
 - **`local`**: sentence-transformers `CrossEncoder` (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`). Requires `sentence-transformers` to be installed separately — the `fastembed` provider is usually preferable.
 
-> **Multilingual content:** the default `Xenova/ms-marco-MiniLM-L-6-v2` is English-only. For Korean, Chinese, Japanese, or other non-English content set `MEMTOMEM_RERANK__MODEL=jinaai/jina-reranker-v2-base-multilingual` — the English default noticeably degrades non-English reranking quality.
+> **Multilingual content:** the default `Xenova/ms-marco-MiniLM-L-6-v2` is English-only. For Korean, Chinese, Japanese, or other non-English content set `MEMTOMEM_RERANK__MODEL=onnx-community/gte-multilingual-reranker-base` — the English default noticeably degrades non-English reranking quality. This is the model the `mm init` wizard's multilingual option writes.
 
 ## Access Frequency Boost
 

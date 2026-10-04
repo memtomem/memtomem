@@ -774,16 +774,19 @@ class RerankConfig(ConfigModel):
     Default is a lightweight English fastembed cross-encoder (~80 MB ONNX,
     local, no external service). For Korean/Chinese/Japanese/other
     non-English content set
-    ``model="jinaai/jina-reranker-v2-base-multilingual"`` (1.1 GB) — the
+    ``model="onnx-community/gte-multilingual-reranker-base"`` (341 MB) — the
     English default noticeably degrades non-English reranking quality.
 
     Provider-specific model IDs:
 
     - ``fastembed``: fastembed catalog ID. Supported built-ins include
       ``Xenova/ms-marco-MiniLM-L-6-v2`` (EN, 80 MB),
-      ``jinaai/jina-reranker-v2-base-multilingual`` (multilingual, 1.1 GB),
-      ``jinaai/jina-reranker-v1-tiny-en`` (EN, 8K context). Custom ONNX
-      exports can be registered via
+      ``jinaai/jina-reranker-v2-base-multilingual`` (multilingual, 1.1 GB,
+      CC-BY-NC-4.0 non-commercial license),
+      ``jinaai/jina-reranker-v1-tiny-en`` (EN, 8K context). memtomem also
+      registers ``onnx-community/gte-multilingual-reranker-base``
+      (multilingual, 341 MB INT8, Apache-2.0) itself, so it needs no setup.
+      Other ONNX exports can be registered via
       ``TextCrossEncoder.add_custom_model()`` before the server starts.
     - ``cohere``: Cohere Rerank API model (e.g. ``rerank-english-v3.0``,
       ``rerank-multilingual-v3.0``). Requires ``api_key``.

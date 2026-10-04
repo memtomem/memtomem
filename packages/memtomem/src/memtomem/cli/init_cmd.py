@@ -681,20 +681,21 @@ def _step_reranker(state: dict) -> None:
     # Sizes pulled from ``embedding/aliases.py:FASTEMBED_RERANKER_SIZES``
     # so the wizard and the readiness banner agree.
     from memtomem.embedding.aliases import FASTEMBED_RERANKER_SIZES, format_size
+    from memtomem.search.reranker.fastembed import GTE_MULTILINGUAL_RERANKER
 
     _en_size = format_size(FASTEMBED_RERANKER_SIZES["Xenova/ms-marco-MiniLM-L-6-v2"])
-    _multi_size = format_size(FASTEMBED_RERANKER_SIZES["jinaai/jina-reranker-v2-base-multilingual"])
+    _multi_size = format_size(FASTEMBED_RERANKER_SIZES[GTE_MULTILINGUAL_RERANKER])
 
     click.echo()
     click.echo("  Available models:")
     click.echo(f"    [1] English (Xenova/ms-marco-MiniLM-L-6-v2) — {_en_size}")
-    click.echo(f"    [2] Multilingual (jinaai/jina-reranker-v2-base-multilingual) — {_multi_size}")
+    click.echo(f"    [2] Multilingual ({GTE_MULTILINGUAL_RERANKER}) — {_multi_size}")
     click.echo("        Recommended for Korean/Chinese/Japanese/mixed content.")
     choice = nav_prompt("  Select", type=click.IntRange(1, 2), default=1)
 
     models = {
         1: "Xenova/ms-marco-MiniLM-L-6-v2",
-        2: "jinaai/jina-reranker-v2-base-multilingual",
+        2: GTE_MULTILINGUAL_RERANKER,
     }
     state["rerank_enabled"] = True
     state["rerank_model"] = models[choice]
