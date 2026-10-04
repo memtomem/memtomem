@@ -1593,11 +1593,6 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "no_recovery_callee",
         "settings target read; " + _NONSKILL,
     ),
-    ("context/settings_doctor.py", "_load_settings_dict", ("OSError",), 0): (
-        _U,
-        "no_recovery_callee",
-        "settings dict read; " + _NONSKILL,
-    ),
     ("context/settings_doctor.py", "_read_settings", ("OSError",), 0): (
         _U,
         "no_recovery_callee",

@@ -143,26 +143,16 @@ def _read_settings(path: Path) -> tuple[dict | None, str | None]:
 def _load_settings_dict(path: Path) -> dict | None:
     """Read a settings.json file; return ``None`` on any read failure.
 
-    Self-contained JSON load so this module doesn't depend on
-    :func:`memtomem.context.settings._safe_load_json` /
-    :data:`memtomem.context.settings._MALFORMED` (private to that
-    module). Returns ``None`` when the file is missing, unreadable, or
-    not valid JSON, **or** when the parsed root is not a dict —
-    callers can treat all three the same way (skip this tier).
-
-    Deliberately not :func:`_read_settings`: that reader also absorbs
-    metadata-probe failures, which would silently hide an inaccessible tier
-    from callers (Web duplicate checks) that do not report unscanned files.
+    The duplicate and matcher checks skip such a tier, and that includes a
+    metadata probe that fails — a parent directory this process cannot search
+    must not abort the doctor or the sync warnings (#2476). Skipping does not
+    hide the tier: :func:`find_unscanned_settings_files` reads the same file
+    through the same :func:`_read_settings` and reports why it was not checked.
+    Callers that do not render that report — the Web settings-sync duplicate
+    check — miss the skipped tier (#2644).
     """
-    if not path.is_file():
-        return None
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(raw, dict):
-        return None
-    return raw
+    data, _reason = _read_settings(path)
+    return data
 
 
 def _normalize_command(value: object) -> str:

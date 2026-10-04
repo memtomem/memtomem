@@ -28,6 +28,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   stderr each time storage was locked or unavailable. The warning is now one
   message naming the error; the traceback moved to debug logging. Stdout and
   exit codes are unchanged.
+- **A settings tier in a directory memtomem cannot search no longer aborts
+  the settings doctor (#2476).** `mm context settings-doctor`, the warnings
+  `mm context sync`/`diff --include=settings` print before writing, and the
+  MCP settings warnings raised `PermissionError` when a non-active tier's
+  directory (or, for the doctor, the canonical `.memtomem/` directory) had no
+  search permission. The duplicate and matcher checks now skip that file and
+  the unscanned-file report lists it as `unreadable`; `--json` reports
+  `"status": "incomplete"` when no duplicates or malformed matchers were
+  found. Syncing into an
+  unsearchable target tier, or from an unsearchable canonical directory, still
+  fails, and the Web settings sync does not yet list skipped files (#2644).
 
 ## [0.6.6] — 2026-10-02
 

@@ -613,6 +613,50 @@ class TestFindUnportableHookCommands:
         assert rows == [("user", "unreadable")]
         assert findings == []
 
+    @pytest.mark.skipif(not hasattr(os, "geteuid"), reason="POSIX permission bits")
+    def test_unsearchable_tier_dir_is_skipped_not_raised(self, project_root, fake_home):
+        """The duplicate and matcher checks skip a tier they cannot probe (#2476).
+
+        A canonical hook is required: with an empty canonical the duplicate
+        check returns before it reads any tier. The skipped tier is not lost —
+        the unscanned check reports it.
+        """
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses directory permissions")
+        _write_canonical(project_root, _bundled_hook())
+        user_dir = fake_home / ".claude"
+        user_dir.mkdir()
+        (user_dir / "settings.json").write_text("{}", encoding="utf-8")
+        user_dir.chmod(0)
+        try:
+            duplicates = detect_duplicate_tiers(project_root, active_scope="project_local")
+            malformed = find_malformed_matchers(project_root)
+            rows = [(u.tier, u.reason) for u in find_unscanned_settings_files(project_root)]
+        finally:
+            user_dir.chmod(0o755)
+        assert duplicates == []
+        assert malformed == []
+        assert rows == [("user", "unreadable")]
+
+    @pytest.mark.skipif(not hasattr(os, "geteuid"), reason="POSIX permission bits")
+    def test_unsearchable_canonical_dir_is_skipped_not_raised(self, project_root, fake_home):
+        """Same for the canonical file: an unsearchable ``.memtomem/`` is no
+        canonical to compare against, and the unscanned check reports it."""
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses directory permissions")
+        _write_canonical(project_root, _bundled_hook())
+        canonical_dir = (project_root / CANONICAL_SETTINGS_FILE).parent
+        canonical_dir.chmod(0)
+        try:
+            duplicates = detect_duplicate_tiers(project_root, active_scope="project_local")
+            malformed = find_malformed_matchers(project_root)
+            rows = [(u.source, u.reason) for u in find_unscanned_settings_files(project_root)]
+        finally:
+            canonical_dir.chmod(0o755)
+        assert duplicates == []
+        assert malformed == []
+        assert rows == [("canonical", "unreadable")]
+
     def test_format_unscanned_settings_warning(self, project_root):
         unscanned = UnscannedSettingsFile(
             source="tier",
@@ -1032,6 +1076,60 @@ class TestSettingsDoctorCli:
         assert len(payload["unportable_commands"]) == 1
         assert len(payload["unscanned_settings"]) == 1
         assert payload["status"] == "incomplete"
+
+    @pytest.mark.skipif(not hasattr(os, "geteuid"), reason="POSIX permission bits")
+    def test_settings_doctor_unsearchable_tier_dir_is_incomplete(
+        self, project_root, fake_home, monkeypatch
+    ):
+        """An unsearchable non-active tier no longer aborts the doctor (#2476).
+
+        HOME and the project root are separate directories here, so scope
+        resolution never probes the chmod'ed tree.
+        """
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses directory permissions")
+        _write_canonical(project_root, _bundled_hook())
+        user_dir = fake_home / ".claude"
+        user_dir.mkdir()
+        user_path = user_dir / "settings.json"
+        user_path.write_text("{}", encoding="utf-8")
+        monkeypatch.setenv("MEMTOMEM_HOOKS__TARGET_SCOPE", "project_local")
+        monkeypatch.chdir(project_root)
+
+        from memtomem.cli.context_cmd import settings_doctor_cmd
+
+        user_dir.chmod(0)
+        try:
+            result = CliRunner().invoke(settings_doctor_cmd, ["--json"])
+        finally:
+            user_dir.chmod(0o755)
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "incomplete"
+        assert payload["unscanned_settings"] == [
+            {"source": "tier", "tier": "user", "path": str(user_path), "reason": "unreadable"}
+        ]
+
+    @pytest.mark.skipif(not hasattr(os, "geteuid"), reason="POSIX permission bits")
+    def test_sync_warnings_survive_an_unsearchable_tier_dir(self, project_root, fake_home, capsys):
+        """The sync/diff pre-write warnings report the tier instead of raising
+        before the settings write (#2476)."""
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses directory permissions")
+        from memtomem.cli import context_cmd
+
+        _write_canonical(project_root, _bundled_hook())
+        user_dir = fake_home / ".claude"
+        user_dir.mkdir()
+        (user_dir / "settings.json").write_text("{}", encoding="utf-8")
+        user_dir.chmod(0)
+        try:
+            context_cmd._print_duplicate_tier_warnings(project_root, scope="project_local")
+        finally:
+            user_dir.chmod(0o755)
+        err = capsys.readouterr().err
+        assert "user tier file (" in err
+        assert "was not checked: unreadable." in err
 
     def test_settings_doctor_unscanned_file_is_incomplete_not_clean(
         self, project_root, fake_home, monkeypatch
