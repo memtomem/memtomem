@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mm memory doctor` no longer reports every multi-chunk memo as stale
+  under the E5 profile (#2665).** When `config.json` or a `config.d` fragment
+  selected `multilingual-e5-small` without pinning chunk settings, the doctor
+  re-chunked files with the generic caps instead of E5's 384-token caps, so
+  any memo the indexer had split was listed under `stale_index`, and
+  re-indexing could not clear it. The doctor now loads config through the
+  same builder as the MCP server, so it applies E5's chunk caps.
+
 ## [0.6.7] — 2026-10-05
 
 ### Upgrading
