@@ -102,9 +102,8 @@ a legitimate steady state) so they warn without failing the exit code —
 mirrors ``mm sync-doctor`` (warns don't fail) while exposing a JSON + exit
 code for CI like ``mm context settings-doctor``.
 
-Read-only contract: config is read via ``Mem2MemConfig`` +
-``load_config_d(quiet=True)`` + ``load_config_overrides(migrate=False)`` so
-the diagnostic never triggers the legacy ``auto_discover`` config rewrite
+Read-only contract: config is read via ``build_fresh_config(migrate=False)``
+so the diagnostic never triggers the legacy ``auto_discover`` config rewrite
 (see PR #838 / #873). The DB is opened through a bare ``sqlite3`` connection
 in URI ``mode=ro`` — never the full ``SqliteBackend``, which on
 ``initialize()`` would create the file/parent dir, run schema migration, and
@@ -851,17 +850,23 @@ def _read_error_message(exc: Exception) -> str:
 
 
 def _load_config_read_only() -> Mem2MemConfig:
-    """Load config without triggering the legacy auto-discover migration.
+    """Load config through the canonical builder, without any config write.
 
-    Mirrors ``mm sync-doctor``: a read-only diagnostic must not rewrite
-    ``config.json`` as a side effect (``migrate=False``).
+    A read-only diagnostic must not rewrite ``config.json`` as a side effect
+    (``migrate=False``). The canonical builder matters for staleness: chunk caps
+    are derived from the embedding profile after every file layer is applied,
+    so a hand-built stack that stops before that step re-chunks E5 files with
+    the generic caps and reports every multi-chunk file as stale (#2665).
+    ``validate_profile=False`` fills the same derived values without raising on
+    an invalid budget, which would otherwise abort the checks that never chunk;
+    ``strict_overrides=False`` keeps a malformed ``config.json`` a logged
+    warning, as before.
     """
-    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+    from memtomem.config_signature import build_fresh_config
 
-    config = Mem2MemConfig()
-    load_config_d(config, quiet=True)
-    load_config_overrides(config, migrate=False)
-    return config
+    return build_fresh_config(
+        migrate=False, strict_overrides=False, quiet=True, validate_profile=False
+    )
 
 
 def _build_discovery_engine(config: Mem2MemConfig) -> object:

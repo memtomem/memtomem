@@ -24,7 +24,6 @@ DEFERRED = {
     "cli/context_cmd.py:_resolve_cli_scope": (1, 1),
     "cli/embedding_cmd.py:_run": (1, 1),
     "cli/mem_cmd.py:rescan_files_cmd": (1, 1),
-    "cli/memory_doctor_cmd.py:_load_config_read_only": (1, 1),
     "cli/reset_cmd.py:_run": (1, 1),
     "cli/sync_doctor_cmd.py:sync_doctor": (1, 0),
     "cli/uninstall_cmd.py:_load_config_safely": (1, 1),
