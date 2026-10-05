@@ -19,11 +19,14 @@ write-time indexing.
 - **One local MCP server.** Claude Code starts `memtomem-server` over stdio with
   `uvx --from 'memtomem[onnx]==0.6.7'`. On first launch uv downloads that exact
   version and its dependencies from PyPI (or the package index your own uv
-  configuration names) and caches them. The plugin ships no hooks, scripts, or
-  binaries of its own.
+  configuration names) and caches them. If the machine has no Python 3.12 or
+  newer, uv also downloads a managed CPython build from Astral's
+  `python-build-standalone` releases, unless your uv configuration disables
+  Python downloads. The plugin ships no hooks, scripts, or binaries of its own.
 - **Local storage.** Memories stay in your Markdown files; the search index is a
   SQLite database at `~/.memtomem/memtomem.db` unless you configure another path.
-- **No other network traffic by default.** The default configuration has no
+- **No other network traffic by default.** Once uv has set up that environment,
+  the running server makes no network requests in the default configuration: no
   embedding provider (BM25 only), the reranker and LLM features off, and no
   webhook. memtomem itself collects no telemetry or analytics.
 - **Network use you opt into:**
