@@ -260,7 +260,7 @@ Combines keyword matching (exact words) with meaning-based search (similar conce
 | `verbose` | Deprecated: use `output_format="verbose"`. A non-default `output_format` overrides it | `true` |
 | `scope` | Memory tier filter: one value, comma list, or glob; omitted uses user plus current-project tiers | `"user,project_local"`, `"project_*"` |
 | `rerank` | Per-call rerank control: `false` skips the cross-encoder rerank stage (fast path for latency-bounded callers); omitted/`true` follows server config — `true` cannot enable reranking the server has disabled | `false` |
-| `record` | Per-call replay control (default `true`): `false` makes the search a background read for fan-out callers — no access-count increments, no query history, caches neither read nor written, and dense retrieval runs exhaustive, so results can differ | `false` |
+| `record` | Per-call replay control (default `true`): `false` makes the search a background read for fan-out callers — no access-count increments, no query history, and caches neither read nor written, so results can differ from a cached answer. Retrieval itself is unchanged | `false` |
 
 ```
 mem_search(query="caching strategy", tag_filter="redis,cache", namespace="work")

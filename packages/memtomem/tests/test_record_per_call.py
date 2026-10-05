@@ -1,6 +1,6 @@
 """Tool-level threading tests for the per-call ``record`` switch (#2166).
 
-Pipeline-level behavior — what replay suppresses, what it widens, how the
+Pipeline-level behavior — what ``record=False`` suppresses and how the
 caches stay isolated — is covered in ``test_pipeline_replay_mode.py``. This
 file pins the plumbing above it: ``mem_search`` / ``mem_agent_search`` /
 ``mem_do(action="agent_search")`` must deliver the caller's decision to
@@ -181,3 +181,42 @@ class TestEndToEndNoWrites:
         counts = await storage.get_access_counts(ids)
         assert all(counts.get(str(cid), 0) >= 1 for cid in ids)
         assert len(await storage.get_search_runs()) == 1
+
+
+class TestRecordFalseKeepsTheDenseLeg:
+    """#2671: above the KNN cap, ``record=false`` used to be keyword-only."""
+
+    @pytest.mark.asyncio
+    async def test_mem_search_record_false_reports_a_dense_leg(self, components, monkeypatch):
+        from memtomem.storage import sqlite_backend
+
+        class _Embedder:
+            dimension = 1024
+            model_name = "fake"
+
+            async def embed_query(self, query: str) -> list[float]:
+                return [0.1] * 1024
+
+        storage, pipeline = components.storage, components.search_pipeline
+        pipeline._embedder = _Embedder()
+        monkeypatch.setattr(sqlite_backend, "VEC_MAX_KNN_K", 3)
+        await storage.upsert_chunks(
+            [
+                make_chunk(f"cap marker {i}", source=f"k{i}.md", embedding=[0.1] * 1024)
+                for i in range(5)
+            ]
+        )
+        ctx = StubCtx(AppContext.from_components(components))
+
+        out = await mem_search(
+            query="cap marker",
+            record=False,
+            output_format="verbose",
+            ctx=ctx,  # type: ignore[arg-type]
+        )
+        await _drain_bg(pipeline)
+
+        pipeline_line = out.rsplit("pipeline: ", 1)[1].splitlines()[0]
+        stages = [stage.split(":", 1)[0] for stage in pipeline_line.split(" → ")]
+        assert "Dense" in stages, pipeline_line
+        assert "Dense-err" not in stages, pipeline_line

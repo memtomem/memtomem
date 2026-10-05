@@ -106,7 +106,7 @@ async def mem_search(
             disabled.
         record: ``false`` = background read, for fan-out callers: no
             access-count increments, no query history, caches neither read
-            nor written, dense retrieval exhaustive — so results can differ.
+            nor written — so results can differ from a cached answer.
 
     A count below ``top_k`` can mean filters excluded candidates or the index
     holds no more. Raising ``top_k`` widens the request; it does not promise
