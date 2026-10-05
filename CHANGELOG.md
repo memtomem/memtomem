@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **The plugins launch the memtomem server with ONNX Runtime telemetry off
+  (#2664).** The Claude Code, Codex and Hermes plugin manifests and the
+  OpenCode plugin now pass `ORT_DISABLE_TELEMETRY=1` in the server's launch
+  environment, so the switch reaches plugin users without waiting for a core
+  release (Claude plugin 0.5.10, Codex 0.3.10, Hermes 0.1.3,
+  `opencode-memtomem` 0.3.10). It turns off the telemetry that official ONNX
+  Runtime builds from 1.29 upload on Linux and macOS; Windows builds do not
+  read it. If you registered the server by hand with the same command as the
+  plugin, `mm doctor --claude-mcp` now notes that the environments differ:
+  your entry wins, without this variable, until you add it.
+
 ## [0.6.7] — 2026-10-05
 
 ### Upgrading

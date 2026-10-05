@@ -58,7 +58,7 @@ def _assert_mcp_pin(document: dict, version: str, tool_mode: str) -> None:
     server = document.get("mcpServers", {}).get("memtomem", {})
     assert server.get("command") == "uvx"
     assert server.get("args") == ["--from", f"memtomem[onnx]=={version}", "memtomem-server"]
-    assert server.get("env") == {"MEMTOMEM_TOOL_MODE": tool_mode}
+    assert server.get("env") == {"MEMTOMEM_TOOL_MODE": tool_mode, "ORT_DISABLE_TELEMETRY": "1"}
 
 
 def _marketplace_entry(marketplace: dict, name: str) -> dict:
@@ -186,7 +186,10 @@ def test_hermes_plugin_matches_contract() -> None:
                 "type": "stdio",
                 "command": "uvx",
                 "args": ["--python", "3.12", "--from", requirement, "memtomem-server"],
-                "env": {"MEMTOMEM_TOOL_MODE": core["tool_mode"]},
+                "env": {
+                    "MEMTOMEM_TOOL_MODE": core["tool_mode"],
+                    "ORT_DISABLE_TELEMETRY": "1",
+                },
             }
         },
     }
