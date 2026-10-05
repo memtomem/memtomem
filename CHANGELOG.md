@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **memtomem turns ONNX Runtime's telemetry off on Linux and macOS (#2664).**
+  Official ONNX Runtime builds from 1.29 upload telemetry to Microsoft on those
+  platforms by default, and a fresh install resolves such a version through
+  fastembed. Importing memtomem now sets `ORT_DISABLE_TELEMETRY=1` before the
+  runtime can load, so the server, the `mm` CLI and the web UI all run with it
+  off. Set the variable yourself (for example `ORT_DISABLE_TELEMETRY=0`) to
+  keep your own choice; a value already in the environment is left alone. Two
+  cases are not covered: a program that initializes `onnxruntime` before it
+  imports memtomem, and Windows, where ONNX Runtime does not read this variable
+  and emits ETW events that Windows records only while a trace session is
+  collecting.
+
 ## [0.6.7] — 2026-10-05
 
 ### Upgrading
