@@ -223,6 +223,17 @@ class TestExhaustiveThreading:
         assert seen == [True]
 
 
+def test_exhaustive_is_keyword_only() -> None:
+    """A replay-only switch must be asked for by name, never by position."""
+    import inspect
+
+    from memtomem.search.pipeline import SearchPipeline
+
+    parameter = inspect.signature(SearchPipeline.search).parameters["exhaustive"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is False
+
+
 class TestBackgroundReadAboveTheCap:
     """#2671: ``record=False`` must not cost a large store its dense leg."""
 

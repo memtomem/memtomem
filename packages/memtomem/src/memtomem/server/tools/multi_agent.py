@@ -259,7 +259,7 @@ async def mem_agent_search(
             ``mem_recall`` so callers don't have to switch tools to get
             structured output.
         record: ``False`` makes this a background read — no access-count
-            increments, no query history, caches neither read nor written,
+            increments, no query history, caches neither read nor filled,
             so results can differ from a cached answer. Defaults to
             recording, as on ``mem_search``; a worker fanning out over a
             shared store is the case for turning it off.

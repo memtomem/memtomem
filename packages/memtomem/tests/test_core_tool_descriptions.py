@@ -107,7 +107,7 @@ _ARG_CONTRACTS: tuple[tuple[str, str, str, str], ...] = (
     (
         "mem_search",
         "record",
-        "caches neither read nor written",
+        "caches neither read nor filled",
         "the cache bypass this entry's budget was raised for",
     ),
     (

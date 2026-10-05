@@ -1438,6 +1438,7 @@ class SearchPipeline:
         rerank: bool | None = None,
         origin: SearchOrigin = "internal",
         record: bool = True,
+        *,
         exhaustive: bool = False,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         # Two independent axes (#1802, split by #2671).
@@ -1771,7 +1772,7 @@ class SearchPipeline:
                         report_failure=_mark_expansion_failed,
                     )
                 if strategy == "llm":
-                    # ``record=False`` neither reads nor writes the expansion
+                    # ``record=False`` neither reads nor fills the expansion
                     # cache, so it cannot depend on a prior call's expansion
                     # nor leave one behind.
                     cached_expansion = self._expansion_cache.get(query) if record else None
