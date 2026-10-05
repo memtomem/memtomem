@@ -178,7 +178,7 @@ async def create_components(
     """
     from memtomem.config import load_config_d, load_config_overrides
 
-    if load_ambient_config and config is None:
+    if config is None and load_ambient_config:
         from memtomem.config_signature import build_fresh_config
 
         # The MCP server's startup recipe (server/context.py): migrate a legacy
@@ -187,12 +187,13 @@ async def create_components(
         # embedding profile the final config selects, so a config.d chunk
         # setting survives config.json choosing E5 (#2667).
         config = build_fresh_config(migrate=True, strict_overrides=False)
+    elif config is None:
+        config = Mem2MemConfig()
     elif load_ambient_config:
         # A caller-supplied base with the files layered on top, which the
         # canonical builder cannot express: it always starts from defaults.
         load_config_d(config)
         load_config_overrides(config)
-    config = config or Mem2MemConfig()
 
     from memtomem.chunking.bounded import validate_budget_configuration
 
