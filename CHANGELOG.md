@@ -5,8 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.6.7] — 2026-10-05
+
 ### Upgrading
 
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.8 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.6.7;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.6.7`, confirm with `mm --version`, then start a new
+  Claude Code session — the compatibility check is refreshed at session start,
+  and until then those hooks are skipped. See the
+  [CLI reference](docs/guides/reference/data-config-cli.md#cli-reference) for
+  what `mm upgrade` preserves and stops.
 - **Scripts that read `mm context settings-doctor --json`: expect
   `"status": "advisory"` (#2482).** A settings tree whose only findings are
   unportable hook commands reported `clean` and now reports `advisory`, still
