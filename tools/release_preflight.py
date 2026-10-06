@@ -158,6 +158,70 @@ def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = N
     return version
 
 
+_CLAUDE_PLUGIN = "packages/memtomem-claude-plugin"
+_CLAUDE_TAG_RE = re.compile(r"^claude-plugin-v(?P<version>\d+\.\d+\.\d+)$")
+_CORE_REQUIREMENT_RE = re.compile(r"^memtomem(?![A-Za-z0-9._-])")
+_EXACT_CORE_PIN_RE = re.compile(r"^memtomem(?:\[[A-Za-z0-9_,-]+\])?==(?P<version>\d+\.\d+\.\d+)$")
+
+
+def _load_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReleaseCheckError(f"cannot read {label}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ReleaseCheckError(f"{label} is not a JSON object")
+    return document
+
+
+def _claude_launch_pin(repo_root: Path) -> str:
+    """The core version the Claude plugin's own launch command installs."""
+    label = f"{_CLAUDE_PLUGIN}/.mcp.json"
+    servers = _load_json_object(repo_root / label, label).get("mcpServers")
+    if not isinstance(servers, dict):
+        raise ReleaseCheckError(f"{label} has no mcpServers object")
+    requirements = [
+        arg
+        for server in servers.values()
+        if isinstance(server, dict) and isinstance(server.get("args"), list)
+        for arg in server["args"]
+        if isinstance(arg, str) and _CORE_REQUIREMENT_RE.match(arg)
+    ]
+    if len(requirements) != 1:
+        raise ReleaseCheckError(
+            f"{label} launches {len(requirements)} memtomem requirements; expected exactly one"
+        )
+    match = _EXACT_CORE_PIN_RE.fullmatch(requirements[0])
+    if match is None:
+        raise ReleaseCheckError(
+            f"{label} launches {requirements[0]!r}; expected an exact memtomem[...]==X.Y.Z pin"
+        )
+    return match.group("version")
+
+
+def validate_claude_plugin(
+    tag: str, repo_root: Path, *, fetch_json: _FetchJSON | None = None
+) -> str:
+    """Require a Claude plugin tag to name the shipped version and an installable core."""
+    match = _CLAUDE_TAG_RE.fullmatch(tag)
+    if match is None:
+        raise ReleaseCheckError(f"unsupported tag {tag!r}; expected claude-plugin-vX.Y.Z")
+    label = f"{_CLAUDE_PLUGIN}/.claude-plugin/plugin.json"
+    version = _load_json_object(repo_root / label, label).get("version")
+    if version != match.group("version"):
+        raise ReleaseCheckError(f"tag {tag!r} does not match {label} version {version!r}")
+    core = _claude_launch_pin(repo_root)
+    try:
+        _probe_pypi_release(core, fetch_json=fetch_json or _request_json)
+    except ReleaseCheckError as exc:
+        raise ReleaseCheckError(
+            f"the Claude plugin cannot be published while memtomem=={core} is unverified: {exc}. "
+            f"Wait for / approve the PyPI v{core} release, confirm propagation, "
+            "then rerun the Claude plugin release."
+        ) from exc
+    return version
+
+
 def validate_registry_publish(
     tag: str,
     repo_root: Path,
@@ -840,6 +904,10 @@ def _build_parser() -> argparse.ArgumentParser:
     opencode = subparsers.add_parser("opencode-pypi", allow_abbrev=False)
     opencode.add_argument("--repo-root", type=Path, default=Path.cwd())
 
+    claude_plugin = subparsers.add_parser("claude-plugin", allow_abbrev=False)
+    claude_plugin.add_argument("--tag", required=True)
+    claude_plugin.add_argument("--repo-root", type=Path, default=Path.cwd())
+
     wait_ci = subparsers.add_parser("wait-ci")
     wait_ci.add_argument("--repository", required=True)
     wait_ci.add_argument("--sha", required=True)
@@ -877,6 +945,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "opencode-pypi":
             version = validate_opencode_pypi(args.repo_root.resolve())
             print(f"OpenCode core pin memtomem=={version} is available on PyPI")
+        elif args.command == "claude-plugin":
+            version = validate_claude_plugin(args.tag, args.repo_root.resolve())
+            print(f"Claude plugin {version} matches its tag and its core pin is on PyPI")
         else:
             token = os.environ.get("GITHUB_TOKEN", "")
             if not token:

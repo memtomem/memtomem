@@ -1,0 +1,85 @@
+name: Publish Claude plugin directory branch
+
+# The Claude plugin directory tracks the branch `claude-plugin-directory`, not
+# `main`. Its validator reads everything above the plugin folder on the ref it
+# tracks and refuses this repository's root pyproject.toml (the
+# `[tool.uv.sources]` workspace entry reads as a package-source redirect), so
+# that branch holds packages/memtomem-claude-plugin and nothing else.
+#
+# Pushing a `claude-plugin-vX.Y.Z` tag on a main commit is the release step:
+# the preflight job proves the tag is releasable, the publish job adds one
+# commit to the branch. Merging to main publishes nothing here.
+#
+# Nothing else should write to that branch. A tag only triggers this workflow
+# when the tagged commit already contains this file.
+
+on:
+  push:
+    tags:
+      - "claude-plugin-v[0-9]*"
+
+concurrency:
+  group: release-claude-plugin
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Claude plugin release preflight
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the tag to match the plugin version and its core pin on PyPI
+        id: plugin-gate
+        run: python tools/release_preflight.py claude-plugin --tag "$GITHUB_REF_NAME" --repo-root .
+      - name: Fetch main
+        id: fetch-main
+        run: git fetch --no-tags origin main:refs/remotes/origin/main
+      - name: Require the tag commit to be on main
+        id: on-main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Require the exact main-push CI run to succeed
+        id: wait-ci
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python tools/release_preflight.py wait-ci
+          --repository "$GITHUB_REPOSITORY"
+          --sha "$GITHUB_SHA"
+          --timeout-seconds 2400
+          --interval-seconds 15
+
+  publish:
+    name: Update claude-plugin-directory
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment:
+      name: claude-plugin-directory
+    permissions:
+      contents: write
+    # Checkout and the publisher, nothing else: every step of a job that can
+    # write contents can reach its token.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Publish the plugin folder
+        id: publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: >-
+          python tools/publish_claude_plugin_branch.py
+          --source "$GITHUB_SHA"
+          --remote origin
+          --branch claude-plugin-directory
+          --token-env GITHUB_TOKEN
