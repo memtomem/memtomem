@@ -458,6 +458,31 @@ def test_a_push_that_reports_failure_is_not_called_a_refusal(
     assert "refused" not in captured.err
 
 
+def test_a_push_that_does_not_finish_is_not_called_a_refusal(
+    work: _Work, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """git can time out after the remote has already taken the push."""
+    real_run = subprocess.run
+
+    def push_lands_then_times_out(argv: list[str], **kwargs: object) -> object:
+        result = real_run(argv, **kwargs)  # type: ignore[call-overload]
+        if argv[3] == "push":
+            assert result.returncode == 0
+            raise subprocess.TimeoutExpired(argv, 300)
+        return result
+
+    monkeypatch.setattr(pub.subprocess, "run", push_lands_then_times_out)
+    assert work.run() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    landed = _remote_ref(work.remote)
+    assert landed != ""
+    assert captured.err.startswith(f"publish failed: git push of {landed} to {_BRANCH} failed")
+    assert "timed out" in captured.err
+    assert "may or may not have been updated" in captured.err
+    assert "refused" not in captured.err
+
+
 def test_dry_run_builds_without_pushing(work: _Work, capsys: pytest.CaptureFixture[str]) -> None:
     assert work.run("HEAD", "--dry-run") == 0
     commit = capsys.readouterr().out.strip()

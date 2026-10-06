@@ -242,19 +242,27 @@ def _remote_tip(repo: _Repo, remote: str, branch: str) -> str | None:
     return fetched
 
 
+def _push_report(commit: str, branch: str, detail: str) -> str:
+    return (
+        f"git push of {commit} to {branch} failed {detail}. "
+        "The branch may or may not have been updated; look at it before running this again"
+    )
+
+
 def publish(repo: _Repo, *, source: str, remote: str, branch: str, dry_run: bool) -> str:
     tip = _remote_tip(repo, remote, branch)
     commit = _build(repo, source, tip)
     if commit != tip and not dry_run:
         # A plain push: the remote refuses anything that is not a fast-forward,
         # which is the answer wanted when the branch moved on since the lookup.
-        result = repo.git("push", remote, f"{commit}:refs/heads/{branch}")
+        try:
+            result = repo.git("push", remote, f"{commit}:refs/heads/{branch}")
+        except PublishError as exc:
+            # git did not finish (a timeout, say); the remote may still have acted.
+            raise PushFailed(_push_report(commit, branch, str(exc))) from exc
         if result.returncode != 0:
-            raise PushFailed(
-                f"git push of {commit} to {branch} failed ({result.returncode}): "
-                f"{result.stderr.strip()}. The branch may or may not have been updated; "
-                "look at it before running this again"
-            )
+            detail = f"({result.returncode}): {result.stderr.strip()}"
+            raise PushFailed(_push_report(commit, branch, detail))
     return commit
 
 
