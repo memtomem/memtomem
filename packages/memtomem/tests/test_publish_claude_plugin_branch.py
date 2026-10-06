@@ -38,7 +38,8 @@ pub = _load_tool()
 
 def _git(repo: Path, *args: str, stdin: str | None = None) -> str:
     # ``-c`` beats the developer's global config: no signing prompt, a fixed identity.
-    return subprocess.run(
+    # Bytes in and out: text mode would turn the "\n" fed to mktree into "\r\n" on Windows.
+    result = subprocess.run(
         [
             "git",
             "-C",
@@ -55,10 +56,9 @@ def _git(repo: Path, *args: str, stdin: str | None = None) -> str:
         ],
         check=True,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        input=stdin,
-    ).stdout.strip()
+        input=None if stdin is None else stdin.encode(),
+    )
+    return result.stdout.decode("utf-8").strip()
 
 
 def _write_plugin(repo: Path, version: object, body: str) -> None:
@@ -172,6 +172,34 @@ def _refused(work: _Work, capsys: pytest.CaptureFixture[str], *args: str, **kwar
     assert captured.err.startswith("publish refused: ")
     assert _remote_ref(work.remote) == remote_before
     return captured.err
+
+
+def test_git_receives_its_input_as_the_exact_bytes(
+    work: _Work, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Text mode rewrites line endings on Windows, and nothing on POSIX would show it.
+
+    ``git mktree`` reads one entry per line. Fed through a text-mode pipe on
+    Windows each "\n" arrives as "\r\n" and the "\r" ends up in the entry
+    name, so the published tree would hold ``packages\r``. This is the check
+    that fails on every platform if the pipe goes back to text mode.
+    """
+    seen = []
+    real_run = subprocess.run
+
+    def recording_run(argv: list[str], **kwargs: object) -> object:
+        seen.append((argv[3], kwargs))
+        return real_run(argv, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(pub.subprocess, "run", recording_run)
+    assert work.run() == 0
+    wraps = [kwargs for command, kwargs in seen if command == "mktree"]
+    plugin = _git(work.repo, "rev-parse", f"{work.first}:{_PATH}")
+    assert wraps[0]["input"] == f"040000 tree {plugin}\tmemtomem-claude-plugin\n".encode()
+    assert len(wraps) == 2
+    for _command, kwargs in seen:
+        assert not kwargs.get("text") and "encoding" not in kwargs
+        assert "universal_newlines" not in kwargs
 
 
 def test_first_publish_creates_a_root_commit_holding_only_the_plugin_folder(
@@ -527,7 +555,7 @@ def test_a_branch_that_holds_a_tag_object_is_refused(
     tag = _annotated_tag(work, "wrapped", tip)
     assert _git(work.repo, "cat-file", "-t", tag) == "tag"
     # git refuses to point a branch at a tag object, so write the ref directly.
-    (work.remote / "refs" / "heads" / _BRANCH).write_text(f"{tag}\n", encoding="ascii")
+    (work.remote / "refs" / "heads" / _BRANCH).write_bytes(f"{tag}\n".encode())
     assert _remote_ref(work.remote) == tag
 
     assert work.run() == 1

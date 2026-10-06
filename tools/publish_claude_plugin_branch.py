@@ -58,20 +58,26 @@ class _Repo:
     def git(self, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
         """Run git and hand back the result; callers decide what each exit code means."""
         try:
-            return subprocess.run(
+            raw = subprocess.run(
                 ["git", "-C", str(self._root), *args],
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                # A commit message is bytes in whatever encoding its author used.
-                errors="replace",
-                input=stdin,
+                # Bytes both ways. Text mode rewrites line endings on Windows: a "\n"
+                # written to ``git mktree`` arrives as "\r\n", and the "\r" becomes part
+                # of the entry name.
+                input=None if stdin is None else stdin.encode(),
                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
                 timeout=300,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise PublishError(f"cannot run git {args[0]}: {exc}") from exc
+        # A commit message is bytes in whatever encoding its author used.
+        return subprocess.CompletedProcess(
+            raw.args,
+            raw.returncode,
+            raw.stdout.decode("utf-8", errors="replace"),
+            raw.stderr.decode("utf-8", errors="replace"),
+        )
 
     def ok(self, *args: str, stdin: str | None = None) -> str:
         result = self.git(*args, stdin=stdin)
