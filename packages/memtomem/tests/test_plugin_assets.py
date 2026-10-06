@@ -53,8 +53,13 @@ def _rendered_skills() -> dict[str, str]:
 
 
 def _frontmatter(skill: str) -> object:
-    assert skill.startswith("---\n")
-    return yaml.safe_load(skill.split("---", 2)[1])
+    # The block between the opening fence and the first line that is exactly
+    # "---". Splitting on the substring instead would cut a value that contains
+    # it, which can turn invalid YAML into a shorter document that parses.
+    lines = skill.split("\n")
+    assert lines[0] == "---", "no opening frontmatter fence"
+    assert "---" in lines[1:], "no closing frontmatter fence"
+    return yaml.safe_load("\n".join(lines[1 : lines.index("---", 1)]))
 
 
 def _claude_skill_key(workflow: dict) -> str:
@@ -225,6 +230,21 @@ def test_rendered_skill_frontmatter_is_a_yaml_mapping(skill: str) -> None:
     happens inside each case so one bad file cannot hide the others.
     """
     assert isinstance(_frontmatter(_RENDERED_SKILLS[skill]), dict)
+
+
+def test_frontmatter_helper_keeps_a_value_that_contains_the_fence_text() -> None:
+    skill = '---\nargument-hint: "[foo---bar]"\n---\n\n# Title\n'
+    assert _frontmatter(skill) == {"argument-hint": "[foo---bar]"}
+
+
+def test_frontmatter_helper_does_not_shorten_invalid_yaml_into_valid() -> None:
+    with pytest.raises(yaml.YAMLError):
+        _frontmatter("---\ndescription: hello--- world: invalid\n---\n\n# Title\n")
+
+
+def test_frontmatter_helper_requires_a_closing_fence() -> None:
+    with pytest.raises(AssertionError, match="no closing frontmatter fence"):
+        _frontmatter("---\nname: search\n")
 
 
 def test_rendered_skill_cases_cover_every_claude_workflow() -> None:
