@@ -14,10 +14,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   512 × 512 PNG, with the lettering reduced so a round crop does not cut it.
 - **The Claude plugin names a privacy policy for its directory listing (Claude
   plugin 0.5.13).** `plugin.json` sets `privacyPolicyUrl` to the plugin
-  README's "What this plugin runs and connects to" section, which lists what
-  the plugin stores locally and every network destination it can reach. Claude
-  Code does not read the field; the Claude plugin directory shows it on the
-  listing.
+  README's "What this plugin runs and connects to" section. That section now
+  also describes the local search history (query text and result metadata,
+  kept 90 days, skipped with `record=false`) and that memory text returned by
+  search, recall and read becomes part of the Claude conversation. Claude Code
+  does not read the field; the Claude plugin directory shows it on the listing.
 
 ### Changed
 
