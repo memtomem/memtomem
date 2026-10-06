@@ -17,6 +17,7 @@ from memtomem.config import TargetScope
 from memtomem.models import InvalidFilterSyntaxError, InvalidScopeFilterError
 from memtomem.search.pipeline import RetrievalStats
 from memtomem.services.search_service import (
+    DENSE_LEG_DROPPED_HINT,
     InvalidRrfWeightError,
     InvalidTemporalBoundError,
     dense_degraded_hint,
@@ -247,6 +248,79 @@ async def test_hidden_system_namespaces_yield_a_hint_when_no_namespace_is_pinned
         "3 result(s) hidden in system namespaces: 3 in archive:* "
         '(pass namespace="archive:*" to include them).'
     ]
+
+
+class TestDenseLegDroppedHint:
+    """#2671: a primary dense leg that raised is said out loud with results."""
+
+    @pytest.mark.asyncio
+    async def test_results_with_a_dense_error_yield_the_fixed_hint(self):
+        pipeline = StubPipeline(
+            results=["r"], stats=RetrievalStats(dense_error="Cannot connect to http://u:p@h")
+        )
+
+        _, _, hints = await _run(pipeline)
+
+        assert hints == [DENSE_LEG_DROPPED_HINT]
+        assert "u:p@h" not in " ".join(hints), "the exception text must not travel"
+
+    @pytest.mark.asyncio
+    async def test_an_empty_exception_message_still_counts(self):
+        """``str(RuntimeError())`` is ``""``; the gate is ``is not None``."""
+        pipeline = StubPipeline(results=["r"], stats=RetrievalStats(dense_error=""))
+
+        _, _, hints = await _run(pipeline)
+
+        assert hints == [DENSE_LEG_DROPPED_HINT]
+
+    @pytest.mark.asyncio
+    async def test_no_results_yields_no_hint(self):
+        """The empty-result branches of mem_search name the error themselves."""
+        pipeline = StubPipeline(results=[], stats=RetrievalStats(dense_error="down"))
+
+        _, _, hints = await _run(pipeline)
+
+        assert hints == []
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_dense_leg_yields_no_hint(self):
+        pipeline = StubPipeline(results=["r"], stats=RetrievalStats(dense_candidates=3))
+
+        _, _, hints = await _run(pipeline)
+
+        assert hints == []
+
+    @pytest.mark.asyncio
+    async def test_the_mismatch_hint_takes_its_place(self):
+        """A suppressed leg has a hint that names the fix; do not add a second."""
+        pipeline = StubPipeline(
+            results=["r"],
+            stats=RetrievalStats(
+                dense_suppressed_mismatch=True, mismatch_detail=None, dense_error="x"
+            ),
+        )
+
+        _, _, hints = await _run(pipeline)
+
+        assert hints == [dense_degraded_hint(None)]
+
+    @pytest.mark.asyncio
+    async def test_ordering_degradation_before_discovery(self):
+        pipeline = StubPipeline(
+            results=["r"],
+            stats=RetrievalStats(
+                rerank_applied=False,
+                dense_error="down",
+                hidden_system_ns=1,
+                hidden_by_prefix={"archive:": 1},
+            ),
+        )
+
+        _, _, hints = await _run(pipeline, rerank=True, namespace=None, current_namespace=None)
+
+        assert hints[0].startswith("rerank=true requested")
+        assert hints[1] == DENSE_LEG_DROPPED_HINT
+        assert hints[2].startswith("1 result(s) hidden")
 
 
 @pytest.mark.asyncio

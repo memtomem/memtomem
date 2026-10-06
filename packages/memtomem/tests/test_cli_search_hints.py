@@ -71,6 +71,20 @@ def _invoke(monkeypatch, *args, results=None, stats=_DEGRADED, comp_box=None):
     return CliRunner().invoke(cli, ["search", *args, "pipelines"])
 
 
+class TestDenseLegDroppedHint:
+    """#2671: the fixed notice for a primary dense leg that raised."""
+
+    @pytest.mark.parametrize("fmt", ["table", "plain", "json"])
+    def test_every_format_reports_the_dropped_leg_on_stderr(self, monkeypatch, fmt: str) -> None:
+        stats = RetrievalStats(
+            bm25_candidates=1, final_total=1, dense_error="Cannot connect to http://u:p@h"
+        )
+        result = _invoke(monkeypatch, "--format", fmt, stats=stats)
+        assert result.exit_code == 0, result.output
+        assert "semantic search failed for this query" in result.stderr
+        assert "u:p@h" not in result.stderr and "u:p@h" not in result.stdout
+
+
 class TestDenseDegradedHint:
     @pytest.mark.parametrize("fmt", ["table", "plain", "json", "context", "smart"])
     def test_every_format_reports_the_degradation_on_stderr(self, monkeypatch, fmt: str) -> None:
