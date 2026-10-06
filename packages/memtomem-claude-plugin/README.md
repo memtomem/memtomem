@@ -28,8 +28,11 @@ write-time indexing.
 - **Local search history.** The same database records each `mem_search`: the
   query text, its embedding when an embedding provider is configured, and for
   each result its ID, score, file name and headings (not the memory text). It
-  also counts how often each memory is returned. History rows older than 90
-  days are deleted. A search made with `record=false` records none of this.
+  also counts how often each memory is returned. `mem_add` records one such
+  search too, for its duplicate check, with the new note's text as the query;
+  deleting the memory later does not remove that entry. memtomem only
+  occasionally deletes history rows older than 90 days, so treat the history
+  as kept indefinitely. A search made with `record=false` records none of this.
 - **What Claude receives.** Search, recall and read results, including memory
   text, headings and source file paths, are returned to Claude Code. They
   become part of the conversation, which Claude Code sends to the model

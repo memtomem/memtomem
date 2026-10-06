@@ -16,9 +16,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   plugin 0.5.13).** `plugin.json` sets `privacyPolicyUrl` to the plugin
   README's "What this plugin runs and connects to" section. That section now
   also describes the local search history (query text and result metadata,
-  kept 90 days, skipped with `record=false`) and that memory text returned by
-  search, recall and read becomes part of the Claude conversation. Claude Code
-  does not read the field; the Claude plugin directory shows it on the listing.
+  including the text of each note `mem_add` checks for duplicates, with no
+  reliable expiry) and that memory text returned by search, recall and read
+  becomes part of the Claude conversation. Claude Code does not read the
+  field; the Claude plugin directory shows it on the listing.
 
 ### Changed
 
