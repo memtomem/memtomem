@@ -12,6 +12,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   only the first time the plugin is saved in its developer portal, so the file
   has to be in place before that save. It is the web UI's favicon drawn as a
   512 × 512 PNG, with the lettering reduced so a round crop does not cut it.
+- **The Claude plugin names a privacy policy for its directory listing (Claude
+  plugin 0.5.13).** `plugin.json` sets `privacyPolicyUrl` to the plugin
+  README's "What this plugin runs and connects to" section. That section now
+  also describes the local search history (query text and result metadata,
+  including the text of each note `mem_add` checks for duplicates, with no
+  reliable expiry) and that memory text returned by search, recall and read
+  becomes part of the Claude conversation. Claude Code does not read the
+  field; the Claude plugin directory shows it on the listing.
 
 ### Changed
 

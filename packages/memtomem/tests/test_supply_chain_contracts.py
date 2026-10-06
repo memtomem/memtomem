@@ -151,6 +151,24 @@ def test_claude_plugin_icon_meets_directory_limits() -> None:
     assert 512 <= width <= 2048
 
 
+def test_claude_plugin_privacy_policy_url_names_a_readme_heading() -> None:
+    # The directory listing links this URL as the plugin's privacy policy. It
+    # points at a README section, so renaming that heading would leave the
+    # listing on a link that opens the top of the README instead.
+    url = _json("packages/memtomem-claude-plugin/.claude-plugin/plugin.json")["privacyPolicyUrl"]
+    prefix = (
+        "https://github.com/memtomem/memtomem/blob/main/packages/memtomem-claude-plugin/README.md#"
+    )
+    assert url.startswith(prefix)
+    readme = (_ROOT / "packages/memtomem-claude-plugin/README.md").read_text(encoding="utf-8")
+    slugs = {
+        re.sub(r"[^\w\- ]", "", line[3:].strip().lower()).replace(" ", "-")
+        for line in readme.splitlines()
+        if line.startswith("## ")
+    }
+    assert url.removeprefix(prefix) in slugs
+
+
 def test_codex_plugin_matches_contract_and_marketplace() -> None:
     contract = _contract()
     manifest = _json("plugins/memtomem/.codex-plugin/plugin.json")
