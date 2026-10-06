@@ -1,7 +1,7 @@
 ---
 name: recall
 description: Recall memtomem memories created in a date range. Use for recent memories or requests scoped by day, week, month, source, or namespace.
-argument-hint: [date range]
+argument-hint: "[date range]"
 allowed-tools: mcp__plugin_memtomem_memtomem__mem_recall, mcp__memtomem__mem_recall
 ---
 

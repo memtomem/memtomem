@@ -1,7 +1,7 @@
 ---
 name: remember
 description: Save an explicit user-requested memory with memtomem. Use only when the user clearly asks to remember, record, or persist information for later.
-argument-hint: [content to remember]
+argument-hint: "[content to remember]"
 allowed-tools: mcp__plugin_memtomem_memtomem__mem_add, mcp__memtomem__mem_add, mcp__plugin_memtomem_memtomem__mem_status, mcp__memtomem__mem_status
 disable-model-invocation: true
 ---

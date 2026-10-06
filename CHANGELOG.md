@@ -74,6 +74,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   config the way the MCP server does. Files indexed while the setting was
   dropped are reported by `mm memory doctor` as `stale_index`; `mm index`
   clears that.
+- **The Claude plugin's skills carry `argument-hint` as a quoted string
+  (Claude plugin 0.5.11).** The hint was written into each skill's frontmatter
+  unquoted. The handoff skill's `[save|resume] [target runtime or handoff id]`
+  is not valid YAML in that form, so a YAML parser rejected the whole
+  frontmatter block, and the Claude plugin directory's validator refused the
+  skill. The one-group hints of the search, recall, remember, index and setup
+  skills parsed, but as a list rather than as text. All six are now quoted.
 
 ### Security
 

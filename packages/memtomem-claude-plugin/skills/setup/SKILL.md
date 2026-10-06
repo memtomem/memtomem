@@ -1,7 +1,7 @@
 ---
 name: setup
 description: Set up and verify a first memtomem memory source. Use for onboarding, choosing an index path, or confirming that search works.
-argument-hint: [path]
+argument-hint: "[path]"
 allowed-tools: mcp__plugin_memtomem_memtomem__mem_status, mcp__memtomem__mem_status, mcp__plugin_memtomem_memtomem__mem_index, mcp__memtomem__mem_index, mcp__plugin_memtomem_memtomem__mem_search, mcp__memtomem__mem_search
 disable-model-invocation: true
 ---

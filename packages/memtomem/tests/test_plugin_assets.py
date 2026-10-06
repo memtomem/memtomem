@@ -12,6 +12,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -40,6 +41,27 @@ def _renderer() -> object:
 
 def _user_scope_workflows(workflows: list[dict]) -> list[dict]:
     return [row for row in workflows if "user" in row.get("scopes", ["project", "user"])]
+
+
+def _rendered_skills() -> dict[str, str]:
+    rendered = _renderer().expected_files()  # type: ignore[attr-defined]
+    return {
+        path.relative_to(_ROOT).as_posix(): text
+        for path, text in rendered.items()
+        if path.name == "SKILL.md"
+    }
+
+
+def _frontmatter(skill: str) -> object:
+    assert skill.startswith("---\n")
+    return yaml.safe_load(skill.split("---", 2)[1])
+
+
+def _claude_skill_key(workflow: dict) -> str:
+    return f"packages/memtomem-claude-plugin/skills/{workflow['id']}/SKILL.md"
+
+
+_RENDERED_SKILLS = _rendered_skills()
 
 
 def _flat_body(path: Path) -> str:
@@ -190,6 +212,51 @@ def test_generated_plugin_assets_are_in_sync() -> None:
         text=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize("skill", sorted(_RENDERED_SKILLS))
+def test_rendered_skill_frontmatter_is_a_yaml_mapping(skill: str) -> None:
+    """Every rendered SKILL.md must carry frontmatter a YAML parser accepts.
+
+    The renderer writes frontmatter as plain text lines, so nothing stops a
+    contract value from producing invalid YAML: the handoff skill shipped with
+    ``argument-hint: [save|resume] [target runtime or handoff id]``, which
+    PyYAML and the Claude plugin directory's validator both reject. Parsing
+    happens inside each case so one bad file cannot hide the others.
+    """
+    assert isinstance(_frontmatter(_RENDERED_SKILLS[skill]), dict)
+
+
+def test_rendered_skill_cases_cover_every_claude_workflow() -> None:
+    workflows = _contract()["workflows"]
+    assert workflows
+    claude = {key for key in _RENDERED_SKILLS if key.startswith("packages/memtomem-claude-plugin/")}
+    assert claude == {_claude_skill_key(row) for row in workflows}
+
+
+@pytest.mark.parametrize("workflow", _contract()["workflows"], ids=lambda row: row["id"])
+def test_claude_skill_argument_hint_matches_the_contract(workflow: dict) -> None:
+    """A contract ``argument_hint`` must reach the Claude skill as that string.
+
+    Driven from the contract rather than from what was rendered: checking the
+    key only where it appears would pass if the renderer stopped emitting it,
+    and the drift check would agree. Unquoted, a one-group hint such as
+    ``[path]`` parses as a list, so the comparison is against the exact string.
+    """
+    frontmatter = _frontmatter(_RENDERED_SKILLS[_claude_skill_key(workflow)])
+    assert isinstance(frontmatter, dict)
+    hint = workflow.get("argument_hint")
+    if not hint:
+        assert "argument-hint" not in frontmatter
+        return
+    assert "argument-hint" in frontmatter
+    assert isinstance(frontmatter["argument-hint"], str), frontmatter["argument-hint"]
+    assert frontmatter["argument-hint"] == hint
+
+
+def test_some_workflow_defines_an_argument_hint() -> None:
+    # Keeps the hint test from passing vacuously if the contract key is renamed.
+    assert any(row.get("argument_hint") for row in _contract()["workflows"])
 
 
 def test_every_input_taking_surface_carries_the_non_interactive_fallback() -> None:

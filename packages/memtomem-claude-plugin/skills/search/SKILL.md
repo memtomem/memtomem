@@ -1,7 +1,7 @@
 ---
 name: search
 description: Search indexed memtomem memories by topic. Use for past decisions, notes, findings, or project context that may exist in the memory index.
-argument-hint: [query]
+argument-hint: "[query]"
 allowed-tools: mcp__plugin_memtomem_memtomem__mem_search, mcp__memtomem__mem_search
 ---
 
