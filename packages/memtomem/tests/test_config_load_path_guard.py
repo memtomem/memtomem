@@ -35,6 +35,7 @@ DEFERRED = {
     "integrations/langgraph_store.py:MemtomemBaseStore.__init__._registered_project_dirs": (1, 1),
     # Startup, tracing and MCP failure/recovery policies remain unchanged here.
     "observability/session_tracing.py:get_trace_config": (1, 1),
+    # Only the caller-supplied-base branch; a config-less ambient load is canonical.
     "runtime/components.py:create_components": (1, 1),
     "server/__init__.py:_resolve_store_db_path": (1, 1),
     "server/tools/context.py:_resolve_mcp_scope": (1, 1),
