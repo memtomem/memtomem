@@ -1438,17 +1438,30 @@ class SearchPipeline:
         rerank: bool | None = None,
         origin: SearchOrigin = "internal",
         record: bool = True,
+        *,
+        exhaustive: bool = False,
     ) -> tuple[list[SearchResult], RetrievalStats]:
-        # ``record`` (#1802): the default (True) is today's behavior. False is
-        # the no-side-effects replay/evaluation mode — the call touches no
-        # persistent or cross-call state: it neither reads nor writes the TTL
-        # result cache or the LLM-expansion cache, does not increment access
-        # counters, and does not persist a query-run observation (so
-        # ``stats.query_run_id`` stays None). It also switches the dense legs
-        # to exhaustive KNN so equal-distance boundary rows are selected
-        # deterministically (see ``dense_search(exhaustive=...)``). Pair it
-        # with an explicit ``as_of_unix`` to pin validity + decay to a fixed
-        # instant for byte-reproducible replays.
+        # Two independent axes (#1802, split by #2671).
+        #
+        # ``record``: the default (True) is the ordinary search. False is a
+        # background read — it does not increment access counters, does not
+        # persist a query-run observation (so ``stats.query_run_id`` stays
+        # None), and bypasses the TTL result cache and the LLM-expansion
+        # cache: it is never served a cached entry and never stores one. It
+        # does not freeze those caches, though — a source-visibility change
+        # seen by this call still invalidates them, as it does for any
+        # search. Retrieval itself is the ordinary one, so a fan-out caller
+        # on a large store keeps its dense leg.
+        #
+        # ``exhaustive``: deterministic dense selection for replay and
+        # evaluation — every dense leg scans all embeddings so equal-distance
+        # boundary rows are selected deterministically (see
+        # ``dense_search(exhaustive=...)``), and is refused above the KNN cap.
+        # Only valid with ``record=False``: the result-cache key does not
+        # carry it, so a recorded exhaustive search would be served from, and
+        # stored into, the ordinary search's slot. Pair it with an explicit
+        # ``as_of_unix`` to pin validity + decay to a fixed instant for
+        # byte-reproducible replays.
         #
         # ``rerank`` (#1766): None = follow server config; False = skip the
         # Stage 3b cross-encoder and collapse the candidate pool to top_k
@@ -1460,6 +1473,9 @@ class SearchPipeline:
         # entirely; post-filter stages (validity, decay, access,
         # importance, ctx-window) still apply so ranking reflects
         # recency × access × importance.
+
+        if exhaustive and record:
+            raise ValueError("exhaustive=True requires record=False")
         scope_filter = ScopeFilter.parse(scope)
         metadata_candidate = SearchMetadataFilter(
             source_exact=tuple(sorted(set(source_exact or ()))),
@@ -1578,9 +1594,11 @@ class SearchPipeline:
                     self.invalidate_cache()
                     version_at_start = self._cache_version
                 self._source_visibility_epoch = current_epoch
-            # ``record=False`` (replay) bypasses the TTL result cache in both
-            # directions: it must never be served a cached result nor evict
-            # one, so a concurrent interactive search's cache is untouched.
+            # ``record=False`` bypasses the TTL result cache in both
+            # directions: it is never served a cached result and never
+            # replaces one, so this call leaves a concurrent interactive
+            # search's entry as it found it (the visibility-epoch
+            # invalidation just above is the one exception).
             if record and as_of_unix is None and cache_key in self._search_cache:
                 ts, ver, cached_results, cached_stats = self._search_cache[cache_key]
                 if ver == self._cache_version and time.time() - ts < ttl_snapshot:
@@ -1743,20 +1761,20 @@ class SearchPipeline:
                     # project context onto the heading-expansion's dense
                     # probe so it samples from the same scope set the
                     # primary retrieval is pinned to. ``exhaustive`` carries
-                    # replay's deterministic-dense mode into this leg too.
+                    # the caller's deterministic-dense mode into this leg too.
                     query = await expand_query_headings(
                         query,
                         self._storage,
                         self._embedder,
                         max_terms,
                         project_context_root=project_context_root,
-                        exhaustive=not record,
+                        exhaustive=exhaustive,
                         report_failure=_mark_expansion_failed,
                     )
                 if strategy == "llm":
-                    # Replay (``record=False``) neither reads nor writes the
-                    # expansion cache, so it cannot depend on nor mutate hidden
-                    # prior pipeline state.
+                    # ``record=False`` neither reads nor fills the expansion
+                    # cache, so it cannot depend on a prior call's expansion
+                    # nor leave one behind.
                     cached_expansion = self._expansion_cache.get(query) if record else None
                     if cached_expansion is not None:
                         query = cached_expansion
@@ -1809,7 +1827,7 @@ class SearchPipeline:
                         scope_filter=scope_filter,
                         project_context_root=project_context_root,
                         source_filter=source_filter,
-                        exhaustive=not record,
+                        exhaustive=exhaustive,
                         **metadata_kwargs,
                     )
                 except Exception as exc:
@@ -1898,7 +1916,7 @@ class SearchPipeline:
                             project_context_root=project_context_root,
                             metadata_filter=retrieval_metadata_filter,
                             source_filter=source_filter,
-                            exhaustive=not record,
+                            exhaustive=exhaustive,
                             report_failure=_mark_rescue_failed,
                         )
                         rescue_chunk_ids = {r.chunk.id for r in rescue_results}

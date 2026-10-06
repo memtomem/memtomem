@@ -64,6 +64,9 @@ def _wire_descriptions() -> dict[str, str]:
 #: told only "skips the counters" would be misled. That warning is pinned in
 #: ``_ARG_CONTRACTS`` below. Paid for in part by dropping "Default ``None``
 #: = now" from ``as_of``, which the signature already says.
+#: #2671 then took the dense widening back out of ``record=false`` (it cost
+#: large stores their dense leg), which shortened the entry; the cache bypass
+#: is what "can differ" now rests on. The budget was left where it is.
 _TOTAL_BUDGET = 9_400
 
 
@@ -104,13 +107,7 @@ _ARG_CONTRACTS: tuple[tuple[str, str, str, str], ...] = (
     (
         "mem_search",
         "record",
-        "dense retrieval exhaustive",
-        "the retrieval change behind 'can differ'",
-    ),
-    (
-        "mem_search",
-        "record",
-        "caches neither read nor written",
+        "caches neither read nor filled",
         "the cache bypass this entry's budget was raised for",
     ),
     (

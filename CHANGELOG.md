@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **`mem_search(record=false)` and `mem_agent_search(record=false)` no longer
+  switch dense retrieval to an exhaustive scan (#2671).** That scan is refused
+  above 4,096 embeddings, so on a larger store a `record=false` search lost
+  its semantic leg and returned keyword matches only, with nothing in the
+  default output to say so. `record=false` now means only what its name says:
+  no access-count increments, no query history, and the result and expansion
+  caches neither read nor filled. Its ranking can differ from before on any
+  store, because dense candidates now come from the ordinary bounded search.
+  Deterministic replay (`mm quality replay`, `mem_quality_replay`, the Web
+  quality page) asks for the exhaustive scan itself and behaves as before,
+  including the `dense_exhaustive_limit` report above the cap.
+
 - **memtomem turns ONNX Runtime's telemetry off on Linux and macOS (#2664).**
   Official ONNX Runtime builds from 1.29 upload telemetry to Microsoft on those
   platforms by default, and a fresh install resolves such a version through

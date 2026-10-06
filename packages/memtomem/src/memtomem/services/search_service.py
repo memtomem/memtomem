@@ -319,8 +319,8 @@ async def run_search(
             ``current_namespace``.
         current_namespace: The surface's ambient namespace.
         as_of: ``YYYY-MM-DD`` / ``YYYY-QN`` temporal bound, or ``None``.
-        record: ``False`` runs the query as a replay — see
-            ``SearchPipeline.search`` for what that suppresses and widens.
+        record: ``False`` runs the query as a background read — see
+            ``SearchPipeline.search`` for what that suppresses.
         project_context_root: ADR-0011 scope anchor; resolve it on the
             caller's side (``runtime.project_context``).
         origin: Call-origin label recorded with the query run.
