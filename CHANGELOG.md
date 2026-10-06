@@ -46,6 +46,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A search whose semantic leg failed now says so in its default output
+  (#2671).** When `dense_search` raised — embedder unreachable, for instance —
+  `mem_search`, `mem_agent_search`, `mem_ask` and `mm search` returned the
+  keyword matches with no sign of it unless the result set was empty or the
+  verbose pipeline line was requested. When results come back, they now
+  append the hint `semantic search failed for this query — results may be
+  incomplete` (compact tail, structured `hints` array, `mm search` stderr,
+  the `mem_ask` grounded prompt). An empty result set is unchanged:
+  `mem_search` already named the error there, and `mem_agent_search`,
+  `mem_ask` and `mm search` still do not. The hint is fixed text: the
+  exception message, which can name an embedder endpoint, stays in the
+  server log and the verbose pipeline line.
 - **`mm memory doctor` no longer reports every multi-chunk memo as stale
   under the E5 profile (#2665).** When `config.json` or a `config.d` fragment
   selected `multilingual-e5-small` without pinning chunk settings, the doctor
