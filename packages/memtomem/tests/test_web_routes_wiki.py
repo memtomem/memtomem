@@ -56,7 +56,7 @@ def _seed(root: Path) -> None:
 
 
 @pytest.fixture
-def seeded_wiki(wiki_root: Path) -> Path:  # noqa: F811 — wiki_root from conftest
+def seeded_wiki(wiki_root: Path) -> Path:  # wiki_root from conftest
     _seed(wiki_root)
     return wiki_root
 
@@ -94,7 +94,7 @@ async def test_list_wiki_populated(client, seeded_wiki: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_wiki_empty(wiki_root: Path) -> None:  # noqa: F811
+async def test_list_wiki_empty(wiki_root: Path) -> None:
     WikiStore.at_default().init()
     app = create_app(lifespan=None, mode="prod")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
@@ -104,7 +104,7 @@ async def test_list_wiki_empty(wiki_root: Path) -> None:  # noqa: F811
 
 
 @pytest.mark.asyncio
-async def test_list_wiki_absent_is_404_not_500(client, wiki_root: Path) -> None:  # noqa: F811
+async def test_list_wiki_absent_is_404_not_500(client, wiki_root: Path) -> None:
     # wiki_root sets MEMTOMEM_WIKI_PATH but we never init → no wiki on disk.
     resp = await client.get("/api/wiki")
     assert resp.status_code == 404
@@ -167,7 +167,7 @@ async def test_wiki_status_unborn_is_present_false_not_500(
 @pytest.mark.asyncio
 async def test_wiki_status_absent_is_present_false_not_404(
     client,
-    wiki_root: Path,  # noqa: F811
+    wiki_root: Path,
 ) -> None:
     # Unlike the asset-listing routes, the nav probe must not 404 on an absent
     # wiki — it fires on every gateway open, so it degrades to a hidden badge.
@@ -263,7 +263,7 @@ async def test_lint_ok(client, seeded_wiki: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_lint_flags_stray_override(client, wiki_root: Path) -> None:  # noqa: F811
+async def test_lint_flags_stray_override(client, wiki_root: Path) -> None:
     WikiStore.at_default().init()
     skill = wiki_root / "skills" / "delta"
     (skill / "overrides").mkdir(parents=True)

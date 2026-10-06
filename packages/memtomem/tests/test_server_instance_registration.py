@@ -76,7 +76,7 @@ def _child_try_exclusive(rt_str: str, q) -> None:
     _reg.ensure_runtime_dir = lambda: (target.mkdir(mode=0o700, exist_ok=True), target)[1]
     try:
         _reg.acquire_uninstall_lifecycle_barrier(timeout_s=1.0).release()
-    except Exception as exc:  # noqa: BLE001 — the message is the signal
+    except Exception as exc:  # noqa: BLE001 — the type name is the signal
         q.put(("refused", type(exc).__name__))
         return
     q.put(("acquired", ""))

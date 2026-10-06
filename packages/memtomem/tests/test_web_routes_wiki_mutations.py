@@ -74,7 +74,7 @@ def _seed(root: Path) -> None:
 
 
 @pytest.fixture
-def seeded_wiki(wiki_root: Path) -> Path:  # noqa: F811 — wiki_root from conftest
+def seeded_wiki(wiki_root: Path) -> Path:  # wiki_root from conftest
     _seed(wiki_root)
     return wiki_root
 
@@ -195,7 +195,7 @@ async def test_seed_bad_name_is_400(dev_client, seeded_wiki: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_seed_wiki_absent_is_404(dev_client, wiki_root: Path) -> None:  # noqa: F811
+async def test_seed_wiki_absent_is_404(dev_client, wiki_root: Path) -> None:
     # wiki_root sets MEMTOMEM_WIKI_PATH but we never init → no wiki on disk.
     resp = await dev_client.post("/api/wiki/skills/alpha/override", json={"vendor": "claude"})
     assert resp.status_code == 404
@@ -344,7 +344,7 @@ async def test_get_override_missing_canonical_is_404(dev_client, seeded_wiki: Pa
 
 
 @pytest.mark.asyncio
-async def test_get_override_wiki_absent_is_404(dev_client, wiki_root: Path) -> None:  # noqa: F811
+async def test_get_override_wiki_absent_is_404(dev_client, wiki_root: Path) -> None:
     resp = await dev_client.get("/api/wiki/skills/alpha/override", params={"vendor": "claude"})
     assert resp.status_code == 404
     assert resp.json()["detail"]["reason_code"] == "wiki_absent"
@@ -606,7 +606,7 @@ async def test_get_canonical_missing_is_404(dev_client, seeded_wiki: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_get_canonical_wiki_absent_is_404(dev_client, wiki_root: Path) -> None:  # noqa: F811
+async def test_get_canonical_wiki_absent_is_404(dev_client, wiki_root: Path) -> None:
     resp = await dev_client.get("/api/wiki/skills/alpha/canonical")
     assert resp.status_code == 404
     assert resp.json()["detail"]["reason_code"] == "wiki_absent"

@@ -528,7 +528,7 @@ def restore_pre_image_quietly(file_path: Path, pre_image: PreImage) -> RestoreOu
             return RestoreOutcome.source_replaced
         logger.warning("restoring %s failed while unwinding an error", file_path, exc_info=True)
         return RestoreOutcome.failed
-    except Exception:  # noqa: BLE001 - reported, never raised over the body's
+    except Exception:  # noqa: BLE001 - reported, never raised over the body's error
         logger.warning("restoring %s failed while unwinding an error", file_path, exc_info=True)
         return RestoreOutcome.failed
 
@@ -541,7 +541,7 @@ def restore_pre_image_quietly(file_path: Path, pre_image: PreImage) -> RestoreOu
                 return RestoreOutcome.source_replaced
             handle.truncate(0)
             handle.write(pre_image.data)
-    except Exception:  # noqa: BLE001 - reported, never raised over the body's
+    except Exception:  # noqa: BLE001 - reported, never raised over the body's error
         logger.warning("restoring %s failed while unwinding an error", file_path, exc_info=True)
         return RestoreOutcome.failed
     return RestoreOutcome.restored

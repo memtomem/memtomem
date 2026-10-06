@@ -179,14 +179,14 @@ def _talk(argv: list[str], home: Path, payloads: list[dict], expect_ids: set[int
                     seen[message["id"]] = message
                     if expect_ids <= seen.keys():
                         return
-        except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
+        except BaseException as exc:  # noqa: BLE001 - collected for the main-thread assert
             broke.append(("stdout", exc))
 
     def _drain() -> None:
         try:
             for line in proc.stderr:  # type: ignore[union-attr]
                 errors.append(line)
-        except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
+        except BaseException as exc:  # noqa: BLE001 - collected for the main-thread assert
             broke.append(("stderr", exc))
 
     reader = threading.Thread(target=_read, daemon=True)
