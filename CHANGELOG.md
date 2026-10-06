@@ -30,6 +30,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   imports memtomem, and Windows, where ONNX Runtime does not read this variable
   and emits ETW events that Windows records only while a trace session is
   collecting.
+- **The plugins launch the memtomem server with ONNX Runtime telemetry off
+  (#2664).** The Claude Code, Codex and Hermes plugin manifests and the
+  OpenCode plugin now pass `ORT_DISABLE_TELEMETRY=1` in the server's launch
+  environment, so the switch reaches plugin users without waiting for a core
+  release (Claude plugin 0.5.10, Codex 0.3.10, Hermes 0.1.3,
+  `opencode-memtomem` 0.3.10). It turns off the telemetry that official ONNX
+  Runtime builds from 1.29 upload on Linux and macOS; Windows builds do not
+  read it. If you also registered the server by hand with the plugin's command
+  but a different environment, `mm doctor --claude-mcp` notes that the
+  environments differ and that your entry wins. With the 0.6.7 core the
+  plugins pin, such an entry runs with the switch only if its own environment
+  sets the variable; from the core release that carries the entry above, the
+  server sets it by default.
 
 ### Fixed
 

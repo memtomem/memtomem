@@ -6,11 +6,11 @@ import { fileURLToPath } from "node:url";
 import type { Config, PluginInput, PluginModule } from "@opencode-ai/plugin";
 
 import {
+  LAUNCH_ENV,
   MCP_REQUIREMENT,
   MCP_TIMEOUT_MS,
   OPENCODE_COMMANDS,
   OPENCODE_READ_SKILLS,
-  TOOL_MODE,
 } from "./generated.js";
 
 type PermissionValue = "allow" | "ask" | "deny";
@@ -118,7 +118,7 @@ async function configure(config: RuntimeConfig, input: ServerInput): Promise<voi
       command: ["uvx", "--from", MCP_REQUIREMENT, "memtomem-server"],
       enabled: true,
       timeout: MCP_TIMEOUT_MS,
-      environment: { MEMTOMEM_TOOL_MODE: TOOL_MODE },
+      environment: { ...LAUNCH_ENV },
     };
   }
 
