@@ -28,6 +28,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   any memo the indexer had split was listed under `stale_index`, and
   re-indexing could not clear it. The doctor now loads config through the
   same builder as the MCP server, so it applies E5's chunk caps.
+- **`mm index`, the other CLI commands and `mm web` keep a `config.d` chunk
+  setting when `config.json` selects E5 (#2667).** A fragment such as
+  `{"indexing": {"max_chunk_tokens": 320}}` was checked against the generic
+  chunk defaults before `config.json` chose `multilingual-e5-small`, rejected
+  with an "Invalid config section [indexing]" warning, and dropped, so these
+  commands chunked with 384 while the MCP server used 320. They now load
+  config the way the MCP server does. Files indexed while the setting was
+  dropped are reported by `mm memory doctor` as `stale_index`; `mm index`
+  clears that.
 
 ### Security
 
