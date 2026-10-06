@@ -65,9 +65,9 @@ jobs:
     # Checkout and the publisher, nothing else: every step of a job that can
     # write contents can reach its token.
     steps:
-      # The one checkout in this repository that keeps its credentials: the
-      # publisher pushes with them, so the token is stored and masked by
-      # actions/checkout rather than handled by our own code.
+      # This checkout keeps its credentials on purpose: the publisher pushes
+      # with them, so the token is stored and masked by actions/checkout
+      # rather than handled by our own code.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0

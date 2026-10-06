@@ -11,8 +11,11 @@ commit of that branch from a commit on ``main`` and pushes it.
 It refuses rather than repairs, and every check runs before the push: a branch
 tip that is not shaped like this tool's own output, a content change without a
 higher plugin version, a lookup that failed for any reason other than the
-branch not existing. The push is a plain one, so a branch that moved in the
-meantime rejects it and nothing is published.
+branch not existing. The push is a plain one: a branch that was moved to
+another commit in the meantime rejects it.
+
+A refusal means nothing was pushed. A failed push is reported separately,
+because a failure reported by the remote does not prove the branch is unchanged.
 
 The tip check is a consistency check, not authentication. Anyone who can push
 to the repository can hand-craft a commit that passes it.
@@ -41,7 +44,11 @@ _IDENTITY = ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_C
 
 
 class PublishError(RuntimeError):
-    """The branch cannot be published as asked."""
+    """The branch cannot be published as asked; nothing was pushed."""
+
+
+class PushFailed(RuntimeError):
+    """The push was attempted and did not report success."""
 
 
 class _Repo:
@@ -240,8 +247,14 @@ def publish(repo: _Repo, *, source: str, remote: str, branch: str, dry_run: bool
     commit = _build(repo, source, tip)
     if commit != tip and not dry_run:
         # A plain push: the remote refuses anything that is not a fast-forward,
-        # which is the answer wanted when the branch moved since the lookup.
-        repo.ok("push", remote, f"{commit}:refs/heads/{branch}")
+        # which is the answer wanted when the branch moved on since the lookup.
+        result = repo.git("push", remote, f"{commit}:refs/heads/{branch}")
+        if result.returncode != 0:
+            raise PushFailed(
+                f"git push of {commit} to {branch} failed ({result.returncode}): "
+                f"{result.stderr.strip()}. The branch may or may not have been updated; "
+                "look at it before running this again"
+            )
     return commit
 
 
@@ -269,6 +282,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     except PublishError as exc:
         print(f"publish refused: {exc}", file=sys.stderr)
+        return 1
+    except PushFailed as exc:
+        print(f"publish failed: {exc}", file=sys.stderr)
         return 1
     print(commit)
     return 0

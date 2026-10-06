@@ -415,18 +415,47 @@ def test_a_branch_moved_since_the_lookup_fails_the_push_and_is_left_alone(
     _release(work.repo, "0.5.12", "two")
     rival = _handmade_tip(work.repo, work.first, parent=tip)
     real_build = pub._build
+    built = []
 
     def build_then_lose_the_race(*args: object) -> str:
-        commit = real_build(*args)
+        built.append(real_build(*args))
         _git(work.repo, "push", "-q", str(work.remote), f"{rival}:{_REF}")
-        return commit
+        return built[0]
 
     monkeypatch.setattr(pub, "_build", build_then_lose_the_race)
     assert work.run() == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "git push" in captured.err and "failed" in captured.err
+    assert captured.err.startswith(f"publish failed: git push of {built[0]} to {_BRANCH} failed")
     assert _remote_ref(work.remote) == rival
+
+
+def test_a_push_that_reports_failure_is_not_called_a_refusal(
+    work: _Work, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A remote can update the branch and still answer with a failure.
+
+    The message must not say "refused", which this tool reserves for runs that
+    pushed nothing: here the branch did move.
+    """
+    real_git = pub._Repo.git
+
+    def push_lands_then_reports_failure(self: object, *args: str, **kwargs: object) -> object:
+        result = real_git(self, *args, **kwargs)
+        if args[0] == "push":
+            assert result.returncode == 0
+            result.returncode, result.stderr = 1, "remote: hook declined after the update"
+        return result
+
+    monkeypatch.setattr(pub._Repo, "git", push_lands_then_reports_failure)
+    assert work.run() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    landed = _remote_ref(work.remote)
+    assert landed != ""
+    assert captured.err.startswith(f"publish failed: git push of {landed} to {_BRANCH} failed (1)")
+    assert "may or may not have been updated" in captured.err
+    assert "refused" not in captured.err
 
 
 def test_dry_run_builds_without_pushing(work: _Work, capsys: pytest.CaptureFixture[str]) -> None:

@@ -1825,10 +1825,16 @@ def test_readiness_workflow_guard_rejects_dependency_and_order_bypasses(bypass):
 
 _CLAUDE = "packages/memtomem-claude-plugin"
 _CLAUDE_LAUNCH = ("--from", "memtomem[onnx]==0.6.7", "memtomem-server")
+_CLAUDE_CONTRACT = "packages/memtomem-plugin-assets/contract.toml"
 
 
 def _claude_repo(
-    tmp_path: Path, *, version: object = "0.5.11", args: tuple[object, ...] = _CLAUDE_LAUNCH
+    tmp_path: Path,
+    *,
+    version: object = "0.5.11",
+    args: tuple[object, ...] = _CLAUDE_LAUNCH,
+    core: str = "0.6.7",
+    extras: tuple[str, ...] = ("onnx",),
 ) -> Path:
     repo = tmp_path / "claude"
     (repo / _CLAUDE / ".claude-plugin").mkdir(parents=True)
@@ -1839,7 +1845,16 @@ def _claude_repo(
         json.dumps({"mcpServers": {"memtomem": {"command": "uvx", "args": list(args)}}}),
         encoding="utf-8",
     )
+    contract = repo / _CLAUDE_CONTRACT
+    contract.parent.mkdir(parents=True)
+    contract.write_text(
+        f'[core]\nversion = "{core}"\nmcp_extras = {json.dumps(list(extras))}\n', encoding="utf-8"
+    )
     return repo
+
+
+def _no_network(*_: object) -> object:
+    pytest.fail("network called")
 
 
 def test_claude_plugin_probes_the_core_pin_its_launch_command_ships(tmp_path):
@@ -1849,8 +1864,7 @@ def test_claude_plugin_probes_the_core_pin_its_launch_command_ships(tmp_path):
         calls.append((url, timeout))
         return 200, _pypi_metadata(version="0.6.7")
 
-    # No plugin contract in this tree at all: the pin comes from .mcp.json, and it is
-    # the core version that is probed, not the plugin's own 0.5.11.
+    # The core version is what is probed, not the plugin's own 0.5.11.
     repo = _claude_repo(tmp_path)
     assert rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=fetch) == "0.5.11"
     assert calls == [("https://pypi.org/pypi/memtomem/0.6.7/json", 10)]
@@ -1869,60 +1883,68 @@ def test_claude_plugin_probes_the_core_pin_its_launch_command_ships(tmp_path):
 )
 def test_claude_plugin_refuses_a_tag_that_is_not_this_version_before_any_network(tmp_path, tag):
     with pytest.raises(rp.ReleaseCheckError, match="tag"):
-        rp.validate_claude_plugin(
-            tag, _claude_repo(tmp_path), fetch_json=lambda *_: pytest.fail("network called")
-        )
+        rp.validate_claude_plugin(tag, _claude_repo(tmp_path), fetch_json=_no_network)
 
 
 @pytest.mark.parametrize("version", ["0.5.11rc1", "0.5.11.1", 5, None])
 def test_claude_plugin_refuses_a_manifest_version_no_tag_can_name(tmp_path, version):
     repo = _claude_repo(tmp_path, version=version)
     with pytest.raises(rp.ReleaseCheckError):
-        rp.validate_claude_plugin(
-            f"claude-plugin-v{version}", repo, fetch_json=lambda *_: pytest.fail("network called")
-        )
+        rp.validate_claude_plugin(f"claude-plugin-v{version}", repo, fetch_json=_no_network)
 
 
 @pytest.mark.parametrize(
-    "args,reason",
+    "args",
     [
-        (("--from", "memtomem-server"), "expected uvx --from"),
-        (("--with", "memtomem[onnx]==0.6.7", "memtomem-server"), "expected uvx --from"),
-        (("--from", "memtomem[onnx]==0.6.7", "memtomem==0.6.7"), "expected uvx --from"),
-        # A second requirement in any spelling: the argument list is simply too long.
-        (
-            ("--from", "memtomem[onnx]==0.6.7", "memtomem-server", "MemToMem>=999.0.0"),
-            "expected uvx --from",
-        ),
-        (("--from", 7, "memtomem-server"), "expected uvx --from"),
-        (("--from", "memtomem[onnx]>=0.6.7", "memtomem-server"), "expected an exact"),
-        (("--from", "memtomem[onnx]==0.6", "memtomem-server"), "expected an exact"),
-        (("--from", "memtomem[onnx]==0.6.7rc1", "memtomem-server"), "expected an exact"),
-        (("--from", "memtomem", "memtomem-server"), "expected an exact"),
-        (("--from", "memtomem==0.6.7", "memtomem-server"), "expected an exact"),
-        (("--from", "memtomem[]==0.6.7", "memtomem-server"), "expected an exact"),
-        (("--from", "memtomem[,,,]==0.6.7", "memtomem-server"), "expected an exact"),
-        (("--from", "memtomem[onnx,]==0.6.7", "memtomem-server"), "expected an exact"),
-        (("--from", " memtomem[onnx]==0.6.7", "memtomem-server"), "expected an exact"),
-        (("--from", "MemToMem[onnx]==0.6.7", "memtomem-server"), "expected an exact"),
-        (("--from", "memtomem[onnx]==0.6.7; python_version>'3'", "memtomem-server"), "exact"),
+        ("--from", "memtomem-server"),
+        ("--with", "memtomem[onnx]==0.6.7", "memtomem-server"),
+        ("--from", "memtomem[onnx]==0.6.7", "memtomem==0.6.7"),
+        ("--from", "memtomem[onnx]==0.6.7", "memtomem-server", "MemToMem>=999.0.0"),
+        ("--from", 7, "memtomem-server"),
+        ("--from", "memtomem[onnx]>=0.6.7", "memtomem-server"),
+        ("--from", "memtomem[onnx]==0.6.8", "memtomem-server"),
+        ("--from", "memtomem[all]==0.6.7", "memtomem-server"),
+        ("--from", "memtomem==0.6.7", "memtomem-server"),
+        ("--from", "memtomem[]==0.6.7", "memtomem-server"),
+        ("--from", " memtomem[onnx]==0.6.7", "memtomem-server"),
+        ("--from", "MemToMem[onnx]==0.6.7", "memtomem-server"),
     ],
 )
-def test_claude_plugin_refuses_a_launch_it_cannot_check_before_any_network(tmp_path, args, reason):
-    with pytest.raises(rp.ReleaseCheckError, match=reason):
+def test_claude_plugin_refuses_a_launch_that_is_not_the_contract_one_before_any_network(
+    tmp_path, args
+):
+    with pytest.raises(rp.ReleaseCheckError, match="the plugin contract expects"):
         rp.validate_claude_plugin(
-            "claude-plugin-v0.5.11",
-            _claude_repo(tmp_path, args=args),
-            fetch_json=lambda *_: pytest.fail("network called"),
+            "claude-plugin-v0.5.11", _claude_repo(tmp_path, args=args), fetch_json=_no_network
         )
 
 
-def test_claude_plugin_accepts_several_extras(tmp_path):
-    repo = _claude_repo(
-        tmp_path, args=("--from", "memtomem[onnx,web_ui]==0.6.7", "memtomem-server")
-    )
+def test_claude_plugin_refuses_a_launch_left_behind_by_a_contract_bump(tmp_path):
+    """The contract moved to a new core and the plugin was not re-rendered."""
+    repo = _claude_repo(tmp_path, core="0.6.8")
+    with pytest.raises(rp.ReleaseCheckError, match="the plugin contract expects") as error:
+        rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=_no_network)
+    assert "memtomem[onnx]==0.6.8" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "extras,pin", [((), "memtomem[]==0.6.7"), (("onnx", "web_ui"), "memtomem[onnx,web_ui]==0.6.7")]
+)
+def test_claude_plugin_accepts_whatever_extras_the_contract_renders(tmp_path, extras, pin):
+    repo = _claude_repo(tmp_path, args=("--from", pin, "memtomem-server"), extras=extras)
     reply = (200, _pypi_metadata(version="0.6.7"))
     assert rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=lambda *_: reply)
+
+
+@pytest.mark.parametrize("contract", ["", "[core]\n", '[core]\nversion = "0.6.7"\n', None])
+def test_claude_plugin_refuses_an_unusable_contract_before_any_network(tmp_path, contract):
+    repo = _claude_repo(tmp_path)
+    if contract is None:
+        (repo / _CLAUDE_CONTRACT).unlink()
+    else:
+        (repo / _CLAUDE_CONTRACT).write_text(contract, encoding="utf-8")
+    with pytest.raises(rp.ReleaseCheckError, match="contract"):
+        rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=_no_network)
 
 
 _CLAUDE_SERVER = (
@@ -1953,9 +1975,7 @@ def test_claude_plugin_refuses_an_unreadable_launch_file_before_any_network(tmp_
     else:
         launch.write_text(content, encoding="utf-8")
     with pytest.raises(rp.ReleaseCheckError, match=r"\.mcp\.json"):
-        rp.validate_claude_plugin(
-            "claude-plugin-v0.5.11", repo, fetch_json=lambda *_: pytest.fail("network called")
-        )
+        rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=_no_network)
 
 
 @pytest.mark.parametrize("status,reason", [(404, "absent"), (503, "could not confirm")])

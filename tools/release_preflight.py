@@ -128,8 +128,8 @@ def _probe_pypi_release(
             )
 
 
-def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = None) -> str:
-    """Require the core version actually pinned by OpenCode to exist on PyPI."""
+def _contract_core_requirement(repo_root: Path) -> tuple[str, str]:
+    """The core version the plugin contract pins, and the launch requirement it renders to."""
     core = _load_toml(repo_root / "packages/memtomem-plugin-assets/contract.toml").get("core")
     if not isinstance(core, dict) or not isinstance(core.get("version"), str):
         raise ReleaseCheckError("plugin contract has no core.version")
@@ -139,7 +139,12 @@ def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = N
         isinstance(extra, str) and re.fullmatch(r"[A-Za-z0-9_-]+", extra) for extra in extras
     ):
         raise ReleaseCheckError("plugin contract has invalid core.mcp_extras")
-    requirement = f"memtomem[{','.join(extras)}]=={version}"
+    return version, f"memtomem[{','.join(extras)}]=={version}"
+
+
+def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = None) -> str:
+    """Require the core version actually pinned by OpenCode to exist on PyPI."""
+    version, requirement = _contract_core_requirement(repo_root)
     generated = (repo_root / "packages/opencode-memtomem/src/generated.ts").read_text(
         encoding="utf-8"
     )
@@ -160,9 +165,6 @@ def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = N
 
 _CLAUDE_PLUGIN = "packages/memtomem-claude-plugin"
 _CLAUDE_TAG_RE = re.compile(r"^claude-plugin-v(?P<version>\d+\.\d+\.\d+)$")
-_CLAUDE_LAUNCH_PIN_RE = re.compile(
-    r"^memtomem\[[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*\]==(?P<version>\d+\.\d+\.\d+)$"
-)
 
 
 def _load_json_object(path: Path, label: str) -> dict[str, Any]:
@@ -176,37 +178,25 @@ def _load_json_object(path: Path, label: str) -> dict[str, Any]:
 
 
 def _claude_launch_pin(repo_root: Path) -> str:
-    """The core version the Claude plugin's own launch command installs.
+    """The core version the Claude plugin launches, once its launch command is the rendered one.
 
-    Accepts the one shape the renderer emits and refuses everything else.
-    Recognising a memtomem requirement among arbitrary arguments means
-    re-implementing the dependency-specifier grammar (name case, whitespace,
-    extras, markers); requiring the exact shape leaves nothing to recognise.
+    The plugin contract already says what the launch command must be, and the
+    OpenCode gate already validates it. Comparing the shipped ``.mcp.json``
+    with that leaves no requirement syntax to recognise here.
     """
+    version, requirement = _contract_core_requirement(repo_root)
+    expected = {"command": "uvx", "args": ["--from", requirement, "memtomem-server"]}
     label = f"{_CLAUDE_PLUGIN}/.mcp.json"
     servers = _load_json_object(repo_root / label, label).get("mcpServers")
     if not isinstance(servers, dict) or list(servers) != ["memtomem"]:
         raise ReleaseCheckError(f"{label} must define exactly one server, named memtomem")
     server = servers["memtomem"]
-    command = server.get("command") if isinstance(server, dict) else None
-    args = server.get("args") if isinstance(server, dict) else None
-    if (
-        command != "uvx"
-        or not isinstance(args, list)
-        or len(args) != 3
-        or not all(isinstance(arg, str) for arg in args)
-        or (args[0], args[2]) != ("--from", "memtomem-server")
-    ):
+    launch = {key: server.get(key) for key in expected} if isinstance(server, dict) else server
+    if launch != expected:
         raise ReleaseCheckError(
-            f"{label} launches {command!r} {args!r}; "
-            "expected uvx --from memtomem[...]==X.Y.Z memtomem-server"
+            f"{label} launches {launch!r}; the plugin contract expects {expected!r}"
         )
-    match = _CLAUDE_LAUNCH_PIN_RE.fullmatch(args[1])
-    if match is None:
-        raise ReleaseCheckError(
-            f"{label} launches {args[1]!r}; expected an exact memtomem[...]==X.Y.Z pin"
-        )
-    return match.group("version")
+    return version
 
 
 def validate_claude_plugin(
