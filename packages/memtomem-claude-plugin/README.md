@@ -1,0 +1,149 @@
+# memtomem — Claude Code Plugin
+
+Safe Claude Code workflows for the memtomem Markdown-first memory MCP server.
+BM25 works without an embedding provider; dense retrieval is optional.
+
+One install bundles:
+
+- **Exact-pinned MCP server** — launched on demand with the reviewed core version
+- **Read workflows** — `/memtomem:search`, `/memtomem:recall`, `/memtomem:status`
+- **Explicit workflows** — `/memtomem:remember`, `/memtomem:index`, `/memtomem:setup`,
+  `/memtomem:handoff`
+
+The base plugin does not run background hooks or destructive curation. Install
+`memtomem-automation@memtomem` separately to opt into prompt-time retrieval and
+write-time indexing.
+
+## What this plugin runs and connects to
+
+- **One local MCP server.** Claude Code starts `memtomem-server` over stdio with
+  `uvx --from 'memtomem[onnx]==0.6.7'`. On first launch uv downloads that exact
+  version and its dependencies from PyPI (or the package index your own uv
+  configuration names) and caches them. If the machine has no Python 3.12 or
+  newer, uv also downloads a managed CPython build from Astral's
+  `python-build-standalone` releases, unless your uv configuration disables
+  Python downloads. The plugin ships no hooks, scripts, or binaries of its own.
+- **Local storage.** Memories stay in your Markdown files; the search index is a
+  SQLite database at `~/.memtomem/memtomem.db` unless you configure another path.
+- **No other network traffic by default.** Once uv has created that environment,
+  the running server makes no network requests in the default configuration: no
+  embedding provider (BM25 only), the reranker and LLM features off, and no
+  webhook. memtomem itself collects no telemetry or analytics.
+- **Network use you opt into:**
+  - Embedding and reranker models (fastembed, sentence-transformers) download
+    from the Hugging Face Hub on first use, with Hub telemetry turned off for
+    those downloads. When a Hub download fails, some fastembed models can fall
+    back to archives at `storage.googleapis.com/qdrant-fastembed`.
+  - ONNX models run on ONNX Runtime, whose official builds from 1.29 upload
+    telemetry to Microsoft on Linux and macOS by default. The plugin launches
+    the server with `ORT_DISABLE_TELEMETRY=1`, which turns that upload off.
+    On Windows, ONNX Runtime does not read the variable; it emits events
+    through Windows' own diagnostic data system, which Windows records only
+    while a trace session is collecting (see ONNX Runtime's `docs/Privacy.md`).
+  - The embedding, reranker, or LLM provider you configure (OpenAI, Cohere,
+    Anthropic, Ollama, or any service at an OpenAI-compatible `base_url` you
+    choose) receives the text it embeds, reranks, or processes.
+  - A configured webhook receives event metadata such as file paths and search
+    queries.
+  - `mem_fetch` (through `mem_do`) downloads a URL you or Claude supply and
+    indexes it; it refuses loopback, private, and link-local addresses.
+- **The `mm` CLI is separate.** The plugin does not run it. If you run it
+  yourself, two of its commands also use the network when you ask them to:
+  `mm session` exports traces to Langfuse when session tracing is enabled, and
+  `mm wiki` clones from, pushes to, and pulls from the Git remotes you give it.
+
+claude.ai chat does not start local MCP servers, so use this plugin in Claude
+Code, or in Cowork when the session runs on your computer.
+
+## Install
+
+Before installing, inspect existing servers with `/mcp` in Claude Code, then
+run the read-only diagnostic from the project you want to inspect:
+
+```bash
+uvx --from "memtomem[all]==0.6.7" mm doctor --claude-mcp
+```
+
+The pin is there because installing the plugin does not put `mm` on your PATH —
+it registers an MCP server, not the CLI. If you already have the CLI installed,
+`mm doctor --claude-mcp` is the same check. Neither is required: `/mcp` plus the
+scope-specific removal guidance below covers the same ground by hand.
+
+It reports current registrations and predicts conflicts with this release's
+plugin command. Exit codes: `0` no detected conflict, `1` duplicate risk,
+`2` incomplete inspection. `--json` provides structured findings. Keep your
+existing uv installation; resolve any manual MCP registration shown by the
+check before installing. The check does not intercept `/plugin install`.
+
+Before installation, doctor compares manual registrations with the launch this
+release's plugin bundles (`memtomem[onnx]==0.6.7`). After installation, it reads
+the actual plugin manifest. Use `/mcp` to verify the session, and repeat the
+diagnostic after installation.
+
+```
+/plugin marketplace add memtomem/memtomem
+/plugin install memtomem@memtomem
+```
+
+For project-scoped onboarding, run `claude plugin install memtomem@memtomem --scope project`
+from that project directory instead. The [Korean onboarding guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md#3-경로-a-claude-code-플러그인-설치)
+explains effective enablement and disabling a manual server only in that project.
+
+The bundled server includes the ONNX dependencies so existing ONNX/E5 configurations
+work without a separate Python installation step. The default remains
+`provider=none` (BM25-only); installing the plugin does not enable embeddings.
+Model artifacts are fetched only when the configured workflow needs them.
+
+On a completely fresh machine or HOME, initialize the user-owned store once:
+
+```bash
+uvx --from 'memtomem[onnx]==0.6.7' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem[onnx]==0.6.7' mm status
+```
+
+The plugin intentionally cannot perform this trust-establishing step over MCP.
+`--mcp skip` keeps the bootstrap from adding a second MCP registration because
+the plugin already supplies the server.
+For project-specific memories, preserve the project root and create the
+gitignored local tier explicitly:
+
+```bash
+cd /path/to/project
+uvx --from 'memtomem[onnx]==0.6.7' mm mem init --scope project_local
+```
+
+After that, `/memtomem:setup /path/to/notes` performs a one-shot index and
+verifies search. One-shot indexing does not add a watched source directory.
+Use `/memtomem:handoff save` to leave a compact, project-local checkpoint for
+Claude Code, Codex CLI, or Kimi Code; see the cross-runtime guide below.
+
+If you previously registered the server manually, identical command and
+arguments are expected to let Claude suppress the plugin copy. Different
+commands can expose duplicate tools; tool visibility does not establish live
+process count or database identity. Check `/mcp` for the actual session state.
+
+The `--mcp claude` and `--mcp json` initialization modes now check before
+registration. A usable
+existing connection is preserved and additional registration is skipped.
+Conflicting or uninspectable configurations defer registration; use
+`--mcp skip` to initialize the store separately. Failed or timed-out Claude
+registration never creates a fallback `.mcp.json`.
+
+To switch to the plugin, remove only the manual entry using the diagnostic's
+name and scope, for example `claude mcp remove memtomem -s user`. To keep the
+manual setup, use `/plugin uninstall memtomem@memtomem`. Neither action removes
+your uv installation or memories. Custom launch wrappers, managed policies,
+and unresolved project approval require manual review; session-only flags
+must be checked in `/mcp`. The diagnostic does not execute configured servers.
+
+## Docs
+
+- [Korean Claude Code/Codex vibe-coding quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md)
+  — initialize one store, install one plugin, and verify a memory round trip
+- [Claude Code integration guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/claude-code.md)
+  — setup, optional automation, and CLAUDE.md guidelines
+- [memtomem README](https://github.com/memtomem/memtomem) — project overview
+- [MCP clients guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md)
+  — manual registration for other clients
+- [Cross-runtime handoff guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/cross-runtime-handoff.md)
+  — sequential Claude Code, Codex CLI, and Kimi Code work on one Mac
