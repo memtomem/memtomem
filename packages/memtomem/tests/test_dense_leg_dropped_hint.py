@@ -2,7 +2,9 @@
 
 ``run_search`` derives it; these tests prove it reaches the MCP surfaces with
 a real pipeline whose embedder raises, and that the exception text — which an
-embedder may fill with its endpoint — does not reach any output.
+embedder may fill with its endpoint — is not part of the notice, so compact
+and structured output with results stay free of it. The verbose pipeline line
+and the empty-result branches still carry the raw text (#2675).
 """
 
 from __future__ import annotations
