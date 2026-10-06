@@ -115,7 +115,8 @@ def _claude_skill(workflow: dict, body: str) -> str:
         f"description: {workflow['description']}",
     ]
     if hint := workflow.get("argument_hint"):
-        frontmatter.append(f"argument-hint: {hint}")
+        # Quoted: a bare "[a] [b]" is not valid YAML, and a bare "[a]" is a list.
+        frontmatter.append(f"argument-hint: {_yaml_q(hint)}")
     frontmatter.append(f"allowed-tools: {_allowed_tools(workflow)}")
     if not workflow["implicit"]:
         frontmatter.append("disable-model-invocation: true")

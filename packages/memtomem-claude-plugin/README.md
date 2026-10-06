@@ -25,7 +25,7 @@ write-time indexing.
   Python downloads. The plugin ships no hooks, scripts, or binaries of its own.
 - **Local storage.** Memories stay in your Markdown files; the search index is a
   SQLite database at `~/.memtomem/memtomem.db` unless you configure another path.
-- **No other network traffic by default.** Once uv has set up that environment,
+- **No other network traffic by default.** Once uv has created that environment,
   the running server makes no network requests in the default configuration: no
   embedding provider (BM25 only), the reranker and LLM features off, and no
   webhook. memtomem itself collects no telemetry or analytics.
@@ -42,7 +42,7 @@ write-time indexing.
     while a trace session is collecting (see ONNX Runtime's `docs/Privacy.md`).
   - The embedding, reranker, or LLM provider you configure (OpenAI, Cohere,
     Anthropic, Ollama, or any service at an OpenAI-compatible `base_url` you
-    set) receives the text it embeds, reranks, or processes.
+    choose) receives the text it embeds, reranks, or processes.
   - A configured webhook receives event metadata such as file paths and search
     queries.
   - `mem_fetch` (through `mem_do`) downloads a URL you or Claude supply and

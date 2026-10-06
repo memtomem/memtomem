@@ -4,7 +4,7 @@ tool_mode = "core"
 mcp_extras = ["onnx"]
 
 [plugins]
-claude_version = "0.5.10"
+claude_version = "0.5.11"
 codex_version = "0.3.10"
 automation_version = "0.3.8"
 opencode_version = "0.3.10"
