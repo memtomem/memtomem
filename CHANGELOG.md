@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **The Claude plugin ships a listing icon (Claude plugin 0.5.12).** The Claude
+  plugin directory takes a plugin's icon from `.claude-plugin/icon.png`, and
+  only the first time the plugin is saved in its developer portal, so the file
+  has to be in place before that save. It is the web UI's favicon drawn as a
+  512 × 512 PNG, with the lettering reduced so a round crop does not cut it.
+
 ### Changed
 
 - **`mem_search(record=false)` and `mem_agent_search(record=false)` no longer

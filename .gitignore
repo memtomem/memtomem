@@ -60,6 +60,8 @@ docs/qa/
 .claude-memory/
 BUG_REPORT.md
 *.png
+# The Claude plugin directory takes its listing icon from this file
+!packages/memtomem-claude-plugin/.claude-plugin/icon.png
 main.py
 scripts/
 .agents-dev/
