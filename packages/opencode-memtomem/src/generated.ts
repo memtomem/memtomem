@@ -2,6 +2,7 @@
 export const CORE_VERSION = "0.6.7";
 export const MCP_REQUIREMENT = "memtomem[onnx]==0.6.7";
 export const TOOL_MODE = "core";
+export const LAUNCH_ENV = {"MEMTOMEM_TOOL_MODE": "core", "ORT_DISABLE_TELEMETRY": "1"} as const;
 export const MCP_TIMEOUT_MS = 60000;
 export const OPENCODE_COMMANDS = {
   "memtomem-search": {
