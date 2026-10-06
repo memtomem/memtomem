@@ -34,10 +34,12 @@ write-time indexing.
     from the Hugging Face Hub on first use, with Hub telemetry turned off for
     those downloads. When a Hub download fails, some fastembed models can fall
     back to archives at `storage.googleapis.com/qdrant-fastembed`.
-  - ONNX models run on ONNX Runtime. Its official Windows builds emit
-    telemetry through Windows' own diagnostic data system, which sends it to
-    Microsoft as your Windows diagnostic settings allow; other platforms have
-    none (see ONNX Runtime's `docs/Privacy.md`).
+  - ONNX models run on ONNX Runtime, whose official builds from 1.29 upload
+    telemetry to Microsoft on Linux and macOS by default. The plugin launches
+    the server with `ORT_DISABLE_TELEMETRY=1`, which turns that upload off.
+    On Windows, ONNX Runtime does not read the variable; it emits events
+    through Windows' own diagnostic data system, which Windows records only
+    while a trace session is collecting (see ONNX Runtime's `docs/Privacy.md`).
   - The embedding, reranker, or LLM provider you configure (OpenAI, Cohere,
     Anthropic, Ollama, or any service at an OpenAI-compatible `base_url` you
     set) receives the text it embeds, reranks, or processes.
