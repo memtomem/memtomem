@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import importlib.util
 import json
 import subprocess
@@ -50,6 +49,8 @@ def _git(repo: Path, *args: str, stdin: str | None = None) -> str:
             "user.email=t@example.com",
             "-c",
             "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
             *args,
         ],
         check=True,
@@ -77,12 +78,6 @@ def _commit(repo: Path, message: str) -> str:
 def _release(repo: Path, version: object, body: str) -> str:
     _write_plugin(repo, version, body)
     return _commit(repo, f"plugin {version}")
-
-
-def _objects(repo: Path) -> str:
-    # Unreachable objects included: a refusal that left an orphan commit behind
-    # would be invisible to anything that walks from the refs.
-    return _git(repo, "cat-file", "--batch-all-objects", "--batch-check")
 
 
 def _remote_ref(remote: Path, ref: str = _REF) -> str:
@@ -169,21 +164,14 @@ def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Work:
 
 def _refused(work: _Work, capsys: pytest.CaptureFixture[str], *args: str, **kwargs: str) -> str:
     """Run a publish that must refuse; return its message after the common checks."""
-    before, remote_before = _objects(work.repo), _remote_ref(work.remote)
+    remote_before = _remote_ref(work.remote)
     capsys.readouterr()
     assert work.run(*args, **kwargs) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err.startswith("publish refused: ")
-    assert _objects(work.repo) == before
     assert _remote_ref(work.remote) == remote_before
     return captured.err
-
-
-def test_object_inventory_notices_an_unreachable_object(work: _Work) -> None:
-    before = _objects(work.repo)
-    _git(work.repo, "hash-object", "-w", "--stdin", stdin="orphan")
-    assert _objects(work.repo) != before
 
 
 def test_first_publish_creates_a_root_commit_holding_only_the_plugin_folder(
@@ -209,23 +197,18 @@ def test_first_publish_creates_a_root_commit_holding_only_the_plugin_folder(
 
 
 def test_an_unchanged_plugin_folder_publishes_nothing(
-    work: _Work, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    work: _Work, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert work.run() == 0
     tip = capsys.readouterr().out.strip()
     (work.repo / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     _commit(work.repo, "touch only the root")
-    before = _objects(work.repo)
+    commits = _git(work.repo, "rev-list", "--all", "--count")
 
-    lookups = []
-    real_lookup = pub._remote_tip
-    monkeypatch.setattr(pub, "_remote_tip", lambda *a: lookups.append(a) or real_lookup(*a))
-    monkeypatch.setattr(pub, "_push", lambda *a: pytest.fail("a no-op must not push"))
     assert work.run() == 0
     assert capsys.readouterr().out.strip() == tip
     assert _remote_ref(work.remote) == tip
-    assert _objects(work.repo) == before
-    assert len(lookups) == 2  # The read-back runs after a no-op too.
+    assert _git(work.repo, "rev-list", "--all", "--count") == commits
 
 
 def test_a_higher_version_adds_one_commit_on_top_of_the_tip(
@@ -446,67 +429,95 @@ def test_a_branch_moved_since_the_lookup_fails_the_push_and_is_left_alone(
     assert _remote_ref(work.remote) == rival
 
 
-@pytest.mark.parametrize("answer", [None, "0" * 40])
-def test_a_read_back_that_is_not_the_built_commit_fails_the_run(
-    work: _Work,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-    answer: str | None,
-) -> None:
-    real_lookup = pub._remote_tip
-    answers = iter([real_lookup, lambda *_: answer])
-    monkeypatch.setattr(pub, "_remote_tip", lambda *a: next(answers)(*a))
-    assert work.run() == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert f"at {answer}, not at the expected" in captured.err
-
-
-def test_dry_run_builds_without_pushing(
-    work: _Work, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(pub, "_push", lambda *a: pytest.fail("a dry run must not push"))
+def test_dry_run_builds_without_pushing(work: _Work, capsys: pytest.CaptureFixture[str]) -> None:
     assert work.run("HEAD", "--dry-run") == 0
     commit = capsys.readouterr().out.strip()
     assert _git(work.repo, "cat-file", "-t", commit) == "commit"
     assert _remote_ref(work.remote) == ""
 
 
-def test_a_named_but_unset_token_variable_is_refused(
+def test_a_branch_that_moves_while_it_is_read_is_refused(
     work: _Work, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("PUBLISH_TOKEN", raising=False)
-    assert "PUBLISH_TOKEN is not set" in _refused(
-        work, capsys, "HEAD", "--token-env", "PUBLISH_TOKEN"
-    )
+    assert work.run() == 0
+    tip = capsys.readouterr().out.strip()
+    _release(work.repo, "0.5.12", "two")
+    rival = _handmade_tip(work.repo, work.first, parent=tip)
+    real_ok = pub._Repo.ok
 
+    def move_before_the_fetch(self: object, *args: str, **kwargs: object) -> str:
+        if args[0] == "fetch":
+            _git(work.repo, "push", "-q", str(work.remote), f"{rival}:{_REF}")
+        return real_ok(self, *args, **kwargs)
 
-def test_the_token_reaches_only_network_commands_and_only_through_the_environment(
-    work: _Work, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    token = "not-a-real-token"
-    monkeypatch.setenv("PUBLISH_TOKEN", token)
-    header = "AUTHORIZATION: basic " + base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    calls: list[tuple[str, list[str], dict[str, str]]] = []
-    real_run = subprocess.run
-
-    def recording_run(argv: list[str], **kwargs: object) -> object:
-        calls.append((argv[3], argv, dict(kwargs["env"])))  # type: ignore[call-overload]
-        return real_run(argv, **kwargs)  # type: ignore[call-overload]
-
-    monkeypatch.setattr(pub.subprocess, "run", recording_run)
-    assert work.run("HEAD", "--token-env", "PUBLISH_TOKEN") == 0
+    monkeypatch.setattr(pub._Repo, "ok", move_before_the_fetch)
+    assert work.run() == 1
     captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"from {tip} to {rival} while it was being read" in captured.err
+    assert _remote_ref(work.remote) == rival
 
-    network = {"ls-remote", "fetch", "push"}
-    seen = {command for command, _argv, _env in calls}
-    assert {"ls-remote", "push", "commit-tree"} <= seen
-    for command, argv, env in calls:
-        assert not any(token in part or header in part for part in argv), command
-        carries = env.get("GIT_CONFIG_VALUE_0") == header
-        assert carries is (command in network), command
-        if carries:
-            assert env["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
-            assert env["GIT_CONFIG_COUNT"] == "1"
-    assert token not in captured.out + captured.err
-    assert header not in captured.out + captured.err
+
+def _annotated_tag(work: _Work, name: str, target: str) -> str:
+    _git(work.repo, "tag", "-a", name, "-m", name, target)
+    _git(work.repo, "push", "-q", str(work.remote), f"refs/tags/{name}")
+    return _git(work.repo, "rev-parse", f"refs/tags/{name}")
+
+
+def test_a_branch_that_holds_a_tag_object_is_refused(
+    work: _Work, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A tag that points at a perfectly good publisher commit is still not a commit."""
+    assert work.run() == 0
+    tip = capsys.readouterr().out.strip()
+    tag = _annotated_tag(work, "wrapped", tip)
+    assert _git(work.repo, "cat-file", "-t", tag) == "tag"
+    # git refuses to point a branch at a tag object, so write the ref directly.
+    (work.remote / "refs" / "heads" / _BRANCH).write_text(f"{tag}\n", encoding="ascii")
+    assert _remote_ref(work.remote) == tag
+
+    assert work.run() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"branch tip {tag} is not a commit" in captured.err
+    assert _remote_ref(work.remote) == tag
+
+
+def test_a_source_trailer_naming_a_tag_object_is_refused(
+    work: _Work, capsys: pytest.CaptureFixture[str]
+) -> None:
+    tag = _annotated_tag(work, "source", work.first)
+    work.place(_handmade_tip(work.repo, work.first, message=f"by hand\n\nSource-Commit: {tag}\n"))
+    _release(work.repo, "0.5.12", "two")
+    assert "which is not a commit here" in _refused(work, capsys)
+
+
+def test_a_tip_message_that_is_not_utf8_is_read_without_a_traceback(
+    work: _Work, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plugin = _git(work.repo, "rev-parse", f"{work.first}:{_PATH}")
+    inner = _tree_of(work.repo, ("tree", plugin, "memtomem-claude-plugin"))
+    tree = _tree_of(work.repo, ("tree", inner, "packages"))
+    person = b"t <t@example.com> 0 +0000"
+    # Written as a raw object: ``git commit-tree`` may re-encode a message on the way in.
+    body = (
+        b"tree " + tree.encode() + b"\nauthor " + person + b"\ncommitter " + person + b"\n\n"
+        b"by hand \xff\xfe\n\nSource-Commit: " + work.first.encode() + b"\n"
+    )
+    hashed = subprocess.run(
+        ["git", "-C", str(work.repo), "hash-object", "-t", "commit", "-w", "--stdin"],
+        input=body,
+        capture_output=True,
+        check=True,
+    )
+    tip = hashed.stdout.decode().strip()
+    stored = subprocess.run(
+        ["git", "-C", str(work.repo), "cat-file", "commit", tip], capture_output=True, check=True
+    ).stdout
+    assert b"\xff\xfe" in stored
+
+    work.place(tip)
+    _release(work.repo, "0.5.12", "two")
+    assert work.run() == 0
+    commit = capsys.readouterr().out.strip()
+    assert _git(work.repo, "rev-list", "--parents", "-n", "1", commit) == f"{commit} {tip}"

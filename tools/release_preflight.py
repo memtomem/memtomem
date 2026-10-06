@@ -160,8 +160,9 @@ def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = N
 
 _CLAUDE_PLUGIN = "packages/memtomem-claude-plugin"
 _CLAUDE_TAG_RE = re.compile(r"^claude-plugin-v(?P<version>\d+\.\d+\.\d+)$")
-_CORE_REQUIREMENT_RE = re.compile(r"^memtomem(?![A-Za-z0-9._-])")
-_EXACT_CORE_PIN_RE = re.compile(r"^memtomem(?:\[[A-Za-z0-9_,-]+\])?==(?P<version>\d+\.\d+\.\d+)$")
+_CLAUDE_LAUNCH_PIN_RE = re.compile(
+    r"^memtomem\[[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*\]==(?P<version>\d+\.\d+\.\d+)$"
+)
 
 
 def _load_json_object(path: Path, label: str) -> dict[str, Any]:
@@ -175,26 +176,35 @@ def _load_json_object(path: Path, label: str) -> dict[str, Any]:
 
 
 def _claude_launch_pin(repo_root: Path) -> str:
-    """The core version the Claude plugin's own launch command installs."""
+    """The core version the Claude plugin's own launch command installs.
+
+    Accepts the one shape the renderer emits and refuses everything else.
+    Recognising a memtomem requirement among arbitrary arguments means
+    re-implementing the dependency-specifier grammar (name case, whitespace,
+    extras, markers); requiring the exact shape leaves nothing to recognise.
+    """
     label = f"{_CLAUDE_PLUGIN}/.mcp.json"
     servers = _load_json_object(repo_root / label, label).get("mcpServers")
-    if not isinstance(servers, dict):
-        raise ReleaseCheckError(f"{label} has no mcpServers object")
-    requirements = [
-        arg
-        for server in servers.values()
-        if isinstance(server, dict) and isinstance(server.get("args"), list)
-        for arg in server["args"]
-        if isinstance(arg, str) and _CORE_REQUIREMENT_RE.match(arg)
-    ]
-    if len(requirements) != 1:
+    if not isinstance(servers, dict) or list(servers) != ["memtomem"]:
+        raise ReleaseCheckError(f"{label} must define exactly one server, named memtomem")
+    server = servers["memtomem"]
+    command = server.get("command") if isinstance(server, dict) else None
+    args = server.get("args") if isinstance(server, dict) else None
+    if (
+        command != "uvx"
+        or not isinstance(args, list)
+        or len(args) != 3
+        or not all(isinstance(arg, str) for arg in args)
+        or (args[0], args[2]) != ("--from", "memtomem-server")
+    ):
         raise ReleaseCheckError(
-            f"{label} launches {len(requirements)} memtomem requirements; expected exactly one"
+            f"{label} launches {command!r} {args!r}; "
+            "expected uvx --from memtomem[...]==X.Y.Z memtomem-server"
         )
-    match = _EXACT_CORE_PIN_RE.fullmatch(requirements[0])
+    match = _CLAUDE_LAUNCH_PIN_RE.fullmatch(args[1])
     if match is None:
         raise ReleaseCheckError(
-            f"{label} launches {requirements[0]!r}; expected an exact memtomem[...]==X.Y.Z pin"
+            f"{label} launches {args[1]!r}; expected an exact memtomem[...]==X.Y.Z pin"
         )
     return match.group("version")
 

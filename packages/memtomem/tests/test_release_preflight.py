@@ -1886,18 +1886,29 @@ def test_claude_plugin_refuses_a_manifest_version_no_tag_can_name(tmp_path, vers
 @pytest.mark.parametrize(
     "args,reason",
     [
-        (("--from", "memtomem-server"), "launches 0 memtomem requirements"),
-        (("--from", "memtomem[onnx]==0.6.7", "memtomem==0.6.7"), "launches 2 memtomem"),
+        (("--from", "memtomem-server"), "expected uvx --from"),
+        (("--with", "memtomem[onnx]==0.6.7", "memtomem-server"), "expected uvx --from"),
+        (("--from", "memtomem[onnx]==0.6.7", "memtomem==0.6.7"), "expected uvx --from"),
+        # A second requirement in any spelling: the argument list is simply too long.
+        (
+            ("--from", "memtomem[onnx]==0.6.7", "memtomem-server", "MemToMem>=999.0.0"),
+            "expected uvx --from",
+        ),
+        (("--from", 7, "memtomem-server"), "expected uvx --from"),
         (("--from", "memtomem[onnx]>=0.6.7", "memtomem-server"), "expected an exact"),
         (("--from", "memtomem[onnx]==0.6", "memtomem-server"), "expected an exact"),
         (("--from", "memtomem[onnx]==0.6.7rc1", "memtomem-server"), "expected an exact"),
         (("--from", "memtomem", "memtomem-server"), "expected an exact"),
-        (("--from", 7, "memtomem-server"), "launches 0 memtomem requirements"),
+        (("--from", "memtomem==0.6.7", "memtomem-server"), "expected an exact"),
+        (("--from", "memtomem[]==0.6.7", "memtomem-server"), "expected an exact"),
+        (("--from", "memtomem[,,,]==0.6.7", "memtomem-server"), "expected an exact"),
+        (("--from", "memtomem[onnx,]==0.6.7", "memtomem-server"), "expected an exact"),
+        (("--from", " memtomem[onnx]==0.6.7", "memtomem-server"), "expected an exact"),
+        (("--from", "MemToMem[onnx]==0.6.7", "memtomem-server"), "expected an exact"),
+        (("--from", "memtomem[onnx]==0.6.7; python_version>'3'", "memtomem-server"), "exact"),
     ],
 )
-def test_claude_plugin_refuses_a_launch_pin_it_cannot_check_before_any_network(
-    tmp_path, args, reason
-):
+def test_claude_plugin_refuses_a_launch_it_cannot_check_before_any_network(tmp_path, args, reason):
     with pytest.raises(rp.ReleaseCheckError, match=reason):
         rp.validate_claude_plugin(
             "claude-plugin-v0.5.11",
@@ -1906,7 +1917,34 @@ def test_claude_plugin_refuses_a_launch_pin_it_cannot_check_before_any_network(
         )
 
 
-@pytest.mark.parametrize("content", ["[", "[]", '{"servers": {}}', None])
+def test_claude_plugin_accepts_several_extras(tmp_path):
+    repo = _claude_repo(
+        tmp_path, args=("--from", "memtomem[onnx,web_ui]==0.6.7", "memtomem-server")
+    )
+    reply = (200, _pypi_metadata(version="0.6.7"))
+    assert rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=lambda *_: reply)
+
+
+_CLAUDE_SERVER = (
+    '{"command": "uvx", "args": ["--from", "memtomem[onnx]==0.6.7", "memtomem-server"]}'
+)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[",
+        "[]",
+        '{"servers": {}}',
+        '{"mcpServers": {}}',
+        '{"mcpServers": {"other": %s}}' % _CLAUDE_SERVER,
+        '{"mcpServers": {"memtomem": %s, "second": %s}}' % (_CLAUDE_SERVER, _CLAUDE_SERVER),
+        '{"mcpServers": {"memtomem": []}}',
+        '{"mcpServers": {"memtomem": {"command": "uvx", "args": "--from"}}}',
+        '{"mcpServers": {"memtomem": %s}}' % _CLAUDE_SERVER.replace("uvx", "npx"),
+        None,
+    ],
+)
 def test_claude_plugin_refuses_an_unreadable_launch_file_before_any_network(tmp_path, content):
     repo = _claude_repo(tmp_path)
     launch = repo / _CLAUDE / ".mcp.json"
@@ -1960,7 +1998,7 @@ _CLAUDE_GATE_PREFIX = ("python", "tools/release_preflight.py", "claude-plugin")
 _WAIT_CI_PREFIX = ("python", "tools/release_preflight.py", "wait-ci")
 _PUBLISHER_PREFIX = ("python", "tools/publish_claude_plugin_branch.py")
 _CLAUDE_GATES = ["plugin-gate", "fetch-main", "on-main", "wait-ci"]
-_FULL_CHECKOUT = {"fetch-depth": 0, "persist-credentials": False}
+_CLAUDE_COMMANDS = [*(("preflight", gate) for gate in _CLAUDE_GATES), ("publish", "publish")]
 _BOT = "github-actions[bot]"
 _BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -1979,16 +2017,23 @@ def _assert_claude_plugin_workflow(document: dict) -> None:
     }
     assert "permissions" not in document
     assert set(document["jobs"]) == {"preflight", "publish"}
+    # ``defaults.run`` is inherited by every step: a shell of ``echo {0}`` there
+    # turns each gate into a printout without touching the steps this guard reads.
+    assert "defaults" not in document
+    for job in document["jobs"].values():
+        assert "defaults" not in job
+    for job_name, step_id in _CLAUDE_COMMANDS:
+        # The argv comparisons below see ``$GITHUB_SHA`` whichever way it was
+        # quoted; the shell only expands it outside single quotes.
+        assert "'" not in _required_step(document, job_name, step_id)["run"]
 
     preflight = document["jobs"]["preflight"]
     assert preflight["permissions"] == {"actions": "read", "contents": "read"}
     assert "if" not in preflight
     checkout = preflight["steps"][0]
     assert checkout["uses"].startswith("actions/checkout@")
-    assert checkout["with"] == _FULL_CHECKOUT
+    assert checkout["with"] == {"fetch-depth": 0, "persist-credentials": False}
     assert [step.get("id") for step in preflight["steps"][1:]] == _CLAUDE_GATES
-    for step_id in _CLAUDE_GATES:
-        _required_step(document, "preflight", step_id)
     argv = _single_command_argv(document, "preflight", "plugin-gate", _CLAUDE_GATE_PREFIX)
     args = rp._build_parser().parse_args(argv[len(_CLAUDE_GATE_PREFIX) - 1 :])
     assert (args.tag, args.repo_root) == ("$GITHUB_REF_NAME", Path("."))
@@ -2012,11 +2057,11 @@ def _assert_claude_plugin_workflow(document: dict) -> None:
     assert len(publish["steps"]) == 2
     checkout = publish["steps"][0]
     assert checkout["uses"].startswith("actions/checkout@")
-    assert checkout["with"] == _FULL_CHECKOUT
+    # The publisher pushes with the credentials this checkout keeps.
+    assert checkout["with"] == {"fetch-depth": 0, "persist-credentials": True}
     step = _required_step(document, "publish", "publish")
     assert step is publish["steps"][1]
     assert step.get("env") == {
-        "GITHUB_TOKEN": "${{ github.token }}",
         "GIT_AUTHOR_NAME": _BOT,
         "GIT_AUTHOR_EMAIL": _BOT_EMAIL,
         "GIT_COMMITTER_NAME": _BOT,
@@ -2029,9 +2074,7 @@ def _assert_claude_plugin_workflow(document: dict) -> None:
         "source": "$GITHUB_SHA",
         "remote": "origin",
         "branch": "claude-plugin-directory",
-        "path": publisher.PLUGIN_PATH,
         "repo_root": Path.cwd(),
-        "token_env": "GITHUB_TOKEN",
         "dry_run": False,
     }
 
@@ -2078,25 +2121,31 @@ def _reword(document: dict, job: str, step_id: str, old: str, new: str) -> None:
         "any-tag",
         "concurrency",
         "top-level-write",
+        "workflow-default-shell",
+        "preflight-default-shell",
+        "publish-default-shell",
+        "preflight-default-directory",
         "preflight-write",
         "preflight-credentials",
         "gate-order",
         "gate-fixed-tag",
+        "gate-single-quoted-tag",
         "on-main-other-ref",
+        "on-main-single-quoted-sha",
         "wait-ci-other-sha",
+        "wait-ci-single-quoted-sha",
         "wait-ci-no-token",
         "publish-needs",
         "publish-always",
         "publish-job-continue",
         "publish-no-environment",
-        "publish-credentials",
+        "publish-no-credentials",
         "publish-extra-step",
         "publisher-dry-run",
         "publisher-other-source",
+        "publisher-single-quoted-source",
         "publisher-other-branch",
         "publisher-other-remote",
-        "publisher-other-path",
-        "publisher-no-token",
         "publisher-no-identity",
         "publisher-extra-env",
     ],
@@ -2115,6 +2164,14 @@ def test_claude_plugin_workflow_guard_rejects_trigger_order_and_scope_bypasses(b
         document["concurrency"]["cancel-in-progress"] = True
     elif bypass == "top-level-write":
         document["permissions"] = {"contents": "write"}
+    elif bypass == "workflow-default-shell":
+        document["defaults"] = {"run": {"shell": "echo {0}"}}
+    elif bypass == "preflight-default-shell":
+        preflight["defaults"] = {"run": {"shell": "echo {0}"}}
+    elif bypass == "publish-default-shell":
+        publish["defaults"] = {"run": {"shell": "echo {0}"}}
+    elif bypass == "preflight-default-directory":
+        preflight["defaults"] = {"run": {"working-directory": "docs"}}
     elif bypass == "preflight-write":
         preflight["permissions"]["contents"] = "write"
     elif bypass == "preflight-credentials":
@@ -2123,10 +2180,16 @@ def test_claude_plugin_workflow_guard_rejects_trigger_order_and_scope_bypasses(b
         preflight["steps"][1], preflight["steps"][4] = preflight["steps"][4], preflight["steps"][1]
     elif bypass == "gate-fixed-tag":
         _reword(document, "preflight", "plugin-gate", '"$GITHUB_REF_NAME"', "claude-plugin-v0.5.11")
+    elif bypass == "gate-single-quoted-tag":
+        _reword(document, "preflight", "plugin-gate", '"$GITHUB_REF_NAME"', "'$GITHUB_REF_NAME'")
     elif bypass == "on-main-other-ref":
         _reword(document, "preflight", "on-main", "origin/main", "HEAD")
+    elif bypass == "on-main-single-quoted-sha":
+        _reword(document, "preflight", "on-main", '"$GITHUB_SHA"', "'$GITHUB_SHA'")
     elif bypass == "wait-ci-other-sha":
         _reword(document, "preflight", "wait-ci", '"$GITHUB_SHA"', "HEAD")
+    elif bypass == "wait-ci-single-quoted-sha":
+        _reword(document, "preflight", "wait-ci", '"$GITHUB_SHA"', "'$GITHUB_SHA'")
     elif bypass == "wait-ci-no-token":
         del _required_step(document, "preflight", "wait-ci")["env"]
     elif bypass == "publish-needs":
@@ -2137,25 +2200,25 @@ def test_claude_plugin_workflow_guard_rejects_trigger_order_and_scope_bypasses(b
         publish["continue-on-error"] = True
     elif bypass == "publish-no-environment":
         del publish["environment"]
-    elif bypass == "publish-credentials":
-        publish["steps"][0]["with"]["persist-credentials"] = True
+    elif bypass == "publish-no-credentials":
+        publish["steps"][0]["with"]["persist-credentials"] = False
     elif bypass == "publish-extra-step":
         publish["steps"].append({"run": "git push origin HEAD:refs/heads/claude-plugin-directory"})
     elif bypass == "publisher-dry-run":
-        _reword(document, "publish", "publish", "--token-env", "--dry-run --token-env")
+        _reword(document, "publish", "publish", "--remote origin", "--remote origin --dry-run")
     elif bypass == "publisher-other-source":
         _reword(document, "publish", "publish", '"$GITHUB_SHA"', "origin/main")
+    elif bypass == "publisher-single-quoted-source":
+        _reword(document, "publish", "publish", '"$GITHUB_SHA"', "'$GITHUB_SHA'")
     elif bypass == "publisher-other-branch":
         _reword(document, "publish", "publish", "--branch claude-plugin-directory", "--branch main")
     elif bypass == "publisher-other-remote":
         _reword(document, "publish", "publish", "--remote origin", "--remote upstream")
-    elif bypass == "publisher-other-path":
-        _reword(document, "publish", "publish", "--token-env", "--path packages --token-env")
-    elif bypass == "publisher-no-token":
-        _reword(document, "publish", "publish", " --token-env GITHUB_TOKEN", "")
     elif bypass == "publisher-no-identity":
         del _required_step(document, "publish", "publish")["env"]["GIT_COMMITTER_EMAIL"]
     else:
-        _required_step(document, "publish", "publish")["env"]["GIT_CONFIG_COUNT"] = "0"
+        _required_step(document, "publish", "publish")["env"]["GITHUB_TOKEN"] = (
+            "${{ github.token }}"
+        )
     with pytest.raises(AssertionError):
         _assert_claude_plugin_workflow(document)

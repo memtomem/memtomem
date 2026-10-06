@@ -65,14 +65,16 @@ jobs:
     # Checkout and the publisher, nothing else: every step of a job that can
     # write contents can reach its token.
     steps:
+      # The one checkout in this repository that keeps its credentials: the
+      # publisher pushes with them, so the token is stored and masked by
+      # actions/checkout rather than handled by our own code.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-          persist-credentials: false
+          persist-credentials: true
       - name: Publish the plugin folder
         id: publish
         env:
-          GITHUB_TOKEN: ${{ github.token }}
           GIT_AUTHOR_NAME: github-actions[bot]
           GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
           GIT_COMMITTER_NAME: github-actions[bot]
@@ -82,4 +84,3 @@ jobs:
           --source "$GITHUB_SHA"
           --remote origin
           --branch claude-plugin-directory
-          --token-env GITHUB_TOKEN
