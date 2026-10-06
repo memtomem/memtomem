@@ -116,7 +116,7 @@ describe('path-picker navigate() sequencing', () => {
   });
 
   it('suppresses the toast of a stale FAILED request superseded by a newer success', async () => {
-    // #1247: the seq guard must gate the toast too,
+    // #1247 id 28: the seq guard must gate the toast too,
     // not just the paint — ``_fetchList`` used to toast before ``navigate``
     // checked the ticket, so a slow failing request error-toasted right
     // over the newer listing the user was already on.

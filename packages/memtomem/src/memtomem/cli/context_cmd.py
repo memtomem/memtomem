@@ -6392,8 +6392,8 @@ async def _memory_migrate_run(
             _emit_out("\nRun with --apply to execute.")
             return
 
-        # ADR-0011 PR-D: require an explicit
-        # ``--confirm-project-shared`` for project_shared targets.
+        # ADR-0011 PR-D: project_shared targets need explicit consent —
+        # ``--confirm-project-shared`` or the interactive prompt below.
         # ``--yes`` is a generic "skip prompts" flag users alias for
         # unrelated reasons; accepting it as Gate B satisfaction would
         # let ``mm context memory-migrate --to project_shared --yes``
@@ -6439,7 +6439,7 @@ async def _memory_migrate_run(
         # original chunk's source_file. End state: two sets of chunks
         # at the destination, defeating the chunk-id-stability guarantee
         # the migrate command promises. For batch mode we acquire every
-        # lock up front via ``ExitStack`` so a watcher cannot race any
+        # lock up front via ``AsyncExitStack`` so a watcher cannot race any
         # of the per-file pairs at any point mid-batch; reverse-order
         # release on context exit. Locks live on the file's parent so
         # they survive the rename (``feedback_sidecar_lockfile_for_
