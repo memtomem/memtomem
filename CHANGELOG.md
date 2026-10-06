@@ -41,6 +41,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   re-indexing could not clear it. The doctor now loads config through the
   same builder as the MCP server, so it applies E5's chunk caps.
 
+### Security
+
+- Update locked fsspec 2026.3.0 to 2026.9.0 for
+  [GHSA-27vj-qcqg-25rc](https://osv.dev/vulnerability/GHSA-27vj-qcqg-25rc)
+  (CVE-2026-104851; template injection in `ReferenceFileSystem` leading to
+  remote code execution) and locked langgraph-sdk 0.4.2 to 0.4.5 for
+  [GHSA-fvww-7h3r-vfhp](https://osv.dev/vulnerability/GHSA-fvww-7h3r-vfhp)
+  (CVE-2026-104873; custom auth ignoring `actions=` on resource decorators).
+  fsspec arrives through fastembed's huggingface-hub dependency and
+  langgraph-sdk through the `langgraph` extra; memtomem imports neither
+  package and uses no reference filesystem or LangGraph SDK auth. Published
+  constraints are unchanged; this lockfile is not shipped in the wheel and
+  does not upgrade existing environments.
+- Update source-map-js 1.2.1 to 1.2.2 in the browser test suite's lockfile
+  (`packages/memtomem/tests-js/package-lock.json`) for
+  [GHSA-68fv-2mgg-jv7q](https://osv.dev/vulnerability/GHSA-68fv-2mgg-jv7q)
+  (CVE-2026-93749; event-loop denial of service through indexed source-map
+  section offsets). It is a dev-only dependency pulled in by css-tree and
+  postcss under vitest and jsdom; nothing shipped depends on it.
+
 ## [0.6.7] — 2026-10-05
 
 ### Upgrading
