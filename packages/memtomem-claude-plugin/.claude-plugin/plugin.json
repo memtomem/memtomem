@@ -1,6 +1,6 @@
 {
   "name": "memtomem",
-  "version": "0.5.12",
+  "version": "0.5.13",
   "description": "Safe, explicit memory search and persistence workflows backed by the memtomem MCP server",
   "author": {
     "name": "memtomem",
@@ -8,5 +8,6 @@
   },
   "repository": "https://github.com/memtomem/memtomem",
   "license": "Apache-2.0",
+  "privacyPolicyUrl": "https://github.com/memtomem/memtomem/blob/main/packages/memtomem-claude-plugin/README.md#what-this-plugin-runs-and-connects-to",
   "keywords": ["memory", "semantic-search", "rag", "knowledge-base", "mcp"]
 }

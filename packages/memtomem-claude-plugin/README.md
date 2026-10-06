@@ -25,6 +25,18 @@ write-time indexing.
   Python downloads. The plugin ships no hooks, scripts, or binaries of its own.
 - **Local storage.** Memories stay in your Markdown files; the search index is a
   SQLite database at `~/.memtomem/memtomem.db` unless you configure another path.
+- **Local search history.** The same database records each `mem_search`: the
+  query text, its embedding when an embedding provider is configured, and for
+  each result its ID, score, file name and headings (not the memory text). It
+  also counts how often each memory is returned. `mem_add` records one such
+  search too, for its duplicate check, with the new note's text as the query;
+  deleting the memory later does not remove that entry. memtomem only
+  occasionally deletes history rows older than 90 days, so treat the history
+  as kept indefinitely. A search made with `record=false` records none of this.
+- **What Claude receives.** Search, recall and read results, including memory
+  text, headings and source file paths, are returned to Claude Code. They
+  become part of the conversation, which Claude Code sends to the model
+  provider it is set up to use, under that provider's terms.
 - **No other network traffic by default.** Once uv has created that environment,
   the running server makes no network requests in the default configuration: no
   embedding provider (BM25 only), the reranker and LLM features off, and no
