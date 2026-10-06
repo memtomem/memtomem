@@ -136,6 +136,21 @@ def test_claude_plugins_match_contract_and_marketplace() -> None:
     )
 
 
+def test_claude_plugin_icon_meets_directory_limits() -> None:
+    # The plugin directory's limits for a listing icon: a square PNG or JPEG,
+    # 512 to 2048 px on each side, under 2 MB. It reads the icon only on the
+    # first portal save, so a missing or rejected file cannot be fixed later.
+    icon = _ROOT / "packages/memtomem-claude-plugin/.claude-plugin/icon.png"
+    data = icon.read_bytes()
+    assert len(data) < 2 * 1024 * 1024
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    assert data[12:16] == b"IHDR"
+    width = int.from_bytes(data[16:20], "big")
+    height = int.from_bytes(data[20:24], "big")
+    assert width == height
+    assert 512 <= width <= 2048
+
+
 def test_codex_plugin_matches_contract_and_marketplace() -> None:
     contract = _contract()
     manifest = _json("plugins/memtomem/.codex-plugin/plugin.json")
