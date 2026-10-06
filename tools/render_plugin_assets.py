@@ -203,6 +203,7 @@ def _opencode_generated(contract: dict) -> str:
         f"export const CORE_VERSION = {_q(core['version'])};\n"
         f"export const MCP_REQUIREMENT = {_q(_mcp_requirement(core))};\n"
         f"export const TOOL_MODE = {_q(core['tool_mode'])};\n"
+        f"export const LAUNCH_ENV = {json.dumps(_launch_env(core))} as const;\n"
         f"export const MCP_TIMEOUT_MS = {opencode['mcp_timeout_ms']};\n"
         f"export const OPENCODE_COMMANDS = {payload} as const;\n"
         "export const OPENCODE_READ_SKILLS = [\n"
@@ -220,13 +221,23 @@ def _mcp_requirement(core: dict) -> str:
     return f"memtomem[{extras}]=={core['version']}"
 
 
+def _launch_env(core: dict) -> dict[str, str]:
+    return {
+        "MEMTOMEM_TOOL_MODE": core["tool_mode"],
+        # ONNX Runtime 1.29+ uploads telemetry from official Linux and macOS builds unless
+        # this is truthy before it initializes (#2664). uvx resolves onnxruntime fresh, so
+        # the launch env carries it for every core version the plugins pin.
+        "ORT_DISABLE_TELEMETRY": "1",
+    }
+
+
 def _mcp_config(core: dict) -> str:
     payload = {
         "mcpServers": {
             "memtomem": {
                 "command": "uvx",
                 "args": ["--from", _mcp_requirement(core), "memtomem-server"],
-                "env": {"MEMTOMEM_TOOL_MODE": core["tool_mode"]},
+                "env": _launch_env(core),
             }
         }
     }
@@ -250,7 +261,7 @@ def _hermes_mcp_config(contract: dict) -> str:
                     _mcp_requirement(core),
                     "memtomem-server",
                 ],
-                "env": {"MEMTOMEM_TOOL_MODE": core["tool_mode"]},
+                "env": _launch_env(core),
             }
         },
     }
@@ -283,6 +294,7 @@ def expected_files() -> dict[Path, str]:
             f"CORE_VERSION = {_q(contract['core']['version'])}\n"
             f"MCP_REQUIREMENT = {_q(_mcp_requirement(contract['core']))}\n"
             f"TOOL_MODE = {_q(contract['core']['tool_mode'])}\n"
+            f"LAUNCH_ENV = {json.dumps(_launch_env(contract['core']))}\n"
         ),
         CLAUDE_ROOT / ".mcp.json": _mcp_config(contract["core"]),
         CODEX_ROOT / ".mcp.json": _mcp_config(contract["core"]),

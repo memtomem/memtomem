@@ -5,6 +5,96 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **`mem_search(record=false)` and `mem_agent_search(record=false)` no longer
+  switch dense retrieval to an exhaustive scan (#2671).** That scan is refused
+  above 4,096 embeddings, so on a larger store a `record=false` search lost
+  its semantic leg and returned keyword matches only, with nothing in the
+  default output to say so. `record=false` now means only what its name says:
+  no access-count increments, no query history, and the result and expansion
+  caches neither read nor filled. Its ranking can differ from before on any
+  store, because dense candidates now come from the ordinary bounded search.
+  Deterministic replay (`mm quality replay`, `mem_quality_replay`, the Web
+  quality page) asks for the exhaustive scan itself and behaves as before,
+  including the `dense_exhaustive_limit` report above the cap.
+
+- **memtomem turns ONNX Runtime's telemetry off on Linux and macOS (#2664).**
+  Official ONNX Runtime builds from 1.29 upload telemetry to Microsoft on those
+  platforms by default, and a fresh install resolves such a version through
+  fastembed. Importing memtomem now sets `ORT_DISABLE_TELEMETRY=1` before the
+  runtime can load, so the server, the `mm` CLI and the web UI all run with it
+  off. Set the variable yourself (for example `ORT_DISABLE_TELEMETRY=0`) to
+  keep your own choice; a value already in the environment is left alone. Two
+  cases are not covered: a program that initializes `onnxruntime` before it
+  imports memtomem, and Windows, where ONNX Runtime does not read this variable
+  and emits ETW events that Windows records only while a trace session is
+  collecting.
+- **The plugins launch the memtomem server with ONNX Runtime telemetry off
+  (#2664).** The Claude Code, Codex and Hermes plugin manifests and the
+  OpenCode plugin now pass `ORT_DISABLE_TELEMETRY=1` in the server's launch
+  environment, so the switch reaches plugin users without waiting for a core
+  release (Claude plugin 0.5.10, Codex 0.3.10, Hermes 0.1.3,
+  `opencode-memtomem` 0.3.10). It turns off the telemetry that official ONNX
+  Runtime builds from 1.29 upload on Linux and macOS; Windows builds do not
+  read it. If you also registered the server by hand with the plugin's command
+  but a different environment, `mm doctor --claude-mcp` notes that the
+  environments differ and that your entry wins. With the 0.6.7 core the
+  plugins pin, such an entry runs with the switch only if its own environment
+  sets the variable; from the core release that carries the entry above, the
+  server sets it by default.
+
+### Fixed
+
+- **A search whose semantic leg failed now says so in its default output
+  (#2671).** When `dense_search` raised — embedder unreachable, for instance —
+  `mem_search`, `mem_agent_search`, `mem_ask` and `mm search` returned the
+  keyword matches with no sign of it unless the result set was empty or the
+  verbose pipeline line was requested. When results come back, they now
+  append the hint `semantic search failed for this query — results may be
+  incomplete` (compact tail, structured `hints` array, `mm search` stderr,
+  the `mem_ask` grounded prompt). An empty result set is unchanged:
+  `mem_search` already named the error there, and `mem_agent_search`,
+  `mem_ask` and `mm search` still do not. The hint is fixed text: the
+  exception message, which can name an embedder endpoint, stays in the
+  server log and the verbose pipeline line.
+- **`mm memory doctor` no longer reports every multi-chunk memo as stale
+  under the E5 profile (#2665).** When `config.json` or a `config.d` fragment
+  selected `multilingual-e5-small` without pinning chunk settings, the doctor
+  re-chunked files with the generic caps instead of E5's 384-token caps, so
+  any memo the indexer had split was listed under `stale_index`, and
+  re-indexing could not clear it. The doctor now loads config through the
+  same builder as the MCP server, so it applies E5's chunk caps.
+- **`mm index`, the other CLI commands and `mm web` keep a `config.d` chunk
+  setting when `config.json` selects E5 (#2667).** A fragment such as
+  `{"indexing": {"max_chunk_tokens": 320}}` was checked against the generic
+  chunk defaults before `config.json` chose `multilingual-e5-small`, rejected
+  with an "Invalid config section [indexing]" warning, and dropped, so these
+  commands chunked with 384 while the MCP server used 320. They now load
+  config the way the MCP server does. Files indexed while the setting was
+  dropped are reported by `mm memory doctor` as `stale_index`; `mm index`
+  clears that.
+
+### Security
+
+- Update locked fsspec 2026.3.0 to 2026.9.0 for
+  [GHSA-27vj-qcqg-25rc](https://osv.dev/vulnerability/GHSA-27vj-qcqg-25rc)
+  (CVE-2026-104851; template injection in `ReferenceFileSystem` leading to
+  remote code execution) and locked langgraph-sdk 0.4.2 to 0.4.5 for
+  [GHSA-fvww-7h3r-vfhp](https://osv.dev/vulnerability/GHSA-fvww-7h3r-vfhp)
+  (CVE-2026-104873; custom auth ignoring `actions=` on resource decorators).
+  fsspec arrives through fastembed's huggingface-hub dependency and
+  langgraph-sdk through the `langgraph` extra; memtomem imports neither
+  package and uses no reference filesystem or LangGraph SDK auth. Published
+  constraints are unchanged; this lockfile is not shipped in the wheel and
+  does not upgrade existing environments.
+- Update source-map-js 1.2.1 to 1.2.2 in the browser test suite's lockfile
+  (`packages/memtomem/tests-js/package-lock.json`) for
+  [GHSA-68fv-2mgg-jv7q](https://osv.dev/vulnerability/GHSA-68fv-2mgg-jv7q)
+  (CVE-2026-93749; event-loop denial of service through indexed source-map
+  section offsets). It is a dev-only dependency pulled in by css-tree and
+  postcss under vitest and jsdom; nothing shipped depends on it.
+
 ## [0.6.7] — 2026-10-05
 
 ### Upgrading

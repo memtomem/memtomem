@@ -352,9 +352,9 @@ Call mem_status to check the memtomem connection status
 
 ## 8. OpenCode
 
-The npm plugin for this core version is `opencode-memtomem@0.3.9` (bundling
+The npm plugin for this core version is `opencode-memtomem@0.3.10` (bundling
 core `0.6.7`). Add it through OpenCode's plugin form —
-`{"plugin": ["opencode-memtomem@0.3.9"]}` in `opencode.json`. The plugin
+`{"plugin": ["opencode-memtomem@0.3.10"]}` in `opencode.json`. The plugin
 supplies an exact-pinned MCP server, seven commands, three read-only skills,
 and conservative permissions. Upgrade any pin still on `0.1.3` or older:
 those bundle pre-`0.3.14` cores, whose `mcp` dependency has no `<2` upper

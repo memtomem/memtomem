@@ -24,7 +24,6 @@ DEFERRED = {
     "cli/context_cmd.py:_resolve_cli_scope": (1, 1),
     "cli/embedding_cmd.py:_run": (1, 1),
     "cli/mem_cmd.py:rescan_files_cmd": (1, 1),
-    "cli/memory_doctor_cmd.py:_load_config_read_only": (1, 1),
     "cli/reset_cmd.py:_run": (1, 1),
     "cli/sync_doctor_cmd.py:sync_doctor": (1, 0),
     "cli/uninstall_cmd.py:_load_config_safely": (1, 1),
@@ -36,6 +35,7 @@ DEFERRED = {
     "integrations/langgraph_store.py:MemtomemBaseStore.__init__._registered_project_dirs": (1, 1),
     # Startup, tracing and MCP failure/recovery policies remain unchanged here.
     "observability/session_tracing.py:get_trace_config": (1, 1),
+    # Only the caller-supplied-base branch; a config-less ambient load is canonical.
     "runtime/components.py:create_components": (1, 1),
     "server/__init__.py:_resolve_store_db_path": (1, 1),
     "server/tools/context.py:_resolve_mcp_scope": (1, 1),

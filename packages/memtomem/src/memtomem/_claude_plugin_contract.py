@@ -3,3 +3,4 @@
 CORE_VERSION = "0.6.7"
 MCP_REQUIREMENT = "memtomem[onnx]==0.6.7"
 TOOL_MODE = "core"
+LAUNCH_ENV = {"MEMTOMEM_TOOL_MODE": "core", "ORT_DISABLE_TELEMETRY": "1"}

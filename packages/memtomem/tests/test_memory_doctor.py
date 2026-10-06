@@ -2346,6 +2346,193 @@ class TestStaleIndexBlocked:
         assert "stale_index" not in by
 
 
+_E5 = {"provider": "onnx", "model": "multilingual-e5-small", "dimension": 384}
+
+
+@pytest.fixture
+def e5_home(tmp_path, monkeypatch):
+    """An isolated HOME whose ``~/.memtomem`` holds no config yet.
+
+    Unlike ``stale_env`` nothing here stubs ``_load_config_read_only``: the
+    point is to exercise the doctor's real config load.
+    """
+    from helpers import set_home
+
+    home = tmp_path / "home"
+    (home / ".memtomem" / "config.d").mkdir(parents=True)
+    set_home(monkeypatch, home)
+    for name in list(os.environ):
+        if name.upper().startswith("MEMTOMEM_"):
+            monkeypatch.delenv(name)
+    return home
+
+
+@pytest.fixture
+def fake_e5_tokenizer(tmp_path, monkeypatch):
+    """Resolve the pinned E5 tokenizer to a local byte-level one.
+
+    Chunking under the E5 profile counts tokens with the model's tokenizer,
+    which would otherwise come from the Hugging Face hub. Only the counts
+    matter for chunk parity, and both the doctor and the fixture indexer read
+    the same file, so a one-token-per-byte tokenizer is enough.
+    """
+    tokenizers = pytest.importorskip("tokenizers")
+    alphabet = sorted(tokenizers.pre_tokenizers.ByteLevel.alphabet())
+    tokenizer = tokenizers.Tokenizer(
+        tokenizers.models.BPE(
+            vocab={char: index for index, char in enumerate(alphabet)},
+            merges=[],
+        )
+    )
+    tokenizer.pre_tokenizer = tokenizers.pre_tokenizers.ByteLevel(add_prefix_space=False)
+    path = tmp_path / "tokenizer.json"
+    tokenizer.save(str(path))
+
+    import memtomem.embedding.profiles as profiles
+
+    monkeypatch.setattr(profiles, "resolve_tokenizer", lambda _path: path)
+    return path
+
+
+class TestE5ProfileStaleness:
+    """The doctor re-chunks with the caps the indexer uses (#2665).
+
+    E5's chunk caps are derived from the embedding profile after every config
+    layer is applied. A loader that stopped before that step re-chunked with
+    the generic caps, so a file the indexer had split read as stale forever.
+    """
+
+    @pytest.mark.parametrize("layer", ["config.json", "config.d", "env"])
+    def test_doctor_config_matches_the_canonical_profile(self, e5_home, monkeypatch, layer):
+        """Vary the layer that selects E5, not just the value.
+
+        The environment is the one layer where a hand-built load already
+        agreed with the canonical one, so a probe through it alone would pass
+        with the bug in place.
+        """
+        from memtomem.cli.memory_doctor_cmd import _load_config_read_only
+        from memtomem.config_signature import build_fresh_config
+        from memtomem.embedding.profiles import PROFILE_INDEXING_FIELDS
+
+        dot = e5_home / ".memtomem"
+        if layer == "config.json":
+            (dot / "config.json").write_text(json.dumps({"embedding": _E5}), encoding="utf-8")
+        elif layer == "config.d":
+            (dot / "config.d" / "10-model.json").write_text(
+                json.dumps({"embedding": _E5}), encoding="utf-8"
+            )
+        else:
+            monkeypatch.setenv("MEMTOMEM_EMBEDDING", json.dumps(_E5))
+
+        doctor = _load_config_read_only().indexing
+        canonical = build_fresh_config(migrate=False).indexing
+
+        assert doctor.hard_max_chunk_tokens == 384
+        assert doctor.max_chunk_tokens == 384
+        assert {f: getattr(doctor, f) for f in PROFILE_INDEXING_FIELDS} == {
+            f: getattr(canonical, f) for f in PROFILE_INDEXING_FIELDS
+        }
+
+    @pytest.fixture
+    def e5_store(self, e5_home, tmp_path, fake_e5_tokenizer):
+        """A multi-chunk memo indexed with the canonical E5 caps.
+
+        ``config.json`` selects E5 with no chunk settings, as ``mm init``
+        writes it. The rows are chunked from ``build_fresh_config`` — the
+        config the indexer runs with — never from the doctor's own loader,
+        which is the thing under test.
+        """
+        import asyncio
+
+        from memtomem.config_signature import build_fresh_config
+
+        mem_dir = tmp_path / ".claude" / "projects" / "-e5" / "memory"
+        mem_dir.mkdir(parents=True)
+        note = mem_dir / "note.md"
+        paragraphs = [
+            f"Paragraph {i} records a decision about the indexer, its budget and why "
+            f"the doctor has to agree with it, item zqx{i}."
+            for i in range(12)
+        ]
+        note.write_text("# note\n\n" + "\n\n".join(paragraphs) + "\n", encoding="utf-8")
+        (mem_dir / "MEMORY.md").write_text("- [Note](note.md) — n\n", encoding="utf-8")
+        db_path = tmp_path / "e5.db"
+        (e5_home / ".memtomem" / "config.json").write_text(
+            json.dumps(
+                {
+                    "embedding": _E5,
+                    "storage": {"sqlite_path": str(db_path)},
+                    "indexing": {"memory_dirs": [str(mem_dir)]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        config = build_fresh_config(migrate=False)
+        assert config.indexing.hard_max_chunk_tokens == 384
+
+        async def _index():
+            backend = SqliteBackend(
+                config.storage, dimension=0, embedding_provider="none", embedding_model=""
+            )
+            await backend.initialize()
+            try:
+                return _insert_real_chunks(backend, config, note)
+            finally:
+                await backend.close()
+
+        indexed = asyncio.run(_index())
+        # Under the generic caps this memo is one chunk; the regression needs
+        # a file the E5 caps split.
+        assert indexed >= 2
+        return mem_dir, note
+
+    @staticmethod
+    def _doctor_findings() -> dict:
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+        assert result.exception is None or isinstance(result.exception, SystemExit), result.output
+        payload = json.loads(result.stdout)
+        return {f["check"]: f for d in payload["dirs"] for f in d["findings"]}
+
+    def test_current_multi_chunk_memo_is_not_stale(self, e5_store):
+        by = self._doctor_findings()
+        assert "stale_index" not in by
+
+    def test_edited_memo_is_still_reported(self, e5_store):
+        """Positive control: the E5 re-chunk ran, rather than being skipped.
+
+        ``_confirm_stale`` answers ``skip`` when the chunker raises, and a skip
+        also produces no finding, so a clean report alone cannot tell parity
+        from a crashed comparison.
+        """
+        _mem_dir, note = e5_store
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx99\n")
+
+        by = self._doctor_findings()
+        assert by["stale_index"]["items"] == ["note.md"]
+
+    def test_unresolvable_tokenizer_skips_staleness_only(self, e5_store, monkeypatch):
+        """A tokenizer that cannot load (cold cache, offline, missing extras)
+        costs the staleness verdict, never the report: other checks still run.
+        """
+        import memtomem.embedding.profiles as profiles
+
+        mem_dir, note = e5_store
+        with note.open("a", encoding="utf-8") as fh:
+            fh.write("\nappended later zqx99\n")
+        with (mem_dir / "MEMORY.md").open("a", encoding="utf-8") as fh:
+            fh.write("- [Gone](gone.md) — dead\n")
+
+        def _unavailable(_path):
+            raise ImportError("tokenizers is not installed")
+
+        monkeypatch.setattr(profiles, "resolve_tokenizer", _unavailable)
+
+        by = self._doctor_findings()
+        assert "stale_index" not in by
+        assert by["broken_link"]["items"] == ["L2 [missing_target] gone.md"]
+
+
 class TestStaleIndexScoping:
     """The per-dir chunk-state query must select this dir's rows and no others."""
 

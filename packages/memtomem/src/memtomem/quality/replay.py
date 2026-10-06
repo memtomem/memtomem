@@ -1,7 +1,8 @@
 """Replay engine: run stored eval cases and build a deterministic report (#1802).
 
 Each active (or explicitly selected) evaluation case is re-run through
-:meth:`SearchPipeline.search` in no-side-effects mode (``record=False``) with a
+:meth:`SearchPipeline.search` in no-side-effects mode (``record=False``) with
+exhaustive dense selection (``exhaustive=True``) and a
 pinned ``as_of_unix``, then scored with the pure IR metrics. The output is a
 deterministic JSON-able report: for a deterministic profile, two replays over the
 same corpus/index/profile at the same ``as_of`` serialize byte-for-byte
@@ -293,8 +294,9 @@ async def replay_cases(
 
     ``case_ids`` selects by id-or-name (``None`` = all active). ``as_of_unix``
     pins temporal validity + decay for every case (``None`` = now, pinned once).
-    Runs each case through ``pipeline.search(..., record=False)`` — no access
-    counters, observations, or cache reads/writes are mutated.
+    Runs each case through ``pipeline.search(..., record=False,
+    exhaustive=True)`` — no access counters or observations are written, the
+    caches are neither read nor filled, and dense selection is exhaustive.
     """
     if as_of_unix is not None and not 0 <= as_of_unix <= MAX_AS_OF_UNIX:
         raise ValueError(
@@ -337,6 +339,10 @@ async def replay_cases(
             project_context_root=None,
             as_of_unix=pinned_as_of,
             record=False,
+            # Deterministic dense selection is replay's own requirement, not
+            # part of ``record=False`` (#2671): above the KNN cap it is refused
+            # and reported as ``dense_exhaustive_limit`` below.
+            exhaustive=True,
         )
 
         if stats.dense_error_code == "dense_exhaustive_limit":
