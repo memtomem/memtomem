@@ -128,8 +128,8 @@ def _probe_pypi_release(
             )
 
 
-def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = None) -> str:
-    """Require the core version actually pinned by OpenCode to exist on PyPI."""
+def _contract_core_requirement(repo_root: Path) -> tuple[str, str]:
+    """The core version the plugin contract pins, and the launch requirement it renders to."""
     core = _load_toml(repo_root / "packages/memtomem-plugin-assets/contract.toml").get("core")
     if not isinstance(core, dict) or not isinstance(core.get("version"), str):
         raise ReleaseCheckError("plugin contract has no core.version")
@@ -139,7 +139,12 @@ def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = N
         isinstance(extra, str) and re.fullmatch(r"[A-Za-z0-9_-]+", extra) for extra in extras
     ):
         raise ReleaseCheckError("plugin contract has invalid core.mcp_extras")
-    requirement = f"memtomem[{','.join(extras)}]=={version}"
+    return version, f"memtomem[{','.join(extras)}]=={version}"
+
+
+def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = None) -> str:
+    """Require the core version actually pinned by OpenCode to exist on PyPI."""
+    version, requirement = _contract_core_requirement(repo_root)
     generated = (repo_root / "packages/opencode-memtomem/src/generated.ts").read_text(
         encoding="utf-8"
     )
@@ -154,6 +159,65 @@ def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = N
             f"OpenCode cannot publish while memtomem=={version} is unverified: {exc}. "
             f"Wait for / approve the PyPI v{version} release, confirm propagation, "
             "then rerun the OpenCode release."
+        ) from exc
+    return version
+
+
+_CLAUDE_PLUGIN = "packages/memtomem-claude-plugin"
+_CLAUDE_TAG_RE = re.compile(r"^claude-plugin-v(?P<version>\d+\.\d+\.\d+)$")
+
+
+def _load_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReleaseCheckError(f"cannot read {label}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ReleaseCheckError(f"{label} is not a JSON object")
+    return document
+
+
+def _claude_launch_pin(repo_root: Path) -> str:
+    """The core version the Claude plugin launches, once its launch command is the rendered one.
+
+    The plugin contract already says what the launch command must be, and the
+    OpenCode gate already validates it. Comparing the shipped ``.mcp.json``
+    with that leaves no requirement syntax to recognise here.
+    """
+    version, requirement = _contract_core_requirement(repo_root)
+    expected = {"command": "uvx", "args": ["--from", requirement, "memtomem-server"]}
+    label = f"{_CLAUDE_PLUGIN}/.mcp.json"
+    servers = _load_json_object(repo_root / label, label).get("mcpServers")
+    if not isinstance(servers, dict) or list(servers) != ["memtomem"]:
+        raise ReleaseCheckError(f"{label} must define exactly one server, named memtomem")
+    server = servers["memtomem"]
+    launch = {key: server.get(key) for key in expected} if isinstance(server, dict) else server
+    if launch != expected:
+        raise ReleaseCheckError(
+            f"{label} launches {launch!r}; the plugin contract expects {expected!r}"
+        )
+    return version
+
+
+def validate_claude_plugin(
+    tag: str, repo_root: Path, *, fetch_json: _FetchJSON | None = None
+) -> str:
+    """Require a Claude plugin tag to name the shipped version and an installable core."""
+    match = _CLAUDE_TAG_RE.fullmatch(tag)
+    if match is None:
+        raise ReleaseCheckError(f"unsupported tag {tag!r}; expected claude-plugin-vX.Y.Z")
+    label = f"{_CLAUDE_PLUGIN}/.claude-plugin/plugin.json"
+    version = _load_json_object(repo_root / label, label).get("version")
+    if version != match.group("version"):
+        raise ReleaseCheckError(f"tag {tag!r} does not match {label} version {version!r}")
+    core = _claude_launch_pin(repo_root)
+    try:
+        _probe_pypi_release(core, fetch_json=fetch_json or _request_json)
+    except ReleaseCheckError as exc:
+        raise ReleaseCheckError(
+            f"the Claude plugin cannot be published while memtomem=={core} is unverified: {exc}. "
+            f"Wait for / approve the PyPI v{core} release, confirm propagation, "
+            "then rerun the Claude plugin release."
         ) from exc
     return version
 
@@ -840,6 +904,10 @@ def _build_parser() -> argparse.ArgumentParser:
     opencode = subparsers.add_parser("opencode-pypi", allow_abbrev=False)
     opencode.add_argument("--repo-root", type=Path, default=Path.cwd())
 
+    claude_plugin = subparsers.add_parser("claude-plugin", allow_abbrev=False)
+    claude_plugin.add_argument("--tag", required=True)
+    claude_plugin.add_argument("--repo-root", type=Path, default=Path.cwd())
+
     wait_ci = subparsers.add_parser("wait-ci")
     wait_ci.add_argument("--repository", required=True)
     wait_ci.add_argument("--sha", required=True)
@@ -877,6 +945,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "opencode-pypi":
             version = validate_opencode_pypi(args.repo_root.resolve())
             print(f"OpenCode core pin memtomem=={version} is available on PyPI")
+        elif args.command == "claude-plugin":
+            version = validate_claude_plugin(args.tag, args.repo_root.resolve())
+            print(f"Claude plugin {version} matches its tag and its core pin is on PyPI")
         else:
             token = os.environ.get("GITHUB_TOKEN", "")
             if not token:
