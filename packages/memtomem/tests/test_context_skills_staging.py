@@ -298,7 +298,7 @@ class TestStaleLeftoverReaping:
         assert is_internal_artifact_dir(".old-parity-12345-abc123.tmp")
         # Negative pins: real skills and user dot-dirs never match — including
         # valid user names that mimic the prefix/suffix but lack the generated
-        # pid+rand shape (Codex review: a looser match would hide and even
+        # pid+rand shape (a looser match would hide and even
         # delete them).
         assert not is_internal_artifact_dir("parity")
         assert not is_internal_artifact_dir(".hidden-skill")
@@ -394,7 +394,7 @@ class TestStaleLeftoverReaping:
         ``.old-foo-*.tmp`` also matches ``.old-foo-bar-<pid>-<rand>.tmp``,
         which belongs to the valid skill ``foo-bar``. Syncing ``foo`` therefore
         deleted ``foo-bar``'s in-flight rollback and staging trees while
-        holding the wrong lock (Codex review; live since #1229). Hyphenated
+        holding the wrong lock (live since #1229). Hyphenated
         skill names are the norm, so this is an ordinary-input bug, not an
         adversarial one.
         """
@@ -529,7 +529,7 @@ class TestStaleLeftoverReaping:
         refuses it), and it can be an out-of-band writer's file that the
         promote moved aside between its conflict check and its rename. Deleting
         it would be unrecoverable, so an unexpected type is preserved and
-        logged instead (Codex review).
+        logged instead.
         """
         root = tmp_path / ".memtomem/skills"
         root.mkdir(parents=True)
@@ -578,7 +578,7 @@ class TestStaleLeftoverReaping:
         It used to skip the lock, making it the one path able to park a
         move-aside no other writer knew about — and a concurrent gateway flow
         reaping that destination would delete the tree this copy was about to
-        roll back onto (Codex review). Probed from inside the promote, where
+        roll back onto. Probed from inside the promote, where
         the lock must already be held.
         """
         import memtomem.context.skills as skills_mod
@@ -1006,7 +1006,7 @@ class TestMoveAsideReapingIsStateAware:
         The lock does not serialize editors and shells, so one can remove the
         destination between the promote's rename and this reap — and then the
         move-aside tree is once more the only copy. The precondition has to be
-        evaluated where the deletion happens (Codex review).
+        evaluated where the deletion happens.
         """
         root = tmp_path / ".memtomem/skills"
         root.mkdir(parents=True)
@@ -1062,7 +1062,7 @@ class TestMoveAsideReapingIsStateAware:
         around them was not. Escaping here reaches
         ``pull_apply._commit_skills``'s ``except OSError`` and turns an
         installed skill into a ``write_failed`` refusal with the privacy gate's
-        success unrecorded (Codex review).
+        success unrecorded.
 
         The WARNING is pinned for the same reason the keep-branch's is: a
         swallowed failure that says nothing is indistinguishable from one that

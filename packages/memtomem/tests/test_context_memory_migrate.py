@@ -1308,7 +1308,7 @@ def test_memory_migrate_glob_rejects_duplicate_target_basenames(monkeypatch, fak
 def test_memory_migrate_glob_rejects_case_only_target_collision(
     monkeypatch, fake_project_layout, tmp_path
 ):
-    """Codex review round 2: the collision guard's dedup key must
+    """The collision guard's dedup key must
     normalize for case-insensitive filesystems (macOS APFS, Windows
     NTFS). Two source files ``a/Rule.md`` and ``b/rule.md`` resolve
     to distinct ``Path`` objects (``to_dir/Rule.md`` vs

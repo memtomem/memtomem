@@ -592,7 +592,7 @@ class TestClaudeSettingsMergeMalformed:
     def test_dict_shaped_event_value_returns_error_and_preserves_file(self, claude_home, tmp_path):
         """A record-format hooks whose EVENT value is a dict (not a list)
         used to be coerced by list() into its key strings and written back as
-        "rules" with status="ok" (Codex review on #1229)."""
+        "rules" with status="ok" (#1229)."""
         original = json.dumps(
             {"hooks": {"PreToolUse": {"matcher": "Bash", "hooks": [{"type": "command"}]}}}
         )
@@ -608,8 +608,7 @@ class TestClaudeSettingsMergeMalformed:
 
     def test_scalar_event_value_returns_error_not_crash(self, claude_home, tmp_path):
         """A scalar event value made list() raise TypeError past the
-        MalformedSettingsError catch, crashing the whole fan-out (Codex
-        review on #1229)."""
+        MalformedSettingsError catch, crashing the whole fan-out (#1229)."""
         original = json.dumps({"hooks": {"PreToolUse": 5}})
         target = claude_home / ".claude" / "settings.json"
         target.write_text(original, encoding="utf-8")
@@ -1385,7 +1384,7 @@ class TestGenerateAllSettingsHostWriteGate:
     """``generate_all_settings(allow_host_writes=False)`` — the library-level
     gate every front-end (CLI, MCP, Web) routes through. Without this gate
     living inside the I/O boundary the CLI confirm could be bypassed by any
-    caller that imports the function directly (audit P0 review item 1)."""
+    caller that imports the function directly."""
 
     def _setup(self, tmp_path):
         project = tmp_path / "proj"
@@ -1460,7 +1459,7 @@ class TestGenerateAllSettingsHostWriteGate:
     @pytest.mark.requires_symlinks
     def test_symlink_target_is_treated_as_host_write(self, claude_home, tmp_path):
         """A symlink whose project-relative path *appears* under the project
-        root must be classified by the resolved location (review item 4):
+        root must be classified by the resolved location:
         ``Path.resolve()`` follows the symlink, so the gate still trips."""
         project = self._setup(tmp_path)
         # Symlink <project>/.claude → claude_home/.claude
@@ -1780,7 +1779,7 @@ class TestCliScopeFlag:
     def test_generate_with_scope_project_local(self, claude_home, tmp_path, monkeypatch):
         """Symmetric pin for ``mm context generate --scope=…``. Both commands
         share ``_SCOPE_OPTION`` but a future drift in only one of them would
-        slip past a sync-only test (codex review test-gap)."""
+        slip past a sync-only test."""
         (tmp_path / ".git").mkdir()
         (tmp_path / ".claude").mkdir()
         _make_canonical_settings(
@@ -1802,9 +1801,9 @@ class TestCliScopeFlag:
 class TestTargetScopeValidation:
     """Pin: an unknown ``hooks.target_scope`` is rejected at construction
     time by Pydantic's ``Literal`` validator. This is the safety net
-    behind ``_resolve_scope_path`` raising ``ValueError`` only as a
+    behind ``resolve_scope_path`` raising ``ValueError`` only as a
     defense-in-depth — production code never reaches that branch
-    because Pydantic catches the typo first (codex review #5)."""
+    because Pydantic catches the typo first."""
 
     def test_garbage_scope_raises_validation_error(self):
         from pydantic import ValidationError
