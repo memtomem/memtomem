@@ -10,14 +10,14 @@ import pytest
 
 pytest.importorskip("huggingface_hub")
 
-import huggingface_hub  # noqa: E402
-from huggingface_hub import constants  # noqa: E402
-from huggingface_hub.utils import _headers, build_hf_headers  # noqa: E402
+import huggingface_hub
+from huggingface_hub import constants
+from huggingface_hub.utils import _headers, build_hf_headers
 
-from memtomem.config import EmbeddingConfig, RerankConfig  # noqa: E402
-from memtomem.embedding import hub_telemetry, profiles  # noqa: E402
-from memtomem.embedding.hub_telemetry import hub_telemetry_off  # noqa: E402
-from memtomem.embedding.profiles import (  # noqa: E402
+from memtomem.config import EmbeddingConfig, RerankConfig
+from memtomem.embedding import hub_telemetry, profiles
+from memtomem.embedding.hub_telemetry import hub_telemetry_off
+from memtomem.embedding.profiles import (
     E5_TOKENIZER,
     e5_snapshot,
     resolve_tokenizer,

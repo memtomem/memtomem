@@ -82,7 +82,7 @@ def _reset_privacy_counters():
 
 
 @pytest.fixture
-def seeded_wiki(wiki_root: Path) -> Path:  # noqa: F811 — wiki_root from conftest
+def seeded_wiki(wiki_root: Path) -> Path:  # wiki_root from conftest
     _seed_wiki(wiki_root)
     return wiki_root
 
@@ -539,7 +539,7 @@ async def test_install_missing_asset_is_404(client, seeded_wiki: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_install_wiki_absent_is_404(client, wiki_root: Path) -> None:  # noqa: F811
+async def test_install_wiki_absent_is_404(client, wiki_root: Path) -> None:
     # wiki_root sets MEMTOMEM_WIKI_PATH but we never init → no wiki on disk.
     resp = await client.post("/api/context/skills/alpha/install")
     assert resp.status_code == 404
@@ -578,7 +578,7 @@ async def test_update_unborn_wiki_is_409(client, seeded_wiki: Path, project_root
 async def test_install_privacy_block_is_422_no_path_leak(
     client,
     wiki_root: Path,
-    project_root: Path,  # noqa: F811
+    project_root: Path,
 ) -> None:
     # Seed a wiki asset whose canonical carries a secret-shaped string.
     WikiStore.at_default().init()
@@ -599,7 +599,7 @@ async def test_install_privacy_block_is_422_no_path_leak(
 @pytest.mark.asyncio
 async def test_install_privacy_block_audits_web_surface(
     client,
-    wiki_root: Path,  # noqa: F811 — wiki_root from conftest
+    wiki_root: Path,  # wiki_root from conftest
     project_root: Path,
 ) -> None:
     # Audit attribution (backlog item b, 2026-06-29): a Gate-A block triggered

@@ -114,7 +114,7 @@ def _release_quietly(fp: IO[bytes], lock_path: Path) -> None:
     """
     try:
         portalocker.unlock(fp)
-    except Exception:  # noqa: BLE001 - reported, never raised over the body's
+    except Exception:  # noqa: BLE001 - reported, never raised over the body's exception
         logger.warning("releasing %s failed while unwinding an error", lock_path, exc_info=True)
 
 
@@ -136,7 +136,7 @@ def _close_quietly(fp: IO[bytes], lock_path: Path) -> None:
     """
     try:
         fp.close()
-    except Exception:  # noqa: BLE001 - reported, never raised over the body's
+    except Exception:  # noqa: BLE001 - reported, never raised over the body's exception
         logger.warning("closing %s failed while unwinding an error", lock_path, exc_info=True)
 
 
