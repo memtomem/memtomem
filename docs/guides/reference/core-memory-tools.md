@@ -295,6 +295,18 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > `Score:` caption under the leg footer naming the base scale and noting
 > that modifiers can rescale it; results on the `none` scale get no caption.
 
+> **Recording echo**: structured output also carries a top-level `recorded`
+> key on every response, empty ones included, echoing the `record` mode the
+> search ran with — `true` for the default recording mode, `false` when it ran
+> with `record=false`. It names the mode, not a completed write: the default
+> mode updates access counts and query history in the background, skips them
+> on a cache hit, and increments nothing for an empty result set. A caller
+> that searches in the background without recording can check on each call
+> that the server it reached treats `record=false` as "do not record" rather
+> than trust a version string, since the connection it calls through can be
+> replaced without a visible failure. Servers older than the release that
+> added the key omit it.
+
 > **Quality Lab run ID**: every ranked search persisted by the local SQLite
 > backend receives a `query_run_id`. MCP structured output and the Web search
 > API expose it as soon as the search answers — the observation row is written

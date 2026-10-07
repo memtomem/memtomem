@@ -16,9 +16,11 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 
+from memtomem.models import Chunk, ChunkMetadata, SearchResult
 from memtomem.search.pipeline import RetrievalStats
 
 pytestmark = pytest.mark.asyncio
@@ -575,7 +577,51 @@ class TestFormatterDispatch:
             score_scale="rerank",
             reranker="bge-reranker",
             query_run_id="run-1",
+            recorded=True,
         )
+
+    @pytest.mark.parametrize("record", [True, False])
+    async def test_structured_echoes_the_recording_mode_on_every_response(
+        self, monkeypatch, record
+    ):
+        """The structured payload says whether the search recorded, with and
+        without results. It is the one signal a caller that searches in the
+        background has that the server it reached treats ``record=False`` as
+        no-recording-only (#2671), and it must not depend on there being hits
+        (#2662)."""
+        chunk = Chunk(
+            content="hello",
+            metadata=ChunkMetadata(source_file=Path("/tmp/notes.md"), namespace="default"),
+            id=uuid4(),
+            embedding=[],
+        )
+        hit = SearchResult(chunk=chunk, score=0.5, rank=1, source="fused")
+
+        with_results = json.loads(
+            await _call(
+                monkeypatch,
+                app=_fake_app(),
+                results=[hit],
+                stats=RetrievalStats(final_total=1, score_scale="rrf"),
+                output_format="structured",
+                record=record,
+            )
+        )
+        empty = json.loads(
+            await _call(
+                monkeypatch,
+                app=_fake_app(),
+                results=[],
+                stats=RetrievalStats(final_total=0),
+                output_format="structured",
+                record=record,
+            )
+        )
+
+        assert with_results["recorded"] is record
+        assert with_results["results"][0]["chunk_id"] == str(chunk.id)
+        assert empty["recorded"] is record
+        assert empty["results"] == []
 
     async def test_text_output_carries_the_hints_as_a_suffix(self, monkeypatch):
         from memtomem.server.tools import search as search_mod

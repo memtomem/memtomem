@@ -7,6 +7,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mem_search(output_format="structured")` echoes `recorded`.** Every
+  structured response, empty ones included, now carries a top-level
+  `recorded` key echoing the `record` mode the search ran with: `true` for
+  the default recording mode, `false` under `record=false`. It says which
+  mode applied, not that a write happened — the default mode writes access
+  counts and query history in the background, skips them on cache hits, and
+  increments nothing for an empty result set. A caller that searches in the
+  background without recording — the Hermes memory provider planned in
+  #2662 — reads it on every response to confirm that the server it reached is
+  one where `record=false` means "do not record" (#2671), instead of inferring
+  that from a version string; the connection it calls through can be replaced
+  under it without a visible failure. Compact and verbose output are
+  unchanged, and servers before this release simply omit the key.
+
 - **The Claude plugin ships a listing icon (Claude plugin 0.5.12).** The Claude
   plugin directory takes a plugin's icon from `.claude-plugin/icon.png`, and
   only the first time the plugin is saved in its developer portal, so the file
