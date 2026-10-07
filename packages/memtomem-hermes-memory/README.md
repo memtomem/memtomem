@@ -68,7 +68,9 @@ plugins:
 ```
 
 `hermes memory setup memtomem-memory` writes the `memory.provider` line for you. It does not
-write the `mcp_allowlist` grant, so add that by hand either way.
+write the `mcp_allowlist` grant; add that yourself, in `config.yaml` as above or with
+`hermes config set plugins.entries.memtomem-memory.mcp_allowlist '[memtomem]'`. Keep the
+brackets: without them Hermes stores the string `memtomem`, which grants nothing.
 
 Start a new session. Without the `mcp_allowlist` grant Hermes lets no plugin call an MCP
 server, and the provider reports itself unavailable with the line to add.
