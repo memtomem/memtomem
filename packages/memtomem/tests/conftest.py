@@ -307,6 +307,11 @@ def _playwright_browser_available() -> bool:
 _OLLAMA_UP = _ollama_available()
 _CAN_SYMLINK = _can_create_symlink()
 _PLAYWRIGHT_OK = _playwright_browser_available()
+# The opt-in ``hermes`` contract tests import the real Hermes modules from this checkout.
+_HERMES_SRC_OK = (
+    bool(os.environ.get("HERMES_SRC"))
+    and (Path(os.environ.get("HERMES_SRC", "")) / "agent" / "memory_provider.py").is_file()
+)
 
 
 def pytest_collection_modifyitems(config, items):
@@ -317,6 +322,8 @@ def pytest_collection_modifyitems(config, items):
       symlinks (Windows without Developer Mode / admin shell).
     - ``@pytest.mark.browser`` when ``pytest-playwright`` or Chromium
       isn't installed (the harness in ``tests/web/`` needs both).
+    - ``@pytest.mark.hermes`` when ``HERMES_SRC`` does not name a Hermes Agent
+      checkout (one with ``agent/memory_provider.py``).
     """
     skip_ollama = pytest.mark.skip(reason="Ollama not running")
     skip_symlink = pytest.mark.skip(
@@ -326,6 +333,9 @@ def pytest_collection_modifyitems(config, items):
         reason="pytest-playwright + Chromium not available "
         "(install via `uv sync && uv run playwright install chromium`)"
     )
+    skip_hermes = pytest.mark.skip(
+        reason="HERMES_SRC does not name a Hermes Agent checkout (agent/memory_provider.py)"
+    )
     for item in items:
         if not _OLLAMA_UP and "ollama" in item.keywords:
             item.add_marker(skip_ollama)
@@ -333,6 +343,8 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_symlink)
         if not _PLAYWRIGHT_OK and "browser" in item.keywords:
             item.add_marker(skip_browser)
+        if not _HERMES_SRC_OK and item.get_closest_marker("hermes") is not None:
+            item.add_marker(skip_hermes)
 
 
 _LEFTOVER_LOOP_HINT = (
