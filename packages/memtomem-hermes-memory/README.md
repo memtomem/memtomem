@@ -140,8 +140,12 @@ its models, so every session's recall on that entry pauses for up to a few secon
 
 Recall is refused while the `memtomem` entry is not `trust: full`: on an untrusted entry
 Hermes would ask for approval on every turn. Hermes applies a changed `trust` value only after
-`/reload-mcp`. Until then the provider and Hermes can disagree, and recall may ask for
-approval on each attempt. Run `/reload-mcp` after changing `trust`.
+`/reload-mcp`. Until then the provider and Hermes can disagree: after an entry that Hermes
+loaded as untrusted is changed to `trust: full`, each recall attempt in a gateway chat posts an
+approval request that Hermes withdraws when that turn's reply is ready, a fraction of a second
+later, before it can be approved. Each withdrawn request counts as a failed recall and starts
+a wait. Run `/reload-mcp` after changing `trust`; recall tries the server again once the
+current wait ends.
 
 ## Profiles
 
