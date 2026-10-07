@@ -48,9 +48,12 @@ in `^{}` if there is one, otherwise of the only line, and install at it:
 hermes plugins install "https://github.com/memtomem/memtomem#packages/memtomem-hermes-memory" --ref <commit-sha>
 ```
 
-The install output says "Plugin installed but not enabled" and suggests
-`hermes plugins enable memtomem-memory`. A memory provider does not need that step: on Hermes
-0.21.5 it is active once `memory.provider` names it, without `plugins enable`.
+In a terminal the install asks `Enable 'memtomem-memory' now? [y/N]`; when it does not ask, or
+you answer no, it says "Plugin installed but not enabled" and suggests
+`hermes plugins enable memtomem-memory`. A memory provider needs neither: on Hermes 0.21.5 it is
+active once `memory.provider` names it. The exception is a provider listed under
+`plugins.disabled`, where `hermes plugins disable` puts it: Hermes does not load it until
+`hermes plugins enable memtomem-memory` takes it off that list.
 
 Then select the provider and grant it access to the `memtomem` MCP entry in
 `~/.hermes/config.yaml` (or your profile's `config.yaml`):
