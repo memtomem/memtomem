@@ -122,6 +122,7 @@ def _format_structured_results(
     score_scale: str | None = None,
     reranker: str | None = None,
     query_run_id: str | None = None,
+    recorded: bool | None = None,
 ) -> str:
     """JSON structured format for machine consumption.
 
@@ -142,6 +143,17 @@ def _format_structured_results(
     them enabled. ``reranker`` carries the rerank model ID when the scale
     is "rerank" (ranges are model-dependent). Both are top-level keys,
     omitted when None.
+
+    ``recorded`` echoes the ``record`` mode the search ran with: ``True`` for
+    the default (access counts and query history are written, in the
+    background, except on cache hits and for empty result sets), ``False``
+    for ``record=False``. It is not an acknowledgement that any write
+    happened. A caller that searches in the background without recording
+    reads it on every response to confirm that the server it reached treats
+    ``record=False`` as "do not record" (#2671) instead of inferring that
+    from a version string; a connection can be replaced under such a caller
+    with no visible failure. Emitted on empty responses too; omitted when
+    None (formatters that are not a search).
     """
     out = []
     for r in results:
@@ -181,6 +193,8 @@ def _format_structured_results(
         payload["reranker"] = reranker
     if query_run_id is not None:
         payload["query_run_id"] = query_run_id
+    if recorded is not None:
+        payload["recorded"] = recorded
     if hints:
         payload["hints"] = list(hints)
     return json.dumps(payload, ensure_ascii=False)
