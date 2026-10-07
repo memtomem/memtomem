@@ -31,7 +31,8 @@ _REGISTRY = "_memtomem_memory_admission"
 _QUERY = "what did we decide about the zebra-quokka migration"
 # Upper bound for "returned without waiting for the blocked work": far below the 30 s the fake
 # gates hold a call or a config read, far above runner jitter (a macOS CI runner took 0.3503 s
-# for a 0.3 s budget). How close the hook stays to its budget is measured on a real gateway.
+# for a 0.3 s budget). The timeout the hook gives its wait is pinned exactly by the ``waits``
+# fixture instead; how close a real hook stays to its budget is measured on a real gateway.
 _PROMPT_S = 1.0
 
 
@@ -98,6 +99,30 @@ def clock(mod: Any) -> Clock:
     fake = Clock()
     mod._registry().clock = fake
     return fake
+
+
+class RecordingEvent(threading.Event):
+    def __init__(self, seen: list[float | None]) -> None:
+        super().__init__()
+        self._seen = seen
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self._seen.append(timeout)
+        return super().wait(timeout)
+
+
+@pytest.fixture
+def waits(monkeypatch: pytest.MonkeyPatch, mod: Any) -> list[float | None]:
+    """Every timeout passed to any slot's completion wait, in order, without timing anything."""
+    seen: list[float | None] = []
+
+    class RecordedSlot(mod._Slot):
+        def __init__(self) -> None:
+            super().__init__()
+            self.done = RecordingEvent(seen)
+
+    monkeypatch.setattr(mod, "_Slot", RecordedSlot)
+    return seen
 
 
 @pytest.fixture
@@ -271,13 +296,14 @@ def test_each_failure_uses_the_submitting_instances_schedule(
     assert len(hermes.calls) == 4
 
 
-def test_the_hook_budget_is_initialization_only(mod: Any, hermes: Any) -> None:
+def test_the_hook_budget_is_initialization_only(mod: Any, hermes: Any, waits: list) -> None:
     gate = hermes.block_calls()
     short = make(mod, hermes, budget_ms=50)
     hermes.config["memory"]["memtomem-memory"]["budget_ms"] = 2000
     started = time.perf_counter()
     short.prefetch(_QUERY)
     assert time.perf_counter() - started < _PROMPT_S
+    assert waits[0] is not None and waits[0] <= 0.05
     gate.set()
     drain(mod)
     hermes.call_gate = threading.Event()
@@ -759,13 +785,17 @@ def test_recall_status_reflects_only_the_last_prefetch(mod: Any, hermes: Any, fa
     assert provider.recall_status() is None
 
 
-def test_shutdown_returns_at_once_and_the_call_still_drains(mod: Any, hermes: Any) -> None:
+def test_shutdown_returns_at_once_and_the_call_still_drains(
+    mod: Any, hermes: Any, waits: list
+) -> None:
     gate = hermes.block_calls()
     provider = make(mod, hermes, budget_ms=50)
     provider.prefetch(_QUERY)
+    before = len(waits)
     started = time.perf_counter()
     provider.shutdown()
     assert time.perf_counter() - started < _PROMPT_S
+    assert len(waits) == before  # shutdown never waits on the outstanding call
     assert admission(mod).slot is not None
     gate.set()
     drain(mod)
@@ -994,6 +1024,19 @@ def test_the_hook_returns_within_its_budget(mod: Any, hermes: Any, events: Any) 
     assert provider.prefetch(_QUERY) == ""
     assert time.perf_counter() - started < _PROMPT_S
     assert outcome(events) == "hook_timeout"
+
+
+@pytest.mark.parametrize("budget_ms", [50, 300])
+def test_the_hook_waits_at_most_its_budget(
+    mod: Any, hermes: Any, waits: list, budget_ms: int
+) -> None:
+    gate = hermes.block_calls()
+    provider = make(mod, hermes, budget_ms=budget_ms)
+    provider.prefetch(_QUERY)
+    assert len(waits) == 1
+    assert waits[0] is not None and waits[0] <= budget_ms / 1000
+    gate.set()
+    drain(mod)
 
 
 def test_no_log_record_carries_the_query(
