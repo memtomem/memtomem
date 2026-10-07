@@ -48,6 +48,10 @@ in `^{}` if there is one, otherwise of the only line, and install at it:
 hermes plugins install "https://github.com/memtomem/memtomem#packages/memtomem-hermes-memory" --ref <commit-sha>
 ```
 
+The install output says "Plugin installed but not enabled" and suggests
+`hermes plugins enable memtomem-memory`. A memory provider does not need that step: on Hermes
+0.21.5 it is active once `memory.provider` names it, without `plugins enable`.
+
 Then select the provider and grant it access to the `memtomem` MCP entry in
 `~/.hermes/config.yaml` (or your profile's `config.yaml`):
 
@@ -59,6 +63,9 @@ plugins:
     memtomem-memory:
       mcp_allowlist: [memtomem]
 ```
+
+`hermes memory setup memtomem-memory` writes the `memory.provider` line for you. It does not
+write the `mcp_allowlist` grant, so add that by hand either way.
 
 Start a new session. Without the `mcp_allowlist` grant Hermes lets no plugin call an MCP
 server, and the provider reports itself unavailable with the line to add.
