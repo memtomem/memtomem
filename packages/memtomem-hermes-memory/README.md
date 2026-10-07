@@ -98,7 +98,9 @@ read it at the same release commit you installed.
   have served through the plugin's entry.
 - The provider checks every answer. A server that does not confirm `"recorded": false` is
   older than memtomem 0.6.8; recall stays off, with one warning in the log, until the entry
-  runs a newer release.
+  runs a newer release. Each such answer starts a wait as a failure does (15, 60, then 300 s
+  at the defaults below), so once the entry is fixed and reloaded, the first turn after the
+  current wait ends calls the server again.
 - A disabled entry, a missing entry or a missing `mcp_allowlist` grant turns recall off on
   the next turn, with one warning, and nothing is called.
 
