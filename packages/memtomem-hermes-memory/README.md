@@ -120,8 +120,8 @@ tools. To keep recall from crowding those out, the provider:
 Hermes opens an entry's circuit breaker after three consecutive failed calls and then refuses
 the model's calls to it too. At the default settings (a 10 s call timeout and the 15/60/300 s
 waits above) recall alone reaches three failures only after about the times below. They are
-estimates for these scenarios, and they shrink with a shorter `rpc_timeout_seconds` or
-shorter waits:
+estimates for these scenarios. They shrink with shorter waits, and with a shorter
+`rpc_timeout_seconds`, which for a server that is not running counts only below 5 s:
 
 - about 105 s of continuous failure, for a server that stalls or a call queue held by one
   long model operation;
@@ -130,8 +130,8 @@ shorter waits:
 - about 60 s for a stalling server, or about 45 s for one that is not running, when another
   profile's healthy server runs under the same entry name and its recall succeeds between every
   two failures, which keeps each wait at 15 s. When the failing profile's turn comes first after
-  a wait, the next failure is followed by the 60 s wait as above. During each of those waits the
-  healthy profile's recall pauses too.
+  the first wait, its second failure is followed by the 60 s wait instead, as for a single
+  profile. During each of those waits the healthy profile's recall pauses too.
 
 The next successful call on the connection closes the breaker again: a long model operation
 such as a large `mem_index` finishing, a model call, or recall's own next attempt. When the
