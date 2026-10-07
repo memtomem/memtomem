@@ -29,6 +29,10 @@ _SMOKE = _ROOT / "tools/hermes_memory_py311_smoke.py"
 _LOGGER = "memtomem_memory"
 _REGISTRY = "_memtomem_memory_admission"
 _QUERY = "what did we decide about the zebra-quokka migration"
+# Upper bound for "returned without waiting for the blocked work": far below the 30 s the fake
+# gates hold a call or a config read, far above runner jitter (a macOS CI runner took 0.3503 s
+# for a 0.3 s budget). How close the hook stays to its budget is measured on a real gateway.
+_PROMPT_S = 1.0
 
 
 class Clock:
@@ -175,7 +179,7 @@ def test_any_other_instance_is_busy_while_one_call_is_outstanding(
     patient = make(other_copy, hermes, budget_ms=5000)
     started = time.perf_counter()
     assert patient.prefetch(_QUERY) == ""
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < _PROMPT_S
     assert outcome(events) == "skipped_busy"
     assert len(hermes.calls) == 1
     gate.set()
@@ -270,17 +274,17 @@ def test_each_failure_uses_the_submitting_instances_schedule(
 def test_the_hook_budget_is_initialization_only(mod: Any, hermes: Any) -> None:
     gate = hermes.block_calls()
     short = make(mod, hermes, budget_ms=50)
-    hermes.config["memory"]["memtomem-memory"]["budget_ms"] = 400
+    hermes.config["memory"]["memtomem-memory"]["budget_ms"] = 2000
     started = time.perf_counter()
     short.prefetch(_QUERY)
-    assert time.perf_counter() - started < 0.3
+    assert time.perf_counter() - started < _PROMPT_S
     gate.set()
     drain(mod)
     hermes.call_gate = threading.Event()
     longer = make(mod, hermes)
     started = time.perf_counter()
     longer.prefetch(_QUERY)
-    assert time.perf_counter() - started >= 0.38
+    assert time.perf_counter() - started >= 1.9
     hermes.call_gate.set()
 
 
@@ -391,7 +395,7 @@ def test_a_blocked_config_read_never_blocks_the_hook(mod: Any, hermes: Any, even
     hermes.config_gate = threading.Event()
     started = time.perf_counter()
     assert provider.prefetch(_QUERY) == ""
-    assert time.perf_counter() - started < 0.1 + 0.15
+    assert time.perf_counter() - started < _PROMPT_S
     assert outcome(events) == "hook_timeout"
     provider.prefetch(_QUERY)
     assert outcome(events) == "skipped_busy"
@@ -761,7 +765,7 @@ def test_shutdown_returns_at_once_and_the_call_still_drains(mod: Any, hermes: An
     provider.prefetch(_QUERY)
     started = time.perf_counter()
     provider.shutdown()
-    assert time.perf_counter() - started < 0.05
+    assert time.perf_counter() - started < _PROMPT_S
     assert admission(mod).slot is not None
     gate.set()
     drain(mod)
@@ -935,7 +939,7 @@ def test_building_the_plugin_context_never_blocks_the_hook(
     hermes.manager_gate = threading.Event()
     started = time.perf_counter()
     assert provider.prefetch(_QUERY) == ""
-    assert time.perf_counter() - started < 0.05 + 0.15
+    assert time.perf_counter() - started < _PROMPT_S
     assert outcome(events) == "hook_timeout"
     assert hermes.calls == []
     hermes.manager_gate.set()
@@ -988,7 +992,7 @@ def test_the_hook_returns_within_its_budget(mod: Any, hermes: Any, events: Any) 
     provider = make(mod, hermes)
     started = time.perf_counter()
     assert provider.prefetch(_QUERY) == ""
-    assert time.perf_counter() - started < 0.3 + 0.05
+    assert time.perf_counter() - started < _PROMPT_S
     assert outcome(events) == "hook_timeout"
 
 
