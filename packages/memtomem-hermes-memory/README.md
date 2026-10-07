@@ -125,11 +125,13 @@ shorter waits:
 
 - about 105 s of continuous failure, for a server that stalls or a call queue held by one
   long model operation;
-- about 75 s, for an entry whose server is not running;
-- about 60 s for a stalling server, or about 30 s for one that is not running, when another
-  profile's healthy server runs under the same entry name: its successful recall resets the
-  schedule between failures. During each of those waits the healthy profile's recall pauses
-  too.
+- about 90 s, for an entry whose server is not running: each attempt fails only after Hermes
+  has waited up to 5 s for the connection;
+- about 60 s for a stalling server, or about 45 s for one that is not running, when another
+  profile's healthy server runs under the same entry name and its recall succeeds between every
+  two failures, which keeps each wait at 15 s. When the failing profile's turn comes first after
+  a wait, the next failure is followed by the 60 s wait as above. During each of those waits the
+  healthy profile's recall pauses too.
 
 The next successful call on the connection closes the breaker again: a long model operation
 such as a large `mem_index` finishing, a model call, or recall's own next attempt. When the
