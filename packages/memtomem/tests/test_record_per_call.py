@@ -236,6 +236,45 @@ class TestMemAddDuplicateCheckWritesNothing:
         assert await storage.get_search_runs() == []
 
 
+class TestProcedureListWritesNothing:
+    """#2691: listing procedures runs a fixed query, which nobody searched for.
+
+    Recorded, each listing bumped the access counts of every procedure and
+    stored ``"procedure workflow steps"`` as a query — the second listing too,
+    though the result cache spared its counters.
+    """
+
+    @pytest.mark.asyncio
+    async def test_listing_twice_leaves_access_counts_and_runs_alone(self, bm25_only_components):
+        from memtomem.server.tools.procedure import mem_procedure_list
+
+        comp, _ = bm25_only_components
+        storage, pipeline = comp.storage, comp.search_pipeline
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        await storage.upsert_chunks(
+            [
+                make_chunk(
+                    f"deploy procedure workflow steps {i}", source=f"p{i}.md", tags=("procedure",)
+                )
+                for i in range(3)
+            ]
+        )
+
+        for _ in range(2):
+            out = await mem_procedure_list(ctx=ctx)  # type: ignore[arg-type]
+            await _drain_bg(pipeline)
+            assert out.startswith("Procedures: 3 found"), out
+
+        accessed = (
+            storage._get_read_db()
+            .execute("SELECT COUNT(*) FROM chunks WHERE access_count > 0")
+            .fetchone()[0]
+        )
+        assert accessed == 0
+        assert await storage.get_search_runs() == []
+
+
 class TestRecordFalseKeepsTheDenseLeg:
     """#2671: above the KNN cap, ``record=false`` used to be keyword-only."""
 
