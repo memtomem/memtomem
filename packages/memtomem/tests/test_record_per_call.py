@@ -183,6 +183,59 @@ class TestEndToEndNoWrites:
         assert len(await storage.get_search_runs()) == 1
 
 
+class TestMemAddDuplicateCheckWritesNothing:
+    """#2683: ``mem_add``'s duplicate check is an internal read, not a search.
+
+    It searches for the note it just wrote; recorded, that bumped the access
+    counts of every hit (the new note included) and stored the note body as
+    a query.
+    """
+
+    @pytest.mark.asyncio
+    async def test_mem_add_leaves_access_counts_and_runs_alone(
+        self, bm25_only_components, monkeypatch
+    ):
+        from memtomem.server.tools.memory_crud import mem_add
+
+        comp, _ = bm25_only_components
+        storage, pipeline = comp.storage, comp.search_pipeline
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        # The check swallows its own failures, so prove it actually ran: a
+        # check that raised, or was skipped, would write nothing either.
+        completed: list[dict] = []
+        real_search = pipeline.search
+
+        async def spy(*args, **kwargs):
+            result = await real_search(*args, **kwargs)
+            completed.append(kwargs)
+            return result
+
+        monkeypatch.setattr(pipeline, "search", spy)
+
+        await storage.upsert_chunks(
+            [make_chunk(f"duplicate check marker body {i}", source=f"d{i}.md") for i in range(3)]
+        )
+
+        note = "duplicate check marker body"
+        out = await mem_add(content=note, ctx=ctx)  # type: ignore[arg-type]
+        await _drain_bg(pipeline)
+
+        assert "Error" not in out, out
+        assert [kw.get("record") for kw in completed] == [False]
+        # Sanity: the check's own query hits the seeds and the new note, so a
+        # recorded check would have had four chunks to count.
+        hits, _ = await real_search(note, top_k=5, record=False)
+        assert len(hits) >= 4, hits
+        accessed = (
+            storage._get_read_db()
+            .execute("SELECT COUNT(*) FROM chunks WHERE access_count > 0")
+            .fetchone()[0]
+        )
+        assert accessed == 0
+        assert await storage.get_search_runs() == []
+
+
 class TestRecordFalseKeepsTheDenseLeg:
     """#2671: above the KNN cap, ``record=false`` used to be keyword-only."""
 
