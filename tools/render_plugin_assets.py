@@ -19,6 +19,7 @@ CODEX_ROOT = ROOT / "plugins" / "memtomem"
 KIMI_ROOT = ROOT / "packages" / "memtomem-kimi-skills"
 OPENCODE_ROOT = ROOT / "packages" / "opencode-memtomem"
 HERMES_ROOT = ROOT / "packages" / "memtomem-hermes-plugin"
+HERMES_MEMORY_ROOT = ROOT / "packages" / "memtomem-hermes-memory"
 
 # Workflow sources may carry scope variants: a host that starts the server inside the
 # user's project renders the `project` blocks, one that starts it elsewhere (no project
@@ -287,6 +288,21 @@ def _hermes_plugin_manifest(contract: dict) -> str:
     return json.dumps(payload, indent=2) + "\n"
 
 
+def _hermes_memory_manifest(contract: dict) -> str:
+    # Hermes reads `name` with yaml.safe_load and `description` for its listings. No `hooks:`
+    # key: the provider registers no general-plugin hooks. tools/release_preflight.py reads
+    # `version` back without PyYAML, so the shape of that line is part of the contract.
+    description = (
+        "Recall-only memtomem memory provider: injects relevant long-term memories on each "
+        "turn through Hermes's own memtomem MCP connection."
+    )
+    return (
+        f"name: {_yaml_q('memtomem-memory')}\n"
+        f"version: {_yaml_q(contract['plugins']['hermes_memory_version'])}\n"
+        f"description: {_yaml_q(description)}\n"
+    )
+
+
 def expected_files() -> dict[Path, str]:
     contract = tomllib.loads(CONTRACT.read_text(encoding="utf-8"))
     files: dict[Path, str] = {
@@ -303,6 +319,7 @@ def expected_files() -> dict[Path, str]:
         OPENCODE_ROOT / "src" / "generated.ts": _opencode_generated(contract),
         HERMES_ROOT / "mcp.json": _hermes_mcp_config(contract),
         HERMES_ROOT / "plugin.json": _hermes_plugin_manifest(contract),
+        HERMES_MEMORY_ROOT / "plugin.yaml": _hermes_memory_manifest(contract),
     }
     for workflow in contract["workflows"]:
         body = _workflow_body(workflow["id"], "project")

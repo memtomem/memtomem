@@ -1,0 +1,3 @@
+name: "memtomem-memory"
+version: "0.1.0"
+description: "Recall-only memtomem memory provider: injects relevant long-term memories on each turn through Hermes's own memtomem MCP connection."

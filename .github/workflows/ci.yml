@@ -52,8 +52,8 @@ jobs:
       # `uv sync --frozen` (which neither checks nor regenerates the lock).
       - run: uv lock --check
       - run: uv sync --frozen
-      - run: uv run ruff check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
-      - run: uv run ruff format --check packages/memtomem/src packages/memtomem/tests tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
+      - run: uv run ruff check packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
+      - run: uv run ruff format --check packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
 
   typecheck:
     runs-on: ubuntu-latest
@@ -399,6 +399,23 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run pack:check
+
+  hermes-memory-py311:
+    # Hermes Agent supports Python 3.11 while this monorepo targets 3.12, so the
+    # memtomem-memory provider (packages/memtomem-hermes-memory) is written for 3.11.
+    # A syntax check cannot see a 3.12-only standard-library API; this runs one recall
+    # turn through the provider under a real 3.11 against the fake Hermes modules.
+    name: hermes-memory (Python 3.11 smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv run --no-project --python 3.11 python tools/hermes_memory_py311_smoke.py --repo-root .
 
   packaging-smoke:
     # Mirrors the wheel-install half of the release preflight so a dependency

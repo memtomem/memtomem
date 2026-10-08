@@ -21,6 +21,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   under it without a visible failure. Compact and verbose output are
   unchanged, and servers before this release simply omit the key.
 
+- **`packages/memtomem-hermes-memory/` is a recall-only Hermes Agent memory
+  provider, `memtomem-memory` 0.1.0 (#2662).** On each non-trivial user turn it
+  makes one `mem_search(record=False, rerank=False)` call on the `memtomem` MCP
+  entry through Hermes's own MCP client and injects up to five results, within
+  a 300 ms budget. It owns no server and writes nothing. Because that
+  connection's call queue and circuit breaker are shared with the model's own
+  memtomem tools, it makes at most one recall call per entry name per process
+  and backs off 15 s, 60 s, then 300 s after failures. It needs memtomem 0.6.8
+  or later on the entry: it refuses a server whose answer does not echo
+  `"recorded": false`. Standard library only and Python 3.11 compatible; a new
+  CI job runs it under 3.11. The release preflight's Hermes version-bump check
+  now covers this package as well (`[plugins] hermes_memory_version`).
+
 - **The Claude plugin ships a listing icon (Claude plugin 0.5.12).** The Claude
   plugin directory takes a plugin's icon from `.claude-plugin/icon.png`, and
   only the first time the plugin is saved in its developer portal, so the file
