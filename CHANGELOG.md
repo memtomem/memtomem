@@ -14,34 +14,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   mode applied, not that a write happened — the default mode writes access
   counts and query history in the background, skips them on cache hits, and
   increments nothing for an empty result set. A caller that searches in the
-  background without recording — the Hermes memory provider planned in
-  #2662 — reads it on every response to confirm that the server it reached is
-  one where `record=false` means "do not record" (#2671), instead of inferring
-  that from a version string; the connection it calls through can be replaced
-  under it without a visible failure. Compact and verbose output are
-  unchanged, and servers before this release simply omit the key.
+  background without recording — the Hermes memory provider added in this
+  release (#2662) — reads it on every response to confirm that the server it
+  reached is one where `record=false` means "do not record" (#2671), instead
+  of inferring that from a version string; the connection it calls through
+  can be replaced under it without a visible failure. Compact and verbose
+  output are unchanged, and servers before this release simply omit the key.
 
 - **`packages/memtomem-hermes-memory/` is a recall-only Hermes Agent memory
   provider, `memtomem-memory` 0.1.0 (#2662).** On each non-trivial user turn it
   makes one `mem_search(record=False, rerank=False)` call on the `memtomem` MCP
   entry through Hermes's own MCP client and injects up to five results, within
-  a 300 ms budget. It owns no server and writes nothing. Because that
-  connection's call queue and circuit breaker are shared with the model's own
-  memtomem tools, it makes at most one recall call per entry name per process
-  and backs off 15 s, 60 s, then 300 s after failures. It needs memtomem 0.6.8
-  or later on the entry: it refuses a server whose answer does not echo
+  a 300 ms budget (both defaults; the package README lists the settings). It
+  owns no server and writes nothing. Because that connection's call queue and
+  circuit breaker are shared with the model's own memtomem tools, it makes at
+  most one recall call at a time per entry name per process and by default
+  backs off 15 s, 60 s, then 300 s after failures. It needs memtomem 0.6.8 or
+  later on the entry: it refuses a server whose answer does not echo
   `"recorded": false`. Standard library only and Python 3.11 compatible; a new
   CI job runs it under 3.11. The release preflight's Hermes version-bump check
   now covers this package as well (`[plugins] hermes_memory_version`).
 
+- **The Claude plugin directory reads the plugin from its own branch
+  (#2682).** The directory tracks the branch `claude-plugin-directory`, which
+  holds only `packages/memtomem-claude-plugin`, because its validator refuses
+  this repository's root `pyproject.toml`. Pushing a `claude-plugin-vX.Y.Z`
+  tag on a `main` commit adds one commit to that branch after a preflight
+  check; merging to `main` does not change it, so the directory can lag `main`
+  until the next such tag.
 - **The Claude plugin ships a listing icon (Claude plugin 0.5.12).** The Claude
   plugin directory takes a plugin's icon from `.claude-plugin/icon.png`, and
   only the first time the plugin is saved in its developer portal, so the file
   has to be in place before that save. It is the web UI's favicon drawn as a
   512 × 512 PNG, with the lettering reduced so a round crop does not cut it.
 - **The Claude plugin names a privacy policy for its directory listing (Claude
-  plugin 0.5.13).** `plugin.json` sets `privacyPolicyUrl` to the plugin
-  README's "What this plugin runs and connects to" section. That section now
+  plugin 0.5.13).** The plugin README has a new section, "What this plugin
+  runs and connects to" (#2666): the server the plugin launches and what uv
+  downloads for it, where memories and the index are stored, and which network
+  use is opt-in. `plugin.json` sets `privacyPolicyUrl` to that section, which
   also describes the local search history (query text and result metadata,
   including the text of each note `mem_add` checks for duplicates, with no
   reliable expiry) and that memory text returned by search, recall and read
@@ -82,10 +92,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Runtime builds from 1.29 upload on Linux and macOS; Windows builds do not
   read it. If you also registered the server by hand with the plugin's command
   but a different environment, `mm doctor --claude-mcp` notes that the
-  environments differ and that your entry wins. With the 0.6.7 core the
-  plugins pin, such an entry runs with the switch only if its own environment
-  sets the variable; from the core release that carries the entry above, the
-  server sets it by default.
+  environments differ and that your entry wins. On a 0.6.7 server such an
+  entry runs with the switch only if its own environment sets the variable;
+  from 0.6.8 the server sets it by default (entry above).
 
 ### Fixed
 
