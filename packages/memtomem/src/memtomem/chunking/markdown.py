@@ -337,10 +337,22 @@ class MarkdownChunker:
             # Parent context: parent heading text (if depth >= 2)
             parent_ctx = hierarchy[-2] if len(hierarchy) >= 2 else ""
 
+            # Body offset from the section's first line: the heading
+            # itself (when the section has one — headingless sections
+            # start directly at content, so counting a phantom heading
+            # would shift every sub-chunk range one line down, #1807) +
+            # blank lines stripped by .strip() before the blockquote +
+            # blockquote group + trailing blanks.
+            heading_line = 1 if section["hierarchy"] else 0
+            body_offset = heading_line + leading_strip_lines + blockquote_strip_lines
+
             if est_tokens <= self._max_tokens:
+                body_line = section["start_line"] + body_offset
                 chunks.append(
                     Chunk(
                         content=text,
+                        # ``start_line`` stays on the heading; the body starts below it.
+                        line_map=tuple(range(body_line, body_line + text.count("\n") + 1)),
                         metadata=ChunkMetadata(
                             source_file=file_path,
                             heading_hierarchy=tuple(hierarchy),
@@ -356,21 +368,14 @@ class MarkdownChunker:
                     )
                 )
             else:
-                # Body offset from the section's first line: the heading
-                # itself (when the section has one — headingless sections
-                # start directly at content, so counting a phantom heading
-                # would shift every sub-chunk range one line down, #1807) +
-                # blank lines stripped by .strip() before the blockquote +
-                # blockquote group + trailing blanks. ``_split_section``
-                # uses this to seed its internal line counter so sub-chunk
-                # boundaries map back to real file lines.
-                heading_line = 1 if section["hierarchy"] else 0
-                body_offset = heading_line + leading_strip_lines + blockquote_strip_lines
+                # ``_split_section`` uses the body offset to seed its internal
+                # line counter so sub-chunk boundaries map back to file lines.
                 sub_chunks = self._split_section(text, section, body_offset=body_offset)
                 for sc in sub_chunks:
                     chunks.append(
                         Chunk(
                             content=sc["text"],
+                            line_map=sc["line_map"],
                             metadata=ChunkMetadata(
                                 source_file=file_path,
                                 heading_hierarchy=tuple(hierarchy),
@@ -621,44 +626,66 @@ class MarkdownChunker:
         current_start = 0
         current_end = 0
 
-        def chunk_record(chunk_text: str, span_start: int, span_end: int) -> dict:
+        def line_of(pos: int) -> int:
+            return base_line + body_offset + text.count("\n", 0, pos)
+
+        def own_lines(start: int, part_text: str) -> tuple[int, ...]:
+            first = line_of(start)
+            return tuple(range(first, first + part_text.count("\n") + 1))
+
+        def chunk_record(
+            chunk_text: str, chunk_map: tuple[int, ...], span_start: int, span_end: int
+        ) -> dict:
             source_segment = text[span_start:span_end]
             leading_chars = len(source_segment) - len(source_segment.lstrip())
             trimmed_start = span_start + leading_chars
             trimmed_end = span_start + len(source_segment.rstrip())
             last_char = max(trimmed_start, trimmed_end - 1)
-            source_start_line = base_line + body_offset + text.count("\n", 0, trimmed_start)
-            source_end_line = base_line + body_offset + text.count("\n", 0, last_char)
+            source_start_line = line_of(trimmed_start)
+            source_end_line = line_of(last_char)
+            stripped = chunk_text.strip()
+            skip = chunk_text.count("\n", 0, len(chunk_text) - len(chunk_text.lstrip()))
             return {
-                "text": chunk_text.strip(),
+                "text": stripped,
                 # Keep the first sub-chunk anchored to its heading for mem_edit.
                 "start_line": base_line if not result else source_start_line,
                 "end_line": source_end_line,
+                "line_map": chunk_map[skip : skip + stripped.count("\n") + 1],
             }
 
+        # ``current_map`` follows ``current`` line for line (see ``Chunk.line_map``).
+        current_map: tuple[int, ...] = ()
         for part in text_parts:
             separator = text[current_end : part.start] if current else ""
             if current and len(current) + len(separator) + len(part.text) > max_chars:
-                result.append(chunk_record(current, current_start, current_end))
+                result.append(chunk_record(current, current_map, current_start, current_end))
                 # Apply overlap
                 if overlap_chars > 0:
                     overlap_text = current[-overlap_chars:]
+                    first = current.count("\n", 0, len(current) - len(overlap_text))
+                    borrowed = tuple(-abs(n) for n in current_map[first:])
                     current = overlap_text + "\n\n" + part.text
+                    current_map = borrowed + (0,) + own_lines(part.start, part.text)
                 else:
                     current = part.text
+                    current_map = own_lines(part.start, part.text)
                 current_start = part.start
                 current_end = part.end
             else:
                 if current:
-                    current += separator + part.text
+                    appended = separator + part.text
+                    current += appended
+                    last = line_of(current_end)
+                    current_map += tuple(range(last + 1, last + 1 + appended.count("\n")))
                     current_end = part.end
                 else:
                     current = part.text
+                    current_map = own_lines(part.start, part.text)
                     current_start = part.start
                     current_end = part.end
 
         if current.strip():
-            result.append(chunk_record(current, current_start, current_end))
+            result.append(chunk_record(current, current_map, current_start, current_end))
 
         # Mark overlap
         for i, r in enumerate(result):

@@ -3950,7 +3950,18 @@ def _merge_pair(current: Chunk, nxt: Chunk) -> Chunk:
         end_line=nxt.metadata.end_line,
         tags=tuple(set(current.metadata.tags) | set(nxt.metadata.tags)),
     )
-    return Chunk(content=content, metadata=new_meta)
+    # Mirrors ``_build_merged_content``: a restored heading block is its lines
+    # plus one blank, and the two bodies are joined by one blank line. Count
+    # the rendered newlines: a decoded YAML key can span several lines.
+    labels = [
+        (0,) * ("\n".join(dropped).count("\n") + 2) if dropped else ()
+        for dropped in (
+            current.metadata.heading_hierarchy[len(hierarchy) :],
+            nxt.metadata.heading_hierarchy[len(hierarchy) :],
+        )
+    ]
+    line_map = labels[0] + current.source_line_map() + (0,) + labels[1] + nxt.source_line_map()
+    return Chunk(content=content, metadata=new_meta, line_map=line_map)
 
 
 def _merge_short_chunks(
@@ -4065,6 +4076,9 @@ def _add_overlap(chunks: list[Chunk], overlap_tokens: int) -> list[Chunk]:
         ob = 0  # overlap_before char count
         oa = 0  # overlap_after char count
 
+        prefix_map: tuple[int, ...] = ()
+        suffix_map: tuple[int, ...] = ()
+
         # Borrow from previous chunk (same file)
         if i > 0 and chunks[i - 1].metadata.source_file == c.metadata.source_file:
             prev_content = chunks[i - 1].content
@@ -4072,6 +4086,8 @@ def _add_overlap(chunks: list[Chunk], overlap_tokens: int) -> list[Chunk]:
                 prev_content[-overlap_chars:] if len(prev_content) > overlap_chars else prev_content
             )
             ob = len(prefix)
+            first = prev_content.count("\n", 0, len(prev_content) - ob)
+            prefix_map = tuple(-abs(n) for n in chunks[i - 1].source_line_map()[first:])
 
         # Borrow from next chunk (same file)
         if i + 1 < len(chunks) and chunks[i + 1].metadata.source_file == c.metadata.source_file:
@@ -4080,6 +4096,9 @@ def _add_overlap(chunks: list[Chunk], overlap_tokens: int) -> list[Chunk]:
                 next_content[:overlap_chars] if len(next_content) > overlap_chars else next_content
             )
             oa = len(suffix)
+            suffix_map = tuple(
+                -abs(n) for n in chunks[i + 1].source_line_map()[: suffix.count("\n") + 1]
+            )
 
         if ob == 0 and oa == 0:
             result.append(c)
@@ -4099,5 +4118,7 @@ def _add_overlap(chunks: list[Chunk], overlap_tokens: int) -> list[Chunk]:
         # constructor args would silently drop fields the merger
         # doesn't know about — same rationale as :meth:`_merge_pair`.
         new_meta = dataclasses.replace(c.metadata, overlap_before=ob, overlap_after=oa)
-        result.append(Chunk(content=new_content, metadata=new_meta))
+        # Borrowed lines keep the source lines they came from, negated.
+        line_map = prefix_map + c.source_line_map() + suffix_map
+        result.append(Chunk(content=new_content, metadata=new_meta, line_map=line_map))
     return result

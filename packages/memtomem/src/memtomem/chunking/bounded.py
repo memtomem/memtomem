@@ -188,27 +188,60 @@ class TokenBudget:
         self.validate_composed(chunk)
 
 
+def _fragment_lines(line_map: tuple[int, ...], first: int, last: int) -> tuple[int, int] | None:
+    """Source range of content lines ``first..last``, from the body's line map.
+
+    A fragment's own lines set its range. One made only of borrowed overlap
+    takes where that text sits in the file, so two identical borrowed bodies do
+    not share a start line; one holding only merge labels takes the nearest
+    source line around it. ``None`` when the map knows no line at all.
+    """
+    window = line_map[first : last + 1]
+    lines = [n for n in window if n > 0] or [-n for n in window if n < 0]
+    if lines:
+        return min(lines), max(lines)
+    before = next((abs(n) for n in reversed(line_map[:first]) if n), 0)
+    anchor = before or next((abs(n) for n in line_map[last + 1 :] if n), 0)
+    return (anchor, anchor) if anchor else None
+
+
 def bound_chunks(
     chunks: list[Chunk], config: IndexingConfig, *, preserve_source_lines: bool = False
 ) -> list[Chunk]:
     budget = TokenBudget(config)
     result: list[Chunk] = []
+    copies: set[int] = set()
     for chunk in chunks:
         spans = budget.spans(chunk.content)
+        # Decoded JSON strings have virtual newlines: retain their source
+        # scalar span rather than pretending those lines exist in the file.
+        virtual = preserve_source_lines or len(spans) == 1
+        first, last = chunk.metadata.start_line, chunk.metadata.end_line
+        # A merged or overlapped body is not its span line for line, so its
+        # newlines cannot be counted from ``start_line``; read the line map
+        # the step that rewrote it left behind.
+        line_map = chunk.source_line_map()
         for index, (start, end) in enumerate(spans):
             body = chunk.content[start:end]
-            line = chunk.metadata.start_line + chunk.content.count("\n", 0, start)
-            # Decoded JSON strings have virtual newlines: retain their source
-            # scalar span rather than pretending those lines exist in the file.
-            virtual = preserve_source_lines or len(spans) == 1
+            offset = chunk.content.count("\n", 0, start)
+            last_line = offset + body[:-1].count("\n")
+            lines = _fragment_lines(line_map, offset, last_line)
+            # Placed by the map yet holding no line of its own: borrowed overlap
+            # or merge labels only.
+            sourceless = (
+                not virtual
+                and lines is not None
+                and not any(n > 0 for n in line_map[offset : last_line + 1])
+            )
+            line, line_end = lines or (first + offset, first + offset + body[:-1].count("\n"))
             meta = replace(
                 chunk.metadata,
                 source_read_only=chunk.metadata.source_read_only
                 or len(spans) > 1
                 or preserve_source_lines,
                 source_span_hash=None,
-                start_line=chunk.metadata.start_line if virtual else line,
-                end_line=chunk.metadata.end_line if virtual else line + body[:-1].count("\n"),
+                start_line=first if virtual else line,
+                end_line=last if virtual else line_end,
                 overlap_before=max(0, min(end, chunk.metadata.overlap_before) - start),
                 overlap_after=max(
                     0, end - max(start, len(chunk.content) - chunk.metadata.overlap_after)
@@ -238,7 +271,23 @@ def bound_chunks(
                 )
             )
             result.append(budget.describe(part, description))
-    return result
+            if sourceless:
+                copies.add(id(result[-1]))
+    # A fragment with no line of its own takes its position from text it does
+    # not hold, so it can match another fragment byte for byte at the same line
+    # and share the storage key ``(content_hash, start_line)``: an insert keeps
+    # one of the two and a line-range refresh fails on the unique index. Drop
+    # the copy here; the same bytes stay at that line in the fragment kept.
+    owned = {(c.content_hash, c.metadata.start_line) for c in result if id(c) not in copies}
+    kept: list[Chunk] = []
+    for chunk in result:
+        key = (chunk.content_hash, chunk.metadata.start_line)
+        if id(chunk) in copies:
+            if key in owned:
+                continue
+            owned.add(key)
+        kept.append(chunk)
+    return kept
 
 
 @dataclass

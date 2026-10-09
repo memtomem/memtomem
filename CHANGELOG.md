@@ -33,6 +33,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   already on disk, including note bodies stored by `mem_add`'s duplicate check
   before #2683, go with the first recorded search after upgrading; a store
   that records no further searches keeps them.
+- **Chunks split at the exact token cap report the lines they hold
+  (#2679).** With an exact chunk budget (the E5 CPU profile), a chunk over the
+  cap is split into fragments, and each fragment's `start_line`/`end_line`
+  was found by counting newlines from its parent's first line. That count is
+  wrong whenever the parent's body is not its source span line for line:
+  merged YAML/TOML keys carry a restored key label and a blank line each,
+  Markdown sections drop their heading, and `chunk_overlap_tokens` borrows
+  text from neighbours. Fragments then pointed at the wrong lines, overlapped
+  each other, and could run past the end of the file. Measured on the
+  repository's docs and the Slateharbor sample, 4,199 of 7,264 checked
+  fragment boundaries were wrong and 48 fragments ended past the end of their
+  file; after the fix, none end past the end and the 3 boundaries still
+  counted wrong are fragments that begin on the previous line's newline,
+  which the range assigns to that line, as before. The steps that rewrite a
+  body now record which source line each of its lines came from, and the
+  split reads that record. Fragment contents are unchanged, except that a
+  fragment holding no line of its own (only borrowed overlap, or only a long
+  merge label) is dropped when it repeats another fragment byte for byte at
+  the same line; that text stays in the other fragment. A file indexed before
+  the upgrade keeps its old ranges until it is next edited; that re-index
+  updates the ranges without re-embedding. `mm index --force` updates them at
+  once but re-embeds every chunk.
 
 ## [0.6.8] — 2026-10-08
 
