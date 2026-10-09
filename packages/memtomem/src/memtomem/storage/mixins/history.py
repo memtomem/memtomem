@@ -124,9 +124,10 @@ class HistoryMixin:
         so the pipeline returns without waiting for this method (or the
         history prune it runs), and a run ID can be in a caller's hands before
         its row exists. The write is still synchronous SQLite on the event
-        loop: while it runs, nothing else on that loop makes progress. ``SearchPipeline.flush_observation`` is how a reader that needs
-        the row waits for it; a write that fails leaves the ID unresolvable,
-        and feedback on it is rejected by the ``run_id`` foreign key.
+        loop: while it runs, nothing else on that loop makes progress.
+        ``SearchPipeline.flush_observation`` is how a reader that needs the
+        row waits for it; a write that fails leaves the ID unresolvable, and
+        feedback on it is rejected by the ``run_id`` foreign key.
 
         ``created_at`` is passed in for the same reason: history is ordered and
         ``since``-filtered on it, so it has to record when the search ran, not
