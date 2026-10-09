@@ -90,7 +90,10 @@ directory; with a `uvx` launch that location is inside uv's cache (normally `~/.
 so the nearest `.env` among that cache's ancestor directories is applied — normally
 `~/.env`, unless a nearer one such as `~/.cache/.env` exists — while one in the plugin
 directory or where you start Hermes is not. A `MEMTOMEM_*` setting in
-`~/.env` therefore does reach this server.
+`~/.env` therefore does reach this server. The file is applied whole, not only its
+`MEMTOMEM_*` lines: every variable in it that is not already set enters the server's
+environment, API keys included, regardless of Hermes's allowlist. A variable already set
+keeps its value.
 
 ## Scope
 
