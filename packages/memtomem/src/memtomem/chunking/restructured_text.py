@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from memtomem.chunking.base import split_source_lines
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
 
 # RST adornment characters (any non-alphanumeric printable ASCII)
@@ -67,7 +68,7 @@ class ReStructuredTextChunker:
         return chunks
 
     def _split_by_headings(self, content: str) -> list[dict]:
-        lines = content.splitlines()
+        lines = split_source_lines(content)
         # Detect section headers and their levels.
         # level_order maps adornment character to its depth (0-indexed).
         level_order: dict[tuple[str, bool], int] = {}

@@ -1543,7 +1543,7 @@ class IndexEngine:
             else self._prepare_index_projection(file_path, content, scope)
         )
         content = projection.content
-        chunks = self._chunk_projected_content(file_path, content)
+        chunks = _drop_storage_key_copies(self._chunk_projected_content(file_path, content))
         if projection.redaction_count:
             for chunk in chunks:
                 # Keep whatever retrieval text the chunker produced. On the
@@ -3962,6 +3962,24 @@ def _merge_pair(current: Chunk, nxt: Chunk) -> Chunk:
     ]
     line_map = labels[0] + current.source_line_map() + (0,) + labels[1] + nxt.source_line_map()
     return Chunk(content=content, metadata=new_meta, line_map=line_map)
+
+
+def _drop_storage_key_copies(chunks: list[Chunk]) -> list[Chunk]:
+    """Keep the first chunk of each storage key ``(content_hash, start_line)``.
+
+    Identical text can sit twice on one line, as when a structured value holds
+    a separator PyYAML breaks on but ``\\n`` does not. Storage keys rows on that
+    pair: an insert keeps one of the two and a line-range refresh fails on the
+    unique index. The bytes dropped stay at that line in the chunk kept.
+    """
+    seen: set[tuple[str, int]] = set()
+    kept: list[Chunk] = []
+    for chunk in chunks:
+        key = (chunk.content_hash, chunk.metadata.start_line)
+        if key not in seen:
+            seen.add(key)
+            kept.append(chunk)
+    return kept
 
 
 def _merge_short_chunks(

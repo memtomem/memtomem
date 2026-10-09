@@ -16,6 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from memtomem.chunking.base import split_source_lines
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
 
 if TYPE_CHECKING:
@@ -319,7 +320,7 @@ def _python_structure(text: str, lines: list[int]) -> tuple[list[_Symbol], set[i
     tree = ast.parse(text)
     symbols: list[_Symbol] = []
     statements: set[int] = set()
-    source_lines = text.splitlines()
+    source_lines = split_source_lines(text)
     for node in ast.walk(tree):
         if isinstance(node, ast.stmt):
             statements.add(offset(node.lineno - 1))
@@ -871,7 +872,7 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
                 metadata=ChunkMetadata(
                     source_file=path,
                     start_line=1,
-                    end_line=len(text.splitlines()),
+                    end_line=len(split_source_lines(text)),
                 ),
             )
         ]

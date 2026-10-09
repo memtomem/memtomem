@@ -14,6 +14,7 @@ import logging
 import tomllib
 from pathlib import Path
 
+from memtomem.chunking.base import physical_line_numbers
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
 
 logger = logging.getLogger(__name__)
@@ -86,7 +87,10 @@ class StructuredChunker:
         content: str,
         data: dict,
     ) -> list[Chunk]:
+        # Keys are found on ``splitlines`` lines, the lines PyYAML reads (it breaks
+        # on U+2028 and U+0085 too), and reported on the ``\n`` lines they sit on.
         lines = content.splitlines(keepends=True)
+        line_numbers = physical_line_numbers(content)
         key_ranges = self._find_key_lines(file_path.suffix, content, list(data.keys()))
         filename = file_path.stem
         chunks: list[Chunk] = []
@@ -120,14 +124,18 @@ class StructuredChunker:
                             source_file=file_path,
                             heading_hierarchy=(filename, str(key)),
                             chunk_type=ChunkType.RAW_TEXT,
-                            start_line=start,
-                            end_line=end,
+                            start_line=line_numbers[start - 1],
+                            end_line=line_numbers[end - 1],
                         ),
                     )
                 )
             else:
                 # Split large section by line groups
-                chunks.extend(self._split_lines(file_path, lines, start, end, (filename, str(key))))
+                chunks.extend(
+                    self._split_lines(
+                        file_path, lines, line_numbers, start, end, (filename, str(key))
+                    )
+                )
 
         return chunks if chunks else self._fallback(file_path, content)
 
@@ -135,6 +143,7 @@ class StructuredChunker:
         self,
         file_path: Path,
         all_lines: list[str],
+        line_numbers: list[int],
         start: int,
         end: int,
         hierarchy: tuple[str, ...],
@@ -156,8 +165,8 @@ class StructuredChunker:
                             source_file=file_path,
                             heading_hierarchy=hierarchy,
                             chunk_type=ChunkType.RAW_TEXT,
-                            start_line=buf_start,
-                            end_line=buf_start + len(buf) - 1,
+                            start_line=line_numbers[buf_start - 1],
+                            end_line=line_numbers[buf_start + len(buf) - 2],
                         ),
                     )
                 )
@@ -175,8 +184,8 @@ class StructuredChunker:
                         source_file=file_path,
                         heading_hierarchy=hierarchy,
                         chunk_type=ChunkType.RAW_TEXT,
-                        start_line=buf_start,
-                        end_line=buf_start + len(buf) - 1,
+                        start_line=line_numbers[buf_start - 1],
+                        end_line=line_numbers[buf_start + len(buf) - 2],
                     ),
                 )
             )
