@@ -267,9 +267,9 @@ class TestPromotion:
         db = storage._get_db()
         db.execute("UPDATE query_history SET created_at = '2020-01-01T00:00:00+00:00'")
         db.commit()
-        storage._prune_old_history()
+        await storage.save_query_history("later query", [], [], [])  # prunes RUN_A
 
-        assert db.execute("SELECT COUNT(*) FROM query_history").fetchone()[0] == 0
+        assert [r[0] for r in db.execute("SELECT query_text FROM query_history")] == ["later query"]
         survived = await storage.get_eval_case(case["case_id"])
         assert survived["source_run_id"] == RUN_A  # dangling provenance, not an FK
         assert len(survived["labels"]) == 2

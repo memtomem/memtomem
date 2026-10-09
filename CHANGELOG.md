@@ -23,6 +23,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   count of every listed procedure, lifting procedures in ordinary search
   ranking. It now runs with `record=False`, which also skips the result
   cache; the listing's query, filters and format are unchanged.
+- **Search history older than 90 days is deleted on the next recorded
+  search (#2686).** The 90-day prune of `query_history` (and, through the
+  foreign key, the feedback on those runs) ran only on every 100th search a
+  process recorded, and the count restarted in every process. A per-session
+  MCP server or a CLI run that recorded fewer than 100 searches never pruned,
+  so history was in practice kept indefinitely. Every recorded search now
+  deletes the expired rows in the same write that stores it. Expired rows
+  already on disk, including note bodies stored by `mem_add`'s duplicate check
+  before #2683, go with the first recorded search after upgrading; a store
+  that records no further searches keeps them.
 
 ## [0.6.8] — 2026-10-08
 

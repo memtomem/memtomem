@@ -746,6 +746,9 @@ _PARTICIPANT_HELPERS: dict[tuple[str, str], str] = {
     ("maintenance_runs.py", "MaintenanceRunMixin._prune_maintenance_runs"): (
         "DELETEs run rows past the retention window."
     ),
+    ("history.py", "HistoryMixin._prune_old_history"): (
+        "DELETEs history rows past the retention window."
+    ),
     ("formation.py", "FormationMixin._record_candidate_transition"): (
         "INSERTs the audit row for a state change its caller is making."
     ),
