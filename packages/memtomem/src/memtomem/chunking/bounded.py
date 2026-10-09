@@ -226,8 +226,13 @@ def bound_chunks(
             offset = chunk.content.count("\n", 0, start)
             last_line = offset + body[:-1].count("\n")
             lines = _fragment_lines(line_map, offset, last_line)
-            window = line_map[offset : last_line + 1]
-            borrowed_only = not any(n > 0 for n in window) and any(n < 0 for n in window)
+            # Placed by the map yet holding no line of its own: borrowed overlap
+            # or merge labels only.
+            sourceless = (
+                not virtual
+                and lines is not None
+                and not any(n > 0 for n in line_map[offset : last_line + 1])
+            )
             line, line_end = lines or (first + offset, first + offset + body[:-1].count("\n"))
             meta = replace(
                 chunk.metadata,
@@ -266,12 +271,13 @@ def bound_chunks(
                 )
             )
             result.append(budget.describe(part, description))
-            if borrowed_only:
+            if sourceless:
                 copies.add(id(result[-1]))
-    # A fragment of borrowed overlap alone repeats text another fragment owns.
-    # Matching one byte for byte at the same line, it would share the storage
-    # key ``(content_hash, start_line)``: an insert keeps one of the two and a
-    # line-range refresh fails on the unique index. Drop the copy here.
+    # A fragment with no line of its own takes its position from text it does
+    # not hold, so it can match another fragment byte for byte at the same line
+    # and share the storage key ``(content_hash, start_line)``: an insert keeps
+    # one of the two and a line-range refresh fails on the unique index. Drop
+    # the copy here; the same bytes stay at that line in the fragment kept.
     owned = {(c.content_hash, c.metadata.start_line) for c in result if id(c) not in copies}
     kept: list[Chunk] = []
     for chunk in result:

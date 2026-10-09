@@ -798,6 +798,21 @@ def test_identical_overlapped_fragments_keep_distinct_storage_keys(bounded_confi
     _assert_fragments_sit_on_their_lines(chunks, text)
 
 
+def test_identical_label_fragments_keep_distinct_storage_keys(bounded_config):
+    """A merge label long enough to split yields fragments holding no source line.
+
+    Each takes the nearest source line, so identical ones shared a storage key.
+    """
+    config = bounded_config.model_copy(update={"min_chunk_tokens": 1000, "max_chunk_tokens": 2000})
+    key = "\\n".join(["repeat"] * 40)
+    text = f'"{key}": hello\nnormal:\n' + "".join(f"  field_{i}: value{i}\n" for i in range(8))
+    chunks = IndexEngine(None, None, config).chunk_content(Path("keys.yaml"), text)
+    assert chunks[0].content.startswith("repeat\nrepeat"), "the fixture must split a label"
+    keys = [(c.content_hash, c.metadata.start_line) for c in chunks]
+    assert len(set(keys)) == len(keys)
+    _assert_fragments_sit_on_their_lines(chunks, text)
+
+
 @pytest.mark.parametrize("overlap", [10, 20, 30])
 def test_sections_split_with_overlap_keep_their_lines(bounded_config, overlap):
     """The Markdown chunker's own overlap carries text from real lines too.

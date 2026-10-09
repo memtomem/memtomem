@@ -48,13 +48,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   counted wrong are fragments that begin on the previous line's newline,
   which the range assigns to that line, as before. The steps that rewrite a
   body now record which source line each of its lines came from, and the
-  split reads that record. Fragment contents are unchanged, except that with
-  `chunk_overlap_tokens` set, a fragment made only of borrowed overlap is
-  dropped when it repeats another fragment byte for byte at the same line;
-  that text stays in the other fragment. A file indexed before the upgrade
-  keeps its old ranges until it is next edited; that re-index updates the
-  ranges without re-embedding. `mm index --force` updates them at once but
-  re-embeds every chunk.
+  split reads that record. Fragment contents are unchanged, except that a
+  fragment holding no line of its own (only borrowed overlap, or only a long
+  merge label) is dropped when it repeats another fragment byte for byte at
+  the same line; that text stays in the other fragment. A file indexed before
+  the upgrade keeps its old ranges until it is next edited; that re-index
+  updates the ranges without re-embedding. `mm index --force` updates them at
+  once but re-embeds every chunk.
 
 ## [0.6.8] — 2026-10-08
 
