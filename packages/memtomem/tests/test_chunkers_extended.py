@@ -106,6 +106,22 @@ def foo():
         chunks = chunker.chunk_file(Path("/utils.py"), code)
         assert any("utils" in c.metadata.heading_hierarchy for c in chunks)
 
+    @needs_ts_python
+    def test_names_survive_multibyte_text_before_them(self, chunker):
+        """Tree-sitter reports UTF-8 byte offsets; names must not shift after non-ASCII text."""
+        code = (
+            "# é 한 🙂\n"
+            "def first():\n    return 1\n\n\n"
+            "@decorator\ndef 함수():\n    return '🙂'\n\n\n"
+            "class Second:\n    pass\n"
+        )
+        chunks = chunker.chunk_file(Path("/mod.py"), code)
+        assert [c.metadata.heading_hierarchy for c in chunks] == [
+            ("mod", "first"),
+            ("mod", "함수"),
+            ("mod", "Second"),
+        ]
+
     def test_syntax_error_falls_back_to_whole_file(self, chunker):
         """Invalid Python should fall back to a single whole-file chunk."""
         bad_code = "def broken(\n    x = {unclosed"
@@ -156,6 +172,24 @@ class TestJavaScriptChunker:
         code = "const add = (a, b) => a + b;\n"
         chunks = chunker.chunk_file(Path("/math.js"), code)
         assert len(chunks) >= 1
+
+    @needs_ts_js
+    def test_names_survive_multibyte_text_before_them(self, chunker):
+        """Tree-sitter reports UTF-8 byte offsets; names must not shift after non-ASCII text."""
+        code = (
+            "// é 한 🙂\n"
+            "function first() {\n  return 1;\n}\n\n"
+            "const 둘 = () => '🙂';\n\n"
+            "export default function third() {}\n\n"
+            "class Fourth {}\n"
+        )
+        chunks = chunker.chunk_file(Path("/mod.js"), code)
+        assert [c.metadata.heading_hierarchy for c in chunks] == [
+            ("mod", "first"),
+            ("mod", "둘"),
+            ("mod", "third"),
+            ("mod", "Fourth"),
+        ]
 
     def test_syntax_error_falls_back(self, chunker):
         bad_js = "function broken( { unclosed"
