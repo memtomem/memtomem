@@ -68,12 +68,14 @@ async def mem_procedure_list(
 
     project_context_root = _resolve_project_context_root(app)
 
-    # Find all chunks tagged with "procedure"
+    # Find all chunks tagged with "procedure". record=False: the query is
+    # fixed text, so a listing is neither an access nor a user query (#2691).
     results, _ = await app.search_pipeline.search(
         query="procedure workflow steps",
         top_k=50,
         tag_filter="procedure",
         project_context_root=project_context_root,
+        record=False,
     )
 
     if not results:
