@@ -1543,7 +1543,7 @@ class IndexEngine:
             else self._prepare_index_projection(file_path, content, scope)
         )
         content = projection.content
-        chunks = _drop_storage_key_copies(self._chunk_projected_content(file_path, content))
+        chunks = self._chunk_projected_content(file_path, content)
         if projection.redaction_count:
             for chunk in chunks:
                 # Keep whatever retrieval text the chunker produced. On the
@@ -1621,7 +1621,9 @@ class IndexEngine:
                 source_read_only=read_only,
                 source_span_hash=None if read_only else span_hashes[span],
             )
-        return chunks
+        # After the sweep: a copy dropped first would leave its twin owning
+        # the shared lines alone, writable.
+        return _drop_storage_key_copies(chunks)
 
     def _chunk_projected_content(self, file_path: Path, content: str) -> list[Chunk]:
         if self._config.hard_max_chunk_tokens and file_path.suffix.lower() in {
@@ -3967,10 +3969,11 @@ def _merge_pair(current: Chunk, nxt: Chunk) -> Chunk:
 def _drop_storage_key_copies(chunks: list[Chunk]) -> list[Chunk]:
     """Keep the first chunk of each storage key ``(content_hash, start_line)``.
 
-    Identical text can sit twice on one line, as when a structured value holds
-    a separator PyYAML breaks on but ``\\n`` does not. Storage keys rows on that
-    pair: an insert keeps one of the two and a line-range refresh fails on the
-    unique index. The bytes dropped stay at that line in the chunk kept.
+    Identical text can sit twice on one line: two declarations on one line of
+    code each take the whole line, and a structured value can hold a separator
+    PyYAML breaks on but ``\\n`` does not. Storage keys rows on that pair: an
+    insert keeps one of the two and a line-range refresh fails on the unique
+    index. The bytes dropped stay at that line in the chunk kept.
     """
     seen: set[tuple[str, int]] = set()
     kept: list[Chunk] = []

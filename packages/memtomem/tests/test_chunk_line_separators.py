@@ -249,6 +249,18 @@ def test_identical_fragments_on_one_line_keep_distinct_storage_keys():
     assert any(c.content == "x" * 31 + "\u2028" for c in chunks), "the fixture must repeat"
 
 
+def test_a_copy_dropped_from_a_shared_line_leaves_its_twin_read_only():
+    """Two declarations on one line share it, so neither may rewrite it.
+
+    Dropping the copy before the shared-line sweep left the twin as the line's
+    only owner, writable with a span hash that also covers the other function.
+    """
+    chunks = _chunk("a.js", "function a() {} function b() {}\n")
+    assert len(chunks) == 1
+    assert chunks[0].metadata.source_read_only
+    assert chunks[0].metadata.source_span_hash is None
+
+
 async def test_reindex_moves_identical_fragments_onto_one_line(components, memory_dir, monkeypatch):
     """An index built with the old numbering refreshes onto the new one.
 
