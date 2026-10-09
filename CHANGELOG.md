@@ -5,6 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mem_add` no longer records its duplicate check as a search (#2683).**
+  After writing a note longer than 20 characters, `mem_add` searches for
+  similar memories; that search ran in recording mode, so it raised the
+  access count of each hit (the new note too, when retrieved) and stored the
+  note body as a `query_history` row. Access counts feed the
+  access-frequency boost and importance score, and the history feeds the
+  search-history views and eval cases. The check now runs with
+  `record=False`; its "Similar memories found" warning is unchanged.
+- **Listing procedures no longer records a search (#2691).**
+  `mem_procedure_list` finds procedures with a fixed query, `"procedure
+  workflow steps"`, filtered to the `procedure` tag. That search ran in
+  recording mode: every listing stored the fixed phrase as a `query_history`
+  row, and each listing not served from the result cache raised the access
+  count of every listed procedure, lifting procedures in ordinary search
+  ranking. It now runs with `record=False`, which also skips the result
+  cache; the listing's query, filters and format are unchanged.
+
 ## [0.6.8] — 2026-10-08
 
 ### Upgrading
