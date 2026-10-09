@@ -271,7 +271,7 @@ class EvalCaseMixin:
         """Copy one labeled run into a durable eval case, atomically.
 
         The whole read-then-insert runs under one ``BEGIN IMMEDIATE`` so a
-        concurrent ``_prune_old_history`` or ``save_search_feedback(replace=)``
+        concurrent history save's prune or ``save_search_feedback(replace=)``
         can never yield a half-copied case. Feedback is grouped by
         ``content_hash`` (feedback identity is per ``chunk_id``, and two
         chunk_ids can share a hash): agreeing judgments collapse to one label,

@@ -431,19 +431,32 @@ async def test_cleanup_old_sessions_closes_its_transaction_at_zero_rows(storage)
     assert storage._get_db().in_transaction is False
 
 
-async def test_prune_old_history_inside_a_transaction_leaves_it_open(storage):
-    """Pruning is bookkeeping; it must not end a caller's transaction.
+async def test_history_prune_inside_a_transaction_rolls_back_with_the_owner(storage):
+    """Every history save prunes expired rows in the same write. Inside a
+    caller's transaction that DELETE is the owner's to keep or discard, like
+    the INSERT next to it: a rolled-back owner gets its expired row back."""
+    db = storage._get_db()
+    db.execute(
+        "INSERT INTO query_history (query_text, query_embedding, result_chunk_ids, "
+        "result_scores, project_key, legacy_unscoped, created_at) "
+        "VALUES ('expired', x'', '[]', '[]', 'user', 0, '2020-01-01T00:00:00+00:00')"
+    )
+    db.commit()
 
-    It commits unconditionally when standalone — including at zero rows, for
-    the reason above — which is exactly the shape that ends someone else's
-    transaction when it is not guarded.
-    """
-    async with storage.transaction():
-        await storage.create_session("owner-row", "owner", "default")
-        storage._prune_old_history()
-        assert storage._get_db().in_transaction is True
+    with pytest.raises(RuntimeError, match="roll back owner"):
+        async with storage.transaction():
+            await storage.save_query_history("txn query", [], [], [])
+            assert db.in_transaction is True
+            # Pruned on the owner's connection, not yet for anyone else.
+            assert db.execute(
+                "SELECT COUNT(*) FROM query_history WHERE query_text = 'expired'"
+            ).fetchone() == (0,)
+            assert _committed_rows(
+                storage, "SELECT query_text FROM query_history WHERE query_text=?", ("expired",)
+            ) == [("expired",)]
+            raise RuntimeError("roll back owner")
 
-    assert await storage.get_session("owner-row") is not None
+    assert [r[0] for r in db.execute("SELECT query_text FROM query_history")] == ["expired"]
 
 
 async def test_scratch_cleanup_closes_its_transaction_at_zero_rows(storage):

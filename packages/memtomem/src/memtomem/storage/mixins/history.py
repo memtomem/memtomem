@@ -61,8 +61,6 @@ def _next_audit_timestamp(prev_iso: str) -> str:
 class HistoryMixin:
     """Mixin providing search history methods. Requires self._get_db()."""
 
-    _history_save_count: int = 0
-    _HISTORY_PRUNE_INTERVAL: int = 100
     _HISTORY_MAX_AGE_DAYS: int = 90
 
     async def save_query_history(
@@ -81,6 +79,9 @@ class HistoryMixin:
             struct.pack(f"{len(query_embedding)}f", *query_embedding) if query_embedding else b""
         )
         with self._rolls_back_if_standalone(db):
+            # The prune is a DELETE, so it has to be inside the protected
+            # region: a failure in the INSERT below must not strand it.
+            pruned = self._prune_old_history(db)
             db.execute(
                 "INSERT INTO query_history "
                 "(query_text, query_embedding, result_chunk_ids, result_scores, "
@@ -97,11 +98,7 @@ class HistoryMixin:
                 ),
             )
             self._commit_if_standalone(db)
-
-        # Periodic pruning of old entries
-        self._history_save_count += 1
-        if self._history_save_count % self._HISTORY_PRUNE_INTERVAL == 0:
-            self._prune_old_history()
+        self._log_pruned(pruned)
 
     async def save_search_observation(
         self,
@@ -124,7 +121,7 @@ class HistoryMixin:
 
         The run ID is minted by the caller, and since #2183 the pipeline
         advertises it before this commit and runs the call in the background —
-        so this method (and the periodic prune below it) is off the search
+        so this method (and the history prune it runs) is off the search
         response path, and a run ID can be in a caller's hands before its row
         exists. ``SearchPipeline.flush_observation`` is how a reader that needs
         the row waits for it; a write that fails leaves the ID unresolvable,
@@ -158,6 +155,7 @@ class HistoryMixin:
             struct.pack(f"{len(query_embedding)}f", *query_embedding) if query_embedding else b""
         )
         with self._rolls_back_if_standalone(db):
+            pruned = self._prune_old_history(db)
             db.execute(
                 """INSERT INTO query_history
                    (query_text, query_embedding, result_chunk_ids, result_scores,
@@ -178,13 +176,18 @@ class HistoryMixin:
                 ),
             )
             self._commit_if_standalone(db)
-        self._history_save_count += 1
-        if self._history_save_count % self._HISTORY_PRUNE_INTERVAL == 0:
-            self._prune_old_history()
+        self._log_pruned(pruned)
         return run_id
 
-    def _prune_old_history(self) -> None:
+    def _prune_old_history(self, db: sqlite3.Connection) -> int:
         """Delete query history rows older than _HISTORY_MAX_AGE_DAYS.
+
+        Runs on every history save, inside the save's write, so the bound holds
+        however few searches a process records: a per-process save counter
+        never reached its threshold in short-lived servers and CLI runs, which
+        kept history indefinitely (#2686). The DELETE is an index range scan
+        on ``idx_query_history_created``; after the first save clears the
+        backlog it deletes only the rows that expired since the previous save.
 
         Dependent ``search_feedback`` rows go with them via the FK
         ``ON DELETE CASCADE`` (the write connection runs with
@@ -193,18 +196,9 @@ class HistoryMixin:
         cutoff = (
             datetime.now(timezone.utc) - timedelta(days=self._HISTORY_MAX_AGE_DAYS)
         ).isoformat(timespec="seconds")
-        db = self._get_db()
-        with self._rolls_back_if_standalone(db):
-            deleted = db.execute(
-                "DELETE FROM query_history WHERE created_at < ?", (cutoff,)
-            ).rowcount
-            # Commit whenever this runs standalone, including at zero rows: the
-            # DELETE opens an implicit transaction even when it matches nothing,
-            # and leaving it open makes the next explicit BEGIN IMMEDIATE
-            # (save_search_feedback) fail. Inside a caller's transaction the
-            # owner closes it instead, so committing here would end that
-            # transaction early (#2162).
-            self._commit_if_standalone(db)
+        return db.execute("DELETE FROM query_history WHERE created_at < ?", (cutoff,)).rowcount
+
+    def _log_pruned(self, deleted: int) -> None:
         if deleted:
             _log.info(
                 "Pruned %d old query_history rows (>%d days)", deleted, self._HISTORY_MAX_AGE_DAYS

@@ -22,6 +22,7 @@ from memtomem.storage.sqlite_backend import SqliteBackend
 
 RUN_A = "11111111-1111-4111-8111-111111111111"
 RUN_B = "22222222-2222-4222-8222-222222222222"
+RUN_C = "33333333-3333-4333-8333-333333333333"
 
 
 async def _seed_run(storage, run_id: str, chunk_ids: list[str] | None = None) -> str:
@@ -140,11 +141,11 @@ class TestSaveSearchFeedback:
         assert _next_audit_timestamp(future) == "2999-01-01T00:00:00.000001+00:00"
 
     async def test_feedback_write_survives_empty_prune(self, storage):
-        """A zero-row prune DELETE still opens an implicit transaction; if it
-        were left uncommitted, the next BEGIN IMMEDIATE would fail with
-        'cannot start a transaction within a transaction'."""
-        await _seed_run(storage, RUN_A)
-        storage._prune_old_history()  # nothing is old enough → 0 rows
+        """Every history save runs the prune DELETE, which opens an implicit
+        transaction even at zero rows; if it were left uncommitted, the next
+        BEGIN IMMEDIATE would fail with 'cannot start a transaction within a
+        transaction'."""
+        await _seed_run(storage, RUN_A)  # its prune matches nothing
         assert storage._get_db().in_transaction is False
         saved = await storage.save_search_feedback(RUN_A, "c1", "relevant")
         assert saved["created"] is True
@@ -270,10 +271,10 @@ class TestRetention:
             (RUN_A,),
         )
         db.commit()
-        storage._prune_old_history()
+        await _seed_run(storage, RUN_C, ["later"])  # the next save prunes
 
         remaining_runs = {r[0] for r in db.execute("SELECT run_id FROM query_history")}
-        assert RUN_A not in remaining_runs and RUN_B in remaining_runs
+        assert remaining_runs == {RUN_B, RUN_C}
         assert [r[0] for r in _feedback_rows(storage)] == [RUN_B]
         orphans = db.execute(
             "SELECT COUNT(*) FROM search_feedback f WHERE NOT EXISTS "
@@ -327,7 +328,7 @@ class TestCrossConnection:
         db = a._get_db()
         db.execute("UPDATE query_history SET created_at = '2020-01-01T00:00:00+00:00'")
         db.commit()
-        a._prune_old_history()
+        await _seed_run(a, RUN_B, ["fresh"])  # A's next save prunes RUN_A
 
         with pytest.raises(KeyError, match="not found"):
             await b.save_search_feedback(RUN_A, "c1", "relevant")

@@ -371,23 +371,32 @@ async def test_advertised_run_id_matches_the_row_written_later(bm25_only_compone
     assert row["query_text"] == "telemetry"
 
 
-async def test_prune_never_runs_on_the_response_path(bm25_only_components, monkeypatch):
-    """#2183: every 100th observation also pruned, inline, before responding."""
+async def test_prune_never_runs_on_the_response_path(bm25_only_components):
+    """#2183: the history prune used to run inline, before responding. Every
+    observation save prunes now, so the save staying in the background is
+    what keeps the DELETE off the response path."""
     components, memory_dir = bm25_only_components
     await _index_quality_note(components, memory_dir)
     storage = components.storage
-    monkeypatch.setattr(
-        storage, "_history_save_count", storage._HISTORY_PRUNE_INTERVAL - 1, raising=False
+    db = storage._get_db()
+    db.execute(
+        "INSERT INTO query_history (query_text, query_embedding, result_chunk_ids, "
+        "result_scores, project_key, legacy_unscoped, created_at) "
+        "VALUES ('expired', x'', '[]', '[]', 'user', 0, '2020-01-01T00:00:00+00:00')"
     )
-    pruned: list[bool] = []
-    monkeypatch.setattr(storage, "_prune_old_history", lambda: pruned.append(True))
+    db.commit()
+
+    def expired_rows() -> int:
+        return db.execute(
+            "SELECT COUNT(*) FROM query_history WHERE query_text = 'expired'"
+        ).fetchone()[0]
 
     _, stats = await components.search_pipeline.search("telemetry", origin="web")
 
     assert stats.query_run_id is not None
-    assert pruned == []
+    assert expired_rows() == 1
     await components.search_pipeline.flush_observation(stats.query_run_id)
-    assert pruned == [True]
+    assert expired_rows() == 0
 
 
 async def test_flush_is_a_no_op_with_nothing_pending(bm25_only_components):
