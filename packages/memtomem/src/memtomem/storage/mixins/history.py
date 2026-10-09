@@ -121,9 +121,10 @@ class HistoryMixin:
 
         The run ID is minted by the caller, and since #2183 the pipeline
         advertises it before this commit and runs the call in the background —
-        so this method (and the history prune it runs) is off the search
-        response path, and a run ID can be in a caller's hands before its row
-        exists. ``SearchPipeline.flush_observation`` is how a reader that needs
+        so the pipeline returns without waiting for this method (or the
+        history prune it runs), and a run ID can be in a caller's hands before
+        its row exists. The write is still synchronous SQLite on the event
+        loop: while it runs, nothing else on that loop makes progress. ``SearchPipeline.flush_observation`` is how a reader that needs
         the row waits for it; a write that fails leaves the ID unresolvable,
         and feedback on it is rejected by the ``run_id`` foreign key.
 
@@ -188,6 +189,10 @@ class HistoryMixin:
         kept history indefinitely (#2686). The DELETE is an index range scan
         on ``idx_query_history_created``; after the first save clears the
         backlog it deletes only the rows that expired since the previous save.
+        That first save deletes the whole backlog in one statement, unbatched:
+        on a large store it holds the event loop (and so a server's other
+        requests, and a CLI search's output, which waits for pending writes)
+        until the delete finishes, once.
 
         Dependent ``search_feedback`` rows go with them via the FK
         ``ON DELETE CASCADE`` (the write connection runs with

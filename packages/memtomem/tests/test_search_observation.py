@@ -371,10 +371,12 @@ async def test_advertised_run_id_matches_the_row_written_later(bm25_only_compone
     assert row["query_text"] == "telemetry"
 
 
-async def test_prune_never_runs_on_the_response_path(bm25_only_components):
-    """#2183: the history prune used to run inline, before responding. Every
-    observation save prunes now, so the save staying in the background is
-    what keeps the DELETE off the response path."""
+async def test_prune_runs_after_the_pipeline_returns(bm25_only_components):
+    """#2183: the history prune used to run inline, before the pipeline
+    returned. Every observation save prunes now, and the save staying in the
+    background is what keeps ``search()`` from waiting on the DELETE. This
+    pins the pipeline's return only: the background write is still
+    synchronous on the event loop, so it can delay delivery of the response."""
     components, memory_dir = bm25_only_components
     await _index_quality_note(components, memory_dir)
     storage = components.storage
