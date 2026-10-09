@@ -38,7 +38,8 @@ class PythonChunker:
 
         lang = Language(tspython.language())
         parser = Parser(lang)
-        tree = parser.parse(content.encode())
+        source = content.encode()
+        tree = parser.parse(source)
 
         lines = split_source_lines(content)
         module_stem = file_path.stem
@@ -80,7 +81,7 @@ class PythonChunker:
             if actual.type not in ("function_definition", "class_definition"):
                 continue
 
-            name = self._node_name(actual, content)
+            name = self._node_name(actual, source)
             start_line = node.start_point[0] + 1
             end_line = node.end_point[0] + 1
             body = "\n".join(lines[start_line - 1 : end_line])
@@ -107,10 +108,11 @@ class PythonChunker:
         return chunks if chunks else self._fallback(file_path, content)
 
     @staticmethod
-    def _node_name(node, content: str) -> str:
+    def _node_name(node, source: bytes) -> str:
+        # Tree-sitter offsets are UTF-8 byte offsets into the parsed bytes, not str indices.
         for child in node.children:
             if child.type == "identifier":
-                return content[child.start_byte : child.end_byte]
+                return source[child.start_byte : child.end_byte].decode()
         return ""
 
     def _fallback(self, file_path: Path, content: str) -> list[Chunk]:

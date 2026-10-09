@@ -58,7 +58,8 @@ class JavaScriptChunker:
             lang_name = "javascript"
 
         parser = Parser(lang)
-        tree = parser.parse(content.encode())
+        source = content.encode()
+        tree = parser.parse(source)
 
         lines = split_source_lines(content)
         module_stem = file_path.stem
@@ -68,7 +69,7 @@ class JavaScriptChunker:
             if node.type not in _TOP_LEVEL_TYPES:
                 continue
 
-            name = self._extract_name(node, content)
+            name = self._extract_name(node, source)
             start_line = node.start_point[0] + 1
             end_line = node.end_point[0] + 1
             body = "\n".join(lines[start_line - 1 : end_line])
@@ -90,16 +91,17 @@ class JavaScriptChunker:
         return chunks if chunks else self._fallback(file_path, content)
 
     @classmethod
-    def _extract_name(cls, node, content: str) -> str:
+    def _extract_name(cls, node, source: bytes) -> str:
+        # Tree-sitter offsets are UTF-8 byte offsets into the parsed bytes, not str indices.
         for child in node.children:
             if child.type in ("function_declaration", "class_declaration", "lexical_declaration"):
-                return cls._extract_name(child, content)
+                return cls._extract_name(child, source)
             if child.type == "identifier":
-                return content[child.start_byte : child.end_byte]
+                return source[child.start_byte : child.end_byte].decode()
             if child.type == "variable_declarator":
                 for grandchild in child.children:
                     if grandchild.type == "identifier":
-                        return content[grandchild.start_byte : grandchild.end_byte]
+                        return source[grandchild.start_byte : grandchild.end_byte].decode()
         return ""
 
     def _fallback(self, file_path: Path, content: str) -> list[Chunk]:
