@@ -1621,7 +1621,9 @@ class IndexEngine:
                 source_read_only=read_only,
                 source_span_hash=None if read_only else span_hashes[span],
             )
-        return chunks
+        # After the sweep: a copy dropped first would leave its twin owning
+        # the shared lines alone, writable.
+        return _drop_storage_key_copies(chunks)
 
     def _chunk_projected_content(self, file_path: Path, content: str) -> list[Chunk]:
         if self._config.hard_max_chunk_tokens and file_path.suffix.lower() in {
@@ -3962,6 +3964,25 @@ def _merge_pair(current: Chunk, nxt: Chunk) -> Chunk:
     ]
     line_map = labels[0] + current.source_line_map() + (0,) + labels[1] + nxt.source_line_map()
     return Chunk(content=content, metadata=new_meta, line_map=line_map)
+
+
+def _drop_storage_key_copies(chunks: list[Chunk]) -> list[Chunk]:
+    """Keep the first chunk of each storage key ``(content_hash, start_line)``.
+
+    Identical text can sit twice on one line: two declarations on one line of
+    code each take the whole line, and a structured value can hold a separator
+    PyYAML breaks on but ``\\n`` does not. Storage keys rows on that pair: an
+    insert keeps one of the two and a line-range refresh fails on the unique
+    index. The bytes dropped stay at that line in the chunk kept.
+    """
+    seen: set[tuple[str, int]] = set()
+    kept: list[Chunk] = []
+    for chunk in chunks:
+        key = (chunk.content_hash, chunk.metadata.start_line)
+        if key not in seen:
+            seen.add(key)
+            kept.append(chunk)
+    return kept
 
 
 def _merge_short_chunks(
