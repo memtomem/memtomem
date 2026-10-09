@@ -37,9 +37,13 @@ class ReStructuredTextChunker:
             file_ctx += " > " + " | ".join(unique)
 
         for section in sections:
-            text = section["text"].strip()
+            raw = section["text"]
+            text = raw.strip()
             if not text:
                 continue
+            # Drop the map entries of the blank lines ``strip`` removed.
+            lead = raw[: len(raw) - len(raw.lstrip())].count("\n")
+            line_map = section["line_map"][lead : lead + text.count("\n") + 1]
 
             hierarchy = section["hierarchy"]
             parent_ctx = hierarchy[-2] if len(hierarchy) >= 2 else ""
@@ -47,6 +51,7 @@ class ReStructuredTextChunker:
             chunks.append(
                 Chunk(
                     content=text,
+                    line_map=line_map,
                     metadata=ChunkMetadata(
                         source_file=file_path,
                         heading_hierarchy=tuple(hierarchy),
@@ -66,7 +71,7 @@ class ReStructuredTextChunker:
         # Detect section headers and their levels.
         # level_order maps adornment character to its depth (0-indexed).
         level_order: dict[tuple[str, bool], int] = {}
-        headers: list[tuple[int, str, int]] = []  # (line_idx, title, depth)
+        headers: list[tuple[int, str, int, bool]] = []  # (line_idx, title, depth, overline)
 
         for i, line in enumerate(lines):
             if not _ADORNMENT_RE.match(line):
@@ -88,7 +93,7 @@ class ReStructuredTextChunker:
                     depth = level_order[key]
                     # header_start is the overline (if present) or the title line
                     header_start = i - 2 if has_overline else i - 1
-                    headers.append((header_start, title, depth))
+                    headers.append((header_start, title, depth, has_overline))
 
         if not headers:
             # No headings: return whole content as one chunk
@@ -96,6 +101,7 @@ class ReStructuredTextChunker:
                 {
                     "hierarchy": [],
                     "text": content,
+                    "line_map": tuple(range(1, content.count("\n") + 2)),
                     "start_line": 1,
                     "end_line": len(lines),
                 }
@@ -112,21 +118,20 @@ class ReStructuredTextChunker:
                     {
                         "hierarchy": [],
                         "text": pre,
+                        "line_map": tuple(range(1, headers[0][0] + 1)),
                         "start_line": 1,
                         "end_line": headers[0][0],
                     }
                 )
 
-        for idx, (hdr_start, title, depth) in enumerate(headers):
+        for idx, (hdr_start, title, depth, has_overline) in enumerate(headers):
             # Update hierarchy: keep only levels shallower than current
             current_hierarchy = [h for h in current_hierarchy if h[0] < depth]
             current_hierarchy.append((depth, title))
 
-            # Section body starts after the underline
-            # Find the underline: it's either hdr_start+1 (no overline) or hdr_start+2 (overline)
-            body_start = hdr_start + 2  # title + underline
-            if hdr_start >= 1 and _ADORNMENT_RE.match(lines[hdr_start]):
-                body_start = hdr_start + 3  # overline + title + underline
+            # Section body starts after the underline.
+            title_idx = hdr_start + 1 if has_overline else hdr_start
+            body_start = title_idx + 2  # title + underline
 
             if idx + 1 < len(headers):
                 body_end = headers[idx + 1][0]
@@ -140,6 +145,11 @@ class ReStructuredTextChunker:
                 {
                     "hierarchy": list(hierarchy_strs),
                     "text": f"{title}\n{body}" if body.strip() else title,
+                    # The adornment lines are dropped, so the body does not
+                    # read as the span line for line (see ``Chunk.line_map``).
+                    "line_map": (title_idx + 1,) + tuple(range(body_start + 1, body_end + 1))
+                    if body.strip()
+                    else (title_idx + 1,),
                     "start_line": hdr_start + 1,  # 1-indexed
                     "end_line": body_end,
                 }

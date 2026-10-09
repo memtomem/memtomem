@@ -69,7 +69,12 @@ class TestOverlineHeaders:
         content = "=====\nTitle\n=====\n\nBody."
         chunks = _chunk(content)
         assert len(chunks) == 1
-        assert "Title" in chunks[0].content
+        assert chunks[0].content == "Title\n\nBody."
+
+    def test_overline_after_preamble(self):
+        content = "Intro.\n\n=====\nTitle\n=====\n\nBody."
+        chunks = _chunk(content)
+        assert [c.content for c in chunks] == ["Intro.", "Title\n\nBody."]
 
 
 class TestAdornmentCharacters:

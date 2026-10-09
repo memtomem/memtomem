@@ -773,6 +773,31 @@ def test_overlapped_markdown_fragments_carry_their_own_lines(bounded_config, ove
     _assert_fragments_sit_on_their_lines(chunks, text)
 
 
+_RST_BODY = "".join(f"body line {i:02d} with some words\n" for i in range(20))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Title\n=====\n\n" + _RST_BODY,
+        "=====\nTitle\n=====\n\n" + _RST_BODY,
+        "Intro.\n\n=====\nTitle\n=====\n\n" + _RST_BODY + "\nNext\n----\n\n" + _RST_BODY,
+    ],
+    ids=["underline", "overline", "overline-after-preamble"],
+)
+def test_split_rst_sections_keep_their_lines(bounded_config, text):
+    """The RST chunker drops a heading's adornment lines from the body.
+
+    Read as its span line for line, the body put every fragment after the
+    first one line early per dropped adornment line.
+    """
+    config = bounded_config.model_copy(update={"min_chunk_tokens": 0, "max_chunk_tokens": 2000})
+    chunks = IndexEngine(None, None, config).chunk_content(Path("doc.rst"), text)
+    assert len(chunks) > 2, "the fixture must split"
+    assert not any("=====" in c.content for c in chunks)
+    _assert_fragments_sit_on_their_lines(chunks, text)
+
+
 @pytest.mark.parametrize(
     "text",
     [
