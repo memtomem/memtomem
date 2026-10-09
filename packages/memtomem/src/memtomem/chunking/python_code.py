@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from memtomem.chunking.base import split_source_lines
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ class PythonChunker:
         parser = Parser(lang)
         tree = parser.parse(content.encode())
 
-        lines = content.splitlines()
+        lines = split_source_lines(content)
         module_stem = file_path.stem
         chunks: list[Chunk] = []
 
@@ -113,7 +114,7 @@ class PythonChunker:
         return ""
 
     def _fallback(self, file_path: Path, content: str) -> list[Chunk]:
-        lines = content.splitlines()
+        lines = split_source_lines(content)
         return [
             Chunk(
                 content=content,

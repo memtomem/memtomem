@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from memtomem.chunking.base import split_source_lines
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
 
 
@@ -88,7 +89,7 @@ def _fence_line_set(text: str) -> frozenset[int]:
 
     Handles unclosed fences at EOF by treating the rest of the file as fenced.
     """
-    lines = text.splitlines()
+    lines = split_source_lines(text)
     inside: set[int] = set()
     i = 0
     while i < len(lines):
@@ -126,7 +127,7 @@ def _split_paragraphs_fence_aware(text: str) -> list[str]:
     Unclosed fences at EOF absorb the rest of the text, matching the protective
     convention used by ``_fence_line_set``.
     """
-    lines = text.splitlines(keepends=True)
+    lines = split_source_lines(text, keepends=True)
     parts: list[str] = []
     buf: list[str] = []
     i = 0
@@ -211,7 +212,7 @@ class _TextSpan:
 
 def _is_atomic_markdown_part(text: str) -> bool:
     """Return whether *text* must stay intact because it contains a fence or table."""
-    lines = text.splitlines()
+    lines = split_source_lines(text)
     nonempty_lines = [line for line in lines if line.strip()]
     return any(_FENCE_OPEN_RE.match(line) for line in lines) or (
         bool(nonempty_lines) and all(line.lstrip().startswith("|") for line in nonempty_lines)
@@ -242,7 +243,7 @@ def _split_oversized_part(text: str, max_chars: int) -> list[_TextSpan]:
     if len(text) <= max_chars or _is_atomic_markdown_part(text):
         return [whole]
 
-    lines = text.splitlines()
+    lines = split_source_lines(text)
     if len(lines) > 1:
         natural_boundaries = [index + 1 for index, char in enumerate(text) if char == "\n"]
     else:
@@ -509,7 +510,7 @@ class MarkdownChunker:
           section — use *n* to keep sub-chunk ``start_line`` /
           ``end_line`` aligned with the source file after the strip.
         """
-        lines = text.splitlines()
+        lines = split_source_lines(text)
         # Skip leading blank lines (text is usually .strip()ed already, but
         # be defensive — _split_section can pass non-stripped chunks).
         i = 0
@@ -701,7 +702,7 @@ class MarkdownChunker:
         )
 
     def _split_by_headings(self, content: str) -> list[dict]:
-        lines = content.splitlines()
+        lines = split_source_lines(content)
         fence_lines = _fence_line_set(content)
         sections: list[dict] = []
         current_hierarchy: list[str] = []
