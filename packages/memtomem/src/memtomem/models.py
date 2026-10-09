@@ -381,6 +381,10 @@ class Chunk:
     embedding: list[float] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Source line of each line of ``content``: negative for a line borrowed as
+    # overlap from a neighbour, 0 for a line the file does not hold (a merge
+    # label). Set by the steps that rewrite a body; never stored.
+    line_map: tuple[int, ...] | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.content_hash:
@@ -389,6 +393,14 @@ class Chunk:
             self.content_hash = hashlib.sha256(
                 unicodedata.normalize("NFC", self.content).encode()
             ).hexdigest()
+
+    def source_line_map(self) -> tuple[int, ...]:
+        """``line_map``, or the body read as its span line for line."""
+        if self.line_map is not None:
+            return self.line_map
+        count = self.content.count("\n") + 1
+        start = self.metadata.start_line
+        return tuple(range(start, start + count)) if start >= 1 else (0,) * count
 
     @property
     def retrieval_content(self) -> str:

@@ -708,6 +708,154 @@ def test_packed_code_chunks_carry_the_final_line_range(bounded_config):
     assert chunks[-1].metadata.end_line == lines
 
 
+def _assert_fragments_sit_on_their_lines(chunks, text):
+    """Every source line a fragment carries lies inside the fragment's range."""
+    source = text.split("\n")
+    previous = 1
+    for chunk in chunks:
+        meta = chunk.metadata
+        assert 1 <= meta.start_line <= meta.end_line <= len(text.splitlines())
+        own = chunk.content[meta.overlap_before : len(chunk.content) - meta.overlap_after]
+        # A fragment of borrowed overlap alone sits where its text does.
+        if own.strip():
+            assert meta.start_line >= previous
+            previous = meta.start_line
+            # Exact where the first own line names one place in the file.
+            # Headings are skipped: merging repeats them inside the body.
+            first = next(line for line in own.split("\n") if line)
+            if source.count(first) == 1 and not first.startswith("#"):
+                assert meta.start_line == source.index(first) + 1, (meta.start_line, first)
+        window = source[meta.start_line - 1 : meta.end_line]
+        for line in own.split("\n"):
+            # Merge labels and lines cut mid-way are not source lines.
+            if line and line in source:
+                assert line in window, (meta.start_line, meta.end_line, line)
+
+
+def test_merged_yaml_fragments_carry_their_own_lines(bounded_config):
+    """Merging writes each key's label above its block, lines the file lacks.
+
+    Counting the merged body's newlines placed fragments two lines lower per
+    merged key, overlapping the next fragment and running past the end of
+    the file.
+    """
+    text = "# definitions\n\n" + "\n".join(
+        f"key_{k}:\n"
+        + "".join(f'  field_{f}: "value {k}.{f} with enough words to fill"\n' for f in range(7))
+        for k in range(6)
+    )
+    chunks = IndexEngine(None, None, bounded_config).chunk_content(Path("defs.yaml"), text)
+    assert any(c.content.split("\n")[0] == "key_0" for c in chunks), "the fixture must merge"
+    assert len(chunks) > 6, "the fixture must split"
+    _assert_fragments_sit_on_their_lines(chunks, text)
+
+
+def test_a_multiline_key_label_keeps_later_lines_in_place(bounded_config):
+    """A decoded YAML key can hold a newline, so its restored label spans lines."""
+    config = bounded_config.model_copy(update={"max_chunk_tokens": 2000})
+    text = '"a\\nb": hello\nnormal:\n' + "".join(
+        f"  field_{i}: value{i} abcdefghijklmnop\n" for i in range(8)
+    )
+    chunks = IndexEngine(None, None, config).chunk_content(Path("keys.yaml"), text)
+    assert chunks[0].content.startswith("a\nb\n\n"), "the fixture must restore a multiline label"
+    _assert_fragments_sit_on_their_lines(chunks, text)
+
+
+@pytest.mark.parametrize("overlap", [20, 4], ids=["whole-fragments", "mixed-fragments"])
+def test_overlapped_markdown_fragments_carry_their_own_lines(bounded_config, overlap):
+    config = bounded_config.model_copy(update={"chunk_overlap_tokens": overlap})
+    text = "".join(
+        f"# Part {p}\n\n" + "".join(f"part {p} line {i} says something\n" for i in range(12)) + "\n"
+        for p in range(3)
+    )
+    chunks = IndexEngine(None, None, config).chunk_content(Path("note.md"), text)
+    assert any(c.metadata.overlap_before for c in chunks), "the fixture must overlap"
+    _assert_fragments_sit_on_their_lines(chunks, text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "# A\n\n" + "unique body a\n" * 20 + "\n# B\n\n" + "repeat b\n" * 30,
+        "# A\n\n" + "a\n" * 40 + "\n# B\n\n" + "b\n" * 40,
+    ],
+    ids=["edge-of-parent", "copy-of-neighbour"],
+)
+def test_identical_overlapped_fragments_keep_distinct_storage_keys(bounded_config, text):
+    """Storage keys rows on ``(content_hash, start_line)`` and ignores repeats.
+
+    Placing borrowed overlap at its parent's edge gave identical fragments one
+    start line, so inserts dropped them and a line-range refresh of an existing
+    index failed on the unique index. Placing it where its text sits instead
+    makes it a byte-for-byte copy of the neighbour's own fragment there.
+    """
+    config = bounded_config.model_copy(
+        update={"min_chunk_tokens": 0, "max_chunk_tokens": 2000, "chunk_overlap_tokens": 30}
+    )
+    chunks = IndexEngine(None, None, config).chunk_content(Path("note.md"), text)
+    keys = [(c.content_hash, c.metadata.start_line) for c in chunks]
+    assert len(set(keys)) == len(keys)
+    _assert_fragments_sit_on_their_lines(chunks, text)
+
+
+@pytest.mark.parametrize("overlap", [10, 20, 30])
+def test_sections_split_with_overlap_keep_their_lines(bounded_config, overlap):
+    """The Markdown chunker's own overlap carries text from real lines too.
+
+    Recording it as lines the file lacks placed a fragment of it at the next
+    line of the body, outside every line it shows.
+    """
+    config = bounded_config.model_copy(
+        update={"min_chunk_tokens": 0, "max_chunk_tokens": 60, "chunk_overlap_tokens": overlap}
+    )
+    text = "# A\n\n" + "".join(f"line {i:03d} abcdefghijklmnop\n" for i in range(60))
+    source = text.split("\n")
+    chunks = IndexEngine(None, None, config).chunk_content(Path("a.md"), text)
+    for chunk in chunks:
+        meta = chunk.metadata
+        assert 1 <= meta.start_line <= meta.end_line <= len(text.splitlines())
+        shown = [source.index(line) + 1 for line in chunk.content.split("\n") if line in source]
+        if shown:
+            assert any(meta.start_line <= n <= meta.end_line for n in shown), meta
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["repeat\n" * 198, "".join(f"see [[page|alias {i}]] item\n" for i in range(40))],
+    ids=["repeated-lines", "rewritten-lines"],
+)
+@pytest.mark.parametrize("section_max", [2000, 100], ids=["whole-section", "split-section"])
+def test_a_section_body_starts_below_its_heading(bounded_config, body, section_max):
+    """No line of the body has to match the file for the range to be right."""
+    config = bounded_config.model_copy(
+        update={"min_chunk_tokens": 0, "max_chunk_tokens": section_max}
+    )
+    text = "# T\n\n" + body
+    chunks = IndexEngine(None, None, config).chunk_content(Path("t.md"), text)
+    assert len(chunks) > 1, "the fixture must split"
+    assert chunks[0].metadata.start_line == 3
+    assert chunks[-1].metadata.end_line == len(text.splitlines())
+
+
+def test_rewritten_markdown_lines_keep_exact_fragment_ranges(bounded_config):
+    """Wikilink resolution rewrites a line without moving it; ranges stay exact."""
+    lines = ["# Notes", ""] + [
+        f"L{n} see [[page|alias]] for detail" if n % 3 else f"L{n} plain detail line here"
+        for n in range(3, 63)
+    ]
+    text = "\n".join(lines) + "\n"
+    chunks = IndexEngine(None, None, bounded_config).chunk_content(Path("notes.md"), text)
+    assert len(chunks) > 3, "the fixture must split"
+    for chunk in chunks:
+        meta = chunk.metadata
+        body = chunk.content.rstrip("\n").split("\n")
+        first, last = body[0], body[-1]
+        if first.startswith("L"):
+            assert meta.start_line == int(first.split()[0][1:])
+        if last.startswith("L") and chunk.content.endswith("\n"):
+            assert meta.end_line == int(last.split()[0][1:])
+
+
 def test_long_input_never_tokenizes_an_unbounded_remainder(bounded_config, monkeypatch):
     budget = TokenBudget(bounded_config)
     observed = []
