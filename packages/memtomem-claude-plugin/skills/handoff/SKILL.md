@@ -1,7 +1,7 @@
 ---
 name: handoff
 description: Explicitly save or resume a compact project handoff shared by Claude Code, Codex CLI, Kimi Code, and other compatible runtimes.
-argument-hint: [save|resume] [target runtime or handoff id]
+argument-hint: "[save|resume] [target runtime or handoff id]"
 allowed-tools: mcp__plugin_memtomem_memtomem__mem_status, mcp__memtomem__mem_status, mcp__plugin_memtomem_memtomem__mem_recall, mcp__memtomem__mem_recall, mcp__plugin_memtomem_memtomem__mem_add, mcp__memtomem__mem_add, Bash(git rev-parse:*), Bash(git status:*)
 disable-model-invocation: true
 ---

@@ -27,7 +27,7 @@ def pinned() -> dict:
     return {
         "command": "uvx",
         "args": ["--from", MCP_REQUIREMENT, "memtomem-server"],
-        "env": {"MEMTOMEM_TOOL_MODE": TOOL_MODE},
+        "env": {"MEMTOMEM_TOOL_MODE": TOOL_MODE, "ORT_DISABLE_TELEMETRY": "1"},
     }
 
 
@@ -177,6 +177,21 @@ def test_exact_launch_dedup_ignores_env_but_warns_without_secrets(sandbox):
     assert {"native_dedup", "environment_difference"} <= codes(report)
     assert "private-value" not in json.dumps(report.payload())
     assert "TOKEN" not in json.dumps(report.payload())
+
+
+def test_preinstall_prediction_carries_the_plugin_launch_env(sandbox):
+    # No plugin installed: the predicted launch must use the env the manifest ships.
+    manual(sandbox, entry=pinned())
+    found = codes(checks.inspect_claude_mcp())
+    assert "native_dedup" in found
+    assert "environment_difference" not in found
+
+
+def test_preinstall_prediction_flags_an_entry_without_the_telemetry_switch(sandbox):
+    entry = pinned()
+    del entry["env"]["ORT_DISABLE_TELEMETRY"]
+    manual(sandbox, entry=entry)
+    assert {"native_dedup", "environment_difference"} <= codes(checks.inspect_claude_mcp())
 
 
 @pytest.mark.parametrize("installed", [False, True])

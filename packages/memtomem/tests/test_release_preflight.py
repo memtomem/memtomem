@@ -10,10 +10,12 @@ import json
 import shlex
 import subprocess
 import tarfile
+import tomllib
 import urllib.error
 import zipfile
 from pathlib import Path
 from types import ModuleType
+from typing import NamedTuple
 
 import pytest
 import yaml
@@ -507,7 +509,33 @@ def test_sbom_workflow_does_not_require_the_hermes_version_bump() -> None:
     assert all("--require-hermes-version-bump" not in run for run in runs)
 
 
-_HERMES = "packages/memtomem-hermes-plugin"
+class _Pkg(NamedTuple):
+    path: str
+    manifest: str
+    contract_key: str
+
+
+_PLUGIN_PKG = _Pkg("packages/memtomem-hermes-plugin", "plugin.json", "hermes_version")
+_MEMORY_PKG = _Pkg("packages/memtomem-hermes-memory", "plugin.yaml", "hermes_memory_version")
+_HERMES = _PLUGIN_PKG.path
+
+
+@pytest.fixture(params=[_PLUGIN_PKG, _MEMORY_PKG], ids=lambda pkg: pkg.manifest)
+def pkg(request: pytest.FixtureRequest) -> _Pkg:
+    return request.param
+
+
+def _manifest_text(pkg: _Pkg, version: object) -> str:
+    if pkg.manifest == "plugin.json":
+        manifest: dict[str, object] = {"name": "memtomem"}
+        if version is not None:
+            manifest["version"] = version
+        return json.dumps(manifest)
+    # The shape tools/render_plugin_assets.py renders.
+    lines = ['name: "memtomem-memory"']
+    if version is not None:
+        lines.append(f"version: {json.dumps(version)}")
+    return "\n".join(lines) + "\n"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -533,11 +561,12 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout
 
 
-def _write_hermes(repo: Path, version: str | None, skill: str = "search") -> None:
-    package = repo / _HERMES
+def _write_hermes(
+    repo: Path, version: object, skill: str = "search", pkg: _Pkg = _PLUGIN_PKG
+) -> None:
+    package = repo / pkg.path
     (package / "skills").mkdir(parents=True, exist_ok=True)
-    manifest = {"name": "memtomem"} if version is None else {"name": "memtomem", "version": version}
-    (package / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / pkg.manifest).write_text(_manifest_text(pkg, version), encoding="utf-8")
     (package / "skills" / "SKILL.md").write_text(skill, encoding="utf-8")
 
 
@@ -551,64 +580,111 @@ def _commit(repo: Path, message: str, tag: str | None = None, *, annotated: bool
 
 
 def _hermes_repo(
-    tmp_path: Path, *, baseline_version: str = "0.1.1", annotated: bool = False
+    tmp_path: Path,
+    *,
+    baseline_version: str = "0.1.1",
+    annotated: bool = False,
+    pkg: _Pkg = _PLUGIN_PKG,
 ) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main")
     (repo / "README.md").write_text("x", encoding="utf-8")
     _commit(repo, "before hermes", "v0.6.5")
-    _write_hermes(repo, baseline_version)
+    _write_hermes(repo, baseline_version, pkg=pkg)
     _commit(repo, "release", "v0.6.6", annotated=annotated)
     return repo
 
 
+def test_the_checked_packages_are_the_repos_hermes_packages() -> None:
+    root = Path(__file__).resolve().parents[3]
+    contract = tomllib.loads(
+        (root / "packages/memtomem-plugin-assets/contract.toml").read_text(encoding="utf-8")
+    )
+    checked = [(p.path, p.manifest, p.contract_key) for p in rp._HERMES_PACKAGES]
+    assert checked == [tuple(_PLUGIN_PKG), tuple(_MEMORY_PKG)]
+    for package in rp._HERMES_PACKAGES:
+        raw = (root / package.path / package.manifest).read_text(encoding="utf-8")
+        assert package.read_version(raw) == contract["plugins"][package.contract_key]
+
+
 @pytest.mark.parametrize("annotated", [False, True])
-def test_hermes_change_with_a_bump_passes(tmp_path: Path, annotated: bool) -> None:
-    repo = _hermes_repo(tmp_path, annotated=annotated)
-    _write_hermes(repo, "0.1.2", skill="changed")
+def test_hermes_change_with_a_bump_passes(tmp_path: Path, pkg: _Pkg, annotated: bool) -> None:
+    repo = _hermes_repo(tmp_path, annotated=annotated, pkg=pkg)
+    _write_hermes(repo, "0.1.2", skill="changed", pkg=pkg)
     _commit(repo, "change")
     assert rp.validate_hermes_version_bump("v0.6.7", repo) == "v0.6.6"
 
 
 @pytest.mark.parametrize("version", ["0.1.1", "0.1.0", "0.0.9"])
-def test_hermes_change_without_a_higher_version_is_refused(tmp_path: Path, version: str) -> None:
-    repo = _hermes_repo(tmp_path)
-    _write_hermes(repo, version, skill="changed")
+def test_hermes_change_without_a_higher_version_is_refused(
+    tmp_path: Path, pkg: _Pkg, version: str
+) -> None:
+    repo = _hermes_repo(tmp_path, pkg=pkg)
+    _write_hermes(repo, version, skill="changed", pkg=pkg)
     _commit(repo, "change")
-    with pytest.raises(rp.ReleaseCheckError, match=rf"version is {version} \(was 0\.1\.1\)"):
+    with pytest.raises(
+        rp.ReleaseCheckError,
+        match=rf"^{pkg.path} changed .* version is {version} \(was 0\.1\.1\); "
+        rf"bump \[plugins\] {pkg.contract_key} ",
+    ):
         rp.validate_hermes_version_bump("v0.6.7", repo)
 
 
-def test_hermes_version_comparison_is_numeric_not_lexical(tmp_path: Path) -> None:
-    repo = _hermes_repo(tmp_path, baseline_version="0.1.9")
-    _write_hermes(repo, "0.1.10", skill="changed")
+def test_hermes_version_comparison_is_numeric_not_lexical(tmp_path: Path, pkg: _Pkg) -> None:
+    repo = _hermes_repo(tmp_path, baseline_version="0.1.9", pkg=pkg)
+    _write_hermes(repo, "0.1.10", skill="changed", pkg=pkg)
     _commit(repo, "change")
     assert rp.validate_hermes_version_bump("v0.6.7", repo) == "v0.6.6"
 
 
-def test_unchanged_hermes_package_passes(tmp_path: Path) -> None:
-    repo = _hermes_repo(tmp_path)
+def test_unchanged_hermes_package_passes(tmp_path: Path, pkg: _Pkg) -> None:
+    repo = _hermes_repo(tmp_path, pkg=pkg)
     (repo / "README.md").write_text("unrelated", encoding="utf-8")
     _commit(repo, "unrelated")
     assert rp.validate_hermes_version_bump("v0.6.7", repo) == "v0.6.6"
 
 
-def test_a_version_only_hermes_bump_is_allowed(tmp_path: Path) -> None:
-    repo = _hermes_repo(tmp_path)
-    _write_hermes(repo, "0.1.2")
+def test_a_version_only_hermes_bump_is_allowed(tmp_path: Path, pkg: _Pkg) -> None:
+    repo = _hermes_repo(tmp_path, pkg=pkg)
+    _write_hermes(repo, "0.1.2", pkg=pkg)
     _commit(repo, "bump only")
     assert rp.validate_hermes_version_bump("v0.6.7", repo) == "v0.6.6"
 
 
-def test_baseline_without_the_hermes_package_is_a_first_release(tmp_path: Path) -> None:
-    repo = _hermes_repo(tmp_path)
+def test_baseline_without_the_hermes_package_is_a_first_release(tmp_path: Path, pkg: _Pkg) -> None:
+    repo = _hermes_repo(tmp_path, pkg=pkg)
     assert rp.validate_hermes_version_bump("v0.6.6", repo) is None
 
 
-def test_test_tag_compares_against_the_highest_lower_production_tag(tmp_path: Path) -> None:
+def test_each_package_is_judged_on_its_own(tmp_path: Path) -> None:
+    """The plugin unchanged does not excuse the provider, and the other way round."""
     repo = _hermes_repo(tmp_path)
-    _write_hermes(repo, "0.1.1", skill="changed")
+    _write_hermes(repo, "0.1.0", pkg=_MEMORY_PKG)
+    _commit(repo, "provider released", "v0.6.7")
+    _write_hermes(repo, "0.1.0", skill="changed", pkg=_MEMORY_PKG)
+    _commit(repo, "provider changed, not bumped")
+    with pytest.raises(rp.ReleaseCheckError, match=r"bump \[plugins\] hermes_memory_version "):
+        rp.validate_hermes_version_bump("v0.6.8", repo)
+    _write_hermes(repo, "0.1.1", skill="changed", pkg=_MEMORY_PKG)
+    _write_hermes(repo, "0.1.1", skill="changed", pkg=_PLUGIN_PKG)
+    _commit(repo, "provider bumped, plugin changed, not bumped")
+    with pytest.raises(rp.ReleaseCheckError, match=r"bump \[plugins\] hermes_version "):
+        rp.validate_hermes_version_bump("v0.6.8", repo)
+
+
+def test_a_package_new_since_the_baseline_is_a_first_release(tmp_path: Path) -> None:
+    repo = _hermes_repo(tmp_path)
+    _write_hermes(repo, "0.1.0", pkg=_MEMORY_PKG)
+    _commit(repo, "provider added")
+    assert rp.validate_hermes_version_bump("v0.6.7", repo) == "v0.6.6"
+
+
+def test_test_tag_compares_against_the_highest_lower_production_tag(
+    tmp_path: Path, pkg: _Pkg
+) -> None:
+    repo = _hermes_repo(tmp_path, pkg=pkg)
+    _write_hermes(repo, "0.1.1", skill="changed", pkg=pkg)
     _commit(repo, "change", "v0.6.7")  # the tag being re-run is not its own baseline
     _git(repo, "tag", "v0.7.0")  # nor is a higher one
     _git(repo, "tag", "test-v0.6.6a1")  # test tags are never a baseline
@@ -619,15 +695,15 @@ def test_test_tag_compares_against_the_highest_lower_production_tag(tmp_path: Pa
 @pytest.mark.parametrize(
     "dirty", ["modify", "untracked", "staged"], ids=["modified", "untracked", "staged"]
 )
-def test_dirty_hermes_package_is_refused(tmp_path: Path, dirty: str) -> None:
-    repo = _hermes_repo(tmp_path)
+def test_dirty_hermes_package_is_refused(tmp_path: Path, pkg: _Pkg, dirty: str) -> None:
+    repo = _hermes_repo(tmp_path, pkg=pkg)
     if dirty == "modify":
-        (repo / _HERMES / "skills" / "SKILL.md").write_text("edited", encoding="utf-8")
+        (repo / pkg.path / "skills" / "SKILL.md").write_text("edited", encoding="utf-8")
     else:
-        (repo / _HERMES / "skills" / "NEW.md").write_text("new", encoding="utf-8")
+        (repo / pkg.path / "skills" / "NEW.md").write_text("new", encoding="utf-8")
         if dirty == "staged":
             _git(repo, "add", "-A")
-    with pytest.raises(rp.ReleaseCheckError, match="uncommitted changes"):
+    with pytest.raises(rp.ReleaseCheckError, match=f"^{pkg.path} has uncommitted changes"):
         rp.validate_hermes_version_bump("v0.6.7", repo)
 
 
@@ -650,12 +726,12 @@ def test_no_older_production_tag_is_refused(tmp_path: Path) -> None:
         rp.validate_hermes_version_bump("v0.1.0", repo)
 
 
-def test_a_configured_external_diff_cannot_hide_a_change(tmp_path: Path) -> None:
+def test_a_configured_external_diff_cannot_hide_a_change(tmp_path: Path, pkg: _Pkg) -> None:
     """A trusted external diff exiting 0 made ``--quiet`` report "unchanged" for edits."""
-    repo = _hermes_repo(tmp_path)
+    repo = _hermes_repo(tmp_path, pkg=pkg)
     _git(repo, "config", "diff.external", "true")
     _git(repo, "config", "diff.trustExitCode", "true")
-    _write_hermes(repo, "0.1.1", skill="changed")
+    _write_hermes(repo, "0.1.1", skill="changed", pkg=pkg)
     _commit(repo, "change")
     with pytest.raises(rp.ReleaseCheckError, match="changed since v0.6.6"):
         rp.validate_hermes_version_bump("v0.6.7", repo)
@@ -688,24 +764,34 @@ def test_a_non_repository_is_refused_not_skipped(tmp_path: Path) -> None:
 @pytest.mark.parametrize("side", ["baseline", "head"])
 @pytest.mark.parametrize("version", [None, 7, "0.1", "0.1.2-rc1"])
 def test_malformed_hermes_manifest_version_is_refused(
-    tmp_path: Path, side: str, version: object
+    tmp_path: Path, pkg: _Pkg, side: str, version: object
 ) -> None:
-    repo = _hermes_repo(tmp_path, baseline_version="0.1.1")
+    repo = _hermes_repo(tmp_path, baseline_version="0.1.1", pkg=pkg)
+    manifest = repo / pkg.path / pkg.manifest
     if side == "baseline":
-        _write_hermes(repo, None)
-        manifest = {"name": "memtomem"} if version is None else {"version": version}
-        (repo / _HERMES / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+        manifest.write_text(_manifest_text(pkg, version), encoding="utf-8")
         _commit(repo, "bad baseline", "v0.6.8")
-        _write_hermes(repo, "0.1.5", skill="changed")
+        _write_hermes(repo, "0.1.5", skill="changed", pkg=pkg)
         tag = "v0.6.9"
     else:
-        manifest = {"name": "memtomem"} if version is None else {"version": version}
-        (repo / _HERMES / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
-        (repo / _HERMES / "skills" / "SKILL.md").write_text("changed", encoding="utf-8")
+        manifest.write_text(_manifest_text(pkg, version), encoding="utf-8")
+        (repo / pkg.path / "skills" / "SKILL.md").write_text("changed", encoding="utf-8")
         tag = "v0.6.7"
     _commit(repo, "change")
-    with pytest.raises(rp.ReleaseCheckError, match="has invalid version"):
+    # A rendered YAML version is always a quoted string; a missing or bare one is not rendered.
+    unrendered = pkg.manifest == "plugin.yaml" and not isinstance(version, str)
+    expected = "has no single rendered version line" if unrendered else "has invalid version"
+    with pytest.raises(rp.ReleaseCheckError, match=expected):
         rp.validate_hermes_version_bump(tag, repo)
+
+
+def test_a_rendered_yaml_manifest_with_two_version_lines_is_refused(tmp_path: Path) -> None:
+    repo = _hermes_repo(tmp_path, pkg=_MEMORY_PKG)
+    manifest = repo / _MEMORY_PKG.path / "plugin.yaml"
+    manifest.write_text(manifest.read_text(encoding="utf-8") + 'version: "9.9.9"\n', "utf-8")
+    _commit(repo, "change")
+    with pytest.raises(rp.ReleaseCheckError, match="has no single rendered version line"):
+        rp.validate_hermes_version_bump("v0.6.7", repo)
 
 
 def test_the_flag_is_what_makes_the_contract_check_refuse_an_unbumped_hermes_change(
@@ -1821,3 +1907,424 @@ def test_readiness_workflow_guard_rejects_dependency_and_order_bypasses(bypass):
         step["run"] = step["run"].replace("sha256sum --check --strict", "cat")
     with pytest.raises(AssertionError):
         _assert_readiness_workflows(release, opencode)
+
+
+_CLAUDE = "packages/memtomem-claude-plugin"
+_CLAUDE_LAUNCH = ("--from", "memtomem[onnx]==0.6.7", "memtomem-server")
+_CLAUDE_CONTRACT = "packages/memtomem-plugin-assets/contract.toml"
+
+
+def _claude_repo(
+    tmp_path: Path,
+    *,
+    version: object = "0.5.11",
+    args: tuple[object, ...] = _CLAUDE_LAUNCH,
+    core: str = "0.6.7",
+    extras: tuple[str, ...] = ("onnx",),
+) -> Path:
+    repo = tmp_path / "claude"
+    (repo / _CLAUDE / ".claude-plugin").mkdir(parents=True)
+    (repo / _CLAUDE / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "memtomem", "version": version}), encoding="utf-8"
+    )
+    (repo / _CLAUDE / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"memtomem": {"command": "uvx", "args": list(args)}}}),
+        encoding="utf-8",
+    )
+    contract = repo / _CLAUDE_CONTRACT
+    contract.parent.mkdir(parents=True)
+    contract.write_text(
+        f'[core]\nversion = "{core}"\nmcp_extras = {json.dumps(list(extras))}\n', encoding="utf-8"
+    )
+    return repo
+
+
+def _no_network(*_: object) -> object:
+    pytest.fail("network called")
+
+
+def test_claude_plugin_probes_the_core_pin_its_launch_command_ships(tmp_path):
+    calls = []
+
+    def fetch(url, timeout):
+        calls.append((url, timeout))
+        return 200, _pypi_metadata(version="0.6.7")
+
+    # The core version is what is probed, not the plugin's own 0.5.11.
+    repo = _claude_repo(tmp_path)
+    assert rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=fetch) == "0.5.11"
+    assert calls == [("https://pypi.org/pypi/memtomem/0.6.7/json", 10)]
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "claude-plugin-v0.5.12",
+        "claude-plugin-v0.5.11rc1",
+        "claude-plugin-v0.5.11.1",
+        "claude-plugin-0.5.11",
+        "v0.5.11",
+        "opencode-v0.5.11",
+    ],
+)
+def test_claude_plugin_refuses_a_tag_that_is_not_this_version_before_any_network(tmp_path, tag):
+    with pytest.raises(rp.ReleaseCheckError, match="tag"):
+        rp.validate_claude_plugin(tag, _claude_repo(tmp_path), fetch_json=_no_network)
+
+
+@pytest.mark.parametrize("version", ["0.5.11rc1", "0.5.11.1", 5, None])
+def test_claude_plugin_refuses_a_manifest_version_no_tag_can_name(tmp_path, version):
+    repo = _claude_repo(tmp_path, version=version)
+    with pytest.raises(rp.ReleaseCheckError):
+        rp.validate_claude_plugin(f"claude-plugin-v{version}", repo, fetch_json=_no_network)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--from", "memtomem-server"),
+        ("--with", "memtomem[onnx]==0.6.7", "memtomem-server"),
+        ("--from", "memtomem[onnx]==0.6.7", "memtomem==0.6.7"),
+        ("--from", "memtomem[onnx]==0.6.7", "memtomem-server", "MemToMem>=999.0.0"),
+        ("--from", 7, "memtomem-server"),
+        ("--from", "memtomem[onnx]>=0.6.7", "memtomem-server"),
+        ("--from", "memtomem[onnx]==0.6.8", "memtomem-server"),
+        ("--from", "memtomem[all]==0.6.7", "memtomem-server"),
+        ("--from", "memtomem==0.6.7", "memtomem-server"),
+        ("--from", "memtomem[]==0.6.7", "memtomem-server"),
+        ("--from", " memtomem[onnx]==0.6.7", "memtomem-server"),
+        ("--from", "MemToMem[onnx]==0.6.7", "memtomem-server"),
+    ],
+)
+def test_claude_plugin_refuses_a_launch_that_is_not_the_contract_one_before_any_network(
+    tmp_path, args
+):
+    with pytest.raises(rp.ReleaseCheckError, match="the plugin contract expects"):
+        rp.validate_claude_plugin(
+            "claude-plugin-v0.5.11", _claude_repo(tmp_path, args=args), fetch_json=_no_network
+        )
+
+
+def test_claude_plugin_refuses_a_launch_left_behind_by_a_contract_bump(tmp_path):
+    """The contract moved to a new core and the plugin was not re-rendered."""
+    repo = _claude_repo(tmp_path, core="0.6.8")
+    with pytest.raises(rp.ReleaseCheckError, match="the plugin contract expects") as error:
+        rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=_no_network)
+    assert "memtomem[onnx]==0.6.8" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "extras,pin", [((), "memtomem[]==0.6.7"), (("onnx", "web_ui"), "memtomem[onnx,web_ui]==0.6.7")]
+)
+def test_claude_plugin_accepts_whatever_extras_the_contract_renders(tmp_path, extras, pin):
+    repo = _claude_repo(tmp_path, args=("--from", pin, "memtomem-server"), extras=extras)
+    reply = (200, _pypi_metadata(version="0.6.7"))
+    assert rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=lambda *_: reply)
+
+
+@pytest.mark.parametrize("contract", ["", "[core]\n", '[core]\nversion = "0.6.7"\n', None])
+def test_claude_plugin_refuses_an_unusable_contract_before_any_network(tmp_path, contract):
+    repo = _claude_repo(tmp_path)
+    if contract is None:
+        (repo / _CLAUDE_CONTRACT).unlink()
+    else:
+        (repo / _CLAUDE_CONTRACT).write_text(contract, encoding="utf-8")
+    with pytest.raises(rp.ReleaseCheckError, match="contract"):
+        rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=_no_network)
+
+
+_CLAUDE_SERVER = (
+    '{"command": "uvx", "args": ["--from", "memtomem[onnx]==0.6.7", "memtomem-server"]}'
+)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[",
+        "[]",
+        '{"servers": {}}',
+        '{"mcpServers": {}}',
+        '{"mcpServers": {"other": %s}}' % _CLAUDE_SERVER,
+        '{"mcpServers": {"memtomem": %s, "second": %s}}' % (_CLAUDE_SERVER, _CLAUDE_SERVER),
+        '{"mcpServers": {"memtomem": []}}',
+        '{"mcpServers": {"memtomem": {"command": "uvx", "args": "--from"}}}',
+        '{"mcpServers": {"memtomem": %s}}' % _CLAUDE_SERVER.replace("uvx", "npx"),
+        None,
+    ],
+)
+def test_claude_plugin_refuses_an_unreadable_launch_file_before_any_network(tmp_path, content):
+    repo = _claude_repo(tmp_path)
+    launch = repo / _CLAUDE / ".mcp.json"
+    if content is None:
+        launch.unlink()
+    else:
+        launch.write_text(content, encoding="utf-8")
+    with pytest.raises(rp.ReleaseCheckError, match=r"\.mcp\.json"):
+        rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=_no_network)
+
+
+@pytest.mark.parametrize("status,reason", [(404, "absent"), (503, "could not confirm")])
+def test_claude_plugin_missing_or_unavailable_pypi_fails_with_recovery(tmp_path, status, reason):
+    calls = []
+
+    def fetch(*args):
+        calls.append(args)
+        return status, None
+
+    with pytest.raises(rp.ReleaseCheckError) as error:
+        rp.validate_claude_plugin("claude-plugin-v0.5.11", _claude_repo(tmp_path), fetch_json=fetch)
+    message = str(error.value)
+    assert all(text in message for text in ["memtomem==0.6.7", reason, "approve", "rerun"])
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+def test_claude_plugin_cli_reports_the_gate_result(tmp_path, monkeypatch, capsys, allowed):
+    reply = (200, _pypi_metadata(version="0.6.7")) if allowed else (404, None)
+    monkeypatch.setattr(rp, "_request_json", lambda *_: reply)
+    args = ["claude-plugin", "--tag", "claude-plugin-v0.5.11", "--repo-root"]
+    assert rp.main([*args, str(_claude_repo(tmp_path))]) == (0 if allowed else 1)
+    output = capsys.readouterr()
+    assert ("release preflight failed" in output.err) is not allowed
+    assert ("0.5.11" in output.out) is allowed
+
+
+def _load_publisher() -> ModuleType:
+    path = _ROOT / "tools" / "publish_claude_plugin_branch.py"
+    spec = importlib.util.spec_from_file_location("publish_claude_plugin_branch", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_CLAUDE_WORKFLOW = "release-claude-plugin.yml"
+_CLAUDE_GATE_PREFIX = ("python", "tools/release_preflight.py", "claude-plugin")
+_WAIT_CI_PREFIX = ("python", "tools/release_preflight.py", "wait-ci")
+_PUBLISHER_PREFIX = ("python", "tools/publish_claude_plugin_branch.py")
+_CLAUDE_GATES = ["plugin-gate", "fetch-main", "on-main", "wait-ci"]
+_CLAUDE_COMMANDS = [*(("preflight", gate) for gate in _CLAUDE_GATES), ("publish", "publish")]
+_BOT = "github-actions[bot]"
+_BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+def _triggers(document: dict) -> dict:
+    # YAML 1.1 reads a bare ``on`` key as the boolean true.
+    return document[True] if True in document else document["on"]
+
+
+def _assert_claude_plugin_workflow(document: dict) -> None:
+    """The Claude plugin release publishes only from a tag, and only past every gate."""
+    assert _triggers(document) == {"push": {"tags": ["claude-plugin-v[0-9]*"]}}
+    assert document["concurrency"] == {
+        "group": "release-claude-plugin",
+        "cancel-in-progress": False,
+    }
+    assert "permissions" not in document
+    assert set(document["jobs"]) == {"preflight", "publish"}
+    # ``defaults.run`` is inherited by every step: a shell of ``echo {0}`` there
+    # turns each gate into a printout without touching the steps this guard reads.
+    assert "defaults" not in document
+    for job in document["jobs"].values():
+        assert "defaults" not in job
+    for job_name, step_id in _CLAUDE_COMMANDS:
+        # The argv comparisons below see ``$GITHUB_SHA`` whichever way it was
+        # quoted; the shell only expands it outside single quotes.
+        assert "'" not in _required_step(document, job_name, step_id)["run"]
+
+    preflight = document["jobs"]["preflight"]
+    assert preflight["permissions"] == {"actions": "read", "contents": "read"}
+    assert "if" not in preflight
+    checkout = preflight["steps"][0]
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert checkout["with"] == {"fetch-depth": 0, "persist-credentials": False}
+    assert [step.get("id") for step in preflight["steps"][1:]] == _CLAUDE_GATES
+    argv = _single_command_argv(document, "preflight", "plugin-gate", _CLAUDE_GATE_PREFIX)
+    args = rp._build_parser().parse_args(argv[len(_CLAUDE_GATE_PREFIX) - 1 :])
+    assert (args.tag, args.repo_root) == ("$GITHUB_REF_NAME", Path("."))
+    fetch = ("git", "fetch", "--no-tags", "origin", "main:refs/remotes/origin/main")
+    assert _single_command_argv(document, "preflight", "fetch-main", fetch) == list(fetch)
+    on_main = ("git", "merge-base", "--is-ancestor", "$GITHUB_SHA", "origin/main")
+    assert _single_command_argv(document, "preflight", "on-main", on_main) == list(on_main)
+    argv = _single_command_argv(document, "preflight", "wait-ci", _WAIT_CI_PREFIX)
+    args = rp._build_parser().parse_args(argv[len(_WAIT_CI_PREFIX) - 1 :])
+    assert (args.repository, args.sha) == ("$GITHUB_REPOSITORY", "$GITHUB_SHA")
+    assert (args.timeout_seconds, args.interval_seconds) == (2400, 15)
+    wait_ci = _required_step(document, "preflight", "wait-ci")
+    assert wait_ci.get("env") == {"GITHUB_TOKEN": "${{ github.token }}"}
+
+    publish = document["jobs"]["publish"]
+    assert publish.get("needs") == "preflight"
+    assert "if" not in publish  # No always() bypass of a failed preflight.
+    assert publish["permissions"] == {"contents": "write"}
+    assert publish.get("environment") == {"name": "claude-plugin-directory"}
+    # Checkout and the publisher only: any further step could use the write token.
+    assert len(publish["steps"]) == 2
+    checkout = publish["steps"][0]
+    assert checkout["uses"].startswith("actions/checkout@")
+    # The publisher pushes with the credentials this checkout keeps.
+    assert checkout["with"] == {"fetch-depth": 0, "persist-credentials": True}
+    step = _required_step(document, "publish", "publish")
+    assert step is publish["steps"][1]
+    assert step.get("env") == {
+        "GIT_AUTHOR_NAME": _BOT,
+        "GIT_AUTHOR_EMAIL": _BOT_EMAIL,
+        "GIT_COMMITTER_NAME": _BOT,
+        "GIT_COMMITTER_EMAIL": _BOT_EMAIL,
+    }
+    publisher = _load_publisher()
+    argv = _single_command_argv(document, "publish", "publish", _PUBLISHER_PREFIX)
+    args = publisher._build_parser().parse_args(argv[len(_PUBLISHER_PREFIX) :])
+    assert vars(args) == {
+        "source": "$GITHUB_SHA",
+        "remote": "origin",
+        "branch": "claude-plugin-directory",
+        "repo_root": Path.cwd(),
+        "dry_run": False,
+    }
+
+
+def test_claude_plugin_workflow_publishes_only_from_a_tag_past_every_gate():
+    _assert_claude_plugin_workflow(_workflow(_CLAUDE_WORKFLOW))
+
+
+@pytest.mark.parametrize("target", [*_CLAUDE_GATES, "publish"])
+@pytest.mark.parametrize(
+    "bypass", ["delete", "echo", "if", "continue-on-error", "shell", "comment", "or-true"]
+)
+def test_claude_plugin_workflow_guard_rejects_disabled_or_decoy_commands(target, bypass):
+    document = _workflow(_CLAUDE_WORKFLOW)
+    job = "publish" if target == "publish" else "preflight"
+    step = _required_step(document, job, target)
+    if bypass == "delete":
+        document["jobs"][job]["steps"].remove(step)
+    elif bypass == "echo":
+        step["run"] = "echo " + step["run"]
+    elif bypass == "comment":
+        step["run"] = "# " + step["run"]
+    elif bypass == "or-true":
+        step["run"] = step["run"].strip() + " || true"
+    else:
+        step[bypass] = {"if": "${{ false }}", "continue-on-error": True, "shell": "echo {0}"}[
+            bypass
+        ]
+    with pytest.raises(AssertionError):
+        _assert_claude_plugin_workflow(document)
+
+
+def _reword(document: dict, job: str, step_id: str, old: str, new: str) -> None:
+    step = _required_step(document, job, step_id)
+    assert old in step["run"], f"mutation would change nothing: {old!r} not in {step['run']!r}"
+    step["run"] = step["run"].replace(old, new)
+
+
+@pytest.mark.parametrize(
+    "bypass",
+    [
+        "dispatch",
+        "branch-trigger",
+        "any-tag",
+        "concurrency",
+        "top-level-write",
+        "workflow-default-shell",
+        "preflight-default-shell",
+        "publish-default-shell",
+        "preflight-default-directory",
+        "preflight-write",
+        "preflight-credentials",
+        "gate-order",
+        "gate-fixed-tag",
+        "gate-single-quoted-tag",
+        "on-main-other-ref",
+        "on-main-single-quoted-sha",
+        "wait-ci-other-sha",
+        "wait-ci-single-quoted-sha",
+        "wait-ci-no-token",
+        "publish-needs",
+        "publish-always",
+        "publish-job-continue",
+        "publish-no-environment",
+        "publish-no-credentials",
+        "publish-extra-step",
+        "publisher-dry-run",
+        "publisher-other-source",
+        "publisher-single-quoted-source",
+        "publisher-other-branch",
+        "publisher-other-remote",
+        "publisher-no-identity",
+        "publisher-extra-env",
+    ],
+)
+def test_claude_plugin_workflow_guard_rejects_trigger_order_and_scope_bypasses(bypass):
+    document = _workflow(_CLAUDE_WORKFLOW)
+    preflight = document["jobs"]["preflight"]
+    publish = document["jobs"]["publish"]
+    if bypass == "dispatch":
+        _triggers(document)["workflow_dispatch"] = {}
+    elif bypass == "branch-trigger":
+        _triggers(document)["push"]["branches"] = ["main"]
+    elif bypass == "any-tag":
+        _triggers(document)["push"]["tags"] = ["*"]
+    elif bypass == "concurrency":
+        document["concurrency"]["cancel-in-progress"] = True
+    elif bypass == "top-level-write":
+        document["permissions"] = {"contents": "write"}
+    elif bypass == "workflow-default-shell":
+        document["defaults"] = {"run": {"shell": "echo {0}"}}
+    elif bypass == "preflight-default-shell":
+        preflight["defaults"] = {"run": {"shell": "echo {0}"}}
+    elif bypass == "publish-default-shell":
+        publish["defaults"] = {"run": {"shell": "echo {0}"}}
+    elif bypass == "preflight-default-directory":
+        preflight["defaults"] = {"run": {"working-directory": "docs"}}
+    elif bypass == "preflight-write":
+        preflight["permissions"]["contents"] = "write"
+    elif bypass == "preflight-credentials":
+        preflight["steps"][0]["with"]["persist-credentials"] = True
+    elif bypass == "gate-order":
+        preflight["steps"][1], preflight["steps"][4] = preflight["steps"][4], preflight["steps"][1]
+    elif bypass == "gate-fixed-tag":
+        _reword(document, "preflight", "plugin-gate", '"$GITHUB_REF_NAME"', "claude-plugin-v0.5.11")
+    elif bypass == "gate-single-quoted-tag":
+        _reword(document, "preflight", "plugin-gate", '"$GITHUB_REF_NAME"', "'$GITHUB_REF_NAME'")
+    elif bypass == "on-main-other-ref":
+        _reword(document, "preflight", "on-main", "origin/main", "HEAD")
+    elif bypass == "on-main-single-quoted-sha":
+        _reword(document, "preflight", "on-main", '"$GITHUB_SHA"', "'$GITHUB_SHA'")
+    elif bypass == "wait-ci-other-sha":
+        _reword(document, "preflight", "wait-ci", '"$GITHUB_SHA"', "HEAD")
+    elif bypass == "wait-ci-single-quoted-sha":
+        _reword(document, "preflight", "wait-ci", '"$GITHUB_SHA"', "'$GITHUB_SHA'")
+    elif bypass == "wait-ci-no-token":
+        del _required_step(document, "preflight", "wait-ci")["env"]
+    elif bypass == "publish-needs":
+        publish["needs"] = []
+    elif bypass == "publish-always":
+        publish["if"] = "${{ always() }}"
+    elif bypass == "publish-job-continue":
+        publish["continue-on-error"] = True
+    elif bypass == "publish-no-environment":
+        del publish["environment"]
+    elif bypass == "publish-no-credentials":
+        publish["steps"][0]["with"]["persist-credentials"] = False
+    elif bypass == "publish-extra-step":
+        publish["steps"].append({"run": "git push origin HEAD:refs/heads/claude-plugin-directory"})
+    elif bypass == "publisher-dry-run":
+        _reword(document, "publish", "publish", "--remote origin", "--remote origin --dry-run")
+    elif bypass == "publisher-other-source":
+        _reword(document, "publish", "publish", '"$GITHUB_SHA"', "origin/main")
+    elif bypass == "publisher-single-quoted-source":
+        _reword(document, "publish", "publish", '"$GITHUB_SHA"', "'$GITHUB_SHA'")
+    elif bypass == "publisher-other-branch":
+        _reword(document, "publish", "publish", "--branch claude-plugin-directory", "--branch main")
+    elif bypass == "publisher-other-remote":
+        _reword(document, "publish", "publish", "--remote origin", "--remote upstream")
+    elif bypass == "publisher-no-identity":
+        del _required_step(document, "publish", "publish")["env"]["GIT_COMMITTER_EMAIL"]
+    else:
+        _required_step(document, "publish", "publish")["env"]["GITHUB_TOKEN"] = (
+            "${{ github.token }}"
+        )
+    with pytest.raises(AssertionError):
+        _assert_claude_plugin_workflow(document)

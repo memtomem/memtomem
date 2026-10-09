@@ -5,7 +5,105 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mem_add` no longer records its duplicate check as a search (#2683).**
+  After writing a note longer than 20 characters, `mem_add` searches for
+  similar memories; that search ran in recording mode, so it raised the
+  access count of each hit (the new note too, when retrieved) and stored the
+  note body as a `query_history` row. Access counts feed the
+  access-frequency boost and importance score, and the history feeds the
+  search-history views and eval cases. The check now runs with
+  `record=False`; its "Similar memories found" warning is unchanged.
+- **Listing procedures no longer records a search (#2691).**
+  `mem_procedure_list` finds procedures with a fixed query, `"procedure
+  workflow steps"`, filtered to the `procedure` tag. That search ran in
+  recording mode: every listing stored the fixed phrase as a `query_history`
+  row, and each listing not served from the result cache raised the access
+  count of every listed procedure, lifting procedures in ordinary search
+  ranking. It now runs with `record=False`, which also skips the result
+  cache; the listing's query, filters and format are unchanged.
+
+## [0.6.8] — 2026-10-08
+
+### Upgrading
+
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.9 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.6.8;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.6.8`, confirm with `mm --version`, then start a new
+  Claude Code session — the compatibility check is refreshed at session start,
+  and until then those hooks are skipped. See the
+  [CLI reference](docs/guides/reference/data-config-cli.md#cli-reference) for
+  what `mm upgrade` preserves and stops.
+
+### Added
+
+- **`mem_search(output_format="structured")` echoes `recorded`.** Every
+  structured response, empty ones included, now carries a top-level
+  `recorded` key echoing the `record` mode the search ran with: `true` for
+  the default recording mode, `false` under `record=false`. It says which
+  mode applied, not that a write happened — the default mode writes access
+  counts and query history in the background, skips them on cache hits, and
+  increments nothing for an empty result set. A caller that searches in the
+  background without recording — the Hermes memory provider added in this
+  release (#2662) — reads it on every response to confirm that the server it
+  reached is one where `record=false` means "do not record" (#2671), instead
+  of inferring that from a version string; the connection it calls through
+  can be replaced under it without a visible failure. Compact and verbose
+  output are unchanged, and servers before this release simply omit the key.
+
+- **`packages/memtomem-hermes-memory/` is a recall-only Hermes Agent memory
+  provider, `memtomem-memory` 0.1.0 (#2662).** On each non-trivial user turn it
+  makes one `mem_search(record=False, rerank=False)` call on the `memtomem` MCP
+  entry through Hermes's own MCP client and injects up to five results, within
+  a 300 ms budget (both defaults; the package README lists the settings). It
+  owns no server and writes nothing. Because that connection's call queue and
+  circuit breaker are shared with the model's own memtomem tools, it makes at
+  most one recall call at a time per entry name per process and by default
+  backs off 15 s, 60 s, then 300 s after failures. It needs memtomem 0.6.8 or
+  later on the entry: it refuses a server whose answer does not echo
+  `"recorded": false`. Standard library only and Python 3.11 compatible; a new
+  CI job runs it under 3.11. The release preflight's Hermes version-bump check
+  now covers this package as well (`[plugins] hermes_memory_version`).
+
+- **The Claude plugin directory reads the plugin from its own branch
+  (#2682).** The directory tracks the branch `claude-plugin-directory`, which
+  holds only `packages/memtomem-claude-plugin`, because its validator refuses
+  this repository's root `pyproject.toml`. Pushing a `claude-plugin-vX.Y.Z`
+  tag on a `main` commit adds one commit to that branch after a preflight
+  check; merging to `main` does not change it, so the directory can lag `main`
+  until the next such tag.
+- **The Claude plugin ships a listing icon (Claude plugin 0.5.12).** The Claude
+  plugin directory takes a plugin's icon from `.claude-plugin/icon.png`, and
+  only the first time the plugin is saved in its developer portal, so the file
+  has to be in place before that save. It is the web UI's favicon drawn as a
+  512 × 512 PNG, with the lettering reduced so a round crop does not cut it.
+- **The Claude plugin names a privacy policy for its directory listing (Claude
+  plugin 0.5.13).** The plugin README has a new section, "What this plugin
+  runs and connects to" (#2666): the server the plugin launches and what uv
+  downloads for it, where memories and the index are stored, and which network
+  use is opt-in. `plugin.json` sets `privacyPolicyUrl` to that section, which
+  also describes the local search history (query text and result metadata,
+  including the text of each note `mem_add` checks for duplicates, with no
+  reliable expiry) and that memory text returned by search, recall and read
+  becomes part of the Claude conversation. Claude Code does not read the
+  field; the Claude plugin directory shows it on the listing.
+
 ### Changed
+
+- **`mem_search(record=false)` and `mem_agent_search(record=false)` no longer
+  switch dense retrieval to an exhaustive scan (#2671).** That scan is refused
+  above 4,096 embeddings, so on a larger store a `record=false` search lost
+  its semantic leg and returned keyword matches only, with nothing in the
+  default output to say so. `record=false` now means only what its name says:
+  no access-count increments, no query history, and the result and expansion
+  caches neither read nor filled. Its ranking can differ from before on any
+  store, because dense candidates now come from the ordinary bounded search.
+  Deterministic replay (`mm quality replay`, `mem_quality_replay`, the Web
+  quality page) asks for the exhaustive scan itself and behaves as before,
+  including the `dense_exhaustive_limit` report above the cap.
 
 - **memtomem turns ONNX Runtime's telemetry off on Linux and macOS (#2664).**
   Official ONNX Runtime builds from 1.29 upload telemetry to Microsoft on those
@@ -18,9 +116,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   imports memtomem, and Windows, where ONNX Runtime does not read this variable
   and emits ETW events that Windows records only while a trace session is
   collecting.
+- **The plugins launch the memtomem server with ONNX Runtime telemetry off
+  (#2664).** The Claude Code, Codex and Hermes plugin manifests and the
+  OpenCode plugin now pass `ORT_DISABLE_TELEMETRY=1` in the server's launch
+  environment, so the switch reaches plugin users without waiting for a core
+  release (Claude plugin 0.5.10, Codex 0.3.10, Hermes 0.1.3,
+  `opencode-memtomem` 0.3.10). It turns off the telemetry that official ONNX
+  Runtime builds from 1.29 upload on Linux and macOS; Windows builds do not
+  read it. If you also registered the server by hand with the plugin's command
+  but a different environment, `mm doctor --claude-mcp` notes that the
+  environments differ and that your entry wins. On a 0.6.7 server such an
+  entry runs with the switch only if its own environment sets the variable;
+  from 0.6.8 the server sets it by default (entry above).
 
 ### Fixed
 
+- **A search whose semantic leg failed now says so in its default output
+  (#2671).** When `dense_search` raised — embedder unreachable, for instance —
+  `mem_search`, `mem_agent_search`, `mem_ask` and `mm search` returned the
+  keyword matches with no sign of it unless the result set was empty or the
+  verbose pipeline line was requested. When results come back, they now
+  append the hint `semantic search failed for this query — results may be
+  incomplete` (compact tail, structured `hints` array, `mm search` stderr,
+  the `mem_ask` grounded prompt). An empty result set is unchanged:
+  `mem_search` already named the error there, and `mem_agent_search`,
+  `mem_ask` and `mm search` still do not. The hint is fixed text: the
+  exception message, which can name an embedder endpoint, stays in the
+  server log and the verbose pipeline line.
 - **`mm memory doctor` no longer reports every multi-chunk memo as stale
   under the E5 profile (#2665).** When `config.json` or a `config.d` fragment
   selected `multilingual-e5-small` without pinning chunk settings, the doctor
@@ -28,6 +150,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   any memo the indexer had split was listed under `stale_index`, and
   re-indexing could not clear it. The doctor now loads config through the
   same builder as the MCP server, so it applies E5's chunk caps.
+- **`mm index`, the other CLI commands and `mm web` keep a `config.d` chunk
+  setting when `config.json` selects E5 (#2667).** A fragment such as
+  `{"indexing": {"max_chunk_tokens": 320}}` was checked against the generic
+  chunk defaults before `config.json` chose `multilingual-e5-small`, rejected
+  with an "Invalid config section [indexing]" warning, and dropped, so these
+  commands chunked with 384 while the MCP server used 320. They now load
+  config the way the MCP server does. Files indexed while the setting was
+  dropped are reported by `mm memory doctor` as `stale_index`; `mm index`
+  clears that.
+- **The Claude plugin's skills carry `argument-hint` as a quoted string
+  (Claude plugin 0.5.11).** The hint was written into each skill's frontmatter
+  unquoted. The handoff skill's `[save|resume] [target runtime or handoff id]`
+  is not valid YAML in that form, so a YAML parser rejected the whole
+  frontmatter block, and the Claude plugin directory's validator refused the
+  skill. The one-group hints of the search, recall, remember, index and setup
+  skills parsed, but as a list rather than as text. All six are now quoted.
 
 ### Security
 

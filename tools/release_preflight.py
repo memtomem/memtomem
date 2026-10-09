@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 
 _PROD_TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+)$")
@@ -128,8 +128,8 @@ def _probe_pypi_release(
             )
 
 
-def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = None) -> str:
-    """Require the core version actually pinned by OpenCode to exist on PyPI."""
+def _contract_core_requirement(repo_root: Path) -> tuple[str, str]:
+    """The core version the plugin contract pins, and the launch requirement it renders to."""
     core = _load_toml(repo_root / "packages/memtomem-plugin-assets/contract.toml").get("core")
     if not isinstance(core, dict) or not isinstance(core.get("version"), str):
         raise ReleaseCheckError("plugin contract has no core.version")
@@ -139,7 +139,12 @@ def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = N
         isinstance(extra, str) and re.fullmatch(r"[A-Za-z0-9_-]+", extra) for extra in extras
     ):
         raise ReleaseCheckError("plugin contract has invalid core.mcp_extras")
-    requirement = f"memtomem[{','.join(extras)}]=={version}"
+    return version, f"memtomem[{','.join(extras)}]=={version}"
+
+
+def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = None) -> str:
+    """Require the core version actually pinned by OpenCode to exist on PyPI."""
+    version, requirement = _contract_core_requirement(repo_root)
     generated = (repo_root / "packages/opencode-memtomem/src/generated.ts").read_text(
         encoding="utf-8"
     )
@@ -154,6 +159,65 @@ def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = N
             f"OpenCode cannot publish while memtomem=={version} is unverified: {exc}. "
             f"Wait for / approve the PyPI v{version} release, confirm propagation, "
             "then rerun the OpenCode release."
+        ) from exc
+    return version
+
+
+_CLAUDE_PLUGIN = "packages/memtomem-claude-plugin"
+_CLAUDE_TAG_RE = re.compile(r"^claude-plugin-v(?P<version>\d+\.\d+\.\d+)$")
+
+
+def _load_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReleaseCheckError(f"cannot read {label}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ReleaseCheckError(f"{label} is not a JSON object")
+    return document
+
+
+def _claude_launch_pin(repo_root: Path) -> str:
+    """The core version the Claude plugin launches, once its launch command is the rendered one.
+
+    The plugin contract already says what the launch command must be, and the
+    OpenCode gate already validates it. Comparing the shipped ``.mcp.json``
+    with that leaves no requirement syntax to recognise here.
+    """
+    version, requirement = _contract_core_requirement(repo_root)
+    expected = {"command": "uvx", "args": ["--from", requirement, "memtomem-server"]}
+    label = f"{_CLAUDE_PLUGIN}/.mcp.json"
+    servers = _load_json_object(repo_root / label, label).get("mcpServers")
+    if not isinstance(servers, dict) or list(servers) != ["memtomem"]:
+        raise ReleaseCheckError(f"{label} must define exactly one server, named memtomem")
+    server = servers["memtomem"]
+    launch = {key: server.get(key) for key in expected} if isinstance(server, dict) else server
+    if launch != expected:
+        raise ReleaseCheckError(
+            f"{label} launches {launch!r}; the plugin contract expects {expected!r}"
+        )
+    return version
+
+
+def validate_claude_plugin(
+    tag: str, repo_root: Path, *, fetch_json: _FetchJSON | None = None
+) -> str:
+    """Require a Claude plugin tag to name the shipped version and an installable core."""
+    match = _CLAUDE_TAG_RE.fullmatch(tag)
+    if match is None:
+        raise ReleaseCheckError(f"unsupported tag {tag!r}; expected claude-plugin-vX.Y.Z")
+    label = f"{_CLAUDE_PLUGIN}/.claude-plugin/plugin.json"
+    version = _load_json_object(repo_root / label, label).get("version")
+    if version != match.group("version"):
+        raise ReleaseCheckError(f"tag {tag!r} does not match {label} version {version!r}")
+    core = _claude_launch_pin(repo_root)
+    try:
+        _probe_pypi_release(core, fetch_json=fetch_json or _request_json)
+    except ReleaseCheckError as exc:
+        raise ReleaseCheckError(
+            f"the Claude plugin cannot be published while memtomem=={core} is unverified: {exc}. "
+            f"Wait for / approve the PyPI v{core} release, confirm propagation, "
+            "then rerun the Claude plugin release."
         ) from exc
     return version
 
@@ -440,9 +504,48 @@ def validate_contract(tag: str, repo_root: Path, *, require_registry_manifest: b
     return expected
 
 
-_HERMES_PACKAGE = "packages/memtomem-hermes-plugin"
-_HERMES_MANIFEST = f"{_HERMES_PACKAGE}/plugin.json"
 _PLUGIN_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# tools/render_plugin_assets.py writes the provider's plugin.yaml version as one JSON-quoted
+# scalar; reading that rendered line back needs no YAML parser (this tool runs --no-project).
+_RENDERED_YAML_VERSION_RE = re.compile(r'^version: "([^"\\\n]*)"$', re.MULTILINE)
+
+
+def _json_manifest_version(raw: str) -> object:
+    return json.loads(raw).get("version")
+
+
+def _rendered_yaml_manifest_version(raw: str) -> object:
+    versions = _RENDERED_YAML_VERSION_RE.findall(raw)
+    if len(versions) != 1:
+        raise ValueError("expected exactly one rendered version line")
+    return versions[0]
+
+
+class _HermesPackage(NamedTuple):
+    path: str
+    manifest: str
+    contract_key: str
+    read_version: Callable[[str], object]
+    unreadable: str
+
+
+# Every Hermes package the catalog pins by commit SHA and manifest version.
+_HERMES_PACKAGES = (
+    _HermesPackage(
+        "packages/memtomem-hermes-plugin",
+        "plugin.json",
+        "hermes_version",
+        _json_manifest_version,
+        "is not a JSON object",
+    ),
+    _HermesPackage(
+        "packages/memtomem-hermes-memory",
+        "plugin.yaml",
+        "hermes_memory_version",
+        _rendered_yaml_manifest_version,
+        "has no single rendered version line",
+    ),
+)
 
 
 def _git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -468,14 +571,15 @@ def _git_ok(repo_root: Path, *args: str) -> str:
     return result.stdout
 
 
-def _hermes_manifest_version(repo_root: Path, rev: str, label: str) -> str:
-    raw = _git_ok(repo_root, "show", f"{rev}:{_HERMES_MANIFEST}")
+def _hermes_manifest_version(repo_root: Path, package: _HermesPackage, rev: str, label: str) -> str:
+    manifest = f"{package.path}/{package.manifest}"
+    raw = _git_ok(repo_root, "show", f"{rev}:{manifest}")
     try:
-        version = json.loads(raw).get("version")
+        version = package.read_version(raw)
     except (ValueError, AttributeError) as exc:
-        raise ReleaseCheckError(f"{_HERMES_MANIFEST} at {label} is not a JSON object") from exc
+        raise ReleaseCheckError(f"{manifest} at {label} {package.unreadable}") from exc
     if not isinstance(version, str) or not _PLUGIN_VERSION_RE.fullmatch(version):
-        raise ReleaseCheckError(f"{_HERMES_MANIFEST} at {label} has invalid version {version!r}")
+        raise ReleaseCheckError(f"{manifest} at {label} has invalid version {version!r}")
     return version
 
 
@@ -486,24 +590,26 @@ def _version_tuple(version: str) -> tuple[int, ...]:
 def validate_hermes_version_bump(tag: str, repo_root: Path) -> str | None:
     """Refuse a Hermes package that changed since the last release under the same version.
 
-    Hermes installs the package at a commit SHA and its catalog entry pins the
+    Hermes installs a package at a commit SHA and its catalog entry pins the
     manifest version, so changed content under an unchanged version is invisible
     to anyone reading that version. The comparison is the *delivered* manifest,
     committed HEAD against the previous release commit; contract-to-manifest
-    parity is the supply-chain tests' job. A version-only bump is allowed.
+    parity is the supply-chain tests' job. A version-only bump is allowed. Every
+    package in ``_HERMES_PACKAGES`` is checked on its own.
 
-    Returns the baseline tag, or None when the baseline predates the package.
+    Returns the baseline tag, or None when the baseline predates every package.
     """
     expected = _version_tuple(version_from_tag(tag))
     # The verdict speaks for HEAD, so a package directory that differs from HEAD
     # would make it describe something other than what is on disk.
-    dirty = _git_ok(
-        repo_root, "status", "--porcelain", "--untracked-files=all", "--", _HERMES_PACKAGE
-    )
-    if dirty.strip():
-        raise ReleaseCheckError(
-            f"{_HERMES_PACKAGE} has uncommitted changes; commit them before the release check"
+    for package in _HERMES_PACKAGES:
+        dirty = _git_ok(
+            repo_root, "status", "--porcelain", "--untracked-files=all", "--", package.path
         )
+        if dirty.strip():
+            raise ReleaseCheckError(
+                f"{package.path} has uncommitted changes; commit them before the release check"
+            )
 
     candidates = []
     for line in _git_ok(repo_root, "tag", "--list").splitlines():
@@ -512,7 +618,7 @@ def validate_hermes_version_bump(tag: str, repo_root: Path) -> str | None:
             candidates.append((_version_tuple(match.group("version")), match.group(0)))
     if not candidates:
         raise ReleaseCheckError(
-            f"no production tag older than {tag} to compare the Hermes package against "
+            f"no production tag older than {tag} to compare the Hermes packages against "
             "(a shallow clone or a checkout without tags has none)"
         )
     baseline = max(candidates)[1]
@@ -523,16 +629,30 @@ def validate_hermes_version_bump(tag: str, repo_root: Path) -> str | None:
     if ancestry.returncode == 1:
         raise ReleaseCheckError(
             f"previous release {baseline} is not an ancestor of HEAD; cannot tell what the "
-            "Hermes package changed since it"
+            "Hermes packages changed since it"
         )
     if ancestry.returncode != 0:
         raise ReleaseCheckError(
             f"git merge-base failed ({ancestry.returncode}): {ancestry.stderr.strip()}"
         )
 
+    present = [
+        _check_hermes_package(repo_root, package, base_commit, baseline)
+        for package in _HERMES_PACKAGES
+    ]
+    return baseline if any(present) else None
+
+
+def _check_hermes_package(
+    repo_root: Path, package: _HermesPackage, base_commit: str, baseline: str
+) -> bool:
+    """Refuse *package* if it changed since *baseline* without a higher version.
+
+    Returns whether the package existed at the baseline (False = its first release).
+    """
     # Only a successful, empty listing establishes absence; a failed one refuses.
-    if not _git_ok(repo_root, "ls-tree", base_commit, "--", _HERMES_PACKAGE).strip():
-        return None
+    if not _git_ok(repo_root, "ls-tree", base_commit, "--", package.path).strip():
+        return False
 
     # A configured external diff or textconv driver can report "no difference" for
     # changed bytes, so both are switched off: the question is about the blobs.
@@ -545,21 +665,21 @@ def validate_hermes_version_bump(tag: str, repo_root: Path) -> str | None:
         base_commit,
         "HEAD",
         "--",
-        _HERMES_PACKAGE,
+        package.path,
     )
     if diff.returncode == 0:
-        return baseline
+        return True
     if diff.returncode != 1:
         raise ReleaseCheckError(f"git diff failed ({diff.returncode}): {diff.stderr.strip()}")
-    previous = _hermes_manifest_version(repo_root, base_commit, baseline)
-    current = _hermes_manifest_version(repo_root, "HEAD", "HEAD")
+    previous = _hermes_manifest_version(repo_root, package, base_commit, baseline)
+    current = _hermes_manifest_version(repo_root, package, "HEAD", "HEAD")
     if _version_tuple(current) <= _version_tuple(previous):
         raise ReleaseCheckError(
-            f"{_HERMES_PACKAGE} changed since {baseline} but its version is {current} "
-            f"(was {previous}); bump [plugins] hermes_version in "
+            f"{package.path} changed since {baseline} but its version is {current} "
+            f"(was {previous}); bump [plugins] {package.contract_key} in "
             "packages/memtomem-plugin-assets/contract.toml and re-render"
         )
-    return baseline
+    return True
 
 
 def _metadata_from_wheel(path: Path) -> email.message.Message:
@@ -840,6 +960,10 @@ def _build_parser() -> argparse.ArgumentParser:
     opencode = subparsers.add_parser("opencode-pypi", allow_abbrev=False)
     opencode.add_argument("--repo-root", type=Path, default=Path.cwd())
 
+    claude_plugin = subparsers.add_parser("claude-plugin", allow_abbrev=False)
+    claude_plugin.add_argument("--tag", required=True)
+    claude_plugin.add_argument("--repo-root", type=Path, default=Path.cwd())
+
     wait_ci = subparsers.add_parser("wait-ci")
     wait_ci.add_argument("--repository", required=True)
     wait_ci.add_argument("--sha", required=True)
@@ -877,6 +1001,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "opencode-pypi":
             version = validate_opencode_pypi(args.repo_root.resolve())
             print(f"OpenCode core pin memtomem=={version} is available on PyPI")
+        elif args.command == "claude-plugin":
+            version = validate_claude_plugin(args.tag, args.repo_root.resolve())
+            print(f"Claude plugin {version} matches its tag and its core pin is on PyPI")
         else:
             token = os.environ.get("GITHUB_TOKEN", "")
             if not token:

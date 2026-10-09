@@ -291,6 +291,19 @@ def dense_degraded_hint(mismatch: dict[str, Any] | None) -> str:
     )
 
 
+#: The notice for a query whose primary dense leg raised (#2671). Fixed text on
+#: purpose: ``stats.dense_error`` is ``str(exc)`` and an embedder's message can
+#: carry its endpoint — the Ollama provider names ``base_url``, credentials and
+#: all — and this notice reaches ``mem_ask``'s grounded prompt and every
+#: structured ``hints`` array. The exception text stays in the server log and
+#: the verbose ``pipeline:`` line. "May be incomplete" rather than
+#: "keyword-only": the session-summary rescue leg runs its own dense search
+#: on the embedding the primary leg computed, so a result set can still hold
+#: dense hits after the primary ``dense_search`` call failed. No pointer to a
+#: flag either — the same hint reaches surfaces with different vocabularies.
+DENSE_LEG_DROPPED_HINT = "semantic search failed for this query — results may be incomplete"
+
+
 async def run_search(
     pipeline: SearchPipeline,
     *,
@@ -319,8 +332,8 @@ async def run_search(
             ``current_namespace``.
         current_namespace: The surface's ambient namespace.
         as_of: ``YYYY-MM-DD`` / ``YYYY-QN`` temporal bound, or ``None``.
-        record: ``False`` runs the query as a replay — see
-            ``SearchPipeline.search`` for what that suppresses and widens.
+        record: ``False`` runs the query as a background read — see
+            ``SearchPipeline.search`` for what that suppresses.
         project_context_root: ADR-0011 scope anchor; resolve it on the
             caller's side (``runtime.project_context``).
         origin: Call-origin label recorded with the query run.
@@ -387,6 +400,14 @@ async def run_search(
     # dropped out needs that before a note about rows they could reach.
     if stats.dense_suppressed_mismatch:
         hints.append(dense_degraded_hint(stats.mismatch_detail))
+    # A primary dense leg that raised (#2671). ``is not None``: an exception
+    # with an empty message still sets the field to ``""`` and is still a
+    # failure. Only with results — the empty-result branches of ``mem_search``
+    # already name the error, and a hint here would say it twice there. The
+    # mismatch case keeps its own hint above, which names the fix; this one
+    # has none to offer. Hidden-namespace discovery stays last.
+    elif results and stats.dense_error is not None:
+        hints.append(DENSE_LEG_DROPPED_HINT)
     if effective_ns is None and stats.hidden_system_ns > 0:
         hints.append(hidden_namespace_hint(stats.hidden_system_ns, stats.hidden_by_prefix))
 

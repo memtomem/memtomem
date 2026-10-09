@@ -362,7 +362,7 @@ def _stage_skill(src: Path, dst: Path, *, payload_only: bool = False) -> Path:
     # never affects override application; and the scan therefore never sees
     # (and cannot block on) an unrelated vendor's override.
     skip_pred = (lambda name: not is_payload_top_name(name)) if payload_only else None
-    # Codex review fold: if ``copy_tree_atomic`` raises after partial
+    # If ``copy_tree_atomic`` raises after partial
     # copy, the caller would never see ``staging`` (no return value),
     # leaving an unscanned partial tree under the runtime fan-out root.
     # Clean up here before re-raising so Gate A's staging-dir-first
@@ -390,8 +390,8 @@ def _remove_internal_artifact(path: Path) -> None:
     non-directory" would delete a regular file that an out-of-band writer had
     dropped at the destination between the promote's conflict check and its
     move-aside, and a file that merely happens to carry the reserved name —
-    both of which survive today, because ``rmtree`` refuses them (Codex
-    review). The leak this fixes is one dead symlink; the cure must not be
+    both of which survive today, because ``rmtree`` refuses them. The leak
+    this fixes is one dead symlink; the cure must not be
     broader than that.
 
     The classification is **best-effort against an out-of-band writer**: the
@@ -600,7 +600,7 @@ def _recover_and_reap_internal_dirs(dst: Path) -> None:
     ``.old-foo-bar-<pid>-<rand>.tmp``, which belongs to the perfectly valid
     skill ``foo-bar`` — so syncing ``foo`` deleted another skill's in-flight
     rollback tree while holding the wrong lock, and hyphenated skill names are
-    the norm here (Codex review; live since #1229).
+    the norm here (live since #1229).
 
     **An ``.old-*`` is reaped only while ``dst`` is a present, non-symlink
     directory** (ADR-0030 §10). The two transients are not equivalent: a
@@ -962,7 +962,7 @@ def copy_skill(src: Path, dst: Path) -> None:
     made it the one path that could park a ``.old-*`` tree no other writer
     knew about — a concurrent gateway flow reaping that destination could
     delete the tree this copy was about to roll back onto, leaving the
-    rollback with nothing to restore (Codex review). Reaping cannot tell an
+    rollback with nothing to restore. Reaping cannot tell an
     in-flight move-aside from an abandoned one; the lock is what makes the
     distinction unnecessary.
 

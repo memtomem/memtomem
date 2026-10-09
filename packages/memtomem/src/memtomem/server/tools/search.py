@@ -106,7 +106,7 @@ async def mem_search(
             disabled.
         record: ``false`` = background read, for fan-out callers: no
             access-count increments, no query history, caches neither read
-            nor written, dense retrieval exhaustive — so results can differ.
+            nor filled — so results can differ from a cached answer.
 
     A count below ``top_k`` can mean filters excluded candidates or the index
     holds no more. Raising ``top_k`` widens the request; it does not promise
@@ -215,7 +215,10 @@ async def mem_search(
         if effective_format == "structured":
             all_hints = hints + empty_hints
             return _format_structured_results(
-                [], hints=all_hints or None, query_run_id=stats.query_run_id
+                [],
+                hints=all_hints or None,
+                query_run_id=stats.query_run_id,
+                recorded=record,
             )
 
         # Pick the message, then append hints once. The hint tail has to be
@@ -254,6 +257,7 @@ async def mem_search(
             score_scale=stats.score_scale,
             reranker=stats.reranker_model,
             query_run_id=stats.query_run_id,
+            recorded=record,
         )
     else:
         is_verbose = effective_format == "verbose"

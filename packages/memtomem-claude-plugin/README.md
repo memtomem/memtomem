@@ -14,13 +14,66 @@ The base plugin does not run background hooks or destructive curation. Install
 `memtomem-automation@memtomem` separately to opt into prompt-time retrieval and
 write-time indexing.
 
+## What this plugin runs and connects to
+
+- **One local MCP server.** Claude Code starts `memtomem-server` over stdio with
+  `uvx --from 'memtomem[onnx]==0.6.8'`. On first launch uv downloads that exact
+  version and its dependencies from PyPI (or the package index your own uv
+  configuration names) and caches them. If the machine has no Python 3.12 or
+  newer, uv also downloads a managed CPython build from Astral's
+  `python-build-standalone` releases, unless your uv configuration disables
+  Python downloads. The plugin ships no hooks, scripts, or binaries of its own.
+- **Local storage.** Memories stay in your Markdown files; the search index is a
+  SQLite database at `~/.memtomem/memtomem.db` unless you configure another path.
+- **Local search history.** The same database records each `mem_search`: the
+  query text, its embedding when an embedding provider is configured, and for
+  each result its ID, score, file name and headings (not the memory text). It
+  also counts how often each memory is returned. `mem_add` records one such
+  search too, for its duplicate check, with the new note's text as the query;
+  deleting the memory later does not remove that entry. memtomem only
+  occasionally deletes history rows older than 90 days, so treat the history
+  as kept indefinitely. A search made with `record=false` records none of this.
+- **What Claude receives.** Search, recall and read results, including memory
+  text, headings and source file paths, are returned to Claude Code. They
+  become part of the conversation, which Claude Code sends to the model
+  provider it is set up to use, under that provider's terms.
+- **No other network traffic by default.** Once uv has created that environment,
+  the running server makes no network requests in the default configuration: no
+  embedding provider (BM25 only), the reranker and LLM features off, and no
+  webhook. memtomem itself collects no telemetry or analytics.
+- **Network use you opt into:**
+  - Embedding and reranker models (fastembed, sentence-transformers) download
+    from the Hugging Face Hub on first use, with Hub telemetry turned off for
+    those downloads. When a Hub download fails, some fastembed models can fall
+    back to archives at `storage.googleapis.com/qdrant-fastembed`.
+  - ONNX models run on ONNX Runtime, whose official builds from 1.29 upload
+    telemetry to Microsoft on Linux and macOS by default. The plugin launches
+    the server with `ORT_DISABLE_TELEMETRY=1`, which turns that upload off.
+    On Windows, ONNX Runtime does not read the variable; it emits events
+    through Windows' own diagnostic data system, which Windows records only
+    while a trace session is collecting (see ONNX Runtime's `docs/Privacy.md`).
+  - The embedding, reranker, or LLM provider you configure (OpenAI, Cohere,
+    Anthropic, Ollama, or any service at an OpenAI-compatible `base_url` you
+    choose) receives the text it embeds, reranks, or processes.
+  - A configured webhook receives event metadata such as file paths and search
+    queries.
+  - `mem_fetch` (through `mem_do`) downloads a URL you or Claude supply and
+    indexes it; it refuses loopback, private, and link-local addresses.
+- **The `mm` CLI is separate.** The plugin does not run it. If you run it
+  yourself, two of its commands also use the network when you ask them to:
+  `mm session` exports traces to Langfuse when session tracing is enabled, and
+  `mm wiki` clones from, pushes to, and pulls from the Git remotes you give it.
+
+claude.ai chat does not start local MCP servers, so use this plugin in Claude
+Code, or in Cowork when the session runs on your computer.
+
 ## Install
 
 Before installing, inspect existing servers with `/mcp` in Claude Code, then
 run the read-only diagnostic from the project you want to inspect:
 
 ```bash
-uvx --from "memtomem[all]==0.6.7" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.8" mm doctor --claude-mcp
 ```
 
 The pin is there because installing the plugin does not put `mm` on your PATH —
@@ -35,7 +88,7 @@ existing uv installation; resolve any manual MCP registration shown by the
 check before installing. The check does not intercept `/plugin install`.
 
 Before installation, doctor compares manual registrations with the launch this
-release's plugin bundles (`memtomem[onnx]==0.6.7`). After installation, it reads
+release's plugin bundles (`memtomem[onnx]==0.6.8`). After installation, it reads
 the actual plugin manifest. Use `/mcp` to verify the session, and repeat the
 diagnostic after installation.
 
@@ -56,8 +109,8 @@ Model artifacts are fetched only when the configured workflow needs them.
 On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```bash
-uvx --from 'memtomem[onnx]==0.6.7' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.6.7' mm status
+uvx --from 'memtomem[onnx]==0.6.8' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem[onnx]==0.6.8' mm status
 ```
 
 The plugin intentionally cannot perform this trust-establishing step over MCP.
@@ -68,7 +121,7 @@ gitignored local tier explicitly:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem[onnx]==0.6.7' mm mem init --scope project_local
+uvx --from 'memtomem[onnx]==0.6.8' mm mem init --scope project_local
 ```
 
 After that, `/memtomem:setup /path/to/notes` performs a one-shot index and

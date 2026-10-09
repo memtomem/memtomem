@@ -1,7 +1,7 @@
 ---
 name: setup
 description: Set up and verify a first memtomem memory source. Use for onboarding, choosing an index path, or confirming that search works.
-argument-hint: [path]
+argument-hint: "[path]"
 allowed-tools: mcp__plugin_memtomem_memtomem__mem_status, mcp__memtomem__mem_status, mcp__plugin_memtomem_memtomem__mem_index, mcp__memtomem__mem_index, mcp__plugin_memtomem_memtomem__mem_search, mcp__memtomem__mem_search
 disable-model-invocation: true
 ---
@@ -37,13 +37,13 @@ plugin does not put `mm` on the user's PATH — it registers an MCP server, not
 the CLI. So offer the pinned form, which works either way:
 
 ```bash
-uvx --from "memtomem[all]==0.6.7" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.8" mm doctor --claude-mcp
 ```
 
 This diagnostic runs in its own environment. It does not install dependencies
 into, or repair, the plugin server environment.
 Before installation, doctor compares manual registrations with the launch this
-release's plugin bundles (`memtomem[onnx]==0.6.7`). After installation, it reads
+release's plugin bundles (`memtomem[onnx]==0.6.8`). After installation, it reads
 the actual plugin manifest. Use `/mcp` to verify the session, and repeat the
 diagnostic after installation.
 

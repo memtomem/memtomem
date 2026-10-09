@@ -1,10 +1,11 @@
-"""``record=False`` replay/evaluation mode on ``SearchPipeline.search`` (#1802).
+"""``record=False`` on ``SearchPipeline.search`` (#1802).
 
-Replay must be a no-side-effects read: no access-counter mutation, no
-query-run observation, and no interaction (read or write) with either the TTL
-result cache or the LLM-expansion cache. It must also pin time decay to the
-supplied ``as_of_unix`` so a delayed replay is byte-stable, and switch the dense
-legs to exhaustive KNN for deterministic boundary selection.
+A ``record=False`` search must be a no-side-effects read: no access-counter
+mutation, no query-run observation, and neither served from nor stored into
+the TTL result cache or the LLM-expansion cache. It must also pin time decay
+to the supplied ``as_of_unix`` so a delayed replay is byte-stable. Exhaustive
+dense selection is a separate switch (#2671) — see
+``test_dense_exhaustive_replay.py``.
 """
 
 from __future__ import annotations
@@ -88,6 +89,34 @@ class TestCacheIsolation:
         await _drain_bg(pipeline)
         assert stats.cache_hit is False
         assert pipeline._search_cache == cache_snapshot
+
+    @pytest.mark.asyncio
+    async def test_a_visibility_change_still_invalidates_under_record_false(
+        self, bm25_only_components, monkeypatch
+    ):
+        """Bypassing the cache is not freezing it.
+
+        A ``record=False`` call that observes a new source-visibility epoch
+        drops the cached entries like any other search would: they describe
+        rows whose visibility has changed, whoever notices first.
+        """
+        comp, _ = bm25_only_components
+        storage, pipeline = comp.storage, comp.search_pipeline
+
+        await storage.upsert_chunks([_make_chunk("epoch marker body", source="e.md")])
+        await pipeline.search("epoch", record=True)
+        await _drain_bg(pipeline)
+        assert pipeline._search_cache
+        epoch = await storage.source_visibility_epoch()
+
+        async def _next_epoch() -> int:
+            return epoch + 1
+
+        monkeypatch.setattr(storage, "source_visibility_epoch", _next_epoch)
+
+        await pipeline.search("epoch", record=False)
+        await _drain_bg(pipeline)
+        assert pipeline._search_cache == {}
 
 
 class TestDecayPinning:

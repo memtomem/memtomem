@@ -263,6 +263,26 @@ class TestFormatStructuredResults:
         parsed = json.loads(_format_structured_results([], query_run_id=run_id))
         assert parsed == {"results": [], "query_run_id": run_id}
 
+    def test_recorded_is_omitted_unless_given(self):
+        """Formatters that are not a search pass nothing and get no key."""
+        import json
+
+        parsed = json.loads(_format_structured_results([self._make_result()]))
+        assert "recorded" not in parsed
+
+    @pytest.mark.parametrize("recorded", [True, False])
+    def test_recorded_is_echoed_top_level_even_when_empty(self, recorded):
+        """A background caller reads it on every response, so an empty result
+        set must carry it too (#2662)."""
+        import json
+
+        with_results = json.loads(
+            _format_structured_results([self._make_result()], recorded=recorded)
+        )
+        empty = json.loads(_format_structured_results([], recorded=recorded))
+        assert with_results["recorded"] is recorded
+        assert empty == {"results": [], "recorded": recorded}
+
     def test_required_fields(self):
         import json
 

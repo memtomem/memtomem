@@ -6,10 +6,12 @@ import ast
 import json
 import re
 import shlex
+import sys
 import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
@@ -58,7 +60,7 @@ def _assert_mcp_pin(document: dict, version: str, tool_mode: str) -> None:
     server = document.get("mcpServers", {}).get("memtomem", {})
     assert server.get("command") == "uvx"
     assert server.get("args") == ["--from", f"memtomem[onnx]=={version}", "memtomem-server"]
-    assert server.get("env") == {"MEMTOMEM_TOOL_MODE": tool_mode}
+    assert server.get("env") == {"MEMTOMEM_TOOL_MODE": tool_mode, "ORT_DISABLE_TELEMETRY": "1"}
 
 
 def _marketplace_entry(marketplace: dict, name: str) -> dict:
@@ -136,6 +138,39 @@ def test_claude_plugins_match_contract_and_marketplace() -> None:
     )
 
 
+def test_claude_plugin_icon_meets_directory_limits() -> None:
+    # The plugin directory's limits for a listing icon: a square PNG or JPEG,
+    # 512 to 2048 px on each side, under 2 MB. It reads the icon only on the
+    # first portal save, so a missing or rejected file cannot be fixed later.
+    icon = _ROOT / "packages/memtomem-claude-plugin/.claude-plugin/icon.png"
+    data = icon.read_bytes()
+    assert len(data) < 2 * 1024 * 1024
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    assert data[12:16] == b"IHDR"
+    width = int.from_bytes(data[16:20], "big")
+    height = int.from_bytes(data[20:24], "big")
+    assert width == height
+    assert 512 <= width <= 2048
+
+
+def test_claude_plugin_privacy_policy_url_names_a_readme_heading() -> None:
+    # The directory listing links this URL as the plugin's privacy policy. It
+    # points at a README section, so renaming that heading would leave the
+    # listing on a link that opens the top of the README instead.
+    url = _json("packages/memtomem-claude-plugin/.claude-plugin/plugin.json")["privacyPolicyUrl"]
+    prefix = (
+        "https://github.com/memtomem/memtomem/blob/main/packages/memtomem-claude-plugin/README.md#"
+    )
+    assert url.startswith(prefix)
+    readme = (_ROOT / "packages/memtomem-claude-plugin/README.md").read_text(encoding="utf-8")
+    slugs = {
+        re.sub(r"[^\w\- ]", "", line[3:].strip().lower()).replace(" ", "-")
+        for line in readme.splitlines()
+        if line.startswith("## ")
+    }
+    assert url.removeprefix(prefix) in slugs
+
+
 def test_codex_plugin_matches_contract_and_marketplace() -> None:
     contract = _contract()
     manifest = _json("plugins/memtomem/.codex-plugin/plugin.json")
@@ -166,6 +201,50 @@ def test_kimi_skill_bundle_matches_contract() -> None:
     )
 
 
+def _readme_commands(readme: str, prefix: str) -> list[list[str]]:
+    parsed = []
+    for line in readme.splitlines():
+        if line.startswith(prefix):
+            try:
+                parsed.append(shlex.split(line))
+            except ValueError as exc:
+                pytest.fail(f"README command does not parse ({exc}): {line}")
+    return parsed
+
+
+def _assert_hermes_install_commands(readme: str, subdir: str) -> None:
+    """Hermes 0.21.5 refuses a `--ref` that is not a full 40-character commit SHA, so the
+    install example takes a commit placeholder and the README shows how to resolve a
+    release tag to one. Compared as shell tokens, so quoting and spacing are free, while
+    deleting the command, dropping `--ref`, adding a second `--ref`/`--ref=`, or putting
+    a tag or branch name there all fail."""
+    install = _readme_commands(readme, "hermes plugins install ")
+    assert len(install) == 1, install
+    assert install[0][:4] == [
+        "hermes",
+        "plugins",
+        "install",
+        f"https://github.com/memtomem/memtomem#{subdir}",
+    ], install[0]
+    argv = install[0] + [""]  # a trailing bare `--ref` reads as an empty value, not IndexError
+    refs = [
+        token.removeprefix("--ref=") if token.startswith("--ref=") else argv[i + 1]
+        for i, token in enumerate(install[0])
+        if token == "--ref" or token.startswith("--ref=")
+    ]
+    assert refs == ["<commit-sha>"], install[0]
+    assert _readme_commands(readme, "git ls-remote ") == [
+        [
+            "git",
+            "ls-remote",
+            "--exit-code",
+            "https://github.com/memtomem/memtomem",
+            "refs/tags/v<version>",
+            "refs/tags/v<version>^{}",
+        ]
+    ]
+
+
 def test_hermes_plugin_matches_contract() -> None:
     contract = _contract()
     core = contract["core"]
@@ -186,7 +265,10 @@ def test_hermes_plugin_matches_contract() -> None:
                 "type": "stdio",
                 "command": "uvx",
                 "args": ["--python", "3.12", "--from", requirement, "memtomem-server"],
-                "env": {"MEMTOMEM_TOOL_MODE": core["tool_mode"]},
+                "env": {
+                    "MEMTOMEM_TOOL_MODE": core["tool_mode"],
+                    "ORT_DISABLE_TELEMETRY": "1",
+                },
             }
         },
     }
@@ -205,46 +287,47 @@ def test_hermes_plugin_matches_contract() -> None:
     assert launches[0].lstrip(" -`").startswith("uvx --python"), launches[0]
     assert re.findall(r"^ *command: *(\S+)\n *args: \[\"--python\"", readme, re.M) == ["uvx"]
 
-    # Hermes 0.21.5 refuses a `--ref` that is not a full 40-character commit SHA, so the
-    # install example takes a commit placeholder and the README shows how to resolve a
-    # release tag to one. Compared as shell tokens, so quoting and spacing are free, while
-    # deleting the command, dropping `--ref`, adding a second `--ref`/`--ref=`, or putting
-    # a tag or branch name there all fail.
-    def commands(prefix: str) -> list[list[str]]:
-        parsed = []
-        for line in readme.splitlines():
-            if line.startswith(prefix):
-                try:
-                    parsed.append(shlex.split(line))
-                except ValueError as exc:
-                    pytest.fail(f"README command does not parse ({exc}): {line}")
-        return parsed
+    _assert_hermes_install_commands(readme, "packages/memtomem-hermes-plugin")
 
-    install = commands("hermes plugins install ")
-    assert len(install) == 1, install
-    assert install[0][:4] == [
-        "hermes",
-        "plugins",
-        "install",
-        "https://github.com/memtomem/memtomem#packages/memtomem-hermes-plugin",
-    ], install[0]
-    argv = install[0] + [""]  # a trailing bare `--ref` reads as an empty value, not IndexError
-    refs = [
-        token.removeprefix("--ref=") if token.startswith("--ref=") else argv[i + 1]
-        for i, token in enumerate(install[0])
-        if token == "--ref" or token.startswith("--ref=")
+
+def test_hermes_memory_plugin_matches_contract() -> None:
+    contract = _contract()
+    root = _ROOT / "packages/memtomem-hermes-memory"
+    minimum = contract["hermes"]["memory_min_memtomem"]
+    assert re.fullmatch(r"\d+\.\d+\.\d+", minimum), minimum
+
+    manifest = yaml.safe_load((root / "plugin.yaml").read_text(encoding="utf-8"))
+    # No `hooks:` key: a memory provider registers through register(ctx), not hooks.
+    assert set(manifest) == {"name", "version", "description"}, manifest
+    assert manifest["name"] == "memtomem-memory"
+    assert manifest["version"] == contract["plugins"]["hermes_memory_version"]
+
+    # Hermes's survival contract for a user plugin: no dependency declarations, nothing to
+    # install. The provider imports the standard library and Hermes, nothing else.
+    shipped = sorted(p.name for p in root.iterdir() if p.name != "__pycache__")
+    assert shipped == ["README.md", "__init__.py", "plugin.yaml"], shipped
+    tree = ast.parse((root / "__init__.py").read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+    assert imported - set(sys.stdlib_module_names) == {"agent", "hermes_cli"}, imported
+
+    # The release the provider refuses to run below: one value in the code, the contract
+    # and the README.
+    pinned = [
+        node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and [getattr(t, "id", None) for t in node.targets] == ["_MIN_MEMTOMEM"]
+        and isinstance(node.value, ast.Constant)
     ]
-    assert refs == ["<commit-sha>"], install[0]
-    assert commands("git ls-remote ") == [
-        [
-            "git",
-            "ls-remote",
-            "--exit-code",
-            "https://github.com/memtomem/memtomem",
-            "refs/tags/v<version>",
-            "refs/tags/v<version>^{}",
-        ]
-    ]
+    assert pinned == [minimum], pinned
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert re.findall(r"memtomem (\d+\.\d+\.\d+) or later", readme) == [minimum]
+    _assert_hermes_install_commands(readme, "packages/memtomem-hermes-memory")
 
 
 def test_opencode_plugin_matches_contract() -> None:

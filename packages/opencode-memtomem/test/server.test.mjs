@@ -16,9 +16,12 @@ async function apply(config = {}, input = {}) {
 test("installs exact MCP, seven commands, three read skills, and safe permissions", async () => {
   const config = await apply();
   assert.deepEqual(config.mcp.memtomem.command, [
-    "uvx", "--from", "memtomem[onnx]==0.6.7", "memtomem-server",
+    "uvx", "--from", "memtomem[onnx]==0.6.8", "memtomem-server",
   ]);
-  assert.equal(config.mcp.memtomem.environment.MEMTOMEM_TOOL_MODE, "core");
+  assert.deepEqual(config.mcp.memtomem.environment, {
+    MEMTOMEM_TOOL_MODE: "core",
+    ORT_DISABLE_TELEMETRY: "1",
+  });
   assert.equal(config.mcp.memtomem.timeout, 60000);
   assert.equal(Object.keys(config.command).length, 7);
   assert.equal(config.skills.paths.length, 3);

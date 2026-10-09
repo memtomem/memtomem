@@ -19,6 +19,7 @@ CODEX_ROOT = ROOT / "plugins" / "memtomem"
 KIMI_ROOT = ROOT / "packages" / "memtomem-kimi-skills"
 OPENCODE_ROOT = ROOT / "packages" / "opencode-memtomem"
 HERMES_ROOT = ROOT / "packages" / "memtomem-hermes-plugin"
+HERMES_MEMORY_ROOT = ROOT / "packages" / "memtomem-hermes-memory"
 
 # Workflow sources may carry scope variants: a host that starts the server inside the
 # user's project renders the `project` blocks, one that starts it elsewhere (no project
@@ -115,7 +116,8 @@ def _claude_skill(workflow: dict, body: str) -> str:
         f"description: {workflow['description']}",
     ]
     if hint := workflow.get("argument_hint"):
-        frontmatter.append(f"argument-hint: {hint}")
+        # Quoted: a bare "[a] [b]" is not valid YAML, and a bare "[a]" is a list.
+        frontmatter.append(f"argument-hint: {_yaml_q(hint)}")
     frontmatter.append(f"allowed-tools: {_allowed_tools(workflow)}")
     if not workflow["implicit"]:
         frontmatter.append("disable-model-invocation: true")
@@ -203,6 +205,7 @@ def _opencode_generated(contract: dict) -> str:
         f"export const CORE_VERSION = {_q(core['version'])};\n"
         f"export const MCP_REQUIREMENT = {_q(_mcp_requirement(core))};\n"
         f"export const TOOL_MODE = {_q(core['tool_mode'])};\n"
+        f"export const LAUNCH_ENV = {json.dumps(_launch_env(core))} as const;\n"
         f"export const MCP_TIMEOUT_MS = {opencode['mcp_timeout_ms']};\n"
         f"export const OPENCODE_COMMANDS = {payload} as const;\n"
         "export const OPENCODE_READ_SKILLS = [\n"
@@ -220,13 +223,23 @@ def _mcp_requirement(core: dict) -> str:
     return f"memtomem[{extras}]=={core['version']}"
 
 
+def _launch_env(core: dict) -> dict[str, str]:
+    return {
+        "MEMTOMEM_TOOL_MODE": core["tool_mode"],
+        # ONNX Runtime 1.29+ uploads telemetry from official Linux and macOS builds unless
+        # this is truthy before it initializes (#2664). uvx resolves onnxruntime fresh, so
+        # the launch env carries it for every core version the plugins pin.
+        "ORT_DISABLE_TELEMETRY": "1",
+    }
+
+
 def _mcp_config(core: dict) -> str:
     payload = {
         "mcpServers": {
             "memtomem": {
                 "command": "uvx",
                 "args": ["--from", _mcp_requirement(core), "memtomem-server"],
-                "env": {"MEMTOMEM_TOOL_MODE": core["tool_mode"]},
+                "env": _launch_env(core),
             }
         }
     }
@@ -250,7 +263,7 @@ def _hermes_mcp_config(contract: dict) -> str:
                     _mcp_requirement(core),
                     "memtomem-server",
                 ],
-                "env": {"MEMTOMEM_TOOL_MODE": core["tool_mode"]},
+                "env": _launch_env(core),
             }
         },
     }
@@ -275,6 +288,21 @@ def _hermes_plugin_manifest(contract: dict) -> str:
     return json.dumps(payload, indent=2) + "\n"
 
 
+def _hermes_memory_manifest(contract: dict) -> str:
+    # Hermes reads `name` with yaml.safe_load and `description` for its listings. No `hooks:`
+    # key: the provider registers no general-plugin hooks. tools/release_preflight.py reads
+    # `version` back without PyYAML, so the shape of that line is part of the contract.
+    description = (
+        "Recall-only memtomem memory provider: injects relevant long-term memories on each "
+        "turn through Hermes's own memtomem MCP connection."
+    )
+    return (
+        f"name: {_yaml_q('memtomem-memory')}\n"
+        f"version: {_yaml_q(contract['plugins']['hermes_memory_version'])}\n"
+        f"description: {_yaml_q(description)}\n"
+    )
+
+
 def expected_files() -> dict[Path, str]:
     contract = tomllib.loads(CONTRACT.read_text(encoding="utf-8"))
     files: dict[Path, str] = {
@@ -283,6 +311,7 @@ def expected_files() -> dict[Path, str]:
             f"CORE_VERSION = {_q(contract['core']['version'])}\n"
             f"MCP_REQUIREMENT = {_q(_mcp_requirement(contract['core']))}\n"
             f"TOOL_MODE = {_q(contract['core']['tool_mode'])}\n"
+            f"LAUNCH_ENV = {json.dumps(_launch_env(contract['core']))}\n"
         ),
         CLAUDE_ROOT / ".mcp.json": _mcp_config(contract["core"]),
         CODEX_ROOT / ".mcp.json": _mcp_config(contract["core"]),
@@ -290,6 +319,7 @@ def expected_files() -> dict[Path, str]:
         OPENCODE_ROOT / "src" / "generated.ts": _opencode_generated(contract),
         HERMES_ROOT / "mcp.json": _hermes_mcp_config(contract),
         HERMES_ROOT / "plugin.json": _hermes_plugin_manifest(contract),
+        HERMES_MEMORY_ROOT / "plugin.yaml": _hermes_memory_manifest(contract),
     }
     for workflow in contract["workflows"]:
         body = _workflow_body(workflow["id"], "project")

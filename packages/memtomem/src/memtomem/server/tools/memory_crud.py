@@ -1050,10 +1050,13 @@ async def _mem_add_core(
             # genuine in-project duplicates would slip through.
             from memtomem.server.tools.search import _resolve_project_context_root
 
+            # record=False: an internal read, so its hits are not accesses and
+            # the note body is not stored as a query (#2683).
             similar, _ = await app.search_pipeline.search(
                 content,
                 top_k=5,
                 project_context_root=effective_project_root or _resolve_project_context_root(app),
+                record=False,
             )
             dupes = [
                 s

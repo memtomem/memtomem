@@ -260,7 +260,7 @@ Combines keyword matching (exact words) with meaning-based search (similar conce
 | `verbose` | Deprecated: use `output_format="verbose"`. A non-default `output_format` overrides it | `true` |
 | `scope` | Memory tier filter: one value, comma list, or glob; omitted uses user plus current-project tiers | `"user,project_local"`, `"project_*"` |
 | `rerank` | Per-call rerank control: `false` skips the cross-encoder rerank stage (fast path for latency-bounded callers); omitted/`true` follows server config — `true` cannot enable reranking the server has disabled | `false` |
-| `record` | Per-call replay control (default `true`): `false` makes the search a background read for fan-out callers — no access-count increments, no query history, caches neither read nor written, and dense retrieval runs exhaustive, so results can differ | `false` |
+| `record` | Per-call replay control (default `true`): `false` makes the search a background read for fan-out callers — no access-count increments, no query history, and caches neither read nor filled, so results can differ from a cached answer. Retrieval itself is unchanged | `false` |
 
 ```
 mem_search(query="caching strategy", tag_filter="redis,cache", namespace="work")
@@ -277,7 +277,7 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 
 > **source_filter tip**: Use substrings like `"docs/adr"` or `".py"` for filtering. Glob patterns (`*`, `?`) are matched against the **full absolute path** via `fnmatch`, so `"*.py"` won't work as expected — use `".py"` instead.
 
-> **Trust-UX hints**: when you don't pin a namespace, results are followed by a parenthesized hint if chunks were hidden in system namespaces (e.g. `archive:*`) or if the configured embedding dimension disagrees with what's in the database. A third hint — independent of namespace selection — appears when you pass `rerank=true` but the server has reranking disabled (`rerank.enabled=false`), since the parameter cannot force-enable it. In `output_format="structured"` those hints are emitted as a `hints` array instead.
+> **Trust-UX hints**: when you don't pin a namespace, results are followed by a parenthesized hint if chunks were hidden in system namespaces (e.g. `archive:*`) or if the configured embedding dimension disagrees with what's in the database. A third hint — independent of namespace selection — appears when you pass `rerank=true` but the server has reranking disabled (`rerank.enabled=false`), since the parameter cannot force-enable it. A fourth, `semantic search failed for this query — results may be incomplete`, appears when the primary dense leg raised (embedder unreachable, for example) and the search still returned results; the cause stays in the server log and the `output_format="verbose"` pipeline line. In `output_format="structured"` those hints are emitted as a `hints` array instead.
 
 > **Score scale**: `score` values are only comparable within one scale, and the
 > scale follows server config. Structured output names the base scale in a
@@ -294,6 +294,18 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > per-item `score_scale` / `reranker` keys. The `mm search` table prints a
 > `Score:` caption under the leg footer naming the base scale and noting
 > that modifiers can rescale it; results on the `none` scale get no caption.
+
+> **Recording echo**: structured output also carries a top-level `recorded`
+> key on every response, empty ones included, echoing the `record` mode the
+> search ran with — `true` for the default recording mode, `false` when it ran
+> with `record=false`. It names the mode, not a completed write: the default
+> mode updates access counts and query history in the background, skips them
+> on a cache hit, and increments nothing for an empty result set. A caller
+> that searches in the background without recording can check on each call
+> that the server it reached treats `record=false` as "do not record" rather
+> than trust a version string, since the connection it calls through can be
+> replaced without a visible failure. Servers older than the release that
+> added the key omit it.
 
 > **Quality Lab run ID**: every ranked search persisted by the local SQLite
 > backend receives a `query_run_id`. MCP structured output and the Web search

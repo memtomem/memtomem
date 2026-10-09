@@ -1,7 +1,7 @@
 ---
 name: index
 description: Index or re-index an explicitly selected file or directory with memtomem. Use for initial ingestion or intentional refresh after file changes.
-argument-hint: [path]
+argument-hint: "[path]"
 allowed-tools: mcp__plugin_memtomem_memtomem__mem_index, mcp__memtomem__mem_index
 disable-model-invocation: true
 ---
