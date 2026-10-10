@@ -29,18 +29,32 @@ _TOP_LEVEL_TYPES = (
             "export_statement",
             "lexical_declaration",  # const foo = () => {}
             "variable_declaration",  # var/let foo = function() {}
+            "ambient_declaration",  # declare class/function/module/namespace …
+            "module",  # module M {}
         }
     )
     | _TS_DECLARATION_TYPES
 )
 
-_NESTED_DECLARATION_TYPES = (
-    frozenset({"function_declaration", "class_declaration", "lexical_declaration"})
-    | _TS_DECLARATION_TYPES
-)
+# What export_statement and ambient_declaration wrap.
+_NESTED_DECLARATION_TYPES = (_TOP_LEVEL_TYPES - {"export_statement"}) | {
+    "internal_module",
+    "function_signature",
+}
+
+# Namespaces and modules can be named A.B or "x"; read the name field whatever its node type.
+_NAMED_BY_FIELD_TYPES = frozenset({"internal_module", "module"})
 
 # The TypeScript grammar names classes, interfaces and type aliases with type_identifier.
 _NAME_TYPES = frozenset({"identifier", "type_identifier"})
+
+
+def _is_namespace_statement(node) -> bool:
+    # A top-level `namespace N {}` parses as an expression_statement; other expression
+    # statements (`main();`) stay out of the chunks.
+    return node.type == "expression_statement" and any(
+        child.type == "internal_module" for child in node.children
+    )
 
 
 class JavaScriptChunker:
@@ -87,7 +101,7 @@ class JavaScriptChunker:
         chunks: list[Chunk] = []
 
         for node in tree.root_node.children:
-            if node.type not in _TOP_LEVEL_TYPES:
+            if node.type not in _TOP_LEVEL_TYPES and not _is_namespace_statement(node):
                 continue
 
             name = self._extract_name(node, source)
@@ -114,15 +128,20 @@ class JavaScriptChunker:
     @classmethod
     def _extract_name(cls, node, source: bytes) -> str:
         # Tree-sitter offsets are UTF-8 byte offsets into the parsed bytes, not str indices.
+        if node.type in _NAMED_BY_FIELD_TYPES:
+            name = node.child_by_field_name("name")
+            return source[name.start_byte : name.end_byte].decode() if name else ""
         for child in node.children:
             if child.type in _NESTED_DECLARATION_TYPES:
                 return cls._extract_name(child, source)
             if child.type in _NAME_TYPES:
                 return source[child.start_byte : child.end_byte].decode()
             if child.type == "variable_declarator":
-                for grandchild in child.children:
-                    if grandchild.type == "identifier":
-                        return source[grandchild.start_byte : grandchild.end_byte].decode()
+                # Only the binding is a name: a destructuring pattern ({x} = obj) has none,
+                # and the initializer's identifier (obj) must not stand in for one.
+                name = child.child_by_field_name("name")
+                if name is not None and name.type == "identifier":
+                    return source[name.start_byte : name.end_byte].decode()
         return ""
 
     def _fallback(self, file_path: Path, content: str) -> list[Chunk]:
