@@ -39,6 +39,15 @@ except ImportError:
 needs_ts_python = pytest.mark.skipif(not HAS_TS_PYTHON, reason="tree-sitter-python not installed")
 needs_ts_js = pytest.mark.skipif(not HAS_TS_JS, reason="tree-sitter-javascript not installed")
 
+try:
+    import tree_sitter_typescript  # noqa: F401
+
+    HAS_TS_TS = True
+except ImportError:
+    HAS_TS_TS = False
+
+needs_ts_ts = pytest.mark.skipif(not HAS_TS_TS, reason="tree-sitter-typescript not installed")
+
 
 # ===================================================================
 # PythonChunker
@@ -203,6 +212,48 @@ class TestJavaScriptChunker:
         code = "function f() {}\n"
         chunks = chunker.chunk_file(Path("/app.js"), code)
         assert all(c.metadata.language == "javascript" for c in chunks)
+
+    @needs_ts_ts
+    @pytest.mark.parametrize("suffix", [".ts", ".tsx"])
+    def test_typescript_declarations_are_named_chunks(self, chunker, suffix):
+        code = (
+            "interface Shape {\n  x: number;\n}\n"
+            "type Id = string;\n"
+            "enum Color {\n  Red,\n}\n"
+            "abstract class Base {}\n"
+            "class Circle extends Base {}\n"
+            "export interface Exported {}\n"
+            "export type Alias = Id;\n"
+            "export enum Mode { A }\n"
+            "export abstract class Shared {}\n"
+            "export class Widget {}\n"
+            "function area(s: Shape): number {\n  return s.x;\n}\n"
+        )
+        chunks = chunker.chunk_file(Path(f"/mod{suffix}"), code)
+        assert [
+            (c.metadata.heading_hierarchy, c.metadata.start_line, c.metadata.end_line)
+            for c in chunks
+        ] == [
+            (("mod", "Shape"), 1, 3),
+            (("mod", "Id"), 4, 4),
+            (("mod", "Color"), 5, 7),
+            (("mod", "Base"), 8, 8),
+            (("mod", "Circle"), 9, 9),
+            (("mod", "Exported"), 10, 10),
+            (("mod", "Alias"), 11, 11),
+            (("mod", "Mode"), 12, 12),
+            (("mod", "Shared"), 13, 13),
+            (("mod", "Widget"), 14, 14),
+            (("mod", "area"), 15, 17),
+        ]
+        assert all(c.metadata.chunk_type == ChunkType.JS_FUNCTION for c in chunks)
+
+    @needs_ts_ts
+    def test_typescript_declaration_only_file_does_not_fall_back(self, chunker):
+        chunks = chunker.chunk_file(Path("/types.ts"), "interface Shape {\n  x: number;\n}\n")
+        assert [(c.metadata.heading_hierarchy, c.metadata.chunk_type) for c in chunks] == [
+            (("types", "Shape"), ChunkType.JS_FUNCTION)
+        ]
 
     def test_ts_language_in_fallback(self, chunker):
         """TypeScript files should have language='typescript' even in fallback."""

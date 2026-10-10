@@ -10,16 +10,37 @@ from memtomem.models import Chunk, ChunkMetadata, ChunkType
 
 logger = logging.getLogger(__name__)
 
-_TOP_LEVEL_TYPES = frozenset(
+# Declarations only the TypeScript grammar produces.
+_TS_DECLARATION_TYPES = frozenset(
     {
-        "function_declaration",
-        "class_declaration",
-        "generator_function_declaration",
-        "export_statement",
-        "lexical_declaration",  # const foo = () => {}
-        "variable_declaration",  # var/let foo = function() {}
+        "abstract_class_declaration",
+        "interface_declaration",
+        "type_alias_declaration",
+        "enum_declaration",
     }
 )
+
+_TOP_LEVEL_TYPES = (
+    frozenset(
+        {
+            "function_declaration",
+            "class_declaration",
+            "generator_function_declaration",
+            "export_statement",
+            "lexical_declaration",  # const foo = () => {}
+            "variable_declaration",  # var/let foo = function() {}
+        }
+    )
+    | _TS_DECLARATION_TYPES
+)
+
+_NESTED_DECLARATION_TYPES = (
+    frozenset({"function_declaration", "class_declaration", "lexical_declaration"})
+    | _TS_DECLARATION_TYPES
+)
+
+# The TypeScript grammar names classes, interfaces and type aliases with type_identifier.
+_NAME_TYPES = frozenset({"identifier", "type_identifier"})
 
 
 class JavaScriptChunker:
@@ -94,9 +115,9 @@ class JavaScriptChunker:
     def _extract_name(cls, node, source: bytes) -> str:
         # Tree-sitter offsets are UTF-8 byte offsets into the parsed bytes, not str indices.
         for child in node.children:
-            if child.type in ("function_declaration", "class_declaration", "lexical_declaration"):
+            if child.type in _NESTED_DECLARATION_TYPES:
                 return cls._extract_name(child, source)
-            if child.type == "identifier":
+            if child.type in _NAME_TYPES:
                 return source[child.start_byte : child.end_byte].decode()
             if child.type == "variable_declarator":
                 for grandchild in child.children:
