@@ -255,6 +255,69 @@ class TestJavaScriptChunker:
             (("types", "Shape"), ChunkType.JS_FUNCTION)
         ]
 
+    @needs_ts_ts
+    @pytest.mark.parametrize("suffix", [".ts", ".tsx"])
+    def test_typescript_ambient_and_namespace_blocks_are_named_chunks(self, chunker, suffix):
+        code = (
+            "declare class Ambient {}\n"
+            "declare function signature(): void;\n"
+            'declare module "pkg" {}\n'
+            "declare namespace Declared {}\n"
+            "export declare class Exported {}\n"
+            "namespace Outer {\n  export const x = 1;\n}\n"
+            "namespace A.B {}\n"
+            "export namespace Shared {}\n"
+            "module Legacy {}\n"
+            "main();\n"
+            "function area(): number {\n  return 1;\n}\n"
+        )
+        chunks = chunker.chunk_file(Path(f"/mod{suffix}"), code)
+        assert [
+            (c.metadata.heading_hierarchy, c.metadata.start_line, c.metadata.end_line)
+            for c in chunks
+        ] == [
+            (("mod", "Ambient"), 1, 1),
+            (("mod", "signature"), 2, 2),
+            (("mod", '"pkg"'), 3, 3),
+            (("mod", "Declared"), 4, 4),
+            (("mod", "Exported"), 5, 5),
+            (("mod", "Outer"), 6, 8),
+            (("mod", "A.B"), 9, 9),
+            (("mod", "Shared"), 10, 10),
+            (("mod", "Legacy"), 11, 11),
+            (("mod", "area"), 13, 15),
+        ]
+
+    @needs_ts_js
+    def test_exported_generator_and_var_are_named(self, chunker):
+        code = "export function* gen() {}\nexport var counter = 1;\nexport let other = 2;\n"
+        chunks = chunker.chunk_file(Path("/mod.js"), code)
+        assert [c.metadata.heading_hierarchy for c in chunks] == [
+            ("mod", "gen"),
+            ("mod", "counter"),
+            ("mod", "other"),
+        ]
+
+    @needs_ts_js
+    def test_destructuring_declarations_are_not_named_after_the_initializer(self, chunker):
+        code = (
+            "const {a, b} = obj;\n"
+            "let [p] = items;\n"
+            "export var {x} = source;\n"
+            "export var [first] = list;\n"
+            "const {skip} = other, next = 2;\n"
+            "const alias = target;\n"
+        )
+        chunks = chunker.chunk_file(Path("/mod.js"), code)
+        assert [c.metadata.heading_hierarchy for c in chunks] == [
+            ("mod",),
+            ("mod",),
+            ("mod",),
+            ("mod",),
+            ("mod", "next"),
+            ("mod", "alias"),
+        ]
+
     def test_ts_language_in_fallback(self, chunker):
         """TypeScript files should have language='typescript' even in fallback."""
         chunks = chunker.chunk_file(Path("/app.ts"), "const x = 1;")
