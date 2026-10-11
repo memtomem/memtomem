@@ -249,7 +249,7 @@ jobs:
           uv run python tools/retrieval-eval/write_provenance.py \
             --output tools/retrieval-eval/PROVENANCE.json
       - name: Upload regenerated retrieval baselines
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: retrieval-eval-baselines
           path: |
@@ -296,7 +296,7 @@ jobs:
           uv run python -c "import sqlite3, sys; open('tools/quality-gate/versions.txt', 'w').write(f'python={sys.version.split()[0]}\nsqlite={sqlite3.sqlite_version}\n')"
       - name: Upload regenerated baseline
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_baseline }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: quality-gate-baseline
           path: |
@@ -372,7 +372,7 @@ jobs:
       # load-bearing: with check-latest off setup-node takes the newest
       # matching version already in the runner tool cache, which can be a 24.x
       # below jsdom's 24.15.0 floor.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: "^24.15.0"
           cache: npm
@@ -391,7 +391,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: "24"
           cache: npm
