@@ -88,7 +88,9 @@ class Lab:
             shutil.copytree(
                 self.source_root / "project",
                 self.project,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                # ``.*.lock``: the sidecars ``mm index`` leaves when the sample
+                # itself was indexed in place; the copy holds sources only.
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".*.lock"),
             )
             self.run("init", "--preset", "minimal", "--non-interactive", "--mcp", "skip")
         except BaseException:

@@ -282,6 +282,24 @@ def build_project():
     return files
 
 
+def project_source_files(project: Path) -> list[Path]:
+    """Every source file under *project*, as the checks compare it.
+
+    Skips ``__pycache__`` and the empty ``.{name}.lock`` sidecars that
+    ``mm index`` leaves next to each file it indexes and never deletes. The
+    sidecar test is the ``.gitignore`` pattern ``.*.lock`` (leading dot,
+    ``.lock`` suffix), so any file of that shape is skipped, sidecar or not:
+    a file git does not see is not a source file to these checks either.
+    """
+    return [
+        p
+        for p in project.rglob("*")
+        if p.is_file()
+        and "__pycache__" not in p.parts
+        and not (p.name.startswith(".") and p.name.endswith(".lock"))
+    ]
+
+
 def manifest(files):
     return {
         "version": VERSION,
@@ -304,8 +322,7 @@ def main():
     if args.check:
         actual = {
             p.relative_to(ROOT / "project").as_posix()
-            for p in (ROOT / "project").rglob("*")
-            if p.is_file() and "__pycache__" not in p.parts
+            for p in project_source_files(ROOT / "project")
         }
         assert actual == set(files), (actual - set(files), set(files) - actual)
         for name, content in expected.items():
