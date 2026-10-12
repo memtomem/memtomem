@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Imported notes keep their own frontmatter (#2716).** `import_obsidian`
+  and `import_notion` wrote their `imported_from` / `original_file` block in
+  front of the note. A note that had frontmatter of its own then held two
+  blocks, and indexing reads only the first, so the note's `tags`,
+  `valid_from` / `valid_to` and `redaction` declaration were indexed as body
+  text instead of being applied. The two keys are now added to the note's
+  block; a note whose frontmatter is not a plain YAML mapping, or already
+  carries both keys, is copied with its frontmatter unchanged. The original
+  file name is now quoted when YAML needs it, so a name containing `: `, a
+  leading `#` or a line break no longer breaks the block or adds keys to it.
+  Notes imported before this release keep the two-block layout until they are
+  imported again.
 - **`mem_add` no longer records its duplicate check as a search (#2683).**
   After writing a note longer than 20 characters, `mem_add` searches for
   similar memories; that search ran in recording mode, so it raised the

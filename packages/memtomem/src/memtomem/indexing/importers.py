@@ -8,6 +8,9 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
+import yaml
+
+from memtomem.chunking.markdown import _FRONT_MATTER_RE
 from memtomem.context._atomic import atomic_write_text
 from memtomem.privacy import enforce_write_guard
 from memtomem.source_provenance import WriteTargetGuard, refuse_replace_target
@@ -227,9 +230,7 @@ async def import_notion(
         # Preserve directory structure
         target = output_dir / rel.parent / clean_name
 
-        # Add source metadata
-        header = f"---\nimported_from: notion\noriginal_file: {original_name}\n---\n\n"
-        final = header + content
+        final = _with_import_header(content, "notion", original_name)
         guard = enforce_write_guard(
             final,
             surface="mcp_import_notion",
@@ -298,9 +299,7 @@ async def import_obsidian(
         content = _convert_obsidian_syntax(content)
 
         target = output_dir / rel
-        # Add source metadata
-        header = f"---\nimported_from: obsidian\noriginal_file: {rel}\n---\n\n"
-        final = header + content
+        final = _with_import_header(content, "obsidian", str(rel))
         guard = enforce_write_guard(
             final,
             surface="mcp_import_obsidian",
@@ -321,6 +320,136 @@ async def import_obsidian(
 
     logger.info("Imported %d files from Obsidian vault", len(imported))
     return imported
+
+
+# ── Import provenance header ─────────────────────────────────────────────
+#
+# Each imported file records where it came from as ``imported_from`` and
+# ``original_file`` frontmatter keys. The chunker reads only the frontmatter
+# block at the start of a file, so a note that already has one must receive
+# the keys *inside* that block; a second block in front of it would turn the
+# note's own ``tags`` / ``valid_from`` / ``valid_to`` / ``redaction`` into
+# body text (#2716).
+#
+# The note's block is never re-serialised: a YAML load/dump rewrites its
+# quoting and comments and resolves escapes and aliases, which would turn a
+# redaction declaration that ``indexing/redaction_exemption.py`` rejects as
+# written into one it accepts. The keys are inserted as text and the result
+# is checked with the readers' own rules. When the check fails, or the block
+# cannot be read as a plain mapping, the note is written unchanged: nothing
+# reads the provenance keys, while the note's frontmatter is what indexing
+# uses.
+
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+_STR_TAG = "tag:yaml.org,2002:str"
+
+
+def _indexer_view(text: str) -> str:
+    """*text* as ``Path.read_text`` will return it once written (universal newlines)."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _provenance_lines(fields: dict[str, str]) -> str:
+    """Serialise *fields* as one frontmatter line each.
+
+    ``yaml.safe_dump`` quotes a value only when YAML needs it, so ordinary
+    names stay plain. A value holding a line break would be dumped as a
+    multi-line scalar whose continuation lines the chunker's line-based
+    frontmatter scans read as keys of their own, so it is forced into
+    double-quoted style, where every break is an escape on a single line.
+    Not ``json.dumps``: it writes a character outside the BMP as a surrogate
+    pair, which YAML reads back as two separate characters.
+    """
+    out = []
+    for key, value in fields.items():
+        if value.splitlines() == [value]:
+            out.append(
+                yaml.safe_dump(
+                    {key: value}, sort_keys=False, allow_unicode=True, width=float("inf")
+                )
+            )
+        else:
+            quoted = yaml.safe_dump(value, default_style='"', width=float("inf"))
+            out.append(f"{key}: {quoted}")
+    return "".join(out)
+
+
+def _top_level_entries(block: str) -> list[tuple[str, yaml.Node]] | None:
+    """Top-level ``(key, value node)`` pairs of a frontmatter *block*, or
+    ``None`` if it is not a plain mapping.
+
+    Reads the composed node graph only. Constructing values (``safe_load``)
+    runs tag constructors and expands ``<<`` merge chains, both of which can
+    be made to fail or blow up by a hostile note, and the Notion import is
+    reachable over MCP. Any failure to read the block means the merge cannot
+    be checked, so it is treated as "not a plain mapping" whatever its class:
+    PyYAML raises bare ``ValueError`` and others besides ``YAMLError`` here.
+
+    A ``<<`` key is refused because it can supply keys this list would not show.
+    """
+    try:
+        node = yaml.compose(block, Loader=yaml.SafeLoader)
+    except Exception:
+        return None
+    if node is None:
+        return []
+    if not isinstance(node, yaml.MappingNode):
+        return None
+    entries = []
+    for key_node, value_node in node.value:
+        if not isinstance(key_node, yaml.ScalarNode) or key_node.tag == _MERGE_TAG:
+            return None
+        entries.append((key_node.value, value_node))
+    return entries
+
+
+def _reads_back(block: str, fields: dict[str, str], note_keys: list[str]) -> bool:
+    """Whether *block* is *fields*, as plain strings, followed by *note_keys*."""
+    entries = _top_level_entries(block)
+    if entries is None or [k for k, _ in entries] != [*fields, *note_keys]:
+        return False
+    return all(
+        isinstance(node, yaml.ScalarNode) and node.tag == _STR_TAG and node.value == fields[key]
+        for key, node in entries[: len(fields)]
+    )
+
+
+def _with_import_header(content: str, source: str, original_file: str) -> str:
+    """Return *content* with the import provenance keys in its frontmatter."""
+    fields = {"imported_from": source, "original_file": original_file}
+    match = _FRONT_MATTER_RE.match(_indexer_view(content))
+    if match is None:
+        lines = _provenance_lines(fields)
+        if not _reads_back(lines, fields, []):
+            logger.debug("import: provenance keys for %r do not read back; omitted", original_file)
+            return content
+        return f"---\n{lines}---\n\n{content}"
+
+    block = match.group(1)
+    entries = _top_level_entries(block)
+    if entries is None:
+        logger.debug("import: %r frontmatter is not a plain mapping; kept as is", original_file)
+        return content
+    keys = [k for k, _ in entries]
+    missing = {k: v for k, v in fields.items() if k not in keys}
+    if not missing:
+        return content
+
+    lines = _provenance_lines(missing)
+    opener = 5 if content.startswith("---\r\n") else 4
+    merged = content[:opener] + lines + content[opener:]
+
+    # The chunker must see the note's block with our lines in front of it,
+    # and YAML our values, then the note's keys.
+    merged_match = _FRONT_MATTER_RE.match(_indexer_view(merged))
+    if (
+        merged_match is None
+        or merged_match.group(1) != lines + block
+        or not _reads_back(merged_match.group(1), missing, keys)
+    ):
+        logger.debug("import: provenance keys do not fit %r frontmatter; kept as is", original_file)
+        return content
+    return merged
 
 
 # ── Notion helpers ───────────────────────────────────────────────────────

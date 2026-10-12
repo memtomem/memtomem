@@ -65,7 +65,7 @@ mem_do(action="import_obsidian", params={"vault_path": "~/obsidian-vault", "name
 ```
 
 How Obsidian files are processed:
-- **YAML frontmatter**: `tags` are automatically extracted and applied as memtomem chunk tags. Other frontmatter fields are included in the searchable content.
+- **YAML frontmatter**: `tags` are automatically extracted and applied as memtomem chunk tags. Other frontmatter fields are included in the searchable content. The copied file keeps the note's frontmatter and records the import in it as `imported_from` and `original_file` keys; a note whose frontmatter is not a plain YAML mapping is copied with its frontmatter as is and without those keys.
 - **Wikilinks**: the import rewrites them as Markdown links in the copied file — `[[target|alias]]` becomes `[alias](target.md)`, `[[target]]` becomes `[target](target.md)`, and an embed `![[target]]` becomes the same kind of link — so search results show the link text and its `.md` target.
 - **Heading-based chunking**: Each `##` heading becomes a separate chunk, just like native memtomem files.
 - **Output**: Imported files are copied to `~/.memtomem/memories/_imported/obsidian/`.
@@ -78,6 +78,8 @@ How Obsidian files are processed:
 ```
 mem_do(action="import_notion", params={"path": "~/notion-export.zip", "namespace": "notion"})
 ```
+
+A page that has YAML frontmatter keeps it, with the import keys added, as for Obsidian.
 
 ### Ingesting Claude Code auto-memory
 
