@@ -66,7 +66,7 @@ mem_do(action="import_obsidian", params={"vault_path": "~/obsidian-vault", "name
 
 How Obsidian files are processed:
 - **YAML frontmatter**: `tags` are automatically extracted and applied as memtomem chunk tags. Other frontmatter fields are included in the searchable content.
-- **Wikilinks**: `[[target|alias]]` is resolved to `alias`, `[[target]]` to `target` — the `[[` brackets are removed during chunking so search results show clean text.
+- **Wikilinks**: the import rewrites them as Markdown links in the copied file — `[[target|alias]]` becomes `[alias](target.md)`, `[[target]]` becomes `[target](target.md)`, and an embed `![[target]]` becomes the same kind of link — so search results show the link text and its `.md` target.
 - **Heading-based chunking**: Each `##` heading becomes a separate chunk, just like native memtomem files.
 - **Output**: Imported files are copied to `~/.memtomem/memories/_imported/obsidian/`.
 

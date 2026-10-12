@@ -52,9 +52,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   fragment holding no line of its own (only borrowed overlap, or only a long
   merge label) is dropped when it repeats another fragment byte for byte at
   the same line; that text stays in the other fragment. A file indexed before
-  the upgrade keeps its old ranges until it is next edited; that re-index
-  updates the ranges without re-embedding. `mm index --force` updates them at
-  once but re-embeds every chunk.
+  the upgrade keeps its old ranges until it is next indexed. The index
+  receipt records the release, so the first `mm index` after upgrading
+  re-chunks every file, edited or not, and updates the ranges without
+  re-embedding; `mm index --force` is not needed for this and re-embeds every
+  chunk.
 - **A Markdown wikilink that crosses a line break no longer shifts later line
   numbers (#2696).** Chunking resolves `[[target|alias]]` to `alias`, and the
   pattern let the target span a newline, so `[[tar\nget|alias]]` removed a
