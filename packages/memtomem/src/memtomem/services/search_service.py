@@ -292,11 +292,11 @@ def dense_degraded_hint(mismatch: dict[str, Any] | None) -> str:
 
 
 #: The notice for a query whose primary dense leg raised (#2671). Fixed text on
-#: purpose: ``stats.dense_error`` is ``str(exc)`` and an embedder's message can
-#: carry its endpoint — the Ollama provider names ``base_url``, credentials and
-#: all — and this notice reaches ``mem_ask``'s grounded prompt and every
-#: structured ``hints`` array. The exception text stays in the server log and
-#: the verbose ``pipeline:`` line. "May be incomplete" rather than
+#: purpose: this notice reaches ``mem_ask``'s grounded prompt and every
+#: structured ``hints`` array, and it says only that the leg failed. Since
+#: #2675 ``stats.dense_error`` itself no longer holds ``str(exc)`` (an
+#: embedder's message can carry its endpoint, credentials and all); the full
+#: exception text is in the server log only. "May be incomplete" rather than
 #: "keyword-only": the session-summary rescue leg runs its own dense search
 #: on the embedding the primary leg computed, so a result set can still hold
 #: dense hits after the primary ``dense_search`` call failed. No pointer to a

@@ -1,8 +1,32 @@
 """Custom exceptions for memtomem."""
 
+from typing import Self
+
 
 class Mem2MemError(Exception):
-    """Base exception."""
+    """Base exception.
+
+    ``public_message`` is the text a caller may be shown in place of
+    ``str(exc)`` where an error crosses to a client: search's failed-leg
+    notice, for one (#2675). It is opt-in and set at the raise site, from
+    memtomem's own wording, config field names, the model name and integers
+    only — never an endpoint, a path, or another exception's text, which can
+    carry credentials. ``None`` means "nothing vetted", and a surface that
+    honours the field then shows only the error's class.
+    """
+
+    def __init__(self, *args: object, public_message: str | None = None) -> None:
+        super().__init__(*args)
+        self.public_message = public_message
+
+    @classmethod
+    def vetted(cls, message: str) -> Self:
+        """Build an error whose whole message is fit for callers to see.
+
+        For classes constructed from a message alone; one whose ``__init__``
+        takes other required arguments passes ``public_message`` itself.
+        """
+        return cls(message, public_message=message)
 
 
 class StorageError(Mem2MemError):

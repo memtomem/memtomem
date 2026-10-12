@@ -144,11 +144,16 @@ class OpenAIEmbedder:
         except httpx.ConnectError as exc:
             raise RetryableEmbeddingError(
                 f"Cannot connect to OpenAI API. "
-                f"Check your network connection and base_url. Error: {exc}"
+                f"Check your network connection and base_url. Error: {exc}",
+                public_message=(
+                    "Cannot connect to OpenAI API. "
+                    "Check your network connection and embedding.base_url."
+                ),
             ) from exc
         except httpx.TimeoutException as exc:
             raise RetryableEmbeddingError(
-                f"OpenAI embedding request timed out. The API may be overloaded. Error: {exc}"
+                f"OpenAI embedding request timed out. The API may be overloaded. Error: {exc}",
+                public_message="OpenAI embedding request timed out. The API may be overloaded.",
             ) from exc
         except RateLimitError as exc:
             if exc.status_code == 429:
@@ -156,15 +161,18 @@ class OpenAIEmbedder:
                     "OpenAI API rate limit exceeded after retries. "
                     "Please wait before retrying or upgrade your plan."
                 )
+                public = message
             else:
                 message = f"OpenAI kept returning a transient HTTP error after retries: {exc}"
-            raise RetryableEmbeddingError(message) from exc
+                public = "OpenAI kept returning a transient HTTP error after retries."
+            raise RetryableEmbeddingError(message, public_message=public) from exc
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
-                raise EmbeddingError(
+                message = (
                     "OpenAI API authentication failed. "
                     "Verify your API key is valid and set correctly."
-                ) from exc
+                )
+                raise EmbeddingError.vetted(message) from exc
             raise EmbeddingError(f"OpenAI embedding request failed: {exc}") from exc
         except httpx.HTTPError as exc:
             raise RetryableEmbeddingError(f"OpenAI embedding transport failed: {exc}") from exc
@@ -176,10 +184,10 @@ class OpenAIEmbedder:
 
     async def embed_query(self, query: str) -> list[float]:
         if not query or not query.strip():
-            raise EmbeddingError("Query text cannot be empty")
+            raise EmbeddingError.vetted("Query text cannot be empty")
         embeddings = await self.embed_texts([query])
         if not embeddings:
-            raise EmbeddingError("No embeddings returned for query")
+            raise EmbeddingError.vetted("No embeddings returned for query")
         return embeddings[0]
 
     async def close(self) -> None:

@@ -184,7 +184,13 @@ If you switch the embedding model after indexing, run `mm embedding-reset` to de
 
 ## Troubleshooting
 
-- **"Request URL is missing an 'http://' or 'https://' protocol"** — your config has `embedding.provider` set to `ollama` but `embedding.base_url` is empty. Upgrade to the latest version (which defaults to `http://localhost:11434`) or add `"base_url": "http://localhost:11434"` to the `embedding` section of `~/.memtomem/config.json`.
+A failed search leg reports a short reason in `mem_search` and the Web search
+results: the provider's own advice where there is one (the two Ollama messages
+below are among them), otherwise only the error's type. The provider's full
+message, which can name the configured endpoint, is written to the server log
+only.
+
+- **"Request URL is missing an 'http://' or 'https://' protocol"** (server log) — your config has `embedding.provider` set to `ollama` but `embedding.base_url` is empty. Upgrade to the latest version (which defaults to `http://localhost:11434`) or add `"base_url": "http://localhost:11434"` to the `embedding` section of `~/.memtomem/config.json`.
 - **"Cannot connect to Ollama"** — verify `ollama serve` is running.
 - **"Model not found"** — run `ollama pull <model>` to download it.
 - **Embedding model or ONNX sequence-policy mismatch** — dense search safely

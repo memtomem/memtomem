@@ -63,6 +63,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   crosses a line break stays in the chunk as written. Files without such a
   link chunk to the same text as before. In a file with one, the chunk holding
   it now keeps the raw link and is re-embedded when the file is next indexed.
+- **A failed search leg no longer echoes its exception text to callers
+  (#2675).** When keyword or semantic search failed, `mem_search` (its
+  empty-result note, structured `hints` and verbose `pipeline:` line) and the
+  Web search API's `retrieval_stats` carried the raw error text. An embedder's
+  message can name its configured endpoint: the Ollama connection error
+  included `embedding.base_url`, credentials or query-string tokens and all.
+  These surfaces now show the provider's own advice where memtomem wrote one
+  without such details (Ollama not running, `ollama pull <model>`, the OpenAI
+  key check, a missing `memtomem[onnx]` install, an embedding dimension
+  mismatch, a newer database schema), and otherwise only the error's type.
+  The full text is still written to the server log.
 
 ## [0.6.8] — 2026-10-08
 

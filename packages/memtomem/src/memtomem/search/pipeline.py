@@ -84,7 +84,12 @@ from memtomem.config import (
     SessionSummaryConfig,
 )
 from memtomem.constants import SearchOrigin, normalize_search_origin
-from memtomem.errors import ExhaustiveDenseSearchLimitError, TransactionOwnedError
+from memtomem.errors import (
+    ExhaustiveDenseSearchLimitError,
+    Mem2MemError,
+    RetryableError,
+    TransactionOwnedError,
+)
 from memtomem.generation import ComponentGeneration
 from memtomem.models import (
     Chunk,
@@ -122,6 +127,24 @@ _OBSERVATION_WRITE_RETRY_DELAY_S = 0.05
 # pattern: storage/mixins/schedules.py), DEBUG afterwards so a
 # persistently failing dependency doesn't spam the log on every query.
 _RESCUE_WARNED: set[str] = set()
+
+
+def _leg_error_text(exc: BaseException) -> str:
+    """What callers see of a failed retrieval leg (``bm25_error``/``dense_error``).
+
+    Never ``str(exc)``: an embedder's message can carry its endpoint, user-info
+    and query-string credentials included, and these fields reach the MCP
+    response, the Web API and the result cache (#2675). A memtomem error's
+    vetted ``public_message`` keeps its remediation; anything else is named by
+    class only and the full text stays in the server log. Never empty, so the
+    ``is not None`` checks downstream still read "this leg failed".
+    """
+    if isinstance(exc, Mem2MemError) and exc.public_message:
+        return exc.public_message
+    name = type(exc).__name__
+    if isinstance(exc, RetryableError):
+        return f"a transient failure ({name}) — retry shortly; details are in the server log"
+    return f"{name} — details are in the server log"
 
 
 def _log_rescue_failure(site: str, msg: str, *args: object) -> None:
@@ -1833,7 +1856,7 @@ class SearchPipeline:
                 except Exception as exc:
                     logger.warning("Dense search unavailable: %s", exc)
                     dense_results = []
-                    dense_error = str(exc)
+                    dense_error = _leg_error_text(exc)
                     if isinstance(exc, ExhaustiveDenseSearchLimitError):
                         dense_error_code = "dense_exhaustive_limit"
             if use_bm25:
@@ -1842,7 +1865,7 @@ class SearchPipeline:
                 except Exception as exc:
                     logger.warning("BM25 search failed: %s", exc)
                     bm25_results = []
-                    bm25_error = str(exc)
+                    bm25_error = _leg_error_text(exc)
 
             bm25_results = _exclude_source_roots(bm25_results, normalized_exclusion_roots)
             dense_results = _exclude_source_roots(dense_results, normalized_exclusion_roots)

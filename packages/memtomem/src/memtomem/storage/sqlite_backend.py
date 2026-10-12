@@ -457,6 +457,10 @@ class SqliteBackend(
         # was checked, and the refusal once another process migrated past us.
         self._schema_checked_at: dict[int, int] = {}
         self._schema_superseded: str | None = None
+        # The same refusal as callers may see it (``Mem2MemError.public_message``),
+        # built from the vetted text of the error that tripped it — never from
+        # its ``str()``, so an unvetted refusal stays unvetted when re-raised.
+        self._schema_superseded_public: str | None = None
 
     async def initialize(self) -> None:
         db_path = Path(self._config.sqlite_path).expanduser()
@@ -633,7 +637,9 @@ class SqliteBackend(
         re-checks under the write lock (``force``) and has no such gap.
         """
         if self._schema_superseded is not None:
-            raise SchemaDowngradeError(self._schema_superseded)
+            raise SchemaDowngradeError(
+                self._schema_superseded, public_message=self._schema_superseded_public
+            )
         key = id(conn)
         version: int | None = None
         if not force:
@@ -643,11 +649,17 @@ class SqliteBackend(
         try:
             check_schema_downgrade(conn)
         except SchemaDowngradeError as exc:
-            self._schema_superseded = (
-                f"{exc} This process opened the database under the older schema "
-                f"and has stopped using it; restart it on the newer release."
+            restart = (
+                " This process opened the database under the older schema "
+                "and has stopped using it; restart it on the newer release."
             )
-            raise SchemaDowngradeError(self._schema_superseded) from exc
+            self._schema_superseded = f"{exc}{restart}"
+            self._schema_superseded_public = (
+                f"{exc.public_message}{restart}" if exc.public_message else None
+            )
+            raise SchemaDowngradeError(
+                self._schema_superseded, public_message=self._schema_superseded_public
+            ) from exc
         if version is not None:
             self._schema_checked_at[key] = version
 
@@ -3045,7 +3057,7 @@ class SqliteBackend(
         # with no ``dense_error`` at all (Codex review, #2120). Kept below the
         # BM25-only guard above: dimension-0 stores accept any width by design.
         if len(embedding) != self._dimension:
-            raise QueryEmbeddingDimensionError(
+            raise QueryEmbeddingDimensionError.vetted(
                 f"Embedding dimension mismatch: query has {len(embedding)}d "
                 f"but DB expects {self._dimension}d. "
                 f"Check MEMTOMEM_EMBEDDING__MODEL / "
@@ -3157,7 +3169,7 @@ class SqliteBackend(
         # replay diff would compare against a silently partial scan. Refuse
         # instead — fail-closed beats a result that lies about its own shape.
         if exhaustive and total_vec_rows > VEC_MAX_KNN_K:
-            raise ExhaustiveDenseSearchLimitError(
+            raise ExhaustiveDenseSearchLimitError.vetted(
                 f"Exhaustive dense search needs to scan all {total_vec_rows} embeddings, "
                 f"but sqlite-vec caps a KNN query at {VEC_MAX_KNN_K}. Deterministic "
                 f"replay/evaluation is unavailable on a store this large — run it "
@@ -3207,7 +3219,7 @@ class SqliteBackend(
                 ).fetchall()
             except _sqlite3.OperationalError as exc:
                 if "Dimension mismatch" in str(exc):
-                    raise QueryEmbeddingDimensionError(
+                    raise QueryEmbeddingDimensionError.vetted(
                         f"Embedding dimension mismatch: query has {len(embedding)}d "
                         f"but DB expects {self._dimension}d. "
                         f"Check MEMTOMEM_EMBEDDING__MODEL / "

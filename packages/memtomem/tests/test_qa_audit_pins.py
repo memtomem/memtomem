@@ -482,10 +482,11 @@ class TestEmbeddingResetBm25Fallback:
             "`dense_results = []` — stale prior results would leak across "
             "queries, breaking the F-C4-1 graceful-degradation contract"
         )
-        assert "dense_error = str(exc)" in handler_src, (
-            "SearchPipeline.search dense handler stopped surfacing "
-            "`dense_error = str(exc)` — the /api/embedding-status "
-            "diagnostic depends on this string for reset-detection"
+        assert "dense_error = _leg_error_text(exc)" in handler_src, (
+            "SearchPipeline.search dense handler stopped recording "
+            "`dense_error = _leg_error_text(exc)` — callers read the field "
+            "as 'the dense leg failed', and raw `str(exc)` would put an "
+            "embedder's endpoint in the response (#2675)"
         )
 
     def test_reset_embedding_meta_is_single_atomic_transaction(self, reset_body: str):
