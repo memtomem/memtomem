@@ -55,6 +55,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the upgrade keeps its old ranges until it is next edited; that re-index
   updates the ranges without re-embedding. `mm index --force` updates them at
   once but re-embeds every chunk.
+- **A Markdown wikilink that crosses a line break no longer shifts later line
+  numbers (#2696).** Chunking resolves `[[target|alias]]` to `alias`, and the
+  pattern let the target span a newline, so `[[tar\nget|alias]]` removed a
+  line: every later line of the file, in later sections too, was numbered one
+  line early. Wikilinks now resolve only within one line; a `[[...]]` that
+  crosses a line break stays in the chunk as written. Files without such a
+  link chunk to the same text as before. In a file with one, the chunk holding
+  it now keeps the raw link and is re-embedded when the file is next indexed.
 
 ## [0.6.8] — 2026-10-08
 
