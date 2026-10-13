@@ -122,6 +122,18 @@ class EmbeddingDimensionMismatchError(StorageError):
     """
 
 
+class EmbeddingPolicyChangedError(StorageError):
+    """Raised instead of writing vectors under a stored policy this backend does not use.
+
+    A backend builds vectors under the policy it read at open. When the stored
+    row differs — another process (or another backend on the same file)
+    restamped it after that, or it already differed at open — vectors from
+    this backend would land under a row that does not describe them. The write
+    is refused and the backend enters the policy-mismatch degraded mode an
+    open-time mismatch does (#2620).
+    """
+
+
 class SchemaDowngradeError(StorageError):
     """Raised when the DB's stored schema version is newer than this binary's.
 

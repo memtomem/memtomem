@@ -1698,3 +1698,261 @@ class TestRevertStampConfirmation:
                 storage.confirm_embedding_stamp(stamp, adopt_policy="adopted")
         finally:
             await storage.close()
+
+
+class TestPolicyWriteFence:
+    """#2620: a backend opened before the stored policy moved refuses to write
+    vectors under the new row, and enters policy-mismatch degraded mode."""
+
+    _POLICY = "onnx:v1:max_sequence_tokens=1024"
+
+    @classmethod
+    def _backend(cls, db_path: Path, policy: str | None = None) -> SqliteBackend:
+        return SqliteBackend(
+            StorageConfig(sqlite_path=db_path),
+            dimension=1024,
+            embedding_provider="onnx",
+            embedding_model="bge-m3",
+            embedding_policy_fingerprint=cls._POLICY if policy is None else policy,
+            embedding_max_sequence_tokens=1024,
+        )
+
+    @staticmethod
+    def _sql(db_path: Path, statement: str, *args: object) -> list[tuple]:
+        import sqlite3
+
+        with sqlite3.connect(db_path) as db:
+            return db.execute(statement, args).fetchall()
+
+    @classmethod
+    def _restamp(cls, db_path: Path, policy: str) -> None:
+        """Change the policy row from outside, the way another process would."""
+        cls._sql(
+            db_path,
+            "UPDATE _memtomem_meta SET value=? WHERE key='embedding_policy_fingerprint'",
+            policy,
+        )
+
+    @classmethod
+    async def _counts(cls, db_path: Path, storage: SqliteBackend) -> tuple[int, int]:
+        """Committed chunk rows, and vector rows read through *storage*'s reader
+        (a plain connection cannot load the ``vec0`` module)."""
+        chunks = cls._sql(db_path, "SELECT count(*) FROM chunks")[0][0]
+        vectors = (await storage.read_embedding_stamp_fresh())["vectors"]
+        return chunks, vectors
+
+    async def _pair(self, tmp_path: Path) -> tuple[Path, SqliteBackend, SqliteBackend]:
+        db_path = tmp_path / "shared.db"
+        a = self._backend(db_path)
+        await a.initialize()
+        b = self._backend(db_path)
+        await b.initialize()
+        return db_path, a, b
+
+    async def test_a_peer_adopting_a_policy_refuses_the_older_backends_vectors(self, tmp_path):
+        from memtomem.errors import EmbeddingPolicyChangedError
+
+        db_path, a, b = await self._pair(tmp_path)
+        try:
+            stamp = await b.read_embedding_stamp_fresh()
+            assert b.confirm_embedding_stamp(stamp, adopt_policy="adopted-by-b") is True
+            assert a.embedding_mismatch is None
+
+            with pytest.raises(EmbeddingPolicyChangedError) as excinfo:
+                await a.upsert_chunks([make_chunk(content="written by a")])
+
+            assert excinfo.value.public_message == str(excinfo.value)
+            assert await self._counts(db_path, a) == (0, 0)
+            mismatch = a.embedding_mismatch
+            assert mismatch is not None and mismatch["policy_mismatch"] is True
+            assert mismatch["stored"]["policy_fingerprint"] == "adopted-by-b"
+            assert mismatch["configured"]["policy_fingerprint"] == self._POLICY
+            assert a._get_db().in_transaction is False
+        finally:
+            await b.close()
+            await a.close()
+
+    async def test_a_malformed_stored_token_limit_does_not_stop_the_refusal(self, tmp_path):
+        from memtomem.errors import EmbeddingPolicyChangedError
+
+        db_path, a, b = await self._pair(tmp_path)
+        try:
+            self._restamp(db_path, "moved")
+            self._sql(
+                db_path,
+                "UPDATE _memtomem_meta SET value='invalid' "
+                "WHERE key='embedding_max_sequence_tokens'",
+            )
+            with pytest.raises(EmbeddingPolicyChangedError):
+                await a.upsert_chunks([make_chunk(content="written by a")])
+            mismatch = a.embedding_mismatch
+            assert mismatch is not None and mismatch["policy_mismatch"] is True
+            assert mismatch["stored"]["max_sequence_tokens"] is None
+        finally:
+            await b.close()
+            await a.close()
+
+    async def test_the_refusal_repeats_once_degraded(self, tmp_path):
+        from memtomem.errors import EmbeddingPolicyChangedError
+
+        db_path, a, b = await self._pair(tmp_path)
+        try:
+            self._restamp(db_path, "moved")
+            for content in ("first", "second"):
+                with pytest.raises(EmbeddingPolicyChangedError):
+                    await a.upsert_chunks([make_chunk(content=content)])
+            assert await self._counts(db_path, a) == (0, 0)
+        finally:
+            await b.close()
+            await a.close()
+
+    async def test_a_peer_reset_refuses_the_older_backends_vectors(self, tmp_path):
+        from memtomem.errors import EmbeddingPolicyChangedError
+
+        db_path, a, b = await self._pair(tmp_path)
+        try:
+            await b.reset_embedding_meta(
+                dimension=1024, provider="onnx", model="bge-m3", policy_fingerprint="reset-by-b"
+            )
+            with pytest.raises(EmbeddingPolicyChangedError):
+                await a.upsert_chunks([make_chunk(content="written by a")])
+            assert await self._counts(db_path, a) == (0, 0)
+        finally:
+            await b.close()
+            await a.close()
+
+    async def test_a_refusal_inside_a_transaction_commits_nothing(self, tmp_path):
+        from memtomem.errors import EmbeddingPolicyChangedError
+
+        db_path, a, b = await self._pair(tmp_path)
+        try:
+            self._restamp(db_path, "moved")
+            with pytest.raises(EmbeddingPolicyChangedError):
+                async with a.transaction():
+                    await a.upsert_chunks([make_chunk(content="in a transaction")])
+            assert await self._counts(db_path, a) == (0, 0)
+            assert a._get_db().in_transaction is False
+        finally:
+            await b.close()
+            await a.close()
+
+    async def test_the_update_path_keeps_the_stored_vector(self, tmp_path):
+        """The update branch deletes the old vector before inserting; a refusal
+        rolls that delete back too, and a mixed update+insert batch commits
+        neither half."""
+        from memtomem.errors import EmbeddingPolicyChangedError
+
+        db_path, a, b = await self._pair(tmp_path)
+        try:
+            stored = make_chunk(content="stored")
+            await a.upsert_chunks([stored])
+            assert await self._counts(db_path, a) == (1, 1)
+            self._restamp(db_path, "moved")
+
+            stored.embedding = [0.2] * 1024
+            with pytest.raises(EmbeddingPolicyChangedError):
+                await a.upsert_chunks([stored])
+            with pytest.raises(EmbeddingPolicyChangedError):
+                await a.upsert_chunks([stored, make_chunk(content="new")])
+
+            assert await self._counts(db_path, a) == (1, 1)
+            assert self._sql(db_path, "SELECT content FROM chunks") == [("stored",)]
+        finally:
+            await b.close()
+            await a.close()
+
+    async def test_the_backends_own_restamps_do_not_trip_it(self, tmp_path):
+        db_path = tmp_path / "own.db"
+        a = self._backend(db_path)
+        await a.initialize()
+        try:
+            stamp = await a.read_embedding_stamp_fresh()
+            assert a.confirm_embedding_stamp(stamp, adopt_policy="adopted-by-a") is True
+            await a.upsert_chunks([make_chunk(content="after adopting")])
+            await a.reset_embedding_meta(
+                dimension=1024, provider="onnx", model="bge-m3", policy_fingerprint="reset-by-a"
+            )
+            await a.upsert_chunks([make_chunk(content="after resetting")])
+            assert a.embedding_mismatch is None
+            assert await self._counts(db_path, a) == (2, 1)
+        finally:
+            await a.close()
+
+    async def test_writes_without_vectors_are_not_fenced(self, tmp_path):
+        db_path, a, b = await self._pair(tmp_path)
+        try:
+            self._restamp(db_path, "moved")
+            assert await a.upsert_chunks([make_chunk(content="bm25 only", embedding=[])]) == 1
+            assert await self._counts(db_path, a) == (1, 0)
+            assert a.embedding_mismatch is None
+        finally:
+            await b.close()
+            await a.close()
+
+    async def test_a_backend_opened_with_a_mismatch_refuses_vectors(self, tmp_path):
+        from memtomem.errors import EmbeddingPolicyChangedError
+
+        db_path = tmp_path / "opened.db"
+        first = self._backend(db_path, policy="stored-policy")
+        await first.initialize()
+        await first.close()
+        a = self._backend(db_path)
+        await a.initialize()
+        try:
+            assert a.embedding_mismatch is not None
+            with pytest.raises(EmbeddingPolicyChangedError):
+                await a.upsert_chunks([make_chunk(content="degraded write")])
+            assert await self._counts(db_path, a) == (0, 0)
+        finally:
+            await a.close()
+
+    async def test_the_same_boundaries_as_the_open_time_check(self, tmp_path):
+        """A max-only change, an absent stored row and an empty configured
+        fingerprint are not mismatches at open, so they do not trip the fence."""
+        db_path, a, b = await self._pair(tmp_path)
+        unset = self._backend(db_path, policy="")
+        await unset.initialize()
+        try:
+            self._sql(
+                db_path,
+                "UPDATE _memtomem_meta SET value='512' WHERE key='embedding_max_sequence_tokens'",
+            )
+            await a.upsert_chunks([make_chunk(content="max only")])
+            self._sql(
+                db_path, "DELETE FROM _memtomem_meta WHERE key='embedding_policy_fingerprint'"
+            )
+            await a.upsert_chunks([make_chunk(content="row absent")])
+            self._sql(
+                db_path,
+                "INSERT INTO _memtomem_meta(key, value) VALUES ('embedding_policy_fingerprint', ?)",
+                "moved",
+            )
+            assert self._sql(
+                db_path,
+                "SELECT value FROM _memtomem_meta WHERE key='embedding_policy_fingerprint'",
+            ) == [("moved",)]
+            await unset.upsert_chunks([make_chunk(content="nothing configured")])
+            assert a.embedding_mismatch is None and unset.embedding_mismatch is None
+            assert await self._counts(db_path, a) == (3, 3)
+        finally:
+            await unset.close()
+            await b.close()
+            await a.close()
+
+    async def test_an_invalid_stored_token_limit_still_fails_at_open(self, tmp_path):
+        """The open-time check parses the stored limit whether or not the
+        fingerprints differ, as it did before the predicate was shared."""
+        db_path = tmp_path / "invalid.db"
+        first = self._backend(db_path)
+        await first.initialize()
+        await first.close()
+        self._sql(
+            db_path,
+            "UPDATE _memtomem_meta SET value='invalid' WHERE key='embedding_max_sequence_tokens'",
+        )
+        from memtomem.errors import StorageStartupError
+
+        again = self._backend(db_path)
+        with pytest.raises(StorageStartupError) as excinfo:
+            await again.initialize()
+        assert isinstance(excinfo.value.__cause__, ValueError)

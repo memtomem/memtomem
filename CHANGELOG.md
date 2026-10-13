@@ -7,6 +7,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A process no longer writes vectors under an embedding policy another
+  process stamped after it opened the store (#2620).** The embedding policy
+  is read once at open, and vectors are embedded before the write lock is
+  taken. When another process changed the stored policy in between, through
+  `mem_embedding_reset(mode="apply_current")` or the empty-store policy
+  adoption of a revert, the older process kept writing vectors built under its
+  own policy, and they landed under a row that does not describe them. Every
+  vector write now re-reads the stored policy under the write lock. On a
+  mismatch the write is refused with `EmbeddingPolicyChangedError`, which names
+  the recovery, and the process enters the same policy-mismatch degraded mode
+  an open-time mismatch does: indexing is refused before embedding, search
+  falls back to BM25, and `mem_status` reports it. `mm embedding-reset`
+  shows both policies; `--mode apply-current` followed by
+  `mm index --force` resolves it, as for an open-time mismatch. A cached
+  search result is no longer served across that
+  change. An import that hits it reports the error (the web route returns
+  409) instead of a failed count. The check costs about 5 µs per vector write
+  against about 4 ms for upserting ten 1024-dimension chunks. Only the policy
+  fingerprint is compared, as at open; a model, provider or dimension change
+  that leaves the policy row as it was is not detected.
 - **Imported notes keep their own frontmatter (#2716).** `import_obsidian`
   and `import_notion` wrote their `imported_from` / `original_file` block in
   front of the note. A note that had frontmatter of its own then held two

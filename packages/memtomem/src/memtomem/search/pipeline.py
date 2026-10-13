@@ -1624,7 +1624,21 @@ class SearchPipeline:
             # invalidation just above is the one exception).
             if record and as_of_unix is None and cache_key in self._search_cache:
                 ts, ver, cached_results, cached_stats = self._search_cache[cache_key]
-                if ver == self._cache_version and time.time() - ts < ttl_snapshot:
+                # The storage can enter embedding-mismatch degraded mode at
+                # runtime, when a vector write finds the stored policy moved
+                # (#2620), and nothing invalidates this cache then. An entry
+                # is served only while dense suppression is what it was when
+                # the entry was stored (same expression as Stage 1).
+                suppressed_now = (
+                    self._config.enable_dense
+                    and dense_weight > 0
+                    and isinstance(getattr(self._storage, "embedding_mismatch", None), dict)
+                )
+                if (
+                    ver == self._cache_version
+                    and time.time() - ts < ttl_snapshot
+                    and cached_stats.dense_suppressed_mismatch == suppressed_now
+                ):
                     # Cache entries are internal snapshots. SearchResult embeds
                     # mutable Chunk/metadata objects, so handing the stored list
                     # out directly lets one caller poison every later hit.
