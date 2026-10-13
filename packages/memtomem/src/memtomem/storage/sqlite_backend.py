@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator, Mapping, Sequence, TypeVar
+from typing import Any, AsyncIterator, Iterator, Mapping, Sequence, TypeGuard, TypeVar
 from uuid import UUID
 
 import sqlite_vec
@@ -584,7 +584,7 @@ class SqliteBackend(
                 raise
             raise _classify_startup_error(exc, stage) from exc
 
-    def _policy_differs(self, stored_policy: str | None) -> bool:
+    def _policy_differs(self, stored_policy: str | None) -> TypeGuard[str]:
         """Whether *stored_policy* disagrees with the policy this backend embeds under.
 
         The one comparison both the open-time check and the write-time fence
@@ -598,7 +598,7 @@ class SqliteBackend(
             and stored_policy != self._embedding_policy_fingerprint
         )
 
-    def _set_policy_mismatch(self, stored_policy: str | None, stored_max: int | None) -> None:
+    def _set_policy_mismatch(self, stored_policy: str, stored_max: int | None) -> None:
         self._policy_mismatch = (
             stored_policy,
             self._embedding_policy_fingerprint,
