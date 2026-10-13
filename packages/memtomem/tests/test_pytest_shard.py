@@ -422,3 +422,54 @@ def test_record_cli_rejects_overlapping_reports_without_writing(
 
     assert excinfo.value.code == 2
     assert not out.exists()
+
+
+def test_runs_are_averaged_per_file(tmp_path: Path) -> None:
+    """A noisy file must not carry one run's spike into every later partition.
+
+    Measured on Windows CI: one file took 28 s in one run and 82 s in the next.
+    A file each run recorded gets the mean; a file only one run recorded keeps
+    that run's value rather than being diluted by runs that never saw it.
+    """
+    _fake_suite(tmp_path, "test_a", "test_b", "test_c")
+    run1 = [
+        _junit(tmp_path / "r1s0.xml", [("packages.memtomem.tests.test_a", 28.0)]),
+        _junit(tmp_path / "r1s1.xml", [("packages.memtomem.tests.test_b", 4.0)]),
+    ]
+    run2 = [
+        _junit(tmp_path / "r2s0.xml", [("packages.memtomem.tests.test_a", 82.0)]),
+        _junit(tmp_path / "r2s1.xml", [("packages.memtomem.tests.test_c", 6.0)]),
+    ]
+
+    averaged = sharder.durations_from_runs([run1, run2], tmp_path)
+
+    assert averaged == {
+        "packages/memtomem/tests/test_a.py": 55.0,
+        "packages/memtomem/tests/test_b.py": 4.0,
+        "packages/memtomem/tests/test_c.py": 6.0,
+    }
+
+
+def test_overlap_inside_one_run_is_still_refused(tmp_path: Path) -> None:
+    """Averaging across runs must not relax the per-run disjointness check."""
+    _fake_suite(tmp_path, "test_a")
+    report = _junit(tmp_path / "s0.xml", [("packages.memtomem.tests.test_a", 1.0)])
+
+    with pytest.raises(ValueError, match="repeats 1 file"):
+        sharder.durations_from_runs([[report, report]], tmp_path)
+
+
+def test_record_cli_averages_one_flag_per_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each ``--record-durations`` is one run; repeating the flag averages the runs."""
+    out = tmp_path / "map.json"
+    monkeypatch.setattr(sharder, "DURATIONS_FILE", str(out))
+    first = _junit(tmp_path / "r1.xml", [("packages.memtomem.tests.test_pytest_shard", 2.0)])
+    second = _junit(tmp_path / "r2.xml", [("packages.memtomem.tests.test_pytest_shard", 6.0)])
+
+    rc = sharder.main(["--record-durations", str(first), "--record-durations", str(second)])
+
+    assert rc == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["durations"] == {"packages/memtomem/tests/test_pytest_shard.py": 4.0}

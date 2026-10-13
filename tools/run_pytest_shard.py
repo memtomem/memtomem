@@ -174,14 +174,37 @@ def durations_from_reports(xml_paths: list[Path], repo_root: Path) -> dict[str, 
     return merged
 
 
+def durations_from_runs(runs: list[list[Path]], repo_root: Path) -> dict[str, float]:
+    """Average per-file costs over several CI runs, each given as its shard reports.
+
+    One run's timings balance that run well and the next one poorly: on Windows
+    a single file can take 28 s in one run and 82 s in the next, so a map from
+    one run carries that run's noise into every later partition. Each file's
+    cost is the mean over the runs that recorded it. Within a run the reports
+    must still be disjoint, as ``durations_from_reports`` enforces.
+    """
+    per_run = [durations_from_reports(reports, repo_root) for reports in runs]
+    names = set().union(*per_run)
+    return {
+        name: sum(run[name] for run in per_run if name in run)
+        / sum(1 for run in per_run if name in run)
+        for name in names
+    }
+
+
 def write_durations(totals: dict[str, float], path: Path, *, platform: str) -> None:
     """Persist the per-file cost map, rounded and key-sorted for a clean diff."""
     payload = {
         "note": (
             "Per-file pytest cost in seconds, used by run_pytest_shard.py to balance "
             "the Windows shards. Regenerate from the junit-windows-shard-* artifacts "
-            "of a CI run: uv run python tools/run_pytest_shard.py --record-durations "
-            "junit-windows-shard-0.xml junit-windows-shard-1.xml --platform win32. "
+            "of several CI runs: download each with gh run download <run-id> --dir "
+            "<run>, then pass one --record-durations per run, e.g. uv run python "
+            "tools/run_pytest_shard.py --record-durations "
+            "<run>/junit-windows-shard-0/junit-windows-shard-0.xml "
+            "<run>/junit-windows-shard-1/junit-windows-shard-1.xml "
+            "--record-durations <next run>/... --platform win32. "
+            "Each file's cost is its mean over the runs. "
             "Stale or missing entries only cost balance, never correctness."
         ),
         "platform": platform,
@@ -198,8 +221,12 @@ def main(argv: list[str] | None = None) -> int:
         "--record-durations",
         type=Path,
         nargs="+",
+        action="append",
         metavar="JUNIT_XML",
-        help="Rewrite the cost map from JUnit XML reports, one per shard, and exit.",
+        help=(
+            "Rewrite the cost map from one CI run's JUnit XML reports, one per shard, "
+            "and exit. Repeat the flag once per run to average several runs."
+        ),
     )
     parser.add_argument(
         "--platform",
@@ -215,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.record_durations is not None:
         try:
-            totals = durations_from_reports(args.record_durations, repo_root)
+            totals = durations_from_runs(args.record_durations, repo_root)
         except ValueError as exc:
             parser.error(str(exc))
         write_durations(totals, durations_path, platform=args.platform)
