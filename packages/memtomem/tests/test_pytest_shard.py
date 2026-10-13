@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import itertools
+import json
 import os
 import subprocess
 import sys
@@ -318,3 +319,106 @@ def test_merely_huge_finite_costs_cannot_overflow_the_shard_loads() -> None:
     shards = [sharder.shard_files(files, index=i, count=2, durations=durations) for i in range(2)]
 
     assert sorted(len(shard) for shard in shards) == [3, 3]
+
+
+def _junit(path: Path, rows: list[tuple[str, float]]) -> Path:
+    """Write a minimal pytest-style JUnit report with one testcase per row."""
+    cases = "".join(
+        f'<testcase classname="{classname}" name="t{i}" time="{seconds}"/>'
+        for i, (classname, seconds) in enumerate(rows)
+    )
+    path.write_text(f"<testsuites><testsuite>{cases}</testsuite></testsuites>", encoding="utf-8")
+    return path
+
+
+def _fake_suite(tmp_path: Path, *names: str) -> None:
+    tests_root = tmp_path / "packages" / "memtomem" / "tests"
+    tests_root.mkdir(parents=True)
+    for name in names:
+        (tests_root / f"{name}.py").touch()
+
+
+def test_one_report_per_shard_merges_into_one_map(tmp_path: Path) -> None:
+    """Each Windows shard writes its own report; the map needs all of them.
+
+    The map is rewritten whole, so recording the shards one after the other
+    would keep only the last shard's files. Merging is what makes the shard
+    artifacts usable as the regeneration input.
+    """
+    _fake_suite(tmp_path, "test_a", "test_b")
+    first = _junit(tmp_path / "s0.xml", [("packages.memtomem.tests.test_a", 1.25)])
+    second = _junit(tmp_path / "s1.xml", [("packages.memtomem.tests.test_b.TestB", 4.0)])
+
+    merged = sharder.durations_from_reports([first, second], tmp_path)
+
+    assert merged == {
+        "packages/memtomem/tests/test_a.py": 1.25,
+        "packages/memtomem/tests/test_b.py": 4.0,
+    }
+
+
+def test_a_file_in_two_reports_is_refused_not_doubled(tmp_path: Path) -> None:
+    """Shards are disjoint, so a repeated file means the wrong pair of reports.
+
+    Two attempts of the same shard, or one report passed twice, would add a
+    file's cost to itself. Refusing keeps the map from overstating it.
+    """
+    _fake_suite(tmp_path, "test_a", "test_b")
+    first = _junit(tmp_path / "s0.xml", [("packages.memtomem.tests.test_a", 1.0)])
+    again = _junit(
+        tmp_path / "s0-retry.xml",
+        [("packages.memtomem.tests.test_b", 2.0), ("packages.memtomem.tests.test_a", 1.0)],
+    )
+
+    with pytest.raises(ValueError, match="repeats 1 file"):
+        sharder.durations_from_reports([first, again], tmp_path)
+
+
+def test_a_report_resolving_no_file_is_refused(tmp_path: Path) -> None:
+    """A report that maps to no distributed file is almost always the wrong file."""
+    _fake_suite(tmp_path, "test_a")
+    good = _junit(tmp_path / "s0.xml", [("packages.memtomem.tests.test_a", 1.0)])
+    stray = _junit(tmp_path / "other.xml", [("somewhere.else.test_x", 3.0)])
+
+    with pytest.raises(ValueError, match="no test files resolved from"):
+        sharder.durations_from_reports([good, stray], tmp_path)
+
+
+def test_record_cli_writes_every_report_and_the_given_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI takes the shard reports together and labels the map's platform.
+
+    Recording happens on a developer machine from reports downloaded from a
+    Windows run, so the map's ``platform`` has to come from the flag rather
+    than from ``sys.platform``. The output path is redirected so the committed
+    map is never touched.
+    """
+    out = tmp_path / "map.json"
+    monkeypatch.setattr(sharder, "DURATIONS_FILE", str(out))
+    first = _junit(tmp_path / "s0.xml", [("packages.memtomem.tests.test_pytest_shard", 2.0)])
+    second = _junit(tmp_path / "s1.xml", [("packages.memtomem.tests.test_dirty", 3.0)])
+
+    rc = sharder.main(["--record-durations", str(first), str(second), "--platform", "win32"])
+
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert payload["platform"] == "win32"
+    assert payload["durations"] == {
+        "packages/memtomem/tests/test_dirty.py": 3.0,
+        "packages/memtomem/tests/test_pytest_shard.py": 2.0,
+    }
+
+
+def test_record_cli_rejects_overlapping_reports_without_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "map.json"
+    monkeypatch.setattr(sharder, "DURATIONS_FILE", str(out))
+    report = _junit(tmp_path / "s0.xml", [("packages.memtomem.tests.test_pytest_shard", 2.0)])
+
+    with pytest.raises(SystemExit) as excinfo:
+        sharder.main(["--record-durations", str(report), str(report)])
+
+    assert excinfo.value.code == 2
+    assert not out.exists()

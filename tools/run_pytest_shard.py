@@ -149,14 +149,39 @@ def durations_from_junit(xml_path: Path, repo_root: Path) -> dict[str, float]:
     return dict(totals)
 
 
+def durations_from_reports(xml_paths: list[Path], repo_root: Path) -> dict[str, float]:
+    """Merge several JUnit reports, one per shard, into one per-file map.
+
+    The map is rewritten whole, so recording the shards one at a time would
+    keep only the last shard's files. Reports must cover disjoint files: the
+    same file in two reports means an overlapping pair, such as two attempts
+    of one shard, and adding them would double that file's cost. A report that
+    resolves no file at all is almost certainly the wrong file. Both refuse
+    rather than write a map that looks plausible.
+    """
+    merged: dict[str, float] = {}
+    for xml_path in xml_paths:
+        totals = durations_from_junit(xml_path, repo_root)
+        if not totals:
+            raise ValueError(f"no test files resolved from {xml_path}")
+        overlap = sorted(merged.keys() & totals.keys())
+        if overlap:
+            raise ValueError(
+                f"{xml_path} repeats {len(overlap)} file(s) already in an earlier report, "
+                f"first {overlap[0]}; pass one report per shard"
+            )
+        merged.update(totals)
+    return merged
+
+
 def write_durations(totals: dict[str, float], path: Path, *, platform: str) -> None:
     """Persist the per-file cost map, rounded and key-sorted for a clean diff."""
     payload = {
         "note": (
             "Per-file pytest cost in seconds, used by run_pytest_shard.py to balance "
-            "the Windows shards. Regenerate with: "
-            "uv run pytest -m 'not ollama and not llm' --junit-xml=junit.xml && "
-            "uv run python tools/run_pytest_shard.py --record-durations junit.xml. "
+            "the Windows shards. Regenerate from the junit-windows-shard-* artifacts "
+            "of a CI run: uv run python tools/run_pytest_shard.py --record-durations "
+            "junit-windows-shard-0.xml junit-windows-shard-1.xml --platform win32. "
             "Stale or missing entries only cost balance, never correctness."
         ),
         "platform": platform,
@@ -172,8 +197,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--record-durations",
         type=Path,
+        nargs="+",
         metavar="JUNIT_XML",
-        help="Rewrite the cost map from a JUnit XML report and exit.",
+        help="Rewrite the cost map from JUnit XML reports, one per shard, and exit.",
+    )
+    parser.add_argument(
+        "--platform",
+        default=sys.platform,
+        help="Platform the reports were recorded on (default: this machine's).",
     )
     args, pytest_args = parser.parse_known_args(argv)
     if pytest_args[:1] == ["--"]:
@@ -183,10 +214,11 @@ def main(argv: list[str] | None = None) -> int:
     durations_path = Path(__file__).resolve().parent / DURATIONS_FILE
 
     if args.record_durations is not None:
-        totals = durations_from_junit(args.record_durations, repo_root)
-        if not totals:
-            parser.error(f"no test files resolved from {args.record_durations}")
-        write_durations(totals, durations_path, platform=sys.platform)
+        try:
+            totals = durations_from_reports(args.record_durations, repo_root)
+        except ValueError as exc:
+            parser.error(str(exc))
+        write_durations(totals, durations_path, platform=args.platform)
         print(f"recorded {len(totals)} file durations to {durations_path}")
         return 0
 

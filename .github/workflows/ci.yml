@@ -119,6 +119,20 @@ jobs:
           --shard-count 2 --
           -m "not ollama and not llm"
           --tb=short -q
+          --junit-xml=junit-windows-shard-${{ matrix.shard }}.xml
+      # Per-file Windows timings, the input for regenerating the shard cost map
+      # (see the note in tools/pytest_shard_durations.json). pytest writes the
+      # report when the session ends, so a shard cancelled at the timeout has
+      # nothing to upload; a failed one still does.
+      - name: Upload shard timings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: junit-windows-shard-${{ matrix.shard }}
+          path: junit-windows-shard-${{ matrix.shard }}.xml
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 14
 
   test-windows:
     name: test (windows-latest)
