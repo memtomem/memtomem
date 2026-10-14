@@ -183,7 +183,10 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
         provided = request.headers.get("X-Memtomem-CSRF")
         if not provided:
             return False
-        return secrets.compare_digest(provided, expected)
+        # Compare bytes: Starlette decodes header values as latin-1, and
+        # ``compare_digest`` raises ``TypeError`` on a non-ASCII ``str`` rather
+        # than reporting the mismatch. ``latin-1`` restores the bytes as sent.
+        return secrets.compare_digest(provided.encode("latin-1"), expected.encode())
 
     @staticmethod
     def _check_origin(request: Request) -> bool:

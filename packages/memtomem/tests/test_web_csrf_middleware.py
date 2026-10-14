@@ -176,6 +176,28 @@ def test_post_with_wrong_token_returns_403(caplog_csrf) -> None:
     assert events[0]["would_block"] == "True"
 
 
+# Starlette decodes header bytes as latin-1, so a byte >= 0x80 reaches the
+# token check as a non-ASCII ``str`` — which ``secrets.compare_digest`` refuses
+# with ``TypeError`` instead of answering "no match" (#2729).
+@pytest.mark.parametrize("token", [b"\xff", b"test-token-abc\xe9"], ids=["byte", "suffix"])
+@pytest.mark.parametrize("enforce", [True, False], ids=["enforce", "observe"])
+def test_post_with_non_ascii_token_is_a_mismatch(caplog_csrf, token: bytes, enforce: bool) -> None:
+    client = TestClient(_build_app(enforce=enforce))
+    res = client.post(
+        "/api/echo",
+        headers={
+            "X-Memtomem-CSRF": token,
+            "Host": "127.0.0.1:8080",
+            "Origin": "http://127.0.0.1:8080",
+        },
+    )
+    assert res.status_code == (403 if enforce else 200)
+    events = _parse_observe(caplog_csrf.records)
+    assert len(events) == 1
+    assert events[0]["token_ok"] == "False"
+    assert events[0]["would_block"] == "True"
+
+
 def test_post_with_right_token_but_non_loopback_host_returns_403(caplog_csrf) -> None:
     """Default TestClient sends ``Host: testserver`` — non-loopback. A
     valid token isn't enough; the Host check still has to pass."""
