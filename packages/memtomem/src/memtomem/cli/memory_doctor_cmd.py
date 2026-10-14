@@ -2629,3 +2629,14 @@ def memory_doctor(path: str | None, json_out: bool, fix: bool, apply_: bool) -> 
 
     if _severity_totals(reports)["error"] > 0:
         raise click.exceptions.Exit(1)
+
+
+def _register_shared_subcommands() -> None:
+    from memtomem.cli.mem_cmd import init_cmd, rescan_cmd, rescan_files_cmd
+
+    memory.add_command(init_cmd, "init")
+    memory.add_command(rescan_cmd, "rescan")
+    memory.add_command(rescan_files_cmd, "rescan-files")
+
+
+_register_shared_subcommands()

@@ -24,6 +24,21 @@ from memtomem.memory_scope import (
 _MEMORY_SCOPE_CHOICES = list(get_args(TargetScope))
 
 
+def _resolve_project_context_root(holder: object) -> Path | None:
+    import sys
+
+    from memtomem.runtime.project_context import (
+        _resolve_project_context_root as _runtime_resolve,
+    )
+
+    search_mod = sys.modules.get("memtomem.server.tools.search")
+    if search_mod is not None:
+        patched = getattr(search_mod, "_resolve_project_context_root", None)
+        if callable(patched) and patched is not _runtime_resolve:
+            return patched(holder)
+    return _runtime_resolve(holder)
+
+
 def _resolve_memory_scope_dir(
     scope: TargetScope,
     project_root: Path | None,
@@ -201,7 +216,6 @@ async def _add(
     from memtomem.cli._bootstrap import cli_components
     from memtomem.cli._session_state import resolve_session_write_namespace
     from memtomem.constants import InvalidNameError, validate_namespace
-    from memtomem.server.tools.search import _resolve_project_context_root
     from memtomem.tools.memory_writer import append_entry
 
     if namespace is not None:
@@ -402,18 +416,28 @@ async def _add(
                     if mix_err is not None:
                         raise click.ClickException(mix_err)
                     target.parent.mkdir(parents=True, exist_ok=True)
+                    pre_lines = (
+                        len(target.read_text(encoding="utf-8", errors="replace").splitlines())
+                        if target.exists()
+                        else 0
+                    )
                     await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
                     # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
                     stats = await comp.index_engine.index_file(
                         target, namespace=effective_ns, already_scanned=True, lock_held=True
                     )
 
-                    # Apply tags to indexed chunks (chunker doesn't parse tag text
-                    # from content). Inside the lock — keyed to this file's chunks.
+                    # Apply tags to newly appended chunks (chunker doesn't parse tag text
+                    # from content). Inside the lock — keyed to this file's new chunks.
                     if tags and stats.indexed_chunks > 0:
                         chunks = await comp.storage.list_chunks_by_source(target)
                         updated = []
                         for c in chunks:
+                            if (
+                                c.metadata.start_line is not None
+                                and c.metadata.start_line <= pre_lines
+                            ):
+                                continue
                             merged = set(c.metadata.tags) | set(tags)
                             if merged != set(c.metadata.tags):
                                 c.metadata = c.metadata.__class__(
@@ -483,6 +507,13 @@ async def _add(
     ),
 )
 @click.option("--format", "fmt", type=click.Choice(["table", "json", "plain"]), default="table")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Output results as JSON (shorthand for --format json).",
+)
 def recall(
     since: str | None,
     until: str | None,
@@ -492,8 +523,11 @@ def recall(
     namespace: str | None,
     scope: str | None,
     fmt: str,
+    as_json: bool = False,
 ) -> None:
     """Recall recent memory chunks."""
+    if as_json:
+        fmt = "json"
     try:
         asyncio.run(_recall(since, until, limit, source_filter, tag_filter, namespace, scope, fmt))
     except Exception as e:
@@ -515,12 +549,16 @@ async def _recall(
     from memtomem.cli._bootstrap import cli_components
     from memtomem.cli._empty_results import explain_empty_result
     from memtomem.models import InvalidScopeFilterError, NamespaceFilter, ScopeFilter
-    from memtomem.server.helpers import _parse_recall_date
-    from memtomem.server.tools.search import _resolve_project_context_root
     from memtomem.services.search_service import validate_scope_vocabulary
 
-    since_dt = _parse_recall_date(since) if since else None
-    until_dt = _parse_recall_date(until, end_of_period=True) if until else None
+    if since or until:
+        from memtomem.server.helpers import _parse_recall_date
+
+        since_dt = _parse_recall_date(since) if since else None
+        until_dt = _parse_recall_date(until, end_of_period=True) if until else None
+    else:
+        since_dt = None
+        until_dt = None
 
     # Same check ``mm search`` runs, ahead of opening anything (#2295). The
     # recalled value is kept apart from the typed one: storage gets what was
@@ -583,7 +621,8 @@ async def _recall(
             {
                 "id": str(c.id),
                 "source": str(c.metadata.source_file),
-                "content": c.content[:200],
+                "content": c.content,
+                "content_preview": c.content[:200],
                 "created_at": c.created_at.isoformat(),
             }
             for c in chunks

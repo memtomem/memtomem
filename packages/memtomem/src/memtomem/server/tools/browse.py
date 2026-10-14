@@ -41,10 +41,15 @@ async def mem_list(
         mem_list(source_filter="docs/")          — files with "docs/" in path (substring)
         mem_list(namespace="work")               — files in the "work" namespace
     """
+    from memtomem.models import has_namespace_prefix
     from memtomem.search.pipeline import match_source_filter
+    from memtomem.storage.sqlite_visibility import hidden_source_paths
 
     app = await _get_app_initialized(ctx)
     rows = await app.storage.get_source_files_with_counts()
+    hidden = {str(p) for p in await hidden_source_paths(app.storage)}
+    if hidden:
+        rows = [r for r in rows if str(r[0]) not in hidden]
 
     if not rows:
         return "No indexed files."
@@ -55,9 +60,19 @@ async def mem_list(
     if source_filter:
         rows = [r for r in rows if match_source_filter(source_filter, str(r[0]))]
 
-    # Apply namespace filter
+    # Apply namespace filter (or hide sources that live exclusively in system
+    # namespaces when no explicit namespace filter is supplied).
     if namespace:
         rows = [r for r in rows if r[3] and namespace in r[3].split(",")]
+    else:
+        sys_prefixes = tuple(app.config.search.system_namespace_prefixes)
+        if sys_prefixes:
+            rows = [
+                r
+                for r in rows
+                if not r[3]
+                or any(not has_namespace_prefix(ns, sys_prefixes) for ns in r[3].split(","))
+            ]
 
     if not rows:
         return "No files match the filter."

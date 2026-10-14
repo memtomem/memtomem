@@ -10,6 +10,7 @@ from memtomem.errors import (
     ConfigError,
     EmbeddingError,
     IndexingError,
+    Mem2MemError,
     PermanentError,
     RetryableError,
     StorageError,
@@ -47,12 +48,13 @@ def tool_handler(fn):
             return await fn(*args, **kwargs)
         except Exception as exc:
             logger.error("%s failed: %s", fn.__name__, exc, exc_info=True)
+            msg = exc.public_message if isinstance(exc, Mem2MemError) and exc.public_message else str(exc)
             if isinstance(exc, RetryableError):
-                return f"Error (retryable): {exc}"
+                return f"Error (retryable): {msg}"
             if isinstance(exc, PermanentError):
-                return f"Error (permanent): {exc}"
+                return f"Error (permanent): {msg}"
             if isinstance(exc, _KNOWN_EXCEPTIONS):
-                return f"Error: {exc}"
-            return f"Error: internal error ({type(exc).__name__}: {exc})"
+                return f"Error: {msg}"
+            return f"Error: internal error ({type(exc).__name__}: {msg})"
 
     return wrapper

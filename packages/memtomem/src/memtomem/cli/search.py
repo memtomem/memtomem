@@ -21,7 +21,7 @@ from memtomem.services.search_service import run_search
 # CLI and MCP surfaces share one resolution rule. Both ``app`` (server) and
 # ``comp`` (CLI) carry the same ``.config.indexing.project_memory_dirs``
 # field, so the helper is interchangeable.
-from memtomem.server.tools.search import (
+from memtomem.runtime.project_context import (
     _resolve_project_context_root as _resolve_project_context_root_from_cwd,
 )
 
@@ -122,6 +122,13 @@ Examples:
     ),
 )
 @click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Output results as JSON (shorthand for --format json).",
+)
+@click.option(
     "--no-rerank",
     "no_rerank",
     is_flag=True,
@@ -140,9 +147,12 @@ def search(
     scope: str | None,
     as_of: str | None,
     fmt: str,
-    no_rerank: bool,
+    as_json: bool = False,
+    no_rerank: bool = False,
 ) -> None:
     """Search the knowledge base."""
+    if as_json:
+        fmt = "json"
     try:
         asyncio.run(
             _search(
@@ -437,7 +447,8 @@ def render_search_results(query: str, fmt: str, payload: SearchPayload) -> None:
                 **({"reranker": stats.reranker_model} if stats.reranker_model is not None else {}),
                 "source": str(r.chunk.metadata.source_file),
                 "chunk_id": str(r.chunk.id),
-                "content": r.chunk.content[:200],
+                "content": r.chunk.content,
+                "content_preview": r.chunk.content[:200],
                 "retrieval_context": r.chunk.metadata.retrieval_context,
             }
             for r in results

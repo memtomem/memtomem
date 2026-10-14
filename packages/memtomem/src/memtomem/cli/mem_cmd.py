@@ -476,3 +476,12 @@ async def _rescan(
             )
 
     return scanned, violations
+
+
+def _register_shared_subcommands() -> None:
+    from memtomem.cli.memory_doctor_cmd import memory_doctor
+
+    mem.add_command(memory_doctor, "doctor")
+
+
+_register_shared_subcommands()

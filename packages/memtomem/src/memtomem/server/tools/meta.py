@@ -62,7 +62,8 @@ async def mem_do(
 
     if action == "help":
         category = (params or {}).get("category")
-        return _help(category)
+        target_action = (params or {}).get("action")
+        return _help(category, action=target_action)
 
     # Resolve aliases
     resolved = _ALIASES.get(action, action)
@@ -185,8 +186,22 @@ that can call the server can read it.
 }
 
 
-def _help(category: str | None = None) -> str:
+def _help(category: str | None = None, *, action: str | None = None) -> str:
     """Generate action catalog."""
+    if action:
+        resolved = _ALIASES.get(action, action)
+        info = ACTIONS.get(resolved)
+        if not info:
+            return f"Unknown action '{action}'. Use action='help' to list all."
+        lines = [f"## {resolved} (category: {info.category})\n", f"**{resolved}**: {info.description}"]
+        for p, t in info.params.items():
+            doc = info.param_docs.get(p, "")
+            if doc:
+                lines.append(f"  - {p}: {t} — {doc}")
+            else:
+                lines.append(f"  - {p}: {t}")
+        return "\n".join(lines)
+
     if category:
         actions = {k: v for k, v in ACTIONS.items() if v.category == category}
         if not actions:

@@ -167,11 +167,12 @@ async def mem_recall(
         hierarchy = " > ".join(meta.heading_hierarchy) if meta.heading_hierarchy else ""
         tags_str = f"  tags: {', '.join(meta.tags)}" if meta.tags else ""
         ns_badge = f" [{meta.namespace}]" if meta.namespace != "default" else ""
+        preview = chunk.content[:400] + ("..." if len(chunk.content) > 400 else "")
         parts.append(
             f"**[{i}]** {date_str} |{ns_badge} {_display_path(meta.source_file)}"
             + (f" | {hierarchy}" if hierarchy else "")
             + tags_str
-            + f"\n```\n{chunk.content[:400]}\n```"
+            + f"\n```\n{preview}\n```"
         )
 
     header = f"Found {len(chunks)} memor{'y' if len(chunks) == 1 else 'ies'}"
