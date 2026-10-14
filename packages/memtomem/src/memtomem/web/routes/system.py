@@ -998,11 +998,16 @@ def validate_memory_dir_path(dir_path: str) -> Path:
     resolved = expanded.resolve()
     if resolved == Path(resolved.anchor):
         raise HTTPException(status_code=403, detail="Path is not allowed as a memory directory")
-    resolved_posix = resolved.as_posix()
+    # Compare case-folded: on a case-insensitive filesystem (APFS and NTFS by
+    # default) ``resolve()`` keeps the caller's spelling, so ``/USR/local`` and
+    # ``~/.SSH`` name the denied directories. On a case-sensitive one this also
+    # refuses spellings that name a different directory, which fails closed.
+    folded = resolved.as_posix().casefold()
     for prefix in _DENIED_MEMORY_DIR_PREFIXES:
-        if resolved_posix == prefix or resolved_posix.startswith(prefix + "/"):
+        denied = prefix.casefold()
+        if folded == denied or folded.startswith(denied + "/"):
             raise HTTPException(status_code=403, detail="Path is not allowed as a memory directory")
-    if any(part in _DENIED_MEMORY_DIR_PARTS for part in resolved.parts):
+    if any(part.casefold() in _DENIED_MEMORY_DIR_PARTS for part in resolved.parts):
         raise HTTPException(status_code=403, detail="Path is not allowed as a memory directory")
     if resolved.exists() and not resolved.is_dir():
         raise HTTPException(status_code=400, detail="Path is not a directory")
