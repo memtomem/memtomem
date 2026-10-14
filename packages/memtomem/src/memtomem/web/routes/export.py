@@ -21,16 +21,21 @@ async def export_memories(
     since: datetime | None = Query(None, description="ISO datetime lower bound (created_at)"),
     namespace: str | None = Query(None, description="Namespace filter"),
     storage=Depends(get_storage),
+    config=Depends(get_config),
 ) -> Response:
     """Export indexed chunks as a downloadable JSON bundle."""
+    from memtomem.runtime.project_context import _resolve_project_context_from_dirs
     from memtomem.tools.export_import import export_chunks
 
+    boundary = _resolve_project_context_from_dirs(config.indexing.memory_dirs)
     bundle = await export_chunks(
         storage,
         source_filter=source,
         tag_filter=tag,
         since=since,
         namespace_filter=namespace,
+        project_context_root=boundary,
+        filter_by_scope_boundary=True,
     )
     return Response(
         content=bundle.to_json(),
@@ -46,10 +51,13 @@ async def export_stats(
     since: datetime | None = Query(None),
     namespace: str | None = Query(None),
     storage=Depends(get_storage),
+    config=Depends(get_config),
 ) -> ExportStatsResponse:
     """Return chunk count that would be exported (without downloading)."""
+    from memtomem.runtime.project_context import _resolve_project_context_from_dirs
     from memtomem.tools.export_import import export_chunks
 
+    boundary = _resolve_project_context_from_dirs(config.indexing.memory_dirs)
     # Count-only preview: skip provenance signing so this read endpoint neither
     # creates the per-install key file nor fails on a key-file problem.
     bundle = await export_chunks(
@@ -59,6 +67,8 @@ async def export_stats(
         since=since,
         namespace_filter=namespace,
         stamp_provenance=False,
+        project_context_root=boundary,
+        filter_by_scope_boundary=True,
     )
     return ExportStatsResponse(
         total_chunks=bundle.total_chunks,

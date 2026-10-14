@@ -119,6 +119,9 @@ async def export_chunks(
     namespace_filter: str | None = None,
     provenance_key_path: Path | None = None,
     stamp_provenance: bool = True,
+    *,
+    project_context_root: Path | None = None,
+    filter_by_scope_boundary: bool = False,
 ) -> ExportBundle:
     """Export indexed chunks to an ExportBundle (and optionally to a JSON file).
 
@@ -138,12 +141,17 @@ async def export_chunks(
             Pass ``False`` for count-only callers (e.g. the ``/export/stats``
             preview) so a read-shaped request neither creates the key file nor
             fails on a key-file problem unrelated to counting.
+        project_context_root: Optional active project root for scope-boundary
+            filtering when ``filter_by_scope_boundary=True``.
+        filter_by_scope_boundary: When True, exclude chunks from other projects'
+            ``project_shared`` / ``project_local`` scopes.
     Returns:
         ExportBundle with the selected chunks; a provenance marker is attached
         when ``stamp_provenance`` is set.
     """
     from memtomem import provenance
     from memtomem.search.pipeline import match_source_filter_substring
+    from memtomem.search.visibility import chunk_in_scope_boundary
 
     source_files = await storage.get_all_source_files()
 
@@ -161,6 +169,10 @@ async def export_chunks(
             if (not tag_filter or tag_filter in chunk.metadata.tags)
             and (not since or chunk.created_at >= since)
             and (not namespace_filter or chunk.metadata.namespace == namespace_filter)
+            and (
+                not filter_by_scope_boundary
+                or chunk_in_scope_boundary(chunk, project_context_root)
+            )
         ]
         # Bundles carry chunks but no source visibility state. Exporting held
         # rows would make deleted or renamed-away content searchable on import.

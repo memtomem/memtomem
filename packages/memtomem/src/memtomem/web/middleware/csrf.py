@@ -43,6 +43,7 @@ Invariants:
 from __future__ import annotations
 
 import logging
+import secrets
 from urllib.parse import urlparse
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -77,7 +78,7 @@ def _strip_port(host_header: str | None) -> str | None:
     """
     if not host_header:
         return None
-    h = host_header.strip()
+    h = host_header.strip().lower()
     if h.startswith("["):
         # IPv6 literal: ``[::1]`` or ``[::1]:8080``
         end = h.find("]")
@@ -180,7 +181,9 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
             # log surfaces a misconfiguration rather than silent success.
             return False
         provided = request.headers.get("X-Memtomem-CSRF")
-        return provided == expected
+        if not provided:
+            return False
+        return secrets.compare_digest(provided, expected)
 
     @staticmethod
     def _check_origin(request: Request) -> bool:

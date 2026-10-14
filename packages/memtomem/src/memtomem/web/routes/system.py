@@ -347,7 +347,7 @@ async def get_bootstrap_state(request: Request) -> dict[str, Any]:
             str(Path(p).expanduser().resolve()) for p in config.indexing.read_only_memory_dirs
         ]
         db_path = str(Path(config.storage.sqlite_path).expanduser().resolve())
-        from memtomem.server.tools.search import _resolve_project_context_from_dirs
+        from memtomem.runtime.project_context import _resolve_project_context_from_dirs
 
         root = _resolve_project_context_from_dirs(config.indexing.project_memory_dirs)
         project_context_root = str(root) if root is not None else None
@@ -974,7 +974,53 @@ async def save_config(
     return {"ok": True, "message": "Config saved to ~/.memtomem/config.json"}
 
 
-@router.post("/memory-dirs/add", dependencies=[Depends(require_configured)])
+_DENIED_MEMORY_DIR_PREFIXES: tuple[str, ...] = (
+    "/etc",
+    "/private/etc",
+    "/System",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/dev",
+    "/proc",
+    "/sys",
+)
+_DENIED_MEMORY_DIR_PARTS: frozenset[str] = frozenset({".ssh", ".aws", ".gnupg", ".kube"})
+
+
+def validate_memory_dir_path(dir_path: str) -> Path:
+    """Validate a candidate memory_dir path before creating or registering it."""
+    if "\x00" in dir_path:
+        raise HTTPException(status_code=400, detail="Invalid directory path")
+    expanded = Path(dir_path).expanduser()
+    if expanded.is_symlink():
+        raise HTTPException(
+            status_code=403, detail="Symlinked memory directories are not allowed"
+        )
+    resolved = expanded.resolve()
+    if resolved == Path(resolved.anchor):
+        raise HTTPException(
+            status_code=403, detail="Path is not allowed as a memory directory"
+        )
+    resolved_posix = resolved.as_posix()
+    for prefix in _DENIED_MEMORY_DIR_PREFIXES:
+        if resolved_posix == prefix or resolved_posix.startswith(prefix + "/"):
+            raise HTTPException(
+                status_code=403, detail="Path is not allowed as a memory directory"
+            )
+    if any(part in _DENIED_MEMORY_DIR_PARTS for part in resolved.parts):
+        raise HTTPException(
+            status_code=403, detail="Path is not allowed as a memory directory"
+        )
+    if resolved.exists() and not resolved.is_dir():
+        raise HTTPException(status_code=400, detail="Path is not a directory")
+    return resolved
+
+
+@router.post(
+    "/memory-dirs/add",
+    dependencies=[Depends(require_configured), Depends(_require_localhost)],
+)
 async def add_memory_dir(
     request: Request,
     storage=Depends(get_storage),
@@ -1010,7 +1056,7 @@ async def add_memory_dir(
     if not dir_path:
         raise HTTPException(status_code=400, detail="path is required")
 
-    resolved = Path(dir_path).expanduser().resolve()
+    resolved = validate_memory_dir_path(dir_path)
     if not resolved.is_dir():
         resolved.mkdir(parents=True, exist_ok=True)
 
@@ -1159,7 +1205,7 @@ def _path_identity_key(path: str) -> str:
     return os.path.normcase(path)
 
 
-@router.post("/memory-dirs/remove")
+@router.post("/memory-dirs/remove", dependencies=[Depends(_require_localhost)])
 async def remove_memory_dir(
     request: Request,
     storage=Depends(get_storage),
@@ -1368,7 +1414,7 @@ def _open_in_file_manager(path: Path) -> None:
         raise OSError(f"{cmd[0]} exited {result.returncode}: {stderr}")
 
 
-@router.post("/memory-dirs/open")
+@router.post("/memory-dirs/open", dependencies=[Depends(_require_localhost)])
 async def open_memory_dir(request: Request, config=Depends(get_config)):
     """Reveal a configured index root in the OS file manager.
 
@@ -2566,7 +2612,7 @@ async def add_memory(
             project_tier_registration_error,
             resolve_memory_scope_dir,
         )
-        from memtomem.server.tools.search import _resolve_project_context_from_dirs
+        from memtomem.runtime.project_context import _resolve_project_context_from_dirs
 
         # ADR-0011 PR-F parity with MCP ``mem_add`` (memory_crud.py:285
         # via search.py:73-96): resolve the *registered* project root
@@ -2693,6 +2739,11 @@ async def add_memory(
                 _revalidate_add_target(base, target)
             except (OSError, ValueError) as exc:
                 raise HTTPException(status_code=422, detail=_ADD_PATH_ERROR) from exc
+            pre_lines = (
+                len(target.read_text(encoding="utf-8", errors="replace").splitlines())
+                if target.exists()
+                else 0
+            )
             # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
             await _asyncio.to_thread(append_entry, target, req.content, title=req.title, tags=tags)
             stats = await index_engine.index_file(
@@ -2706,13 +2757,14 @@ async def add_memory(
             if stats.mutated:
                 search_pipeline.invalidate_cache()
 
-            # Apply tags to indexed chunks (the chunker doesn't parse tag text
-            # from content). Inside the lock — it upserts rows keyed to this
-            # file's just-indexed chunks.
+            # Apply tags only to newly appended chunks (so existing entries in
+            # the same file are not polluted with the new entry's tags).
             if tags and stats.indexed_chunks > 0:
-                chunks = await storage.list_chunks_by_source(target)
+                chunks = await storage.list_chunks_by_source(target, limit=None)
                 updated = []
                 for c in chunks:
+                    if c.metadata.start_line is not None and c.metadata.start_line <= pre_lines:
+                        continue
                     merged = set(c.metadata.tags) | set(tags)
                     if merged != set(c.metadata.tags):
                         c.metadata = c.metadata.__class__(

@@ -69,6 +69,8 @@ async def promote_scratch(
     index_engine=Depends(get_index_engine),
 ) -> ScratchPromoteResponse:
     """Promote a working memory entry to long-term memory."""
+    import asyncio as _asyncio
+
     entry = await storage.scratch_get(key)
     if not entry:
         raise HTTPException(status_code=404, detail=f"Key '{key}' not found")
@@ -98,9 +100,17 @@ async def promote_scratch(
     bases = [Path(d).expanduser().resolve() for d in config.indexing.memory_dirs]
     bases_norm = [Path(norm_path(b)) for b in bases]
     if body.file:
-        target = Path(body.file).expanduser().resolve()
+        raw_target = Path(body.file).expanduser()
+        if raw_target.is_symlink():
+            raise HTTPException(status_code=403, detail="Symlinked targets are not allowed")
+        target = raw_target.resolve()
         if target.is_symlink():
             raise HTTPException(status_code=403, detail="Symlinked targets are not allowed")
+        if target.suffix.lower() not in {".md", ".markdown"}:
+            raise HTTPException(
+                status_code=400,
+                detail="Target file must be a Markdown file (.md or .markdown)",
+            )
         target_norm = Path(norm_path(target))
         if not any(target_norm.is_relative_to(b) for b in bases_norm):
             raise HTTPException(
@@ -122,14 +132,33 @@ async def promote_scratch(
     if index_engine.is_read_only_source(target):
         raise HTTPException(status_code=409, detail=READ_ONLY_TARGET_DETAIL)
 
-    append_entry(target, entry["value"], title=body.title, tags=body.tags)
+    from memtomem.context._atomic import (
+        _CRUD_SIDECAR_LOCK_BUDGET_S,
+        async_file_lock,
+        memory_lock_path,
+    )
+
+    try:
+        async with async_file_lock(memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+            await _asyncio.to_thread(
+                append_entry, target, entry["value"], title=body.title, tags=body.tags
+            )
+            stats = await index_engine.index_file(
+                target, already_scanned=True, lock_held=True
+            )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503, detail="Memory file is locked by another writer; try again."
+        ) from exc
 
     # Mark as promoted
     await storage.scratch_promote(key)
 
+    raw_indexed = getattr(stats, "indexed_chunks", None)
+    indexed_chunks = raw_indexed if isinstance(raw_indexed, int) and raw_indexed > 0 else 1
     return ScratchPromoteResponse(
         key=key,
         promoted=True,
         file=str(target),
-        indexed_chunks=1,
+        indexed_chunks=indexed_chunks,
     )

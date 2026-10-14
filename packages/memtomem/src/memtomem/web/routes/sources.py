@@ -388,8 +388,17 @@ async def source_content(
     storage=Depends(get_storage),
 ):
     """Return the raw text content of an indexed source file (max 1 MB)."""
+    raw_candidate = Path(path).expanduser()
+    if raw_candidate.is_symlink():
+        raise HTTPException(status_code=403, detail="Symlinked files are not served.")
+
     indexed_sources = await storage.get_all_source_files()
     request_path = require_indexed_source(path, indexed_sources)
+
+    from memtomem.storage.sqlite_visibility import source_hidden
+
+    if await source_hidden(storage, request_path):
+        raise HTTPException(status_code=404, detail="Source file not found on disk.")
 
     if not request_path.exists():
         raise HTTPException(status_code=404, detail="Source file not found on disk.")
@@ -406,6 +415,13 @@ async def source_content(
         text = request_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Cannot read file.") from exc
+
+    chunks = await storage.list_chunks_by_source(request_path, limit=None)
+    if any(getattr(c.metadata, "redaction_count", 0) > 0 for c in chunks):
+        from memtomem.indexing.privacy_projection import project_for_indexing
+
+        projected = project_for_indexing(text, source_path=request_path)
+        text = projected.content
 
     return {"path": str(request_path), "content": text, "size": size}
 

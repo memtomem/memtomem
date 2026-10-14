@@ -28,15 +28,10 @@ class UploadBodyLimitMiddleware:
 
         headers = {k.lower(): v for k, v in scope.get("headers", [])}
         path = scope.get("path", "")
-        content_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower()
         if path in _MULTIPART_PATHS:
             limit = UPLOAD_REQUEST_LIMIT
             detail = "Upload request too large"
-        elif path.startswith("/api/") and (
-            not content_type
-            or content_type == b"application/json"
-            or (content_type.startswith(b"application/") and content_type.endswith(b"+json"))
-        ):
+        elif path.startswith("/api/"):
             limit = JSON_REQUEST_LIMIT
             detail = "JSON request too large"
         else:
