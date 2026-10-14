@@ -95,15 +95,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1]
+        shard: [0, 1, 2]
     runs-on: windows-latest
-    # 35, matching the Linux/macOS `test` job. The 25-minute cap was set when
-    # the worst shard ran ~12m; it has since crept to 24.4m on a green main
-    # (28b6fee) and cancelled two PRs mid-run (#2058, #2266). Balancing the
-    # shards by recorded cost buys back roughly 15% of the worst cell, which
-    # is not enough on its own — a slow Windows runner still costs more than
-    # the remaining margin. The timeout is a hang guard (#1642), and 35
-    # minutes still catches a hang long before the 6-hour default does.
+    # 35, matching the Linux/macOS `test` job, and a hang guard (#1642) that
+    # still fires long before the 6-hour default. Three shards, not two
+    # (#2720): with two, the heavier shard's job ran 25-28 minutes, and a
+    # Windows runner 1.4x slow pushed one past 35 at 96% done. Three put the
+    # heaviest shard at 16-18 minutes of test time on the recorded timings,
+    # so the same slowdown ends well inside the cap. Keep the shard list and
+    # --shard-count below in step.
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -116,7 +116,7 @@ jobs:
       - run: >-
           uv run python tools/run_pytest_shard.py
           --shard-index ${{ matrix.shard }}
-          --shard-count 2 --
+          --shard-count 3 --
           -m "not ollama and not llm"
           --tb=short -q
           --junit-xml=junit-windows-shard-${{ matrix.shard }}.xml
