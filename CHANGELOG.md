@@ -7,6 +7,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Files under `.aws/` and `.gnupg/` are no longer indexed (#2734).** The two
+  secret-store directories were excluded only by the recursive directory walk,
+  and only when spelled exactly in lower case. The file watcher, single-file
+  `mem_index` and every writer's exclusion check use the built-in exclude
+  patterns instead, which listed `.ssh` but not these two, so a supported file
+  beneath either directory under a memory root was indexed there in any case,
+  and the walk admitted `.AWS` or `.GnuPG`. Both are now built-in secret
+  patterns, matched case-insensitively on every surface like `**/.ssh/**`.
+  The patterns also match the absolute path, so a memory root that lies
+  inside `.aws` or `.gnupg` now indexes nothing. Chunks already indexed from
+  those directories are not removed by re-indexing, which skips an excluded
+  file without touching its rows; `mm purge --matching-excluded` lists them
+  and `--apply` deletes them.
 - **A process no longer writes vectors under an embedding policy another
   process stamped after it opened the store (#2620).** The embedding policy
   is read once at open, and vectors are embedded before the write lock is
