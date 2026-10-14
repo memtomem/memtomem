@@ -994,24 +994,16 @@ def validate_memory_dir_path(dir_path: str) -> Path:
         raise HTTPException(status_code=400, detail="Invalid directory path")
     expanded = Path(dir_path).expanduser()
     if expanded.is_symlink():
-        raise HTTPException(
-            status_code=403, detail="Symlinked memory directories are not allowed"
-        )
+        raise HTTPException(status_code=403, detail="Symlinked memory directories are not allowed")
     resolved = expanded.resolve()
     if resolved == Path(resolved.anchor):
-        raise HTTPException(
-            status_code=403, detail="Path is not allowed as a memory directory"
-        )
+        raise HTTPException(status_code=403, detail="Path is not allowed as a memory directory")
     resolved_posix = resolved.as_posix()
     for prefix in _DENIED_MEMORY_DIR_PREFIXES:
         if resolved_posix == prefix or resolved_posix.startswith(prefix + "/"):
-            raise HTTPException(
-                status_code=403, detail="Path is not allowed as a memory directory"
-            )
+            raise HTTPException(status_code=403, detail="Path is not allowed as a memory directory")
     if any(part in _DENIED_MEMORY_DIR_PARTS for part in resolved.parts):
-        raise HTTPException(
-            status_code=403, detail="Path is not allowed as a memory directory"
-        )
+        raise HTTPException(status_code=403, detail="Path is not allowed as a memory directory")
     if resolved.exists() and not resolved.is_dir():
         raise HTTPException(status_code=400, detail="Path is not a directory")
     return resolved

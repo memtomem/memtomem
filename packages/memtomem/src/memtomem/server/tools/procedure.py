@@ -41,7 +41,9 @@ async def mem_procedure_save(
         or ".." in cleaned_name
         or "\x00" in cleaned_name
     ):
-        return "Error: procedure name must not be empty or contain path separators ('/', '\\', '..')."
+        return (
+            "Error: procedure name must not be empty or contain path separators ('/', '\\', '..')."
+        )
 
     all_tags = list(tags or [])
     if "procedure" not in all_tags:

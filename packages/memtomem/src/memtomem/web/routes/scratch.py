@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL, READ_ONLY_TARGET_DETAIL
-from memtomem.web.deps import get_config, get_index_engine, get_storage
+from memtomem.web.deps import get_config, get_index_engine, get_search_pipeline, get_storage
 from memtomem.web.schemas.scratch import (
     ScratchDeleteResponse,
     ScratchEntryOut,
@@ -67,6 +67,7 @@ async def promote_scratch(
     storage=Depends(get_storage),
     config=Depends(get_config),
     index_engine=Depends(get_index_engine),
+    search_pipeline=Depends(get_search_pipeline),
 ) -> ScratchPromoteResponse:
     """Promote a working memory entry to long-term memory."""
     import asyncio as _asyncio
@@ -143,9 +144,10 @@ async def promote_scratch(
             await _asyncio.to_thread(
                 append_entry, target, entry["value"], title=body.title, tags=body.tags
             )
-            stats = await index_engine.index_file(
-                target, already_scanned=True, lock_held=True
-            )
+            stats = await index_engine.index_file(target, already_scanned=True, lock_held=True)
+            # #2141: a warmed query must not answer as if the entry was never added.
+            if stats.mutated:
+                search_pipeline.invalidate_cache()
     except TimeoutError as exc:
         raise HTTPException(
             status_code=503, detail="Memory file is locked by another writer; try again."
@@ -154,11 +156,9 @@ async def promote_scratch(
     # Mark as promoted
     await storage.scratch_promote(key)
 
-    raw_indexed = getattr(stats, "indexed_chunks", None)
-    indexed_chunks = raw_indexed if isinstance(raw_indexed, int) and raw_indexed > 0 else 1
     return ScratchPromoteResponse(
         key=key,
         promoted=True,
         file=str(target),
-        indexed_chunks=indexed_chunks,
+        indexed_chunks=stats.indexed_chunks,
     )

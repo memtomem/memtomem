@@ -388,12 +388,13 @@ async def source_content(
     storage=Depends(get_storage),
 ):
     """Return the raw text content of an indexed source file (max 1 MB)."""
-    raw_candidate = Path(path).expanduser()
-    if raw_candidate.is_symlink():
-        raise HTTPException(status_code=403, detail="Symlinked files are not served.")
-
     indexed_sources = await storage.get_all_source_files()
     request_path = require_indexed_source(path, indexed_sources)
+
+    # Checked on the caller's spelling as well as the resolved one, and only
+    # after the indexed-source gate so this route cannot probe arbitrary paths.
+    if Path(path).expanduser().is_symlink():
+        raise HTTPException(status_code=403, detail="Symlinked files are not served.")
 
     from memtomem.storage.sqlite_visibility import source_hidden
 
@@ -407,6 +408,14 @@ async def source_content(
     if request_path.is_symlink():
         raise HTTPException(status_code=403, detail="Symlinked files are not served.")
 
+    # A masked projection's chunks are what search serves; the file behind them
+    # still holds the values the mask removed. Refuse rather than re-derive the
+    # mask here — the engine's projection depends on scope and the reviewed
+    # masking manifest, and a second copy of that decision would drift from it.
+    chunks = await storage.list_chunks_by_source(request_path, limit=None)
+    if any(c.metadata.redaction_count for c in chunks):
+        raise HTTPException(status_code=409, detail="masked_projection_read_only")
+
     size = request_path.stat().st_size
     if size > 1_048_576:
         raise HTTPException(status_code=413, detail="File too large (max 1 MB).")
@@ -415,13 +424,6 @@ async def source_content(
         text = request_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Cannot read file.") from exc
-
-    chunks = await storage.list_chunks_by_source(request_path, limit=None)
-    if any(getattr(c.metadata, "redaction_count", 0) > 0 for c in chunks):
-        from memtomem.indexing.privacy_projection import project_for_indexing
-
-        projected = project_for_indexing(text, source_path=request_path)
-        text = projected.content
 
     return {"path": str(request_path), "content": text, "size": size}
 

@@ -231,9 +231,7 @@ async def import_notion(
                 if symlink_paths is not None:
                     symlink_paths.append(rel.as_posix())
                 continue
-            sources.append(
-                (rel, p.name, p.read_text(encoding="utf-8", errors="replace"))
-            )
+            sources.append((rel, p.name, p.read_text(encoding="utf-8", errors="replace")))
 
     for rel, original_name, content in sources:
         # Clean Notion-specific artifacts
@@ -309,8 +307,7 @@ async def import_obsidian(
         if str(rel).startswith(".obsidian"):
             continue
         if md_file.is_symlink() or any(
-            (vault_path / Path(*rel.parts[: i + 1])).is_symlink()
-            for i in range(len(rel.parts))
+            (vault_path / Path(*rel.parts[: i + 1])).is_symlink() for i in range(len(rel.parts))
         ):
             if symlink_paths is not None:
                 symlink_paths.append(rel.as_posix())
