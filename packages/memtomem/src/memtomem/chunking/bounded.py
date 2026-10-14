@@ -150,8 +150,17 @@ class TokenBudget:
             # different (and possibly longer) string than the one just
             # measured. Keep one character so the measured composition is the
             # one that ships.
-            chunk.metadata = replace(chunk.metadata, retrieval_context=context[: max(1, low)])
-        self.validate(chunk)
+            trimmed = context[: max(1, low)]
+            chunk.metadata = replace(chunk.metadata, retrieval_context=trimmed)
+            self.validate_description(chunk)
+            self.validate_body(chunk)
+            if low == 0:
+                self.validate_composed(chunk)
+        else:
+            if not context:
+                self.validate_description(chunk)
+                self.validate_composed(chunk)
+            self.validate_body(chunk)
         return chunk
 
     def validate_description(self, chunk: Chunk) -> None:

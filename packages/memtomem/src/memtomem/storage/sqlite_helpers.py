@@ -9,7 +9,7 @@ import unicodedata
 import hashlib
 from datetime import datetime, timezone
 from fnmatch import fnmatch
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from memtomem.models import NamespaceFilter
@@ -275,6 +275,15 @@ def placeholders(n: int) -> str:
     if n <= 0:
         raise ValueError(f"placeholders() requires n > 0, got {n}")
     return ",".join("?" * n)
+
+
+def param_batches(items: Sequence, *, size: int | None = None):
+    """Slice *items* into chunks of at most ``_SQL_MAX_PARAMS`` (or *size*)."""
+    from memtomem.storage import sqlite_backend
+
+    step = sqlite_backend._SQL_MAX_PARAMS if size is None else size
+    for start in range(0, len(items), step):
+        yield items[start : start + step]
 
 
 def now_iso() -> str:

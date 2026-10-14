@@ -314,15 +314,19 @@ class EntityMixin:
         """Return the subset of chunk_ids that already have extracted entities."""
         if not chunk_ids:
             return set()
-        from memtomem.storage.sqlite_helpers import placeholders
+        from memtomem.storage.sqlite_helpers import param_batches, placeholders
 
         db = self._get_read_db()
-        ph = placeholders(len(chunk_ids))
-        rows = db.execute(
-            f"SELECT DISTINCT chunk_id FROM chunk_entities WHERE chunk_id IN ({ph})",
-            chunk_ids,
-        ).fetchall()
-        return {r[0] for r in rows}
+        unique_ids = list(dict.fromkeys(chunk_ids))
+        extracted: set[str] = set()
+        for batch in param_batches(unique_ids):
+            ph = placeholders(len(batch))
+            rows = db.execute(
+                f"SELECT DISTINCT chunk_id FROM chunk_entities WHERE chunk_id IN ({ph})",
+                batch,
+            ).fetchall()
+            extracted.update(r[0] for r in rows)
+        return extracted
 
     async def get_matching_entities(
         self,
@@ -358,27 +362,33 @@ class EntityMixin:
         """
         if not chunk_ids or not entity_keys:
             return {}
-        from memtomem.storage.sqlite_helpers import placeholders
+        from memtomem.storage.sqlite_helpers import param_batches, placeholders
 
         db = self._get_read_db()
-        ph = placeholders(len(chunk_ids))
-        key_clause = " OR ".join(
-            ["(entity_type = ? AND entity_value = ? COLLATE NOCASE)"] * len(entity_keys)
-        )
-        params: list[object] = [*chunk_ids, min_confidence]
-        for entity_type, value in entity_keys:
-            params.extend((entity_type, value))
-
-        rows = db.execute(
-            f"SELECT DISTINCT chunk_id, entity_type, lower(entity_value) "
-            f"FROM chunk_entities "
-            f"WHERE chunk_id IN ({ph}) AND confidence >= ? AND ({key_clause})",
-            params,
-        ).fetchall()
-
+        unique_ids = list(dict.fromkeys(chunk_ids))
+        unique_keys = list(dict.fromkeys(entity_keys))
         matches: dict[str, set[tuple[str, str]]] = {}
-        for chunk_id, entity_type, value in rows:
-            matches.setdefault(chunk_id, set()).add((entity_type, value))
+
+        # Each entity_key consumes 2 SQL variables; reserve 400 vars for keys
+        # and 400 vars for chunk_ids so total parameters stay well under 900.
+        for key_batch in param_batches(unique_keys, size=200):
+            key_clause = " OR ".join(
+                ["(entity_type = ? AND entity_value = ? COLLATE NOCASE)"] * len(key_batch)
+            )
+            key_params: list[object] = []
+            for entity_type, value in key_batch:
+                key_params.extend((entity_type, value))
+            for id_batch in param_batches(unique_ids, size=400):
+                ph = placeholders(len(id_batch))
+                params: list[object] = [*id_batch, min_confidence, *key_params]
+                rows = db.execute(
+                    f"SELECT DISTINCT chunk_id, entity_type, lower(entity_value) "
+                    f"FROM chunk_entities "
+                    f"WHERE chunk_id IN ({ph}) AND confidence >= ? AND ({key_clause})",
+                    params,
+                ).fetchall()
+                for chunk_id, entity_type, value in rows:
+                    matches.setdefault(chunk_id, set()).add((entity_type, value))
         return matches
 
     async def get_entity_type_counts(self) -> dict[str, int]:

@@ -1076,6 +1076,7 @@ class IndexEngine:
         self._ns_rule_specs: list[tuple[pathspec.GitIgnoreSpec, NamespacePolicyRule]] = [
             (_build_exclude_spec([rule.path_glob]), rule) for rule in self._ns_config.rules
         ]
+        self._user_exclude_cache: tuple[tuple[str, ...], pathspec.GitIgnoreSpec] | None = None
         self._warned_empty_parent_rules: set[int] = set()
         # Resolved on first use by ``_chunk_tokenizer_fingerprint``. The *path*
         # is restart-guarded so resolving once is correct; the digest at that
@@ -1855,6 +1856,16 @@ class IndexEngine:
             async with self._index_lock:
                 return await run()
 
+    def _get_user_exclude_spec(self) -> pathspec.GitIgnoreSpec:
+        """Return cached GitIgnoreSpec for ``self._config.exclude_patterns``."""
+        key = tuple(self._config.exclude_patterns)
+        cached = self._user_exclude_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        spec = _build_exclude_spec(list(key))
+        self._user_exclude_cache = (key, spec)
+        return spec
+
     def is_excluded(self, file_path: Path) -> bool:
         """True when indexing ``file_path`` on its own would skip it.
 
@@ -1865,7 +1876,7 @@ class IndexEngine:
         writing a file whose re-index is skipped would leave the old chunks
         searchable beside the new bytes (#2488).
         """
-        user_spec = _build_exclude_spec(self._config.exclude_patterns)
+        user_spec = self._get_user_exclude_spec()
         return _path_is_excluded(file_path, self._config.all_index_roots(), user_spec)
 
     def is_read_only_source(self, file_path: Path) -> bool:
@@ -2563,7 +2574,7 @@ class IndexEngine:
         # ``walk_root`` is set only by a directory walk, so a walked file is
         # judged by the bound discovery used; every other caller gets the
         # enclosing-repository bound (#2486).
-        user_spec = _build_exclude_spec(self._config.exclude_patterns)
+        user_spec = self._get_user_exclude_spec()
         if _path_is_excluded(
             file_path, self._config.all_index_roots(), user_spec, walk_root=walk_root
         ):
@@ -3750,7 +3761,7 @@ class IndexEngine:
 
     def _discover_files(self, directory: Path, recursive: bool) -> list[Path]:
         supported = self._registry.supported_extensions() & self._config.supported_extensions
-        user_spec = _build_exclude_spec(self._config.exclude_patterns)
+        user_spec = self._get_user_exclude_spec()
         memory_dirs = self._config.all_index_roots()
 
         # One memo per walk: ``_under_nested_worktree`` probes the filesystem

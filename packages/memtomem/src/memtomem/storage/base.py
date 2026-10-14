@@ -217,6 +217,19 @@ class StorageBackend(Protocol):
     @property
     def dense_enabled(self) -> bool: ...
 
+    @property
+    def stored_embedding_info(self) -> dict:
+        return {}
+
+    @property
+    def embedding_mismatch(self) -> dict | None:
+        return None
+
+    async def get_dense_coverage(
+        self, project_context_root: Path | None = None
+    ) -> dict[str, int]:
+        return {"total": 0, "with_dense": 0}
+
     async def bm25_search(
         self,
         query: str,
@@ -251,15 +264,20 @@ class StorageBackend(Protocol):
     async def get_chunk_index_state(
         self, source_file: Path
     ) -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None, str]]: ...
-    async def get_chunk_ids_by_hashes(self, content_hashes: Sequence[str]) -> dict[str, UUID]: ...
+    async def get_chunk_ids_by_hashes(
+        self, content_hashes: Sequence[str], *, namespace: str | None = None
+    ) -> dict[str, UUID]: ...
     async def get_stats(self) -> dict[str, int]: ...
     async def get_all_source_files(self) -> set[Path]: ...
     async def get_orphan_candidate_source_files(self) -> set[Path]: ...
     async def search_source_files_by_content(
         self, query: str, limit: int = 10000
     ) -> list[Path]: ...
+    async def list_chunks(
+        self, limit: int | None = 1000, offset: int = 0
+    ) -> list[Chunk]: ...
     async def list_chunks_by_source(
-        self, source_file: Path, limit: int | None = 50
+        self, source_file: Path, limit: int | None = 50, offset: int = 0
     ) -> list[Chunk]: ...
     async def count_chunks_by_source(self, source_file: Path) -> int: ...
     # Batch sibling of the above (#2261). Two contract points:

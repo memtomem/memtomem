@@ -304,6 +304,7 @@ class StructuredChunker:
 
         result: dict[str, tuple[int, int]] = {}
         key_positions: list[tuple[int, str]] = []
+        cursor = 0
 
         for key in keys:
             escaped = _re.escape(str(key))
@@ -316,11 +317,20 @@ class StructuredChunker:
             else:
                 continue
 
-            for line_idx, line in enumerate(lines):
-                if pattern.match(line):
+            found = False
+            for line_idx in range(cursor, len(lines)):
+                if pattern.match(lines[line_idx]):
                     key_positions.append((line_idx + 1, str(key)))
+                    cursor = line_idx + 1
+                    found = True
                     break
-            else:
+            if not found and cursor > 0:
+                for line_idx in range(0, cursor):
+                    if pattern.match(lines[line_idx]):
+                        key_positions.append((line_idx + 1, str(key)))
+                        found = True
+                        break
+            if not found:
                 key_positions.append((0, str(key)))
 
         key_positions.sort(key=lambda x: x[0])

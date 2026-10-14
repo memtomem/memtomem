@@ -13,7 +13,7 @@ from memtomem.embedding.probe import embed_document_probe
 from memtomem.errors import NamespaceResolutionError
 from memtomem.search.visibility import resolve_visible_chunk
 from memtomem.storage.sqlite_visibility import source_hidden
-from memtomem.server.tools.search import _resolve_project_context_from_dirs
+from memtomem.runtime.project_context import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
 from memtomem.source_provenance import (
     EXCLUDED_SOURCE_DETAIL,
@@ -96,13 +96,14 @@ async def _screened_chunk(storage, chunk_id: UUID, config):
 async def list_chunks(
     source: str = Query(..., description="Absolute path of the source file"),
     limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     storage=Depends(get_storage),
 ) -> ChunksListResponse:
     indexed_sources = await storage.get_all_source_files()
     request_path = require_indexed_source(source, indexed_sources)
     if await source_hidden(storage, request_path):
         raise HTTPException(status_code=404, detail="Source not found")
-    chunks = await storage.list_chunks_by_source(request_path, limit=limit)
+    chunks = await storage.list_chunks_by_source(request_path, limit=limit, offset=offset)
     out = [chunk_to_out(c) for c in chunks]
     total = await storage.count_chunks_by_source(request_path)
     if await source_hidden(storage, request_path):

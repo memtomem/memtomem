@@ -170,9 +170,12 @@ class DedupScanner:
         source_files = await self._storage.get_all_source_files()
         chunks: list[Chunk] = []
         for source in source_files:
+            remaining = max_count - len(chunks)
+            if remaining <= 0:
+                break
             if await self._storage.is_source_held(source):
                 continue
-            file_chunks = await self._storage.list_chunks_by_source(source, limit=max_count)
+            file_chunks = await self._storage.list_chunks_by_source(source, limit=remaining)
             chunks.extend(file_chunks)
             if len(chunks) >= max_count:
                 break

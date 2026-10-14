@@ -217,7 +217,7 @@ class HistoryMixin:
         *,
         project_context_root: Path | str | None = None,
     ) -> list[dict]:
-        db = self._get_db()
+        db = self._get_read_db()
         query = (
             "SELECT query_text, result_chunk_ids, result_scores, created_at, "
             "run_id, observation_json, result_snapshot_json FROM query_history "
@@ -250,7 +250,7 @@ class HistoryMixin:
         *,
         project_context_root: Path | str | None = None,
     ) -> list[str]:
-        db = self._get_db()
+        db = self._get_read_db()
         rows = db.execute(
             "SELECT query_text, MAX(created_at) as latest FROM query_history "
             "WHERE project_key = ? AND legacy_unscoped = 0 AND query_text LIKE ? "
@@ -413,7 +413,7 @@ class HistoryMixin:
         self, run_id: str, project_context_root: Path | str | None = None
     ) -> tuple:
         row = (
-            self._get_db()
+            self._get_read_db()
             .execute(
                 "SELECT run_id, query_text, created_at, observation_json, result_snapshot_json "
                 "FROM query_history WHERE run_id = ? AND project_key = ? "
@@ -432,7 +432,7 @@ class HistoryMixin:
         """Current judgments for one observed run, ordered by chunk_id."""
         self._require_search_run(run_id, project_context_root)
         rows = (
-            self._get_db()
+            self._get_read_db()
             .execute(
                 "SELECT chunk_id, judgment, created_at, updated_at FROM search_feedback "
                 "WHERE run_id = ? ORDER BY chunk_id",
@@ -486,7 +486,7 @@ class HistoryMixin:
             params.append(utc_bound_from_iso(since, field="since", timespec="seconds"))
         query += " ORDER BY h.created_at DESC, h.id DESC LIMIT ?"
         params.append(limit)
-        rows = self._get_db().execute(query, params).fetchall()
+        rows = self._get_read_db().execute(query, params).fetchall()
         return [
             {
                 "run_id": r[0],

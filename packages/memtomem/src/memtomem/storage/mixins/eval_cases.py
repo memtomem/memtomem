@@ -449,7 +449,7 @@ class EvalCaseMixin:
 
     async def list_eval_cases(self, status: str | None = None) -> list[dict[str, Any]]:
         """Newest-first case summaries (no labels), optionally filtered by status."""
-        db = self._get_db()
+        db = self._get_read_db()
         query = (
             "SELECT case_id, name, query_text, top_k, source_run_id, version, status, "
             "created_at, updated_at, "
@@ -499,7 +499,7 @@ class EvalCaseMixin:
 
     async def get_eval_case(self, case_id_or_name: str) -> dict[str, Any]:
         """One case with its labels, looked up by case_id then by name."""
-        db = self._get_db()
+        db = self._get_read_db()
         case_id = self._resolve_case_id(db, case_id_or_name)
         row = db.execute(
             "SELECT case_id, name, query_text, top_k, filters_json, source_run_id, "

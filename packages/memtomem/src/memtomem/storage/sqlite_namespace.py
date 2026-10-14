@@ -127,7 +127,7 @@ class NamespaceOps:
         self._in_transaction = in_transaction
 
     async def list_namespaces(self) -> list[tuple[str, int]]:
-        db = self._get_db()
+        db = self._get_db() if self._in_transaction() else self._get_read_db()
         rows = db.execute(
             "SELECT namespace, COUNT(*) FROM chunks GROUP BY namespace ORDER BY namespace"
         ).fetchall()
@@ -140,7 +140,7 @@ class NamespaceOps:
         ``list_namespaces`` for it aggregates the whole ``chunks`` table to
         read a single bucket.
         """
-        db = self._get_db()
+        db = self._get_db() if self._in_transaction() else self._get_read_db()
         row = db.execute("SELECT COUNT(*) FROM chunks WHERE namespace=?", (namespace,)).fetchone()
         return int(row[0]) if row else 0
 

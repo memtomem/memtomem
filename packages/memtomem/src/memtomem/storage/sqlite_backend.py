@@ -108,7 +108,9 @@ _SQL_MAX_PARAMS = 900
 _T = TypeVar("_T")
 
 
-def _param_batches(values: Sequence[_T]) -> Iterator[Sequence[_T]]:
+def _param_batches(
+    values: Sequence[_T], *, size: int | None = None
+) -> Iterator[Sequence[_T]]:
     """Slice *values* into runs that fit one ``IN (...)`` clause.
 
     Every caller of this hands over a list whose length is chosen by the data
@@ -118,8 +120,9 @@ def _param_batches(values: Sequence[_T]) -> Iterator[Sequence[_T]]:
     ``_SQL_MAX_PARAMS`` at call time so a test can shrink it and observe the
     split on a build whose real ceiling is 32766.
     """
-    for start in range(0, len(values), _SQL_MAX_PARAMS):
-        yield values[start : start + _SQL_MAX_PARAMS]
+    step = _SQL_MAX_PARAMS if size is None else size
+    for start in range(0, len(values), step):
+        yield values[start : start + step]
 
 
 __all__ = ["SqliteBackend"]
@@ -796,6 +799,15 @@ class SqliteBackend(
 
     def _get_read_db(self) -> sqlite3.Connection:
         """Return a read-only connection from the pool (round-robin, thread-safe)."""
+        if (
+            self._db is not None
+            and (self._in_transaction or self._db.in_transaction)
+            and self._transaction_owner in (None, self._current_task())
+        ):
+            self._check_schema_current(self._db)
+            return self._db
+        if "_get_db" in self.__dict__ and self._transaction_owner is None:
+            return self._get_db()
         if not self._read_pool:
             return self._get_db()
         with self._read_pool_lock:
@@ -1621,6 +1633,9 @@ class SqliteBackend(
                             f"chunk {chunk.id} from {chunk.metadata.source_file}: {exc}"
                         ) from exc
 
+            norm_sources = {
+                sf: norm_path(sf) for sf in {c.metadata.source_file for c in chunks}
+            }
             to_update = [
                 (c, existing_rowid_map[str(c.id)])
                 for c in chunks
@@ -1640,7 +1655,7 @@ class SqliteBackend(
                         (
                             c.content,
                             c.content_hash,
-                            norm_path(c.metadata.source_file),
+                            norm_sources[c.metadata.source_file],
                             json.dumps(list(c.metadata.heading_hierarchy)),
                             c.metadata.chunk_type.value,
                             c.metadata.start_line,
@@ -1670,7 +1685,7 @@ class SqliteBackend(
                     [
                         (
                             _fts.tokenize_for_fts(c.retrieval_content),
-                            norm_path(c.metadata.source_file),
+                            norm_sources[c.metadata.source_file],
                             rowid,
                         )
                         for c, rowid in to_update
@@ -1726,7 +1741,7 @@ class SqliteBackend(
                             str(c.id),
                             c.content,
                             c.content_hash,
-                            norm_path(c.metadata.source_file),
+                            norm_sources[c.metadata.source_file],
                             json.dumps(list(c.metadata.heading_hierarchy)),
                             c.metadata.chunk_type.value,
                             c.metadata.start_line,
@@ -1792,7 +1807,7 @@ class SqliteBackend(
                             (
                                 new_rowid_map[str(c.id)],
                                 _fts.tokenize_for_fts(c.retrieval_content),
-                                norm_path(c.metadata.source_file),
+                                norm_sources[c.metadata.source_file],
                             )
                             for c in to_insert
                             if str(c.id) in new_rowid_map
@@ -3380,7 +3395,9 @@ class SqliteBackend(
             state[chunk_id] = (content_hash, hierarchy, tags, valid_from, valid_to, context)
         return state
 
-    async def get_chunk_ids_by_hashes(self, content_hashes: Sequence[str]) -> dict[str, UUID]:
+    async def get_chunk_ids_by_hashes(
+        self, content_hashes: Sequence[str], *, namespace: str | None = None
+    ) -> dict[str, UUID]:
         """Return ``{content_hash: chunk_id}`` for hashes present in the DB.
 
         Used by import to dedup by content across instances (cross-PC merge,
@@ -3391,13 +3408,23 @@ class SqliteBackend(
         if not content_hashes:
             return {}
         db = self._get_read_db()
-        unique = list(set(content_hashes))
-        rows = db.execute(
-            f"SELECT content_hash, id FROM chunks "
-            f"WHERE content_hash IN ({placeholders(len(unique))})",
-            unique,
-        ).fetchall()
-        return {row[0]: UUID(row[1]) for row in rows}
+        unique = list(dict.fromkeys(content_hashes))
+        result: dict[str, UUID] = {}
+        for batch in _param_batches(unique):
+            if namespace is not None:
+                rows = db.execute(
+                    f"SELECT content_hash, id FROM chunks "
+                    f"WHERE content_hash IN ({placeholders(len(batch))}) AND namespace = ?",
+                    [*batch, namespace],
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    f"SELECT content_hash, id FROM chunks "
+                    f"WHERE content_hash IN ({placeholders(len(batch))})",
+                    batch,
+                ).fetchall()
+            result.update({row[0]: UUID(row[1]) for row in rows})
+        return result
 
     async def get_stats(self) -> dict[str, int]:
         db = self._get_read_db()
@@ -3646,7 +3673,7 @@ class SqliteBackend(
         Token estimate: LENGTH(content) / 3.
         If source_file is given, filter to that source only.
         """
-        db = self._get_db()
+        db = self._get_read_db()
         where = ""
         params: list = []
         if source_file is not None:
@@ -3671,17 +3698,43 @@ class SqliteBackend(
         counts = {row[0]: row[1] for row in rows}
         return [{"bucket": b, "count": counts.get(b, 0)} for b in ordered]
 
-    async def list_chunks_by_source(self, source_file: Path, limit: int | None = 50) -> list[Chunk]:
+    async def list_chunks(
+        self, limit: int | None = 1000, offset: int = 0
+    ) -> list[Chunk]:
+        db = self._get_read_db()
+        if offset:
+            rows = db.execute(
+                f"SELECT * FROM chunks WHERE {_VISIBLE_SOURCE} "
+                "ORDER BY source_file, start_line, rowid LIMIT ? OFFSET ?",
+                (-1 if limit is None else limit, offset),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                f"SELECT * FROM chunks WHERE {_VISIBLE_SOURCE} "
+                "ORDER BY source_file, start_line, rowid LIMIT ?",
+                (-1 if limit is None else limit,),
+            ).fetchall()
+        return [self._row_to_chunk(row) for row in rows]
+
+    async def list_chunks_by_source(
+        self, source_file: Path, limit: int | None = 50, offset: int = 0
+    ) -> list[Chunk]:
         # ``limit=None`` reads the whole source in one snapshot — for callers
         # that must cover it completely (the entity scan), where paging would
         # let a concurrent re-index between pages skip or repeat rows. SQLite
         # treats a negative LIMIT as unbounded. ``rowid`` tie-break: chunks of
         # a virtual source can share one ``start_line``.
         db = self._get_read_db()
-        rows = db.execute(
-            "SELECT * FROM chunks WHERE source_file=? ORDER BY start_line, rowid LIMIT ?",
-            (norm_path(source_file), -1 if limit is None else limit),
-        ).fetchall()
+        if offset:
+            rows = db.execute(
+                "SELECT * FROM chunks WHERE source_file=? ORDER BY start_line, rowid LIMIT ? OFFSET ?",
+                (norm_path(source_file), -1 if limit is None else limit, offset),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT * FROM chunks WHERE source_file=? ORDER BY start_line, rowid LIMIT ?",
+                (norm_path(source_file), -1 if limit is None else limit),
+            ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
 
     async def get_context_windows(
@@ -3736,29 +3789,32 @@ class SqliteBackend(
         # reads a leading ``WITH`` as a possible write, on the grounds that a
         # CTE can end in an INSERT and it should not have to parse one to find
         # out. This spelling is the same plan and is visibly a read.
-        wanted = [str(a) for a in anchor_ids]
-        rows = db.execute(
-            f"""
-            SELECT id, start_line, rid, vis, COALESCE(visible_before, 0), visible_all
-            FROM (
-                SELECT id, start_line, rid, vis,
-                       SUM(vis) OVER (
-                           ORDER BY start_line, rid
-                           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                       ) AS visible_before,
-                       SUM(vis) OVER () AS visible_all
+        wanted = list(dict.fromkeys(str(a) for a in anchor_ids))
+        batch_limit = max(1, _SQL_MAX_PARAMS - len(vis_params) - 1)
+        located: dict[str, tuple[Any, ...]] = {}
+        for batch in _param_batches(wanted, size=batch_limit):
+            rows = db.execute(
+                f"""
+                SELECT id, start_line, rid, vis, COALESCE(visible_before, 0), visible_all
                 FROM (
-                    SELECT id, start_line, rowid AS rid,
-                           CASE WHEN {vis_sql} THEN 1 ELSE 0 END AS vis
-                    FROM chunks WHERE source_file=?
+                    SELECT id, start_line, rid, vis,
+                           SUM(vis) OVER (
+                               ORDER BY start_line, rid
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                           ) AS visible_before,
+                           SUM(vis) OVER () AS visible_all
+                    FROM (
+                        SELECT id, start_line, rowid AS rid,
+                               CASE WHEN {vis_sql} THEN 1 ELSE 0 END AS vis
+                        FROM chunks WHERE source_file=?
+                    )
                 )
-            )
-            WHERE id IN ({placeholders(len(wanted))})
-            """,
-            (*vis_params, norm_source, *wanted),
-        ).fetchall()
-
-        located = {row[0]: row for row in rows}
+                WHERE id IN ({placeholders(len(batch))})
+                """,
+                (*vis_params, norm_source, *batch),
+            ).fetchall()
+            for row in rows:
+                located[row[0]] = row
         result: dict[UUID, ContextWindowRows | None] = {}
         for anchor_id in anchor_ids:
             row = located.get(str(anchor_id))
@@ -4049,7 +4105,7 @@ class SqliteBackend(
         return int(row[0]), int(row[1])
 
     async def get_all_source_files(self) -> set[Path]:
-        db = self._get_db()
+        db = self._get_read_db()
         rows = db.execute("SELECT DISTINCT source_file FROM chunks").fetchall()
         return {Path(row[0]) for row in rows}
 
@@ -4094,7 +4150,7 @@ class SqliteBackend(
         self,
     ) -> list[tuple[Path, int, str | None, str | None, int, int, int]]:
         """Return (path, chunk_count, last_updated, namespaces, avg_tokens, min_tokens, max_tokens)."""
-        db = self._get_db()
+        db = self._get_read_db()
         rows = db.execute(
             "SELECT source_file, COUNT(*), MAX(updated_at), GROUP_CONCAT(DISTINCT namespace),"
             " CAST(AVG(LENGTH(content)/3) AS INTEGER),"
@@ -4318,12 +4374,15 @@ class SqliteBackend(
         if not chunk_ids:
             return {}
         db = self._get_read_db()
-        placeholders = ",".join("?" for _ in chunk_ids)
-        rows = db.execute(
-            f"SELECT id, access_count FROM chunks WHERE id IN ({placeholders})",
-            [str(cid) for cid in chunk_ids],
-        ).fetchall()
-        return {row[0]: row[1] for row in rows}
+        ids_str = list(dict.fromkeys(str(cid) for cid in chunk_ids))
+        result: dict[str, int] = {}
+        for batch in _param_batches(ids_str):
+            rows = db.execute(
+                f"SELECT id, access_count FROM chunks WHERE id IN ({placeholders(len(batch))})",
+                batch,
+            ).fetchall()
+            result.update({row[0]: row[1] for row in rows})
+        return result
 
     # ---- session, scratch, relations, tags, history, analytics ──────────
     # These methods are provided by Mixin classes:

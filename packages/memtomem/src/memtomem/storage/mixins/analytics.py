@@ -6,7 +6,7 @@ import logging
 import sqlite3
 from pathlib import Path
 
-from memtomem.storage.sqlite_helpers import project_boundary_key
+from memtomem.storage.sqlite_helpers import param_batches, placeholders, project_boundary_key
 from memtomem.storage.sqlite_scope import scope_context_sql
 from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_CHUNKS
 
@@ -64,7 +64,7 @@ class AnalyticsMixin:
         :func:`_unavailable_block`). Consumers must branch on ``available``
         before formatting the counts.
         """
-        db = self._get_db()
+        db = self._get_read_db()
         visible_sql, visible_params = _visible_chunks_where(namespace, project_context_root)
 
         # Single query for chunk aggregate counts
@@ -138,7 +138,7 @@ class AnalyticsMixin:
         """Return most accessed chunks with hierarchy info — for reflection."""
         import json as _json
 
-        db = self._get_db()
+        db = self._get_read_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root)
         # ``visible_sql`` is built by ``scope_context_sql`` from fixed column
         # names with ``?`` placeholders; every caller value travels in
@@ -166,7 +166,7 @@ class AnalyticsMixin:
         limit: int = 20,
     ) -> list[dict]:
         """Return agent activity summary — for reflection."""
-        db = self._get_db()
+        db = self._get_read_db()
         query = "SELECT agent_id, COUNT(*) as cnt, MAX(started_at) as last FROM sessions "
         params: list = []
         if since:
@@ -181,7 +181,7 @@ class AnalyticsMixin:
         self, limit: int = 10, *, project_context_root: Path | None = None
     ) -> list[dict]:
         """Return frequent queries with no results — for reflection."""
-        db = self._get_db()
+        db = self._get_read_db()
         try:
             rows = db.execute(
                 "SELECT query_text, COUNT(*) as cnt FROM query_history "
@@ -218,18 +218,8 @@ class AnalyticsMixin:
         degree and is absent from the result — it is never reported as zero.
         Callers therefore do not need to over-fetch and re-rank.
         """
-        db = self._get_db()
+        db = self._get_read_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root)
-        # ``adjacency`` is the undirected neighbour set ``get_related`` returns,
-        # restricted to visible endpoints: each stored row read from both ends,
-        # deduplicated on ``(hub, neighbour, relation_type)`` by the ``UNION``.
-        # That identity is ``get_related``'s own, so two rows joining the same
-        # pair under different relation types stay two links, as they do there.
-        # Summing two directed ``COUNT``s instead would count twice both a
-        # self-relation and a same-type pair stored in both endpoint orders —
-        # ``mem_link`` writes one row, so that shape comes from linking the two
-        # ends separately — inflating the degree above the links a caller can
-        # actually follow, and with it the ranking.
         rows = db.execute(
             "SELECT chunk_id, link_count FROM (WITH visible AS (SELECT id FROM chunks WHERE "
             f"{visible_sql}), adjacency AS ("  # nosec B608
@@ -254,18 +244,25 @@ class AnalyticsMixin:
         """Return access_count, tag_count, relation_count per chunk — for importance scoring."""
         import json as _json2
 
-        db = self._get_db()
+        db = self._get_read_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root, alias="c.")
-        # Same contract as ``get_frequently_accessed`` above: structure is
-        # interpolated, values stay bound in ``params``.
+        # Pre-aggregate visible relation counts using indexed source_id / target_id
+        # joins instead of a correlated OR subquery per chunk.
         query = (
-            "SELECT * FROM (WITH visible AS (SELECT c.* FROM chunks c WHERE "
-            f"{visible_sql}) "  # nosec B608
-            "SELECT c.id, c.access_count, c.updated_at, c.tags, "
-            "(SELECT COUNT(*) FROM chunk_relations cr "
-            " WHERE (cr.source_id = c.id AND cr.target_id IN (SELECT id FROM visible)) "
-            "    OR (cr.target_id = c.id AND cr.source_id IN (SELECT id FROM visible))) "
-            "AS rel_count FROM visible c)"
+            "SELECT * FROM (WITH visible AS ("
+            "  SELECT c.id, c.access_count, c.updated_at, c.tags FROM chunks c WHERE "
+            f"  {visible_sql}"  # nosec B608
+            "), rel_edges AS ("
+            "  SELECT cr.source_id AS chunk_id, cr.rowid AS rid FROM chunk_relations cr "
+            "  JOIN visible s ON s.id = cr.source_id JOIN visible t ON t.id = cr.target_id "
+            "  UNION "
+            "  SELECT cr.target_id AS chunk_id, cr.rowid AS rid FROM chunk_relations cr "
+            "  JOIN visible s ON s.id = cr.source_id JOIN visible t ON t.id = cr.target_id"
+            "), rel_counts AS ("
+            "  SELECT chunk_id, COUNT(*) AS cnt FROM rel_edges GROUP BY chunk_id"
+            ") "
+            "SELECT c.id, c.access_count, c.updated_at, c.tags, COALESCE(rc.cnt, 0) AS rel_count "
+            "FROM visible c LEFT JOIN rel_counts rc ON rc.chunk_id = c.id)"
         )
         rows = db.execute(query, params).fetchall()
         results = []
@@ -284,7 +281,7 @@ class AnalyticsMixin:
 
     async def get_consolidation_groups(self, min_size: int = 3, max_groups: int = 10) -> list[dict]:
         """Return source files with enough chunks for consolidation — for scheduler."""
-        db = self._get_db()
+        db = self._get_read_db()
         rows = db.execute(
             "SELECT source_file, COUNT(*) as cnt FROM chunks "
             f"WHERE {VISIBLE_SOURCE_CHUNKS} "
@@ -311,13 +308,16 @@ class AnalyticsMixin:
     async def get_importance_scores(self, chunk_ids: list) -> dict[str, float]:
         if not chunk_ids:
             return {}
-        db = self._get_db()
-        placeholders = ",".join("?" for _ in chunk_ids)
-        rows = db.execute(
-            f"SELECT id, importance_score FROM chunks WHERE id IN ({placeholders})",
-            [str(cid) for cid in chunk_ids],
-        ).fetchall()
-        return {row[0]: row[1] for row in rows}
+        db = self._get_read_db()
+        ids_str = list(dict.fromkeys(str(cid) for cid in chunk_ids))
+        result: dict[str, float] = {}
+        for batch in param_batches(ids_str):
+            rows = db.execute(
+                f"SELECT id, importance_score FROM chunks WHERE id IN ({placeholders(len(batch))})",
+                batch,
+            ).fetchall()
+            result.update({row[0]: row[1] for row in rows})
+        return result
 
     async def get_activity_summary(
         self,
@@ -335,12 +335,13 @@ class AnalyticsMixin:
         """
         db = self._get_read_db()
 
-        # Build date filter
+        # Build date filter (with sargable ISO prefix bounds so SQLite can use
+        # idx_chunks_created_at and idx_access_log_created before checking DATE()).
         where_parts: list[str] = []
         params: list[str] = []
         if since:
-            where_parts.append("DATE(created_at) >= ?")
-            params.append(since)
+            where_parts.append("created_at >= ? AND DATE(created_at) >= ?")
+            params.extend((since, since))
         if until:
             where_parts.append("DATE(created_at) <= ?")
             params.append(until)

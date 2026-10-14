@@ -9,6 +9,8 @@ from typing import Any
 
 from memtomem.storage.sqlite_helpers import norm_path
 
+_VERSION = 2
+
 
 def digest(value: Any) -> str:
     def normalize(item: Any) -> Any:
@@ -50,7 +52,7 @@ def state(db: Any, source: Path, dimension: int) -> tuple[str, int] | None:
         " OR NOT EXISTS (SELECT 1 FROM chunks_vec v WHERE v.rowid=c.rowid)" if dimension else ""
     )
     rows = db.execute(
-        f"""SELECT c.rowid, c.id, c.content, c.content_hash, c.heading_hierarchy,
+        f"""SELECT c.rowid, c.id, c.content_hash, c.heading_hierarchy,
         c.retrieval_context, c.namespace, c.tags, c.valid_from_unix, c.valid_to_unix,
         c.scope, c.project_root, c.start_line, c.end_line, c.source_read_only,
         c.source_span_hash, c.redaction_count,
