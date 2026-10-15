@@ -213,6 +213,7 @@ async def _add(
     allow_namespace_mix: bool = False,
 ) -> None:
     from memtomem import privacy
+    from memtomem.chunking.base import split_source_lines
     from memtomem.cli._bootstrap import cli_components
     from memtomem.cli._session_state import resolve_session_write_namespace
     from memtomem.constants import InvalidNameError, validate_namespace
@@ -416,8 +417,12 @@ async def _add(
                     if mix_err is not None:
                         raise click.ClickException(mix_err)
                     target.parent.mkdir(parents=True, exist_ok=True)
+                    # Counted the way chunk ``start_line`` is, not ``str.splitlines``,
+                    # which also breaks at U+0085, ``\x0c`` and friends.
                     pre_lines = (
-                        len(target.read_text(encoding="utf-8", errors="replace").splitlines())
+                        len(
+                            split_source_lines(target.read_text(encoding="utf-8", errors="replace"))
+                        )
                         if target.exists()
                         else 0
                     )
