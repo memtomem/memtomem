@@ -13,16 +13,18 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import create_autospec
 from uuid import uuid4
 
 import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
+from memtomem.cli import search as search_mod
 from memtomem.cli.search import SearchPayload, render_search_results
 from memtomem.models import Chunk, ChunkMetadata, SearchResult
 from memtomem.search.pipeline import RetrievalStats
+from memtomem.storage.sqlite_backend import SqliteBackend
 
 _LONG = "x" * 150 + " middle " + "y" * 150 + " tail-marker"
 
@@ -38,10 +40,10 @@ def _chunk() -> Chunk:
 
 
 def _recall(monkeypatch, *args: str, chunk: Chunk | None = None):
-    storage = SimpleNamespace(
-        recall_chunks=AsyncMock(return_value=[chunk or _chunk()]),
-        list_namespaces=AsyncMock(return_value=[("default", 1)]),
-    )
+    # Autospecced, so a keyword the real ``recall_chunks`` does not take fails here too.
+    storage = create_autospec(SqliteBackend, instance=True)
+    storage.recall_chunks.return_value = [chunk or _chunk()]
+    storage.list_namespaces.return_value = [("default", 1)]
     comp = SimpleNamespace(
         storage=storage,
         config=SimpleNamespace(
@@ -76,16 +78,18 @@ class TestRecallJson:
         assert json.loads(flag.stdout) == json.loads(long_form.stdout)
 
 
+def _payload(chunk: Chunk | None = None) -> SearchPayload:
+    return SearchPayload(
+        results=[SearchResult(chunk=chunk or _chunk(), score=0.5, rank=1, source="fused")],
+        stats=RetrievalStats(final_total=1),
+        hints=[],
+        empty_message="",
+    )
+
+
 class TestSearchJson:
     def test_content_is_whole_and_preview_is_the_old_cut(self, capsys):
-        payload = SearchPayload(
-            results=[SearchResult(chunk=_chunk(), score=0.5, rank=1, source="fused")],
-            stats=RetrievalStats(final_total=1),
-            hints=[],
-            empty_message="",
-        )
-
-        render_search_results("q", "json", payload)
+        render_search_results("q", "json", _payload())
 
         [row] = json.loads(capsys.readouterr().out)
         assert row["content"] == _LONG
@@ -93,10 +97,21 @@ class TestSearchJson:
 
     @pytest.mark.parametrize("args", [["--json"], ["--format", "json"]])
     def test_json_flag_reaches_the_renderer_as_json(self, monkeypatch, args):
-        search = AsyncMock()
-        monkeypatch.setattr("memtomem.cli.search._search", search)
+        """Only retrieval is replaced; the command, ``_search`` and the
+        renderer all run, so stdout is what a pipe would read."""
+
+        @asynccontextmanager
+        async def fake():
+            yield SimpleNamespace()
+
+        retrieval = create_autospec(search_mod._search_with_components, return_value=_payload())
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake)
+        monkeypatch.setattr("memtomem.cli.search._search_with_components", retrieval)
 
         result = CliRunner().invoke(cli, ["search", "q", *args])
 
         assert result.exit_code == 0, result.output
-        assert search.await_args.args[7] == "json"
+        assert retrieval.call_args.kwargs["fmt"] == "json"
+        [row] = json.loads(result.stdout)
+        assert row["content"] == _LONG
+        assert row["content_preview"] == _LONG[:200]
