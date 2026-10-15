@@ -101,6 +101,9 @@ class TestCliAddTagIsolation:
 
     @pytest.mark.asyncio
     async def test_every_chunk_of_a_multi_chunk_entry_is_tagged(self, cli_comp):
+        """Pins the state right after the add only. The sub-heading chunks
+        carry the tags because ``_add`` merged them in after indexing, and
+        the next re-index of the file drops them again (#2747)."""
         comp, _ = cli_comp
         await _add(_ALPHA, "Alpha", ["alpha"], "shared.md")
         sections = "\n\n".join(
