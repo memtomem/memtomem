@@ -33,6 +33,18 @@ async def mem_procedure_save(
     """
     from memtomem.server.tools.memory_crud import mem_add
 
+    cleaned_name = name.strip()
+    if (
+        not cleaned_name
+        or "/" in cleaned_name
+        or "\\" in cleaned_name
+        or ".." in cleaned_name
+        or "\x00" in cleaned_name
+    ):
+        return (
+            "Error: procedure name must not be empty or contain path separators ('/', '\\', '..')."
+        )
+
     all_tags = list(tags or [])
     if "procedure" not in all_tags:
         all_tags.append("procedure")
@@ -44,9 +56,9 @@ async def mem_procedure_save(
 
     return await mem_add(
         content=content,
-        title=f"Procedure: {name}",
+        title=f"Procedure: {cleaned_name}",
         tags=all_tags,
-        file=f"procedures/{name.replace(' ', '-').lower()}.md",
+        file=f"procedures/{cleaned_name.replace(' ', '-').lower()}.md",
         namespace=namespace,
         ctx=ctx,
     )

@@ -769,6 +769,11 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "",
         "Memory file (L2) on the web side.",
     ),
+    ("web/routes/scratch.py", "promote_scratch", 0, "async_file_lock"): (
+        MEMORY_L2,
+        "",
+        "Memory file (L2) — scratch promotion appends and re-indexes the target.",
+    ),
     ("cli/context_cmd.py", "_memory_migrate_run", 0, "async_file_lock"): (
         MEMORY_L2,
         "",

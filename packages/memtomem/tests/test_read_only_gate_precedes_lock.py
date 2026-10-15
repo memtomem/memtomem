@@ -47,6 +47,7 @@ _MUST_GATE = {
     ("cli/review_cmd.py", "_decide"),
     ("integrations/langgraph.py", "add"),
     ("web/routes/system.py", "add_memory"),
+    ("web/routes/scratch.py", "promote_scratch"),
 }
 
 #: Acquires that are deliberately ungated, each with the reason.
