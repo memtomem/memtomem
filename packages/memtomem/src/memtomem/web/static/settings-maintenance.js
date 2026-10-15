@@ -453,9 +453,8 @@ async function runImport() {
   form.append('file', file);
 
   try {
-    const csrf = await ensureCsrfToken();
-    const headers = csrf ? { 'X-Memtomem-CSRF': csrf } : {};
-    const res = await fetch('/api/export/import', { method: 'POST', body: form, headers });
+    const headers = {};
+    const res = await csrfFetch('/api/export/import', { method: 'POST', body: form, headers });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail || res.statusText);

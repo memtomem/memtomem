@@ -1043,10 +1043,9 @@ async function loadCtxList(type) {
           // the error paths.
           btnLoading(removeBtn, true);
           try {
-            const csrf = await ensureCsrfToken();
-            const r = await fetch(`/api/context/known-projects/${encodeURIComponent(scope.scope_id)}`, {
+            const r = await csrfFetch(`/api/context/known-projects/${encodeURIComponent(scope.scope_id)}`, {
               method: 'DELETE',
-              headers: csrf ? { 'X-Memtomem-CSRF': csrf } : {},
+              headers: {},
             });
             if (!r.ok) {
               const err = await r.json().catch(() => ({}));

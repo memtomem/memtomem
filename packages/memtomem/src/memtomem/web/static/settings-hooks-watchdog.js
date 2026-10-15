@@ -151,11 +151,8 @@ function _hooksIsPrivateTargetScope() {
 }
 
 async function _hooksFetchSyncData() {
-  const csrf = await ensureCsrfToken();
-  const headers = csrf
-    ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-    : { 'Content-Type': 'application/json' };
-  const res = await fetch(_hooksScopedUrl('/api/settings-sync'), { method: 'GET', headers });
+  const headers = { 'Content-Type': 'application/json' };
+  const res = await csrfFetch(_hooksScopedUrl('/api/settings-sync'), { method: 'GET', headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(_hooksErrDetail(err.detail, `Request failed: ${res.status}`));
@@ -164,11 +161,8 @@ async function _hooksFetchSyncData() {
 }
 
 async function _hooksPostRuleAction(action, entry, confirmPrivateToShared) {
-  const csrf = await ensureCsrfToken();
-  const headers = csrf
-    ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-    : { 'Content-Type': 'application/json' };
-  const res = await fetch(_hooksScopedUrl(`/api/context/settings/rules/${action}`), {
+  const headers = { 'Content-Type': 'application/json' };
+  const res = await csrfFetch(_hooksScopedUrl(`/api/context/settings/rules/${action}`), {
     method: 'POST',
     headers,
     body: JSON.stringify(_hooksRuleActionPayload(entry, confirmPrivateToShared)),
@@ -347,7 +341,11 @@ async function _handleHooksPromoteAll(btn) {
         } else {
           summary.failed += 1;
         }
-      } catch (_err) {
+      } catch (err) {
+        if (err.name === 'CsrfRecoveryError') {
+          showToast(err.message, 'error');
+          return; // Stop the batch; further writes require an explicit retry.
+        }
         summary.failed += 1;
       }
     }
@@ -357,7 +355,11 @@ async function _handleHooksPromoteAll(btn) {
         const deleted = await _deleteOriginalAfterPromote(entry);
         if (deleted.status === 'ok') summary.deleted += 1;
         else summary.failed += 1;
-      } catch (_err) {
+      } catch (err) {
+        if (err.name === 'CsrfRecoveryError') {
+          showToast(err.message, 'error');
+          return; // Stop the batch; further writes require an explicit retry.
+        }
         summary.failed += 1;
       }
     }
@@ -819,10 +821,7 @@ async function loadHooksSync() {
         if (!ok) return;
         btnLoading(btn, true);
         try {
-          const csrf = await ensureCsrfToken();
-          const headers = csrf
-            ? {'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf}
-            : {'Content-Type': 'application/json'};
+          const headers = {'Content-Type': 'application/json'};
           // Send the exact rule identity when the card carries it (issue
           // #1112) so the Nth same-matcher conflict resolves the Nth row.
           // Legacy cards without identity fall back to label-only first-match.
@@ -832,7 +831,7 @@ async function loadHooksSync() {
             resolveBody.rule_hash = card.dataset.ruleHash;
             if (card.dataset.proposedHash) resolveBody.proposed_hash = card.dataset.proposedHash;
           }
-          const r = await fetch(_hooksScopedUrl('/api/context/settings/resolve'), {
+          const r = await csrfFetch(_hooksScopedUrl('/api/context/settings/resolve'), {
             method: 'POST',
             headers,
             body: JSON.stringify(resolveBody),
@@ -880,11 +879,9 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
   // the URL and abort if it drifted.
   const scopedUrl = _hooksScopedUrl('/api/settings-sync');
   const postSettingsSync = async (allowHostWrites) => {
-    const csrf = await ensureCsrfToken();
-    const headers = csrf
-      ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-      : { 'Content-Type': 'application/json' };
-    const res = await fetch(scopedUrl, {
+
+    const headers = { 'Content-Type': 'application/json' };
+    const res = await csrfFetch(scopedUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify({ allow_host_writes: allowHostWrites }),

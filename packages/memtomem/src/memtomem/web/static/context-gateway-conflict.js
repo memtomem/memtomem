@@ -311,16 +311,13 @@ function _ctxMoveCopyBody(state) {
 // (CSRFGuardMiddleware), so thread the header on all legs. Source project+tier
 // are pinned (``scopeResolved``) so a mid-modal scope drift can't re-target.
 async function _ctxMoveCopyPost(state, body, dryRun) {
-  const csrf = await ensureCsrfToken();
-  const headers = csrf
-    ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-    : { 'Content-Type': 'application/json' };
+  const headers = { 'Content-Type': 'application/json' };
   const url = _ctxWithTargetScope(
     `/api/context/${state.srcType}/${encodeURIComponent(state.srcName)}/transfer`
     + (dryRun ? '?dry_run=1' : ''),
     { scopeId: state.srcScopeIdEff, scopeResolved: true, targetScope: state.srcTier },
   );
-  return fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+  return csrfFetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
 }
 
 // Paint the cached dry-run outcome into the JS-owned lines + Apply state.
@@ -575,14 +572,11 @@ function _ctxMoveCopySuccess(state, data) {
 // can't sync the wrong scope.
 async function _ctxMoveCopyRunDestSync(state, data) {
   try {
-    const csrf = await ensureCsrfToken();
-    const headers = csrf
-      ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-      : { 'Content-Type': 'application/json' };
+    const headers = { 'Content-Type': 'application/json' };
     const url = _ctxWithTargetScope(`/api/context/${state.srcType}/sync`, {
       scopeId: data.dst_project_scope_id || '', scopeResolved: true, targetScope: data.to_scope,
     });
-    const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify({}) });
+    const r = await csrfFetch(url, { method: 'POST', headers, body: JSON.stringify({}) });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
       showToast(_ctxErrDetail(err && err.detail, t('toast.request_failed')), 'error');
@@ -836,11 +830,8 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
   }
   if (choice === 'force') {
     try {
-      const csrf = await ensureCsrfToken();
-      const headers = csrf
-        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-        : { 'Content-Type': 'application/json' };
-      const forcePut = (extra) => fetch(
+      const headers = { 'Content-Type': 'application/json' };
+      const forcePut = (extra) => csrfFetch(
         _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
         {
           method: 'PUT',

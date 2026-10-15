@@ -878,17 +878,14 @@ async function _ctxSyncProjectScope(scopeId, btn) {
   // claims to have synced.
   const attentionSkips = [];
   try {
-    const csrf = await ensureCsrfToken();
-    const headers = csrf
-      ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-      : { 'Content-Type': 'application/json' };
+    const headers = { 'Content-Type': 'application/json' };
 
     const types = ['skills', 'commands', 'agents', 'mcp-servers'];
     for (const typ of types) {
       anyPhaseStarted = true;
       let resp;
       try {
-        resp = await fetch(
+        resp = await csrfFetch(
           _ctxWithTargetScope(`/api/context/${typ}/sync`, pinnedScopeOpts),
           { method: 'POST', headers }
         );
@@ -926,7 +923,7 @@ async function _ctxSyncProjectScope(scopeId, btn) {
     if (!failed) {
       anyPhaseStarted = true;
       try {
-        const settingsResp = await fetch(
+        const settingsResp = await csrfFetch(
           _ctxWithTargetScope('/api/context/settings/sync', pinnedScopeOpts),
           { method: 'POST', headers }
         );
@@ -1522,14 +1519,12 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     // preview, the dialog copy, and every phase URL share one (project,
     // tier); a mid-run tier flip OR a cache refresh applies to the next run
     // (ADR-0016 §5 / ADR-0021 §C Major-1).
-    const csrf = await ensureCsrfToken();
-    const headers = csrf
-      ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-      : { 'Content-Type': 'application/json' };
+
+    const headers = { 'Content-Type': 'application/json' };
     if (syncAllTier === 'project_shared') {
       anyPhaseStarted = true;
       for (const phase of _CTX_SYNC_PHASES) setPhase(phase, 'syncing');
-      const response = await fetch(
+      const response = await csrfFetch(
         _ctxWithTargetScope('/api/context/sync-all', pinnedScopeOpts),
         { method: 'POST', headers },
       );
@@ -1612,20 +1607,15 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       // regenerate-from-canonical, so the second pass is an idempotent no-op.
       for (const phase of _CTX_SYNC_PHASES) setPhase(phase, 'pending');
     }
-    // Re-bind the CSRF headers next to the legacy fan-out: the batch branch
-    // above pushed these fetches past the CSRF invariant's binding-lookback
-    // window (test_spa_api_fetch_threads_csrf_token), same rationale as the
-    // settings phase's inline binding below. ``csrf`` is the run-level token.
-    const legacyHeaders = csrf
-      ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-      : { 'Content-Type': 'application/json' };
+    // Keep JSON headers for legacy phases; csrfFetch supplies the live token.
+    const legacyHeaders = { 'Content-Type': 'application/json' };
     const types = ['skills', 'commands', 'agents', 'mcp-servers'];
     for (const typ of types) {
       anyPhaseStarted = true;
       setPhase(typ, 'syncing');
       let resp;
       try {
-        resp = await fetch(
+        resp = await csrfFetch(
           _ctxWithTargetScope(`/api/context/${typ}/sync`, {
             scopeId: syncAllScopeId,
             scopeResolved: true,
@@ -1708,11 +1698,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       setPhase('settings', 'syncing');
       let settingsResp;
       try {
-        // Inline the CSRF headers at the call site (rather than the shared
-        // run-level ``headers`` var): this phase's fetch sits beyond the
-        // invariant guard's binding-lookback window, so thread the token here.
-        // ``csrf`` is the run-level token bound above.
-        settingsResp = await fetch(
+        settingsResp = await csrfFetch(
           _ctxWithTargetScope('/api/context/settings/sync', {
             scopeId: syncAllScopeId,
             scopeResolved: true,
@@ -1720,9 +1706,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
           }),
           {
             method: 'POST',
-            headers: csrf
-              ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-              : { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
           },
         );
       } catch (err) {

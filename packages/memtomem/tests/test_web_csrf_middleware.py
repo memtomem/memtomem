@@ -458,3 +458,49 @@ def test_production_create_app_enforces_csrf_without_token(
     assert ev["host_ok"] == "True", "loopback host must pass the host check"
     assert ev["origin_ok"] == "True", "loopback origin must pass the origin check"
     assert ev["would_block"] == "True"
+
+
+@pytest.mark.parametrize(
+    ("host", "origin", "classified"),
+    [
+        ("localhost", "http://localhost", True),
+        ("localhost", "https://evil.example", False),
+        ("evil.example", "http://localhost", False),
+        ("evil.example", "https://evil.example", False),
+    ],
+)
+def test_recovery_signal_requires_valid_host_and_origin(host, origin, classified):
+    app = _build_app()
+    applied = []
+
+    @app.post("/api/mutate")
+    async def mutate():
+        applied.append(True)
+        return {"ok": True}
+
+    with TestClient(app, base_url=f"http://{host}") as client:
+        result = client.post("/api/mutate", headers={"Origin": origin, "X-Memtomem-CSRF": "old"})
+    assert result.status_code == 403
+    assert (result.json().get("code") == "csrf_token_mismatch") is classified
+    assert applied == []
+
+
+def test_rotated_token_refuses_before_handler_then_accepts_explicit_retry():
+    app = _build_app()
+    applied = []
+
+    @app.post("/api/mutate")
+    async def mutate():
+        applied.append(True)
+        return {"ok": True}
+
+    with TestClient(app, base_url="http://localhost") as client:
+        old = client.get("/api/session").json()["csrf"]
+        app.state.csrf_token = "rotated-token"
+        refused = client.post("/api/mutate", headers={"X-Memtomem-CSRF": old})
+        assert refused.json()["code"] == "csrf_token_mismatch"
+        assert not applied
+        fresh = client.get("/api/session").json()["csrf"]
+        assert not applied
+        assert client.post("/api/mutate", headers={"X-Memtomem-CSRF": fresh}).status_code == 200
+        assert applied == [True]

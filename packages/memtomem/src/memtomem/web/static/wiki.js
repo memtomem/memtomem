@@ -7,7 +7,7 @@
  * dispatches from switchSettingsSection via loadWiki() rather than loadCtxList.
  *
  * Depends on globals from app.js: qs, show, hide, escapeHtml, t, showToast,
- * showConfirm, ensureCsrfToken, emptyState, panelLoading.
+ * showConfirm, csrfFetch, emptyState, panelLoading.
  *
  * i18n: all dynamic text goes through inline t() (never data-i18n on injected
  * nodes — applyDOM would clobber re-rendered content), and a `langchange`
@@ -249,10 +249,9 @@ async function _doWikiCommit(force) {
   const url = `/api/wiki/${encodeURIComponent(type)}/${encodeURIComponent(name)}/commit`;
   let res;
   try {
-    const csrf = await ensureCsrfToken();
     const headers = { 'Content-Type': 'application/json' };
-    if (csrf) headers['X-Memtomem-CSRF'] = csrf;
-    res = await fetch(url, {
+
+    res = await csrfFetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify({ expected_head: expectedHead, message, targets, force }),
@@ -506,10 +505,9 @@ async function _seedWikiOverride(type, name, vendor, force) {
   const url = `/api/wiki/${encodeURIComponent(type)}/${encodeURIComponent(name)}/override`;
   let res;
   try {
-    const csrf = await ensureCsrfToken();
     const headers = { 'Content-Type': 'application/json' };
-    if (csrf) headers['X-Memtomem-CSRF'] = csrf;
-    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ vendor, force }) });
+
+    res = await csrfFetch(url, { method: 'POST', headers, body: JSON.stringify({ vendor, force }) });
   } catch (err) {
     showToast(t('settings.ctx.wiki_seed_failed', { error: String((err && err.message) || err) }), 'error');
     return;
@@ -614,10 +612,9 @@ async function _saveWikiOverride(type, name, vendor, content, mtimeNs, force) {
   const url = `/api/wiki/${encodeURIComponent(type)}/${encodeURIComponent(name)}/override`;
   let res;
   try {
-    const csrf = await ensureCsrfToken();
     const headers = { 'Content-Type': 'application/json' };
-    if (csrf) headers['X-Memtomem-CSRF'] = csrf;
-    res = await fetch(url, {
+
+    res = await csrfFetch(url, {
       method: 'PUT',
       headers,
       body: JSON.stringify({ vendor, content, mtime_ns: mtimeNs, force }),
@@ -796,10 +793,9 @@ async function _saveWikiCanonical(type, name, content, mtimeNs, force) {
   const url = `/api/wiki/${encodeURIComponent(type)}/${encodeURIComponent(name)}/canonical`;
   let res;
   try {
-    const csrf = await ensureCsrfToken();
     const headers = { 'Content-Type': 'application/json' };
-    if (csrf) headers['X-Memtomem-CSRF'] = csrf;
-    res = await fetch(url, {
+
+    res = await csrfFetch(url, {
       method: 'PUT',
       headers,
       body: JSON.stringify({ content, mtime_ns: mtimeNs, force }),
@@ -1042,12 +1038,11 @@ async function _installWikiAsset(type, name, scopeId, force, verb) {
   const url = scopeParam ? `${base}?${scopeParam}` : base;
   let res;
   try {
-    const csrf = await ensureCsrfToken();
     const headers = { 'Content-Type': 'application/json' };
-    if (csrf) headers['X-Memtomem-CSRF'] = csrf;
+
     const init = { method: 'POST', headers };
     if (verb === 'update') init.body = JSON.stringify({ force });
-    res = await fetch(url, init);
+    res = await csrfFetch(url, init);
   } catch (err) {
     showToast(t('settings.ctx.wiki_install_failed', { error: String((err && err.message) || err) }), 'error');
     return;

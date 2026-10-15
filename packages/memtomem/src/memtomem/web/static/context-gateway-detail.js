@@ -321,12 +321,8 @@ function _ctxWireEnableVersioning(type, name, detailEl, seq) {
   btn.addEventListener('click', async () => {
     btnLoading(btn, true);
     try {
-      const csrf = await ensureCsrfToken();
-      // Inline-binding CSRF thread (shape B in test_web_invariants_registry).
-      const headers = csrf
-        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-        : { 'Content-Type': 'application/json' };
-      const r = await fetch(
+      const headers = { 'Content-Type': 'application/json' };
+      const r = await csrfFetch(
         _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/versions/enable`),
         { method: 'POST', headers, body: JSON.stringify({}) },
       );
@@ -340,8 +336,8 @@ function _ctxWireEnableVersioning(type, name, detailEl, seq) {
       // flight — re-rendering the detail would yank them back to this one.
       if (seq != null && seq !== _ctxDetailSeq[type]) return;
       loadCtxDetail(type, name);
-    } catch (_) {
-      showToast(t('toast.request_failed'), 'error');
+    } catch (err) {
+      showToast(err.name === 'CsrfRecoveryError' ? err.message : t('toast.request_failed'), 'error');
     } finally {
       btnLoading(btn, false);
     }
@@ -358,12 +354,8 @@ function _ctxWireVersionControls(type, name, detailEl, seq) {
     const btn = detailEl.querySelector('.ctx-version-freeze-btn');
     btnLoading(btn, true);
     try {
-      const csrf = await ensureCsrfToken();
-      // Inline-binding CSRF thread (shape B in test_web_invariants_registry).
-      const headers = csrf
-        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-        : { 'Content-Type': 'application/json' };
-      const r = await fetch(
+      const headers = { 'Content-Type': 'application/json' };
+      const r = await csrfFetch(
         _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/versions`),
         { method: 'POST', headers, body: JSON.stringify({}) },
       );
@@ -376,8 +368,8 @@ function _ctxWireVersionControls(type, name, detailEl, seq) {
       const tag = (result.version && result.version.tag) || '';
       showToast(t('settings.ctx.versions.freeze_success', { name, tag }));
       reload();
-    } catch (_) {
-      showToast(t('toast.request_failed'), 'error');
+    } catch (err) {
+      showToast(err.name === 'CsrfRecoveryError' ? err.message : t('toast.request_failed'), 'error');
     } finally {
       btnLoading(btn, false);
     }
@@ -392,12 +384,8 @@ function _ctxWireVersionControls(type, name, detailEl, seq) {
       if (!label) return;
       btnLoading(btn, true);
       try {
-        const csrf = await ensureCsrfToken();
-        // Inline-binding CSRF thread (shape B in test_web_invariants_registry).
-        const headers = csrf
-          ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-          : { 'Content-Type': 'application/json' };
-        const r = await fetch(
+        const headers = { 'Content-Type': 'application/json' };
+        const r = await csrfFetch(
           _ctxWithTargetScope(
             `/api/context/${type}/${encodeURIComponent(name)}/labels/${encodeURIComponent(label)}`,
           ),
@@ -410,8 +398,8 @@ function _ctxWireVersionControls(type, name, detailEl, seq) {
         }
         showToast(t('settings.ctx.versions.promote_success', { label, tag }));
         reload();
-      } catch (_) {
-        showToast(t('toast.request_failed'), 'error');
+      } catch (err) {
+        showToast(err.name === 'CsrfRecoveryError' ? err.message : t('toast.request_failed'), 'error');
       } finally {
         btnLoading(btn, false);
       }
@@ -423,12 +411,11 @@ function _ctxWireVersionControls(type, name, detailEl, seq) {
       const label = btn.dataset.label || '';
       if (!label) return;
       try {
-        const csrf = await ensureCsrfToken();
-        const r = await fetch(
+        const r = await csrfFetch(
           _ctxWithTargetScope(
             `/api/context/${type}/${encodeURIComponent(name)}/labels/${encodeURIComponent(label)}`,
           ),
-          { method: 'DELETE', headers: csrf ? { 'X-Memtomem-CSRF': csrf } : {} },
+          { method: 'DELETE', headers: {} },
         );
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
@@ -437,8 +424,8 @@ function _ctxWireVersionControls(type, name, detailEl, seq) {
         }
         showToast(t('settings.ctx.versions.remove_label_success', { label }));
         reload();
-      } catch (_) {
-        showToast(t('toast.request_failed'), 'error');
+      } catch (err) {
+        showToast(err.name === 'CsrfRecoveryError' ? err.message : t('toast.request_failed'), 'error');
       }
     });
   });
@@ -709,11 +696,8 @@ async function loadCtxDetail(type, name, opts = {}) {
       const mtime_ns = detailEl.dataset.mtimeNs || '';
       btnLoading(btn, true);
       try {
-        const csrf = await ensureCsrfToken();
-        const headers = csrf
-          ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-          : { 'Content-Type': 'application/json' };
-        const putOnce = (extra) => fetch(
+        const headers = { 'Content-Type': 'application/json' };
+        const putOnce = (extra) => csrfFetch(
           _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
           {
             method: 'PUT',
@@ -824,13 +808,13 @@ async function loadCtxDetail(type, name, opts = {}) {
       // re-enabling a detached button is harmless.
       btnLoading(delBtn, true);
       try {
-        const csrf = await ensureCsrfToken();
-        const deleteOnce = (confirmed) => fetch(
+
+        const deleteOnce = (confirmed) => csrfFetch(
           _ctxWithTargetScope(
             `/api/context/${type}/${encodeURIComponent(name)}?cascade=${cascade}`
             + (confirmed ? '&allow_host_writes=true' : ''),
           ),
-          { method: 'DELETE', headers: csrf ? { 'X-Memtomem-CSRF': csrf } : {} },
+          { method: 'DELETE', headers: {} },
         );
         let r = await deleteOnce(false);
         if (!r.ok) {
@@ -1125,11 +1109,8 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
       const btn = detailEl.querySelector('.ctx-runtime-only-import');
       btnLoading(btn, true);
       try {
-        const csrf = await ensureCsrfToken();
-        const headers = csrf
-          ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-          : { 'Content-Type': 'application/json' };
-        const importOnce = (extra) => fetch(
+        const headers = { 'Content-Type': 'application/json' };
+        const importOnce = (extra) => csrfFetch(
           _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/import`),
           {
             method: 'POST',
@@ -1166,11 +1147,8 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
       const btn = detailEl.querySelector('.ctx-runtime-import-to-user');
       btnLoading(btn, true);
       try {
-        const csrf = await ensureCsrfToken();
-        const headers = csrf
-          ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-          : { 'Content-Type': 'application/json' };
-        const importOnce = (extra) => fetch(
+        const headers = { 'Content-Type': 'application/json' };
+        const importOnce = (extra) => csrfFetch(
           _ctxWithTargetScope(
             `/api/context/skills/${encodeURIComponent(name)}/import-to-user`,
             { targetScope: 'project_shared' },

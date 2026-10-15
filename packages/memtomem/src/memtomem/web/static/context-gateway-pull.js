@@ -236,11 +236,8 @@ function _ctxPullBody(state) {
 }
 
 async function _ctxPullPost(state, body) {
-  const csrf = await ensureCsrfToken();
-  const headers = csrf
-    ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-    : { 'Content-Type': 'application/json' };
-  const r = await fetch(_ctxPullUrl(state, '/pull'), {
+  const headers = { 'Content-Type': 'application/json' };
+  const r = await csrfFetch(_ctxPullUrl(state, '/pull'), {
     method: 'POST', headers, body: JSON.stringify(body),
   });
   const data = await r.json().catch(() => ({}));

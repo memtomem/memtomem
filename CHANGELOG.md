@@ -7,6 +7,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Web writes recover after a server restart (#2746).** A stale CSRF token
+  triggers a shared refresh and an explicit retry message across JSON, streaming,
+  upload, Context Gateway, wiki and settings requests. Writes are never replayed
+  automatically; Host/Origin and privacy/consent refusals retain their handling.
+
 - **Files under `.aws/` and `.gnupg/` are no longer indexed (#2734).** The two
   secret-store directories were excluded only by the recursive directory walk,
   and only when spelled exactly in lower case. The file watcher, single-file

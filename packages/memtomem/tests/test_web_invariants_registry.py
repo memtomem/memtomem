@@ -1574,12 +1574,10 @@ def _classify_site(path: Path, window: str, start: int) -> tuple[str, str | None
 
 
 def test_spa_api_fetch_threads_csrf_token() -> None:
-    """Every SPA ``/api/...`` fetch is either a safe-method read or
-    threads the CSRF token via the local-binding convention.
+    """Raw API fetches must be safe reads; csrfFetch owns unsafe requests.
 
-    Shape-specific failure verdicts make it obvious what to change:
-    ``method-not-inferable``, ``inline-literal-missing-csrf``,
-    ``no-headers-on-unsafe-fetch``, ``headers-var-without-csrf-binding``.
+    Combined with the centralized header/bootstrap guard below, legacy
+    header-threading shapes cannot bypass restart recovery.
     """
     sites = _iter_api_fetch_sites()
     assert sites, "static/*.js sweep found no /api/... fetch sites"
@@ -1594,16 +1592,8 @@ def test_spa_api_fetch_threads_csrf_token() -> None:
 
     if failures:
         pytest.fail(
-            "Unsafe /api fetch() sites without CSRF threading.\n\n"
-            "Safe shapes (one must apply):\n"
-            "  A. Inline literal: `headers: { ..., 'X-Memtomem-CSRF': csrf }`.\n"
-            "  B. Variable threading with a local binding:\n"
-            "       const csrf = await ensureCsrfToken();\n"
-            "       const headers = csrf\n"
-            "         ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }\n"
-            "         : { 'Content-Type': 'application/json' };\n"
-            "       fetch(URL, { method: 'POST', headers });\n"
-            "  C. Safe-method (GET/HEAD/OPTIONS) — no threading required.\n\n"
+            "Unsafe /api fetch() sites must use csrfFetch().\n"
+            "Safe-method (GET/HEAD/OPTIONS) fetch() needs no token.\n\n"
             "Offending sites:\n  - " + "\n  - ".join(failures)
         )
 
@@ -1634,3 +1624,20 @@ def test_context_gateway_fragment_list_matches_disk_and_index_html() -> None:
         f"slice depends on). index.html={tag_order} "
         f"tuple={list(CTX_GATEWAY_JS_FILES)}"
     )
+
+
+def test_csrf_headers_and_bootstrap_are_centralized() -> None:
+    """Direct callers must not bypass rotation recovery with their own token."""
+    app = STATIC_DIR / "app.js"
+    source = app.read_text()
+    start = source.index("async function ensureCsrfToken()")
+    end = source.index("// Trust-boundary redaction guard", start)
+    assert "X-Memtomem-CSRF" in source[start:end]
+    for path in STATIC_DIR.rglob("*.js"):
+        if any(part in _STATIC_SKIP_DIRS for part in path.parts):
+            continue
+        text = path.read_text()
+        if path == app:
+            text = text[:start] + text[end:]
+        assert "X-Memtomem-CSRF" not in text, path
+        assert not re.search(r"\bensureCsrfToken\s*\(", text), path

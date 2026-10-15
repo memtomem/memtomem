@@ -48,7 +48,7 @@ from urllib.parse import urlparse
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 logger = logging.getLogger(__name__)
 
@@ -164,11 +164,13 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
 
         enforce = bool(getattr(request.app.state, "csrf_enforce", False))
         if would_block and enforce:
-            return Response(
-                content='{"detail":"CSRF / origin / host check failed"}',
-                status_code=403,
-                media_type="application/json",
-            )
+            detail = {"detail": "CSRF / origin / host check failed"}
+            # Only a token refusal after the browser-origin boundary passes
+            # permits client recovery. The handler has not run; Host/Origin
+            # failures and observe-only requests never carry this signal.
+            if token_required and not token_ok and origin_ok and host_ok:
+                detail["code"] = "csrf_token_mismatch"
+            return JSONResponse(content=detail, status_code=403)
 
         return await call_next(request)
 

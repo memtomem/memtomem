@@ -8,7 +8,7 @@
  * their globals rather than re-implementing them:
  *
  *   app.js            — t, escapeHtml, panelLoading, emptyState, showToast,
- *                       showConfirm, ensureCsrfToken, btnLoading
+ *                       showConfirm, csrfFetch, btnLoading
  *   context-gateway.js — _ctxFetchProjects, _ctxProjectsCache,
  *                       _ctxActiveScopeId, _ctxTargetScope, _CTX_ACTIVE_SCOPE_KEY,
  *                       _ctxScopeIsServerCwd, _ctxScopeIsActive,
@@ -1137,12 +1137,9 @@ function _ctxPortalSetActive(scopeId) {
 async function _ctxPortalSaveLabel(scope, rawValue) {
   const value = (rawValue || '').trim();
   try {
-    const csrf = await ensureCsrfToken();
-    const r = await fetch(`/api/context/known-projects/${encodeURIComponent(scope.scope_id)}`, {
+    const r = await csrfFetch(`/api/context/known-projects/${encodeURIComponent(scope.scope_id)}`, {
       method: 'PATCH',
-      headers: csrf
-        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-        : { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label: value }),
     });
     if (!r.ok) {
@@ -1157,7 +1154,7 @@ async function _ctxPortalSaveLabel(scope, rawValue) {
     _ctxPortalEditingId = null;
     await loadCtxProjects();
   } catch (err) {
-    showToast(t('toast.request_failed', { error: err.message }), 'error');
+    showToast(err.name === 'CsrfRecoveryError' ? err.message : t('toast.request_failed'), 'error');
   }
 }
 
@@ -1171,10 +1168,9 @@ async function _ctxPortalUnregister(scope) {
   });
   if (!ok) return;
   try {
-    const csrf = await ensureCsrfToken();
-    const r = await fetch(`/api/context/known-projects/${encodeURIComponent(scope.scope_id)}`, {
+    const r = await csrfFetch(`/api/context/known-projects/${encodeURIComponent(scope.scope_id)}`, {
       method: 'DELETE',
-      headers: csrf ? { 'X-Memtomem-CSRF': csrf } : {},
+      headers: {},
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
@@ -1195,12 +1191,9 @@ async function _ctxPortalUnregister(scope) {
 async function _ctxPortalEnroll(scope) {
   if (!scope.root) return; // _ctxPortalCanEnroll already excludes missing roots
   try {
-    const csrf = await ensureCsrfToken();
-    const r = await fetch('/api/context/known-projects', {
+    const r = await csrfFetch('/api/context/known-projects', {
       method: 'POST',
-      headers: csrf
-        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-        : { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ root: scope.root }),
     });
     if (!r.ok) {
@@ -1211,7 +1204,7 @@ async function _ctxPortalEnroll(scope) {
     showToast(t('settings.ctx.portal_enroll_success'));
     await loadCtxProjects();
   } catch (err) {
-    showToast(t('toast.request_failed', { error: err.message }), 'error');
+    showToast(err.name === 'CsrfRecoveryError' ? err.message : t('toast.request_failed'), 'error');
   }
 }
 
@@ -1222,12 +1215,9 @@ async function _ctxPortalEnroll(scope) {
 async function _ctxPortalToggleEnabled(scope) {
   const newEnabled = _ctxPortalIsPaused(scope);
   try {
-    const csrf = await ensureCsrfToken();
-    const r = await fetch(`/api/context/known-projects/${encodeURIComponent(scope.scope_id)}`, {
+    const r = await csrfFetch(`/api/context/known-projects/${encodeURIComponent(scope.scope_id)}`, {
       method: 'PATCH',
-      headers: csrf
-        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-        : { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: newEnabled }),
     });
     if (!r.ok) {
@@ -1238,7 +1228,7 @@ async function _ctxPortalToggleEnabled(scope) {
     showToast(t(newEnabled ? 'settings.ctx.portal_resume_success' : 'settings.ctx.portal_pause_success'));
     await loadCtxProjects();
   } catch (err) {
-    showToast(t('toast.request_failed', { error: err.message }), 'error');
+    showToast(err.name === 'CsrfRecoveryError' ? err.message : t('toast.request_failed'), 'error');
   }
 }
 

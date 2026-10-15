@@ -1,4 +1,6 @@
 {
+  "error.csrf_refreshed": "The server session changed. Your request was not applied. The connection has been refreshed; please retry.",
+  "error.csrf_refresh_failed": "The server session changed and could not be refreshed. Your request was not applied. Keep your input and try again, or copy it before reloading the page.",
   "nav.home": "Home",
   "nav.search": "Search",
   "nav.sources": "Sources",

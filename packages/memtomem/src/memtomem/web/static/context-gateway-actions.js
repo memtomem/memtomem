@@ -76,11 +76,8 @@ async function _ctxRunSync(type, { btn, canonicalCount, noFanout, onComplete }) 
     if (!ok) return;
     btnLoading(btn, true);
     try {
-      const csrf = await ensureCsrfToken();
-      const headers = csrf
-        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-        : { 'Content-Type': 'application/json' };
-      const syncOnce = (extra) => fetch(
+      const headers = { 'Content-Type': 'application/json' };
+      const syncOnce = (extra) => csrfFetch(
         _ctxWithTargetScope(`/api/context/${type}/sync`, pinnedScopeOpts),
         {
           method: 'POST',
@@ -221,13 +218,11 @@ async function _ctxRunImport(type, { btn, onComplete }) {
     btnLoading(btn, true);
     let preview = null;
     try {
-      const previewCsrf = await ensureCsrfToken();
-      const previewHeaders = previewCsrf
-        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': previewCsrf }
-        : { 'Content-Type': 'application/json' };
+
+      const previewHeaders = { 'Content-Type': 'application/json' };
       // ``_ctxWithTargetScope`` appends scope/tier with ``&`` since the URL
       // already carries ``?dry_run=1`` (it branches on ``url.includes('?')``).
-      const pr = await fetch(
+      const pr = await csrfFetch(
         _ctxWithTargetScope(`/api/context/${type}/import?dry_run=1`, pinnedScopeOpts),
         { method: 'POST', headers: previewHeaders, body: JSON.stringify({ overwrite: false }) },
       );
@@ -295,13 +290,10 @@ async function _ctxRunImport(type, { btn, onComplete }) {
     const overwrite = !!(result.extras && result.extras.overwrite);
     btnLoading(btn, true);
     try {
-      const csrf = await ensureCsrfToken();
-      const headers = csrf
-        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-        : { 'Content-Type': 'application/json' };
+      const headers = { 'Content-Type': 'application/json' };
       // Same click-time (project, tier) snapshot as the preview so the write
       // can't land somewhere the preview/label didn't describe.
-      const importOnce = (extra) => fetch(
+      const importOnce = (extra) => csrfFetch(
         _ctxWithTargetScope(`/api/context/${type}/import`, pinnedScopeOpts),
         {
           method: 'POST',
@@ -447,11 +439,8 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
       const submitBtn = form.querySelector('.ctx-create-submit');
       btnLoading(submitBtn, true);
       try {
-        const csrf = await ensureCsrfToken();
-        const headers = csrf
-          ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-          : { 'Content-Type': 'application/json' };
-        const createOnce = (extra) => fetch(_ctxWithTargetScope(`/api/context/${type}`), {
+        const headers = { 'Content-Type': 'application/json' };
+        const createOnce = (extra) => csrfFetch(_ctxWithTargetScope(`/api/context/${type}`), {
           method: 'POST',
           headers,
           body: JSON.stringify({ name: nameInput, content, ...extra }),
@@ -504,11 +493,8 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
       if (!root) return;
       btnLoading(btn, true);
       try {
-        const csrf = await ensureCsrfToken();
-        const headers = csrf
-          ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-          : { 'Content-Type': 'application/json' };
-        const r = await fetch('/api/context/known-projects', {
+        const headers = { 'Content-Type': 'application/json' };
+        const r = await csrfFetch('/api/context/known-projects', {
           method: 'POST',
           headers,
           body: JSON.stringify({ root }),
@@ -562,7 +548,7 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
           loadCtxList(type);
         }
       } catch (err) {
-        showToast(t('toast.request_failed', { error: err.message }), 'error');
+        showToast(err.name === 'CsrfRecoveryError' ? err.message : t('toast.request_failed'), 'error');
       } finally {
         btnLoading(btn, false);
       }

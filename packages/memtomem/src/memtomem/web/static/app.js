@@ -334,15 +334,9 @@ _applyAppSimpleMode();
 // Utilities
 // ---------------------------------------------------------------------------
 
-// CSRF token bootstrap (RFC #787 stage 1). Server generates a per-process
-// token at create_app() and exposes it via GET /api/session. The api()
-// helper (and the FormData uploaders that bypass it — see ``ensureCsrfToken``
-// callsites) thread the token through every unsafe-method request via
-// ``X-Memtomem-CSRF``. Server-side enforcement is default-on: a missing or
-// invalid token on an unsafe method is rejected (set
-// ``MEMTOMEM_WEB__CSRF_ENFORCE=0`` to fall back to observe-only logging). The
-// client threads the token unconditionally, so the server-side posture stays a
-// toggle rather than a coordinated client release.
+// All unsafe SPA requests go through csrfFetch, including direct fetch
+// consumers (wiki, Context Gateway, settings), SSE and multipart uploads.
+// Tokens are per server process. Never replay a mutation after a refusal.
 let _csrfToken = null;
 let _csrfTokenPromise = null;
 const _UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -350,20 +344,52 @@ const _UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 async function ensureCsrfToken() {
   if (_csrfToken) return _csrfToken;
   if (_csrfTokenPromise) return _csrfTokenPromise;
-  _csrfTokenPromise = (async () => {
+  const pending = (async () => {
     try {
-      const res = await fetch(API + '/api/session', { method: 'GET' });
+      const res = await fetch(API + '/api/session', {
+        method: 'GET', signal: AbortSignal.timeout(10_000),
+      });
       if (!res.ok) return '';
       const data = await res.json();
-      _csrfToken = data?.csrf || '';
+      _csrfToken = typeof data?.csrf === 'string' ? data.csrf : '';
     } catch (_) {
       _csrfToken = '';
-    } finally {
-      _csrfTokenPromise = null;
     }
     return _csrfToken;
   })();
-  return _csrfTokenPromise;
+  _csrfTokenPromise = pending;
+  try { return await pending; }
+  finally { if (_csrfTokenPromise === pending) _csrfTokenPromise = null; }
+}
+
+async function csrfFetch(url, options = {}) {
+  const unsafe = _UNSAFE_METHODS.has((options.method || 'GET').toUpperCase());
+  let token = '';
+  if (unsafe) {
+    token = await ensureCsrfToken();
+    // SPA callers use plain header objects; preserve JSON/Accept headers and
+    // let the browser set multipart Content-Type (including its boundary).
+    options = { ...options, headers: { ...options.headers } };
+    if (token) options.headers['X-Memtomem-CSRF'] = token;
+  }
+  const res = await fetch(url, options);
+  if (!unsafe || res.status !== 403) return res;
+  // Inspect a clone: other refusals retain their original response body for
+  // the caller's privacy/consent/permission handling.
+  if (typeof res.clone !== 'function') return res;
+  const body = await res.clone().json().catch(() => null);
+  if (body?.code !== 'csrf_token_mismatch') return res;
+  options.signal?.throwIfAborted();
+  // A late refusal of token A must not invalidate token B already obtained
+  // by another request. Concurrent refusals join the same bootstrap promise.
+  if (_csrfToken === token) _csrfToken = null;
+  const fresh = await ensureCsrfToken();
+  options.signal?.throwIfAborted();
+  const err = new Error(t(fresh ? 'error.csrf_refreshed' : 'error.csrf_refresh_failed'));
+  err.name = 'CsrfRecoveryError';
+  err.status = 403;
+  err.tokenRefreshed = Boolean(fresh);
+  throw err;
 }
 
 // Trust-boundary redaction guard (PR #784). Server mutating routes return
@@ -421,14 +447,10 @@ function formatProjectTierBlockedToast(err) {
 async function api(method, path, body, opts = {}) {
   if (typeof opts !== 'object' || Array.isArray(opts)) opts = {};
   const fetchOpts = { method, headers: { 'Content-Type': 'application/json' } };
-  if (_UNSAFE_METHODS.has(method.toUpperCase())) {
-    const tok = await ensureCsrfToken();
-    if (tok) fetchOpts.headers['X-Memtomem-CSRF'] = tok;
-  }
   if (body !== undefined) fetchOpts.body = JSON.stringify(body);
   if (opts.signal) fetchOpts.signal = opts.signal;
   else fetchOpts.signal = AbortSignal.timeout(opts.timeout ?? 30_000);
-  const res = await fetch(API + path, fetchOpts);
+  const res = await csrfFetch(API + path, fetchOpts);
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     if (
@@ -476,11 +498,8 @@ async function api(method, path, body, opts = {}) {
 // CSRF-protected POST SSE transport. Fetch is required because EventSource
 // cannot carry either the CSRF header or the IndexRequest JSON body.
 async function fetchIndexStream(body, { signal, onEvent } = {}) {
-  const csrf = await ensureCsrfToken();
-  const headers = csrf
-    ? { 'Content-Type': 'application/json', 'Accept': 'text/event-stream', 'X-Memtomem-CSRF': csrf }
-    : { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' };
-  const res = await fetch(API + '/api/index/stream', {
+  const headers = { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' };
+  const res = await csrfFetch(API + '/api/index/stream', {
     method: 'POST', headers, body: JSON.stringify(body), signal,
   });
   if (!res.ok) {
@@ -790,10 +809,9 @@ async function _runChunkSaveConversation(chunkId, body, opts) {
 const _UPLOAD_REDACTION_BLOCKED_RE = /^redaction_blocked \(hits=(\d+)\)$/;
 async function uploadFilesWithRedactionRetry(formData) {
   async function _post(form, forceUnsafe) {
-    const csrf = await ensureCsrfToken();
-    const headers = csrf ? { 'X-Memtomem-CSRF': csrf } : {};
+    const headers = {};
     const url = forceUnsafe ? '/api/upload?force_unsafe=true' : '/api/upload';
-    const res = await fetch(url, { method: 'POST', body: form, headers });
+    const res = await csrfFetch(url, { method: 'POST', body: form, headers });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       const detail = err.detail;

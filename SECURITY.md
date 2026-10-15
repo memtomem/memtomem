@@ -52,12 +52,19 @@ skipped:
 3. **CSRF token** — `X-Memtomem-CSRF` must match the per-process token in
    `app.state.csrf_token`. Required for **unsafe** methods (POST / PUT /
    PATCH / DELETE) only. The SPA fetches it via `GET /api/session` lazily
-   (cached for the page lifetime); the token rotates on every restart and
+   (cached until a classified token mismatch); the token rotates on every restart and
    is never persisted. `GET /api/session` is token-exempt but still
    Host/Origin-checked.
 
 Failures return `403` with a JSON `{"detail": "..."}` body and a
 structured `web.csrf.observe` log record for after-the-fact auditing.
+Only an unsafe request with a mismatched token **and passing Host/Origin
+checks** adds `"code": "csrf_token_mismatch"`; the route handler has not run.
+The SPA then refreshes its token through the guarded `/api/session` endpoint
+and asks the user to retry, without replaying the write or clearing the input.
+Concurrent refusals share one token fetch. If refresh fails, keep/copy any
+unsaved input before reloading the tab. Other 403 responses do not trigger
+this recovery and retain their own privacy, consent, or permission handling.
 
 **Operator surface:**
 
