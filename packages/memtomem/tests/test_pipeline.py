@@ -1227,6 +1227,60 @@ class TestZeroWeightExcludesLeg:
         assert {r.chunk.content for r in results} == {"d0"}
 
 
+class TestCacheFollowsRuntimeDegradation:
+    """#2620: the storage can enter embedding-mismatch degraded mode while a
+    result cache is warm. An entry is served only while dense suppression is
+    what it was when the entry was stored."""
+
+    _make_result = staticmethod(TestRerankCandidatePool._make_result)
+    _make_pipeline = TestScoreScale._make_pipeline
+
+    def _pipeline(self):
+        bm25_in = [self._make_result("b0", rank=1)]
+        dense_in = [self._make_result("d0", rank=1)]
+        pipeline = self._make_pipeline(bm25_in, dense_in, enable_dense=True)
+        pipeline._storage.embedding_mismatch = None
+        return pipeline
+
+    @pytest.mark.asyncio
+    async def test_entering_and_leaving_degraded_mode_misses_the_cache(self):
+        pipeline = self._pipeline()
+        dense = pipeline._storage.dense_search
+
+        _, stats = await pipeline.search("q", top_k=5)
+        assert (stats.cache_hit, stats.dense_suppressed_mismatch) == (False, False)
+        _, stats = await pipeline.search("q", top_k=5)
+        assert stats.cache_hit is True
+        assert dense.await_count == 1
+
+        pipeline._storage.embedding_mismatch = {"policy_mismatch": True}
+        results, stats = await pipeline.search("q", top_k=5)
+        assert (stats.cache_hit, stats.dense_suppressed_mismatch) == (False, True)
+        assert {r.chunk.content for r in results} == {"b0"}
+        _, stats = await pipeline.search("q", top_k=5)
+        assert (stats.cache_hit, stats.dense_suppressed_mismatch) == (True, True)
+        assert dense.await_count == 1
+
+        pipeline._storage.embedding_mismatch = None
+        results, stats = await pipeline.search("q", top_k=5)
+        assert (stats.cache_hit, stats.dense_suppressed_mismatch) == (False, False)
+        assert {r.chunk.content for r in results} == {"b0", "d0"}
+        assert dense.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("weights,enable_dense", [([1.0, 0.0], True), (None, False)])
+    async def test_no_dense_leg_keeps_its_cache_entry(self, weights, enable_dense):
+        """Without a dense leg nothing is suppressed, so the entry stays valid."""
+        pipeline = self._pipeline()
+        pipeline._config.enable_dense = enable_dense
+
+        await pipeline.search("q", top_k=5, rrf_weights=weights)
+        pipeline._storage.embedding_mismatch = {"policy_mismatch": True}
+        _, stats = await pipeline.search("q", top_k=5, rrf_weights=weights)
+
+        assert (stats.cache_hit, stats.dense_suppressed_mismatch) == (True, False)
+
+
 class CloseAwareFakeReranker:
     """Counts rerank/close calls and refuses to rerank after close (#1777).
 

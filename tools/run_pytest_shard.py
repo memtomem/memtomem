@@ -149,14 +149,63 @@ def durations_from_junit(xml_path: Path, repo_root: Path) -> dict[str, float]:
     return dict(totals)
 
 
+def durations_from_reports(xml_paths: list[Path], repo_root: Path) -> dict[str, float]:
+    """Merge several JUnit reports, one per shard, into one per-file map.
+
+    The map is rewritten whole, so recording the shards one at a time would
+    keep only the last shard's files. Reports must cover disjoint files: the
+    same file in two reports means an overlapping pair, such as two attempts
+    of one shard, and adding them would double that file's cost. A report that
+    resolves no file at all is almost certainly the wrong file. Both refuse
+    rather than write a map that looks plausible.
+    """
+    merged: dict[str, float] = {}
+    for xml_path in xml_paths:
+        totals = durations_from_junit(xml_path, repo_root)
+        if not totals:
+            raise ValueError(f"no test files resolved from {xml_path}")
+        overlap = sorted(merged.keys() & totals.keys())
+        if overlap:
+            raise ValueError(
+                f"{xml_path} repeats {len(overlap)} file(s) already in an earlier report, "
+                f"first {overlap[0]}; pass one report per shard"
+            )
+        merged.update(totals)
+    return merged
+
+
+def durations_from_runs(runs: list[list[Path]], repo_root: Path) -> dict[str, float]:
+    """Average per-file costs over several CI runs, each given as its shard reports.
+
+    One run's timings balance that run well and the next one poorly: on Windows
+    a single file can take 28 s in one run and 82 s in the next, so a map from
+    one run carries that run's noise into every later partition. Each file's
+    cost is the mean over the runs that recorded it. Within a run the reports
+    must still be disjoint, as ``durations_from_reports`` enforces.
+    """
+    per_run = [durations_from_reports(reports, repo_root) for reports in runs]
+    names = set().union(*per_run)
+    return {
+        name: sum(run[name] for run in per_run if name in run)
+        / sum(1 for run in per_run if name in run)
+        for name in names
+    }
+
+
 def write_durations(totals: dict[str, float], path: Path, *, platform: str) -> None:
     """Persist the per-file cost map, rounded and key-sorted for a clean diff."""
     payload = {
         "note": (
             "Per-file pytest cost in seconds, used by run_pytest_shard.py to balance "
-            "the Windows shards. Regenerate with: "
-            "uv run pytest -m 'not ollama and not llm' --junit-xml=junit.xml && "
-            "uv run python tools/run_pytest_shard.py --record-durations junit.xml. "
+            "the Windows shards. Regenerate from the junit-windows-shard-* artifacts "
+            "of several CI runs: download each with gh run download <run-id> --dir "
+            "<run>, then pass one --record-durations per run listing every shard's "
+            "report, e.g. uv run python tools/run_pytest_shard.py --record-durations "
+            "<run>/junit-windows-shard-0/junit-windows-shard-0.xml "
+            "<run>/junit-windows-shard-1/junit-windows-shard-1.xml "
+            "<run>/junit-windows-shard-2/junit-windows-shard-2.xml "
+            "--record-durations <next run>/... --platform win32. "
+            "Each file's cost is its mean over the runs. "
             "Stale or missing entries only cost balance, never correctness."
         ),
         "platform": platform,
@@ -172,8 +221,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--record-durations",
         type=Path,
+        nargs="+",
+        action="append",
         metavar="JUNIT_XML",
-        help="Rewrite the cost map from a JUnit XML report and exit.",
+        help=(
+            "Rewrite the cost map from one CI run's JUnit XML reports, one per shard, "
+            "and exit. Repeat the flag once per run to average several runs."
+        ),
+    )
+    parser.add_argument(
+        "--platform",
+        default=sys.platform,
+        help="Platform the reports were recorded on (default: this machine's).",
     )
     args, pytest_args = parser.parse_known_args(argv)
     if pytest_args[:1] == ["--"]:
@@ -183,10 +242,11 @@ def main(argv: list[str] | None = None) -> int:
     durations_path = Path(__file__).resolve().parent / DURATIONS_FILE
 
     if args.record_durations is not None:
-        totals = durations_from_junit(args.record_durations, repo_root)
-        if not totals:
-            parser.error(f"no test files resolved from {args.record_durations}")
-        write_durations(totals, durations_path, platform=sys.platform)
+        try:
+            totals = durations_from_runs(args.record_durations, repo_root)
+        except ValueError as exc:
+            parser.error(str(exc))
+        write_durations(totals, durations_path, platform=args.platform)
         print(f"recorded {len(totals)} file durations to {durations_path}")
         return 0
 

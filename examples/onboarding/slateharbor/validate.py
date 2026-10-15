@@ -15,7 +15,7 @@ import tomllib
 
 import yaml
 
-from generate import build_project, manifest
+from generate import build_project, manifest, project_source_files
 from lab import Lab, ROOT, verify_sources
 
 DOMAINS = ("auth", "billing", "notifications", "jobs", "files", "reports")
@@ -38,8 +38,7 @@ def static_checks():
     expected = build_project()
     actual = {
         p.relative_to(ROOT / "project").as_posix(): p.read_text(encoding="utf-8")
-        for p in (ROOT / "project").rglob("*")
-        if p.is_file() and "__pycache__" not in p.parts
+        for p in project_source_files(ROOT / "project")
     }
     assert actual == expected, "Regeneration drift or unexpected source files"
     assert verify_sources() == manifest(expected)

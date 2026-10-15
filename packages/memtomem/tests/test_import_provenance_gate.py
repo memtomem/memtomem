@@ -497,3 +497,37 @@ async def test_self_export_unicode_content_roundtrips(tmp_path):
     dst = await _make_storage(tmp_path, "dst")
     stats = await import_chunks(dst, _FakeEmbedder(), bundle_path, provenance_key_path=key_path)
     assert stats.imported_chunks == 1
+
+
+async def test_a_moved_embedding_policy_surfaces_and_commits_nothing(tmp_path):
+    """#2620: import embeds before its transaction, so another process can
+    restamp the policy in between. The refusal must reach the caller (MCP
+    reports it through ``tool_handler``), not become a silent failed count."""
+    import sqlite3
+
+    from memtomem.errors import EmbeddingPolicyChangedError
+
+    cfg = StorageConfig()
+    cfg.sqlite_path = tmp_path / "moved.db"
+    storage = SqliteBackend(
+        cfg,
+        dimension=8,
+        embedding_provider="onnx",
+        embedding_model="fake-test",
+        embedding_policy_fingerprint="policy-at-open",
+    )
+    await storage.initialize()
+    try:
+        with sqlite3.connect(cfg.sqlite_path) as db:
+            db.execute(
+                "UPDATE _memtomem_meta SET value='moved' WHERE key='embedding_policy_fingerprint'"
+            )
+        bundle = _write_bundle(tmp_path / "b.json", [_record(_CLEAN)])
+
+        with pytest.raises(EmbeddingPolicyChangedError):
+            await import_chunks(storage, _FakeEmbedder(), bundle)
+
+        with sqlite3.connect(cfg.sqlite_path) as db:
+            assert db.execute("SELECT count(*) FROM chunks").fetchone()[0] == 0
+    finally:
+        await storage.close()

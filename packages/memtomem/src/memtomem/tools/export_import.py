@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, get_args
 from uuid import UUID, uuid4
 
-from memtomem.errors import EmbeddingError
+from memtomem.errors import EmbeddingError, EmbeddingPolicyChangedError
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata, ChunkType
 from memtomem.storage.sqlite_visibility import source_hidden
 from memtomem.tools.entity_sync import sync_entities_for_chunks
@@ -572,6 +572,10 @@ async def import_chunks(
             # "imported" counts only genuinely new rows; updates are tracked
             # separately so callers can distinguish merge from overwrite.
             imported = len(to_upsert) - updated
+        except EmbeddingPolicyChangedError:
+            # Not a per-import failure: the store left this process's policy,
+            # and the caller has to see the recovery the error names.
+            raise
         except Exception as exc:
             logger.error("Upsert failed during import: %s", exc)
             failed = len(to_upsert)

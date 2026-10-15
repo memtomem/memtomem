@@ -285,7 +285,7 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     # ``indexing.memory_dirs``, #1768) is an operational conflict, not an
     # internal defect — surface the field-naming message with 409, matching
     # ``deps.require_configured``, instead of the opaque generic 500.
-    from memtomem.errors import ConfigError
+    from memtomem.errors import ConfigError, Mem2MemError
 
     @app.exception_handler(ConfigError)
     async def config_error_handler(request: Request, exc: ConfigError) -> JSONResponse:
@@ -310,6 +310,8 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     @app.exception_handler(Exception)
     async def generic_error_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.error("Unhandled exception: %s", exc, exc_info=True)
+        if isinstance(exc, Mem2MemError) and exc.public_message:
+            return JSONResponse(status_code=500, content={"detail": exc.public_message})
         return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
     app.add_middleware(

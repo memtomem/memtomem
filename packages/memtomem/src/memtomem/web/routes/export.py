@@ -7,6 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 
+from memtomem.errors import EmbeddingPolicyChangedError
 from memtomem.web.deps import get_config, get_embedder, get_storage
 from memtomem.web.schemas import ExportStatsResponse, ImportResponse
 
@@ -130,6 +131,11 @@ async def import_memories(
                 "blocked_records": exc.blocked_records,
                 "surface": "web_api_import",
             },
+        ) from exc
+    except EmbeddingPolicyChangedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"detail": "embedding_policy_changed", "message": exc.public_message},
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
