@@ -271,13 +271,21 @@ async function _handleHooksRuleAction(action, key, btn) {
 
     if (result.status === 'ok') {
       if (action === 'promote' && entry._deleteOriginalAfterPromote) {
-        const deleted = await _deleteOriginalAfterPromote(entry);
-        if (deleted.status === 'ok') {
-          showToast(t('settings.hooks.promote_delete_success'));
-        } else {
-          showToast(deleted.reason || t('settings.hooks.promote_delete_partial'), 'warning');
+        let deleteError = null;
+        try {
+          const deleted = await _deleteOriginalAfterPromote(entry);
+          if (deleted.status === 'ok') {
+            showToast(t('settings.hooks.promote_delete_success'));
+          } else {
+            showToast(deleted.reason || t('settings.hooks.promote_delete_partial'), 'warning');
+          }
+        } catch (err) {
+          // Promote has already succeeded, even if the read/delete step fails.
+          showToast(t('settings.hooks.promote_delete_partial'), 'warning');
+          deleteError = err;
         }
-        loadHooksSync();
+        await loadHooksSync();
+        if (deleteError) showToast(deleteError.message || t('toast.request_failed'), 'error');
         return;
       }
       showToast(

@@ -151,3 +151,36 @@ def test_direct_click_handlers_surface_recovery(page, mm_web_url, action):
         expect(page.locator(".hooks-sync-conflict")).to_have_count(1)
     assert len(writes) == 1
     assert errors == []
+
+
+def test_single_promote_preserves_partial_success_after_delete_refusal(page, mm_web_url):
+    install_default_stubs(page)
+    writes = []
+    page.route("**/api/session", lambda route: route.fulfill(json={"csrf": "fresh"}))
+
+    def mutate(route):
+        writes.append(route.request.url)
+        refused = "/delete" in route.request.url
+        route.fulfill(
+            status=403 if refused else 200,
+            json={"code": "csrf_token_mismatch"} if refused else {"status": "ok"},
+        )
+
+    page.route("**/api/context/settings/rules/**", mutate)
+    goto_after_i18n_init(page, mm_web_url, lang="en")
+    result = page.evaluate(
+        """async () => {
+            _hooksRuleRegistry = [{event:'Stop', _bucket:'target-only'}];
+            _confirmHooksPromote = async () => ({ok:true, deleteOriginal:true});
+            _deleteOriginalAfterPromote = entry => _hooksPostRuleAction('delete', entry, false);
+            let refreshed = 0;
+            loadHooksSync = async () => { refreshed++; };
+            const btn = document.createElement('button');
+            await _handleHooksRuleAction('promote', '0', btn);
+            return {refreshed, disabled:btn.disabled};
+        }"""
+    )
+    expect(page.locator(".toast").filter(has_text="Saved to memtomem")).to_be_visible()
+    expect(page.locator(".toast").filter(has_text="please retry")).to_be_visible()
+    assert result == {"refreshed": 1, "disabled": False}
+    assert len(writes) == 2

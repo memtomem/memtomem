@@ -231,7 +231,8 @@ async function _ctxRunImport(type, { btn, onComplete }) {
         // to the destination-only confirm rather than a misleading "0 / 0".
         if (Array.isArray(data?.imported) && Array.isArray(data?.skipped)) preview = data;
       }
-    } catch {
+    } catch (err) {
+      if (err?.name === 'CsrfRecoveryError') showToast(err.message, 'warning');
       /* best-effort preview — fall through to the destination-only confirm */
     } finally {
       btnLoading(btn, false);

@@ -1347,10 +1347,37 @@ def _scan_fetch_args(window: str) -> tuple[str, str]:
     return (window[first_arg_start:], "identifier")
 
 
-def _is_api_fetch(window: str) -> bool:
-    """Does this fetch call target ``/api/...``?"""
-    first_arg, _ = _scan_fetch_args(window)
-    return "/api/" in first_arg
+def _fetch_call_text(text: str, start: int) -> str:
+    """Bound a call so a later request's method cannot classify this one."""
+    depth = 0
+    quote = None
+    i = start
+    while i < len(text):
+        char = text[i]
+        if quote:
+            if char == "\\":
+                i += 2
+                continue
+            if char == quote:
+                quote = None
+        elif text.startswith("//", i):
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+            continue
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = len(text) if end < 0 else end + 2
+            continue
+        elif char in ("'", '"', "`"):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+        i += 1
+    return text[start:]
 
 
 def _extract_methods(window: str) -> list[str]:
@@ -1359,9 +1386,8 @@ def _extract_methods(window: str) -> list[str]:
     return [m.group(1).upper() for m in _METHOD_LITERAL_RE.finditer(window)]
 
 
-def _iter_api_fetch_sites() -> list[tuple[Path, int, str, int]]:
-    """Return ``(file, line, window, start_offset)`` for each ``/api/...``
-    fetch call (safe or unsafe)."""
+def _iter_raw_fetch_sites() -> list[tuple[Path, int, str, int]]:
+    """Inspect raw fetches regardless of whether the URL is literal or computed."""
     sites: list[tuple[Path, int, str, int]] = []
     for path in sorted(STATIC_DIR.rglob("*.js")):
         if any(part in _STATIC_SKIP_DIRS for part in path.parts):
@@ -1369,9 +1395,13 @@ def _iter_api_fetch_sites() -> list[tuple[Path, int, str, int]]:
         text = path.read_text(encoding="utf-8")
         for line_match in _FETCH_LINE_RE.finditer(text):
             start = line_match.start()
-            window = text[start : start + 800]
-            if not _is_api_fetch(window):
-                continue
+            window = _fetch_call_text(text, start)
+            # The single transport call in csrfFetch is the only exemption.
+            if path.name == "app.js" and window == "fetch(url, options)":
+                helper_start = text.index("async function csrfFetch(")
+                helper_end = text.index("// Trust-boundary redaction guard", helper_start)
+                if helper_start < start < helper_end:
+                    continue
             line_no = text.count("\n", 0, start) + 1
             sites.append((path, line_no, window, start))
     return sites
@@ -1403,13 +1433,13 @@ def _classify_site(window: str) -> tuple[str, str | None]:
 
 
 def test_spa_api_fetch_threads_csrf_token() -> None:
-    """Raw API fetches must be safe reads; csrfFetch owns unsafe requests.
+    """Raw fetches must be safe reads; csrfFetch owns unsafe requests.
 
     Combined with the centralized header/bootstrap guard below, legacy
     header-threading shapes cannot bypass restart recovery.
     """
-    sites = _iter_api_fetch_sites()
-    assert sites, "static/*.js sweep found no /api/... fetch sites"
+    sites = _iter_raw_fetch_sites()
+    assert sites, "static/*.js sweep found no raw fetch sites"
 
     failures: list[str] = []
     for path, line_no, window, start in sites:
@@ -1485,3 +1515,21 @@ def test_raw_unsafe_fetch_cannot_bypass_recovery(options: str) -> None:
     verdict, reason = _classify_site(f"fetch('/api/write', {options})")
     assert verdict == "unsafe-raw-fetch"
     assert "csrfFetch()" in reason
+
+
+def test_fetch_sweep_checks_computed_urls_and_bounds_each_call(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "STATIC_DIR", tmp_path)
+    (tmp_path / "caller.js").write_text(
+        "fetch(readUrl);\n"
+        "fetch(scopedUrl, {method: 'POST', body: JSON.stringify({text: ')'})});\n"
+        "fetch(buildUrl(), {method: 'DELETE'});\n"
+        "fetch(url, options);\n"
+    )
+    sites = _iter_raw_fetch_sites()
+    assert len(sites) == 4
+    assert [_classify_site(window)[0] for _, _, window, _ in sites] == [
+        "pass",
+        "unsafe-raw-fetch",
+        "unsafe-raw-fetch",
+        "method-not-inferable",
+    ]

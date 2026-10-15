@@ -202,6 +202,54 @@ describe('shared recovery at direct caller boundaries', () => {
     }
   });
 
+  it.each(['csrf refusal', 'read failure'])('single promote reports saved state after deletion %s', async failure => {
+    ({ window } = await bootApp({ scripts: ['i18n.js', 'app.js', 'settings-hooks-watchdog.js'] }));
+    window.eval("_hooksRuleRegistry = [{event:'Stop', _bucket:'target-only'}]");
+    window._confirmHooksPromote = async () => ({ok:true, deleteOriginal:true});
+    const events = [], writes = [];
+    window.showToast = (text, tone) => events.push({text, tone});
+    window.loadHooksSync = async () => { events.push('reload'); };
+    window._deleteOriginalAfterPromote = async entry => {
+      if (failure === 'read failure') throw new Error('Read failed');
+      return window._hooksPostRuleAction('delete', entry, false);
+    };
+    window.fetch = async (url, opts = {}) => {
+      if (url === '/api/session') return response({csrf:'fresh'});
+      if (opts.method !== 'POST') return response({});
+      writes.push(url);
+      return url.includes('/delete') ? mismatch() : response({status:'ok'});
+    };
+    const btn = window.document.createElement('button');
+    await window._handleHooksRuleAction('promote', '0', btn);
+    expect(events).toEqual([
+      {text:window.t('settings.hooks.promote_delete_partial'), tone:'warning'},
+      'reload',
+      {text:failure === 'csrf refusal' ? window.t('error.csrf_refreshed') : 'Read failed', tone:'error'},
+    ]);
+    expect(writes).toHaveLength(failure === 'csrf refusal' ? 2 : 1);
+    expect(btn.disabled).toBe(false);
+  });
+
+  it('warns when import preview refreshes the token and still requires confirmation', async () => {
+    ({ window } = await bootApp({scripts:['i18n.js','app.js','context-gateway.js']}));
+    const toasts = [], writes = [], confirmations = [];
+    window.showToast = (text, tone) => toasts.push({text, tone});
+    window.showConfirm = async opts => { confirmations.push(opts); return false; };
+    window.fetch = async (url, opts = {}) => {
+      if (url === '/api/session') return response({csrf:'fresh'});
+      if (opts.method !== 'POST') return response({});
+      writes.push(url);
+      return mismatch();
+    };
+    const btn = window.document.createElement('button');
+    await window._ctxRunImport('skills', {btn, onComplete:() => { throw new Error('Unexpected import'); }});
+    expect(toasts).toContainEqual({text:window.t('error.csrf_refreshed'), tone:'warning'});
+    expect(confirmations).toHaveLength(1);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toContain('dry_run=1');
+    expect(btn.disabled).toBe(false);
+  });
+
   it('versioning buttons show recovery guidance instead of generic failure', async () => {
     ({ window } = await bootApp({ scripts: ['i18n.js', 'app.js', 'context-gateway.js'] }));
     const toasts = [];
