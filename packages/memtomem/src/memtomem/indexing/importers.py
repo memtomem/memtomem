@@ -145,6 +145,24 @@ def _refused_target(
     return refusal is not None
 
 
+def _unsafe_source(source_root: Path, resolved_root: Path, path: Path, rel: Path) -> bool:
+    """Whether a walked source file must not be read.
+
+    A file that is a symlink, sits under a symlinked directory, or resolves
+    outside the export root would import bytes from somewhere the caller did
+    not point at. These are the *sources*; a symlinked *target* is
+    ``_refused_target``'s, and the two are reported separately because the
+    directory to fix differs.
+    """
+    if any((source_root / Path(*rel.parts[: i + 1])).is_symlink() for i in range(len(rel.parts))):
+        return True
+    try:
+        path.resolve().relative_to(resolved_root)
+    except (OSError, ValueError):
+        return True
+    return False
+
+
 async def import_notion(
     export_path: Path,
     output_dir: Path,
@@ -156,6 +174,7 @@ async def import_notion(
     excluded_paths: list[str] | None = None,
     symlink_paths: list[str] | None = None,
     read_only_paths: list[str] | None = None,
+    source_symlink_paths: list[str] | None = None,
 ) -> list[Path]:
     """Import a Notion export (ZIP or directory) into markdown files.
 
@@ -170,6 +189,9 @@ async def import_notion(
             ``excluded_paths``, a symlinked target into ``symlink_paths`` and
             one under a read-only index root into ``read_only_paths``, before
             anything is written for that file.
+        source_symlink_paths: Collects source files that are not read
+            because they are symlinks, sit under a symlinked directory or
+            resolve outside the export root.
 
     Returns:
         List of imported file paths.
@@ -218,18 +240,9 @@ async def import_notion(
         export_root = export_path.resolve()
         for p in sorted(export_path.rglob("*.md")):
             rel = p.relative_to(export_path)
-            if p.is_symlink() or any(
-                (export_path / Path(*rel.parts[: i + 1])).is_symlink()
-                for i in range(len(rel.parts))
-            ):
-                if symlink_paths is not None:
-                    symlink_paths.append(rel.as_posix())
-                continue
-            try:
-                p.resolve().relative_to(export_root)
-            except (OSError, ValueError):
-                if symlink_paths is not None:
-                    symlink_paths.append(rel.as_posix())
+            if _unsafe_source(export_path, export_root, p, rel):
+                if source_symlink_paths is not None:
+                    source_symlink_paths.append(rel.as_posix())
                 continue
             sources.append((rel, p.name, p.read_text(encoding="utf-8", errors="replace")))
 
@@ -277,6 +290,7 @@ async def import_obsidian(
     excluded_paths: list[str] | None = None,
     symlink_paths: list[str] | None = None,
     read_only_paths: list[str] | None = None,
+    source_symlink_paths: list[str] | None = None,
 ) -> list[Path]:
     """Import an Obsidian vault into memtomem-compatible markdown.
 
@@ -294,6 +308,9 @@ async def import_obsidian(
             ``excluded_paths``, a symlinked target into ``symlink_paths`` and
             one under a read-only index root into ``read_only_paths``, before
             anything is written for that file.
+        source_symlink_paths: Collects source files that are not read
+            because they are symlinks, sit under a symlinked directory or
+            resolve outside the export root.
 
     Returns:
         List of imported file paths.
@@ -306,17 +323,9 @@ async def import_obsidian(
         rel = md_file.relative_to(vault_path)
         if str(rel).startswith(".obsidian"):
             continue
-        if md_file.is_symlink() or any(
-            (vault_path / Path(*rel.parts[: i + 1])).is_symlink() for i in range(len(rel.parts))
-        ):
-            if symlink_paths is not None:
-                symlink_paths.append(rel.as_posix())
-            continue
-        try:
-            md_file.resolve().relative_to(vault_root)
-        except (OSError, ValueError):
-            if symlink_paths is not None:
-                symlink_paths.append(rel.as_posix())
+        if _unsafe_source(vault_path, vault_root, md_file, rel):
+            if source_symlink_paths is not None:
+                source_symlink_paths.append(rel.as_posix())
             continue
 
         content = md_file.read_text(encoding="utf-8", errors="replace")

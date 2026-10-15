@@ -585,6 +585,7 @@ async def test_obsidian_import_that_writes_nothing_says_why(bm25_only_components
     assert result == (
         "Obsidian import wrote nothing: 2 target(s) excluded from indexing, "
         "0 target(s) are symbolic links, 0 target(s) under a read-only index root, "
+        "0 source file(s) are symbolic links or outside the vault, "
         "0 file(s) blocked by the redaction guard."
     )
     assert not (mem_dir / "_imported" / "obsidian" / "kept.md").exists()
