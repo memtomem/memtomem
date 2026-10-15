@@ -131,7 +131,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   file without indexing it and reported `indexed_chunks: 1` regardless. It
   now appends and indexes under the file's lock, as web `/api/add` does,
   clears the search cache, and reports the real chunk count. A `file` target
-  must be a `.md` or `.markdown` file and must not be a symlink.
+  must be a `.md` or `.markdown` file and must not be a symlink. When the
+  stored-namespace lookup is unavailable it returns 503 before writing
+  anything, as `/api/add` does, so a retry does not append the entry twice
+  (#2731).
 - **The web procedures list stays inside the current project (#2724).**
   `GET /api/procedures` listed procedure-tagged chunks from every project.
   It now applies the same project boundary as search: user-scope procedures

@@ -7,9 +7,12 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from memtomem.errors import NamespaceResolutionError
+from memtomem.models import ChunkMetadata
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL, READ_ONLY_TARGET_DETAIL
 from memtomem.web.deps import get_config, get_index_engine, get_search_pipeline, get_storage
+from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
 from memtomem.web.schemas.scratch import (
     ScratchDeleteResponse,
     ScratchEntryOut,
@@ -21,6 +24,8 @@ from memtomem.web.schemas.scratch import (
 )
 
 router = APIRouter(prefix="/scratch", tags=["scratch"])
+
+_UNTAGGED_NAMESPACE = ChunkMetadata(source_file=Path()).namespace
 
 
 @router.get("", response_model=ScratchListResponse)
@@ -141,10 +146,27 @@ async def promote_scratch(
 
     try:
         async with async_file_lock(memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+            # Resolve the namespace before appending, as web ``/api/add`` does
+            # (#2005 follow-up): a lookup failure inside ``index_file`` would
+            # land after the append is durable, and a retry of the 500 would
+            # append the entry again (#2731). Passing the answer on keeps the
+            # re-index from asking a second time.
+            try:
+                resolved_ns = await index_engine.effective_namespace_for(target)
+            except NamespaceResolutionError as exc:
+                raise HTTPException(
+                    status_code=503, detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
+                ) from exc
+            # ``None`` is the untagged carve-out, which stores the chunk model's
+            # default rather than ``namespace.default_namespace``; the two differ
+            # when that setting is "".
+            write_ns = resolved_ns if resolved_ns is not None else _UNTAGGED_NAMESPACE
             await _asyncio.to_thread(
                 append_entry, target, entry["value"], title=body.title, tags=body.tags
             )
-            stats = await index_engine.index_file(target, already_scanned=True, lock_held=True)
+            stats = await index_engine.index_file(
+                target, namespace=write_ns, already_scanned=True, lock_held=True
+            )
             # #2141: a warmed query must not answer as if the entry was never added.
             if stats.mutated:
                 search_pipeline.invalidate_cache()
