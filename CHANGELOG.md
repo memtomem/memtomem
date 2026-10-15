@@ -121,6 +121,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   key check, a missing `memtomem[onnx]` install, an embedding dimension
   mismatch, a newer database schema), and otherwise only the error's type.
   The full text is still written to the server log.
+- **A web add with tags no longer tags the file's earlier entries (#2724).**
+  `POST /api/add` applied the request's tags to every chunk of the day file
+  it appended to, so tagging one new note re-tagged everything already in
+  that file. Only chunks that begin after the existing content now receive
+  the tags.
+- **Promoting a scratch entry from the web makes it searchable at once
+  (#2492).** `POST /api/scratch/{key}/promote` appended the entry to a memory
+  file without indexing it and reported `indexed_chunks: 1` regardless. It
+  now appends and indexes under the file's lock, as web `/api/add` does,
+  clears the search cache, and reports the real chunk count. A `file` target
+  must be a `.md` or `.markdown` file and must not be a symlink.
+- **The web procedures list stays inside the current project (#2724).**
+  `GET /api/procedures` listed procedure-tagged chunks from every project.
+  It now applies the same project boundary as search: user-scope procedures
+  plus those of the project the server was started in.
+- **Notion and Obsidian imports apply `tags` only to the files they indexed
+  (#2724).** Tags were applied to every imported file, including files the
+  redaction guard refused to index.
+- **A web API error that carries vetted text shows it (#2724).** An
+  otherwise unhandled memtomem error with a `public_message` now returns that
+  text as the 500 response's `detail` instead of `Internal server error`.
+  Errors without one still return the generic text.
+
+### Security
+
+- **Memory-directory endpoints accept local requests only, and refuse system
+  and secret-store directories (#2724).** `POST /api/memory-dirs/add`,
+  `/remove` and `/open` now return 403 unless the client address is
+  `127.0.0.1`, `::1` or `localhost`. `/add` also refuses a path whose last
+  component is a symlink, a filesystem root, the POSIX system roots (`/etc`,
+  `/private/etc`, `/System`, `/usr`, `/bin`, `/sbin`, `/dev`, `/proc`,
+  `/sys`) and everything beneath them, such as `/usr/local`, and any path
+  with a `.ssh`, `.aws`, `.gnupg` or `.kube` component. The comparison ignores letter case, since a
+  case-insensitive filesystem (APFS and NTFS by default) resolves `/USR` or
+  `~/.SSH` to the denied directory; on a case-sensitive filesystem this also
+  refuses spellings that name a different directory. Directories already
+  registered are not re-checked.
+- **Webhook URLs naming a local host are refused (#2724).** Besides private,
+  loopback and reserved IP literals, the webhook URL check now rejects
+  `localhost`, `*.localhost`, `*.local` and `*.internal` hostnames and
+  link-local, multicast and unspecified IP literals. A refused URL disables
+  webhooks at startup with a `Webhook URL rejected` warning in the server
+  log, so a webhook that pointed at a local service stops firing after the
+  upgrade. A public hostname that resolves to a private address is still
+  accepted (#2728).
+- **The web source preview no longer serves a masked source's unmasked file
+  (#2724).** `GET /api/sources/content` returns the file on disk. For a
+  source whose chunks are a masked projection it now refuses with
+  `409 masked_projection_read_only` instead of showing the values the mask
+  removed. It also returns 404 for a held or hidden source and 403 when the
+  requested path's last component is a symlink, checked only after the path
+  is known to be an indexed source.
+- **Every web API request body is capped (#2724).** The 4 MiB request limit
+  applied only to JSON or untyped bodies; other content types were read
+  without a limit. It now applies to every `/api/*` request except the two
+  multipart upload paths, which keep their own limit.
+- **Path characters are refused where a name becomes a file path (#2724).**
+  `mem_procedure_save` rejects a name that is empty or contains `/`, `\`,
+  `..` or a NUL byte. Importing an Obsidian vault or an unzipped Notion
+  export no longer imports a source file that is a symlink, lies under a
+  symlinked directory or resolves outside the export root. A skipped file
+  the importer reaches is counted among the skipped symlinks, whose label
+  calls it a symlinked target (#2730).
+- **The CSRF token check compares in constant time (#2724).** It compares
+  the raw header bytes, so a header with non-ASCII bytes is a plain mismatch
+  (403). The `Host` header is matched case-insensitively.
 
 ## [0.6.8] — 2026-10-08
 
