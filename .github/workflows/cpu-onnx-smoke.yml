@@ -5,10 +5,21 @@ permissions:
   contents: read
 jobs:
   smoke:
+    # Keeps the job names `smoke (<os>)`; without it the `python` key joins them.
+    name: smoke (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Same per-OS pins as the `test` job in ci.yml. Unpinned, uv uses the
+        # newest interpreter on the image, and macos-26-arm64 ships Homebrew
+        # CPython 3.15, for which onnxruntime 1.24.4 has no wheel.
+        include:
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.14"
+          - os: windows-latest
+            python: "3.12"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -18,6 +29,7 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: '0.11.16'
+      - run: uv python pin ${{ matrix.python }}
       - run: uv sync --frozen
       # ``runner`` is not an available context in job-level ``env`` (only
       # github/inputs/matrix/needs/secrets/strategy/vars are), so declaring the
