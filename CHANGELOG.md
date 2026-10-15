@@ -184,9 +184,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mem_procedure_save` rejects a name that is empty or contains `/`, `\`,
   `..` or a NUL byte. Importing an Obsidian vault or an unzipped Notion
   export no longer imports a source file that is a symlink, lies under a
-  symlinked directory or resolves outside the export root. A skipped file
-  the importer reaches is counted among the skipped symlinks, whose label
-  calls it a symlinked target (#2730).
+  symlinked directory or resolves outside the export root. `mem_import_*`
+  reports the skipped source files it reached on their own line, "Skipped
+  (source is a symlink or outside the vault)" (or "the export"), apart from
+  symlinked targets in the output directory (#2730).
 - **The CSRF token check compares in constant time (#2724).** It compares
   the raw header bytes, so a header with non-ASCII bytes is a plain mismatch
   (403). The `Host` header is matched case-insensitively.
