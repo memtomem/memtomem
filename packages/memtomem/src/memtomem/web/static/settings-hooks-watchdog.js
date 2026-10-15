@@ -369,7 +369,12 @@ async function _handleHooksPromoteAll(btn) {
 
     const tone = summary.conflicts || summary.aborted || summary.failed ? 'warning' : 'success';
     if (!recoveryError || summary.saved || summary.deleted) {
-      showToast(t('settings.hooks.promote_all_result', summary), tone);
+      let message = t('settings.hooks.promote_all_result', summary);
+      const remainingOriginals = deleteQueue.length - summary.deleted;
+      if (recoveryError && remainingOriginals > 0) {
+        message += ' ' + t('settings.hooks.promote_all_remaining_originals', { count: remainingOriginals });
+      }
+      showToast(message, tone);
     }
     await loadHooksSync();
     if (recoveryError) showToast(recoveryError.message, 'error');
@@ -859,6 +864,8 @@ async function loadHooksSync() {
           } else {
             showToast(result.reason || t('toast.unexpected_response'), 'error');
           }
+        } catch (err) {
+          showToast(err.name === 'CsrfRecoveryError' ? err.message : t('toast.request_failed'), 'error');
         } finally { btnLoading(btn, false); }
       });
     });

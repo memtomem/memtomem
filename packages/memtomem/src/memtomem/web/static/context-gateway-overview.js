@@ -1518,7 +1518,6 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     // preview, the dialog copy, and every phase URL share one (project,
     // tier); a mid-run tier flip OR a cache refresh applies to the next run
     // (ADR-0016 §5 / ADR-0021 §C Major-1).
-
     const headers = { 'Content-Type': 'application/json' };
     if (syncAllTier === 'project_shared') {
       anyPhaseStarted = true;
@@ -1825,6 +1824,12 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     } else {
       showToast(t('settings.ctx.sync_success'));
     }
+  } catch (err) {
+    // One boundary covers the shared batch and unexpected failures in any phase.
+    for (const phase of _CTX_SYNC_PHASES) {
+      if (['pending', 'syncing'].includes(phaseStates[phase].state)) setPhase(phase, 'failed');
+    }
+    showToast(t('toast.push_failed', { error: err.message }), 'error');
   } finally {
     // Restore the tier/project controls. ``loadCtxOverview`` below re-renders
     // fresh (enabled) controls anyway, but restore explicitly so an early

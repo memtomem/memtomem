@@ -1468,7 +1468,7 @@ def test_csrf_headers_and_bootstrap_are_centralized() -> None:
         text = path.read_text()
         if path == app:
             text = text[:start] + text[end:]
-        assert "X-Memtomem-CSRF" not in text, path
+        assert not re.search(r"x-memtomem-csrf", text, re.IGNORECASE), path
         assert not re.search(r"\bensureCsrfToken\s*\(", text), path
 
 

@@ -84,3 +84,70 @@ def test_native_headers_preserve_values_and_replace_caller_token(page, mm_web_ur
     assert len(requests) == 1
     assert requests[0]["x-probe"] == "preserved"
     assert requests[0]["x-memtomem-csrf"] == "fresh"
+
+
+@pytest.mark.parametrize("action", ["shared_sync", "hooks_replace"])
+def test_direct_click_handlers_surface_recovery(page, mm_web_url, action):
+    install_default_stubs(page)
+    errors = []
+    writes = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.route("**/api/session", lambda route: route.fulfill(json={"csrf": "fresh"}))
+    page.route(
+        "**/api/settings-sync**",
+        lambda route: route.fulfill(
+            json={
+                "status": "conflicts",
+                "hooks": {
+                    "pending": [],
+                    "synced": [],
+                    "conflicts": [
+                        {
+                            "event": "Stop",
+                            "existing": {"command": "old"},
+                            "proposed": {"command": "new"},
+                        }
+                    ],
+                },
+            }
+        ),
+    )
+
+    def refuse(route):
+        writes.append(route.request.url)
+        route.fulfill(status=403, json={"code": "csrf_token_mismatch"})
+
+    endpoint = (
+        "/api/context/sync-all" if action == "shared_sync" else "/api/context/settings/resolve"
+    )
+    page.route(f"**{endpoint}**", refuse)
+    goto_after_i18n_init(page, mm_web_url, lang="en")
+    page.evaluate(
+        """async (action) => {
+            showConfirm = async () => true;
+            if (action === 'shared_sync') {
+                _ctxTargetScope = 'project_shared';
+                _ctxSyncAllPreview = async () => ({});
+                _ctxSyncAllConfirmCopy = () => ({message: 'Sync', warningText: ''});
+                loadCtxOverview = () => {};
+                const btn = document.getElementById('ctx-sync-all-btn');
+                btn.disabled = false;
+                btn.dataset.runtimeOnly = 'false';
+                btn.click();
+            } else {
+                await loadHooksSync();
+                document.querySelector('.hooks-resolve-btn').click();
+            }
+        }""",
+        action,
+    )
+    expect(page.locator(".toast").filter(has_text="please retry")).to_be_visible()
+    selector = "#ctx-sync-all-btn" if action == "shared_sync" else ".hooks-resolve-btn"
+    expect(page.locator(selector)).to_be_enabled()
+    if action == "shared_sync":
+        expect(page.locator(".ctx-sync-phase--failed")).to_have_count(5)
+        expect(page.locator(".ctx-sync-phase--syncing")).to_have_count(0)
+    else:
+        expect(page.locator(".hooks-sync-conflict")).to_have_count(1)
+    assert len(writes) == 1
+    assert errors == []

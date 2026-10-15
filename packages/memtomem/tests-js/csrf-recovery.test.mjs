@@ -146,11 +146,60 @@ describe('shared recovery at direct caller boundaries', () => {
     expect(window.eval('_hooksRuleRegistry.length')).toBe(0);
     const expected = [];
     if (saved || deleted) expected.push({
-      text: window.t('settings.hooks.promote_all_result', { saved, deleted, conflicts: 0, aborted: 0, failed: 1 }),
+      text: window.t('settings.hooks.promote_all_result', { saved, deleted, conflicts: 0, aborted: 0, failed: 1 })
+        + (saved > deleted ? ' ' + window.t('settings.hooks.promote_all_remaining_originals', { count: saved - deleted }) : ''),
       tone: 'warning',
     });
     expected.push('reload', { text: window.t('error.csrf_refreshed'), tone: 'error' });
     expect(events).toEqual(expected);
+  });
+
+  it.each(['shared sync', 'hooks replace'])('%s displays recovery and restores UI after refusal', async kind => {
+    const scripts = kind === 'shared sync' ? ['context-gateway.js'] : ['settings-hooks-watchdog.js'];
+    ({ window } = await bootApp({ scripts: ['i18n.js', 'app.js', ...scripts] }));
+    await window.I18N.init();
+    const toasts = [], writes = [];
+    let reloads = 0;
+    window.showConfirm = async () => true;
+    window.showToast = text => toasts.push(text);
+    window.fetch = async (url, opts = {}) => {
+      if (url === '/api/session') return response({ csrf: 'fresh' });
+      if (opts.method === 'POST') { writes.push(url); return mismatch(); }
+      if (url.includes('/api/settings-sync')) return response({
+        status: 'conflicts', hooks: { pending: [], synced: [], conflicts: [
+          { event: 'Stop', existing: { command: 'old' }, proposed: { command: 'new' } },
+        ] },
+      });
+      return response({});
+    };
+    let btn;
+    if (kind === 'shared sync') {
+      window.eval("_ctxTargetScope = 'project_shared'");
+      window._ctxSyncAllPreview = async () => ({});
+      window._ctxSyncAllConfirmCopy = () => ({ message: 'Sync', warningText: '' });
+      window.loadCtxOverview = () => { reloads++; };
+      btn = window.document.getElementById('ctx-sync-all-btn');
+      btn.disabled = false;
+      btn.dataset.runtimeOnly = 'false';
+    } else {
+      await window.loadHooksSync();
+      btn = window.document.querySelector('.hooks-resolve-btn');
+    }
+    expect(btn).toBeTruthy();
+    btn.click();
+    for (let i = 0; i < 100 && !toasts.length; i++) await new Promise(r => setTimeout(r, 10));
+    expect(toasts.some(text => text.includes(window.t('error.csrf_refreshed')))).toBe(true);
+    expect(writes).toHaveLength(1);
+    expect(btn.disabled).toBe(false);
+    if (kind === 'shared sync') {
+      expect(writes[0]).toContain('/api/context/sync-all');
+      expect(window.document.querySelectorAll('.ctx-sync-phase--failed')).toHaveLength(5);
+      expect(window.document.querySelectorAll('.ctx-sync-phase--syncing')).toHaveLength(0);
+      expect(reloads).toBe(1);
+    } else {
+      expect(writes[0]).toContain('/api/context/settings/resolve');
+      expect(window.document.querySelector('.hooks-sync-conflict')).toBeTruthy();
+    }
   });
 
   it('versioning buttons show recovery guidance instead of generic failure', async () => {

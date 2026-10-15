@@ -1065,6 +1065,7 @@
   "settings.hooks.promote_delete_original_option": "Remove original from the selected target after saving",
   "settings.hooks.promote_delete_success": "Saved to memtomem and removed the original target rule",
   "settings.hooks.promote_delete_partial": "Saved to memtomem, but the original target rule was not removed.",
+  "settings.hooks.promote_all_remaining_originals": "Partially completed: {count} saved original(s) remain and need separate removal.",
   "settings.hooks.promote_all_result": "{saved} saved, {deleted} original(s) removed, {conflicts} conflict(s), {aborted} stale, {failed} failed",
   "settings.hooks.original_already_removed": "Original target rule is already gone",
   "settings.hooks.promote_conflict": "memtomem already has a different hook rule for this event and matcher.",
