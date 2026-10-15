@@ -215,10 +215,23 @@ async def import_notion(
                     )
                 )
     else:
-        sources = [
-            (p.relative_to(export_path), p.name, p.read_text(encoding="utf-8", errors="replace"))
-            for p in sorted(export_path.rglob("*.md"))
-        ]
+        export_root = export_path.resolve()
+        for p in sorted(export_path.rglob("*.md")):
+            rel = p.relative_to(export_path)
+            if p.is_symlink() or any(
+                (export_path / Path(*rel.parts[: i + 1])).is_symlink()
+                for i in range(len(rel.parts))
+            ):
+                if symlink_paths is not None:
+                    symlink_paths.append(rel.as_posix())
+                continue
+            try:
+                p.resolve().relative_to(export_root)
+            except (OSError, ValueError):
+                if symlink_paths is not None:
+                    symlink_paths.append(rel.as_posix())
+                continue
+            sources.append((rel, p.name, p.read_text(encoding="utf-8", errors="replace")))
 
     for rel, original_name, content in sources:
         # Clean Notion-specific artifacts
@@ -286,11 +299,24 @@ async def import_obsidian(
         List of imported file paths.
     """
     imported: list[Path] = []
+    vault_root = vault_path.resolve()
 
     for md_file in sorted(vault_path.rglob("*.md")):
         # Skip Obsidian config files
         rel = md_file.relative_to(vault_path)
         if str(rel).startswith(".obsidian"):
+            continue
+        if md_file.is_symlink() or any(
+            (vault_path / Path(*rel.parts[: i + 1])).is_symlink() for i in range(len(rel.parts))
+        ):
+            if symlink_paths is not None:
+                symlink_paths.append(rel.as_posix())
+            continue
+        try:
+            md_file.resolve().relative_to(vault_root)
+        except (OSError, ValueError):
+            if symlink_paths is not None:
+                symlink_paths.append(rel.as_posix())
             continue
 
         content = md_file.read_text(encoding="utf-8", errors="replace")

@@ -106,6 +106,7 @@ async def mem_import_notion(
     effective_ns = namespace or "notion"
     total_chunks = 0
     blocked = len(blocked_paths)
+    indexed_files: list[Path] = []
     for f in imported:
         try:
             stats = await app.index_engine.index_file(
@@ -114,11 +115,12 @@ async def mem_import_notion(
         except PrivacyRejection:
             blocked += 1
             continue
+        indexed_files.append(f)
         total_chunks += stats.indexed_chunks
 
     # Apply tags
     if tags and total_chunks > 0:
-        for f in imported:
+        for f in indexed_files:
             chunks = await app.storage.list_chunks_by_source(f)
             for c in chunks:
                 merged = set(c.metadata.tags) | set(tags) | {"notion", "imported"}
@@ -243,6 +245,7 @@ async def mem_import_obsidian(
     effective_ns = namespace or "obsidian"
     total_chunks = 0
     blocked = len(blocked_paths)
+    indexed_files: list[Path] = []
     for f in imported:
         try:
             stats = await app.index_engine.index_file(
@@ -251,11 +254,12 @@ async def mem_import_obsidian(
         except PrivacyRejection:
             blocked += 1
             continue
+        indexed_files.append(f)
         total_chunks += stats.indexed_chunks
 
     # Apply tags
     if tags and total_chunks > 0:
-        for f in imported:
+        for f in indexed_files:
             chunks = await app.storage.list_chunks_by_source(f)
             for c in chunks:
                 merged = set(c.metadata.tags) | set(tags) | {"obsidian", "imported"}

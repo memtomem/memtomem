@@ -37,9 +37,21 @@ def _validate_webhook_url(url: str) -> str | None:
     if parsed.scheme not in ("http", "https"):
         return f"unsupported scheme '{parsed.scheme}' (must be http or https)"
     hostname = parsed.hostname or ""
+    host_lower = hostname.lower().rstrip(".")
+    if not host_lower:
+        return "malformed URL: missing hostname"
+    if host_lower == "localhost" or host_lower.endswith((".localhost", ".local", ".internal")):
+        return f"private/reserved host '{hostname}' not allowed"
     try:
         addr = ipaddress.ip_address(hostname)
-        if addr.is_private or addr.is_loopback or addr.is_reserved:
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_multicast
+            or addr.is_reserved
+            or addr.is_unspecified
+        ):
             return f"private/reserved IP '{hostname}' not allowed"
     except ValueError:
         pass  # hostname is a DNS name, not an IP — acceptable
