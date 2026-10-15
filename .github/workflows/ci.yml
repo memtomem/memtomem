@@ -70,10 +70,22 @@ jobs:
         run: uv run mypy packages/memtomem/src
 
   test:
+    # The name keeps the required checks `test (ubuntu-latest)` and
+    # `test (macos-latest)`; without it the `python` key would join the name.
+    name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Pinned to what each runner image had been providing: Ubuntu's system
+        # 3.12 and macOS's Homebrew 3.14. Unpinned, uv uses an interpreter it
+        # discovers on the image, and macos-26-arm64 20261013 moved Homebrew's
+        # default to 3.15, for which onnxruntime 1.24.4 has no wheel, so
+        # `uv sync` failed before any test ran.
+        include:
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.14"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:
@@ -83,6 +95,7 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
+      - run: uv python pin ${{ matrix.python }}
       - run: uv sync --frozen
       - run: >-
           uv run pytest
