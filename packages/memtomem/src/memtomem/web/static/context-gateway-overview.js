@@ -879,7 +879,6 @@ async function _ctxSyncProjectScope(scopeId, btn) {
   const attentionSkips = [];
   try {
     const headers = { 'Content-Type': 'application/json' };
-
     const types = ['skills', 'commands', 'agents', 'mcp-servers'];
     for (const typ of types) {
       anyPhaseStarted = true;

@@ -314,6 +314,7 @@ async function _handleHooksPromoteAll(btn) {
   btnLoading(btn, true);
   const summary = { saved: 0, deleted: 0, conflicts: 0, aborted: 0, failed: 0 };
   const deleteQueue = [];
+  let recoveryError = null;
   try {
     for (const entry of entries) {
       try {
@@ -343,30 +344,35 @@ async function _handleHooksPromoteAll(btn) {
         }
       } catch (err) {
         if (err.name === 'CsrfRecoveryError') {
-          showToast(err.message, 'error');
-          return; // Stop the batch; further writes require an explicit retry.
+          recoveryError = err;
+          summary.failed += 1;
+          break; // Stop writes, but still report partial results and refresh the list.
         }
         summary.failed += 1;
       }
     }
 
-    for (const entry of deleteQueue) {
+    for (const entry of recoveryError ? [] : deleteQueue) {
       try {
         const deleted = await _deleteOriginalAfterPromote(entry);
         if (deleted.status === 'ok') summary.deleted += 1;
         else summary.failed += 1;
       } catch (err) {
         if (err.name === 'CsrfRecoveryError') {
-          showToast(err.message, 'error');
-          return; // Stop the batch; further writes require an explicit retry.
+          recoveryError = err;
+          summary.failed += 1;
+          break; // Stop writes, but still report partial results and refresh the list.
         }
         summary.failed += 1;
       }
     }
 
     const tone = summary.conflicts || summary.aborted || summary.failed ? 'warning' : 'success';
-    showToast(t('settings.hooks.promote_all_result', summary), tone);
-    loadHooksSync();
+    if (!recoveryError || summary.saved || summary.deleted) {
+      showToast(t('settings.hooks.promote_all_result', summary), tone);
+    }
+    await loadHooksSync();
+    if (recoveryError) showToast(recoveryError.message, 'error');
   } finally {
     btnLoading(btn, false);
   }
@@ -879,7 +885,6 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
   // the URL and abort if it drifted.
   const scopedUrl = _hooksScopedUrl('/api/settings-sync');
   const postSettingsSync = async (allowHostWrites) => {
-
     const headers = { 'Content-Type': 'application/json' };
     const res = await csrfFetch(scopedUrl, {
       method: 'POST',

@@ -250,7 +250,6 @@ async function _doWikiCommit(force) {
   let res;
   try {
     const headers = { 'Content-Type': 'application/json' };
-
     res = await csrfFetch(url, {
       method: 'POST',
       headers,
@@ -506,7 +505,6 @@ async function _seedWikiOverride(type, name, vendor, force) {
   let res;
   try {
     const headers = { 'Content-Type': 'application/json' };
-
     res = await csrfFetch(url, { method: 'POST', headers, body: JSON.stringify({ vendor, force }) });
   } catch (err) {
     showToast(t('settings.ctx.wiki_seed_failed', { error: String((err && err.message) || err) }), 'error');
@@ -613,7 +611,6 @@ async function _saveWikiOverride(type, name, vendor, content, mtimeNs, force) {
   let res;
   try {
     const headers = { 'Content-Type': 'application/json' };
-
     res = await csrfFetch(url, {
       method: 'PUT',
       headers,
@@ -794,7 +791,6 @@ async function _saveWikiCanonical(type, name, content, mtimeNs, force) {
   let res;
   try {
     const headers = { 'Content-Type': 'application/json' };
-
     res = await csrfFetch(url, {
       method: 'PUT',
       headers,
@@ -1039,7 +1035,6 @@ async function _installWikiAsset(type, name, scopeId, force, verb) {
   let res;
   try {
     const headers = { 'Content-Type': 'application/json' };
-
     const init = { method: 'POST', headers };
     if (verb === 'update') init.body = JSON.stringify({ force });
     res = await csrfFetch(url, init);

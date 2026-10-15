@@ -808,7 +808,6 @@ async function loadCtxDetail(type, name, opts = {}) {
       // re-enabling a detached button is harmless.
       btnLoading(delBtn, true);
       try {
-
         const deleteOnce = (confirmed) => csrfFetch(
           _ctxWithTargetScope(
             `/api/context/${type}/${encodeURIComponent(name)}?cascade=${cascade}`

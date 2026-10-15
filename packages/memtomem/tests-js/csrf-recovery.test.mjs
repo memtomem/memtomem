@@ -83,6 +83,20 @@ describe('server rotation recovery without mutation replay', () => {
     expect(await window.ensureCsrfToken()).toBe('B');
   });
 
+  it.each(['object', 'Headers', 'tuples'])('preserves %s headers and replaces stale caller tokens', async kind => {
+    window.Headers = Headers;
+    const pairs = [['X-Probe', 'keep'], ['x-memtomem-csrf', 'stale']];
+    if (kind === 'tuples') pairs.push(['X-Probe', 'also']);
+    const headers = kind === 'object' ? Object.fromEntries(pairs)
+      : kind === 'Headers' ? new Headers(pairs) : pairs;
+    const before = JSON.stringify(headers instanceof Headers ? [...headers] : headers);
+    await window.csrfFetch('/api/x', { method: 'POST', headers });
+    const sent = new Headers(calls[0].headers);
+    expect(sent.get('x-probe')).toBe(kind === 'tuples' ? 'keep, also' : 'keep');
+    expect(sent.get('x-memtomem-csrf')).toBe('A');
+    expect(JSON.stringify(headers instanceof Headers ? [...headers] : headers)).toBe(before);
+  });
+
   it('preserves multipart bodies and cancellation signals', async () => {
     const form = new window.FormData(); form.append('draft', 'keep me');
     const controller = new window.AbortController();
@@ -100,24 +114,43 @@ describe('server rotation recovery without mutation replay', () => {
 describe('shared recovery at direct caller boundaries', () => {
   let window;
   afterEach(() => window?.close());
-  it('stops a hooks batch at the refused write and restores the button', async () => {
+  it.each([
+    ['first promote', 1, 0, 0],
+    ['second promote', 2, 1, 0],
+    ['first delete', 4, 3, 0],
+    ['second delete', 5, 3, 1],
+  ])('reports partial results and refreshes after refusal at %s', async (_name, refuseAt, saved, deleted) => {
     ({ window } = await bootApp({ scripts: ['i18n.js', 'app.js', 'settings-hooks-watchdog.js'] }));
-    window.eval("_hooksRuleRegistry = [{ _bucket: 'target-only' }, { _bucket: 'target-only' }]");
+    window.eval("_hooksRuleRegistry = [0, 1, 2].map(i => ({ _bucket: 'target-only', event: String(i) }))");
     window._confirmHooksPromote = async () => ({ ok: true, deleteOriginal: true });
-    const toasts = [];
-    window.showToast = text => toasts.push(text);
+    // The batch test isolates rule matching while retaining the real write helper.
+    window._deleteOriginalAfterPromote = entry => window._hooksPostRuleAction('delete', entry, false);
+    const events = [], actions = [];
+    window.showToast = (text, tone) => events.push({ text, tone });
+    window.loadHooksSync = async () => {
+      events.push('reload');
+      window.eval('_hooksRuleRegistry = []');
+    };
     let writes = 0;
     window.fetch = async (url, opts = {}) => {
       if (url === '/api/session') return response({ csrf: 'token' });
       if (!opts.method || opts.method === 'GET') return response({});
-      writes++;
-      return mismatch();
+      actions.push(url.includes('/delete') ? 'delete' : 'promote');
+      return ++writes === refuseAt ? mismatch() : response({ status: 'ok' });
     };
     const btn = window.document.createElement('button');
     await window._handleHooksPromoteAll(btn);
-    expect(writes).toBe(1);
+    expect(writes).toBe(refuseAt);
+    if (refuseAt <= 3) expect(actions).not.toContain('delete');
     expect(btn.disabled).toBe(false);
-    expect(toasts).toContain(window.t('error.csrf_refreshed'));
+    expect(window.eval('_hooksRuleRegistry.length')).toBe(0);
+    const expected = [];
+    if (saved || deleted) expected.push({
+      text: window.t('settings.hooks.promote_all_result', { saved, deleted, conflicts: 0, aborted: 0, failed: 1 }),
+      tone: 'warning',
+    });
+    expected.push('reload', { text: window.t('error.csrf_refreshed'), tone: 'error' });
+    expect(events).toEqual(expected);
   });
 
   it('versioning buttons show recovery guidance instead of generic failure', async () => {

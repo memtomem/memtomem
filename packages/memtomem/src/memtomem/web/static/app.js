@@ -367,9 +367,16 @@ async function csrfFetch(url, options = {}) {
   let token = '';
   if (unsafe) {
     token = await ensureCsrfToken();
-    // SPA callers use plain header objects; preserve JSON/Accept headers and
-    // let the browser set multipart Content-Type (including its boundary).
-    options = { ...options, headers: { ...options.headers } };
+    // Preserve plain objects, Headers and tuple lists. Normalize iterable
+    // forms through Headers so repeated names retain fetch's merge semantics.
+    const inputHeaders = options.headers;
+    const headers = inputHeaders && typeof inputHeaders[Symbol.iterator] === 'function'
+      ? Object.fromEntries(new Headers(inputHeaders)) : { ...inputHeaders };
+    // Replace any caller-supplied token regardless of header-name casing.
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === 'x-memtomem-csrf') delete headers[key];
+    }
+    options = { ...options, headers };
     if (token) options.headers['X-Memtomem-CSRF'] = token;
   }
   const res = await fetch(url, options);

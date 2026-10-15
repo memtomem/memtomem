@@ -59,3 +59,28 @@ def test_restart_preserves_draft_until_user_retries(page, mm_web_url, refresh_fa
         assert len(writes) == 2
         assert writes[1].headers["x-memtomem-csrf"] == "B"
         assert writes[1].post_data_json["content"] == "My unsaved draft"
+
+
+def test_native_headers_preserve_values_and_replace_caller_token(page, mm_web_url):
+    install_default_stubs(page)
+    requests = []
+    page.route(
+        "**/api/session",
+        lambda route: route.fulfill(json={"csrf": "fresh"}),
+    )
+
+    def capture(route):
+        requests.append(route.request.headers)
+        route.fulfill(json={"ok": True})
+
+    page.route("**/api/header-probe", capture)
+    goto_after_i18n_init(page, mm_web_url, lang="en")
+    page.evaluate(
+        """async () => {
+            const headers = new Headers({'X-Probe': 'preserved', 'X-Memtomem-CSRF': 'old'});
+            await csrfFetch('/api/header-probe', {method: 'POST', headers});
+        }"""
+    )
+    assert len(requests) == 1
+    assert requests[0]["x-probe"] == "preserved"
+    assert requests[0]["x-memtomem-csrf"] == "fresh"
