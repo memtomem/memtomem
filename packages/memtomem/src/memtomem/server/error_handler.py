@@ -48,7 +48,11 @@ def tool_handler(fn):
             return await fn(*args, **kwargs)
         except Exception as exc:
             logger.error("%s failed: %s", fn.__name__, exc, exc_info=True)
-            msg = exc.public_message if isinstance(exc, Mem2MemError) and exc.public_message else str(exc)
+            msg = (
+                exc.public_message
+                if isinstance(exc, Mem2MemError) and exc.public_message
+                else str(exc)
+            )
             if isinstance(exc, RetryableError):
                 return f"Error (retryable): {msg}"
             if isinstance(exc, PermanentError):

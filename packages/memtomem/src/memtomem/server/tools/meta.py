@@ -193,7 +193,10 @@ def _help(category: str | None = None, *, action: str | None = None) -> str:
         info = ACTIONS.get(resolved)
         if not info:
             return f"Unknown action '{action}'. Use action='help' to list all."
-        lines = [f"## {resolved} (category: {info.category})\n", f"**{resolved}**: {info.description}"]
+        lines = [
+            f"## {resolved} (category: {info.category})\n",
+            f"**{resolved}**: {info.description}",
+        ]
         for p, t in info.params.items():
             doc = info.param_docs.get(p, "")
             if doc:
