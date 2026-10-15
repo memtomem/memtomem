@@ -125,7 +125,7 @@ def check_schema_downgrade(db: sqlite3.Connection) -> None:
     """
     stored_ver = read_schema_version(db)
     if stored_ver is not None and stored_ver > SCHEMA_VERSION:
-        raise SchemaDowngradeError(
+        raise SchemaDowngradeError.vetted(
             f"This database has schema version {stored_ver}, but this "
             f"memtomem binary only supports up to {SCHEMA_VERSION}. "
             f"The database was created or migrated by a newer memtomem "

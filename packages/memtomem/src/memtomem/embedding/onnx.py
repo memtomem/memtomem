@@ -16,7 +16,7 @@ from memtomem.config import EmbeddingConfig
 from memtomem.embedding.aliases import resolve_embedder_id
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 from memtomem.embedding.hub_telemetry import hub_telemetry_off
-from memtomem.errors import EmbeddingError
+from memtomem.errors import EmbeddingError, Mem2MemError
 from memtomem.embedding.profiles import E5_MODEL, e5_contract_error, is_e5, is_minilm
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ def _configure_tokenizer_limit(
         or isinstance(model_limit, bool)
         or model_limit <= 0
     ):
-        raise EmbeddingError(
+        raise EmbeddingError.vetted(
             "FastEmbed tokenizer layout is incompatible with "
             "embedding.max_sequence_tokens; refusing unsafe ONNX fallback. "
             "Set embedding.max_sequence_tokens=0 to use the model limit explicitly."
@@ -106,7 +106,7 @@ def _verify_cpu_mem_arena(model: object, requested: bool) -> None:
                 "explicitly requests the ORT-compatible default"
             )
             return
-        raise EmbeddingError(
+        raise EmbeddingError.vetted(
             "FastEmbed session layout is incompatible with "
             "embedding.onnx_cpu_mem_arena; refusing unsafe ONNX fallback. "
             "Set embedding.onnx_cpu_mem_arena=true to use the ORT default explicitly."
@@ -118,7 +118,7 @@ def _verify_cpu_mem_arena(model: object, requested: bool) -> None:
         if requested:
             logger.warning("Could not verify the explicitly enabled ORT CPU memory arena: %s", exc)
             return
-        raise EmbeddingError(
+        raise EmbeddingError.vetted(
             "Could not verify embedding.onnx_cpu_mem_arena on the loaded "
             "FastEmbed session; refusing unsafe ONNX fallback. Set "
             "embedding.onnx_cpu_mem_arena=true to use the ORT default explicitly."
@@ -127,7 +127,10 @@ def _verify_cpu_mem_arena(model: object, requested: bool) -> None:
     if not isinstance(actual, bool) or actual is not requested:
         raise EmbeddingError(
             "FastEmbed did not apply embedding.onnx_cpu_mem_arena "
-            f"(requested={requested}, actual={actual!r}); refusing to continue."
+            f"(requested={requested}, actual={actual!r}); refusing to continue.",
+            public_message=(
+                "FastEmbed did not apply embedding.onnx_cpu_mem_arena; refusing to continue."
+            ),
         )
 
 
@@ -336,7 +339,7 @@ class OnnxEmbedder:
                 # it serializes with close()'s own clear: whichever wins, the
                 # loser sees a consistent state and no orphaned ORT session
                 # survives close (#1792 review, #206).
-                raise EmbeddingError("ONNX embedder is closed")
+                raise EmbeddingError.vetted("ONNX embedder is closed")
             # Everything that can fail on the way to a model is inside the
             # guarded load, so readiness reports it as an error rather than
             # ``cold`` (#2586): the fastembed import, custom registration,
@@ -351,11 +354,11 @@ class OnnxEmbedder:
                     self._config.model, self._config.dimension, self._config.max_sequence_tokens
                 )
                 if contract_error:
-                    raise EmbeddingError(contract_error)
+                    raise EmbeddingError.vetted(contract_error)
                 try:
                     from fastembed import TextEmbedding  # type: ignore[import-untyped]
                 except ImportError as exc:
-                    raise EmbeddingError(
+                    raise EmbeddingError.vetted(
                         "fastembed is required for the ONNX embedding provider. "
                         "Install it with: pip install memtomem[onnx]"
                     ) from exc
@@ -506,7 +509,7 @@ class OnnxEmbedder:
         # loss. Truncate and warn instead; the caller still gets a usable
         # vector for the prefix.
         if truncated and refuse_truncation:
-            raise EmbeddingError(
+            raise EmbeddingError.vetted(
                 f"E5 input exceeds 512 tokens including its role prefix ({len(truncated)} inputs); "
                 "split/reindex the source using the model chunk profile"
             )
@@ -558,7 +561,7 @@ class OnnxEmbedder:
         total = len(text_list)
         index_list = list(chunk_indices) if chunk_indices is not None else None
         if index_list is not None and len(index_list) != total:
-            raise EmbeddingError(
+            raise EmbeddingError.vetted(
                 f"chunk_indices has {len(index_list)} entries for {total} embedding inputs"
             )
 
@@ -633,7 +636,7 @@ class OnnxEmbedder:
                     # close() latched (loop-side, synchronous) — fail fast
                     # with a typed error rather than racing the teardown's
                     # cancel_futures over the next submission.
-                    raise EmbeddingError("ONNX embedder is closing")
+                    raise EmbeddingError.vetted("ONNX embedder is closing")
                 slice_texts = text_list[offset : offset + sub]
                 if index_list is not None:
                     slice_indices = index_list[offset : offset + sub]
@@ -669,7 +672,10 @@ class OnnxEmbedder:
         except EmbeddingError:
             raise
         except Exception as exc:
-            raise EmbeddingError(f"ONNX embedding failed: {exc}") from exc
+            # A memtomem error raised on the way to the model (the optional
+            # dependency check, for one) keeps its vetted text for callers.
+            public = exc.public_message if isinstance(exc, Mem2MemError) else None
+            raise EmbeddingError(f"ONNX embedding failed: {exc}", public_message=public) from exc
         return results
 
     async def embed_probe(self, text: str) -> list[float]:
@@ -681,18 +687,18 @@ class OnnxEmbedder:
         Reached through ``embedding.probe.embed_document_probe`` (#2461).
         """
         if not text or not text.strip():
-            raise EmbeddingError("Probe text cannot be empty")
+            raise EmbeddingError.vetted("Probe text cannot be empty")
         embeddings = await self.embed_texts([text], _probe=True)
         if not embeddings:
-            raise EmbeddingError("No embeddings returned for probe")
+            raise EmbeddingError.vetted("No embeddings returned for probe")
         return embeddings[0]
 
     async def embed_query(self, query: str) -> list[float]:
         if not query or not query.strip():
-            raise EmbeddingError("Query text cannot be empty")
+            raise EmbeddingError.vetted("Query text cannot be empty")
         embeddings = await self.embed_texts([query], _query=True)
         if not embeddings:
-            raise EmbeddingError("No embeddings returned for query")
+            raise EmbeddingError.vetted("No embeddings returned for query")
         return embeddings[0]
 
     async def close(self) -> None:

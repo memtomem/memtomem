@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       # Fail closed on pyproject <-> uv.lock drift (e.g. a Dependabot member-dep
@@ -62,7 +62,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
@@ -70,19 +70,32 @@ jobs:
         run: uv run mypy packages/memtomem/src
 
   test:
+    # The name keeps the required checks `test (ubuntu-latest)` and
+    # `test (macos-latest)`; without it the `python` key would join the name.
+    name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Pinned to what each runner image had been providing: Ubuntu's system
+        # 3.12 and macOS's Homebrew 3.14. Unpinned, uv uses an interpreter it
+        # discovers on the image, and macos-26-arm64 20261013 moved Homebrew's
+        # default to 3.15, for which onnxruntime 1.24.4 has no wheel, so
+        # `uv sync` failed before any test ran.
+        include:
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.14"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
+      - run: uv python pin ${{ matrix.python }}
       - run: uv sync --frozen
       - run: >-
           uv run pytest
@@ -95,30 +108,44 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1]
+        shard: [0, 1, 2]
     runs-on: windows-latest
-    # 35, matching the Linux/macOS `test` job. The 25-minute cap was set when
-    # the worst shard ran ~12m; it has since crept to 24.4m on a green main
-    # (28b6fee) and cancelled two PRs mid-run (#2058, #2266). Balancing the
-    # shards by recorded cost buys back roughly 15% of the worst cell, which
-    # is not enough on its own — a slow Windows runner still costs more than
-    # the remaining margin. The timeout is a hang guard (#1642), and 35
-    # minutes still catches a hang long before the 6-hour default does.
+    # 35, matching the Linux/macOS `test` job, and a hang guard (#1642) that
+    # still fires long before the 6-hour default. Three shards, not two
+    # (#2720): with two, the heavier shard's job ran 25-28 minutes, and a
+    # Windows runner 1.4x slow pushed one past 35 at 96% done. Three put the
+    # heaviest shard at 16-18 minutes of test time on the recorded timings,
+    # so the same slowdown ends well inside the cap. Keep the shard list and
+    # --shard-count below in step.
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
       - run: >-
           uv run python tools/run_pytest_shard.py
           --shard-index ${{ matrix.shard }}
-          --shard-count 2 --
+          --shard-count 3 --
           -m "not ollama and not llm"
           --tb=short -q
+          --junit-xml=junit-windows-shard-${{ matrix.shard }}.xml
+      # Per-file Windows timings, the input for regenerating the shard cost map
+      # with `tools/run_pytest_shard.py --record-durations` (one report per
+      # shard). `!cancelled()` uploads after a passed or a failed pytest step.
+      # What a shard stopped by the job timeout leaves behind is not relied on.
+      - name: Upload shard timings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-windows-shard-${{ matrix.shard }}
+          path: junit-windows-shard-${{ matrix.shard }}.xml
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 14
 
   test-windows:
     name: test (windows-latest)
@@ -141,7 +168,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
@@ -161,7 +188,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       - name: Cache retrieval models (English bge-small + multilingual MiniLM)
@@ -222,7 +249,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       - name: Cache retrieval models (English bge-small + multilingual MiniLM)
@@ -249,7 +276,7 @@ jobs:
           uv run python tools/retrieval-eval/write_provenance.py \
             --output tools/retrieval-eval/PROVENANCE.json
       - name: Upload regenerated retrieval baselines
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: retrieval-eval-baselines
           path: |
@@ -265,7 +292,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       # Ubuntu is the canonical baseline producer; pin the interpreter so a
@@ -296,7 +323,7 @@ jobs:
           uv run python -c "import sqlite3, sys; open('tools/quality-gate/versions.txt', 'w').write(f'python={sys.version.split()[0]}\nsqlite={sqlite3.sqlite_version}\n')"
       - name: Upload regenerated baseline
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_baseline }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: quality-gate-baseline
           path: |
@@ -314,7 +341,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
@@ -327,7 +354,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
@@ -372,7 +399,7 @@ jobs:
       # load-bearing: with check-latest off setup-node takes the newest
       # matching version already in the runner tool cache, which can be a 24.x
       # below jsdom's 24.15.0 floor.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: "^24.15.0"
           cache: npm
@@ -391,7 +418,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: "24"
           cache: npm
@@ -412,7 +439,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv run --no-project --python 3.11 python tools/hermes_memory_py311_smoke.py --repo-root .
@@ -428,7 +455,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       - name: Every distribution an extra installs has a probe
@@ -475,7 +502,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
@@ -499,7 +526,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       # Hand-maintained pin: Dependabot sees no release-asset URL, so on a bump
@@ -550,7 +577,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
       # Bandit compares against a committed baseline and blocks only *new*

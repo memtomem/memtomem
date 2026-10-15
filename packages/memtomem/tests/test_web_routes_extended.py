@@ -2533,6 +2533,21 @@ class TestImport:
             assert data["total_chunks"] == 5
             assert data["imported_chunks"] == 4
 
+    async def test_a_moved_embedding_policy_is_a_409_with_its_recovery(self, client: AsyncClient):
+        from memtomem.errors import EmbeddingPolicyChangedError
+
+        error = EmbeddingPolicyChangedError.vetted("policy moved; run embedding-reset")
+        with patch("memtomem.tools.export_import.import_chunks", side_effect=error):
+            resp = await client.post(
+                "/api/export/import",
+                files={"file": ("export.json", b'{"chunks":[]}', "application/json")},
+            )
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == {
+            "detail": "embedding_policy_changed",
+            "message": "policy moved; run embedding-reset",
+        }
+
     async def test_import_rejects_non_json(self, client: AsyncClient):
         resp = await client.post(
             "/api/export/import",

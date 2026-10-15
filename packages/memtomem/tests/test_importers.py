@@ -267,3 +267,246 @@ class TestSafeExtractZip:
         dest.mkdir()
         with pytest.raises(UnsafeArchiveError):
             safe_extract_zip(zpath, dest)
+
+
+def _chunk(path):
+    from memtomem.chunking.markdown import MarkdownChunker
+
+    return MarkdownChunker().chunk_file(path, path.read_text(encoding="utf-8"))
+
+
+class TestImportProvenanceHeader:
+    """The provenance keys join a note's own frontmatter instead of preceding it (#2716)."""
+
+    NOTE = "---\ntags: [alpha, beta]\n---\n\n## Notes\n\nSee [[api-redesign|the API project]].\n"
+
+    @pytest.mark.asyncio
+    async def test_obsidian_note_keeps_its_frontmatter_tags(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "note.md").write_text(self.NOTE, encoding="utf-8")
+
+        await import_obsidian(vault, tmp_path / "out")
+
+        written = tmp_path / "out" / "note.md"
+        assert written.read_text(encoding="utf-8") == (
+            "---\nimported_from: obsidian\noriginal_file: note.md\ntags: [alpha, beta]\n---\n\n"
+            "## Notes\n\nSee [the API project](api-redesign.md).\n"
+        )
+        chunks = _chunk(written)
+        assert chunks
+        assert [c.metadata.tags for c in chunks] == [("alpha", "beta")] * len(chunks)
+
+    @pytest.mark.asyncio
+    async def test_obsidian_note_keeps_its_validity_window(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "note.md").write_text(
+            "---\nvalid_to: 2020-01-01\n---\n\n## Notes\n\nbody\n", encoding="utf-8"
+        )
+
+        await import_obsidian(vault, tmp_path / "out")
+
+        chunks = _chunk(tmp_path / "out" / "note.md")
+        assert chunks
+        assert all(c.metadata.valid_to_unix is not None for c in chunks)
+
+    @pytest.mark.asyncio
+    async def test_notion_directory_note_keeps_its_frontmatter_tags(self, tmp_path):
+        export = tmp_path / "export"
+        export.mkdir()
+        (export / "Page abc123def4567890123456789abcdef0.md").write_text(
+            "---\ntags: [alpha]\n---\n\n# Page\n\nbody\n", encoding="utf-8"
+        )
+
+        await import_notion(export, tmp_path / "out")
+
+        written = tmp_path / "out" / "Page.md"
+        assert written.read_text(encoding="utf-8").startswith(
+            "---\nimported_from: notion\noriginal_file: Page abc123def4567890123456789abcdef0.md\n"
+            "tags: [alpha]\n---\n"
+        )
+        assert {c.metadata.tags for c in _chunk(written)} == {("alpha",)}
+
+    @pytest.mark.asyncio
+    async def test_notion_zip_crlf_frontmatter_is_merged(self, tmp_path):
+        zip_path = tmp_path / "export.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("Page.md", "---\r\ntags: [alpha]\r\n---\r\n\r\n# Page\r\n\r\nbody\r\n")
+
+        await import_notion(zip_path, tmp_path / "out")
+
+        written = tmp_path / "out" / "Page.md"
+        assert written.read_text(encoding="utf-8").startswith(
+            "---\nimported_from: notion\noriginal_file: Page.md\ntags: [alpha]\n---\n"
+        )
+        assert {c.metadata.tags for c in _chunk(written)} == {("alpha",)}
+
+    @pytest.mark.asyncio
+    async def test_note_without_frontmatter_gets_the_old_header(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "Daily Note.md").write_text("# Daily\n\nbody\n", encoding="utf-8")
+
+        await import_obsidian(vault, tmp_path / "out")
+
+        assert (tmp_path / "out" / "Daily Note.md").read_text(encoding="utf-8") == (
+            "---\nimported_from: obsidian\noriginal_file: Daily Note.md\n---\n\n# Daily\n\nbody\n"
+        )
+
+
+class TestWithImportHeader:
+    """Defined outcomes of ``_with_import_header`` for frontmatter shapes (#2716)."""
+
+    @staticmethod
+    def _frontmatter(text):
+        import yaml
+        from memtomem.chunking.markdown import _FRONT_MATTER_RE
+
+        return yaml.safe_load(_FRONT_MATTER_RE.match(text).group(1))
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "a: b.md",
+            "#x.md",
+            "yes",
+            "- x.md",
+            "한글 노트.md",
+            "[x].md",
+            "x\u2028y.md",
+            "😀.md",
+            "x\n😀.md",
+            "x\u2028😀 한글.md",
+            "a\x85b\r\nc\x0bd\x1ce.md",
+        ],
+    )
+    def test_original_file_round_trips(self, name):
+        for content in ("body\n", "---\ntags: [a]\n---\nbody\n"):
+            meta = self._frontmatter(importers._with_import_header(content, "obsidian", name))
+            assert meta["original_file"] == name
+            assert meta["imported_from"] == "obsidian"
+
+    def test_line_break_in_name_cannot_add_frontmatter_lines(self):
+        from memtomem.chunking.markdown import MarkdownChunker
+        from memtomem.indexing.redaction_exemption import declared_exemption
+        from pathlib import Path
+
+        name = "x\nredaction: documents-patterns\ntags: [forged]\ny.md"
+        for content in ("body\n", "---\ntitle: t\n---\nbody\n"):
+            out = importers._with_import_header(content, "notion", name)
+            assert self._frontmatter(out)["original_file"] == name
+            assert declared_exemption(Path("n.md"), out) is None
+            assert MarkdownChunker._extract_frontmatter_tags(out) == []
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            # The chunker reads this block as "---\ntags...": an inserted line
+            # in front would close the block early.
+            "---\n---\ntags: [alpha]\nvalid_to: 2020-01-01\n---\nbody\n",
+            # Same overlap with an empty mapping, so the merged key list
+            # still matches and only the chunker's view differs: the note's
+            # "---" and "{}" lines would become body text.
+            "---\n---\n{}\n---\nbody\n",
+            # Valid mappings that column-0 lines in front would break.
+            "---\n{original: x, tags: [alpha]}\n---\nbody\n",
+            "---\n  tags: [alpha]\n  x: 1\n---\nbody\n",
+            "---\n{\nredaction: documents-patterns\n}\n---\nbody\n",
+            # Not a mapping, or not readable as YAML.
+            "---\n- a\n- b\n---\nbody\n",
+            "---\ntags: [alpha\n---\nbody\n",
+            "---\n<<: {tags: [a]}\n---\nbody\n",
+            "---\n? [a]\n: 1\n---\nbody\n",
+            # Composing raises a bare ValueError, not a YAMLError.
+            '---\nv: "\\U00110000"\n---\nbody\n',
+            "---\n%YAML " + "1" * 4301 + ".1\n---\nbody\n",
+            "---\n" + "[" * 5000 + "]" * 5000 + "\n---\nbody\n",
+        ],
+    )
+    def test_unverifiable_block_is_kept_unchanged(self, content):
+        assert importers._with_import_header(content, "notion", "n.md") == content
+
+    @pytest.mark.parametrize("entry", ['d: !!int ""', "d: !!bool nope", "d: !!timestamp nope"])
+    def test_tag_that_fails_to_construct_is_merged_without_constructing(self, entry):
+        content = f"---\n{entry}\n---\nbody\n"
+        out = importers._with_import_header(content, "notion", "n.md")
+        assert out == f"---\nimported_from: notion\noriginal_file: n.md\n{entry}\n---\nbody\n"
+
+    def test_merge_chain_is_not_expanded(self):
+        lines = ["a0: &a0 {x: 1}"] + [
+            f"a{i}: &a{i} {{<<: [*a{i - 1}, *a{i - 1}]}}" for i in range(1, 60)
+        ]
+        content = "---\n" + "\n".join(lines) + "\n---\nbody\n"
+        out = importers._with_import_header(content, "notion", "n.md")
+        assert out.startswith("---\nimported_from: notion\noriginal_file: n.md\na0:")
+
+    def test_redaction_declaration_still_accepted(self):
+        from memtomem.indexing.redaction_exemption import declared_exemption
+        from pathlib import Path
+
+        content = "---\nredaction: documents-patterns\n---\nbody\n"
+        out = importers._with_import_header(content, "obsidian", "n.md")
+        assert out != content
+        assert declared_exemption(Path("n.md"), out) == declared_exemption(Path("n.md"), content)
+        assert declared_exemption(Path("n.md"), out) is not None
+
+    @pytest.mark.parametrize(
+        "existing",
+        [
+            "imported_from: notion",
+            '"imported_from": notion',
+            "!!str imported_from: notion",
+            "? imported_from\n: notion",
+        ],
+    )
+    def test_existing_key_is_not_duplicated(self, existing):
+        content = f"---\n{existing}\n---\nbody\n"
+        out = importers._with_import_header(content, "obsidian", "n.md")
+        assert out == f"---\noriginal_file: n.md\n{existing}\n---\nbody\n"
+
+    def test_both_keys_present_is_unchanged(self):
+        content = "---\nimported_from: notion\noriginal_file: old.md\n---\nbody\n"
+        assert importers._with_import_header(content, "obsidian", "n.md") == content
+
+    def test_key_lookalike_inside_a_scalar_is_not_a_key(self):
+        content = '---\nnote: "x\noriginal_file: fake.md"\n---\nbody\n'
+        out = importers._with_import_header(content, "obsidian", "n.md")
+        assert out == "---\nimported_from: obsidian\noriginal_file: n.md\n" + content[4:]
+
+    @pytest.mark.parametrize("content", ["body\n", "---\ntags: [a]\n---\nbody\n"])
+    @pytest.mark.parametrize(
+        "serialise",
+        [
+            lambda fields: "".join(f"{k}: {v}x\n" for k, v in fields.items()),
+            lambda fields: "".join(f"{k}_x: {v}\n" for k, v in fields.items()),
+        ],
+        ids=["wrong-value", "wrong-key"],
+    )
+    def test_keys_that_do_not_read_back_are_omitted(self, content, serialise, monkeypatch):
+        monkeypatch.setattr(importers, "_provenance_lines", serialise)
+        assert importers._with_import_header(content, "obsidian", "n.md") == content
+
+    def test_unterminated_opener_gets_the_old_header(self):
+        content = "---\ntags: [a]\nbody\n"
+        out = importers._with_import_header(content, "obsidian", "n.md")
+        assert out == "---\nimported_from: obsidian\noriginal_file: n.md\n---\n\n" + content
+
+    def test_empty_block_receives_the_keys(self):
+        content = "---\n\n---\nbody\n"
+        out = importers._with_import_header(content, "obsidian", "n.md")
+        assert self._frontmatter(out) == {"imported_from": "obsidian", "original_file": "n.md"}
+
+    @pytest.mark.asyncio
+    async def test_unverifiable_note_does_not_stop_the_batch(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "a.md").write_text('---\nv: "\\U00110000"\n---\nbody\n', encoding="utf-8")
+        (vault / "b.md").write_text("---\ntags: [b]\n---\nbody\n", encoding="utf-8")
+
+        imported = await import_obsidian(vault, tmp_path / "out")
+
+        assert sorted(p.name for p in imported) == ["a.md", "b.md"]
+        assert (tmp_path / "out" / "a.md").read_text(encoding="utf-8") == (
+            '---\nv: "\\U00110000"\n---\nbody\n'
+        )

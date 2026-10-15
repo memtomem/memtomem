@@ -3,8 +3,9 @@
 ``run_search`` derives it; these tests prove it reaches the MCP surfaces with
 a real pipeline whose embedder raises, and that the exception text — which an
 embedder may fill with its endpoint — is not part of the notice, so compact
-and structured output with results stay free of it. The verbose pipeline line
-and the empty-result branches still carry the raw text (#2675).
+and structured output with results stay free of it. Since #2675 the verbose
+pipeline line names the failure by class only; the raw text stays in the
+server log.
 """
 
 from __future__ import annotations
@@ -75,8 +76,8 @@ class TestMemSearch:
         assert "hunter2" not in out
 
     @pytest.mark.asyncio
-    async def test_verbose_keeps_the_cause_in_the_pipeline_line(self, failing_dense):
-        """The diagnostic channel still names the error; only the notice is fixed."""
+    async def test_verbose_names_the_failure_without_its_text(self, failing_dense):
+        """The diagnostic line names the error class, never its endpoint-bearing text."""
         ctx = StubCtx(AppContext.from_components(failing_dense))
 
         out = await mem_search(
@@ -85,7 +86,8 @@ class TestMemSearch:
             ctx=ctx,  # type: ignore[arg-type]
         )
 
-        assert "Dense-err:Cannot connect to Ollama" in out
+        assert "Dense-err:RuntimeError — details are in the server log" in out
+        assert "hunter2" not in out and "ollama.internal" not in out
         assert f"({DENSE_LEG_DROPPED_HINT})" in out
 
     @pytest.mark.asyncio

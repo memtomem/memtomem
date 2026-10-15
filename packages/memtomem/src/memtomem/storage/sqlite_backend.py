@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator, Mapping, Sequence, TypeVar
+from typing import Any, AsyncIterator, Iterator, Mapping, Sequence, TypeGuard, TypeVar
 from uuid import UUID
 
 import sqlite_vec
@@ -26,6 +26,7 @@ from memtomem.config import StorageConfig
 from memtomem.errors import (
     ExhaustiveDenseSearchLimitError,
     EmbeddingDimensionMismatchError,
+    EmbeddingPolicyChangedError,
     QueryEmbeddingDimensionError,
     SchemaDowngradeError,
     StorageError,
@@ -457,6 +458,10 @@ class SqliteBackend(
         # was checked, and the refusal once another process migrated past us.
         self._schema_checked_at: dict[int, int] = {}
         self._schema_superseded: str | None = None
+        # The same refusal as callers may see it (``Mem2MemError.public_message``),
+        # built from the vetted text of the error that tripped it — never from
+        # its ``str()``, so an unvetted refusal stays unvetted when re-raised.
+        self._schema_superseded_public: str | None = None
 
     async def initialize(self) -> None:
         db_path = Path(self._config.sqlite_path).expanduser()
@@ -562,17 +567,8 @@ class SqliteBackend(
             stored_policy = self._meta.get_meta("embedding_policy_fingerprint")
             stored_max_raw = self._meta.get_meta("embedding_max_sequence_tokens")
             stored_max = int(stored_max_raw) if stored_max_raw is not None else None
-            if (
-                self._embedding_policy_fingerprint
-                and stored_policy is not None
-                and stored_policy != self._embedding_policy_fingerprint
-            ):
-                self._policy_mismatch = (
-                    stored_policy,
-                    self._embedding_policy_fingerprint,
-                    stored_max,
-                    self._embedding_max_sequence_tokens,
-                )
+            if self._policy_differs(stored_policy):
+                self._set_policy_mismatch(stored_policy, stored_max)
             self._has_vec_table = (
                 self._db.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_vec'"
@@ -587,6 +583,70 @@ class SqliteBackend(
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 raise
             raise _classify_startup_error(exc, stage) from exc
+
+    def _policy_differs(self, stored_policy: str | None) -> TypeGuard[str]:
+        """Whether *stored_policy* disagrees with the policy this backend embeds under.
+
+        The one comparison both the open-time check and the write-time fence
+        use, so the two cannot disagree. Only the fingerprint is compared:
+        an empty configured fingerprint or an absent stored row is not a
+        mismatch, and neither is a ``max_sequence_tokens``-only difference.
+        """
+        return bool(
+            self._embedding_policy_fingerprint
+            and stored_policy is not None
+            and stored_policy != self._embedding_policy_fingerprint
+        )
+
+    def _set_policy_mismatch(self, stored_policy: str, stored_max: int | None) -> None:
+        self._policy_mismatch = (
+            stored_policy,
+            self._embedding_policy_fingerprint,
+            stored_max,
+            self._embedding_max_sequence_tokens,
+        )
+
+    def _fence_vector_write(self, db: sqlite3.Connection) -> None:
+        """Refuse to write vectors under a policy row that no longer matches (#2620).
+
+        The policy is read at open and cached, and the vectors about to be
+        written were embedded under that cache, before the write lock was
+        taken. Another process — or another backend on this file — can
+        restamp the row in between, and the vectors would then land under a
+        row that does not describe them. Called on *db* immediately before a
+        ``chunks_vec`` insert, after the call's first write statement, so the
+        write lock is held (``BEGIN IMMEDIATE`` inside ``transaction()``, the
+        implicit ``BEGIN`` of that first DML otherwise) and the row read here
+        cannot change before the insert commits.
+
+        Runs on every vector write, including after a refusal: a degraded
+        backend's cache still differs from the row, and callers that passed
+        the mismatch gates before the refusal must not get through. Chunk
+        reads never carry vectors, so metadata-only re-upserts do not reach
+        it. On a mismatch the backend enters the open-time degraded mode.
+        """
+        rows = dict(
+            db.execute(
+                "SELECT key, value FROM _memtomem_meta WHERE key IN (?, ?)",
+                ("embedding_policy_fingerprint", "embedding_max_sequence_tokens"),
+            ).fetchall()
+        )
+        stored_policy = rows.get("embedding_policy_fingerprint")
+        if not self._policy_differs(stored_policy):
+            return
+        # The stored limit is only reported, never compared. A malformed one
+        # must not stop the mismatch from being recorded and raised.
+        try:
+            stored_max = int(rows["embedding_max_sequence_tokens"])
+        except (KeyError, TypeError, ValueError):
+            stored_max = None
+        self._set_policy_mismatch(stored_policy, stored_max)
+        raise EmbeddingPolicyChangedError.vetted(
+            "The stored embedding policy differs from the one this process embeds "
+            "with, so its vectors were not written. Run 'mm embedding-reset' (CLI) "
+            "or mem_embedding_reset (MCP) to see the stored and configured policies "
+            "and the recovery options."
+        )
 
     def _discard_partial_connections(self) -> None:
         """Close a failed initialization without checkpointing/mutating the DB."""
@@ -633,7 +693,9 @@ class SqliteBackend(
         re-checks under the write lock (``force``) and has no such gap.
         """
         if self._schema_superseded is not None:
-            raise SchemaDowngradeError(self._schema_superseded)
+            raise SchemaDowngradeError(
+                self._schema_superseded, public_message=self._schema_superseded_public
+            )
         key = id(conn)
         version: int | None = None
         if not force:
@@ -643,11 +705,17 @@ class SqliteBackend(
         try:
             check_schema_downgrade(conn)
         except SchemaDowngradeError as exc:
-            self._schema_superseded = (
-                f"{exc} This process opened the database under the older schema "
-                f"and has stopped using it; restart it on the newer release."
+            restart = (
+                " This process opened the database under the older schema "
+                "and has stopped using it; restart it on the newer release."
             )
-            raise SchemaDowngradeError(self._schema_superseded) from exc
+            self._schema_superseded = f"{exc}{restart}"
+            self._schema_superseded_public = (
+                f"{exc.public_message}{restart}" if exc.public_message else None
+            )
+            raise SchemaDowngradeError(
+                self._schema_superseded, public_message=self._schema_superseded_public
+            ) from exc
         if version is not None:
             self._schema_checked_at[key] = version
 
@@ -1610,6 +1678,7 @@ class SqliteBackend(
                 )
                 vec_updates = [(c, rowid) for c, rowid in to_update if c.embedding]
                 if vec_updates and self._has_vec_table:
+                    self._fence_vector_write(db)
                     # DELETE + INSERT, not UPDATE: after
                     # ``reset_embedding_meta`` drops and recreates
                     # ``chunks_vec``, the chunk rows survive but their vector
@@ -1735,6 +1804,7 @@ class SqliteBackend(
                         if c.embedding and str(c.id) in new_rowid_map
                     ]
                     if vec_inserts and self._has_vec_table:
+                        self._fence_vector_write(db)
                         db.executemany(
                             "INSERT INTO chunks_vec(rowid, embedding) VALUES (?,?)",
                             vec_inserts,
@@ -3045,7 +3115,7 @@ class SqliteBackend(
         # with no ``dense_error`` at all (Codex review, #2120). Kept below the
         # BM25-only guard above: dimension-0 stores accept any width by design.
         if len(embedding) != self._dimension:
-            raise QueryEmbeddingDimensionError(
+            raise QueryEmbeddingDimensionError.vetted(
                 f"Embedding dimension mismatch: query has {len(embedding)}d "
                 f"but DB expects {self._dimension}d. "
                 f"Check MEMTOMEM_EMBEDDING__MODEL / "
@@ -3157,7 +3227,7 @@ class SqliteBackend(
         # replay diff would compare against a silently partial scan. Refuse
         # instead — fail-closed beats a result that lies about its own shape.
         if exhaustive and total_vec_rows > VEC_MAX_KNN_K:
-            raise ExhaustiveDenseSearchLimitError(
+            raise ExhaustiveDenseSearchLimitError.vetted(
                 f"Exhaustive dense search needs to scan all {total_vec_rows} embeddings, "
                 f"but sqlite-vec caps a KNN query at {VEC_MAX_KNN_K}. Deterministic "
                 f"replay/evaluation is unavailable on a store this large — run it "
@@ -3207,7 +3277,7 @@ class SqliteBackend(
                 ).fetchall()
             except _sqlite3.OperationalError as exc:
                 if "Dimension mismatch" in str(exc):
-                    raise QueryEmbeddingDimensionError(
+                    raise QueryEmbeddingDimensionError.vetted(
                         f"Embedding dimension mismatch: query has {len(embedding)}d "
                         f"but DB expects {self._dimension}d. "
                         f"Check MEMTOMEM_EMBEDDING__MODEL / "

@@ -125,26 +125,39 @@ class OllamaEmbedder:
         except httpx.ConnectError as e:
             raise RetryableEmbeddingError(
                 f"Cannot connect to Ollama at {self._config.base_url}. "
-                f"Please verify 'ollama serve' is running. Error: {e}"
+                f"Please verify 'ollama serve' is running. Error: {e}",
+                public_message=(
+                    "Cannot connect to Ollama. Please verify 'ollama serve' is running "
+                    "and embedding.base_url points at it."
+                ),
             ) from e
         except httpx.TimeoutException as e:
             raise RetryableEmbeddingError(
                 f"Ollama embedding request timed out. "
-                f"The model '{self._config.model}' may still be loading. Error: {e}"
+                f"The model '{self._config.model}' may still be loading. Error: {e}",
+                public_message=(
+                    f"Ollama embedding request timed out. "
+                    f"The model '{self._config.model}' may still be loading."
+                ),
             ) from e
         except RateLimitError as e:
             # Retries exhausted on 429/5xx — most commonly Ollama returning
             # 503 for the whole backoff window while a large model loads.
             raise RetryableEmbeddingError(
                 f"Ollama kept returning a transient HTTP error after retries. "
-                f"The model '{self._config.model}' may still be loading. Error: {e}"
+                f"The model '{self._config.model}' may still be loading. Error: {e}",
+                public_message=(
+                    f"Ollama kept returning a transient HTTP error after retries. "
+                    f"The model '{self._config.model}' may still be loading."
+                ),
             ) from e
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                raise EmbeddingError(
+                message = (
                     f"Model '{self._config.model}' not found in Ollama. "
                     f"Run 'ollama pull {self._config.model}' to download it."
-                ) from e
+                )
+                raise EmbeddingError.vetted(message) from e
             raise EmbeddingError(f"Ollama embedding failed: {e}") from e
         except httpx.HTTPError as e:
             raise RetryableEmbeddingError(f"Ollama embedding transport failed: {e}") from e
@@ -156,10 +169,10 @@ class OllamaEmbedder:
 
     async def embed_query(self, query: str) -> list[float]:
         if not query or not query.strip():
-            raise EmbeddingError("Query text cannot be empty")
+            raise EmbeddingError.vetted("Query text cannot be empty")
         embeddings = await self.embed_texts([query])
         if not embeddings:
-            raise EmbeddingError("No embeddings returned for query")
+            raise EmbeddingError.vetted("No embeddings returned for query")
         return embeddings[0]
 
     async def close(self) -> None:

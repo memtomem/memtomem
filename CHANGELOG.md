@@ -7,6 +7,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Files under `.aws/` and `.gnupg/` are no longer indexed (#2734).** The two
+  secret-store directories were excluded only by the recursive directory walk,
+  and only when spelled exactly in lower case. The file watcher, single-file
+  `mem_index` and every writer's exclusion check use the built-in exclude
+  patterns instead, which listed `.ssh` but not these two, so a supported file
+  beneath either directory under a memory root was indexed there in any case,
+  and the walk admitted `.AWS` or `.GnuPG`. Both are now built-in secret
+  patterns, matched case-insensitively on every surface like `**/.ssh/**`.
+  The patterns also match the absolute path, so a memory root that lies
+  inside `.aws` or `.gnupg` now indexes nothing. Chunks already indexed from
+  those directories are not removed by re-indexing, which skips an excluded
+  file without touching its rows; `mm purge --matching-excluded` lists them
+  and `--apply` deletes them.
+- **A process no longer writes vectors under an embedding policy another
+  process stamped after it opened the store (#2620).** The embedding policy
+  is read once at open, and vectors are embedded before the write lock is
+  taken. When another process changed the stored policy in between, through
+  `mem_embedding_reset(mode="apply_current")` or the empty-store policy
+  adoption of a revert, the older process kept writing vectors built under its
+  own policy, and they landed under a row that does not describe them. Every
+  vector write now re-reads the stored policy under the write lock. On a
+  mismatch the write is refused with `EmbeddingPolicyChangedError`, which names
+  the recovery, and the process enters the same policy-mismatch degraded mode
+  an open-time mismatch does: indexing is refused before embedding, search
+  falls back to BM25, and `mem_status` reports it. `mm embedding-reset`
+  shows both policies; `--mode apply-current` followed by
+  `mm index --force` resolves it, as for an open-time mismatch. A cached
+  search result is no longer served across that
+  change. An import that hits it reports the error (the web route returns
+  409) instead of a failed count. The check costs about 5 µs per vector write
+  against about 4 ms for upserting ten 1024-dimension chunks. Only the policy
+  fingerprint is compared, as at open; a model, provider or dimension change
+  that leaves the policy row as it was is not detected.
+- **Imported notes keep their own frontmatter (#2716).** `import_obsidian`
+  and `import_notion` wrote their `imported_from` / `original_file` block in
+  front of the note. A note that had frontmatter of its own then held two
+  blocks, and indexing reads only the first, so the note's `tags`,
+  `valid_from` / `valid_to` and `redaction` declaration were indexed as body
+  text instead of being applied. The two keys are now added to the note's
+  block; a note whose frontmatter is not a plain YAML mapping, or already
+  carries both keys, is copied with its frontmatter unchanged. The original
+  file name is now quoted when YAML needs it, so a name containing `: `, a
+  leading `#` or a line break no longer breaks the block or adds keys to it.
+  Notes imported before this release keep the two-block layout until they are
+  imported again.
 - **`mem_add` no longer records its duplicate check as a search (#2683).**
   After writing a note longer than 20 characters, `mem_add` searches for
   similar memories; that search ran in recording mode, so it raised the
@@ -52,9 +97,100 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   fragment holding no line of its own (only borrowed overlap, or only a long
   merge label) is dropped when it repeats another fragment byte for byte at
   the same line; that text stays in the other fragment. A file indexed before
-  the upgrade keeps its old ranges until it is next edited; that re-index
-  updates the ranges without re-embedding. `mm index --force` updates them at
-  once but re-embeds every chunk.
+  the upgrade keeps its old ranges until it is next indexed. The index
+  receipt records the release, so the first `mm index` after upgrading
+  re-chunks every file, edited or not, and updates the ranges without
+  re-embedding; `mm index --force` is not needed for this and re-embeds every
+  chunk.
+- **A Markdown wikilink that crosses a line break no longer shifts later line
+  numbers (#2696).** Chunking resolves `[[target|alias]]` to `alias`, and the
+  pattern let the target span a newline, so `[[tar\nget|alias]]` removed a
+  line: every later line of the file, in later sections too, was numbered one
+  line early. Wikilinks now resolve only within one line; a `[[...]]` that
+  crosses a line break stays in the chunk as written. Files without such a
+  link chunk to the same text as before. In a file with one, the chunk holding
+  it now keeps the raw link and is re-embedded when the file is next indexed.
+- **A failed search leg no longer echoes its exception text to callers
+  (#2675).** When keyword or semantic search failed, `mem_search` (its
+  empty-result note, structured `hints` and verbose `pipeline:` line) and the
+  Web search API's `retrieval_stats` carried the raw error text. An embedder's
+  message can name its configured endpoint: the Ollama connection error
+  included `embedding.base_url`, credentials or query-string tokens and all.
+  These surfaces now show the provider's own advice where memtomem wrote one
+  without such details (Ollama not running, `ollama pull <model>`, the OpenAI
+  key check, a missing `memtomem[onnx]` install, an embedding dimension
+  mismatch, a newer database schema), and otherwise only the error's type.
+  The full text is still written to the server log.
+- **A web add with tags no longer tags the file's earlier entries (#2724).**
+  `POST /api/add` applied the request's tags to every chunk of the day file
+  it appended to, so tagging one new note re-tagged everything already in
+  that file. Only chunks that begin after the existing content now receive
+  the tags.
+- **Promoting a scratch entry from the web makes it searchable at once
+  (#2492).** `POST /api/scratch/{key}/promote` appended the entry to a memory
+  file without indexing it and reported `indexed_chunks: 1` regardless. It
+  now appends and indexes under the file's lock, as web `/api/add` does,
+  clears the search cache, and reports the real chunk count. A `file` target
+  must be a `.md` or `.markdown` file and must not be a symlink. When the
+  stored-namespace lookup is unavailable it returns 503 before writing
+  anything, as `/api/add` does, so a retry does not append the entry twice
+  (#2731).
+- **The web procedures list stays inside the current project (#2724).**
+  `GET /api/procedures` listed procedure-tagged chunks from every project.
+  It now applies the same project boundary as search: user-scope procedures
+  plus those of the project the server was started in.
+- **Notion and Obsidian imports apply `tags` only to the files they indexed
+  (#2724).** Tags were applied to every imported file, including files the
+  redaction guard refused to index.
+- **A web API error that carries vetted text shows it (#2724).** An
+  otherwise unhandled memtomem error with a `public_message` now returns that
+  text as the 500 response's `detail` instead of `Internal server error`.
+  Errors without one still return the generic text.
+
+### Security
+
+- **Memory-directory endpoints accept local requests only, and refuse system
+  and secret-store directories (#2724).** `POST /api/memory-dirs/add`,
+  `/remove` and `/open` now return 403 unless the client address is
+  `127.0.0.1`, `::1` or `localhost`. `/add` also refuses a path whose last
+  component is a symlink, a filesystem root, the POSIX system roots (`/etc`,
+  `/private/etc`, `/System`, `/usr`, `/bin`, `/sbin`, `/dev`, `/proc`,
+  `/sys`) and everything beneath them, such as `/usr/local`, and any path
+  with a `.ssh`, `.aws`, `.gnupg` or `.kube` component. The comparison ignores letter case, since a
+  case-insensitive filesystem (APFS and NTFS by default) resolves `/USR` or
+  `~/.SSH` to the denied directory; on a case-sensitive filesystem this also
+  refuses spellings that name a different directory. Directories already
+  registered are not re-checked.
+- **Webhook URLs naming a local host are refused (#2724).** Besides private,
+  loopback and reserved IP literals, the webhook URL check now rejects
+  `localhost`, `*.localhost`, `*.local` and `*.internal` hostnames and
+  link-local, multicast and unspecified IP literals. A refused URL disables
+  webhooks at startup with a `Webhook URL rejected` warning in the server
+  log, so a webhook that pointed at a local service stops firing after the
+  upgrade. A public hostname that resolves to a private address is still
+  accepted (#2728).
+- **The web source preview no longer serves a masked source's unmasked file
+  (#2724).** `GET /api/sources/content` returns the file on disk. For a
+  source whose chunks are a masked projection it now refuses with
+  `409 masked_projection_read_only` instead of showing the values the mask
+  removed. It also returns 404 for a held or hidden source and 403 when the
+  requested path's last component is a symlink, checked only after the path
+  is known to be an indexed source.
+- **Every web API request body is capped (#2724).** The 4 MiB request limit
+  applied only to JSON or untyped bodies; other content types were read
+  without a limit. It now applies to every `/api/*` request except the two
+  multipart upload paths, which keep their own limit.
+- **Path characters are refused where a name becomes a file path (#2724).**
+  `mem_procedure_save` rejects a name that is empty or contains `/`, `\`,
+  `..` or a NUL byte. Importing an Obsidian vault or an unzipped Notion
+  export no longer imports a source file that is a symlink, lies under a
+  symlinked directory or resolves outside the export root. `mem_import_*`
+  reports the skipped source files it reached on their own line, "Skipped
+  (source is a symlink or outside the vault)" (or "the export"), apart from
+  symlinked targets in the output directory (#2730).
+- **The CSRF token check compares in constant time (#2724).** It compares
+  the raw header bytes, so a header with non-ASCII bytes is a plain mismatch
+  (403). The `Host` header is matched case-insensitively.
 
 ## [0.6.8] — 2026-10-08
 

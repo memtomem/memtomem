@@ -14,7 +14,13 @@ from memtomem.models import Chunk, ChunkMetadata, ChunkType
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 _FRONT_MATTER_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
-_WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
+# A wikilink lies on one line. Resolution drops an aliased link's target, so a
+# target spanning a newline would take that newline with it and number every
+# later line of the file one too early; padding the newline back instead would
+# push the text after ``]]`` to the start of a line, where it can read as a
+# heading, a code fence or a metadata blockquote. A match crossing a newline is
+# left as written (#2696).
+_WIKILINK_RE = re.compile(r"\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]")
 # Temporal-validity frontmatter formats (RFC: temporal-validity).
 # Date-only ``YYYY-MM-DD`` and quarter ``YYYY-QN`` (N in 1-4). Anything else
 # parses to ``None`` and the bound is treated as unset (no exception raised —

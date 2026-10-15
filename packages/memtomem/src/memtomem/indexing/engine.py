@@ -106,6 +106,8 @@ _BUILTIN_SECRET_PATTERNS: tuple[str, ...] = (
     "**/*.pem",
     "**/*.key",
     "**/.ssh/**",
+    "**/.aws/**",
+    "**/.gnupg/**",
 )
 
 _BUILTIN_NOISE_PATTERNS: tuple[str, ...] = (

@@ -8,6 +8,7 @@ import pytest
 
 from memtomem.chunking import bounded as bounded_module
 from memtomem.chunking.bounded import TokenBudget, bound_chunks, chunk_code, chunk_json
+from memtomem.chunking.markdown import MarkdownChunker
 from memtomem.config import IndexingConfig
 from memtomem.indexing.chunk_context import enrich_context
 from memtomem.indexing.differ import compute_diff
@@ -894,6 +895,70 @@ def test_rewritten_markdown_lines_keep_exact_fragment_ranges(bounded_config):
             assert meta.start_line == int(first.split()[0][1:])
         if last.startswith("L") and chunk.content.endswith("\n"):
             assert meta.end_line == int(last.split()[0][1:])
+
+
+def _section_spans(text):
+    chunks = MarkdownChunker().chunk_file(Path("w.md"), text)
+    return [
+        (c.metadata.heading_hierarchy, c.metadata.start_line, c.metadata.end_line, c.line_map)
+        for c in chunks
+    ]
+
+
+def test_a_wikilink_across_lines_moves_no_later_line():
+    """Resolving an aliased link drops its target; a newline in it would go too (#2696)."""
+    text = "# A\n\nsee [[tar\nget|alias]] here\nA2\n\n# B\n\nB1\nB2\n"
+    assert _section_spans(text) == [
+        (("# A",), 1, 6, (3, 4, 5)),
+        (("# B",), 7, 10, (9, 10)),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "# A\n\nsee [[tar\nget|alias]]# Fake\nbody\n\n# B\n\nB1\n",
+            [(("# A",), 1, 6, (3, 4, 5)), (("# B",), 7, 9, (9,))],
+        ),
+        (
+            "# A\n\nsee [[tar\nget|alias]]```\n# B\nbody\n",
+            [(("# A",), 1, 4, (3, 4)), (("# B",), 5, 6, (6,))],
+        ),
+        (
+            "# A\n\n> created: [[tar\nget|alias]]tags: [fake]\n\nbody\n",
+            [(("# A",), 1, 6, (3, 4, 5, 6))],
+        ),
+    ],
+    ids=["heading-after-link", "fence-after-link", "tags-after-link"],
+)
+def test_text_after_a_wikilink_across_lines_stays_on_its_line(text, expected):
+    """Padding the dropped newline back would start a line with the text after ``]]``."""
+    assert _section_spans(text) == expected
+    tags = [c.metadata.tags for c in MarkdownChunker().chunk_file(Path("w.md"), text)]
+    assert tags == [()] * len(expected)
+
+
+def test_only_one_line_wikilinks_resolve():
+    text = "# N\n\nx [[a|b]] y [[c]]\n[[d\ne]] [[f|g\nh]]\n"
+    (chunk,) = MarkdownChunker().chunk_file(Path("w.md"), text)
+    assert chunk.content == "x b y c\n[[d\ne]] [[f|g\nh]]"
+
+
+def test_fragments_after_a_wikilink_across_lines_keep_their_lines(bounded_config):
+    config = bounded_config.model_copy(update={"min_chunk_tokens": 0, "max_chunk_tokens": 2000})
+    text = "# T\n\nsee [[tar\nget|alias]] here\n" + "".join(
+        f"line {i:02d} with some more words\n" for i in range(20)
+    )
+    chunks = IndexEngine(None, None, config).chunk_content(Path("w.md"), text)
+    assert len(chunks) > 1, "the fixture must split"
+    checked = 0
+    for chunk in chunks:
+        first = chunk.content.split("\n", 1)[0]
+        if first.startswith("line "):
+            assert chunk.metadata.start_line == 5 + int(first.split()[1])
+            checked += 1
+    assert checked, "no fragment starts on a labelled line"
 
 
 def test_long_input_never_tokenizes_an_unbounded_remainder(bounded_config, monkeypatch):

@@ -298,7 +298,11 @@ _WIKILINK_LABEL_RE = re.compile(r"^\[[^\[\]]*\]$")
 # internals). Wikilinks are never pointer *entries* — ``--fix`` must not act on
 # them — but they do name memory files, so the doctor collects them for the
 # info-severity ``dangling_wikilink`` check (#1762). Group 1 is the target; an
-# alias never names the file.
+# alias never names the file. Unlike the chunker's copy, it lets a newline
+# through: a text token here holds one only when a character reference
+# (``&#10;``) decoded to it, and refusing that match changes what
+# :func:`_settle_wikilink_labels` makes of a ``[[memo]](note)`` label on the
+# same line.
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
 
 
