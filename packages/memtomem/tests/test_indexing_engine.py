@@ -58,6 +58,40 @@ def _under_two(chunk) -> bool:
     return any("two" in heading for heading in chunk.metadata.heading_hierarchy)
 
 
+class TestUserExcludeSpecCache:
+    """The compiled ``exclude_patterns`` spec is reused, and rebuilt on change."""
+
+    @staticmethod
+    def _engine(root: Path) -> IndexEngine:
+        from memtomem.config import IndexingConfig
+
+        # ``__new__`` without ``__init__``, as several tests build engines:
+        # the cache must not depend on a constructor having run.
+        engine = IndexEngine.__new__(IndexEngine)
+        engine._config = IndexingConfig(memory_dirs=[root])
+        return engine
+
+    def test_spec_is_reused_while_the_patterns_are_unchanged(self, tmp_path):
+        engine = self._engine(tmp_path)
+        assert engine._get_user_exclude_spec() is engine._get_user_exclude_spec()
+
+    def test_patterns_edited_in_place_are_picked_up(self, tmp_path):
+        engine = self._engine(tmp_path)
+        draft = tmp_path / "draft.md"
+        assert not engine.is_excluded(draft)
+        engine._config.exclude_patterns.append("draft.md")
+        assert engine.is_excluded(draft)
+        engine._config.exclude_patterns.clear()
+        assert not engine.is_excluded(draft)
+
+    def test_patterns_replaced_are_picked_up(self, tmp_path):
+        engine = self._engine(tmp_path)
+        draft = tmp_path / "draft.md"
+        assert not engine.is_excluded(draft)
+        engine._config.exclude_patterns = ["*.md"]
+        assert engine.is_excluded(draft)
+
+
 class TestPathIsExcludedProviderConventions:
     """The single exclude funnel for ``_discover_files``, ``_index_file``,
     and ``mm purge`` must honor provider index-file conventions.

@@ -341,6 +341,36 @@ class TestStructuredChunker:
         all_text = " ".join(c.content for c in chunks)
         assert "Alice" in all_text
 
+    # ``_find_key_lines`` searches every key from the first line. Searching each
+    # key only after the previous one's line (to make the scan linear) broke
+    # both of these, so they are pinned for the next attempt.
+
+    def test_toml_table_is_not_traded_for_a_scoped_assignment(self):
+        """``[a.b]`` makes ``a`` the first key although ``[a]`` comes last.
+
+        Searching ``c`` after ``a``'s line would find ``c = 3`` under ``[a]``
+        and drop the real ``[c]`` table from ``c``'s range.
+        """
+        import tomllib
+
+        content = "[a.b]\nx = 1\n[c]\ny = 2\n[a]\nc = 3\n"
+        keys = list(tomllib.loads(content))
+        assert keys == ["a", "c"]
+        ranges = StructuredChunker._find_key_lines(".toml", content, keys)
+        assert ranges == {"c": (3, 4), "a": (5, 6)}
+
+    def test_json_key_is_not_traded_for_a_later_nested_occurrence(self):
+        """Only a key at a line start matches, so ``b`` (sharing ``a``'s line) is found nested.
+
+        Searching ``c`` after that nested ``b`` would skip the top-level ``c``
+        for the one nested in ``d``, and leave ``d``'s range empty.
+        """
+        content = '{\n"a": 1, "b": 2,\n"c": {\n"b": 3\n},\n"d": {\n"c": 4\n}\n}'
+        keys = list(json.loads(content))
+        ranges = StructuredChunker._find_key_lines(".json", content, keys)
+        assert ranges["c"] == (3, 3)
+        assert ranges["d"] == (6, 9)
+
     def test_yaml_sections(self):
         chunker = StructuredChunker()
         yaml_content = "server:\n  host: localhost\n  port: 8080\ndb:\n  name: mydb\n"
