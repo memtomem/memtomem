@@ -20,8 +20,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   follow stored-path order: a traversal never repeats a file, but misses one
   added before its cursor. The `memtomem://sources` resource still returns the
   full list.
+- **`mem_importance_scan` no longer re-reads the store once per chunk
+  (#2758).** Each chunk's relation count came from a correlated subquery that
+  re-evaluated the visible-chunk set for every chunk, so on a 47,000-chunk
+  store the factor read alone took about 168 seconds. It now counts relations
+  with joins and takes about 0.16 seconds. The counts are unchanged.
+- **`mm` starts faster (#2754).** Command modules are imported when their
+  command runs instead of at startup, so `mm version` and one command's
+  `--help` take about 0.03 s instead of 0.21 s. `mm --help` still loads every
+  command to print its summary.
+- **Indexing skips token-budget checks it has already made (#2755).** When a
+  chunk's retrieval description and composed input already fit, the chunk is
+  tokenized 3 times instead of 5 while its budget is checked, and the
+  `exclude_patterns` spec is compiled when the patterns change rather than for
+  every file. What is indexed is unchanged.
+- **The LangGraph hybrid store reads full rows only for the page it returns
+  (#2757).** Ranking now uses each candidate's id and sort key, so a query with
+  `limit=10` no longer reads up to 200 full rows first. Results and their order
+  are unchanged.
 
 ### Fixed
+
+- **Read-only storage queries are no longer refused while another task holds
+  a storage transaction (#2756).** The health watchdog's deep check,
+  reflection's most-accessed and most-connected reads, `mem_importance_scan`,
+  the web source and namespace listings and a few other reads went through the
+  writer connection, and failed with `TransactionOwnedError` until that task
+  finished. They now read committed state from the read pool. The reads that
+  callers make straight after their own commit (the eval-case and rename
+  receipts, search history after an observation flush, consolidation groups
+  during a policy run) stay on the writer, because a pooled read can miss a
+  commit made just before it (#2760).
+- **Large inputs no longer fail with `too many SQL variables` (#2758).**
+  `mem_import`'s content dedup, the importance decay in `mem_consolidate_apply`
+  and automatic consolidation, `mem_entity_scan`, and empty-query searches with
+  a tag or source filter each bound every id or hash in one statement, which
+  fails past the default limit of 999 parameters on SQLite builds older than
+  3.32. They now run in batches.
 
 - **Web writes recover after a server restart (#2746).** A stale CSRF token
   triggers a shared refresh and an explicit retry message across JSON, streaming,
