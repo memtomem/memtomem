@@ -249,6 +249,68 @@ class TestSearchMetadataFilters:
             ),
         )
 
+    def test_post_filter_uses_a_precomputed_source_set(self, monkeypatch):
+        """The stage normalizes ``source_exact`` once, not once per result."""
+        from memtomem.search import pipeline
+
+        chunk = _make_chunk("kept")
+        result = SearchResult(chunk=chunk, score=1.0, rank=1, source="bm25")
+        source = str(chunk.metadata.source_file)
+        metadata_filter = SearchMetadataFilter(source_exact=(source, "/elsewhere.md"))
+        allowed = {norm_path(Path(value)) for value in metadata_filter.source_exact}
+
+        calls: list[Path] = []
+        real = pipeline.norm_path
+
+        def counting(path):
+            calls.append(path)
+            return real(path)
+
+        monkeypatch.setattr(pipeline, "norm_path", counting)
+        assert _matches_metadata(result, metadata_filter, allowed_sources=allowed)
+        assert calls == [chunk.metadata.source_file]
+        assert not _matches_metadata(
+            result,
+            SearchMetadataFilter(source_exact=("/elsewhere.md",)),
+            allowed_sources={norm_path(Path("/elsewhere.md"))},
+        )
+
+    @pytest.mark.asyncio
+    async def test_search_normalizes_source_exact_once_per_query(self, components, monkeypatch):
+        """The post-filter stage builds the ``source_exact`` set once, then reuses it."""
+        from memtomem.search import pipeline as pipeline_module
+
+        storage, pipeline = components.storage, components.search_pipeline
+        chunks = [_make_chunk(f"shared needle {i}", source=f"s{i % 2}.md") for i in range(6)]
+        await storage.upsert_chunks(chunks)
+        # Spelled with ``..`` so a call normalizing a filter value is told apart
+        # from the per-result calls on the stored source, on every platform.
+        sources = sorted(
+            {
+                str(
+                    c.metadata.source_file.parent
+                    / ".."
+                    / c.metadata.source_file.parent.name
+                    / c.metadata.source_file.name
+                )
+                for c in chunks
+            }
+        )
+
+        calls: list[Path] = []
+        real = pipeline_module.norm_path
+
+        def counting(path):
+            calls.append(Path(path))
+            return real(path)
+
+        monkeypatch.setattr(pipeline_module, "norm_path", counting)
+        results, _ = await pipeline.search("shared needle", source_exact=sources, record=False)
+
+        assert len(results) >= 3
+        for source in sources:
+            assert calls.count(Path(source)) == 1, (source, calls.count(Path(source)))
+
     @pytest.mark.asyncio
     async def test_bm25_applies_exact_source_type_and_date_before_limit(self, storage):
         now = datetime.now(UTC)

@@ -387,6 +387,40 @@ def test_namespace_ties_use_tuple_order_before_limits(tmp_path):
         assert [r.namespace for r in results] == sorted(namespaces)[:3]
 
 
+def test_only_the_returned_page_is_hydrated(tmp_path):
+    """Ranking needs ids and sort keys; full rows are read for the page alone.
+
+    Built on ``HybridDatabase`` directly: the store opens its connection on a
+    worker thread, where this thread cannot attach a trace callback.
+    """
+    from memtomem.storage.hybrid_store import HybridDatabase
+
+    db = HybridDatabase(tmp_path / "h.db", {"dims": 0})
+    try:
+        db.write(
+            [
+                {
+                    "namespace": ("a",),
+                    "key": f"k{i:02d}",
+                    "value": {"n": i},
+                    "ttl": None,
+                    "index": ["text"],
+                    "text": "apple",
+                    "vectors": [],
+                }
+                for i in range(12)
+            ]
+        )
+        statements: list[str] = []
+        db.connection.set_trace_callback(statements.append)
+        rows, _ = db.search(("a",), None, "apple", None, "bm25", 3, 2, [1.0, 0.0], 60, False)
+    finally:
+        db.close()
+    # Equal scores fall back to (namespace, key) order, before the page is cut.
+    assert [r["key"] for r in rows] == ["k02", "k03", "k04"]
+    assert sum(s.startswith("SELECT * FROM items WHERE id=") for s in statements) == 3
+
+
 def test_selected_fields_and_index_false_replace_vectors(tmp_path):
     with indexed(tmp_path / "s.db") as store:
         store.put(("a",), "x", {"text": "apple", "extra": "pear"}, index=["extra"])
