@@ -283,7 +283,7 @@ class HybridDatabase:
                     and fts.strip()
                 ):
                     lexical = db.execute(
-                        """SELECT i.id,-bm25(item_fts) AS score FROM item_fts
+                        """SELECT i.id,-bm25(item_fts) AS score,i.namespace,i.key FROM item_fts
                         JOIN items i ON i.id=item_fts.rowid
                         WHERE item_fts MATCH ? AND namespace_prefix(i.namespace,?)
                         AND value_matches(i.value_json,?)
@@ -297,7 +297,7 @@ class HybridDatabase:
                     and vector is not None
                 ):
                     dense = db.execute(
-                        """SELECT i.id,MAX(1-vec_distance_cosine(v.vector,?)) AS score
+                        """SELECT i.id,MAX(1-vec_distance_cosine(v.vector,?)) AS score,i.namespace,i.key
                         FROM items i JOIN vectors v ON v.item_id=i.id
                         WHERE namespace_prefix(i.namespace,?) AND value_matches(i.value_json,?)
                         AND (i.expires_at IS NULL OR i.expires_at>?) GROUP BY i.id
@@ -313,16 +313,20 @@ class HybridDatabase:
                 else:
                     scores = {r["id"]: r["score"] for r in lexical + dense}
                     scale = "bm25" if mode == "bm25" else "cosine_similarity"
-                # Hydration is inside the same snapshot as candidate selection.
+                # Sort and slice before hydrating full item rows inside the same snapshot.
+                order_keys = {
+                    r["id"]: (tuple(json.loads(r["namespace"])), r["key"])
+                    for r in (*lexical, *dense)
+                }
+                ranked_ids = sorted(
+                    scores.items(),
+                    key=lambda item: (-item[1], *order_keys[item[0]]),
+                )[offset : offset + limit]
                 rows = []
-                for identity, score in scores.items():
+                for identity, score in ranked_ids:
                     row = dict(db.execute("SELECT * FROM items WHERE id=?", (identity,)).fetchone())
                     row["score"] = score
                     rows.append(row)
-                rows.sort(
-                    key=lambda row: (-row["score"], tuple(json.loads(row["namespace"])), row["key"])
-                )
-                rows = rows[offset : offset + limit]
             if refresh:
                 self._refresh(rows, now)
             return [dict(row) for row in rows], {

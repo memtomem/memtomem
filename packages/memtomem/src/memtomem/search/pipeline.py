@@ -341,12 +341,21 @@ def match_source_filter_glob(filter_str: str, source_path: str) -> bool:
     return fnmatch(source_path.replace("\\", "/"), filter_str.replace("\\", "/"))
 
 
-def _matches_metadata(result: SearchResult, metadata_filter: SearchMetadataFilter | None) -> bool:
+def _matches_metadata(
+    result: SearchResult,
+    metadata_filter: SearchMetadataFilter | None,
+    *,
+    allowed_sources: set[str] | None = None,
+) -> bool:
     if metadata_filter is None:
         return True
     chunk = result.chunk
     if metadata_filter.source_exact:
-        allowed = {norm_path(Path(value)) for value in metadata_filter.source_exact}
+        allowed = (
+            allowed_sources
+            if allowed_sources is not None
+            else {norm_path(Path(value)) for value in metadata_filter.source_exact}
+        )
         if norm_path(chunk.metadata.source_file) not in allowed:
             return False
     if metadata_filter.chunk_types:
@@ -2092,7 +2101,16 @@ class SearchPipeline:
             # (SQL for BM25, post-KNN inside ``dense_search``) so a rare tag
             # can reach the ranked pool at all (#2191).
             if metadata_filter is not None:
-                fused = [r for r in fused if _matches_metadata(r, metadata_filter)]
+                allowed_exact = (
+                    {norm_path(Path(value)) for value in metadata_filter.source_exact}
+                    if metadata_filter.source_exact
+                    else None
+                )
+                fused = [
+                    r
+                    for r in fused
+                    if _matches_metadata(r, metadata_filter, allowed_sources=allowed_exact)
+                ]
 
             # Stage β': temporal-validity filter (RFC §Pipeline integration).
             # AND-combined with the source filter via sequential application —
