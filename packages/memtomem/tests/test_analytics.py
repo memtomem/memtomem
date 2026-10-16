@@ -438,6 +438,45 @@ class TestChunkFactors:
         assert factors[0]["access_count"] == 1
         assert factors[0]["updated_at"] is not None
 
+    @pytest.mark.asyncio
+    async def test_relation_count_matches_the_per_chunk_definition(self, storage, components):
+        """Relation rows touching the chunk with both endpoints visible, once per row.
+
+        Checked against the correlated subquery the joins replaced, on the
+        shapes that tell them apart: a self-relation, a pair stored in both
+        orders, and an edge leaving the caller's project.
+        """
+        project, other = Path("/workspace/project-a"), Path("/workspace/project-b")
+        hub = _project_chunk(components, project, "alpha-hub", "alpha")
+        spoke = _project_chunk(components, project, "alpha-spoke", "alpha")
+        lone = _project_chunk(components, project, "alpha-lone", "alpha")
+        foreign = _project_chunk(components, other, "beta", "beta")
+        await storage.upsert_chunks([hub, spoke, lone, foreign])
+        for source, target in [(hub, hub), (hub, spoke), (spoke, hub), (hub, foreign)]:
+            await storage.add_relation(source.id, target.id)
+
+        factors = await storage.get_chunk_factors(project_context_root=project)
+        counts = {row["id"]: row["relation_count"] for row in factors}
+        assert counts == {str(hub.id): 3, str(spoke.id): 2, str(lone.id): 0}
+
+        from memtomem.storage.mixins.analytics import _visible_chunks_where
+
+        visible_sql, params = _visible_chunks_where(None, project, alias="c.")
+        reference = (
+            storage._get_db()
+            .execute(
+                "SELECT * FROM (WITH visible AS (SELECT c.* FROM chunks c WHERE "
+                f"{visible_sql}) "
+                "SELECT c.id, (SELECT COUNT(*) FROM chunk_relations cr "
+                " WHERE (cr.source_id = c.id AND cr.target_id IN (SELECT id FROM visible)) "
+                "    OR (cr.target_id = c.id AND cr.source_id IN (SELECT id FROM visible))) "
+                "FROM visible c)",
+                params,
+            )
+            .fetchall()
+        )
+        assert counts == dict(reference)
+
 
 class TestConsolidationGroups:
     @pytest.mark.asyncio

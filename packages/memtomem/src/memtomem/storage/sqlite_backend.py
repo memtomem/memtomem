@@ -1639,6 +1639,10 @@ class SqliteBackend(
                             f"chunk {chunk.id} from {chunk.metadata.source_file}: {exc}"
                         ) from exc
 
+            # ``norm_path`` resolves on disk; a batch is usually one file's chunks.
+            norm_sources = {
+                source: norm_path(source) for source in {c.metadata.source_file for c in chunks}
+            }
             to_update = [
                 (c, existing_rowid_map[str(c.id)])
                 for c in chunks
@@ -1658,7 +1662,7 @@ class SqliteBackend(
                         (
                             c.content,
                             c.content_hash,
-                            norm_path(c.metadata.source_file),
+                            norm_sources[c.metadata.source_file],
                             json.dumps(list(c.metadata.heading_hierarchy)),
                             c.metadata.chunk_type.value,
                             c.metadata.start_line,
@@ -1688,7 +1692,7 @@ class SqliteBackend(
                     [
                         (
                             _fts.tokenize_for_fts(c.retrieval_content),
-                            norm_path(c.metadata.source_file),
+                            norm_sources[c.metadata.source_file],
                             rowid,
                         )
                         for c, rowid in to_update
@@ -1744,7 +1748,7 @@ class SqliteBackend(
                             str(c.id),
                             c.content,
                             c.content_hash,
-                            norm_path(c.metadata.source_file),
+                            norm_sources[c.metadata.source_file],
                             json.dumps(list(c.metadata.heading_hierarchy)),
                             c.metadata.chunk_type.value,
                             c.metadata.start_line,
@@ -1810,7 +1814,7 @@ class SqliteBackend(
                             (
                                 new_rowid_map[str(c.id)],
                                 _fts.tokenize_for_fts(c.retrieval_content),
-                                norm_path(c.metadata.source_file),
+                                norm_sources[c.metadata.source_file],
                             )
                             for c in to_insert
                             if str(c.id) in new_rowid_map
@@ -3410,12 +3414,16 @@ class SqliteBackend(
             return {}
         db = self._get_read_db()
         unique = list(set(content_hashes))
-        rows = db.execute(
-            f"SELECT content_hash, id FROM chunks "
-            f"WHERE content_hash IN ({placeholders(len(unique))})",
-            unique,
-        ).fetchall()
-        return {row[0]: UUID(row[1]) for row in rows}
+        # Batched: an import bundle hands over every hash it carries.
+        found: dict[str, UUID] = {}
+        for batch in _param_batches(unique):
+            rows = db.execute(
+                f"SELECT content_hash, id FROM chunks "
+                f"WHERE content_hash IN ({placeholders(len(batch))})",
+                batch,
+            ).fetchall()
+            found.update({row[0]: UUID(row[1]) for row in rows})
+        return found
 
     async def get_stats(self) -> dict[str, int]:
         db = self._get_read_db()
@@ -4394,12 +4402,16 @@ class SqliteBackend(
         if not chunk_ids:
             return {}
         db = self._get_read_db()
-        placeholders = ",".join("?" for _ in chunk_ids)
-        rows = db.execute(
-            f"SELECT id, access_count FROM chunks WHERE id IN ({placeholders})",
-            [str(cid) for cid in chunk_ids],
-        ).fetchall()
-        return {row[0]: row[1] for row in rows}
+        # Batched: a filter-only search asks about its whole candidate pool,
+        # ``max(top_k * 5, 100)`` rows, before trimming to ``top_k``.
+        counts: dict[str, int] = {}
+        for batch in _param_batches([str(cid) for cid in chunk_ids]):
+            rows = db.execute(
+                f"SELECT id, access_count FROM chunks WHERE id IN ({placeholders(len(batch))})",
+                batch,
+            ).fetchall()
+            counts.update({row[0]: row[1] for row in rows})
+        return counts
 
     # ---- session, scratch, relations, tags, history, analytics ──────────
     # These methods are provided by Mixin classes:

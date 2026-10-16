@@ -394,3 +394,116 @@ class TestGetEmbeddingsForChunks:
 
         assert set(found) == set(ids)
         assert counting.seen == [3, 3, 1]
+
+
+def _hashes(storage, source: Path) -> list[str]:
+    rows = storage._get_db().execute(
+        "SELECT content_hash FROM chunks WHERE source_file=?", (norm_path(source),)
+    )
+    return [row[0] for row in rows]
+
+
+class TestGetChunkIdsByHashes:
+    """Import dedups an incoming bundle by asking for every hash it carries."""
+
+    async def test_matches_hashes_past_the_bound_variable_ceiling(self, storage):
+        ids = _seed(storage, Path("/tmp/import.md"), _OVER_THE_LIMIT)
+        hashes = _hashes(storage, Path("/tmp/import.md"))
+        _force_historic_limit(storage)
+
+        found = await storage.get_chunk_ids_by_hashes(hashes)
+
+        assert {str(v) for v in found.values()} == set(ids)
+
+    async def test_splits_the_lookup_at_the_configured_size(self, storage, monkeypatch):
+        ids = _seed(storage, Path("/tmp/import-split.md"), 7)
+        hashes = _hashes(storage, Path("/tmp/import-split.md"))
+        monkeypatch.setattr(sqlite_backend, "_SQL_MAX_PARAMS", 3)
+        counting = _Counting(storage._get_read_db(), "WHERE content_hash IN")
+        monkeypatch.setattr(storage, "_get_read_db", lambda: counting)
+
+        found = await storage.get_chunk_ids_by_hashes(hashes)
+
+        assert {str(v) for v in found.values()} == set(ids)
+        assert counting.seen == [3, 3, 1]
+
+
+class TestGetImportanceScores:
+    """Consolidation scores every chunk of a source group in one call."""
+
+    async def test_scores_past_the_bound_variable_ceiling(self, storage):
+        ids = _seed(storage, Path("/tmp/importance.md"), _OVER_THE_LIMIT)
+        _force_historic_limit(storage)
+
+        scores = await storage.get_importance_scores(ids)
+
+        assert set(scores) == set(ids)
+
+    async def test_splits_the_lookup_at_the_configured_size(self, storage, monkeypatch):
+        ids = _seed(storage, Path("/tmp/importance-split.md"), 7)
+        monkeypatch.setattr(sqlite_backend, "_SQL_MAX_PARAMS", 3)
+        counting = _Counting(storage._get_read_db(), "FROM chunks WHERE id IN")
+        monkeypatch.setattr(storage, "_get_read_db", lambda: counting)
+
+        scores = await storage.get_importance_scores(ids)
+
+        assert set(scores) == set(ids)
+        assert counting.seen == [3, 3, 1]
+
+
+class TestGetExtractedChunkIds:
+    """The entity scan asks which chunks of a whole source already have entities."""
+
+    @staticmethod
+    def _extract(storage, ids: list[str]) -> None:
+        db = storage._get_db()
+        db.executemany(
+            "INSERT INTO chunk_entities (chunk_id, entity_type, entity_value, created_at) "
+            "VALUES (?, 'person', 'Ada', '2026-01-01T00:00:00+00:00')",
+            [(cid,) for cid in ids],
+        )
+        db.commit()
+
+    async def test_answers_past_the_bound_variable_ceiling(self, storage):
+        ids = _seed(storage, Path("/tmp/entities.md"), _OVER_THE_LIMIT)
+        self._extract(storage, ids[::2])
+        _force_historic_limit(storage)
+
+        extracted = await storage.get_extracted_chunk_ids(ids)
+
+        assert extracted == set(ids[::2])
+
+    async def test_splits_the_lookup_at_the_configured_size(self, storage, monkeypatch):
+        ids = _seed(storage, Path("/tmp/entities-split.md"), 7)
+        self._extract(storage, ids)
+        monkeypatch.setattr(sqlite_backend, "_SQL_MAX_PARAMS", 3)
+        counting = _Counting(storage._get_read_db(), "FROM chunk_entities WHERE chunk_id IN")
+        monkeypatch.setattr(storage, "_get_read_db", lambda: counting)
+
+        extracted = await storage.get_extracted_chunk_ids(ids)
+
+        assert extracted == set(ids)
+        assert counting.seen == [3, 3, 1]
+
+
+class TestGetAccessCounts:
+    """A filter-only search reads access counts for its whole candidate pool."""
+
+    async def test_counts_past_the_bound_variable_ceiling(self, storage):
+        ids = _seed(storage, Path("/tmp/access.md"), _OVER_THE_LIMIT)
+        _force_historic_limit(storage)
+
+        counts = await storage.get_access_counts([UUID(cid) for cid in ids])
+
+        assert set(counts) == set(ids)
+
+    async def test_splits_the_lookup_at_the_configured_size(self, storage, monkeypatch):
+        ids = _seed(storage, Path("/tmp/access-split.md"), 7)
+        monkeypatch.setattr(sqlite_backend, "_SQL_MAX_PARAMS", 3)
+        counting = _Counting(storage._get_read_db(), "SELECT id, access_count FROM chunks")
+        monkeypatch.setattr(storage, "_get_read_db", lambda: counting)
+
+        counts = await storage.get_access_counts([UUID(cid) for cid in ids])
+
+        assert set(counts) == set(ids)
+        assert counting.seen == [3, 3, 1]

@@ -6,7 +6,7 @@ import logging
 import sqlite3
 from pathlib import Path
 
-from memtomem.storage.sqlite_helpers import project_boundary_key
+from memtomem.storage.sqlite_helpers import placeholders, project_boundary_key
 from memtomem.storage.sqlite_scope import scope_context_sql
 from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_CHUNKS
 
@@ -258,14 +258,27 @@ class AnalyticsMixin:
         visible_sql, params = _visible_chunks_where(namespace, project_context_root, alias="c.")
         # Same contract as ``get_frequently_accessed`` above: structure is
         # interpolated, values stay bound in ``params``.
+        #
+        # ``rel_count`` is the number of relation rows that touch the chunk and
+        # have both endpoints visible. Counted once per (endpoint, row) through
+        # the ``UNION`` rather than by a correlated subquery per chunk, whose
+        # ``OR`` across both columns could not use either index: a
+        # self-relation is still one row, a pair stored in both orders still two.
         query = (
-            "SELECT * FROM (WITH visible AS (SELECT c.* FROM chunks c WHERE "
-            f"{visible_sql}) "  # nosec B608
-            "SELECT c.id, c.access_count, c.updated_at, c.tags, "
-            "(SELECT COUNT(*) FROM chunk_relations cr "
-            " WHERE (cr.source_id = c.id AND cr.target_id IN (SELECT id FROM visible)) "
-            "    OR (cr.target_id = c.id AND cr.source_id IN (SELECT id FROM visible))) "
-            "AS rel_count FROM visible c)"
+            "SELECT * FROM (WITH visible AS ("
+            "  SELECT c.id, c.access_count, c.updated_at, c.tags FROM chunks c WHERE "
+            f"  {visible_sql}"  # nosec B608
+            "), rel_edges AS ("
+            "  SELECT cr.source_id AS chunk_id, cr.rowid AS rid FROM chunk_relations cr "
+            "  JOIN visible s ON s.id = cr.source_id JOIN visible t ON t.id = cr.target_id "
+            "  UNION "
+            "  SELECT cr.target_id, cr.rowid FROM chunk_relations cr "
+            "  JOIN visible s ON s.id = cr.source_id JOIN visible t ON t.id = cr.target_id"
+            "), rel_counts AS ("
+            "  SELECT chunk_id, COUNT(*) AS cnt FROM rel_edges GROUP BY chunk_id"
+            ") "
+            "SELECT c.id, c.access_count, c.updated_at, c.tags, COALESCE(rc.cnt, 0) "
+            "FROM visible c LEFT JOIN rel_counts rc ON rc.chunk_id = c.id)"
         )
         rows = db.execute(query, params).fetchall()
         results = []
@@ -311,13 +324,19 @@ class AnalyticsMixin:
     async def get_importance_scores(self, chunk_ids: list) -> dict[str, float]:
         if not chunk_ids:
             return {}
+        # Imported here: ``sqlite_backend`` imports this mixin.
+        from memtomem.storage.sqlite_backend import _param_batches
+
         db = self._get_txn_read_db()
-        placeholders = ",".join("?" for _ in chunk_ids)
-        rows = db.execute(
-            f"SELECT id, importance_score FROM chunks WHERE id IN ({placeholders})",
-            [str(cid) for cid in chunk_ids],
-        ).fetchall()
-        return {row[0]: row[1] for row in rows}
+        # Batched: consolidation scores every chunk of a source group.
+        scores: dict[str, float] = {}
+        for batch in _param_batches([str(cid) for cid in chunk_ids]):
+            rows = db.execute(
+                f"SELECT id, importance_score FROM chunks WHERE id IN ({placeholders(len(batch))})",
+                batch,
+            ).fetchall()
+            scores.update({row[0]: row[1] for row in rows})
+        return scores
 
     async def get_activity_summary(
         self,
