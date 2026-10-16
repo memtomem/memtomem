@@ -813,6 +813,16 @@ class SqliteBackend(
         self._check_schema_current(conn)
         return conn
 
+    def _get_txn_read_db(self) -> sqlite3.Connection:
+        """Reader for a method that does not write but may run inside ``transaction()``.
+
+        While the current task owns the transaction this is the writer, so the
+        read still sees that task's uncommitted writes, as it did when these
+        methods read through ``_get_db``. Otherwise it is a pool reader: the read
+        no longer waits on, or is refused by, another task's transaction.
+        """
+        return self._get_db() if self._in_transaction else self._get_read_db()
+
     def _cached_vec_row_count(self, db: sqlite3.Connection) -> int:
         """``count(*) FROM chunks_vec``, memoized behind ``PRAGMA data_version``.
 
@@ -3654,7 +3664,7 @@ class SqliteBackend(
         Token estimate: LENGTH(content) / 3.
         If source_file is given, filter to that source only.
         """
-        db = self._get_db()
+        db = self._get_txn_read_db()
         where = ""
         params: list = []
         if source_file is not None:
@@ -4057,7 +4067,7 @@ class SqliteBackend(
         return int(row[0]), int(row[1])
 
     async def get_all_source_files(self) -> set[Path]:
-        db = self._get_db()
+        db = self._get_txn_read_db()
         rows = db.execute("SELECT DISTINCT source_file FROM chunks").fetchall()
         return {Path(row[0]) for row in rows}
 
@@ -4102,7 +4112,7 @@ class SqliteBackend(
         self,
     ) -> list[tuple[Path, int, str | None, str | None, int, int, int]]:
         """Return (path, chunk_count, last_updated, namespaces, avg_tokens, min_tokens, max_tokens)."""
-        db = self._get_db()
+        db = self._get_txn_read_db()
         rows = db.execute(
             "SELECT source_file, COUNT(*), MAX(updated_at), GROUP_CONCAT(DISTINCT namespace),"
             " CAST(AVG(LENGTH(content)/3) AS INTEGER),"

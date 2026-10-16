@@ -127,7 +127,7 @@ class NamespaceOps:
         self._in_transaction = in_transaction
 
     async def list_namespaces(self) -> list[tuple[str, int]]:
-        db = self._get_db()
+        db = self._get_db() if self._in_transaction() else self._get_read_db()
         rows = db.execute(
             "SELECT namespace, COUNT(*) FROM chunks GROUP BY namespace ORDER BY namespace"
         ).fetchall()
@@ -138,7 +138,9 @@ class NamespaceOps:
 
         The rename receipt needs the target's resulting total; going through
         ``list_namespaces`` for it aggregates the whole ``chunks`` table to
-        read a single bucket.
+        read a single bucket. It reads the writer: the receipt is read straight
+        after the rename commits, and a pool connection another thread still
+        has a statement open on keeps serving the snapshot from before it.
         """
         db = self._get_db()
         row = db.execute("SELECT COUNT(*) FROM chunks WHERE namespace=?", (namespace,)).fetchone()
