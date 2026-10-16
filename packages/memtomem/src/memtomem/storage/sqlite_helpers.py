@@ -7,12 +7,14 @@ import struct
 import sys
 import unicodedata
 import hashlib
+import json
 from datetime import datetime, timezone
 from fnmatch import fnmatch
-from collections.abc import Iterable
+from functools import lru_cache
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-from memtomem.models import NamespaceFilter
+from memtomem.models import NamespaceFilter, has_namespace_prefix
 
 
 def serialize_f32(vector: list[float]) -> bytes:
@@ -268,6 +270,37 @@ def match_source_filter_value(filter_str: str, source_path: str) -> bool:
     if any(char in norm_filter for char in ("*", "?", "[")):
         return fnmatch(norm_source, norm_filter)
     return norm_filter in norm_source
+
+
+def source_namespaces_admit(
+    namespaces: str | None, namespace: str | None, system_prefixes: Sequence[str]
+) -> bool:
+    """Whether a source listing keeps a file, given its ``GROUP_CONCAT(DISTINCT namespace)``.
+
+    An explicit ``namespace`` keeps a file when it is one of the comma-split
+    tokens. Without one, a file is dropped only when every token is a system
+    namespace; an empty aggregate is kept. The split is on the aggregate, not
+    per stored value, because namespace values are not comma-free at the
+    storage layer (``mem_add(namespace="work,personal")`` stores the comma), and
+    ``mem_list`` has always matched such a file under ``work``.
+    """
+    if namespace:
+        return namespace in namespaces.split(",") if namespaces else False
+    if not namespaces or not system_prefixes:
+        return True
+    return any(not has_namespace_prefix(ns, system_prefixes) for ns in namespaces.split(","))
+
+
+@lru_cache(maxsize=32)
+def _decode_prefixes(prefixes_json: str) -> tuple[str, ...]:
+    return tuple(json.loads(prefixes_json))
+
+
+def source_namespaces_admit_sql(
+    namespaces: str | None, namespace: str | None, prefixes_json: str
+) -> bool:
+    """SQL-function adapter for :func:`source_namespaces_admit` (prefixes as a JSON list)."""
+    return source_namespaces_admit(namespaces, namespace, _decode_prefixes(prefixes_json))
 
 
 def placeholders(n: int) -> str:

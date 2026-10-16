@@ -63,6 +63,7 @@ from memtomem.storage.sqlite_helpers import (
     placeholders,
     quote_ident,
     serialize_f32,
+    source_namespaces_admit_sql,
     utc_bound,
     utc_stamp,
 )
@@ -78,6 +79,7 @@ from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority
 from memtomem.storage.sqlite_visibility import (
     VISIBLE_SOURCE_C,
     VISIBLE_SOURCE_CHUNKS,
+    VISIBLE_SOURCE_PATH,
     neighbor_visibility_sql,
 )
 from memtomem.storage.mixins import (
@@ -474,6 +476,9 @@ class SqliteBackend(
             self._db.create_function(
                 "memtomem_source_match", 2, match_source_filter_value, deterministic=True
             )
+            self._db.create_function(
+                "memtomem_list_admit", 3, source_namespaces_admit_sql, deterministic=True
+            )
             # Restrict DB file to owner-only access
             try:
                 db_path.chmod(0o600)
@@ -507,6 +512,9 @@ class SqliteBackend(
                 try:
                     rconn.create_function(
                         "memtomem_source_match", 2, match_source_filter_value, deterministic=True
+                    )
+                    rconn.create_function(
+                        "memtomem_list_admit", 3, source_namespaces_admit_sql, deterministic=True
                     )
                     rconn.execute("PRAGMA journal_mode=WAL")
                     rconn.enable_load_extension(True)
@@ -4106,6 +4114,64 @@ class SqliteBackend(
             (Path(row[0]), row[1], row[2], row[3], row[4] or 0, row[5] or 0, row[6] or 0)
             for row in rows
         ]
+
+    async def get_source_files_page(
+        self,
+        *,
+        after: str | None,
+        limit: int,
+        source_filter: str | None = None,
+        namespace: str | None = None,
+        system_prefixes: Sequence[str] = (),
+    ) -> tuple[list[tuple[Path, int, str | None, str | None, int, int, int]], str | None]:
+        """One page of :meth:`get_source_files_with_counts`, filtered before ``LIMIT``.
+
+        Rows come in ``source_file`` order, starting strictly after ``after``;
+        held, pending and policy-derived hidden files, files ``source_filter``
+        rejects and files :func:`source_namespaces_admit` drops never take a slot.
+        Returns ``(rows, next_cursor)``. ``next_cursor`` is the stored
+        ``source_file`` of the last row when more follow, else ``None``; it is the
+        raw key, because the ``Path`` in a row can spell it differently (a POSIX
+        path read on Windows) and would resume at the wrong place.
+
+        One statement, so the page and its aggregates come from one snapshot. A
+        traversal of a changing store never repeats a file, but misses files
+        added before its cursor and reports each page as of its own read.
+        """
+        where = ["chunks.source_file > ?"]
+        params: list[object] = [after or ""]
+        if namespace:
+            # A superset of token membership (a token is a substring of the
+            # value it came from); ``memtomem_list_admit`` stays the authority.
+            where.append("instr(chunks.namespace, ?) > 0")
+            params.append(namespace)
+        having: list[str] = []
+        if source_filter:
+            having.append("memtomem_source_match(?, chunks.source_file)")
+            params.append(source_filter)
+        having.append("memtomem_list_admit(GROUP_CONCAT(DISTINCT chunks.namespace), ?, ?)")
+        params += [namespace, json.dumps(list(system_prefixes))]
+        having.append(VISIBLE_SOURCE_PATH)
+        params.append(limit + 1)
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT c.source_file, COUNT(*), MAX(c.updated_at), GROUP_CONCAT(DISTINCT c.namespace),"
+            " CAST(AVG(LENGTH(c.content)/3) AS INTEGER),"
+            " MIN(LENGTH(c.content)/3),"
+            " MAX(LENGTH(c.content)/3)"
+            " FROM (SELECT chunks.source_file FROM chunks"  # nosec B608 — fixed fragments, values bound
+            f" WHERE {' AND '.join(where)}"
+            f" GROUP BY chunks.source_file HAVING {' AND '.join(having)}"
+            " ORDER BY chunks.source_file LIMIT ?) AS page"
+            " JOIN chunks c ON c.source_file = page.source_file"
+            " GROUP BY c.source_file ORDER BY c.source_file",
+            params,
+        ).fetchall()
+        next_cursor = rows[limit - 1][0] if len(rows) > limit else None
+        return [
+            (Path(row[0]), row[1], row[2], row[3], row[4] or 0, row[5] or 0, row[6] or 0)
+            for row in rows[:limit]
+        ], next_cursor
 
     async def get_source_summaries(self) -> dict[str, tuple[list[str], str]]:
         """Return ``{source_file_path_str: (heading_hierarchy, first_chunk_content)}``.

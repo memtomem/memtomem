@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **`mem_list` returns one page of files instead of the whole store (#2745).**
+  Every call used to aggregate every indexed source and filter the result
+  afterwards, so even a `source_filter` naming one file paid for the whole
+  store, and an unfiltered call on 50,000 sources returned 3.45 MB. The
+  hidden-source, `source_filter` and namespace rules now run in the query, ahead
+  of a page limit: `limit` (1–500, default 50) sets the page size, and a page
+  that is not the whole listing is labelled with its own counts and ends with a
+  `More: mem_list(cursor=…)` line that repeats the filters. The rules
+  themselves are unchanged, comma-joined namespace values included. A store
+  with no more than `limit` visible files gets the same output as before. Pages
+  follow stored-path order: a traversal never repeats a file, but misses one
+  added before its cursor. The `memtomem://sources` resource still returns the
+  full list.
+
 ### Fixed
 
 - **Web writes recover after a server restart (#2746).** A stale CSRF token

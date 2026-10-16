@@ -1,5 +1,11 @@
 """Tools: mem_list, mem_read.
 
+``mem_list`` pages through source files in stored-path order: each page is one
+bounded query, filtered before its ``LIMIT``, and a page that is not the whole
+listing ends with a ``More:`` call carrying the stored path of its last file as
+the cursor. A store that is a single page reads exactly as the unpaged listing
+did. Page counts are that page's, never a store total — ``mem_stats`` has those.
+
 ``mem_read`` resolves its id through the ADR-0011 project boundary
 (``_id_access.resolve_chunk``): outside a project only user-scope chunks
 resolve, inside one user-scope plus that project's, and an id from another
@@ -13,6 +19,7 @@ because the core-tool description budget is a hard test.
 
 from __future__ import annotations
 
+import json
 from uuid import UUID
 
 from memtomem.server import mcp
@@ -21,70 +28,81 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.formatters import _display_path
 from memtomem.server.tools._id_access import not_found, resolve_chunk
 
+_DEFAULT_LIMIT = 50
+
 
 @mcp.tool()
 @tool_handler
 async def mem_list(
     source_filter: str | None = None,
     namespace: str | None = None,
+    limit: int = _DEFAULT_LIMIT,
+    cursor: str | None = None,
     ctx: CtxType = None,
 ) -> str:
-    """List all indexed source files with chunk counts and metadata.
+    """List indexed source files with chunk counts, one page at a time.
 
     Args:
         source_filter: Filter by source file path (substring match, or glob pattern with *, ?, [])
         namespace: Only list sources containing chunks in this namespace
+        limit: Files per page (1-500, default 50)
+        cursor: Where to resume; copy it from the previous page's "More:" line
 
     Examples:
-        mem_list()                               — all indexed files
         mem_list(source_filter="*.md")           — markdown files (glob)
-        mem_list(source_filter="docs/")          — files with "docs/" in path (substring)
         mem_list(namespace="work")               — files in the "work" namespace
     """
-    from memtomem.models import has_namespace_prefix
-    from memtomem.search.pipeline import match_source_filter
-    from memtomem.storage.sqlite_visibility import hidden_source_paths
+    if not 1 <= limit <= 500:
+        return f"Error: limit must be between 1 and 500, got {limit}."
 
     app = await _get_app_initialized(ctx)
-    rows = await app.storage.get_source_files_with_counts()
-    hidden = {str(p) for p in await hidden_source_paths(app.storage)}
-    if hidden:
-        rows = [r for r in rows if str(r[0]) not in hidden]
+    # Hidden files (held, pending, policy summaries of either), files the
+    # source filter rejects, and — without ``namespace=`` — files that live only
+    # in system namespaces are all dropped in SQL, before the page is cut.
+    rows, next_cursor = await app.storage.get_source_files_page(
+        after=cursor,
+        limit=limit,
+        source_filter=source_filter,
+        namespace=namespace,
+        system_prefixes=tuple(app.config.search.system_namespace_prefixes),
+    )
 
     if not rows:
-        return "No indexed files."
+        if cursor is not None:
+            return "No more files."
+        # Tell an empty store from an over-narrow filter, as the unpaged
+        # listing did: only hidden files count as nothing indexed.
+        visible, _ = await app.storage.get_source_files_page(after=None, limit=1)
+        return "No files match the filter." if visible else "No indexed files."
 
-    # Apply source_filter — same substring + glob contract as
-    # ``mem_search(source_filter=...)``, including separator-fold for
-    # Windows portability (#720).
-    if source_filter:
-        rows = [r for r in rows if match_source_filter(source_filter, str(r[0]))]
-
-    # Apply namespace filter (or hide sources that live exclusively in system
-    # namespaces when no explicit namespace filter is supplied).
-    if namespace:
-        rows = [r for r in rows if r[3] and namespace in r[3].split(",")]
-    else:
-        sys_prefixes = tuple(app.config.search.system_namespace_prefixes)
-        if sys_prefixes:
-            rows = [
-                r
-                for r in rows
-                if not r[3]
-                or any(not has_namespace_prefix(ns, sys_prefixes) for ns in r[3].split(","))
-            ]
-
-    if not rows:
-        return "No files match the filter."
-
-    lines = [f"Indexed files: {len(rows)}\n"]
+    lines = []
     for path, count, updated, ns, avg_tok, min_tok, max_tok in rows:
         ns_label = f" [{ns}]" if ns else ""
         lines.append(f"  {_display_path(path)}  — {count} chunks, ~{avg_tok} tok/chunk{ns_label}")
-
     total_chunks = sum(r[1] for r in rows)
-    lines.append(f"\nTotal: {len(rows)} files, {total_chunks} chunks")
-    return "\n".join(lines)
+
+    if cursor is None and next_cursor is None:
+        return "\n".join(
+            [
+                f"Indexed files: {len(rows)}\n",
+                *lines,
+                f"\nTotal: {len(rows)} files, {total_chunks} chunks",
+            ]
+        )
+
+    footer = [f"\nPage: {len(rows)} files, {total_chunks} chunks"]
+    if next_cursor is None:
+        footer.append("End of list.")
+    else:
+        args = [f"cursor={json.dumps(next_cursor)}"]
+        if source_filter:
+            args.append(f"source_filter={json.dumps(source_filter)}")
+        if namespace:
+            args.append(f"namespace={json.dumps(namespace)}")
+        if limit != _DEFAULT_LIMIT:
+            args.append(f"limit={limit}")
+        footer.append(f"More: mem_list({', '.join(args)})")
+    return "\n".join([f"Indexed files (page): {len(rows)}\n", *lines, *footer])
 
 
 @mcp.tool()

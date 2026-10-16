@@ -65,6 +65,26 @@ VISIBLE_SOURCE_C = _visible_source_sql("c")
 VISIBLE_SOURCE_CHUNKS = _visible_source_sql("chunks")
 
 
+# Per-path twin of ``SqliteBackend.get_hidden_source_files``: that query returns
+# the hidden *set*, this tests one ``chunks.source_file`` against it, so a
+# paginated listing drops hidden files before ``LIMIT`` without reading the set.
+# Unlike ``_visible_source_sql`` it hides the whole file, which is what a
+# path-level listing reports: a file is hidden when it is held or pending, or
+# when any of its chunks is a consolidation-policy summary whose parent is
+# (derived with the same unconditional ``substr``). ``test_mem_list_pagination``
+# checks both against one matrix.
+_PATH = "chunks.source_file"
+_PARENT = f"substr({_PATH}, 1, length({_PATH}) - length('{CONSOLIDATED_SUFFIX}'))"
+VISIBLE_SOURCE_PATH = (
+    f"(NOT EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file={_PATH}) "  # nosec B608
+    f"AND NOT EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file={_PATH}) "
+    f"AND NOT (EXISTS (SELECT 1 FROM chunks o WHERE o.source_file={_PATH} "
+    f"AND o.origin='{ORIGIN_CONSOLIDATION_POLICY}') "
+    f"AND (EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file={_PARENT}) "
+    f"OR EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file={_PARENT}))))"
+)
+
+
 async def hidden_source_paths(storage: StorageBackend) -> set[Path]:
     """Fetch path-level visibility for Web and export, including policy summaries."""
     getter = (
