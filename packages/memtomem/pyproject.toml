@@ -28,7 +28,7 @@ dependencies = [
     # ordinary major-version hygiene: the server reaches into
     # ``_tool_manager`` for tool-mode pruning, so a major deserves a
     # deliberate look rather than a silent resolve.
-    "mcp[cli]>=2.0.0,<3",
+    "mcp[cli]>=2.2.0,<3",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
     "sqlite-vec>=0.1.6",

@@ -1488,14 +1488,14 @@ def test_context_gateway_fragment_list_matches_disk_and_index_html() -> None:
 def test_csrf_headers_and_bootstrap_are_centralized() -> None:
     """Direct callers must not bypass rotation recovery with their own token."""
     app = STATIC_DIR / "app.js"
-    source = app.read_text()
+    source = app.read_text(encoding="utf-8")
     start = source.index("async function ensureCsrfToken()")
     end = source.index("// Trust-boundary redaction guard", start)
     assert "X-Memtomem-CSRF" in source[start:end]
     for path in STATIC_DIR.rglob("*.js"):
         if any(part in _STATIC_SKIP_DIRS for part in path.parts):
             continue
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         if path == app:
             text = text[:start] + text[end:]
         assert not re.search(r"x-memtomem-csrf", text, re.IGNORECASE), path
