@@ -294,6 +294,22 @@ class TestRetrieval:
         assert updated["status"] == "archived"
         assert updated["updated_at"] >= case["updated_at"]
 
+    async def test_writes_return_their_own_result_past_an_open_pool_statement(
+        self, storage, monkeypatch
+    ):
+        """Promotion and a status change return a read taken right after their commit.
+
+        A pool connection another thread is still iterating on serves the
+        snapshot from before that commit, so the readback must not use one.
+        """
+        from test_storage_read_routing import pool_reader_mid_statement
+
+        await _seed_labeled_run(storage)
+        with pool_reader_mid_statement(storage, monkeypatch):
+            case = await storage.promote_search_run(RUN_A, fingerprints=FP)
+            updated = await storage.set_eval_case_status(case["case_id"], "archived")
+        assert updated["status"] == "archived"
+
     async def test_set_status_rejects_bad_value(self, storage):
         await _seed_labeled_run(storage)
         case = await storage.promote_search_run(RUN_A, fingerprints=FP)
