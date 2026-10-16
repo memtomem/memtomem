@@ -64,7 +64,7 @@ class AnalyticsMixin:
         :func:`_unavailable_block`). Consumers must branch on ``available``
         before formatting the counts.
         """
-        db = self._get_db()
+        db = self._get_txn_read_db()
         visible_sql, visible_params = _visible_chunks_where(namespace, project_context_root)
 
         # Single query for chunk aggregate counts
@@ -138,7 +138,7 @@ class AnalyticsMixin:
         """Return most accessed chunks with hierarchy info — for reflection."""
         import json as _json
 
-        db = self._get_db()
+        db = self._get_txn_read_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root)
         # ``visible_sql`` is built by ``scope_context_sql`` from fixed column
         # names with ``?`` placeholders; every caller value travels in
@@ -166,7 +166,7 @@ class AnalyticsMixin:
         limit: int = 20,
     ) -> list[dict]:
         """Return agent activity summary — for reflection."""
-        db = self._get_db()
+        db = self._get_txn_read_db()
         query = "SELECT agent_id, COUNT(*) as cnt, MAX(started_at) as last FROM sessions "
         params: list = []
         if since:
@@ -218,7 +218,7 @@ class AnalyticsMixin:
         degree and is absent from the result — it is never reported as zero.
         Callers therefore do not need to over-fetch and re-rank.
         """
-        db = self._get_db()
+        db = self._get_txn_read_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root)
         # ``adjacency`` is the undirected neighbour set ``get_related`` returns,
         # restricted to visible endpoints: each stored row read from both ends,
@@ -254,7 +254,7 @@ class AnalyticsMixin:
         """Return access_count, tag_count, relation_count per chunk — for importance scoring."""
         import json as _json2
 
-        db = self._get_db()
+        db = self._get_txn_read_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root, alias="c.")
         # Same contract as ``get_frequently_accessed`` above: structure is
         # interpolated, values stay bound in ``params``.
@@ -311,7 +311,7 @@ class AnalyticsMixin:
     async def get_importance_scores(self, chunk_ids: list) -> dict[str, float]:
         if not chunk_ids:
             return {}
-        db = self._get_db()
+        db = self._get_txn_read_db()
         placeholders = ",".join("?" for _ in chunk_ids)
         rows = db.execute(
             f"SELECT id, importance_score FROM chunks WHERE id IN ({placeholders})",
