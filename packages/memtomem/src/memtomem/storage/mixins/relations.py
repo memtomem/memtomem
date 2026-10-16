@@ -38,7 +38,7 @@ class RelationMixin:
             self._commit_if_standalone(db)
 
     async def get_related(self, chunk_id: UUID) -> list[tuple[UUID, str]]:
-        db = self._get_db()
+        db = self._get_txn_read_db()
         cid = str(chunk_id)
         rows = db.execute(
             "SELECT target_id, relation_type FROM chunk_relations WHERE source_id = ? "

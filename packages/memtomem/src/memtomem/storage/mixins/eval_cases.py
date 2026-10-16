@@ -449,7 +449,7 @@ class EvalCaseMixin:
 
     async def list_eval_cases(self, status: str | None = None) -> list[dict[str, Any]]:
         """Newest-first case summaries (no labels), optionally filtered by status."""
-        db = self._get_db()
+        db = self._get_txn_read_db()
         query = (
             "SELECT case_id, name, query_text, top_k, source_run_id, version, status, "
             "created_at, updated_at, "
@@ -499,6 +499,10 @@ class EvalCaseMixin:
 
     async def get_eval_case(self, case_id_or_name: str) -> dict[str, Any]:
         """One case with its labels, looked up by case_id then by name."""
+        # The writer, not a pool reader: ``promote_search_run`` and
+        # ``set_eval_case_status`` return this read straight after their own
+        # commit, and a pool connection another thread still has a statement
+        # open on keeps serving the snapshot from before that commit.
         db = self._get_db()
         case_id = self._resolve_case_id(db, case_id_or_name)
         row = db.execute(
