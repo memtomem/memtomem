@@ -170,12 +170,13 @@ class DedupScanner:
         source_files = await self._storage.get_all_source_files()
         chunks: list[Chunk] = []
         for source in source_files:
+            remaining = max_count - len(chunks)
+            if remaining <= 0:
+                break
             if await self._storage.is_source_held(source):
                 continue
-            file_chunks = await self._storage.list_chunks_by_source(source, limit=max_count)
-            chunks.extend(file_chunks)
-            if len(chunks) >= max_count:
-                break
+            # Only what is still missing: the slice below used to discard the rest.
+            chunks.extend(await self._storage.list_chunks_by_source(source, limit=remaining))
         return chunks[:max_count]
 
     def _find_exact_duplicates(

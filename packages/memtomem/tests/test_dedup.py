@@ -346,6 +346,30 @@ class TestStoredVectorsAndCoverage:
         assert storage.lookups == [[str(c.id) for c in chunks[:3]]]
 
     @pytest.mark.asyncio
+    async def test_each_source_is_asked_only_for_what_the_pool_still_lacks(
+        self, scanner_factory, monkeypatch
+    ):
+        chunks = [
+            replace(_mk(f"{name}-{i}"), metadata=ChunkMetadata(source_file=Path(f"/{name}.md")))
+            for name in ("a", "b", "c")
+            for i in range(4)
+        ]
+        scanner, storage = scanner_factory(chunks)
+        limits: list[int] = []
+        real = storage.list_chunks_by_source
+
+        async def spy(source, limit):
+            limits.append(limit)
+            return await real(source, limit)
+
+        monkeypatch.setattr(storage, "list_chunks_by_source", spy)
+
+        _, coverage = await scanner.scan_with_coverage(max_scan=6)
+
+        assert coverage.pool == 6
+        assert limits == [6, 2]
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("max_scan", [0, -1])
     async def test_non_positive_max_scan_is_rejected(self, scanner_factory, max_scan):
         scanner, storage = scanner_factory([_mk("a"), _mk("b"), _mk("c")])
