@@ -126,7 +126,15 @@ class TokenBudget:
     def describe(self, chunk: Chunk, description: str) -> Chunk:
         context = self.trim(description, self.context)
         chunk.metadata = replace(chunk.metadata, retrieval_context=context)
-        if context and self.count(chunk.retrieval_content, special=True) > self.model:
+        if not context:
+            # No description: ``retrieval_content`` composes the heading
+            # hierarchy instead, and nothing about it has been measured yet.
+            self.validate(chunk)
+            return chunk
+        # ``trim`` returns only a verified fitting prefix, so ``context`` is
+        # within the description budget, and the count below measures exactly
+        # the composition ``validate_composed`` would.
+        if self.count(chunk.retrieval_content, special=True) > self.model:
             # ``IndexingConfig`` can only bound ``hard_max + context`` against
             # ``chunk_model_tokens``; the composed input the embedder sees also
             # carries the tokenizer's special tokens and the ``\n\n`` separator,
@@ -150,8 +158,17 @@ class TokenBudget:
             # different (and possibly longer) string than the one just
             # measured. Keep one character so the measured composition is the
             # one that ships.
-            chunk.metadata = replace(chunk.metadata, retrieval_context=context[: max(1, low)])
-        self.validate(chunk)
+            measured = low > 0
+            low = max(1, low)
+            chunk.metadata = replace(chunk.metadata, retrieval_context=context[:low])
+            # Counts are not monotonic over prefixes, so the shorter
+            # description is checked against its own budget again. Its
+            # composition was measured by the search, unless no length fit
+            # and the one character kept above never was.
+            self.validate_description(chunk)
+            if not measured:
+                self.validate_composed(chunk)
+        self.validate_body(chunk)
         return chunk
 
     def validate_description(self, chunk: Chunk) -> None:

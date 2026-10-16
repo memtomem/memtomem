@@ -1126,6 +1126,80 @@ def test_a_description_that_overflows_only_once_composed_is_trimmed(bounded_conf
     budget.validate(chunk)
 
 
+def _spy_checks(budget, monkeypatch):
+    """Record which ``validate_*`` checks ``describe`` runs, still running them."""
+    calls: list[str] = []
+    for name in ("validate_description", "validate_body", "validate_composed"):
+        real = getattr(budget, name)
+
+        def spy(chunk, _real=real, _name=name):
+            calls.append(_name)
+            return _real(chunk)
+
+        monkeypatch.setattr(budget, name, spy)
+    return calls
+
+
+def test_describe_skips_only_the_checks_it_has_already_measured(bounded_config, monkeypatch):
+    """A fitting description is not re-measured; the body always is.
+
+    ``trim`` returns a verified prefix, and ``describe`` has just counted the
+    composition, so re-running those two checks only re-tokenizes the chunk.
+    """
+    budget = TokenBudget(bounded_config)
+    calls = _spy_checks(budget, monkeypatch)
+    chunk = Chunk(content="x" * 10, metadata=ChunkMetadata(source_file=Path("a.md")))
+    budget.describe(chunk, "a short description")
+    assert calls == ["validate_body"]
+
+
+def test_describe_without_a_description_checks_the_heading_composition(bounded_config, monkeypatch):
+    budget = TokenBudget(bounded_config)
+    calls = _spy_checks(budget, monkeypatch)
+    chunk = Chunk(
+        content="x" * 10,
+        metadata=ChunkMetadata(source_file=Path("a.md"), heading_hierarchy=("h" * 300,)),
+    )
+    with pytest.raises(ValueError, match="description exceeds"):
+        budget.describe(chunk, "")
+    assert calls == ["validate_description"]
+
+
+@pytest.mark.parametrize("description", ["", "a short description"])
+def test_describe_still_refuses_an_oversized_body(bounded_config, description):
+    budget = TokenBudget(bounded_config)
+    body = "x" * (bounded_config.hard_max_chunk_tokens + 1)
+    chunk = Chunk(content=body, metadata=ChunkMetadata(source_file=Path("a.md")))
+    with pytest.raises(ValueError, match="body exceeds"):
+        budget.describe(chunk, description)
+
+
+def test_describe_checks_a_composition_the_search_never_measured(bounded_config, monkeypatch):
+    """No description length fits: the one character kept was never counted."""
+    budget = TokenBudget(bounded_config)
+    body = "x" * 10
+    budget.model = budget.count(body, special=True)
+    calls = _spy_checks(budget, monkeypatch)
+    chunk = Chunk(content=body, metadata=ChunkMetadata(source_file=Path("a.md")))
+    with pytest.raises(ValueError, match="composed retrieval input exceeds"):
+        budget.describe(chunk, "description")
+    assert chunk.metadata.retrieval_context == "d"
+    assert calls == ["validate_description", "validate_composed"]
+
+
+def test_describe_trusts_the_search_measurement_when_a_length_fit(bounded_config, monkeypatch):
+    budget = TokenBudget(bounded_config)
+    body = "x" * 10
+    description = "d" * 40
+    budget.model = budget.count(description[:5] + "\n\n" + body, special=True)
+    calls = _spy_checks(budget, monkeypatch)
+    chunk = Chunk(content=body, metadata=ChunkMetadata(source_file=Path("a.md")))
+    budget.describe(chunk, description)
+    assert 0 < len(chunk.metadata.retrieval_context) < len(description)
+    assert budget.count(chunk.retrieval_content, special=True) <= budget.model
+    assert calls == ["validate_description", "validate_body"]
+
+
 def test_the_configuration_reserves_room_for_composing(tmp_path):
     """The validator must refuse a split that only overflows once composed."""
     from memtomem.config import _COMPOSED_INPUT_RESERVE
