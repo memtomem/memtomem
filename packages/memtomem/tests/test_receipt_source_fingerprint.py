@@ -67,6 +67,57 @@ def test_tree_fingerprint_orders_files_by_posix_relative_path(tmp_path):
     assert source_receipt._tree_fingerprint(root) == expected.hexdigest()
 
 
+def test_tree_fingerprint_refuses_an_empty_walk(tmp_path):
+    # A zipped install's package path is not a directory, and a tree with no
+    # Python files is not the package: neither may hash to a stable value.
+    (tmp_path / "empty").mkdir()
+    (tmp_path / "pkg.zip").write_bytes(b"PK")
+    for root in (tmp_path / "empty", tmp_path / "pkg.zip" / "memtomem"):
+        with pytest.raises(OSError):
+            source_receipt._tree_fingerprint(root)
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions")
+def test_tree_fingerprint_refuses_a_directory_it_cannot_list(tmp_path):
+    root = _tree(tmp_path / "root", {"a.py": "x = 1\n", "hidden/b.py": "y = 2\n"})
+    (root / "hidden").chmod(0)
+    try:
+        with pytest.raises(OSError):
+            source_receipt._tree_fingerprint(root)
+    finally:
+        (root / "hidden").chmod(0o755)
+
+
+def test_tree_fingerprint_hashes_a_name_that_is_not_utf8(tmp_path, monkeypatch):
+    # POSIX hands an undecodable name back surrogate-escaped. Simulated, since
+    # some file systems (APFS) refuse to create one.
+    name = os.fsdecode(b"\xff.py") if os.name == "posix" else "\udcff.py"
+    monkeypatch.setattr(source_receipt.os, "walk", lambda root, onerror: [(str(root), [], [name])])
+    monkeypatch.setattr(Path, "read_bytes", lambda self: b"x = 1\n")
+    assert len(source_receipt._tree_fingerprint(tmp_path)) == 64
+
+
+def test_code_fingerprint_falls_back_on_an_unencodable_name(monkeypatch):
+    def unencodable(root):
+        raise UnicodeEncodeError("utf-8", "\udcff", 0, 1, "surrogates not allowed")
+
+    monkeypatch.setattr(source_receipt, "_tree_fingerprint", unencodable)
+    assert source_receipt.code_fingerprint() == "unavailable"
+
+
+def test_code_fingerprint_hashes_the_whole_package(tmp_path, monkeypatch):
+    package = _tree(
+        tmp_path / "memtomem",
+        {"__init__.py": "", "chunking/markdown.py": "a = 1\n", "privacy.py": "b = 1\n"},
+    )
+    monkeypatch.setattr(memtomem, "__file__", str(package / "__init__.py"))
+    before = source_receipt.code_fingerprint()
+    assert before == source_receipt._tree_fingerprint(package)
+    # A module outside ``chunking/`` that chunk output depends on.
+    (package / "privacy.py").write_text("b = 2\n", encoding="utf-8")
+    assert source_receipt.code_fingerprint() != before
+
+
 def test_code_fingerprint_falls_back_when_the_source_cannot_be_read(monkeypatch):
     def unreadable(root):
         raise PermissionError(root)
@@ -75,13 +126,19 @@ def test_code_fingerprint_falls_back_when_the_source_cannot_be_read(monkeypatch)
     assert source_receipt.code_fingerprint() == "unavailable"
 
 
+def test_code_fingerprint_falls_back_without_a_package_file(monkeypatch):
+    monkeypatch.delattr(memtomem, "__file__")
+    assert source_receipt.code_fingerprint() == "unavailable"
+
+
 _SNAPSHOT_PROBE = """
+import memtomem
 from memtomem.indexing import source_receipt
 
 def unreadable(root):
     raise OSError(root)
 
-source_receipt._tree_fingerprint = {at_import}
+{setup}
 import memtomem.indexing.engine as engine
 source_receipt._tree_fingerprint = lambda root: "after-import"
 print(engine._CODE_FINGERPRINT)
@@ -89,13 +146,20 @@ print(engine._CODE_FINGERPRINT)
 
 
 @pytest.mark.parametrize(
-    ("at_import", "expected"),
+    ("setup", "expected"),
     [
-        pytest.param('lambda root: "at-import"', "at-import", id="readable"),
-        pytest.param("unreadable", "unavailable", id="unreadable"),
+        pytest.param(
+            'source_receipt._tree_fingerprint = lambda root: "at-import"',
+            "at-import",
+            id="readable",
+        ),
+        pytest.param(
+            "source_receipt._tree_fingerprint = unreadable", "unavailable", id="unreadable"
+        ),
+        pytest.param("del memtomem.__file__", "unavailable", id="no-package-file"),
     ],
 )
-def test_engine_takes_the_fingerprint_once_at_import(at_import, expected):
+def test_engine_takes_the_fingerprint_once_at_import(setup, expected):
     """Files edited after the engine loaded must not relabel its receipts.
 
     A fresh interpreter, because this process has already imported the engine.
@@ -103,7 +167,7 @@ def test_engine_takes_the_fingerprint_once_at_import(at_import, expected):
     src = str(Path(memtomem.__file__).parents[1])
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([src, os.environ.get("PYTHONPATH", "")])}
     result = subprocess.run(
-        [sys.executable, "-c", _SNAPSHOT_PROBE.format(at_import=at_import)],
+        [sys.executable, "-c", _SNAPSHOT_PROBE.format(setup=setup)],
         capture_output=True,
         text=True,
         env=env,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -26,15 +27,31 @@ def digest(value: Any) -> str:
     ).hexdigest()
 
 
+def _raise(error: OSError) -> None:
+    raise error
+
+
 def _tree_fingerprint(root: Path) -> str:
     """Hash every ``*.py`` file under *root*, path included, in a fixed order.
 
     Files are ordered by their POSIX relative path as a string, so the digest
     does not depend on the platform's path separator or ``Path`` ordering.
+    Paths are hashed as file-system bytes, so a name that is not valid UTF-8
+    still hashes. Raises ``OSError`` when any directory cannot be listed or no
+    file is found: a partial or empty walk would be a stable digest of the
+    wrong tree.
     """
+    files = sorted(
+        ((Path(dirpath) / name).relative_to(root).as_posix(), Path(dirpath) / name)
+        for dirpath, _dirs, names in os.walk(root, onerror=_raise)
+        for name in names
+        if name.endswith(".py")
+    )
+    if not files:
+        raise FileNotFoundError(f"no Python source under {root}")
     h = hashlib.sha256()
-    for rel, path in sorted((p.relative_to(root).as_posix(), p) for p in root.rglob("*.py")):
-        h.update(rel.encode("utf-8"))
+    for rel, path in files:
+        h.update(os.fsencode(rel))
         h.update(b"\0")
         h.update(path.read_bytes())
         h.update(b"\0")
@@ -51,11 +68,15 @@ def code_fingerprint() -> str:
     because chunk output also depends on modules outside it.
 
     Returns ``"unavailable"`` when the source cannot be read (a zipped or
-    frozen install), which leaves the version as the only code identity.
+    frozen install), which leaves the version as the only code identity. It
+    runs while the indexing engine is imported, so no failure may escape.
     """
+    location = getattr(memtomem, "__file__", None)
+    if not location:
+        return "unavailable"
     try:
-        return _tree_fingerprint(Path(memtomem.__file__).parent)
-    except (OSError, TypeError):
+        return _tree_fingerprint(Path(location).parent)
+    except (OSError, ValueError):
         return "unavailable"
 
 
