@@ -35,7 +35,9 @@ _BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = t
         "::/128",
         "::1/128",
         "100::/64",  # discard-only
+        "2001::/32",  # Teredo tunnels
         "2001:db8::/32",  # documentation
+        "2002::/16",  # 6to4 tunnels
         "fc00::/7",  # unique local
         "fe80::/10",  # link-local
         "fec0::/10",  # site-local (deprecated, still routed on old networks)
@@ -57,30 +59,36 @@ _BLOCKING_FLAGS = (
 
 
 def _carried_ipv4(addr: IPAddress) -> ipaddress.IPv4Address | None:
-    """The IPv4 address an IPv6 transition address carries, if any.
+    """The IPv4 address an IPv4-mapped or NAT64 address carries, if any.
 
-    An IPv4-mapped, 6to4, Teredo or NAT64 address reaches an IPv4 host; the
-    embedded address is what the connection lands on, so it is classified
-    too. (The carrier itself is still classified — a Teredo or 6to4 prefix is
-    private on its own terms.)
+    Both reach an IPv4 host, and the embedded address is what the connection
+    lands on, so that is what gets classified. The carrier prefix itself is
+    not put through the ``ipaddress`` flags: whether ``::ffff:0:0/96`` is
+    ``is_reserved`` differs between CPython patch releases, and a policy
+    must not. (6to4 and Teredo also carry an IPv4 address, but those are
+    tunnels into networks this process cannot vouch for, so their prefixes
+    are blocked outright in the list above.)
     """
     if not isinstance(addr, ipaddress.IPv6Address):
         return None
     if addr.ipv4_mapped is not None:
         return addr.ipv4_mapped
-    if addr.sixtofour is not None:
-        return addr.sixtofour
-    if addr.teredo is not None:
-        return addr.teredo[1]
     if addr in _NAT64:
         return ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
     return None
 
 
-def _reason_for(addr: IPAddress) -> str | None:
+def _in_blocked_network(addr: IPAddress) -> str | None:
     for net in _BLOCKED_NETWORKS:
         if addr.version == net.version and addr in net:
             return f"in {net}"
+    return None
+
+
+def _reason_for(addr: IPAddress) -> str | None:
+    reason = _in_blocked_network(addr)
+    if reason is not None:
+        return reason
     for flag in _BLOCKING_FLAGS:
         if getattr(addr, flag, False):
             return flag
@@ -98,12 +106,13 @@ def blocked_address_reason(address: str | IPAddress) -> str | None:
         addr: IPAddress = ipaddress.ip_address(address.split("%", 1)[0])
     else:
         addr = address
-    reason = _reason_for(addr)
-    if reason is not None:
-        return reason
     carried = _carried_ipv4(addr)
     if carried is not None:
+        reason = _in_blocked_network(addr)
+        if reason is not None:
+            return reason
         inner = _reason_for(carried)
         if inner is not None:
             return f"carries {carried} ({inner})"
-    return None
+        return None
+    return _reason_for(addr)

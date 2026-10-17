@@ -147,15 +147,29 @@ class TestBlockedAddressReason:
             "::ffff:10.0.0.1",  # IPv4-mapped
             "::ffff:127.0.0.1",
             "2002:7f00:1::",  # 6to4 of 127.0.0.1
+            "2002:808:808::",  # 6to4 of 8.8.8.8: the tunnel prefix is blocked outright
             "64:ff9b::7f00:1",  # NAT64 of 127.0.0.1
             "2001:0:7f00:1::",  # Teredo prefix
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",  # Teredo with a public client
         ],
     )
     def test_blocked(self, address):
         assert blocked_address_reason(address) is not None
 
-    @pytest.mark.parametrize("address", ["8.8.8.8", PUBLIC_A, "::ffff:8.8.8.8", "2606:4700::1"])
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "8.8.8.8",
+            PUBLIC_A,
+            "::ffff:8.8.8.8",  # IPv4-mapped: the embedded address decides
+            "64:ff9b::808:808",  # NAT64 of 8.8.8.8: likewise
+            "2606:4700::1",
+        ],
+    )
     def test_allowed(self, address):
+        """Independent of the ``ipaddress`` flags on the carrier prefix:
+        ``::ffff:0:0/96`` is ``is_reserved`` on some CPython patch releases
+        and not others (CI's 3.12 and a local 3.12.11 disagreed)."""
         assert blocked_address_reason(address) is None
 
     def test_accepts_parsed_addresses(self):
