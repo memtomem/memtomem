@@ -18,8 +18,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   themselves are unchanged, comma-joined namespace values included. A store
   with no more than `limit` visible files gets the same output as before. Pages
   follow stored-path order: a traversal never repeats a file, but misses one
-  added before its cursor. The `memtomem://sources` resource still returns the
-  full list.
+  added before its cursor. The `memtomem://sources` resource is paged the same
+  way (#2753, below).
 - **`mem_importance_scan` no longer re-reads the store once per chunk
   (#2758).** Each chunk's relation count came from a correlated subquery that
   re-evaluated the visible-chunk set for every chunk, so on a 47,000-chunk
@@ -61,6 +61,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `<file>: cancelled` and its worker stops. When every worker has stopped that
   way, the files behind them are left unattempted — the one-task-per-file run
   would have attempted them — and each is listed as `<file>: not attempted`.
+- **The `memtomem://sources` resource returns one page with `mem_list`'s
+  visibility (#2753).** Reading it used to return every indexed source in one
+  JSON array — 14 MB for 50,000 sources — and included the held and pending
+  sources and the system-namespace-only sources that `mem_list` hides. It now
+  returns an object: `sources`, the first 50 visible files in stored-path
+  order with the same per-file fields as before (`path`, `chunks`, `updated`,
+  `namespaces`, `avg_tokens`); `page_size`; and `next`, the URI of the
+  following page or `null`. Continuations read through a new resource
+  template, `memtomem://sources{?cursor,limit,namespace}` (`limit` 1–500,
+  default 50; `namespace` is the only way to list files that live solely in
+  a system namespace, as with the tool). Held, pending and policy-summary
+  files are omitted the way `mem_list` omits them. A client that parsed the
+  response as a bare array needs to read `sources` instead and follow `next`.
+  `memtomem://namespaces`, `://tags` and `://stats` are unchanged, and the
+  web routes, consolidation and the index engine keep the complete aggregate.
 
 ### Fixed
 
