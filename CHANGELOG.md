@@ -41,6 +41,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Untagged writes keep the `default` namespace when `namespace.default_namespace`
+  is empty (#2738).** The namespace resolver answers "nothing chose one" for a
+  file no rule matches, which is stored as `default`. Web `/api/add` read that
+  answer as the configured default, so with the setting at `""` it stored new
+  entries under `""` where every other surface stores `default`, and
+  `--reassign-namespaces` reported a move from `default` to `""` that never
+  happened. The same substitution read a file stored under `""` as unset: after
+  the setting changed, `/api/add`, `mem_add`, `mm add` and the other add
+  surfaces refused to append to it, and web `/api/add` with
+  `allow_namespace_mix=true` stored the new entry under the configured default,
+  leaving the file split across two namespaces. All of these now use the stored
+  spelling.
 - **Read-only storage queries are no longer refused while another task holds
   a storage transaction (#2756).** The health watchdog's deep check,
   reflection's most-accessed and most-connected reads, `mem_importance_scan`,

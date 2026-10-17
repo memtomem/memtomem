@@ -622,7 +622,6 @@ class MemtomemStore:
                 mix_err = await namespace_mix_refusal(
                     index_engine=comp.index_engine,
                     storage=comp.storage,
-                    default_namespace=default_ns,
                     target=target,
                     effective_ns=effective_namespace,
                     override_hint="a different target file",

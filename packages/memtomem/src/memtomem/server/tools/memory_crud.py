@@ -228,7 +228,6 @@ async def _namespace_mix_refusal(
     err = await namespace_mix_refusal(
         index_engine=app.index_engine,
         storage=app.storage,
-        default_namespace=app.config.namespace.default_namespace,
         target=target,
         effective_ns=effective_ns,
         override_hint=override_hint,

@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 
 from memtomem.errors import NamespaceResolutionError
-from memtomem.models import ChunkMetadata
+from memtomem.models import stored_namespace
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL, READ_ONLY_TARGET_DETAIL
 from memtomem.web.deps import get_config, get_index_engine, get_search_pipeline, get_storage
@@ -24,8 +24,6 @@ from memtomem.web.schemas.scratch import (
 )
 
 router = APIRouter(prefix="/scratch", tags=["scratch"])
-
-_UNTAGGED_NAMESPACE = ChunkMetadata(source_file=Path()).namespace
 
 
 @router.get("", response_model=ScratchListResponse)
@@ -157,10 +155,9 @@ async def promote_scratch(
                 raise HTTPException(
                     status_code=503, detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
                 ) from exc
-            # ``None`` is the untagged carve-out, which stores the chunk model's
-            # default rather than ``namespace.default_namespace``; the two differ
-            # when that setting is "".
-            write_ns = resolved_ns if resolved_ns is not None else _UNTAGGED_NAMESPACE
+            # ``None`` is the untagged carve-out; passing it back would re-enter
+            # rule resolution, so pass the namespace it is stored as.
+            write_ns = stored_namespace(resolved_ns)
             await _asyncio.to_thread(
                 append_entry, target, entry["value"], title=body.title, tags=body.tags
             )

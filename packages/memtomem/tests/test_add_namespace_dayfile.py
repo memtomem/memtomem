@@ -353,7 +353,6 @@ class TestNamespaceMixRefusal:
         err = await namespace_mix_refusal(
             index_engine=_engine("bbb"),
             storage=storage,
-            default_namespace="default",
             target=tmp_path / "absent.md",
             effective_ns="bbb",
             override_hint="-x",
@@ -371,7 +370,6 @@ class TestNamespaceMixRefusal:
         err = await namespace_mix_refusal(
             index_engine=_engine("bbb"),
             storage=SimpleNamespace(namespaces_for_source=AsyncMock(return_value=["aaa"])),
-            default_namespace="default",
             target=target,
             effective_ns="bbb",
             override_hint="-x",
@@ -388,7 +386,6 @@ class TestNamespaceMixRefusal:
         err = await namespace_mix_refusal(
             index_engine=_engine("bbb"),
             storage=SimpleNamespace(namespaces_for_source=AsyncMock(return_value=[])),
-            default_namespace="default",
             target=target,
             effective_ns="bbb",
             override_hint="-x",
@@ -402,7 +399,6 @@ class TestNamespaceMixRefusal:
         err = await namespace_mix_refusal(
             index_engine=_engine("bbb"),
             storage=SimpleNamespace(namespaces_for_source=AsyncMock(return_value=["aaa"])),
-            default_namespace="default",
             target=target,
             effective_ns="bbb",
             override_hint="-x",
@@ -419,7 +415,6 @@ class TestNamespaceMixRefusal:
         err = await namespace_mix_refusal(
             index_engine=_engine("aaa"),  # rules resolve this file to aaa
             storage=SimpleNamespace(namespaces_for_source=AsyncMock(return_value=["aaa"])),
-            default_namespace="default",
             target=target,
             effective_ns=None,
             override_hint="-x",
@@ -427,15 +422,14 @@ class TestNamespaceMixRefusal:
         assert err is None
 
     @pytest.mark.asyncio
-    async def test_none_resolution_compares_against_the_configured_default(self, tmp_path):
+    async def test_none_resolution_compares_against_the_untagged_namespace(self, tmp_path):
         """The engine returns ``None`` for the untagged carve-out, which is
-        stored as the configured default namespace."""
+        stored as ``UNTAGGED_NAMESPACE`` whatever ``default_namespace`` says."""
         target = tmp_path / "plain.md"
         target.write_text("some text")
         err = await namespace_mix_refusal(
             index_engine=_engine(None),
             storage=SimpleNamespace(namespaces_for_source=AsyncMock(return_value=["default"])),
-            default_namespace="default",
             target=target,
             effective_ns=None,
             override_hint="-x",
@@ -454,7 +448,6 @@ class TestNamespaceMixRefusal:
             storage=SimpleNamespace(
                 namespaces_for_source=AsyncMock(side_effect=RuntimeError("db"))
             ),
-            default_namespace="default",
             target=target,
             effective_ns="bbb",
             override_hint="--allow-namespace-mix",
@@ -937,7 +930,6 @@ class TestWebSurface:
         err = await _refusal(
             index_engine=comp.index_engine,
             storage=comp.storage,
-            default_namespace=comp.config.namespace.default_namespace,
             target=target,
             effective_ns="bbb",
             override_hint="allow_namespace_mix=true",
@@ -983,7 +975,6 @@ class TestGuardFailsClosedOnFilesystemErrors:
         err = await namespace_mix_refusal(
             index_engine=_engine("bbb"),
             storage=SimpleNamespace(namespaces_for_source=AsyncMock(return_value=["aaa"])),
-            default_namespace="default",
             target=target,
             effective_ns="bbb",
             override_hint="--allow-namespace-mix",
@@ -1008,7 +999,6 @@ class TestGuardFailsClosedOnFilesystemErrors:
         err = await namespace_mix_refusal(
             index_engine=_engine("bbb"),
             storage=SimpleNamespace(namespaces_for_source=AsyncMock(return_value=["aaa"])),
-            default_namespace="default",
             target=target,
             effective_ns="bbb",
             override_hint="--allow-namespace-mix",
@@ -1024,7 +1014,6 @@ class TestGuardFailsClosedOnFilesystemErrors:
         err = await namespace_mix_refusal(
             index_engine=_engine("bbb"),
             storage=SimpleNamespace(namespaces_for_source=AsyncMock()),
-            default_namespace="default",
             target=tmp_path / "absent.md",
             effective_ns="bbb",
             override_hint="-x",
@@ -1041,7 +1030,6 @@ class TestGuardFailsClosedOnFilesystemErrors:
         err = await namespace_mix_refusal(
             index_engine=_engine("bbb"),
             storage=SimpleNamespace(namespaces_for_source=AsyncMock()),
-            default_namespace="default",
             target=not_a_dir / "child.md",
             effective_ns="bbb",
             override_hint="-x",

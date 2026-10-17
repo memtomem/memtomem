@@ -456,7 +456,6 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                 mix_err = await namespace_mix_refusal(
                     index_engine=comp.index_engine,
                     storage=comp.storage,
-                    default_namespace=default_ns,
                     target=path,
                     effective_ns=target,
                     override_hint="--allow-namespace-mix on `mm add` for a hand-picked file",

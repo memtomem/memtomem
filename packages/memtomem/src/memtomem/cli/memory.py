@@ -408,7 +408,6 @@ async def _add(
                         else await namespace_mix_refusal(
                             index_engine=comp.index_engine,
                             storage=comp.storage,
-                            default_namespace=default_ns,
                             target=target,
                             effective_ns=effective_ns,
                             override_hint="--allow-namespace-mix",

@@ -26,6 +26,23 @@ CONSOLIDATED_SUFFIX = ".consolidated.md"
 #: constant — an unrecognised origin is treated as "not ours", never as owned.
 ChunkOrigin = Literal["consolidation_policy"]
 
+#: The namespace a chunk is stored under when nothing chose one: the
+#: namespace resolver's ``None`` carve-out. It is a fixed spelling, not
+#: ``namespace.default_namespace`` — the resolver answers ``None`` when that
+#: setting is ``"default"`` *or* ``""``, and both store this value.
+UNTAGGED_NAMESPACE = "default"
+
+
+def stored_namespace(resolved: str | None) -> str:
+    """The namespace a resolver answer is stored as.
+
+    Every surface that turns ``IndexEngine.effective_namespace_for``'s answer
+    into a namespace to stamp or compare goes through this, so none of them
+    can read ``None`` as ``namespace.default_namespace`` again (#2738). Any
+    other value, ``""`` included, is a namespace already and passes through.
+    """
+    return UNTAGGED_NAMESPACE if resolved is None else resolved
+
 
 class ChunkType(StrEnum):
     MARKDOWN_SECTION = "markdown_section"
@@ -46,7 +63,7 @@ class ChunkMetadata:
     end_line: int = 0
     language: str = "en"
     tags: tuple[str, ...] = ()
-    namespace: str = "default"
+    namespace: str = UNTAGGED_NAMESPACE
     overlap_before: int = 0  # chars of overlap with previous chunk
     overlap_after: int = 0  # chars of overlap with next chunk
     parent_context: str = ""  # parent heading or document title

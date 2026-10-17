@@ -26,6 +26,7 @@ from typing import Any
 
 from memtomem.config import TargetScope, classify_scope
 from memtomem.errors import ConfigError
+from memtomem.models import stored_namespace
 
 
 logger = logging.getLogger(__name__)
@@ -261,9 +262,9 @@ def namespace_mix_error(
     and silently restamp *their* namespace to ``resolved``.
 
     ``resolved`` must be the namespace ``index_file`` will actually apply
-    — callers map the engine's ``None`` carve-out to
-    ``namespace.default_namespace`` first, so the comparison is against
-    what is stored rather than what was passed in.
+    — callers map the engine's ``None`` carve-out through
+    ``memtomem.models.stored_namespace`` first, so the comparison is
+    against what is stored rather than what was passed in.
 
     ``override_hint`` is the surface's own spelling of the escape hatch
     (``--allow-namespace-mix`` for the CLI, ``allow_namespace_mix=true``
@@ -288,7 +289,6 @@ async def namespace_mix_refusal(
     *,
     index_engine: Any,
     storage: Any,
-    default_namespace: str,
     target: Path,
     effective_ns: str | None,
     override_hint: str,
@@ -297,7 +297,7 @@ async def namespace_mix_refusal(
 
     Asks the engine what it will actually stamp
     (``effective_namespace_for``) rather than re-deriving it, with the
-    ``None`` carve-out mapped to ``default_namespace``. Re-deriving is how
+    ``None`` carve-out mapped to the namespace it is stored as. Re-deriving is how
     the guard and the indexer drift: resolving through the rules alone
     would refuse a write to a file whose stored namespace the indexer
     would have *preserved*, which is a refusal with no hazard behind it.
@@ -366,7 +366,7 @@ async def namespace_mix_refusal(
             "its existing entries into another namespace (issue #2005). "
             f"Retry, or pass {override_hint} to append anyway."
         )
-    stored = resolved or default_namespace
+    stored = stored_namespace(resolved)
     try:
         existing = await storage.namespaces_for_source(target)
     except Exception:

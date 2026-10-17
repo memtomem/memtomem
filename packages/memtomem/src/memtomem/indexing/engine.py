@@ -43,7 +43,7 @@ from memtomem.errors import (
 from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.indexing.redaction_exemption import declared_exemption
-from memtomem.models import Chunk, IndexingStats
+from memtomem.models import Chunk, IndexingStats, stored_namespace
 from memtomem.storage.sqlite_helpers import norm_dir_prefix as _norm_dir_prefix
 from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
 from memtomem.tools.entity_sync import sync_entities_for_chunks
@@ -2148,11 +2148,13 @@ class IndexEngine:
         """The spelling a namespace has once stored.
 
         ``None`` is the untagged carve-out, which the chunk model persists as
-        the configured default. Comparing a resolver answer against a stored
+        ``UNTAGGED_NAMESPACE``. Comparing a resolver answer against a stored
         value without this would read a file that never moved as a move
-        (``None`` vs ``"default"`` are the same state by two names).
+        (``None`` vs ``"default"`` are the same state by two names). Mapping
+        ``None`` to ``namespace.default_namespace`` instead reported every
+        untagged file as moved to ``""`` when that setting is empty (#2738).
         """
-        return namespace if namespace is not None else self._ns_config.default_namespace
+        return stored_namespace(namespace)
 
     async def _namespace_decision(
         self,

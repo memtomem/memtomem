@@ -2691,7 +2691,6 @@ async def add_memory(
                 mix_err = await namespace_mix_refusal(
                     index_engine=index_engine,
                     storage=storage,
-                    default_namespace=config.namespace.default_namespace,
                     target=target,
                     effective_ns=req.namespace,
                     override_hint="allow_namespace_mix=true",
@@ -2717,16 +2716,17 @@ async def add_memory(
             # ``namespace`` short-circuits the resolver, so it needs neither.
             write_ns = req.namespace
             if write_ns is None:
+                from memtomem.models import stored_namespace
+
                 try:
-                    # ``or default_namespace``: the resolver returns ``None``
-                    # for the untagged carve-out, and passing that back through
-                    # would read as "no caller namespace" and re-enter rule
-                    # resolution — the very thing being avoided. The explicit
-                    # default stores the same value the carve-out does. Mirrors
-                    # the web chunk-delete path's ``preserved_ns``.
-                    write_ns = (
-                        await index_engine.effective_namespace_for(target)
-                    ) or config.namespace.default_namespace
+                    # The resolver returns ``None`` for the untagged carve-out,
+                    # and passing that back through would read as "no caller
+                    # namespace" and re-enter rule resolution — the very thing
+                    # being avoided. ``stored_namespace`` names what the
+                    # carve-out stores, which is not
+                    # ``namespace.default_namespace`` when that setting is ""
+                    # (#2738).
+                    write_ns = stored_namespace(await index_engine.effective_namespace_for(target))
                 except NamespaceResolutionError as exc:
                     raise HTTPException(
                         status_code=503, detail=NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
