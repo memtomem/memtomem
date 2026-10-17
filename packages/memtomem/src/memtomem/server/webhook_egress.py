@@ -39,6 +39,33 @@ _KEEPALIVE_EXPIRY = 5.0
 Resolver = Callable[..., Awaitable[Sequence[tuple[Any, ...]]]]
 
 
+def _ordered_addresses(infos: Sequence[tuple[Any, ...]]) -> list[str]:
+    """Unique addresses from a ``getaddrinfo`` answer, in anyio's race order.
+
+    anyio's ``connect_tcp`` puts the first IPv6 address first and the first
+    IPv4 address second, so a stalled IPv6 answer costs one stagger before
+    IPv4 is tried; the rest keep resolver order. Resolver order alone can
+    list every AAAA before the A record, and three stalled ones would eat a
+    short connect timeout before IPv4 was reached. A zone index is dropped.
+    """
+    seen: set[str] = set()
+    v6: list[str] = []
+    v4: list[str] = []
+    rest: list[str] = []
+    for info in infos:
+        addr = str(info[4][0]).split("%", 1)[0]
+        if addr in seen:
+            continue
+        seen.add(addr)
+        if info[0] == socket.AF_INET6 and not v6:
+            v6.append(addr)
+        elif info[0] == socket.AF_INET and not v4:
+            v4.append(addr)
+        else:
+            rest.append(addr)
+    return v6 + v4 + rest
+
+
 class WebhookEgressRefused(httpcore.ConnectError):
     """The webhook host resolved to an address the policy refuses.
 
@@ -88,7 +115,7 @@ class EgressBackend(httpcore.AnyIOBackend):
                     # these inside ``anyio.connect_tcp``; the resolve now
                     # happens before that call, so map here.
                     raise httpcore.ConnectError(f"could not resolve {host!r}: {exc}") from exc
-                addrs = list(dict.fromkeys(str(info[4][0]).split("%", 1)[0] for info in infos))
+                addrs = _ordered_addresses(infos)
                 if not addrs:
                     raise httpcore.ConnectError(f"no address for {host!r}")
                 for addr in addrs:

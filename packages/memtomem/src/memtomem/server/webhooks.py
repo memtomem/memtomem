@@ -92,8 +92,12 @@ class WebhookManager:
         # one: the first refusal warns, later ones go to debug.
         self._egress_refused_logged = False
         if config.url:
+            # With a proxy, the proxy connects to the receiver and the address
+            # policy is its to enforce (``build_transport``), so the startup
+            # host check would refuse what the delivery path then allows.
             err = _validate_webhook_url(
-                config.url, enforce_host_policy=not config.allow_private_hosts
+                config.url,
+                enforce_host_policy=not (config.allow_private_hosts or config.proxy),
             )
             if err is None and config.proxy:
                 err = _validate_proxy_url(config.proxy)

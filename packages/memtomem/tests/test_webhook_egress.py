@@ -226,6 +226,19 @@ class TestEgressBackend:
         assert PUBLIC_A not in fake.streams, "the cancelled attempt never produced a stream"
 
     @pytest.mark.asyncio
+    async def test_ipv4_is_tried_second_when_every_aaaa_record_stalls(self, connects):
+        """anyio's order: first IPv6, then first IPv4, then the rest. In
+        resolver order the three stalled AAAA answers would take three
+        staggers (0.75 s) and the 0.6 s connect timeout would expire before
+        the reachable A record was tried."""
+        v6 = ["2606:4700::1", "2606:4700::2", "2606:4700::3"]
+        fake = connects({a: "stall" for a in v6})
+        backend = EgressBackend(resolver=_answer(*v6, PUBLIC_A))
+        stream = await backend.connect_tcp("hooks.example", 443, timeout=0.6)
+        assert stream.addr == PUBLIC_A
+        assert fake.calls == [v6[0], PUBLIC_A]
+
+    @pytest.mark.asyncio
     async def test_a_losing_stream_is_closed_despite_the_cancellation(self, connects):
         """The first candidate's connector hands back a stream after the second
         has already won: that stream must be closed, not left to the GC."""
@@ -394,6 +407,21 @@ class TestStartupPolicy:
         assert mgr._config.enabled is False
         assert "port" in caplog.text
         assert "hunter2" not in caplog.text and "operator" not in caplog.text
+
+    @pytest.mark.parametrize("url", ["http://10.0.0.1/h", "http://receiver.internal/h"])
+    def test_proxy_mode_delegates_the_host_policy_at_startup_too(self, url):
+        """With a proxy the proxy connects to the receiver and the address
+        policy is its to enforce; startup must not refuse what delivery
+        allows. Scheme, syntax and the proxy URL are still checked."""
+        mgr = WebhookManager(
+            WebhookConfig(enabled=True, url=url, proxy="http://proxy.example:3128")
+        )
+        assert mgr._config.enabled is True
+        for bad in ("file:///etc/passwd", "http://receiver.internal:bad/h"):
+            mgr = WebhookManager(
+                WebhookConfig(enabled=True, url=bad, proxy="http://proxy.example:3128")
+            )
+            assert mgr._config.enabled is False
 
     def test_bad_proxy_url_disables_webhooks(self, caplog):
         with caplog.at_level(logging.WARNING, logger="memtomem.server.webhooks"):
