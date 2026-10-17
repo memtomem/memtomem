@@ -2140,7 +2140,7 @@ class TestSubcommandHelp:
 
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", lambda: fake_components())
         monkeypatch.setattr(
-            "memtomem.server.tools.search._resolve_project_context_root", lambda _comp: None
+            "memtomem.runtime.project_context._resolve_project_context_root", lambda _comp: None
         )
 
         result = runner.invoke(

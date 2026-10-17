@@ -85,7 +85,7 @@ def _patch_components(monkeypatch: pytest.MonkeyPatch, comp: SimpleNamespace) ->
 
     monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake)
     monkeypatch.setattr(
-        "memtomem.server.tools.search._resolve_project_context_root", lambda comp: None
+        "memtomem.runtime.project_context._resolve_project_context_root", lambda comp: None
     )
 
 

@@ -38,6 +38,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (#2757).** Ranking now uses each candidate's id and sort key, so a query with
   `limit=10` no longer reads up to 200 full rows first. Results and their order
   are unchanged.
+- **`mm add` and `mm recall` call the project-context resolver directly
+  (#2749).** Since #2726 the two commands chose their resolver by checking
+  whether a test had replaced the MCP search module's copy of it, so a test that
+  replaced the real function instead was ignored. The commands now import the
+  function from `memtomem.runtime.project_context` when they run, and the CLI
+  tests patch that module. What the commands resolve is unchanged.
 
 ### Fixed
 

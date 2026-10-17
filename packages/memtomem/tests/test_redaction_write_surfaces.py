@@ -252,10 +252,8 @@ class TestCliMmAddRedactionGuard:
             yield comp
 
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
-        # ``_resolve_project_context_root`` is lazy-imported inside
-        # ``_add`` from its defining module, so patch it there.
         monkeypatch.setattr(
-            "memtomem.server.tools.search._resolve_project_context_root",
+            "memtomem.runtime.project_context._resolve_project_context_root",
             lambda comp: tmp_path / "proj_unreg",
         )
 
@@ -304,7 +302,7 @@ class TestCliMmAddRedactionGuard:
 
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
         monkeypatch.setattr(
-            "memtomem.server.tools.search._resolve_project_context_root",
+            "memtomem.runtime.project_context._resolve_project_context_root",
             lambda comp: proj_root,
         )
 

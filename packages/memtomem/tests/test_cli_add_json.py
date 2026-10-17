@@ -80,10 +80,10 @@ def _patch_components(monkeypatch: pytest.MonkeyPatch, comp: SimpleNamespace) ->
         yield comp
 
     monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake)
-    # ``_add`` lazy-imports this from its defining module; ``None`` means
-    # "not inside a project", which keeps the default user scope simple.
+    # ``None`` means "not inside a project", which keeps the default user
+    # scope simple.
     monkeypatch.setattr(
-        "memtomem.server.tools.search._resolve_project_context_root", lambda comp: None
+        "memtomem.runtime.project_context._resolve_project_context_root", lambda comp: None
     )
 
 
@@ -135,7 +135,7 @@ class TestAddJsonAck:
         comp.config.indexing.project_memory_dirs = [str(base)]
         _patch_components(monkeypatch, comp)
         monkeypatch.setattr(
-            "memtomem.server.tools.search._resolve_project_context_root", lambda comp: proj
+            "memtomem.runtime.project_context._resolve_project_context_root", lambda comp: proj
         )
 
         result = CliRunner().invoke(
@@ -160,7 +160,7 @@ class TestAddJsonAck:
         comp.config.indexing.project_memory_dirs = [str(base)]
         _patch_components(monkeypatch, comp)
         monkeypatch.setattr(
-            "memtomem.server.tools.search._resolve_project_context_root", lambda comp: proj
+            "memtomem.runtime.project_context._resolve_project_context_root", lambda comp: proj
         )
         calls = poison_click_prompts(monkeypatch)
 

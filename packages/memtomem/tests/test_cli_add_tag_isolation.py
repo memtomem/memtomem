@@ -32,8 +32,6 @@ def _reset_privacy_counters():
 @pytest.fixture
 def cli_comp(bm25_only_components, monkeypatch, tmp_path):
     """Route ``mm add`` at the real BM25-only stack, outside any project."""
-    import memtomem.server.tools.search  # noqa: F401 — the patch target below
-
     comp, mem_dir = bm25_only_components
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
@@ -45,7 +43,7 @@ def cli_comp(bm25_only_components, monkeypatch, tmp_path):
 
     monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake)
     monkeypatch.setattr(
-        "memtomem.server.tools.search._resolve_project_context_root", lambda comp: None
+        "memtomem.runtime.project_context._resolve_project_context_root", lambda comp: None
     )
     return comp, mem_dir
 

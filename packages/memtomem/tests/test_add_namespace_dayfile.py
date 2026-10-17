@@ -629,7 +629,7 @@ class TestCliSurface:
 
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake)
         monkeypatch.setattr(
-            "memtomem.server.tools.search._resolve_project_context_root", lambda comp: None
+            "memtomem.runtime.project_context._resolve_project_context_root", lambda comp: None
         )
         return CliRunner().invoke(add_cmd, args)
 

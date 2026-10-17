@@ -11,11 +11,12 @@ move. That leaves three different places a test can patch, and which one works
 depends on how the consumer binds the name:
 
 - ``memtomem.runtime.project_context`` — for callers that import from the
-  defining module (``integrations/langgraph.py``).
+  defining module inside a function (``integrations/langgraph.py``,
+  ``cli/memory.py``, ``cli/agent_cmd.py``, ``cli/tags_cmd.py``).
 - ``memtomem.server.tools.search`` — for callers that import from the
   re-export *inside a function*, so the lookup happens per call. Most MCP
-  tools and ``cli/memory.py`` work this way, and the long-standing patch
-  target in the suite is this one.
+  tools work this way, and the long-standing patch target in the suite is
+  this one.
 - the consumer's own module — for callers that bind at import time
   (``cli/search.py``, ``web/routes/{search,chunks,timeline}.py``). Patching
   either module above does not reach these; their local name is already

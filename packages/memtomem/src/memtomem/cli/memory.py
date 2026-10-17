@@ -24,21 +24,6 @@ from memtomem.memory_scope import (
 _MEMORY_SCOPE_CHOICES = list(get_args(TargetScope))
 
 
-def _resolve_project_context_root(holder: object) -> Path | None:
-    import sys
-
-    from memtomem.runtime.project_context import (
-        _resolve_project_context_root as _runtime_resolve,
-    )
-
-    search_mod = sys.modules.get("memtomem.server.tools.search")
-    if search_mod is not None:
-        patched = getattr(search_mod, "_resolve_project_context_root", None)
-        if callable(patched) and patched is not _runtime_resolve:
-            return patched(holder)
-    return _runtime_resolve(holder)
-
-
 def _resolve_memory_scope_dir(
     scope: TargetScope,
     project_root: Path | None,
@@ -255,6 +240,8 @@ async def _add(
         )
 
     async with cli_components() as comp:
+        from memtomem.runtime.project_context import _resolve_project_context_root
+
         project_root = _resolve_project_context_root(comp)
         # ADR-0011 PR-D review round 7: ``mm mem add user_base`` must
         # read from ``indexing.memory_dirs[0]`` so the CLI agrees with
@@ -584,6 +571,8 @@ async def _recall(
             system_prefixes=tuple(comp.config.search.system_namespace_prefixes),
         )
         scope_filter = ScopeFilter.parse(effective_scope)
+        from memtomem.runtime.project_context import _resolve_project_context_root
+
         project_context_root = _resolve_project_context_root(comp)
         chunks = await comp.storage.recall_chunks(
             since=since_dt,

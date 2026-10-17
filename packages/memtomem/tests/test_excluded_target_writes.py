@@ -71,9 +71,6 @@ def _patch_cli_components(monkeypatch, comp) -> None:
 
     monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake)
     monkeypatch.setattr(
-        "memtomem.server.tools.search._resolve_project_context_root", lambda comp: None
-    )
-    monkeypatch.setattr(
         "memtomem.runtime.project_context._resolve_project_context_root", lambda comp: None
     )
 
