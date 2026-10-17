@@ -403,3 +403,168 @@ class TestOversizeSectionParagraphGap:
         # chunk[2]: trailing inherits section end (line 10).
         assert chunks[2].metadata.start_line == 10
         assert chunks[2].metadata.end_line == 10
+
+
+def _entry(level: int, title: str, tags: list[str] | None = None, body: str = "") -> str:
+    """One heading, an optional ``append_entry``-style header, an optional body."""
+    out = f"{'#' * level} {title}\n\n"
+    if tags is not None:
+        out += f"> created: 2026-10-17T00:00:00+00:00\n> tags: {json.dumps(tags)}\n\n"
+    if body:
+        out += f"{body}\n\n"
+    return out
+
+
+def _tags_by_heading(content: str) -> dict[str, set[str]]:
+    """Tags per headed chunk; a headingless chunk (preamble, frontmatter) is left out."""
+    return {
+        c.metadata.heading_hierarchy[-1]: set(c.metadata.tags)
+        for c in _chunk(content)
+        if c.metadata.heading_hierarchy
+    }
+
+
+class TestBlockquoteTagScope:
+    """An entry's blockquote tags reach the sub-sections nested under its
+    heading, up to the next heading at the same or a higher level (#2747)."""
+
+    def test_header_only_entry_tags_its_sub_heading_chunks(self):
+        content = _entry(2, "Beta", ["beta"]) + "".join(
+            _entry(3, f"Part {i}", body=f"part {i} body") for i in range(3)
+        )
+        assert _tags_by_heading(content) == {f"### Part {i}": {"beta"} for i in range(3)}
+
+    def test_entry_with_its_own_body_tags_body_and_children(self):
+        content = _entry(2, "Beta", ["beta"], "intro") + _entry(3, "Part", body="part body")
+        assert _tags_by_heading(content) == {"## Beta": {"beta"}, "### Part": {"beta"}}
+
+    def test_scope_closes_at_the_next_sibling_and_at_a_higher_heading(self):
+        content = (
+            _entry(2, "Beta", ["beta"])
+            + _entry(3, "Part", body="part body")
+            + _entry(2, "Sibling", body="sibling body")
+            + _entry(3, "Sibling part", body="sibling part body")
+            + _entry(2, "Gamma", ["gamma"])
+            + _entry(3, "Gamma part", body="gamma part body")
+            + _entry(1, "Root", body="root body")
+            + _entry(3, "Under root", body="under root body")
+        )
+        assert _tags_by_heading(content) == {
+            "### Part": {"beta"},
+            "## Sibling": set(),
+            "### Sibling part": set(),
+            "### Gamma part": {"gamma"},
+            "# Root": set(),
+            "### Under root": set(),
+        }
+
+    def test_nested_tags_union_with_their_ancestors(self):
+        content = (
+            _entry(2, "Outer", ["outer"])
+            + _entry(3, "Inner", ["inner"], "inner body")
+            + _entry(4, "Deep", body="deep body")
+            + _entry(3, "Next", body="next body")
+        )
+        assert _tags_by_heading(content) == {
+            "### Inner": {"inner", "outer"},
+            "#### Deep": {"inner", "outer"},
+            "### Next": {"outer"},
+        }
+
+    def test_skipped_levels_stay_inside_the_scope(self):
+        content = (
+            _entry(2, "Beta", ["beta"])
+            + _entry(4, "Deep", body="deep body")
+            + _entry(3, "Mid", body="mid body")
+        )
+        assert _tags_by_heading(content) == {"#### Deep": {"beta"}, "### Mid": {"beta"}}
+
+    def test_preamble_tags_do_not_reach_headed_sections(self):
+        content = '> created: 2026-10-17\n> tags: ["pre"]\n\npreamble body\n\n' + _entry(
+            2, "Next", body="next body"
+        )
+        chunks = _chunk(content)
+        assert [(c.metadata.heading_hierarchy, set(c.metadata.tags)) for c in chunks] == [
+            ((), {"pre"}),
+            (("## Next",), set()),
+        ]
+
+    def test_fenced_heading_does_not_close_the_scope(self):
+        content = (
+            _entry(2, "Beta", ["beta"])
+            + _entry(3, "Part", body="```\n## not a heading\n```\nafter the fence")
+            + _entry(3, "Part two", body="second part")
+        )
+        assert _tags_by_heading(content) == {"### Part": {"beta"}, "### Part two": {"beta"}}
+
+    def test_frontmatter_tags_union_with_inherited_ones(self):
+        content = "---\ntags: [project]\n---\n\n" + (
+            _entry(2, "Beta", ["beta"]) + _entry(3, "Part", body="part body")
+        )
+        assert _tags_by_heading(content) == {"### Part": {"beta", "project"}}
+
+    def test_body_less_heading_still_closes_the_scope(self):
+        """A heading followed directly by another emits no section of its
+        own; the boundary it sets must still reach the scope stack."""
+        for closer in ("## B", "# Root"):
+            content = (
+                _entry(2, "A", ["beta"])
+                + _entry(3, "Old", body="old body")
+                + f"{closer}\n"
+                + _entry(3, "New", body="new body")
+            )
+            assert _tags_by_heading(content) == {"### Old": {"beta"}, "### New": set()}, closer
+
+    def test_blank_only_section_closes_the_scope(self):
+        content = (
+            _entry(2, "A", ["beta"])
+            + _entry(3, "Old", body="old body")
+            + "## Empty\n\n\n"
+            + _entry(3, "New", body="new body")
+        )
+        assert _tags_by_heading(content) == {"### Old": {"beta"}, "### New": set()}
+
+    def test_wikilink_alias_that_becomes_a_heading_closes_the_scope(self):
+        """Wikilinks resolve before splitting, so an alias that turns a line
+        into a heading is a heading for the scope too."""
+        content = (
+            _entry(2, "A", ["beta"])
+            + _entry(3, "Old", body="old body")
+            + "[[target|## B]]\n\n"
+            + _entry(3, "New", body="new body")
+        )
+        assert _tags_by_heading(content) == {"### Old": {"beta"}, "### New": set()}
+
+
+class TestSplitByHeadingsLevels:
+    """``heading_levels`` lists every heading passed since the previous
+    emitted section, the section's own heading last."""
+
+    def _levels(self, content: str) -> list[tuple[list[str], list[int]]]:
+        return [
+            (s["hierarchy"], s["heading_levels"])
+            for s in MarkdownChunker()._split_by_headings(content)
+        ]
+
+    def test_consecutive_headings_accumulate_onto_the_next_section(self):
+        assert self._levels("## A\n### B\nbody\n## C\nmore\n") == [
+            (["## A", "### B"], [2, 3]),
+            (["## C"], [2]),
+        ]
+
+    def test_preamble_has_no_levels(self):
+        assert self._levels("intro\n## A\nbody\n") == [([], []), (["## A"], [2])]
+
+    def test_terminal_heading_is_dropped_not_attached_backward(self):
+        assert self._levels("## A\nbody\n## B") == [(["## A"], [2])]
+
+    def test_headings_only_file_falls_back_with_no_levels(self):
+        assert self._levels("## A\n### B") == [([], [])]
+
+    def test_sections_are_otherwise_unchanged(self):
+        sections = MarkdownChunker()._split_by_headings("intro\n## A\n\nbody\n### B\nmore\n")
+        assert [{k: v for k, v in s.items() if k != "heading_levels"} for s in sections] == [
+            {"hierarchy": [], "text": "intro", "start_line": 1, "end_line": 1},
+            {"hierarchy": ["## A"], "text": "\nbody", "start_line": 2, "end_line": 4},
+            {"hierarchy": ["## A", "### B"], "text": "more", "start_line": 5, "end_line": 6},
+        ]

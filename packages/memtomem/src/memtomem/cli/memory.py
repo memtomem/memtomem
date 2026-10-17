@@ -432,8 +432,12 @@ async def _add(
                         target, namespace=effective_ns, already_scanned=True, lock_held=True
                     )
 
-                    # Apply tags to newly appended chunks (chunker doesn't parse tag text
-                    # from content). Inside the lock — keyed to this file's new chunks.
+                    # The chunker tags the entry from its ``> tags:`` header, except when
+                    # ``content`` opens with its own ``## `` heading: ``format_entry_block``
+                    # then writes the header above that heading, in the preamble or at the
+                    # end of the previous section, so the new entry's section never sees
+                    # it (#2762). Merge into this add's new chunks for that case. Inside the
+                    # lock — keyed to this file's new chunks.
                     if tags and stats.indexed_chunks > 0:
                         chunks = await comp.storage.list_chunks_by_source(target)
                         updated = []
