@@ -43,6 +43,7 @@ from memtomem.errors import (
 from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.indexing.redaction_exemption import declared_exemption
+from memtomem.indexing.source_receipt import code_fingerprint
 from memtomem.models import Chunk, IndexingStats, stored_namespace
 from memtomem.storage.sqlite_helpers import norm_dir_prefix as _norm_dir_prefix
 from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
@@ -59,6 +60,16 @@ logger = logging.getLogger(__name__)
 PathScope = Literal["configured", "explicit"]
 
 _MAX_INDEX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+# Source identity for the receipt policy, read once when the engine is
+# imported so that it describes the code this process loaded. Read at the
+# first receipt check instead, a process still running old chunker code could
+# record its chunks under the identity of files edited since it started, and
+# every later process running the new code would reuse them. This is still a
+# snapshot of files on disk, not proof of what was loaded: modules imported
+# before or after this line are covered only if their files did not change in
+# between, so a server must be restarted after its source is edited.
+_CODE_FINGERPRINT = code_fingerprint()
 
 # Max files whose ``_index_file`` pipelines run concurrently in a bulk
 # ``index_path`` run. Also the default and upper bound for the embedding
@@ -2820,6 +2831,10 @@ class IndexEngine:
                     # caught the change. Deliberately coarse: a release bump
                     # costs one re-chunk pass, which is the safe direction.
                     "code": _memtomem_version,
+                    # The version alone lets two builds that report the same
+                    # one (a ``main`` checkout and the release it follows)
+                    # reuse each other's receipts across a chunker change.
+                    "source": _CODE_FINGERPRINT,
                     "indexing": self._config.model_dump(mode="python"),
                     "namespace": self._ns_config.model_dump(mode="python"),
                     "namespace_target": ns_decision.target,

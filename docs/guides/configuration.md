@@ -1616,6 +1616,10 @@ An unchanged completed source can reuse a transactionally recorded receipt
 under the existing per-source lock, after privacy checks. Forced indexing,
 namespace reassignment, enrichment and automatic summarization use the normal
 indexing path. Receipts check current chunk/index completeness and policy;
-they are not a substitute for backup or database integrity checks. The watcher
+they are not a substitute for backup or database integrity checks. A receipt
+is tied to the memtomem release and its installed source files, so after an
+upgrade, or a code change in a source checkout, the next index re-chunks each
+unchanged source once; chunks whose text and context still match keep their
+vectors. The watcher
 window bounds scheduling; inference and lock contention can add execution time.
 See `tools/cpu-embedding/` for pinned INT8 export and isolated measurements.

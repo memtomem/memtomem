@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import memtomem
 from memtomem.storage.sqlite_helpers import norm_path
 
 
@@ -23,6 +24,39 @@ def digest(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(normalize(value), sort_keys=True, default=str).encode()
     ).hexdigest()
+
+
+def _tree_fingerprint(root: Path) -> str:
+    """Hash every ``*.py`` file under *root*, path included, in a fixed order.
+
+    Files are ordered by their POSIX relative path as a string, so the digest
+    does not depend on the platform's path separator or ``Path`` ordering.
+    """
+    h = hashlib.sha256()
+    for rel, path in sorted((p.relative_to(root).as_posix(), p) for p in root.rglob("*.py")):
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        h.update(path.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def code_fingerprint() -> str:
+    """Identity of the installed memtomem source, for the receipt policy.
+
+    The release version alone cannot tell two builds of one version apart: a
+    checkout of unreleased ``main`` and the PyPI release both report it, and
+    a chunker change between them would otherwise reuse the other build's
+    receipts (#2773). The whole package is hashed, not only ``chunking/``,
+    because chunk output also depends on modules outside it.
+
+    Returns ``"unavailable"`` when the source cannot be read (a zipped or
+    frozen install), which leaves the version as the only code identity.
+    """
+    try:
+        return _tree_fingerprint(Path(memtomem.__file__).parent)
+    except (OSError, TypeError):
+        return "unavailable"
 
 
 def content_hash(text: str) -> str:

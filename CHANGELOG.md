@@ -79,6 +79,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm index <file>` clears the `stale_index` that `mm memory doctor`
+  reports when another build of the same release wrote the index (#2773).**
+  The index receipt identified the code by its release version only, so a
+  source checkout of unreleased changes reused receipts written by the
+  released package it follows: its `mm index` skipped re-chunking, while its
+  doctor re-chunked with the checkout's chunker, saw moved line ranges, and
+  printed a remedy that could not clear them. The receipt now also records a
+  hash of the installed memtomem source, taken when the indexer loads. A
+  checkout re-chunks unchanged sources once after its code changes; chunks
+  whose text and context still match keep their vectors. Installs from a
+  release are unaffected, since their source changes only with the version.
 - **An entry's tags now reach the chunks under its sub-headings (#2747).** A
   `> tags:` header tagged only the section it opened, so an entry whose content
   began with `###` headings stored its tags on none of its chunks when added
