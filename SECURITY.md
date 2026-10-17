@@ -159,6 +159,20 @@ docs, and the bind-time banner to keep the misconfiguration probability low.
 - **Redirect validation**: Each redirect hop is validated against the same IP blocklist
 - **Internal hostname blocking**: `.local`, `.internal` TLD hosts are rejected
 
+### Webhook delivery
+
+- **Egress policy at the socket**: the webhook host is resolved and every
+  address in the answer is classified before a connection is opened — a
+  private, loopback, link-local or reserved address (including one carried by
+  an IPv4-mapped, 6to4, Teredo or NAT64 IPv6 address, or hidden behind a
+  public hostname) refuses the event. The classifier is the one `mem_fetch`
+  uses (`memtomem/egress_policy.py`).
+- **No ambient proxy**: delivery is direct unless `webhook.proxy` names a
+  forward proxy explicitly; with one set, the proxy connects to the receiver
+  and the address policy is the proxy's to enforce.
+- **Local receivers are opt-in**: `webhook.allow_private_hosts` turns the
+  address policy off for a receiver on the operator's own machine or LAN.
+
 ### Data Security
 
 - **SQL injection**: All queries use parameterized statements

@@ -1297,6 +1297,9 @@ _FRESH_PRESERVE_KEYS: frozenset[str] = frozenset(
         "embedding.base_url",
         "llm.base_url",
         "webhook.url",
+        "webhook.proxy",
+        # Egress policy (wizard doesn't ask; resetting it silences a local receiver)
+        "webhook.allow_private_hosts",
         # User-curated lists / rules (wizard doesn't ask)
         "indexing.exclude_patterns",
         "indexing.supported_extensions",

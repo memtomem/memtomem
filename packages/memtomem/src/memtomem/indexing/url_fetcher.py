@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal
 from urllib.parse import ParseResult, urljoin, urlparse, urlunparse
 
 from memtomem.context._atomic import atomic_write_text
+from memtomem.egress_policy import blocked_address_reason
 from memtomem.privacy import enforce_write_guard
 from memtomem.source_provenance import WriteTargetGuard, refuse_replace_target
 
@@ -52,18 +53,11 @@ class FetchTargetRefusedError(ValueError):
 def _is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True for any IP we refuse to connect to.
 
-    `is_reserved` is IPv4-only; `is_private` covers most ranges of interest on
-    IPv6. The combination here is intentionally broad — anything that isn't
-    obviously a globally-routed unicast address gets blocked.
+    The classification is shared with webhook delivery
+    (:mod:`memtomem.egress_policy`, #2728): an explicit range list plus the
+    ``ipaddress`` flags, and the IPv4 an IPv6 transition address carries.
     """
-    return (
-        addr.is_private
-        or addr.is_loopback
-        or addr.is_link_local
-        or addr.is_reserved
-        or addr.is_multicast
-        or addr.is_unspecified
-    )
+    return blocked_address_reason(addr) is not None
 
 
 def _check_syntax(parsed: ParseResult) -> str:

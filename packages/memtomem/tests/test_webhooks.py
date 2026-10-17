@@ -215,6 +215,8 @@ class TestConfigSections:
         assert c.query_expansion.enabled is False
         assert c.importance.enabled is False
         assert c.webhook.enabled is False
+        assert c.webhook.allow_private_hosts is False
+        assert c.webhook.proxy == ""
         assert c.consolidation_schedule.enabled is False
 
     def test_rerank_config_validation(self):

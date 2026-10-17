@@ -970,6 +970,14 @@ class WebhookConfig(ConfigModel):
     )
     secret: str = ""
     timeout_seconds: float = 10.0
+    # Deliver to a receiver on this machine or LAN. Off, the URL's host must
+    # not resolve to a private, loopback, link-local or reserved address —
+    # checked where the socket opens, not only at startup (#2728).
+    allow_private_hosts: bool = False
+    # Explicit forward proxy (``http://`` or ``https://``). Webhooks never
+    # use an ambient ``HTTP(S)_PROXY``; with a proxy set, the proxy connects
+    # to the receiver and the address policy is the proxy's to enforce.
+    proxy: str = ""
 
 
 class ConsolidationScheduleConfig(ConfigModel):

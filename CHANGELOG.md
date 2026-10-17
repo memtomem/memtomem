@@ -233,6 +233,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- **Webhook delivery refuses hosts that resolve to private addresses
+  (#2728).** The URL check only ever saw IP literals, so `http://localtest.me/`,
+  `http://127.1/`, `http://2130706433/` or any public hostname whose DNS
+  answer includes a loopback, private, link-local or reserved address reached
+  the socket. The policy now runs where the socket opens, on the resolved
+  addresses, so there is no window for a DNS rebinding; a refused answer is
+  logged once and not retried, and the manager stays enabled. The range list
+  is explicit and shared with `mem_fetch`, which gains the same ranges
+  (`100.64.0.0/10`, `fec0::/10`, and the IPv4 an IPv6 transition address
+  carries). Two settings are new: `webhook.allow_private_hosts` for a
+  receiver on this machine or LAN, and `webhook.proxy` for an explicit
+  forward proxy. **Webhooks no longer use an ambient `HTTP(S)_PROXY`**; a
+  deployment that relied on one sets `webhook.proxy`.
 - **Memory-directory endpoints accept local requests only, and refuse system
   and secret-store directories (#2724).** `POST /api/memory-dirs/add`,
   `/remove` and `/open` now return 403 unless the client address is

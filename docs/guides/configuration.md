@@ -1329,8 +1329,17 @@ depend on `policy_type`:
 | `MEMTOMEM_WEBHOOK__EVENTS` | `["add", "delete", "search"]` | Event types to fire (currently emitted: `add`, `search`, `ask`) |
 | `MEMTOMEM_WEBHOOK__SECRET` | _(empty)_ | HMAC-SHA256 signing key — when set, each request includes `X-Webhook-Signature: sha256=<hex>` |
 | `MEMTOMEM_WEBHOOK__TIMEOUT_SECONDS` | `10.0` | HTTP request timeout per attempt |
+| `MEMTOMEM_WEBHOOK__ALLOW_PRIVATE_HOSTS` | `false` | Deliver to a receiver on this machine or LAN (`localhost`, `192.168.…`). Off, the host must resolve to a public address |
+| `MEMTOMEM_WEBHOOK__PROXY` | _(empty)_ | Explicit forward proxy (`http://` or `https://`). Webhooks never use an ambient `HTTP(S)_PROXY` |
 
-Webhooks fire asynchronously with up to 3 retries on failure. The URL must be `http` or `https` — private/loopback IPs are rejected at startup.
+Webhooks fire asynchronously with up to 3 retries on failure. The URL must be `http` or `https`.
+
+Delivery goes direct and is checked where the socket opens: the host is resolved, every address in
+the answer is classified, and a private, loopback, link-local or reserved address — including one
+behind a public hostname — refuses the event (one warning, no retry). A literal such as
+`http://127.0.0.1/` is refused at startup instead, with webhooks disabled. For a receiver on your
+own machine or LAN set `allow_private_hosts`; for a network that requires a proxy set `proxy` — the
+proxy then connects to the receiver, so the address policy is the proxy's to enforce.
 
 ### Minimal working example
 

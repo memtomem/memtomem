@@ -11,10 +11,13 @@ import logging
 from urllib.parse import urlparse
 from typing import TYPE_CHECKING
 
+from memtomem.egress_policy import blocked_address_reason
+
 if TYPE_CHECKING:
     from httpx import AsyncClient
 
     from memtomem.config import WebhookConfig
+    from memtomem.server.webhook_egress import Resolver
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +31,14 @@ def webhook_error_cb(task: asyncio.Task) -> None:
         logger.warning("Webhook fire failed: %s", exc)
 
 
-def _validate_webhook_url(url: str) -> str | None:
-    """Return an error message if the URL is unsafe, or None if valid."""
+def _validate_webhook_url(url: str, *, enforce_host_policy: bool = True) -> str | None:
+    """Return an error message if the URL is unsafe, or None if valid.
+
+    Scheme and syntax are always checked. The host policy — local-only
+    hostnames and IP literals the egress policy refuses — is the startup
+    fast path of the same policy ``EgressBackend`` enforces at connect time;
+    ``allow_private_hosts`` turns it off here as there.
+    """
     try:
         parsed = urlparse(url)
     except Exception:
@@ -40,49 +49,68 @@ def _validate_webhook_url(url: str) -> str | None:
     host_lower = hostname.lower().rstrip(".")
     if not host_lower:
         return "malformed URL: missing hostname"
+    try:
+        # ``urlparse`` defers the port parse to attribute access, so a URL
+        # like ``http://host:bad`` has a hostname and no usable authority;
+        # httpx raises ``InvalidURL`` on it when the client is built. The
+        # message names the host only: the authority may carry userinfo,
+        # and this string reaches the warning log.
+        parsed.port
+    except ValueError:
+        return f"malformed URL: invalid port for host '{hostname}'"
+    if not enforce_host_policy:
+        return None
     if host_lower == "localhost" or host_lower.endswith((".localhost", ".local", ".internal")):
         return f"private/reserved host '{hostname}' not allowed"
     try:
         addr = ipaddress.ip_address(hostname)
-        if (
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_multicast
-            or addr.is_reserved
-            or addr.is_unspecified
-        ):
-            return f"private/reserved IP '{hostname}' not allowed"
     except ValueError:
-        pass  # hostname is a DNS name, not an IP — acceptable
+        return None  # a DNS name: classified when it resolves, at connect time
+    reason = blocked_address_reason(addr)
+    if reason is not None:
+        return f"private/reserved IP '{hostname}' not allowed ({reason})"
     return None
+
+
+def _validate_proxy_url(url: str) -> str | None:
+    """Return an error message if the proxy URL cannot be used, or None."""
+    err = _validate_webhook_url(url, enforce_host_policy=False)
+    return None if err is None else f"proxy: {err}"
 
 
 class WebhookManager:
     """Fires HTTP webhooks on memory lifecycle events."""
 
-    def __init__(self, config: WebhookConfig):
+    def __init__(self, config: WebhookConfig, *, resolver: Resolver | None = None):
         self._config = config
         self._client: AsyncClient | None = None
         self._pending_tasks: set[asyncio.Task] = set()
         self._closed = False
+        # Tests inject a resolver; production uses the backend's default.
+        self._resolver = resolver
+        # A refused resolution is a configuration problem, not a transient
+        # one: the first refusal warns, later ones go to debug.
+        self._egress_refused_logged = False
         if config.url:
-            err = _validate_webhook_url(config.url)
+            err = _validate_webhook_url(
+                config.url, enforce_host_policy=not config.allow_private_hosts
+            )
+            if err is None and config.proxy:
+                err = _validate_proxy_url(config.proxy)
             if err:
                 logger.warning("Webhook URL rejected: %s — webhooks disabled", err)
-                self._config = config.__class__(
-                    enabled=False,
-                    url=config.url,
-                    secret=config.secret,
-                    events=config.events,
-                    timeout_seconds=config.timeout_seconds,
-                )
+                self._config = config.model_copy(update={"enabled": False})
 
     def _get_client(self) -> AsyncClient:
         if self._client is None:
             import httpx
 
-            self._client = httpx.AsyncClient(timeout=self._config.timeout_seconds)
+            from memtomem.server.webhook_egress import build_transport
+
+            self._client = httpx.AsyncClient(
+                transport=build_transport(self._config, resolver=self._resolver),
+                timeout=self._config.timeout_seconds,
+            )
         return self._client
 
     async def fire(self, event: str, payload: dict) -> None:
@@ -127,6 +155,16 @@ class WebhookManager:
                     "Webhook returned %d (attempt %d/%d)", resp.status_code, attempt + 1, attempts
                 )
             except Exception as exc:
+                from memtomem.server.webhook_egress import egress_refusal
+
+                refused = egress_refusal(exc)
+                if refused is not None:
+                    # Retrying would re-resolve the same name; the manager
+                    # stays enabled so a corrected answer delivers next time.
+                    level = logging.DEBUG if self._egress_refused_logged else logging.WARNING
+                    self._egress_refused_logged = True
+                    logger.log(level, "Webhook not delivered: %s", refused)
+                    return
                 logger.debug("Webhook failed (attempt %d/%d): %s", attempt + 1, attempts, exc)
             if attempt < attempts - 1:
                 await asyncio.sleep(1.0 * (attempt + 1))

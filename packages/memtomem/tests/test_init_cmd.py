@@ -2506,6 +2506,9 @@ class TestFreshFlag:
             ("embedding.base_url", "https://my-openai-proxy/v1"),
             ("llm.base_url", "http://my-llm:8080"),
             ("webhook.url", "https://ops.example.com/hook"),
+            ("webhook.proxy", "http://proxy.example.com:3128"),
+            # Egress policy
+            ("webhook.allow_private_hosts", True),
             # User-curated lists / rules
             ("indexing.exclude_patterns", ["*.tmp", "node_modules/"]),
             ("indexing.supported_extensions", [".rst", ".org"]),

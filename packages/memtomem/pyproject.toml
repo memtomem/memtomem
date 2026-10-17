@@ -33,6 +33,11 @@ dependencies = [
     "pydantic-settings>=2.7",
     "sqlite-vec>=0.1.6",
     "httpx>=0.28",
+    # Both are httpx's own dependencies; declared because webhook delivery
+    # imports them directly (an httpcore network backend and anyio's
+    # resolver, #2728).
+    "httpcore>=1.0",
+    "anyio>=4.0",
     "watchdog>=6.0",
     "click>=8.1",
     "pathspec>=0.12",

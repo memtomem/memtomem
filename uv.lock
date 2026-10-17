@@ -1146,9 +1146,11 @@ name = "memtomem"
 version = "0.6.8"
 source = { editable = "packages/memtomem" }
 dependencies = [
+    { name = "anyio" },
     { name = "click" },
     { name = "croniter" },
     { name = "cryptography" },
+    { name = "httpcore" },
     { name = "httpx" },
     { name = "idna" },
     { name = "markdown-it-py" },
@@ -1211,11 +1213,13 @@ web = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.0" },
     { name = "click", specifier = ">=8.1" },
     { name = "croniter", specifier = ">=2.0" },
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.115" },
     { name = "fastembed", marker = "extra == 'onnx'", specifier = ">=0.8,<0.9" },
+    { name = "httpcore", specifier = ">=1.0" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "huggingface-hub", marker = "extra == 'onnx'", specifier = ">=0.20,<2" },
     { name = "idna", specifier = ">=3.15" },
