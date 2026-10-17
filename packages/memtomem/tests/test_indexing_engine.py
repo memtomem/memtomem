@@ -7,14 +7,18 @@ import contextlib
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
 from memtomem.config import NamespaceConfig, NamespacePolicyRule
 from memtomem.context import _atomic as atomic_mod
+from memtomem.errors import RetryableError
+from memtomem.indexing import engine as engine_mod
 from memtomem.indexing.engine import (
     IndexEngine,
+    PrivacyRejection,
     _build_exclude_spec,
     _merge_short_chunks,
     _add_overlap,
@@ -5911,3 +5915,223 @@ class TestDefaultChunkerRegistry:
             )
         finally:
             await close_components(comp)
+
+
+class TestBulkWorkerPool:
+    """#2744: bulk ``index_path`` used to create one task per discovered file
+    and let them all queue on the file-pipeline slot, so a 50,000-file root
+    held 50,000 live task objects for eight running bodies. A fixed set of
+    ``_FILE_CONCURRENCY`` workers now pulls files off a shared cursor; the
+    per-file outcome still lands in its file's positional slot.
+    """
+
+    @staticmethod
+    def _ok(i: int) -> dict:
+        return {"total": 1, "indexed": 1, "skipped": 0, "deleted": 0, "errors": []}
+
+    @staticmethod
+    async def _settled(run: asyncio.Task, ready, *, timeout: float = 5.0) -> None:
+        """Spin until ``ready()`` holds; fail if the run ends first or the clock runs out."""
+        async with asyncio.timeout(timeout):
+            while not ready():
+                if run.done():
+                    run.result()  # raise the run's own error if it has one
+                    pytest.fail("the run finished before the workers were parked")
+                await asyncio.sleep(0)
+
+    @staticmethod
+    async def _reap(run: asyncio.Task) -> None:
+        if not run.done():
+            run.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await run
+
+    @staticmethod
+    def _stub_bulk(engine, monkeypatch, files, locked):
+        """Drive ``_index_path_inner``'s orchestration with the file worker replaced."""
+        monkeypatch.setattr(engine, "discover_indexable_files", lambda *a, **k: list(files))
+        monkeypatch.setattr(
+            engine,
+            "_resolve_namespaces_per_file",
+            AsyncMock(return_value=["default"] * len(files)),
+        )
+        monkeypatch.setattr(engine, "_index_file_locked", locked)
+
+    async def test_live_file_tasks_stay_bounded_by_the_worker_count(
+        self, components, memory_dir, monkeypatch
+    ):
+        """1,000 discovered files, eight workers parked: the run adds at most
+        the workers plus itself to the loop, not one task per file."""
+        engine = components.index_engine
+        files = [memory_dir / f"f{i}.md" for i in range(1000)]
+        gate = asyncio.Event()
+        entered = 0
+
+        async def locked(fp, force, **kwargs):
+            nonlocal entered
+            entered += 1
+            await gate.wait()
+            return self._ok(0), 0.0
+
+        self._stub_bulk(engine, monkeypatch, files, locked)
+        baseline = len(asyncio.all_tasks())
+        run = asyncio.create_task(engine.index_path(memory_dir, recursive=True))
+        try:
+            await self._settled(run, lambda: entered >= _FILE_CONCURRENCY)
+            live = len(asyncio.all_tasks()) - baseline
+            assert live <= _FILE_CONCURRENCY + 1, (
+                f"{live} live tasks for {_FILE_CONCURRENCY} workers and 1,000 files"
+            )
+            gate.set()
+            stats = await run
+        finally:
+            await self._reap(run)
+        assert stats.total_files == 1000
+        assert entered == 1000
+
+    async def test_outcomes_land_in_their_files_slots_whatever_the_finish_order(
+        self, components, memory_dir, monkeypatch
+    ):
+        """Twelve files finishing in reverse order within each worker wave,
+        with success, retryable, blocked and permanent outcomes interleaved:
+        every error names its own file, the retryable and blocked lists keep
+        file order, and new chunk ids follow file order, not finish order."""
+        engine = components.index_engine
+        n = 12
+        files = [memory_dir / f"f{i}.md" for i in range(n)]
+        ids = {i: uuid4() for i in range(0, n, 4)}
+        release = [asyncio.Event() for _ in range(n)]
+        entered: list[int] = []
+
+        async def locked(fp, force, **kwargs):
+            i = files.index(fp)
+            entered.append(i)
+            await release[i].wait()
+            if i % 4 == 1:
+                raise RetryableError("retry me")
+            if i % 4 == 2:
+                raise PrivacyRejection(path=fp, hit_count=1, scope="user", decision="blocked")
+            if i % 4 == 3:
+                raise ValueError("boom")
+            result = self._ok(i)
+            result["new_chunk_ids"] = [ids[i]]
+            result["resolved_namespace"] = f"ns{i}"
+            return result, 0.0
+
+        self._stub_bulk(engine, monkeypatch, files, locked)
+        run = asyncio.create_task(engine.index_path(memory_dir, recursive=True))
+        try:
+            # Wave 1: the eight workers take files 0..7; let them finish 7 → 0.
+            await self._settled(run, lambda: len(entered) >= _FILE_CONCURRENCY)
+            assert sorted(entered) == list(range(_FILE_CONCURRENCY))
+            for i in reversed(range(_FILE_CONCURRENCY)):
+                release[i].set()
+            # Wave 2: the remaining four, again finishing in reverse.
+            await self._settled(run, lambda: len(entered) >= n)
+            for i in reversed(range(_FILE_CONCURRENCY, n)):
+                release[i].set()
+            stats = await run
+        finally:
+            await self._reap(run)
+
+        assert stats.total_files == n
+        assert stats.indexed_chunks == 3
+        assert stats.new_chunk_ids == (ids[0], ids[4], ids[8])
+        assert stats.applied_namespaces == ("ns0", "ns4", "ns8")
+        assert stats.retryable_errors == tuple(f"f{i}.md: retry me" for i in (1, 5, 9))
+        assert stats.blocked_paths == tuple(str(files[i]) for i in (2, 6, 10))
+        assert stats.blocked_files == 3
+        for i in (3, 7, 11):
+            assert f"f{i}.md: boom" in stats.errors
+        for i in (2, 6, 10):
+            assert (
+                f"f{i}.md: redaction_blocked (hits=1, scope=user, decision=blocked)" in stats.errors
+            )
+
+    async def test_cancelling_the_run_reaps_the_workers(self, components, memory_dir, monkeypatch):
+        """Cancel while every worker is parked (as on a contended sidecar): the
+        run raises ``CancelledError``, no worker task survives it, and the
+        engine's active-run count returns to zero."""
+        engine = components.index_engine
+        files = [memory_dir / f"f{i}.md" for i in range(40)]
+        gate = asyncio.Event()
+        entered = 0
+
+        async def locked(fp, force, **kwargs):
+            nonlocal entered
+            entered += 1
+            await gate.wait()
+            return self._ok(0), 0.0
+
+        self._stub_bulk(engine, monkeypatch, files, locked)
+        baseline = len(asyncio.all_tasks())
+        run = asyncio.create_task(engine.index_path(memory_dir, recursive=True))
+        try:
+            await self._settled(run, lambda: entered >= _FILE_CONCURRENCY)
+            run.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run
+        finally:
+            await self._reap(run)
+        await asyncio.sleep(0)
+        assert len(asyncio.all_tasks()) == baseline
+        assert engine._active_runs == 0
+        assert entered == _FILE_CONCURRENCY
+
+    async def test_a_cancelled_files_worker_stops_and_the_others_finish_the_run(
+        self, components, memory_dir, monkeypatch
+    ):
+        """A ``CancelledError`` raised inside one file's pipeline while the run
+        itself goes on (no shipped pipeline does this; ``gather`` kept it as a
+        silent result) stops that worker. The other workers drain the cursor,
+        so every other file is still attempted, and the file is named in
+        ``errors`` instead of being omitted."""
+        engine = components.index_engine
+        n = 12
+        files = [memory_dir / f"f{i}.md" for i in range(n)]
+        attempted: list[str] = []
+
+        async def locked(fp, force, **kwargs):
+            attempted.append(fp.name)
+            await asyncio.sleep(0)
+            if fp.name == "f3.md":
+                raise asyncio.CancelledError()
+            return self._ok(0), 0.0
+
+        self._stub_bulk(engine, monkeypatch, files, locked)
+        stats = await asyncio.wait_for(engine.index_path(memory_dir, recursive=True), 5.0)
+        assert sorted(attempted) == sorted(f.name for f in files)
+        assert stats.total_files == n
+        assert stats.indexed_chunks == n - 1
+        assert stats.errors == ("f3.md: cancelled",)
+        assert stats.retryable_errors == ()
+
+    async def test_files_no_worker_reached_are_reported_not_dropped(
+        self, components, memory_dir, monkeypatch
+    ):
+        """With one worker, a cancelled file leaves nobody to reach the files
+        behind it. They must show up in ``errors`` rather than disappear
+        behind a ``total_files`` that still counts them."""
+        engine = components.index_engine
+        monkeypatch.setattr(engine_mod, "_FILE_CONCURRENCY", 1)
+        files = [memory_dir / f"f{i}.md" for i in range(4)]
+        attempted: list[str] = []
+
+        async def locked(fp, force, **kwargs):
+            attempted.append(fp.name)
+            if fp.name == "f0.md":
+                raise asyncio.CancelledError()
+            return self._ok(0), 0.0
+
+        self._stub_bulk(engine, monkeypatch, files, locked)
+        stats = await asyncio.wait_for(engine.index_path(memory_dir, recursive=True), 5.0)
+        assert attempted == ["f0.md"]
+        assert stats.total_files == 4
+        assert stats.indexed_chunks == 0
+        assert stats.errors == (
+            "f0.md: cancelled",
+            "f1.md: not attempted",
+            "f2.md: not attempted",
+            "f3.md: not attempted",
+        )
+        assert stats.retryable_errors == ()

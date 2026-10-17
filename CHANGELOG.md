@@ -44,6 +44,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   replaced the real function instead was ignored. The commands now import the
   function from `memtomem.runtime.project_context` when they run, and the CLI
   tests patch that module. What the commands resolve is unchanged.
+- **Bulk indexing runs a fixed set of file workers instead of one task per
+  file (#2744).** The non-streaming directory run — `mem_index`, the watcher's
+  backfill and overflow rescans, the `mm index --debounce-window` / `--flush`
+  drain, `mm shell`'s `index`, the web add-directory, reindex and index routes
+  and the LangGraph adapter (plain `mm index` streams and was not affected) —
+  created a task for every discovered file up front and let them all queue on
+  the eight-wide file slot, so a 50,000-file root held 50,000 live tasks
+  (about 105 MiB) while eight did work. Eight workers now pull files off a
+  shared cursor: the same probe shows 8 live tasks and about 0.4 MiB at 50,000
+  files. Which files are indexed, the concurrency cap, per-file locking,
+  retryable and blocked-file reporting and the order of returned chunk ids are
+  unchanged. Two reports are new, for a case no shipped pipeline produces: a
+  file whose pipeline raised `CancelledError` while the run itself went on was
+  counted in `total_files` but omitted from `errors`. It is now listed as
+  `<file>: cancelled` and its worker stops. When every worker has stopped that
+  way, the files behind them are left unattempted — the one-task-per-file run
+  would have attempted them — and each is listed as `<file>: not attempted`.
 
 ### Fixed
 

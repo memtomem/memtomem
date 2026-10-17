@@ -1321,7 +1321,40 @@ class IndexEngine:
             )
             return result
 
-        raw_results = await asyncio.gather(*[_bounded(f) for f in files], return_exceptions=True)
+        # A fixed set of ``_FILE_CONCURRENCY`` workers pulls files off a
+        # shared cursor (#2744). One task per discovered file would queue them
+        # all on the file-pipeline slot at once: 50,000 live task objects
+        # (about 105 MiB traced) for eight running bodies. The result slot is
+        # positional, so the per-file loop below still pairs each outcome with
+        # ``files[i]`` and ``prepass_namespaces[i]`` whatever order the workers
+        # finish in. Exceptions are kept per slot, as ``gather(
+        # return_exceptions=True)`` kept them; cancelling the run cancels the
+        # workers, as cancelling the gather did. A ``CancelledError`` is
+        # recorded in its slot and then stops the worker — whether it is the
+        # run being cancelled (then nothing below is reached) or one file's
+        # pipeline cancelling itself (no shipped pipeline does; ``gather``
+        # kept such a result silently). The workers that remain drain the
+        # cursor, and the per-file loop reports any slot no worker reached,
+        # so a stopped worker never drops a file without a trace.
+        raw_results: list[IndexFileResult | BaseException | None] = [None] * len(files)
+        cursor = 0
+
+        async def _worker() -> None:
+            nonlocal cursor
+            while cursor < len(files):
+                i = cursor
+                cursor += 1
+                try:
+                    raw_results[i] = await _bounded(files[i])
+                except asyncio.CancelledError as exc:
+                    raw_results[i] = exc
+                    raise
+                except Exception as exc:
+                    raw_results[i] = exc
+
+        async with asyncio.TaskGroup() as workers:
+            for _ in range(min(_FILE_CONCURRENCY, len(files))):
+                workers.create_task(_worker())
         file_results: list[IndexFileResult] = []
         all_errors: list[str] = []
         retryable_errors: list[str] = []
@@ -1367,6 +1400,12 @@ class IndexEngine:
                     f"{files[i].name}: redaction_blocked "
                     f"(hits={r.hit_count}, scope={r.scope}, decision={r.decision})"
                 )
+            elif isinstance(r, asyncio.CancelledError):
+                logger.error("Indexing of %s was cancelled while the run went on", files[i])
+                all_errors.append(f"{files[i].name}: cancelled")
+            elif r is None:
+                logger.error("Indexing of %s was not attempted: its worker had stopped", files[i])
+                all_errors.append(f"{files[i].name}: not attempted")
             elif isinstance(r, Exception):
                 logger.error("Indexing failed for %s: %s", files[i], r)
                 msg = f"{files[i].name}: {r}"
@@ -1792,8 +1831,8 @@ class IndexEngine:
             )
         async with self._file_semaphore():
             # Resolving happens in ``_locked_index``, inside this slot: it is a
-            # synchronous stat chain, and a bulk gather would otherwise run one
-            # per discovered file on the event loop before anything bounds
+            # synchronous stat chain, and the bulk fan-out would otherwise run
+            # one per discovered file on the event loop before anything bounds
             # them — on a network-backed tree, the whole walk at once.
             return await self._locked_index(
                 path,
@@ -3539,9 +3578,8 @@ class IndexEngine:
                         }
                     except Exception as exc:
                         logger.error("Stream indexing failed for %s: %s", fp, exc)
-                        # Same shape as non-stream's
-                        # ``asyncio.gather(return_exceptions=True)`` branch
-                        # in ``_index_path_inner`` so consumers see the same
+                        # Same shape as non-stream's per-slot exception
+                        # branch in ``_index_path_inner`` so consumers see the same
                         # error shape regardless of stream vs non-stream —
                         # including the retryable marker (issue #2018).
                         result = {
