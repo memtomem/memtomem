@@ -127,7 +127,14 @@ class EgressBackend(httpcore.AnyIOBackend):
                     winner = stream
                     tg.cancel_scope.cancel()
                 else:
-                    await stream.aclose()
+                    # A loser that still produced a stream: the group is being
+                    # cancelled, and the cancellation would land on this await
+                    # and leave the socket to the garbage collector. (On
+                    # asyncio a cancelled attempt never gets its stream — the
+                    # error is thrown at its connect await — so this is for a
+                    # connector or backend that completes the connect anyway.)
+                    with anyio.CancelScope(shield=True):
+                        await stream.aclose()
             finally:
                 done.set()
 

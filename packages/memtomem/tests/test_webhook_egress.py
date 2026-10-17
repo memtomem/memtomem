@@ -57,6 +57,8 @@ class _Stream:
         self.closed = False
 
     async def aclose(self) -> None:
+        # Like anyio's ``SocketStream.aclose``, a close has an await in it.
+        await anyio.sleep(0)
         self.closed = True
 
 
@@ -75,6 +77,17 @@ class _Connects:
             raise httpcore.ConnectError(f"refused by {host}")
         if outcome == "stall":
             await anyio.sleep(30)
+        if outcome == "completes-anyway":
+            # A connector that has the socket open when the group is cancelled
+            # and still returns it: the stream exists before the await, and
+            # the cancellation is swallowed so the caller receives it.
+            stream = _Stream(host)
+            self.streams[host] = stream
+            try:
+                await anyio.sleep(30)
+            except anyio.get_cancelled_exc_class():
+                pass
+            return stream
         stream = _Stream(host)
         self.streams[host] = stream
         return stream
@@ -211,6 +224,17 @@ class TestEgressBackend:
         assert fake.calls == [PUBLIC_A, PUBLIC_B]
         assert elapsed < 5.0, f"stalled candidate held the connect for {elapsed:.1f}s"
         assert PUBLIC_A not in fake.streams, "the cancelled attempt never produced a stream"
+
+    @pytest.mark.asyncio
+    async def test_a_losing_stream_is_closed_despite_the_cancellation(self, connects):
+        """The first candidate's connector hands back a stream after the second
+        has already won: that stream must be closed, not left to the GC."""
+        fake = connects({PUBLIC_A: "completes-anyway"})
+        backend = EgressBackend(resolver=_answer(PUBLIC_A, PUBLIC_B))
+        stream = await backend.connect_tcp("hooks.example", 443, timeout=10.0)
+        assert stream.addr == PUBLIC_B
+        assert fake.streams[PUBLIC_A].closed is True
+        assert fake.streams[PUBLIC_B].closed is False
 
     @pytest.mark.asyncio
     async def test_all_addresses_failing_raises_the_last_error(self, connects):
