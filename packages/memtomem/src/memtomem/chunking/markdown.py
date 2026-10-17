@@ -315,7 +315,19 @@ class MarkdownChunker:
             unique = dict.fromkeys(all_headings)  # preserve order, dedup
             file_ctx += " > " + " | ".join(unique)
 
+        # Blockquote tags open a scope at their section's heading level that
+        # covers the sub-sections nested under it, so an entry written as
+        # ``## title`` + header + ``### parts`` tags its parts too. The stack
+        # holds ``(level, tags)`` for each open scope.
+        scope_tags: list[tuple[int, list[str]]] = []
+
         for section in sections:
+            # Close scopes before the empty-text skips below: a heading-only
+            # or blank section still ends every scope at its level or deeper.
+            for level in section["heading_levels"]:
+                while scope_tags and scope_tags[-1][0] >= level:
+                    scope_tags.pop()
+
             raw_section_text = section["text"]
             text = raw_section_text.strip()
             if not text:
@@ -334,9 +346,14 @@ class MarkdownChunker:
             # [...]``) is promoted to ``metadata.tags`` and stripped from
             # the chunk content so it doesn't leak into BM25/embedding.
             section_tags, text, blockquote_strip_lines = self._extract_section_blockquote_tags(text)
+            inherited_tags = {tag for _, tags in scope_tags for tag in tags}
+            # Pushed before the skip below, which an entry whose header is its
+            # section's only text takes. A preamble's tags stay its own.
+            if section_tags and section["heading_levels"]:
+                scope_tags.append((section["heading_levels"][-1], section_tags))
             if not text.strip():
                 continue
-            combined_tags = tuple(sorted(set(fm_tags) | set(section_tags)))
+            combined_tags = tuple(sorted(set(fm_tags) | set(section_tags) | inherited_tags))
 
             hierarchy = section["hierarchy"]
             est_tokens = len(text) // _TOKEN_CHAR_RATIO
@@ -714,6 +731,12 @@ class MarkdownChunker:
         current_hierarchy: list[str] = []
         current_lines: list[str] = []
         current_start = 1
+        # Levels of every heading passed since the last emitted section. A
+        # heading directly followed by another emits no section of its own,
+        # but it still closes the tag scopes ``chunk_file`` tracks, so each
+        # section carries the boundaries it was reached through, its own
+        # heading last. Headings after the last emitted section are dropped.
+        pending_levels: list[int] = []
 
         for i, line in enumerate(lines, 1):
             match = _HEADING_RE.match(line) if i not in fence_lines else None
@@ -726,10 +749,13 @@ class MarkdownChunker:
                             "text": "\n".join(current_lines),
                             "start_line": current_start,
                             "end_line": i - 1,
+                            "heading_levels": pending_levels,
                         }
                     )
+                    pending_levels = []
 
                 level = len(match.group(1))
+                pending_levels.append(level)
                 heading_text = match.group(2).strip()
                 heading_full = f"{'#' * level} {heading_text}"
 
@@ -752,6 +778,7 @@ class MarkdownChunker:
                     "text": "\n".join(current_lines),
                     "start_line": current_start,
                     "end_line": len(lines),
+                    "heading_levels": pending_levels,
                 }
             )
 
@@ -763,6 +790,7 @@ class MarkdownChunker:
                     "text": content,
                     "start_line": 1,
                     "end_line": len(lines),
+                    "heading_levels": [],
                 }
             )
 

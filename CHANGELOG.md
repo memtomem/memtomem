@@ -41,6 +41,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **An entry's tags now reach the chunks under its sub-headings (#2747).** A
+  `> tags:` header tagged only the section it opened, so an entry whose content
+  began with `###` headings stored its tags on none of its chunks when added
+  through `mem_add`, and one with an introduction before its `###` headings
+  stored them on the introduction only. `mm add` tagged them right after the write, but the next
+  add to the same file or any re-index dropped them again. The tags now cover
+  every section nested under the entry's heading, up to the next heading at the
+  same or a higher level. Files already indexed are re-tagged on their first
+  index after upgrading; chunks are not re-embedded.
 - **Untagged writes keep the `default` namespace when `namespace.default_namespace`
   is empty (#2738).** The namespace resolver answers "nothing chose one" for a
   file no rule matches, which is stored as `default`. Web `/api/add` read that

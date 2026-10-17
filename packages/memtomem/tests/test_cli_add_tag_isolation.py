@@ -101,9 +101,8 @@ class TestCliAddTagIsolation:
 
     @pytest.mark.asyncio
     async def test_every_chunk_of_a_multi_chunk_entry_is_tagged(self, cli_comp):
-        """Pins the state right after the add only. The sub-heading chunks
-        carry the tags because ``_add`` merged them in after indexing, and
-        the next re-index of the file drops them again (#2747)."""
+        """Pins the state right after the add. The survives-a-later-write
+        cases are ``test_sub_heading_tags_survive_*`` below."""
         comp, _ = cli_comp
         await _add(_ALPHA, "Alpha", ["alpha"], "shared.md")
         sections = "\n\n".join(
@@ -140,3 +139,41 @@ class TestCliAddTagIsolation:
         assert all(set(c.metadata.tags) == {"beta"} for c in parts), [
             (c.metadata.start_line, c.metadata.tags) for c in parts
         ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("later_tags", [["gamma"], []])
+    async def test_sub_heading_tags_survive_a_later_add(self, cli_comp, later_tags):
+        """The tags used to live only in the DB patch ``_add`` applied after
+        indexing, so the next add to the file re-chunked them away (#2747)."""
+        comp, _ = cli_comp
+        await _add(_PARTED, "Beta", ["beta"], "shared.md")
+        await _add(_ALPHA, "Alpha", later_tags, "shared.md")
+
+        target = await _only_source(comp)
+        assert await _part_tags(comp, target) == {"beta"}
+        tags = await _tags_by_entry(comp, target, _ALPHA)
+        assert tags == {_ALPHA: set(later_tags)}
+
+    @pytest.mark.asyncio
+    async def test_sub_heading_tags_survive_a_forced_reindex(self, cli_comp):
+        comp, _ = cli_comp
+        await _add(_PARTED, "Beta", ["beta"], "shared.md")
+
+        target = await _only_source(comp)
+        assert not (await comp.index_engine.index_file(target, force=True)).errors
+        assert await _part_tags(comp, target) == {"beta"}
+
+
+_PARTED = "\n\n".join(
+    f"### Part {i}\n\n" + " ".join(f"part{i}-word{j}" for j in range(400)) for i in range(3)
+)
+
+
+async def _part_tags(comp, target: Path) -> set[str]:
+    """The one tag set every ``### Part`` chunk carries."""
+    chunks = await comp.storage.list_chunks_by_source(target)
+    parts = [c for c in chunks if "-word" in c.content]
+    assert len(parts) > 1, "the long entry did not split; the test proves nothing"
+    tag_sets = {tuple(c.metadata.tags) for c in parts}
+    assert len(tag_sets) == 1, [(c.metadata.start_line, c.metadata.tags) for c in parts]
+    return set(next(iter(tag_sets)))

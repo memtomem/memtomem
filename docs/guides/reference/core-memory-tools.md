@@ -468,7 +468,10 @@ mem_add(content="Sprint decision: use GraphQL", title="Sprint 12", namespace="wo
 
 Tags are persisted as a per-entry `> tags: [...]` blockquote header on the
 markdown entry and promoted to chunk metadata at index time so
-`mem_search(tag_filter=...)` can match. See
+`mem_search(tag_filter=...)` can match. They apply to the chunks under the
+entry's heading, including chunks under `###` (or deeper) sub-headings inside
+`content`. Content that opens with its own `## ` heading is the exception: the
+header is written above that heading, and its chunks are not tagged. See
 [ADR-0002](../../adr/0002-mem-add-blockquote-tags.md) for the on-disk format
 and reader/writer contract.
 

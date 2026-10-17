@@ -1,7 +1,7 @@
 # ADR-0002: Per-Entry Tag Promotion via Blockquote Header
 
-**Status:** Accepted
-**Date:** 2026-04-25
+**Status:** Accepted; amended by #2747
+**Date:** 2026-04-25 (amended 2026-10-17)
 **Audience:** memtomem maintainers touching the markdown chunker
 (`packages/memtomem/src/memtomem/chunking/markdown.py`) or the `mem_add` /
 `mem_edit` writer (`packages/memtomem/src/memtomem/tools/memory_writer.py`).
@@ -108,6 +108,28 @@ File-level frontmatter tags apply to every chunk in the file (unchanged
 behavior). Section-leading blockquote tags apply only to chunks of that
 section — `_split_section` carries them onto every sub-chunk. Empty
 sets compose to empty.
+
+#### 2026-10-17 amendment — tags cover the entry's nested sections (#2747)
+
+"Only chunks of that section" lost the tags of every chunk under an
+entry's own sub-headings: `append_entry` writes `## <title>`, the
+header, then the content, and the `###` sections carried no tags. When
+the content began with a `###` heading the `##` section held nothing but
+the header and was skipped once the header was stripped, so the entry
+had no tagged chunk at all. The scope is now the heading's subtree:
+
+- A section's blockquote tags apply to that section and to every section
+  nested under it, up to the next heading at the same or a higher level.
+- A nested section with its own header carries the union of its tags and
+  its ancestors'.
+- A heading with no body still closes scopes at its level or deeper
+  (`_split_by_headings` reports every heading level passed in a
+  section's `heading_levels`).
+- A preamble header (before the first heading) still tags only the
+  preamble chunk.
+
+Each chunk's tags are `fm_tags | section_tags | inherited`, where
+`inherited` is the union of the open ancestor scopes.
 
 ### 4. `mem_edit` preserves the header
 
