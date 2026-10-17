@@ -2608,8 +2608,12 @@ def memory_doctor(path: str | None, json_out: bool, fix: bool, apply_: bool) -> 
         inspect_dirs = list(memory_dirs)
 
     if not inspect_dirs:
-        click.secho("No memory_dirs configured. Run `mm init`.", fg="yellow")
-        return
+        # Under --json, stdout carries the document in every outcome: the hint
+        # goes to stderr and the run continues over no dirs, which still
+        # reports the store-wide notes (unreadable DB, unowned chunks).
+        click.secho("No memory_dirs configured. Run `mm init`.", fg="yellow", err=json_out)
+        if not json_out:
+            return
 
     if fix:
         _run_fix(

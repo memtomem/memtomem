@@ -62,6 +62,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `allow_namespace_mix=true` stored the new entry under the configured default,
   leaving the file split across two namespaces. All of these now use the stored
   spelling.
+- **`mm memory doctor --json` writes JSON when no memory dirs are configured
+  (#2748).** It printed `No memory_dirs configured. Run \`mm init\`.` to stdout
+  and exited 0, so a consumer parsing stdout got a decode error from a command
+  that reported success; `mm mem doctor --json` and `--fix --json` did the same.
+  Under `--json` the hint now goes to stderr and stdout carries the normal
+  report, which still lists the store-wide notes (an unreadable database, chunks
+  under no configured dir). Output without `--json` is unchanged.
 - **Read-only storage queries are no longer refused while another task holds
   a storage transaction (#2756).** The health watchdog's deep check,
   reflection's most-accessed and most-connected reads, `mem_importance_scan`,
