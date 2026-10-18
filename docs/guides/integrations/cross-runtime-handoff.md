@@ -84,6 +84,10 @@ Use the memtomem-handoff skill to resume the newest handoff for kimi-code.
 After the intended Kimi work, save for Claude with `to_runtime=claude-code`,
 then resume it in Claude Code with `/memtomem:handoff resume`.
 
+`s` and `r` are accepted as shorthand for `save` and `resume` when they are the
+first word of the arguments: `/memtomem:handoff s to codex-cli`,
+`/memtomem:handoff r <ID>`.
+
 Each save must report its `handoff_id`, `project_local` scope,
 `shared:<project-slug>` namespace, written file, and indexed chunk count. Each
 resume must report whether the stored project root, Git commit, and worktree

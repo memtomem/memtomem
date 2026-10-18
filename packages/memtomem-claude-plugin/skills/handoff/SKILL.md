@@ -1,7 +1,7 @@
 ---
 name: handoff
 description: Explicitly save or resume a compact project handoff shared by Claude Code, Codex CLI, Kimi Code, and other compatible runtimes.
-argument-hint: "[save|resume] [target runtime or handoff id]"
+argument-hint: "[save|resume|s|r] [target runtime or handoff id]"
 allowed-tools: mcp__plugin_memtomem_memtomem__mem_status, mcp__memtomem__mem_status, mcp__plugin_memtomem_memtomem__mem_recall, mcp__memtomem__mem_recall, mcp__plugin_memtomem_memtomem__mem_add, mcp__memtomem__mem_add, Bash(git rev-parse:*), Bash(git status:*)
 disable-model-invocation: true
 ---
@@ -16,7 +16,10 @@ A request that does specify the handoff operation (save or resume) proceeds norm
 This workflow is explicit and sequential. It records a compact project handoff; it does not
 capture the whole conversation, coordinate concurrent agents, or claim a task.
 
-Accept exactly one operation: `save` or `resume`. If the operation is ambiguous, ask before
+Accept exactly one operation: `save` or `resume`. As a shorthand, `s` means `save` and `r`
+means `resume`, but only when it is the entire first word of the operation's arguments (the
+words after the skill's invocation name), as in `s to codex-cli` or `r <handoff-id>`. A bare
+`s` or `r` anywhere else is not an operation. If the operation is ambiguous, ask before
 calling a tool; in a non-interactive context (a subagent or scripted run with nobody to
 ask), do not stall and do not guess — stop and report `insufficient_input: operation`.
 Supported runtime labels are `claude-code`, `codex-cli`, `kimi-code`,

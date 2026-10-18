@@ -437,6 +437,7 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
     assert handoff["effect"] == "write"
     assert handoff["implicit"] is False
     assert handoff["tools"] == ["mem_status", "mem_recall", "mem_add"]
+    assert handoff["argument_hint"] == "[save|resume|s|r] [target runtime or handoff id]"
     # Host-tool grants stay subcommand-scoped: a bare ``Bash(git:*)`` would
     # also permit ``git -c alias.x=!<shell> x`` style execution while the
     # workflow resumes untrusted handoff text.
@@ -500,6 +501,11 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "a fabricated checkpoint is worse than none",
         "insufficient_input: work context",
         "insufficient_input: operation",
+        # The one-letter aliases are only safe in the first-word position: a
+        # lone `s` or `r` later in the request is prose, not an operation.
+        "`s` means `save` and `r` means `resume`",
+        "only when it is the entire first word of the operation's arguments",
+        "A bare `s` or `r` anywhere else is not an operation",
     )
     for marker in required:
         assert marker in flat

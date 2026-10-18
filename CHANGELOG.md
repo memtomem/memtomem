@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **The handoff skill accepts `s` and `r` for `save` and `resume`.** The
+  alias counts only as the first word of the arguments
+  (`/memtomem:handoff s to codex-cli`, `/memtomem:handoff r <ID>`); a lone `s`
+  or `r` elsewhere in the request is not read as an operation, so free-form
+  requests are interpreted as before. The Claude Code `argument-hint` lists
+  both forms.
+
 ### Changed
 
 - **`mem_list` returns one page of files instead of the whole store (#2745).**

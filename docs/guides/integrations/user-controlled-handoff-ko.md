@@ -47,6 +47,10 @@ MCP 또는 skill을 새로 설치했다면 모든 기존 에이전트 세션을 
 | Codex CLI | `Use $memtomem-handoff to save this work for kimi-code.` |
 | Kimi Code | `Use the memtomem-handoff skill to resume handoff_id <ID> for kimi-code.` |
 
+첫 단어로 `s`/`r`을 쓰면 각각 `save`/`resume`의 단축 입력으로 처리됩니다
+(예: `/memtomem:handoff s to codex-cli`, `/memtomem:handoff r <ID>`). 첫 단어가
+아닌 위치의 `s`/`r`은 작업으로 해석되지 않습니다.
+
 가능하면 항상 `newest`보다 출력된 정확한 `handoff_id`를 사용합니다. 같은
 프로젝트에 이전 Handoff가 여러 개 있어도 다른 작업을 잘못 재개하지 않게 합니다.
 
