@@ -180,6 +180,27 @@ class TestBulkTagTools:
         assert _tags_of(comp, visible.id) == ["z"]
         assert _tags_of(comp, held.id) == ["a", "b"]
 
+    @pytest.mark.parametrize("op", ["rename", "delete", "merge"])
+    async def test_a_held_rows_tags_are_never_decoded(self, bm25_only_components, op):
+        """A malformed tag list on a held row must not stop the visible rows' rewrite."""
+        comp, mem_dir = bm25_only_components
+        held, visible = await self._tagged(comp, mem_dir, "scan_missing")
+        db = comp.storage._get_db()
+        # Both source tags, so merge's OR-joined candidate clauses match it in
+        # either order and only the parenthesised hold screen keeps it out.
+        db.execute("UPDATE chunks SET tags=? WHERE id=?", ('["a", "b", broken', str(held.id)))
+        db.commit()
+
+        if op == "rename":
+            result = await tag_svc.rename_tag(comp.storage, "a", "z")
+        elif op == "delete":
+            result = await tag_svc.delete_tag(comp.storage, "a")
+        else:
+            result = await tag_svc.merge_tags(comp.storage, ["a", "b"], "m")
+
+        assert result.affected_chunks == 1
+        assert "a" not in _tags_of(comp, visible.id)
+
     async def test_merge_leaves_a_held_row_carrying_every_source_tag(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         held, visible = await self._tagged(comp, mem_dir, "scan_missing")

@@ -61,11 +61,11 @@ class RelationMixin:
     def _write_tag_batch(self, db, batch: list[tuple[str, str, int]]) -> int:
         """Apply ``(tags, updated_at, rowid)`` rewrites; return the rows written.
 
-        The hold is judged here, in the write, not in the candidate read: the
-        tag lock is process-local, so another process can hold a source
-        between the two statements, and the write must then leave that row
-        alone. A held candidate costs one refused ``UPDATE``; its tags are not
-        returned to anyone.
+        The candidate reads already leave held rows out, so a held row's tags
+        are never decoded and a malformed one cannot stop the visible rows
+        from being rewritten. The write judges the hold again: the tag lock
+        is process-local, so another process can hold a source between the
+        two statements, and the write must then leave that row alone.
         """
         if not batch:
             return 0
@@ -93,7 +93,7 @@ class RelationMixin:
         """
         db = self._get_db()
         rows = db.execute(
-            "SELECT rowid, tags FROM chunks WHERE tags LIKE ?",
+            f"SELECT rowid, tags FROM chunks WHERE tags LIKE ? AND {VISIBLE_SOURCE_CHUNKS}",  # nosec B608
             (f'%"{old_tag}"%',),
         ).fetchall()
         now = utc_stamp(datetime.now(timezone.utc))
@@ -110,7 +110,7 @@ class RelationMixin:
         leaves held chunks alone per :meth:`rename_tag`."""
         db = self._get_db()
         rows = db.execute(
-            "SELECT rowid, tags FROM chunks WHERE tags LIKE ?",
+            f"SELECT rowid, tags FROM chunks WHERE tags LIKE ? AND {VISIBLE_SOURCE_CHUNKS}",  # nosec B608
             (f'%"{tag}"%',),
         ).fetchall()
         now = utc_stamp(datetime.now(timezone.utc))
@@ -143,7 +143,8 @@ class RelationMixin:
         params = [f'%"{s}"%' for s in source_set]
         db = self._get_db()
         rows = db.execute(
-            f"SELECT rowid, tags FROM chunks WHERE {like_clauses}",
+            f"SELECT rowid, tags FROM chunks WHERE ({like_clauses}) "  # nosec B608
+            f"AND {VISIBLE_SOURCE_CHUNKS}",
             params,
         ).fetchall()
         now = utc_stamp(datetime.now(timezone.utc))
