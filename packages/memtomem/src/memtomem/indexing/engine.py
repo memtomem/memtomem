@@ -43,9 +43,10 @@ from memtomem.errors import (
 from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.indexing.redaction_exemption import declared_exemption
-from memtomem.indexing.source_receipt import code_fingerprint
+from memtomem.indexing.source_receipt import chunker_versions, code_fingerprint
 from memtomem.models import Chunk, IndexingStats, stored_namespace
 from memtomem.storage.sqlite_helpers import norm_dir_prefix as _norm_dir_prefix
+from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
 from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 
@@ -70,6 +71,12 @@ _MAX_INDEX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 # before or after this line are covered only if their files did not change in
 # between, so a server must be restarted after its source is edited.
 _CODE_FINGERPRINT = code_fingerprint()
+
+# Versions of the third-party parsers the chunkers import lazily, read at the
+# same moment and for the same reason. The same caveat applies: a parser
+# installed, removed or upgraded under a running process is not seen until it
+# restarts, and a chunker may already have loaded the old one.
+_CHUNKER_VERSIONS = chunker_versions()
 
 # Max files whose ``_index_file`` pipelines run concurrently in a bulk
 # ``index_path`` run. Also the default and upper bound for the embedding
@@ -823,6 +830,9 @@ def _distinct_sorted(values: Iterable[str | None]) -> list[str | None]:
     return sorted(set(values), key=lambda x: (x is None, x or ""))
 
 
+_UNHIDDEN_BLOCKED_ERROR = "could not hide the indexed chunks of this blocked file; retry"
+
+
 class PrivacyRejection(Exception):
     """Raised by :meth:`IndexEngine._index_file` when a file's content trips the
     secret-redaction guard during **un-adjudicated** indexing (ADR-0006 PR-A).
@@ -835,6 +845,11 @@ class PrivacyRejection(Exception):
 
     Carries only the hit **count** and file path — never the matched bytes
     (secret-in-log hygiene).
+
+    ``held`` says what happened to the chunks the file already had (#2629):
+    ``True`` they were hidden behind a ``redaction_blocked`` hold, ``False``
+    the hold failed and they may still be served, so the caller should retry,
+    ``None`` no hold was attempted.
     """
 
     retryable = False
@@ -844,7 +859,38 @@ class PrivacyRejection(Exception):
         self.hit_count = hit_count
         self.scope = scope
         self.decision = decision
+        self.held: bool | None = None
+        self.retryable = False
         super().__init__(f"redaction_blocked: {path.name} (hits={hit_count}, decision={decision})")
+
+    def error_detail(self) -> str:
+        """The per-file ``redaction_blocked`` text bulk runs report.
+
+        Its shape is a contract: the CLI recognises it and shows the file in
+        the blocked summary instead (``cli/_index_progress.py``).
+        """
+        return (
+            f"redaction_blocked (hits={self.hit_count}, scope={self.scope}, "
+            f"decision={self.decision})"
+        )
+
+    def unhidden_error(self) -> str | None:
+        """A separate, retryable error when the older chunks could not be held."""
+        if self.held is False:
+            return _UNHIDDEN_BLOCKED_ERROR
+        return None
+
+    def mark_unheld(self) -> None:
+        """Record that the hold failed: the refusal stands, but it is now retryable.
+
+        A held block is permanent until the file changes; one whose older
+        chunks are still served is not settled, so queue consumers that read
+        ``retryable`` (the debounce queue) must retry it, and its message says
+        why.
+        """
+        self.held = False
+        self.retryable = True
+        self.args = (f"{self.args[0]}; {_UNHIDDEN_BLOCKED_ERROR}",)
 
 
 class NamespaceMixedUnderForceError(Exception):
@@ -1407,10 +1453,11 @@ class IndexEngine:
                 blocked_paths.append(str(files[i]))
                 if r.scope == "project_shared":
                     blocked_project_shared += 1
-                all_errors.append(
-                    f"{files[i].name}: redaction_blocked "
-                    f"(hits={r.hit_count}, scope={r.scope}, decision={r.decision})"
-                )
+                all_errors.append(f"{files[i].name}: {r.error_detail()}")
+                unhidden = r.unhidden_error()
+                if unhidden is not None:
+                    all_errors.append(f"{files[i].name}: {unhidden}")
+                    retryable_errors.append(f"{files[i].name}: {unhidden}")
             elif isinstance(r, asyncio.CancelledError):
                 logger.error("Indexing of %s was cancelled while the run went on", files[i])
                 all_errors.append(f"{files[i].name}: cancelled")
@@ -1783,22 +1830,26 @@ class IndexEngine:
             # A new watcher delete may arrive while this file is being read.
             # Release only visibility rows that preceded this indexing pass.
             hold_generation = await self._storage.source_hold_snapshot(path)
-            result = await self._index_file(
-                path,
-                force,
-                namespace=namespace,
-                on_chunk_progress=on_chunk_progress,
-                force_unsafe=force_unsafe,
-                already_scanned=already_scanned,
-                path_scope=path_scope,
-                # Engine-scoped, so the #1783 embedding cap holds across every
-                # entry point now that a bulk run can overlap an ``index_file``
-                # or stream call (#2105).
-                embed_semaphore=self._embed_semaphore(),
-                reassign_namespaces=reassign_namespaces,
-                new_source_namespace=new_source_namespace,
-                walk_root=walk_root,
-            )
+            try:
+                result = await self._index_file(
+                    path,
+                    force,
+                    namespace=namespace,
+                    on_chunk_progress=on_chunk_progress,
+                    force_unsafe=force_unsafe,
+                    already_scanned=already_scanned,
+                    path_scope=path_scope,
+                    # Engine-scoped, so the #1783 embedding cap holds across every
+                    # entry point now that a bulk run can overlap an ``index_file``
+                    # or stream call (#2105).
+                    embed_semaphore=self._embed_semaphore(),
+                    reassign_namespaces=reassign_namespaces,
+                    new_source_namespace=new_source_namespace,
+                    walk_root=walk_root,
+                )
+            except PrivacyRejection as exc:
+                await self._hold_blocked_source(path, exc)
+                raise
             # A held source is visible again only after the current contents
             # have been validated/indexed. Receipt hits take this path without
             # embedding; failed, excluded and unreadable paths keep the hold.
@@ -2512,6 +2563,34 @@ class IndexEngine:
         """
         return self._containing_index_root(path) is not None
 
+    async def _hold_blocked_source(self, path: Path, exc: PrivacyRejection) -> None:
+        """Hide the chunks a now-refused file already had (#2629).
+
+        The guard refuses the file's current content, so its stored chunks
+        describe an older version, including text deleted in the same edit.
+        Serving them would answer from content the file no longer holds. They
+        are held, not deleted: the hold lifts on the next clean index pass.
+        A file with no chunks gets no hold row.
+
+        A failed hold must not mask the refusal, so it is recorded on *exc*
+        for the caller to retry rather than raised.
+        """
+        try:
+            held = await self._storage.hold_source(path, REDACTION_BLOCKED_HOLD)
+        except Exception as hold_exc:
+            exc.mark_unheld()
+            logger.error(
+                "Could not hold indexed chunks of redaction-blocked source %s: %s",
+                path.name,
+                hold_exc,
+            )
+            return
+        exc.held = True
+        if held:
+            logger.warning(
+                "Source blocked by redaction guard; holding its indexed chunks: %s", path.name
+            )
+
     async def _delete_missing_source(
         self, file_path: Path, *, path_scope: PathScope = "configured"
     ) -> IndexFileResult:
@@ -2835,6 +2914,9 @@ class IndexEngine:
                     # one (a ``main`` checkout and the release it follows)
                     # reuse each other's receipts across a chunker change.
                     "source": _CODE_FINGERPRINT,
+                    # Chunk output also depends on parsers outside memtomem,
+                    # which a chunker silently falls back from when absent.
+                    "chunkers": _CHUNKER_VERSIONS,
                     "indexing": self._config.model_dump(mode="python"),
                     "namespace": self._ns_config.model_dump(mode="python"),
                     "namespace_target": ns_decision.target,
@@ -3584,13 +3666,14 @@ class IndexEngine:
                             "indexed": 0,
                             "skipped": 0,
                             "deleted": 0,
-                            "errors": [
-                                f"{fp.name}: redaction_blocked "
-                                f"(hits={exc.hit_count}, scope={exc.scope}, decision={exc.decision})"
-                            ],
+                            "errors": [f"{fp.name}: {exc.error_detail()}"],
                             "blocked": 1,
                             "blocked_project_shared": 1 if exc.scope == "project_shared" else 0,
                         }
+                        unhidden = exc.unhidden_error()
+                        if unhidden is not None:
+                            result["errors"].append(f"{fp.name}: {unhidden}")
+                            retryable_errors.append(f"{fp.name}: {unhidden}")
                     except Exception as exc:
                         logger.error("Stream indexing failed for %s: %s", fp, exc)
                         # Same shape as non-stream's per-slot exception

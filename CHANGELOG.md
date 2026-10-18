@@ -88,6 +88,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A file the redaction guard refuses on re-index no longer keeps serving
+  its older chunks (#2629).** When an edit added secret-shaped text to a file
+  that was already indexed, the guard refused the new content but the chunks
+  from the last clean index stayed searchable, including text the same edit
+  had deleted. Those chunks are now held, the same way the chunks of an
+  unavailable source are: hidden from search, kept in the database, and
+  listed by `mm memory doctor` as a held source. The next clean index of the
+  file lifts the hold. Noticing that the file exists, or that it went missing
+  or left the configured roots, does not. If the hold itself cannot be
+  written, the run reports a separate retryable error, and the watcher
+  retries the file. A file refused on its first index has nothing to hold.
+  Reading a held chunk by its id is still possible (#2777).
+- **`mm index <file>` clears the `stale_index` that `mm memory doctor`
+  reports after a parser is installed, removed or upgraded (#2774).** The
+  code and JavaScript chunkers fall back to coarser chunks when
+  `tree-sitter` or one of its grammars is missing, and the structured and
+  bounded chunkers depend on `PyYAML` and `tokenizers`. None of these was part
+  of the index receipt, so after installing the `code` extra an unchanged
+  source kept the chunks made without the parser: `mm index` reused them,
+  while the doctor re-chunked with the parser and printed a remedy that could
+  not clear the finding. The receipt now records the installed version of
+  each of these packages, read when the indexer loads, so the next plain
+  `mm index` re-chunks unchanged sources once; a server already running keeps
+  the versions it started with until restarted. Chunks whose text and context
+  still match keep their vectors. As before, a re-chunk that would remove a
+  chunk referenced by a link is refused and needs an explicit link migration.
 - **Opening a populated store under a different provider no longer records
   that provider's policy for its vectors (#2619).** A store created before
   policies were recorded has no policy row, and the first config to open it
