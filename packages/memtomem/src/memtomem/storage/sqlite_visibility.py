@@ -111,14 +111,12 @@ def visible_path_sql(path: str) -> str:
     return (
         f"(NOT EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file={path}) "  # nosec B608
         f"AND NOT EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file={path}) "
-        # Parent first: two primary-key probes that are almost always false,
-        # so the scan of the file's chunks for a policy origin (no index
-        # covers ``origin``) runs only for a file whose parent is hidden.
-        # The other order costs a full scan of the file per row read.
-        f"AND NOT ((EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file={parent}) "
-        f"OR EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file={parent})) "
-        f"AND EXISTS (SELECT 1 FROM chunks o WHERE o.source_file={path} "
-        f"AND o.origin='{ORIGIN_CONSOLIDATION_POLICY}')))"
+        # ``idx_chunks_policy_source`` answers this probe; without it, a
+        # per-row screen scanned the whole file once per row it read.
+        f"AND NOT (EXISTS (SELECT 1 FROM chunks o WHERE o.source_file={path} "
+        f"AND o.origin='{ORIGIN_CONSOLIDATION_POLICY}') "
+        f"AND (EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file={parent}) "
+        f"OR EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file={parent}))))"
     )
 
 

@@ -457,7 +457,9 @@ class TestCostStaysLinear:
     Two shapes did, both measured at 50,000 chunks: a ``visible`` CTE the
     planner inlined into a nested scan of both relation endpoints (over 15 s,
     from under 0.1 s), and a path screen that scanned the whole file once per
-    row it read (over 30 s). Wall-clock limits would be flaky, so this counts
+    row it read (over 30 s), which ``idx_chunks_policy_source`` answers. That
+    scan ran in either order of the screen's terms for a file whose parent is
+    held, hence the ``held_parent`` cells. Wall-clock limits would be flaky, so this counts
     SQLite VM steps through the progress handler and compares two sizes:
     quadrupling the rows must cost well under the sixteenfold a quadratic
     plan does.
@@ -466,7 +468,7 @@ class TestCostStaysLinear:
     _SMALL, _LARGE = 300, 1200
 
     @staticmethod
-    def _fill(comp, n: int) -> None:
+    def _fill(comp, n: int, source: str) -> None:
         import uuid
 
         db = comp.storage._get_db()
@@ -474,10 +476,10 @@ class TestCostStaysLinear:
         db.executemany(
             "INSERT INTO chunks (id, content, source_file, tags, access_count, start_line, "
             "content_hash, created_at, updated_at, namespace, end_line, heading_hierarchy, "
-            "scope) VALUES (?, 'c', '/big/one.md', ?, 1, ?, 'h', "
+            "scope) VALUES (?, 'c', ?, ?, 1, ?, 'h', "
             "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'default', 2, '[]', 'user')",
             # Half tagged for the tag counts, half untagged for the policy estimate.
-            [(str(uuid.uuid4()), '["t"]' if i % 2 else "[]", i) for i in range(n)],
+            [(str(uuid.uuid4()), source, '["t"]' if i % 2 else "[]", i) for i in range(n)],
         )
         db.commit()
 
@@ -513,12 +515,24 @@ class TestCostStaysLinear:
             "policy_estimate",
         ],
     )
-    async def test_quadrupling_the_rows_does_not_square_the_cost(self, bm25_only_components, name):
+    @pytest.mark.parametrize("held_parent", [False, True])
+    async def test_quadrupling_the_rows_does_not_square_the_cost(
+        self, bm25_only_components, name, held_parent
+    ):
         from memtomem.tools.policy_engine import execute_auto_tag
 
         comp, _ = bm25_only_components
         st = comp.storage
-        source = Path("/big/one.md")
+        # Ordinary chunks (no policy origin) under a ``.consolidated.md`` path
+        # whose parent is held: the screen must look for a policy row there.
+        source = Path("/big/root.md.consolidated.md" if held_parent else "/big/one.md")
+        if held_parent:
+            db = st._get_db()
+            db.execute(
+                "INSERT INTO held_sources(source_file, reason, first_seen_at, last_checked_at) "
+                "VALUES ('/big/root.md', 'scan_missing', '2026-01-01', '2026-01-01')"
+            )
+            db.commit()
         calls = {
             "health_report": lambda: st.get_health_report(),
             "chunk_factors": lambda: st.get_chunk_factors(),
@@ -531,6 +545,6 @@ class TestCostStaysLinear:
         }
         costs = []
         for n in (self._SMALL, self._LARGE):
-            self._fill(comp, n)
+            self._fill(comp, n, str(source))
             costs.append(await self._steps(comp, calls[name]))
         assert costs[1] < 8 * max(costs[0], 1), costs

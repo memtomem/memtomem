@@ -562,6 +562,16 @@ def create_tables(
         ON chunks(project_root)
         WHERE project_root IS NOT NULL
     """)
+    # The path-level hold screen asks, per row it reads, whether the row's
+    # file holds a consolidation-policy summary (#2781). Only policy rows are
+    # indexed, so the index stays small and the probe is one seek instead of
+    # a scan of the file. The predicate must match ``visible_path_sql``'s
+    # literal for SQLite to use it. Additive and idempotent: no bump.
+    db.execute(f"""
+        CREATE INDEX IF NOT EXISTS idx_chunks_policy_source
+        ON chunks(source_file)
+        WHERE origin = '{ORIGIN_CONSOLIDATION_POLICY}'
+    """)  # nosec B608
 
     # --- Personalization tables ---
     db.execute("""
