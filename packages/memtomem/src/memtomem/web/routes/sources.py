@@ -108,8 +108,10 @@ async def list_sources(
     # is cached yet.
     summaries = await storage.get_source_summaries()
     # Cached LLM summaries (path → record dict). Empty dict when the
-    # ``auto_summarize`` flag has never produced a row.
-    ai_summaries = await storage.get_all_ai_summaries()
+    # ``auto_summarize`` flag has never produced a row. Both reads drop hidden
+    # sources themselves: a hold committed after ``visibility`` was read
+    # leaves that row without an excerpt rather than quoting it.
+    ai_summaries = await storage.get_all_ai_summaries(exclude_hidden=True)
 
     # Pre-compute (prefix, dir_path, kind) once per request so the
     # per-source classification stays O(D × startswith) instead of
@@ -307,7 +309,7 @@ async def source_content_matches(
             paths.append(candidate)
     seen = {str(p) for p in paths}
     needle = query.casefold()
-    for path, record in (await storage.get_all_ai_summaries()).items():
+    for path, record in (await storage.get_all_ai_summaries(exclude_hidden=True)).items():
         summary = (record or {}).get("summary") or ""
         if path not in seen and needle in summary.casefold() and _visible_for_scope(path):
             if len(paths) >= limit:
@@ -398,7 +400,11 @@ async def source_content(
 
     from memtomem.storage.sqlite_visibility import source_hidden
 
-    if await source_hidden(storage, request_path):
+    # The holds are keyed on the stored path, compared as stored. This route
+    # reads the file through ``request_path`` next, so resolve it again here:
+    # if a parent directory was retargeted since the gate, the hold that
+    # matters is the one on the file the read will reach.
+    if await source_hidden(storage, Path(norm_path(request_path))):
         raise HTTPException(status_code=404, detail="Source file not found on disk.")
 
     if not request_path.exists():

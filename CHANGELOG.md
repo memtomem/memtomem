@@ -88,6 +88,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A held source's chunks no longer surface through reports, tag tools or
+  the web source views (#2781).** Search already hid the chunks of a missing
+  source, a source waiting on a watcher check, and a file the redaction guard
+  refused, but several surfaces that reach chunks without an id still read
+  them. The health report (`mem_eval`, web `/eval`) quoted them among the most
+  accessed and counted them, `mem_reflect` listed their headings and linked
+  them, importance scoring scored them, and the tag listing (MCP, resource,
+  web, `mm tags list`, query expansion) counted tags only they carried. Bulk
+  tag rename, delete and merge previewed and rewrote them, and auto-tagging
+  sent their text to the extractor, which may be an LLM, and returned it in
+  previews. All of these now leave held chunks out. A held chunk keeps its
+  tags through a rename, delete or merge, so if the hold is released with the
+  file unchanged it comes back with the old tag. The health report's totals
+  now count only visible chunks. `GET /api/chunks?source=` and the Sources
+  tab's excerpts, AI summaries and content filter judge the hold in the
+  statement that reads the rows, so a hold that lands mid-request no longer
+  lets content through. The stored-path hold checks behind dedup,
+  consolidation and export compare the path as stored, so a symlink placed at
+  a held source's path no longer hides the hold. A test now fails when a
+  caller-facing id read omits `exclude_withheld=True` (#2777) without a listed
+  reason.
 - **A chunk held because the redaction guard refused its file can no longer
   be read or changed by its id (#2777).** Search hid those chunks, but
   `mem_read`, `mem_expand`, `mem_related`, the `memtomem://chunks/{id}`

@@ -75,7 +75,7 @@ async def mem_tag_rename(
     dry_run: StrictBool = True,
     ctx: CtxType = None,
 ) -> str:
-    """Rename a tag across all chunks that use it.
+    """Rename a tag across all visible chunks that use it.
 
     Args:
         old_tag: The current tag name to replace
@@ -119,7 +119,7 @@ async def mem_tag_delete(
     dry_run: StrictBool = True,
     ctx: CtxType = None,
 ) -> str:
-    """Remove a tag from all chunks that use it.
+    """Remove a tag from all visible chunks that use it.
 
     The chunks themselves are not deleted — only the tag is removed.
 
@@ -158,7 +158,7 @@ async def mem_tag_merge(
     dry_run: StrictBool = True,
     ctx: CtxType = None,
 ) -> str:
-    """Fold multiple source tags into a single target tag across all chunks.
+    """Fold multiple source tags into a single target tag across all visible chunks.
 
     Each chunk that carries any source tag gets the source replaced with
     ``target``; the resulting per-chunk tag list is deduplicated. Chunks

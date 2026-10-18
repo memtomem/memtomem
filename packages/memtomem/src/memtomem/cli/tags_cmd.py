@@ -5,7 +5,10 @@ shared service the Web ``/api/tags/{...}`` routes and the MCP ``mem_tag_*``
 tools call, so all three surfaces share one write lock, one ``updated_at``
 policy, and one search-cache invalidation. Mutations are **global**: they
 touch every chunk carrying the tag regardless of scope tier, matching the
-``count``/sample the dry-run preview shows.
+``count``/sample the dry-run preview shows. Chunks of a held source (missing,
+pending a check, or refused by the redaction guard) are outside the preview
+and the write alike; they keep their tags, and show them again if the hold is
+released with the file unchanged.
 
 UX mirrors ``mm gc orphan-projects``: the default is a dry-run preview
 (count + sample); ``--apply`` performs the write behind a confirmation
@@ -82,7 +85,7 @@ async def _run_list() -> None:
     help="Skip the confirmation prompt. Requires --apply.",
 )
 def rename(old_tag: str, new_tag: str, apply_: bool, assume_yes: bool) -> None:
-    """Rename OLD_TAG to NEW_TAG across every chunk that carries it."""
+    """Rename OLD_TAG to NEW_TAG across every visible chunk that carries it."""
     if assume_yes and not apply_:
         raise click.UsageError("--yes requires --apply.")
     asyncio.run(_run_rename(old_tag, new_tag, apply_=apply_, assume_yes=assume_yes))
@@ -99,7 +102,7 @@ async def _run_rename(old_tag: str, new_tag: str, *, apply_: bool, assume_yes: b
 
         old_s, new_s = old_tag.strip(), new_tag.strip()
         if preview.affected_chunks == 0:
-            click.secho(f"No chunks carry tag '{old_s}'. Nothing to do.", fg="yellow")
+            click.secho(f"No visible chunks carry tag '{old_s}'. Nothing to do.", fg="yellow")
             return
 
         click.echo(f"Rename '{old_s}' → '{new_s}' would affect {preview.affected_chunks} chunks.")
@@ -140,7 +143,7 @@ async def _run_rename(old_tag: str, new_tag: str, *, apply_: bool, assume_yes: b
     help="Skip the confirmation prompt. Requires --apply.",
 )
 def delete(name: str, apply_: bool, assume_yes: bool) -> None:
-    """Remove NAME from every chunk that carries it (the chunks stay indexed)."""
+    """Remove NAME from every visible chunk that carries it (the chunks stay indexed)."""
     if assume_yes and not apply_:
         raise click.UsageError("--yes requires --apply.")
     asyncio.run(_run_delete(name, apply_=apply_, assume_yes=assume_yes))
@@ -157,7 +160,7 @@ async def _run_delete(name: str, *, apply_: bool, assume_yes: bool) -> None:
 
         name_s = name.strip()
         if preview.affected_chunks == 0:
-            click.secho(f"No chunks carry tag '{name_s}'. Nothing to do.", fg="yellow")
+            click.secho(f"No visible chunks carry tag '{name_s}'. Nothing to do.", fg="yellow")
             return
 
         click.echo(f"Delete '{name_s}' would affect {preview.affected_chunks} chunks.")
@@ -197,7 +200,7 @@ async def _run_delete(name: str, *, apply_: bool, assume_yes: bool) -> None:
     help="Skip the confirmation prompt. Requires --apply.",
 )
 def merge(sources: tuple[str, ...], target: str, apply_: bool, assume_yes: bool) -> None:
-    """Fold one or more SOURCES tags into --into TARGET across all chunks."""
+    """Fold one or more SOURCES tags into --into TARGET across all visible chunks."""
     if assume_yes and not apply_:
         raise click.UsageError("--yes requires --apply.")
     asyncio.run(_run_merge(sources, target, apply_=apply_, assume_yes=assume_yes))

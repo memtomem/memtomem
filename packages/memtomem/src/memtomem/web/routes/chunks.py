@@ -102,9 +102,11 @@ async def list_chunks(
     request_path = require_indexed_source(source, indexed_sources)
     if await source_hidden(storage, request_path):
         raise HTTPException(status_code=404, detail="Source not found")
-    chunks = await storage.list_chunks_by_source(request_path, limit=limit)
+    # The checks around the reads answer 404; the reads judge the hold
+    # themselves, so rows read while the source was hidden never get here.
+    chunks = await storage.list_chunks_by_source(request_path, limit=limit, exclude_hidden=True)
     out = [chunk_to_out(c) for c in chunks]
-    total = await storage.count_chunks_by_source(request_path)
+    total = await storage.count_chunks_by_source(request_path, exclude_hidden=True)
     if await source_hidden(storage, request_path):
         raise HTTPException(status_code=404, detail="Source not found")
     return ChunksListResponse(chunks=out, total=total)

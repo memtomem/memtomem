@@ -16,7 +16,7 @@ from watchdog.observers.polling import PollingObserver
 
 from memtomem.config import IndexingConfig
 from memtomem.errors import NamespaceResolutionError, RetryableError
-from memtomem.storage.sqlite_helpers import is_under_any_root
+from memtomem.storage.sqlite_helpers import is_under_any_root, norm_path
 
 if TYPE_CHECKING:
     from watchdog.observers.api import BaseObserver, ObservedWatch
@@ -1093,8 +1093,10 @@ class FileWatcher:
                 # The observer journals a delete before it reaches this gate.
                 # Move that pending row into the held recheck path; otherwise
                 # every restart replays and drops the same pending path.
+                # ``file_path`` is an event path, not a stored key, so it is
+                # normalised the way the store keyed it.
                 try:
-                    if await storage.is_source_held(file_path):
+                    if await storage.is_source_held(Path(norm_path(file_path))):
                         await storage.hold_source(file_path, "watch_root_removed")
                 except Exception:
                     logger.exception("Could not settle watcher check outside roots: %s", file_path)

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from memtomem.storage.sqlite_helpers import escape_like
+from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_PATH
 
 if TYPE_CHECKING:
     from memtomem.llm.base import LLMProvider
@@ -298,7 +299,11 @@ async def execute_auto_tag(
     max_tags = config.get("max_tags", 5)
 
     db = storage._get_read_db()
-    query = "SELECT COUNT(*) FROM chunks WHERE (tags = '[]' OR tags = '')"
+    # Same rows ``auto_tag_storage`` reads: it skips hidden sources whole.
+    query = (
+        "SELECT COUNT(*) FROM chunks WHERE (tags = '[]' OR tags = '') "
+        f"AND {VISIBLE_SOURCE_PATH}"  # nosec B608
+    )
     params: list = []
     if namespace:
         query += " AND namespace = ?"

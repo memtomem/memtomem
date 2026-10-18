@@ -8,7 +8,7 @@ from pathlib import Path
 
 from memtomem.storage.sqlite_helpers import placeholders, project_boundary_key
 from memtomem.storage.sqlite_scope import scope_context_sql
-from memtomem.storage.sqlite_visibility import NOT_WITHHELD_CHUNKS, VISIBLE_SOURCE_CHUNKS
+from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_C, VISIBLE_SOURCE_CHUNKS
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,14 @@ def _visible_chunks_where(
     alias: str = "",
 ) -> tuple[str, list]:
     clause, params = scope_context_sql(None, project_context_root, column_alias=alias)
+    # Held sources are out of every report built on this, as they are out of
+    # search: the previews would quote them, the counts would describe rows
+    # nothing else can reach, and importance scoring would score them.
+    # The correlated hold lookups make SQLite's planner inline a ``visible``
+    # CTE into a nested scan of both relation endpoints (over 15 s at 50,000
+    # chunks, from under 0.1 s); the CTEs built on this clause are
+    # ``MATERIALIZED`` so they are computed once.
+    clause += f" AND {VISIBLE_SOURCE_C if alias == 'c.' else VISIBLE_SOURCE_CHUNKS}"
     if namespace is not None:
         clause += f" AND {alias}namespace = ?"
         params.append(namespace)
@@ -99,7 +107,7 @@ class AnalyticsMixin:
         ).fetchone()[0]
 
         relation_count = db.execute(
-            "SELECT relation_count FROM (WITH visible AS (SELECT id FROM chunks WHERE "
+            "SELECT relation_count FROM (WITH visible AS MATERIALIZED (SELECT id FROM chunks WHERE "
             f"{visible_sql}) "
             "SELECT COUNT(*) AS relation_count FROM chunk_relations r "
             "JOIN visible s ON s.id = r.source_id "
@@ -216,10 +224,10 @@ class AnalyticsMixin:
         ranking and ``limit`` are applied after that screen rather than
         before it. A hub whose every edge leaves the boundary has no visible
         degree and is absent from the result — it is never reported as zero.
-        Callers therefore do not need to over-fetch and re-rank. A chunk under
-        a redaction hold (#2777) is outside that screen too, as a hub and as
-        an endpoint; the caller still screens each hub it hydrates, since a
-        hold can commit between this query and that fetch.
+        Callers therefore do not need to over-fetch and re-rank. A chunk of a
+        held source, for any hold reason, is outside that screen too, as a hub
+        and as an endpoint; the caller still screens each hub it hydrates,
+        since a hold can commit between this query and that fetch.
         """
         db = self._get_txn_read_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root)
@@ -234,8 +242,8 @@ class AnalyticsMixin:
         # ends separately — inflating the degree above the links a caller can
         # actually follow, and with it the ranking.
         rows = db.execute(
-            "SELECT chunk_id, link_count FROM (WITH visible AS (SELECT id FROM chunks WHERE "
-            f"{visible_sql} AND {NOT_WITHHELD_CHUNKS}), adjacency AS ("  # nosec B608
+            "SELECT chunk_id, link_count FROM (WITH visible AS MATERIALIZED (SELECT id FROM chunks WHERE "
+            f"{visible_sql}), adjacency AS ("  # nosec B608
             "  SELECT r.source_id AS chunk_id, r.target_id AS neighbour_id, "
             "         r.relation_type AS rel FROM chunk_relations r "
             "  JOIN visible s ON s.id = r.source_id JOIN visible t ON t.id = r.target_id "
@@ -268,7 +276,7 @@ class AnalyticsMixin:
         # ``OR`` across both columns could not use either index: a
         # self-relation is still one row, a pair stored in both orders still two.
         query = (
-            "SELECT * FROM (WITH visible AS ("
+            "SELECT * FROM (WITH visible AS MATERIALIZED ("
             "  SELECT c.id, c.access_count, c.updated_at, c.tags FROM chunks c WHERE "
             f"  {visible_sql}"  # nosec B608
             "), rel_edges AS ("

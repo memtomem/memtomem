@@ -818,8 +818,8 @@ class TestAutoTag:
         assert calls["n"] == 0
 
     async def test_auto_tag_storage_invalidates_after_a_partial_failure(self, storage):
-        """The upserts already committed are durable and searchable, so a pass
-        that dies partway through must still drop the cache — hence the
+        """The tag writes already committed are durable and searchable, so a
+        pass that dies partway through must still drop the cache — hence the
         ``finally``."""
         from types import SimpleNamespace
 
@@ -831,21 +831,21 @@ class TestAutoTag:
                 _chunk("Kubernetes cluster deployment scaling", source="inv_b.md"),
             ]
         )
-        real_upsert = storage.upsert_chunks
+        real_set = storage.set_chunk_tags
         seen = {"n": 0}
 
-        async def flaky_upsert(chunks):
+        async def flaky_set(chunk_id, tags):
             seen["n"] += 1
             if seen["n"] > 1:
                 raise RuntimeError("store blip")
-            return await real_upsert(chunks)
+            return await real_set(chunk_id, tags)
 
-        storage.upsert_chunks = flaky_upsert
+        storage.set_chunk_tags = flaky_set
         try:
             with pytest.raises(RuntimeError, match="store blip"):
                 await auto_tag_storage(storage, max_tags=3, search_pipeline=pipeline)
         finally:
-            storage.upsert_chunks = real_upsert
+            storage.set_chunk_tags = real_set
 
         assert seen["n"] == 2
         assert calls["n"] == 1

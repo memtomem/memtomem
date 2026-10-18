@@ -10,6 +10,7 @@ import pytest
 from helpers import make_chunk
 
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
+from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.tools.consolidation_engine import (
     DEFAULT_SUMMARY_NAMESPACE,
     apply_consolidation,
@@ -739,7 +740,9 @@ class TestPolicyEngine:
         )
         db.commit()
         await storage.hold_source(chunk.metadata.source_file, "source_missing")
-        assert await storage.is_source_held(chunk.metadata.source_file)
+        # The hold checks compare the path as stored; ``/tmp`` is stored resolved.
+        stored = Path(norm_path(chunk.metadata.source_file))
+        assert await storage.is_source_held(stored)
 
         result = await execute_auto_expire(
             storage, {"max_age_days": 90}, namespace=None, dry_run=False
@@ -749,7 +752,7 @@ class TestPolicyEngine:
 
         row = db.execute("SELECT id FROM chunks WHERE id = ?", [str(chunk.id)]).fetchone()
         assert row is None  # deleted
-        assert not await storage.is_source_held(chunk.metadata.source_file)
+        assert not await storage.is_source_held(stored)
 
     async def test_auto_expire_keeps_accessed(self, storage):
         """Chunks with access_count > 0 should not be expired even if old."""

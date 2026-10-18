@@ -355,10 +355,11 @@ mm upgrade --version 0.6.8 --dry-run  # preview an exact uv-tool reinstall (also
 # warnings is additive on Windows, where processes are never killed automatically; db_lock_warning still requests a manual restart
 
 # Tags — bulk tag maintenance (mutations are dry-run unless --apply; --yes skips the prompt)
+# held sources (missing, pending, or redaction-refused) are left out of the counts and the writes
 mm tags list                           # list every tag with its chunk count
-mm tags rename old new --apply         # rename a tag across all chunks
+mm tags rename old new --apply         # rename a tag across all visible chunks
 mm tags merge a b --into c --apply     # fold tags a, b into c
-mm tags delete stale --apply           # drop a tag from all chunks
+mm tags delete stale --apply           # drop a tag from all visible chunks
 
 # Retrieval quality — promote labeled search runs into eval cases, then replay
 # them to measure retrieval quality and compare two retrieval profiles.

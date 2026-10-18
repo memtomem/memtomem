@@ -106,7 +106,7 @@ async def rename_tag(
     storage=Depends(get_storage),
     search_pipeline=Depends(get_search_pipeline),
 ) -> TagOpResponse:
-    """Rename ``name`` to ``body.new_name`` across every chunk that carries it.
+    """Rename ``name`` to ``body.new_name`` across every visible chunk carrying it.
 
     With ``dry_run=true`` the response carries the count + up to 10 sample
     chunk previews so the UI can show a confirmation modal before the
@@ -132,8 +132,8 @@ async def delete_tag(
     storage=Depends(get_storage),
     search_pipeline=Depends(get_search_pipeline),
 ) -> TagOpResponse:
-    """Drop ``name`` from every chunk that carries it. Chunks ending up
-    tag-less stay indexed."""
+    """Drop ``name`` from every visible chunk that carries it. Chunks ending up
+    tag-less stay indexed; chunks of a held source keep the tag."""
     try:
         result = await tag_svc.delete_tag(
             storage, name, dry_run=dry_run, search_pipeline=search_pipeline
@@ -151,7 +151,7 @@ async def merge_tags(
     search_pipeline=Depends(get_search_pipeline),
 ) -> TagOpResponse:
     """Replace every tag in ``body.sources`` with ``body.target`` across all
-    chunks. Resulting per-chunk tag list is deduplicated."""
+    visible chunks. Resulting per-chunk tag list is deduplicated."""
     try:
         result = await tag_svc.merge_tags(
             storage,

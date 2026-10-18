@@ -46,7 +46,6 @@ _CONTENT_WRITERS: dict[tuple[str, str], str] = {
 # pass through untouched. Their stored entities still describe the stored
 # content, so extraction here would be wasted work — not an oversight.
 _METADATA_ONLY: dict[tuple[str, str], str] = {
-    ("tools/auto_tag.py", "auto_tag_storage"): "Replaces metadata.tags only.",
     (
         "search/dedup.py",
         "DedupScanner.merge",

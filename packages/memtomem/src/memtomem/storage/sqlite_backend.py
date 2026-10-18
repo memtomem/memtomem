@@ -83,6 +83,7 @@ from memtomem.storage.sqlite_visibility import (
     VISIBLE_SOURCE_CHUNKS,
     VISIBLE_SOURCE_PATH,
     neighbor_visibility_sql,
+    visible_path_sql,
 )
 from memtomem.storage.mixins import (
     AnalyticsMixin,
@@ -2485,9 +2486,12 @@ class SqliteBackend(
         return {Path(row[0]) for row in rows}
 
     async def is_source_hidden(self, source_file: Path) -> bool:
-        """Include a policy summary's parent in path-level visibility."""
+        """Include a policy summary's parent in path-level visibility.
+
+        ``source_file`` is compared as stored, like :meth:`is_source_held`.
+        """
         db = self._get_read_db()
-        source = norm_path(source_file)
+        source = str(source_file)
         if (
             db.execute(
                 "SELECT 1 FROM held_sources WHERE source_file=? UNION "
@@ -2511,8 +2515,14 @@ class SqliteBackend(
         )
 
     async def is_source_held(self, source_file: Path) -> bool:
+        """Whether a stored source path is held or pending, compared as stored.
+
+        Callers pass a path read back from the store. Resolving it again would
+        follow a symlink placed at a held source's path to some other file and
+        miss the hold; a caller holding a filesystem path normalises it first.
+        """
         db = self._get_read_db()
-        source = norm_path(source_file)
+        source = str(source_file)
         return (
             db.execute(
                 "SELECT 1 FROM held_sources WHERE source_file=? UNION "
@@ -3764,15 +3774,25 @@ class SqliteBackend(
         counts = {row[0]: row[1] for row in rows}
         return [{"bucket": b, "count": counts.get(b, 0)} for b in ordered]
 
-    async def list_chunks_by_source(self, source_file: Path, limit: int | None = 50) -> list[Chunk]:
+    async def list_chunks_by_source(
+        self,
+        source_file: Path,
+        limit: int | None = 50,
+        *,
+        exclude_hidden: bool = False,
+    ) -> list[Chunk]:
         # ``limit=None`` reads the whole source in one snapshot — for callers
         # that must cover it completely (the entity scan), where paging would
         # let a concurrent re-index between pages skip or repeat rows. SQLite
         # treats a negative LIMIT as unbounded. ``rowid`` tie-break: chunks of
-        # a virtual source can share one ``start_line``.
+        # a virtual source can share one ``start_line``. ``exclude_hidden``
+        # judges the path-level hold in this statement, so a hold committed
+        # after a caller's own check still returns no rows.
         db = self._get_read_db()
+        hidden_clause = f" AND {VISIBLE_SOURCE_PATH}" if exclude_hidden else ""
         rows = db.execute(
-            "SELECT * FROM chunks WHERE source_file=? ORDER BY start_line, rowid LIMIT ?",
+            f"SELECT * FROM chunks WHERE source_file=?{hidden_clause} "  # nosec B608
+            "ORDER BY start_line, rowid LIMIT ?",
             (norm_path(source_file), -1 if limit is None else limit),
         ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
@@ -3932,10 +3952,13 @@ class SqliteBackend(
         ).fetchall()
         return sorted(str(row[0]) for row in rows)
 
-    async def count_chunks_by_source(self, source_file: Path) -> int:
+    async def count_chunks_by_source(
+        self, source_file: Path, *, exclude_hidden: bool = False
+    ) -> int:
         db = self._get_read_db()
+        hidden_clause = f" AND {VISIBLE_SOURCE_PATH}" if exclude_hidden else ""
         row = db.execute(
-            "SELECT COUNT(*) FROM chunks WHERE source_file=?",
+            f"SELECT COUNT(*) FROM chunks WHERE source_file=?{hidden_clause}",  # nosec B608
             (norm_path(source_file),),
         ).fetchone()
         return int(row[0]) if row else 0
@@ -4015,10 +4038,13 @@ class SqliteBackend(
         # apply still wiped N rows. Mirror ``count_chunks_by_tag``'s
         # ``EXISTS(json_each)`` membership here so sample / count / apply agree
         # on one row set (#688). ``id`` breaks created_at ties deterministically.
+        # Whole-store across scope tiers, but not across holds: a held source's
+        # chunks are outside all three, the way the tag listing leaves them out.
         db = self._get_read_db()
         rows = db.execute(
             "SELECT * FROM chunks WHERE EXISTS "
             "(SELECT 1 FROM json_each(chunks.tags) WHERE value = ?) "
+            f"AND {_VISIBLE_SOURCE} "  # nosec B608
             "ORDER BY created_at DESC, id LIMIT ?",
             (tag, limit),
         ).fetchall()
@@ -4028,7 +4054,8 @@ class SqliteBackend(
         db = self._get_read_db()
         row = db.execute(
             "SELECT COUNT(*) FROM chunks WHERE EXISTS "
-            "(SELECT 1 FROM json_each(chunks.tags) WHERE value = ?)",
+            "(SELECT 1 FROM json_each(chunks.tags) WHERE value = ?) "
+            f"AND {_VISIBLE_SOURCE}",  # nosec B608
             (tag,),
         ).fetchone()
         return int(row[0]) if row else 0
@@ -4045,7 +4072,8 @@ class SqliteBackend(
         db = self._get_read_db()
         row = db.execute(
             "SELECT COUNT(*) FROM chunks WHERE EXISTS "
-            f"(SELECT 1 FROM json_each(chunks.tags) WHERE value IN ({placeholders}))",
+            f"(SELECT 1 FROM json_each(chunks.tags) WHERE value IN ({placeholders})) "
+            f"AND {_VISIBLE_SOURCE}",  # nosec B608
             tuple(tags),
         ).fetchone()
         return int(row[0]) if row else 0
@@ -4278,17 +4306,20 @@ class SqliteBackend(
         source. Powers the Source tab's heuristic preview (first heading +
         first paragraph) — drives the fallback shown when no AI summary has
         been generated yet, or when the LLM is disabled. Pure read-side
-        aggregation; no LLM, no extra storage column.
+        aggregation; no LLM, no extra storage column. Hidden sources are
+        left out in this statement, so a hold committed after the caller
+        read its visibility set still yields no excerpt.
         """
         db = self._get_read_db()
+        # The screen is path-level, so it runs on the one row kept per file.
         rows = db.execute(
-            "SELECT source_file, content, heading_hierarchy FROM ("
+            "SELECT f.source_file, f.content, f.heading_hierarchy FROM ("
             "  SELECT source_file, content, heading_hierarchy,"
             "         ROW_NUMBER() OVER ("
             "           PARTITION BY source_file ORDER BY start_line, rowid"
             "         ) AS rn"
             "  FROM chunks"
-            ") WHERE rn = 1"
+            f") AS f WHERE f.rn = 1 AND {visible_path_sql('f.source_file')}"  # nosec B608
         ).fetchall()
         result: dict[str, tuple[list[str], str]] = {}
         for source, content, hh_json in rows:
@@ -4389,7 +4420,7 @@ class SqliteBackend(
             )
             self._commit_if_standalone(db)
 
-    async def get_all_ai_summaries(self) -> dict[str, dict]:
+    async def get_all_ai_summaries(self, *, exclude_hidden: bool = False) -> dict[str, dict]:
         """Return ``{normalised_path: record}`` for every cached AI summary.
 
         Prefix-scans ``_memtomem_meta`` for keys starting with
@@ -4401,10 +4432,17 @@ class SqliteBackend(
         can be secret-shaped (feedback_canonical_path_leak_resolved_root,
         feedback_no_secret_in_validation_log), so only a short opaque
         fingerprint of the key is emitted to correlate repeat failures.
+
+        ``exclude_hidden`` drops the summary of a hidden source in this
+        statement: the prose is derived from the source's content.
         """
         db = self._get_read_db()
+        hidden_clause = ""
+        if exclude_hidden:
+            stored = f"substr(_memtomem_meta.key, {len(_AI_SUMMARY_KEY_PREFIX) + 1})"
+            hidden_clause = f" AND {visible_path_sql(stored)}"
         rows = db.execute(
-            "SELECT key, value FROM _memtomem_meta WHERE key LIKE ?",
+            f"SELECT key, value FROM _memtomem_meta WHERE key LIKE ?{hidden_clause}",  # nosec B608
             (f"{_AI_SUMMARY_KEY_PREFIX}%",),
         ).fetchall()
         result: dict[str, dict] = {}
@@ -4451,7 +4489,10 @@ class SqliteBackend(
         rows = db.execute(
             "SELECT value, COUNT(*) as cnt "
             "FROM chunks c, json_each(c.tags) "
-            f"WHERE {scope_frag} "
+            # Held sources are out of the counts like they are out of search:
+            # a tag only held chunks carry would otherwise list a tag no
+            # query can return, and name it in query expansion.
+            f"WHERE {scope_frag} {_VISIBLE_SOURCE_C} "  # nosec B608
             # ``value ASC`` breaks count ties deterministically so tag-strategy
             # query expansion (which truncates to max_terms) is order-stable
             # across runs — a replay-determinism requirement (#1802). Completes

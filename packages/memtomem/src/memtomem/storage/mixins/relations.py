@@ -12,7 +12,7 @@ from memtomem.errors import StorageError
 from memtomem.models import Chunk
 from memtomem.storage.sqlite_helpers import utc_stamp
 from memtomem.storage.sqlite_scope import scope_context_sql
-from memtomem.storage.sqlite_visibility import NOT_WITHHELD_CHUNKS
+from memtomem.storage.sqlite_visibility import NOT_WITHHELD_CHUNKS, VISIBLE_SOURCE_CHUNKS
 
 
 class RelationMixin:
@@ -58,14 +58,38 @@ class RelationMixin:
             self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
+    def _write_tag_batch(self, db, batch: list[tuple[str, str, int]]) -> int:
+        """Apply ``(tags, updated_at, rowid)`` rewrites; return the rows written.
+
+        The hold is judged here, in the write, not in the candidate read: the
+        tag lock is process-local, so another process can hold a source
+        between the two statements, and the write must then leave that row
+        alone. A held candidate costs one refused ``UPDATE``; its tags are not
+        returned to anyone.
+        """
+        if not batch:
+            return 0
+        with self._rolls_back_if_standalone(db):
+            cursor = db.executemany(
+                "UPDATE chunks SET tags = ?, updated_at = ? "
+                f"WHERE rowid = ? AND {VISIBLE_SOURCE_CHUNKS}",  # nosec B608
+                batch,
+            )
+            self._commit_if_standalone(db)
+        return cursor.rowcount
+
     async def rename_tag(self, old_tag: str, new_tag: str) -> int:
-        """Rename a tag across all chunks.
+        """Rename a tag across all visible chunks.
 
         Bumps ``updated_at`` on every mutated row so downstream consumers
         (search result TTL cache, decay scoring) see the rewrite as a
         write event. ``decay.py`` reads ``updated_at`` for age, so a
         rename does reset the decay timer for affected chunks — that is
         an intentional v1 trade-off (see #688 confirm thread).
+
+        Chunks of a held source keep their tags, like the sample and count
+        the service shows for the same call leave them out. If the hold is
+        released with the file unchanged, they come back carrying the old tag.
         """
         db = self._get_db()
         rows = db.execute(
@@ -79,15 +103,11 @@ class RelationMixin:
             if old_tag in tags:
                 tags = sorted({new_tag if t == old_tag else t for t in tags})
                 batch.append((json.dumps(tags), now, row[0]))
-        if batch:
-            with self._rolls_back_if_standalone(db):
-                db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
-                self._commit_if_standalone(db)
-        return len(batch)
+        return self._write_tag_batch(db, batch)
 
     async def delete_tag(self, tag: str) -> int:
-        """Delete a tag from all chunks. Bumps ``updated_at`` per
-        :meth:`rename_tag`."""
+        """Delete a tag from all visible chunks. Bumps ``updated_at`` and
+        leaves held chunks alone per :meth:`rename_tag`."""
         db = self._get_db()
         rows = db.execute(
             "SELECT rowid, tags FROM chunks WHERE tags LIKE ?",
@@ -100,20 +120,16 @@ class RelationMixin:
             if tag in tags:
                 tags = [t for t in tags if t != tag]
                 batch.append((json.dumps(tags), now, row[0]))
-        if batch:
-            with self._rolls_back_if_standalone(db):
-                db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
-                self._commit_if_standalone(db)
-        return len(batch)
+        return self._write_tag_batch(db, batch)
 
     async def merge_tags(self, sources: Sequence[str], target: str) -> int:
-        """Replace any tag in ``sources`` with ``target`` across all chunks.
+        """Replace any tag in ``sources`` with ``target`` across all visible chunks.
 
         Result tag list is deduplicated and sorted. Chunks that carry both
         a source tag and ``target`` collapse to a single ``target``. Returns
         the number of chunks actually mutated. ``sources`` containing
         ``target`` is allowed; the target is treated as a no-op source.
-        Bumps ``updated_at`` per :meth:`rename_tag`.
+        Bumps ``updated_at`` and leaves held chunks alone per :meth:`rename_tag`.
         """
         if not sources:
             return 0
@@ -139,11 +155,25 @@ class RelationMixin:
             new_tags = sorted({target if t in source_set else t for t in tags})
             if new_tags != tags:
                 batch.append((json.dumps(new_tags), now, row[0]))
-        if batch:
-            with self._rolls_back_if_standalone(db):
-                db.executemany("UPDATE chunks SET tags = ?, updated_at = ? WHERE rowid = ?", batch)
-                self._commit_if_standalone(db)
-        return len(batch)
+        return self._write_tag_batch(db, batch)
+
+    async def set_chunk_tags(self, chunk_id: UUID, tags: Sequence[str]) -> bool:
+        """Overwrite one chunk's tags whole-store, unless its source is hidden.
+
+        For bulk taggers that run outside any project boundary. Only ``tags``
+        and ``updated_at`` are written, so nothing read earlier can overwrite
+        newer metadata, and a chunk deleted meanwhile is not recreated. The
+        hold is judged in this statement. ``False`` means no row was written.
+        """
+        db = self._get_db()
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute(
+                "UPDATE chunks SET tags = ?, updated_at = ? "
+                f"WHERE id = ? AND {VISIBLE_SOURCE_CHUNKS}",  # nosec B608
+                (json.dumps(list(tags)), utc_stamp(datetime.now(timezone.utc)), str(chunk_id)),
+            )
+            self._commit_if_standalone(db)
+        return cursor.rowcount > 0
 
     async def replace_chunk_tags(
         self,
