@@ -192,6 +192,40 @@ class TestReads:
         )
         assert expand == await search.mem_expand(chunk_id=cid, ctx=ctx)
 
+    @pytest.mark.parametrize("reason", [REDACTION_BLOCKED_HOLD, "scan_missing"])
+    async def test_mem_expand_rechecks_after_reading_the_neighbours(
+        self, stack, monkeypatch, reason
+    ):
+        """A hold committed between the anchor screen and the window read.
+
+        The neighbours are read after the anchor was judged; under a redaction
+        hold the window must not come back. An availability hold landing at the
+        same point changes nothing.
+        """
+        comp, mem_dir, ctx = stack
+        path = mem_dir / "win.md"
+        body = "".join(f"## S{i}\n\ntokWin{i} " + "word " * 300 + "\n\n" for i in range(3))
+        path.write_text(f"# W\n\n{body}", encoding="utf-8")
+        assert not (await comp.index_engine.index_file(path)).errors
+        rows = await comp.storage.list_chunks_by_source(path.resolve())
+        assert len(rows) >= 2, "the window needs a neighbour"
+        anchor = next(r for r in rows if "tokWin0" in r.content)
+        real = comp.storage.get_context_windows
+
+        async def hold_then_read(*args, **kwargs):
+            await comp.storage.hold_source(path, reason)
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(comp.storage, "get_context_windows", hold_then_read)
+
+        expand = await search.mem_expand(chunk_id=str(anchor.id), ctx=ctx)
+
+        if reason == REDACTION_BLOCKED_HOLD:
+            assert "tokWin1" not in expand and "tokWin0" not in expand
+            assert expand == f"Chunk {anchor.id} not found."
+        else:
+            assert "tokWin0" in expand and "tokWin1" in expand
+
     async def test_mem_related_drops_a_withheld_target(self, stack):
         comp, mem_dir, ctx = stack
         _, held = await _redaction_held(comp, mem_dir)

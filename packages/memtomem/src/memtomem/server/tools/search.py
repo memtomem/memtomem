@@ -384,6 +384,10 @@ async def mem_expand(
     source_file = chunk.metadata.source_file
     spec = _expand_visibility_spec(app)
     windows = await app.storage.get_context_windows(source_file, [uid], window, **spec)
+    # The neighbours were read after the anchor was screened, and they share
+    # its source: a redaction hold committed in between must not reach them.
+    if await chunk_withheld(app.storage, chunk.metadata):
+        return not_found(chunk_id)
     rows = windows.get(uid)
     if rows is None:
         return f"Chunk {chunk_id} not found in source file listing."
