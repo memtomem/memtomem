@@ -2781,6 +2781,7 @@ async def add_memory(
             # and let the valve cover this entry only in a file with nothing
             # flagged or masked in it.
             from memtomem.indexing.engine import PrivacyRejection
+            from memtomem.tools.memory_mutation import appended_valve_text
             from memtomem.tools.memory_writer import read_pre_image_or_empty
 
             needs_valve = guard.decision == "bypassed"
@@ -2798,13 +2799,16 @@ async def add_memory(
                 if target.exists()
                 else 0
             )
-            await _asyncio.to_thread(append_entry, target, req.content, title=req.title, tags=tags)
+            appended = await _asyncio.to_thread(
+                append_entry, target, req.content, title=req.title, tags=tags
+            )
             try:
                 stats = await index_engine.index_file(
                     target,
                     namespace=write_ns,
                     ingress_guarded=True,
                     force_unsafe=needs_valve,
+                    valve_text=appended_valve_text(pre, appended) if needs_valve else None,
                     lock_held=True,
                 )
             except PrivacyRejection as exc:

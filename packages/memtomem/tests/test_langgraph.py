@@ -586,7 +586,10 @@ class TestAddPrivacyGate:
 
         monkeypatch.setattr(privacy, "enforce_write_guard", _fake_guard)
         monkeypatch.setattr(
-            memory_writer, "append_entry", lambda *a, **k: append_calls.append((a, k))
+            memory_writer,
+            "append_entry",
+            # The real one returns the text it appended.
+            lambda *a, **k: append_calls.append((a, k)) or "",
         )
         return guard_calls, append_calls
 

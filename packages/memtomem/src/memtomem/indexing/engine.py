@@ -2167,12 +2167,13 @@ class IndexEngine:
         counted by its own ingress guard: the gate then counts only a refusal,
         and still emits every audit line. It changes no decision.
 
-        ``valve_text`` binds ``force_unsafe`` to the text the caller guarded:
-        when given, the valve applies only if the file the engine reads is that
-        text (after the newline translation ``read_text`` performs), and the
-        call is judged without it otherwise. Writers that replace a whole file
-        and then index it without holding its lock pass it, so a delayed forced
-        index cannot cover somebody else's later write.
+        ``valve_text`` binds ``force_unsafe`` to the text the caller expects
+        the file to hold: the valve applies only if the file the engine reads
+        is that text (after the newline translation ``read_text`` performs),
+        and the call is judged without it otherwise. An ``ingress_guarded``
+        call must pass it to use the valve at all. Memory tools pass the file
+        their preflight judged plus their own write, so the valve cannot cover
+        anything another writer — memtomem or not — added in between.
 
         ``force=True`` re-embeds every chunk in the file but preserves chunk
         identity (UUID) and per-chunk personalization (``access_count``,
@@ -2946,6 +2947,11 @@ class IndexEngine:
         # the declaration only for label-shaped hits, and hard-refuses it for
         # ``project_shared`` exactly as it does the valve.
         scope_val, project_root = self._resolve_scope(decision_path)
+        if force_unsafe and ingress_guarded and valve_text is None:
+            # A memory tool's valve must say which bytes it covers; without
+            # that it would cover whatever else the file holds by now.
+            logger.warning("force_unsafe dropped for %s: no valve_text to bind it", file_path.name)
+            force_unsafe = False
         if force_unsafe and valve_text is not None and content != _read_text_view(valve_text):
             # The file is no longer the text the caller guarded and forced:
             # someone wrote after it. The valve covered that caller's bytes only.

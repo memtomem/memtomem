@@ -249,7 +249,7 @@ async def _cmd_add(comp, args: list[str]) -> None:
     # only the lock keeps it standing until the re-index reads it.
     try:
         async with async_file_lock(memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
-            refusal = await preflight_refusal(
+            refusal, _ = await preflight_refusal(
                 comp.index_engine, target, op="add", needs_valve=False
             )
             if refusal is not None:

@@ -442,3 +442,99 @@ class TestAppendedRefusalsSpeakAtEveryPublicTool:
         assert "refused" in result
         assert "appended" in result
         assert "internal error" not in result
+
+
+_OTHER_SECRET = "hf" + "_OTHERfake0123456789OTHERfake01234"
+
+
+class TestAForcedWriteCoversOnlyItsOwnBytes:
+    """A program outside memtomem writes into the file between preflight and index."""
+
+    @pytest.mark.asyncio
+    async def test_append(self, bm25_only_components, monkeypatch):
+        import memtomem.tools.memory_writer as memory_writer
+        from memtomem.tools.memory_writer import append_entry as real_append
+
+        comp, mem_dir = bm25_only_components
+        target = mem_dir / "clean.md"
+        target.write_text(_CLEAN, encoding="utf-8")
+        await comp.index_engine.index_file(target)
+
+        def append_then_intruder(path, *args, **kwargs):
+            appended = real_append(path, *args, **kwargs)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n## Intruder\n\ntoken {_OTHER_SECRET}\n")
+            return appended
+
+        monkeypatch.setattr(memory_writer, "append_entry", append_then_intruder)
+        result = await mem_add(  # type: ignore[arg-type]
+            content=f"aws {_KEY}",
+            file=str(target),
+            force_unsafe=True,
+            ctx=StubCtx(AppContext.from_components(comp)),
+        )
+
+        assert "refused" in result and "appended" in result
+        stored = await _stored_text(comp, target)
+        assert _OTHER_SECRET not in stored
+        assert _KEY not in stored
+
+    @pytest.mark.asyncio
+    async def test_rewrite(self, bm25_only_components, monkeypatch):
+        import memtomem.tools.memory_writer as memory_writer
+        from memtomem.tools.memory_writer import replace_chunk_body as real_replace
+
+        comp, mem_dir = bm25_only_components
+        target = mem_dir / "clean.md"
+        target.write_text(_CLEAN, encoding="utf-8")
+        await comp.index_engine.index_file(target)
+        chunk_id = await _chunk_id(comp, target, "alpha")
+
+        def intruder_then_replace(path, *args, **kwargs):
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n## Intruder\n\ntoken {_OTHER_SECRET}\n")
+            return real_replace(path, *args, **kwargs)
+
+        monkeypatch.setattr(memory_writer, "replace_chunk_body", intruder_then_replace)
+        result = await mem_edit(  # type: ignore[arg-type]
+            chunk_id=chunk_id,
+            new_content=f"alpha now holds aws {_KEY}",
+            force_unsafe=True,
+            ctx=StubCtx(AppContext.from_components(comp)),
+        )
+
+        assert "refused" in result
+        stored = await _stored_text(comp, target)
+        assert _OTHER_SECRET not in stored
+        assert _KEY not in stored
+
+    @pytest.mark.asyncio
+    async def test_engine_drops_an_unbound_valve(self, bm25_only_components):
+        from memtomem.indexing.engine import PrivacyRejection
+
+        comp, mem_dir = bm25_only_components
+        target = mem_dir / "unbound.md"
+        target.write_text(f"## A\n\naws {_KEY}\n", encoding="utf-8")
+
+        with pytest.raises(PrivacyRejection):
+            await comp.index_engine.index_file(target, ingress_guarded=True, force_unsafe=True)
+
+    def test_appended_text_matches_the_engines_read(self, tmp_path):
+        from memtomem.tools.memory_mutation import appended_valve_text
+        from memtomem.tools.memory_writer import append_entry
+
+        target = tmp_path / "n.md"
+        target.write_bytes(b"# Notes\r\n\r\nfirst line\r\n")
+        pre = target.read_bytes()
+        appended = append_entry(target, "second entry", title="T")
+
+        assert appended_valve_text(pre, appended) == target.read_text(encoding="utf-8")
+
+    def test_a_rewrite_that_read_something_else_cannot_be_bound(self):
+        from memtomem.tools.memory_mutation import rewrite_valve_text
+        from memtomem.tools.memory_writer import Rewrite
+
+        judged = b"## A\n\nalpha\n"
+        assert rewrite_valve_text(judged, Rewrite("## A\n\nalpha\n", "x")) == "x"
+        assert rewrite_valve_text(judged, Rewrite("## A\n\nalpha\nmore\n", "x")) is None
+        assert rewrite_valve_text(judged, None) is None

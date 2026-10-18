@@ -166,6 +166,7 @@ async def promote_scratch(
             # whose content may not be indexed before anything is written. The
             # entry stays in scratch, unpromoted.
             from memtomem.indexing.engine import PrivacyRejection
+            from memtomem.tools.memory_mutation import appended_valve_text
             from memtomem.tools.memory_writer import read_pre_image_or_empty
 
             needs_valve = guard.decision == "bypassed"
@@ -178,7 +179,7 @@ async def promote_scratch(
             blocker = preflight.blocker("promote", target.name, needs_valve=needs_valve)
             if blocker is not None:
                 raise index_blocked_http(blocker)
-            await _asyncio.to_thread(
+            appended = await _asyncio.to_thread(
                 append_entry, target, entry["value"], title=body.title, tags=body.tags
             )
             try:
@@ -187,6 +188,7 @@ async def promote_scratch(
                     namespace=write_ns,
                     ingress_guarded=True,
                     force_unsafe=needs_valve,
+                    valve_text=appended_valve_text(pre, appended) if needs_valve else None,
                     lock_held=True,
                 )
             except PrivacyRejection as exc:

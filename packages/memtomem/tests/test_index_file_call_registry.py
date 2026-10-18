@@ -11,8 +11,12 @@ shapes are safe, and this registry pins each call site to one of them:
     through ``preflight_refusal``), which is what limits the valve to a file
     that held nothing flagged.
 ``replace``
-    Writes a whole file from text it guarded, then indexes it. A forwarded
-    valve must be bound to that text with ``valve_text``.
+    Writes a whole file from text it guarded, then indexes it.
+
+Every call that forwards a valve binds it with ``valve_text`` to the text the
+file should hold: the guarded text for ``replace``, the judged file plus the
+write for ``modify``. The engine drops an unbound valve on an
+``ingress_guarded`` call anyway; this pins that no caller relies on that.
 ``plain``
     Bulk, watcher and maintenance indexes: no ingress, no forwarded valve.
 
@@ -124,11 +128,15 @@ def test_modify_sites_ask_the_engine_before_writing():
     assert missing == []
 
 
-def test_replace_sites_bind_a_forwarded_valve_to_their_text():
+def test_every_forwarded_valve_is_bound_to_text():
+    """A memory tool's valve names the bytes it covers, at every call site."""
     unbound = []
     for key, call, _ in _sites():
         kws = _keywords(call)
-        if REGISTRY.get(key) == "replace" and "force_unsafe" in kws and "valve_text" not in kws:
+        forwards = "force_unsafe" in kws and not (
+            isinstance(kws["force_unsafe"], ast.Constant) and kws["force_unsafe"].value is False
+        )
+        if forwards and "valve_text" not in kws:
             unbound.append(key)
     assert unbound == []
 

@@ -247,7 +247,7 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                         # The re-index judges the whole file: refuse a file whose
                         # content may not be indexed before appending (the claim
                         # is released below, nothing was written).
-                        refusal = await preflight_refusal(
+                        refusal, _ = await preflight_refusal(
                             comp.index_engine, target, op="approve", needs_valve=False
                         )
                         if refusal is not None:

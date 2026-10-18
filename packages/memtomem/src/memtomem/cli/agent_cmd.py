@@ -463,23 +463,24 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                 if mix_err is not None:
                     raise click.ClickException(mix_err)
                 from memtomem.indexing.engine import PrivacyRejection
-                from memtomem.tools.memory_mutation import preflight_refusal
+                from memtomem.tools.memory_mutation import appended_valve_text, preflight_refusal
 
                 # The re-index after the append judges the whole file: refuse a
                 # file whose content may not be indexed before writing anything.
                 needs_valve = guard.decision == "bypassed"
-                refusal = await preflight_refusal(
+                refusal, pre = await preflight_refusal(
                     comp.index_engine, path, op="mm agent share", needs_valve=needs_valve
                 )
                 if refusal is not None:
                     raise click.ClickException(refusal.removeprefix("Error: "))
-                append_entry(path, chunk.content, title=title, tags=tags)
+                appended = append_entry(path, chunk.content, title=title, tags=tags)
                 try:
                     stats = await comp.index_engine.index_file(
                         path,
                         namespace=target,
                         ingress_guarded=True,
                         force_unsafe=needs_valve,
+                        valve_text=(appended_valve_text(pre, appended) if needs_valve else None),
                         lock_held=True,
                     )
                 except PrivacyRejection as exc:

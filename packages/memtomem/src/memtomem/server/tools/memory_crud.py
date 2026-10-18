@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from memtomem.models import Chunk, IndexingStats
-    from memtomem.tools.memory_writer import PreImage
+    from memtomem.tools.memory_writer import PreImage, Rewrite
 
 logger = logging.getLogger(__name__)
 
@@ -372,21 +372,21 @@ async def _flag_imprecise_write(
 
 async def _preflight_refusal(
     app: AppContext, path: Path, *, op: str, needs_valve: bool
-) -> str | None:
+) -> tuple[str | None, bytes]:
     """:func:`~memtomem.tools.memory_mutation.preflight_refusal`, dropping warmed
     queries when a refusal held the file."""
     from memtomem.tools.memory_mutation import preflight_refusal
 
-    refusal = await preflight_refusal(app.index_engine, path, op=op, needs_valve=needs_valve)
+    refusal, pre = await preflight_refusal(app.index_engine, path, op=op, needs_valve=needs_valve)
     if refusal is not None:
         app.search_pipeline.invalidate_cache()
-    return refusal
+    return refusal, pre
 
 
 async def _mutate_file_and_reindex(
     app: AppContext,
     source_file: Path,
-    mutate: Callable[[PreImage], None],
+    mutate: Callable[[PreImage], Rewrite | None],
     op: str,
     *,
     force_unsafe: bool = False,
@@ -438,6 +438,7 @@ async def _mutate_file_and_reindex(
     # Before any write: a source indexing now skips would take the mutation and
     # then re-index to zeroed stats, leaving the old chunks searchable (#2488).
     from memtomem.indexing.engine import PrivacyRejection
+    from memtomem.tools.memory_mutation import rewrite_valve_text
 
     if app.index_engine.is_excluded(source_file):
         return None, f"Error: {EXCLUDED_SOURCE_DETAIL}"
@@ -464,10 +465,17 @@ async def _mutate_file_and_reindex(
         return None, blocker
     mutation_completed = False
     try:
-        await asyncio.to_thread(mutate, pre_image)
+        written = await asyncio.to_thread(mutate, pre_image)
         mutation_completed = True
+        # The valve covers this edit only: bound to the judged file plus the
+        # edit, and not forwarded when the rewrite read something else.
+        valve_text = rewrite_valve_text(pre_image.data, written) if force_unsafe else None
         stats = await app.index_engine.index_file(
-            source_file, ingress_guarded=True, force_unsafe=force_unsafe, lock_held=True
+            source_file,
+            ingress_guarded=True,
+            force_unsafe=valve_text is not None,
+            valve_text=valve_text,
+            lock_held=True,
         )
         app.search_pipeline.invalidate_cache()
         await flag_untracked_write(app, provenance_session_id)
@@ -949,6 +957,7 @@ async def _mem_add_core(
         # idempotency claim is taken *after* the re-target check, so an aborted
         # attempt leaves no trace — not on disk, and not in the ledger.
         from memtomem.indexing.engine import PrivacyRejection
+        from memtomem.tools.memory_mutation import appended_valve_text
 
         for _attempt in range(NS_RETARGET_ATTEMPTS):
             # Re-asked each attempt, not only before the loop: a retarget moves
@@ -1012,7 +1021,7 @@ async def _mem_add_core(
                     # the claim. ``force_unsafe`` covers this write only when the
                     # file holds nothing flagged or masked.
                     needs_valve = guard.decision == "bypassed"
-                    refusal = await _preflight_refusal(
+                    refusal, pre = await _preflight_refusal(
                         app, target, op="mem_add", needs_valve=needs_valve
                     )
                     if refusal is not None:
@@ -1038,7 +1047,7 @@ async def _mem_add_core(
                     # the watcher / ``mm index --force`` recovers the un-indexed entry.
                     try:
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        await asyncio.to_thread(
+                        appended = await asyncio.to_thread(
                             append_entry, target, content, title=title, tags=tags
                         )
                     except Exception:
@@ -1059,6 +1068,11 @@ async def _mem_add_core(
                             namespace=effective_ns,
                             ingress_guarded=True,
                             force_unsafe=needs_valve,
+                            # Bound to the judged file plus this append: the
+                            # valve covers nothing another writer added since.
+                            valve_text=(
+                                appended_valve_text(pre, appended) if needs_valve else None
+                            ),
                             lock_held=True,
                         )
                     except PrivacyRejection as exc:
@@ -1936,9 +1950,9 @@ async def mem_batch_add(
 
     assert target is not None
 
-    def _append_entries(path: Path) -> int:
+    def _append_entries(path: Path) -> tuple[int, str]:
         """Append all non-empty entries in ONE write; returns the skipped
-        count. Composing every block up front and doing a single append
+        count and the text appended. Composing every block up front and doing a single append
         makes the batch all-or-nothing (issue #1573) — a mid-batch failure
         can no longer leave entries ``0..k-1`` stranded on disk. Runs in one
         worker thread so formatting up to 500 blocks doesn't block the loop.
@@ -1958,8 +1972,7 @@ async def mem_batch_add(
                 skipped += 1
                 continue
             blocks.append(format_entry_block(value, title=key or None, tags=entry_tags))
-        append_blocks(path, blocks)
-        return skipped
+        return skipped, append_blocks(path, blocks)
 
     # Serialize the batch append + re-index under the per-file lock (issue
     # #1570) plus the cross-process sidecar (#1587) so a concurrent
@@ -1978,6 +1991,7 @@ async def mem_batch_add(
         # (issue #2005): the day file's name depends on the namespace, which
         # is only authoritative once resolved inside the lock.
         from memtomem.indexing.engine import PrivacyRejection
+        from memtomem.tools.memory_mutation import appended_valve_text
 
         for _attempt in range(NS_RETARGET_ATTEMPTS):
             # Before the sidecar acquire: ``memory_lock_path`` RESOLVES the target, so a day file that is a symlink into a protected root gets its ``.lock`` created inside that root — a write into the directory we are about to refuse to write. The in-lock gate stays authoritative for the final target.
@@ -2027,7 +2041,7 @@ async def mem_batch_add(
                     # the claim. ``force_unsafe`` covers this write only when the
                     # file holds nothing flagged or masked.
                     needs_valve = any(d[1] == "bypassed" for d in decisions)
-                    refusal = await _preflight_refusal(
+                    refusal, pre = await _preflight_refusal(
                         app, target, op="mem_batch_add", needs_valve=needs_valve
                     )
                     if refusal is not None:
@@ -2050,7 +2064,7 @@ async def mem_batch_add(
                     # never released, so a keyed retry can't duplicate the batch.
                     try:
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        skipped = await asyncio.to_thread(_append_entries, target)
+                        skipped, appended = await asyncio.to_thread(_append_entries, target)
                     except Exception:
                         if idempotency_key is not None:
                             await _release_idempotency_claim(app, "mem_batch_add", idempotency_key)
@@ -2067,6 +2081,11 @@ async def mem_batch_add(
                             namespace=effective_ns,
                             ingress_guarded=True,
                             force_unsafe=needs_valve,
+                            # Bound to the judged file plus this append: the
+                            # valve covers nothing another writer added since.
+                            valve_text=(
+                                appended_valve_text(pre, appended) if needs_valve else None
+                            ),
                             lock_held=True,
                         )
                     except PrivacyRejection as exc:

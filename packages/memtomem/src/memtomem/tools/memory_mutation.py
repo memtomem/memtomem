@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -39,6 +40,7 @@ from memtomem.tools.memory_writer import (
 
 if TYPE_CHECKING:
     from memtomem.indexing.engine import MutationOutcome
+    from memtomem.tools.memory_writer import Rewrite
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
     from uuid import UUID
@@ -145,7 +147,7 @@ async def locked_source_chunk(
 async def mutate_source_and_reindex(
     index_engine,
     source_file: Path,
-    mutate: Callable[[PreImage], None],
+    mutate: Callable[[PreImage], Rewrite | None],
     *,
     force_unsafe: bool = False,
 ) -> IndexingStats:
@@ -211,10 +213,17 @@ async def mutate_source_and_reindex(
         raise MutationBlockedError(blocker)
     mutation_completed = False
     try:
-        await asyncio.to_thread(mutate, pre_image)
+        written = await asyncio.to_thread(mutate, pre_image)
         mutation_completed = True
+        # The valve covers this edit only: bound to the judged file plus the
+        # edit, and not forwarded when the rewrite read something else.
+        valve_text = rewrite_valve_text(pre_image.data, written) if force_unsafe else None
         return await index_engine.index_file(
-            source_file, ingress_guarded=True, force_unsafe=force_unsafe, lock_held=True
+            source_file,
+            ingress_guarded=True,
+            force_unsafe=valve_text is not None,
+            valve_text=valve_text,
+            lock_held=True,
         )
     except Exception as exc:
         if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:
@@ -262,7 +271,9 @@ async def mutate_source_and_reindex(
         raise
 
 
-async def preflight_refusal(index_engine, path: Path, *, op: str, needs_valve: bool) -> str | None:
+async def preflight_refusal(
+    index_engine, path: Path, *, op: str, needs_valve: bool
+) -> tuple[str | None, bytes]:
     """Ask the engine whether ``path`` may take a write; the refusal text if not.
 
     For memory tools that append to or edit a file and then re-index it. The
@@ -271,6 +282,9 @@ async def preflight_refusal(index_engine, path: Path, *, op: str, needs_valve: b
     written, and recorded and held (``refuse_mutation``); so is a file under a
     reviewed masking manifest, and a forced write (``needs_valve``) into a file
     that already holds something flagged or masked. ``None`` means write.
+
+    Also returns the bytes the preflight judged: a caller forwarding its valve
+    binds it to them (:func:`appended_valve_text`), not to a later re-read.
     """
     from memtomem.tools.memory_writer import read_pre_image_or_empty
 
@@ -278,8 +292,8 @@ async def preflight_refusal(index_engine, path: Path, *, op: str, needs_valve: b
     preflight = await asyncio.to_thread(index_engine.preflight_mutation, path, pre)
     if preflight.rejection is not None:
         rejection = await index_engine.refuse_mutation(path, preflight)
-        return rejection.mutation_detail(op, outcome="not_written")
-    return preflight.blocker(op, path.name, needs_valve=needs_valve)
+        return rejection.mutation_detail(op, outcome="not_written"), pre
+    return preflight.blocker(op, path.name, needs_valve=needs_valve), pre
 
 
 def outcome_after_restore(restore: RestoreOutcome) -> MutationOutcome:
@@ -289,3 +303,34 @@ def outcome_after_restore(restore: RestoreOutcome) -> MutationOutcome:
     if restore is RestoreOutcome.failed:
         return "not_rolled_back"
     return "superseded"
+
+
+def appended_valve_text(pre_image: bytes, appended: str) -> str:
+    """The text a file should read as after ``appended`` landed on ``pre_image``.
+
+    For binding a forwarded ``force_unsafe`` (``IndexEngine.index_file``'s
+    ``valve_text``) to exactly this write: ``pre_image`` must be the bytes the
+    preflight judged, and the append writes ``appended`` in text mode, so the
+    platform newline is applied before decoding as the indexer reads. Anything
+    another writer added in between makes the file differ, and the engine then
+    judges it without the valve.
+    """
+    from memtomem.indexing.redaction_exemption import indexer_text
+
+    written = appended.replace("\n", os.linesep).encode("utf-8")
+    return indexer_text(pre_image + written, errors="replace")
+
+
+def rewrite_valve_text(pre_image: bytes, rewrite: Rewrite | None) -> str | None:
+    """``valve_text`` for an in-place rewrite, or ``None`` when it cannot be bound.
+
+    The rewrite reads the file again through its own descriptor. Only when that
+    text is the one the preflight judged does the result consist of the
+    judged file plus this caller's edit; otherwise the result may carry
+    somebody else's bytes, and the caller must not forward its valve.
+    """
+    from memtomem.indexing.redaction_exemption import indexer_text
+
+    if rewrite is None or rewrite.base != indexer_text(pre_image, errors="replace"):
+        return None
+    return rewrite.result

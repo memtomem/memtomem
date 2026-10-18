@@ -630,24 +630,25 @@ class MemtomemStore:
                     return {"error": "namespace_mix_refused", "detail": mix_err}
 
                 from memtomem.indexing.engine import PrivacyRejection
-                from memtomem.tools.memory_mutation import preflight_refusal
+                from memtomem.tools.memory_mutation import appended_valve_text, preflight_refusal
 
                 # The re-index after the append judges the whole file: refuse a
                 # file whose content may not be indexed before writing anything.
                 needs_valve = guard.decision == "bypassed"
-                refusal = await preflight_refusal(
+                refusal, pre = await preflight_refusal(
                     comp.index_engine, target, op="add", needs_valve=needs_valve
                 )
                 if refusal is not None:
                     comp.search_pipeline.invalidate_cache()
                     return {"error": "index_blocked", "detail": refusal, "written": False}
-                append_entry(target, content, title=title, tags=tags)
+                appended = append_entry(target, content, title=title, tags=tags)
                 try:
                     stats = await comp.index_engine.index_file(
                         target,
                         namespace=effective_namespace,
                         ingress_guarded=True,
                         force_unsafe=needs_valve,
+                        valve_text=(appended_valve_text(pre, appended) if needs_valve else None),
                         lock_held=True,
                     )
                 except PrivacyRejection as exc:

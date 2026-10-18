@@ -203,7 +203,7 @@ async def _add(
     from memtomem.cli._session_state import resolve_session_write_namespace
     from memtomem.constants import InvalidNameError, validate_namespace
     from memtomem.indexing.engine import PrivacyRejection
-    from memtomem.tools.memory_mutation import preflight_refusal
+    from memtomem.tools.memory_mutation import appended_valve_text, preflight_refusal
     from memtomem.tools.memory_writer import append_entry
 
     if namespace is not None:
@@ -408,7 +408,7 @@ async def _add(
                     # refuse a file whose content may not be indexed before
                     # writing anything.
                     needs_valve = guard.decision == "bypassed"
-                    refusal = await preflight_refusal(
+                    refusal, pre = await preflight_refusal(
                         comp.index_engine, target, op="mm add", needs_valve=needs_valve
                     )
                     if refusal is not None:
@@ -423,13 +423,18 @@ async def _add(
                         if target.exists()
                         else 0
                     )
-                    await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
+                    appended = await asyncio.to_thread(
+                        append_entry, target, content, title=title, tags=tags
+                    )
                     try:
                         stats = await comp.index_engine.index_file(
                             target,
                             namespace=effective_ns,
                             ingress_guarded=True,
                             force_unsafe=needs_valve,
+                            valve_text=(
+                                appended_valve_text(pre, appended) if needs_valve else None
+                            ),
                             lock_held=True,
                         )
                     except PrivacyRejection as exc:

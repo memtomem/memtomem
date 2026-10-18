@@ -161,18 +161,24 @@ def format_entry_block(
     return f"\n{heading}\n\n> created: {now}{tag_line}\n\n{stripped}\n"
 
 
-def append_blocks(file_path: Path, blocks: Sequence[str]) -> None:
+def append_blocks(file_path: Path, blocks: Sequence[str]) -> str:
     """Append pre-formatted entry blocks to a markdown file in ONE write.
 
     All-or-nothing (issue #1573): a batch of entries is composed into a
     single ``write`` so a mid-batch failure can't leave a partial run of
     entries on disk. A no-op when ``blocks`` is empty (no file touched).
+
+    Returns the text appended (``""`` for none), before the platform newline
+    translation text mode applies, so a caller can name exactly what the file
+    should hold after the write.
     """
     if not blocks:
-        return
+        return ""
     file_path.parent.mkdir(parents=True, exist_ok=True)
+    text = "".join(blocks)
     with open(file_path, "a", encoding="utf-8") as f:
-        f.write("".join(blocks))
+        f.write(text)
+    return text
 
 
 def append_entry(
@@ -180,9 +186,12 @@ def append_entry(
     content: str,
     title: str | None = None,
     tags: list[str] | None = None,
-) -> None:
-    """Append a single new entry to a markdown file, creating it if needed."""
-    append_blocks(file_path, [format_entry_block(content, title=title, tags=tags)])
+) -> str:
+    """Append a single new entry to a markdown file, creating it if needed.
+
+    Returns the text appended (see :func:`append_blocks`).
+    """
+    return append_blocks(file_path, [format_entry_block(content, title=title, tags=tags)])
 
 
 def _find_body_start_index(chunk_lines: list[str]) -> int:
@@ -227,11 +236,23 @@ def _find_body_start_index(chunk_lines: list[str]) -> int:
     return i
 
 
+@dataclass(frozen=True)
+class Rewrite:
+    """What an in-place rewrite read and what it wrote, both as read_text sees text.
+
+    ``base`` is the text the rewrite read through its own descriptor; it can
+    differ from what the caller read earlier if somebody wrote in between.
+    """
+
+    base: str
+    result: str
+
+
 def _rewrite_in_place(
     file_path: Path,
     expected_identity: tuple[int, int] | None,
     edit: Callable[[str], str],
-) -> None:
+) -> Rewrite:
     """Read *file_path*, hand its text to *edit*, and write the result back — but
     only while the path still holds the file the caller was editing (#2367).
 
@@ -319,6 +340,7 @@ def _rewrite_in_place(
         handle.seek(0)
         handle.truncate()
         handle.write(result)
+    return Rewrite(base=text, result=result)
 
 
 def replace_chunk_body(
@@ -329,7 +351,7 @@ def replace_chunk_body(
     *,
     expected_source_span_hash: str | None,
     expected_identity: tuple[int, int] | None = None,
-) -> None:
+) -> Rewrite:
     """Replace a chunk's body in *file_path* while preserving its header.
 
     "Header" means the heading line and any section-leading blockquote
@@ -375,7 +397,7 @@ def replace_chunk_body(
             result += "\n"
         return result
 
-    _rewrite_in_place(file_path, expected_identity, edit)
+    return _rewrite_in_place(file_path, expected_identity, edit)
 
 
 def _validate_source_span(
@@ -409,7 +431,7 @@ def replace_lines(
     *,
     expected_source_span_hash: str | None,
     expected_identity: tuple[int, int] | None = None,
-) -> None:
+) -> Rewrite:
     """Replace lines [start_line, end_line] (1-based, inclusive) with new_content.
 
     Never creates; see :func:`_rewrite_in_place` for what a removed or replaced
@@ -428,7 +450,7 @@ def replace_lines(
             result += "\n"
         return result
 
-    _rewrite_in_place(file_path, expected_identity, edit)
+    return _rewrite_in_place(file_path, expected_identity, edit)
 
 
 def remove_lines(
@@ -438,7 +460,7 @@ def remove_lines(
     *,
     expected_source_span_hash: str | None,
     expected_identity: tuple[int, int] | None = None,
-) -> None:
+) -> Rewrite:
     """Remove lines [start_line, end_line] (1-based, inclusive) from file.
 
     Never creates; see :func:`_rewrite_in_place` for what a removed or replaced
@@ -457,7 +479,7 @@ def remove_lines(
             result += "\n"
         return result
 
-    _rewrite_in_place(file_path, expected_identity, edit)
+    return _rewrite_in_place(file_path, expected_identity, edit)
 
 
 def read_pre_image(file_path: Path) -> PreImage:
