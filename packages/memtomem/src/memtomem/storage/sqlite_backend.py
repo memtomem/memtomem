@@ -74,6 +74,7 @@ from memtomem.storage.orphan_gc import (
     sweep_orphan_project_root,
 )
 from memtomem.storage.sqlite_meta import MetaManager
+from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
 from memtomem.storage.sqlite_namespace import NamespaceOps
 from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority_case
 from memtomem.storage.sqlite_visibility import (
@@ -2304,7 +2305,15 @@ class SqliteBackend(
         return changed
 
     async def hold_source(self, source_file: Path, reason: str) -> bool:
-        """Hide existing source chunks without destroying them (#2498)."""
+        """Hide existing source chunks without destroying them (#2498).
+
+        A ``redaction_blocked`` hold keeps its reason when an availability
+        reason arrives later (#2629): the file being missing or outside the
+        roots says nothing about whether its content may be served again, and
+        the out-of-root recheck lifts availability holds on presence alone.
+        Moving a hold *to* that reason advances the source's visibility
+        generation, so a release prepared before the block cannot lift it.
+        """
         # A stale network mount can block Path.resolve(); keep that syscall off
         # the event loop for scanner and scheduler callers that reach here.
         source = await asyncio.to_thread(norm_path, source_file)
@@ -2315,7 +2324,9 @@ class SqliteBackend(
         existing = db.execute(
             "SELECT reason FROM held_sources WHERE source_file=?", (source,)
         ).fetchone()
-        if existing is not None and existing[0] == reason:
+        if existing is not None and (
+            existing[0] == reason or existing[0] == REDACTION_BLOCKED_HOLD
+        ):
             pending = db.execute(
                 "SELECT 1 FROM pending_source_checks WHERE source_file=?", (source,)
             ).fetchone()
@@ -2333,27 +2344,45 @@ class SqliteBackend(
                     "(source_file, first_seen_at, last_checked_at, reason) VALUES (?, ?, ?, ?)",
                     (source, now, now, reason),
                 ).rowcount
+                blocked_now = False
                 if not inserted:
                     current = db.execute(
                         "SELECT reason FROM held_sources WHERE source_file=?", (source,)
                     ).fetchone()
-                    if current is not None and current[0] != reason:
+                    if (
+                        current is not None
+                        and current[0] != reason
+                        and current[0] != REDACTION_BLOCKED_HOLD
+                    ):
                         db.execute(
                             "UPDATE held_sources SET last_checked_at=?, reason=? WHERE source_file=?",
                             (now, reason, source),
                         )
+                        blocked_now = reason == REDACTION_BLOCKED_HOLD
                 pending = db.execute(
                     "DELETE FROM pending_source_checks WHERE source_file=?", (source,)
                 ).rowcount
-                changed = bool(inserted or pending)
+                changed = bool(inserted or pending or blocked_now)
                 if changed:
                     self._bump_source_visibility(db, source)
             self._commit_if_standalone(db)
         return changed
 
     async def release_source_hold(
-        self, source_file: Path, *, expected_generation: int | None = None
+        self,
+        source_file: Path,
+        *,
+        expected_generation: int | None = None,
+        validated: bool = True,
     ) -> bool:
+        """Lift a source's hold; ``validated=False`` for a presence-only release.
+
+        ``validated`` means the caller has just indexed the current content
+        cleanly. A caller that only saw the file exist passes ``False``, and a
+        ``redaction_blocked`` hold then stays: its file is present, and the
+        reason it is held is what the file contains (#2629). The reason is
+        read under the writer lock, in the transaction that clears it.
+        """
         db = self._get_db()
         source = norm_path(source_file)
         changed = False
@@ -2366,7 +2395,7 @@ class SqliteBackend(
             # The observer uses a separate SQLite connection. Hold the writer
             # lock while checking this source's generation and clearing rows, so a delete
             # journaled after indexing began cannot be erased here.
-            if expected_generation is not None and not self._in_transaction:
+            if (expected_generation is not None or not validated) and not self._in_transaction:
                 db.execute("BEGIN IMMEDIATE")
             generation_matches = True
             if expected_generation is not None:
@@ -2375,10 +2404,17 @@ class SqliteBackend(
                     (source,),
                 ).fetchone()
                 generation_matches = (int(row[0]) if row else 0) == expected_generation
+            content_blocked = False
+            if not validated:
+                reason = db.execute(
+                    "SELECT reason FROM held_sources WHERE source_file=?", (source,)
+                ).fetchone()
+                content_blocked = reason is not None and reason[0] == REDACTION_BLOCKED_HOLD
             # An ordinary receipt hit has no visibility row. Skip DELETE so
             # the common path stays read-only.
             if (
                 generation_matches
+                and not content_blocked
                 and db.execute(
                     "SELECT 1 FROM held_sources WHERE source_file=? UNION "
                     "SELECT 1 FROM pending_source_checks WHERE source_file=? LIMIT 1",

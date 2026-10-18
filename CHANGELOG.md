@@ -88,6 +88,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A file the redaction guard refuses on re-index no longer keeps serving
+  its older chunks (#2629).** When an edit added secret-shaped text to a file
+  that was already indexed, the guard refused the new content but the chunks
+  from the last clean index stayed searchable, including text the same edit
+  had deleted. Those chunks are now held, the same way the chunks of an
+  unavailable source are: hidden from search, kept in the database, and
+  listed by `mm memory doctor` as a held source. The next clean index of the
+  file lifts the hold. Noticing that the file exists, or that it went missing
+  or left the configured roots, does not. If the hold itself cannot be
+  written, the run reports a separate retryable error, and the watcher
+  retries the file. A file refused on its first index has nothing to hold.
+  Reading a held chunk by its id is still possible (#2777).
 - **`mm index <file>` clears the `stale_index` that `mm memory doctor`
   reports when another build of the same release wrote the index (#2773).**
   The index receipt identified the code by its release version only, so a

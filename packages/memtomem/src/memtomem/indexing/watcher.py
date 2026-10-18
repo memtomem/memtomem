@@ -442,6 +442,8 @@ class FileWatcher:
                             # here could block the event loop on the same mount.
                             continue
                         if state == "present":
+                            from memtomem.indexing.engine import PrivacyRejection
+
                             try:
                                 if is_under_any_root(path, self._config.all_index_roots()):
                                     stats = await self._engine.index_file(
@@ -454,11 +456,16 @@ class FileWatcher:
                                     # A root removed without a chunk sweep must
                                     # not be reindexed by a late watcher event.
                                     # Its existing rows may become visible again
-                                    # once the source is positively present.
-                                    if await storage.release_source_hold(path):
+                                    # once the source is positively present —
+                                    # unless its content was what held it.
+                                    if await storage.release_source_hold(path, validated=False):
                                         if self._search_pipeline is not None:
                                             self._search_pipeline.invalidate_cache()
                                         self._recheck_wakeup.set()
+                            except PrivacyRejection:
+                                # Still refused: the engine kept the hold.
+                                # Expected until the file is fixed, not a fault.
+                                logger.debug("Held source still redaction-blocked: %s", path)
                             except Exception:
                                 logger.exception("Could not restore held source %s", path)
                         elif path in pending_checks:
@@ -1063,8 +1070,9 @@ class FileWatcher:
 
     async def _reindex(self, file_path: Path) -> Path | None:
         """Reindex one changed file. Returns ``file_path`` when the reindex
-        timed out acquiring the file's cross-process sidecar (so the caller can
-        retry it next window), else ``None``.
+        timed out acquiring the file's cross-process sidecar, or was refused by
+        the redaction guard without its older chunks being held (so the caller
+        can retry it next window), else ``None``.
 
         A path no longer contained in any configured root is dropped. Events are
         collected before a flush and ``reconfigure`` leaves them alone, so a file
@@ -1121,6 +1129,10 @@ class FileWatcher:
                 file_path.name,
                 exc.hit_count,
             )
+            if exc.held is False:
+                # Its older chunks could not be hidden (#2629). Retry next
+                # debounce window rather than leave them served.
+                return file_path
         except TimeoutError:
             # #1587: a CRUD span or ``memory-migrate`` held this file's sidecar
             # past the bounded acquire budget. The change is NOT lost — return
