@@ -986,6 +986,38 @@ async def test_a_populated_onnx_store_backfilled_as_none(
         await close_components(comp)
 
 
+async def test_revert_refuses_vectors_whose_policy_is_not_recorded(
+    tmp_path, monkeypatch, budget_checks
+):
+    """#2619: an opener whose provider differs from the stored one leaves a
+    missing policy row missing. Reverting onto those vectors would adopt ``""``
+    as the runtime policy, which turns the write fence off."""
+    config = _degraded_config(tmp_path, monkeypatch)
+    await _seed_store(config, vectors=1, provider="ollama", model="nomic-embed-text", dimension=768)
+    _set_meta(config, embedding_policy_fingerprint=None, embedding_max_sequence_tokens=None)
+
+    await _assert_revert_refused(config, "does not record the embedding policy")
+    assert _stored_meta(config, "embedding_policy_fingerprint") is None
+
+
+async def test_embedding_status_renders_an_unrecorded_policy(tmp_path, monkeypatch, budget_checks):
+    """The web schema's policy field is a string; a missing row renders as ""."""
+    from memtomem.web.routes.system import get_embedding_status
+
+    config = _degraded_config(tmp_path, monkeypatch)
+    await _seed_store(config, vectors=1, provider="ollama", model="nomic-embed-text", dimension=768)
+    _set_meta(config, embedding_policy_fingerprint=None, embedding_max_sequence_tokens=None)
+    comp = await create_components(config)
+    try:
+        assert comp.storage.embedding_mismatch["stored"]["policy_fingerprint"] is None
+        status = await get_embedding_status(storage=comp.storage)
+        assert status.has_mismatch is True
+        assert status.stored.policy_fingerprint == ""
+        assert status.stored.max_sequence_tokens is None
+    finally:
+        await close_components(comp)
+
+
 async def test_revert_allows_the_variant_the_store_was_built_with(
     tmp_path, monkeypatch, budget_checks
 ):

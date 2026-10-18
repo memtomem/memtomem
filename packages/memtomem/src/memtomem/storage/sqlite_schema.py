@@ -435,9 +435,25 @@ def create_tables(
     # native limit. Record that legacy policy as cap=0 instead of silently
     # claiming the newly configured safety cap. Fresh DBs and non-ONNX
     # legacy DBs can safely adopt the current policy metadata.
+    #
+    # The row is the only record of the policy the stored vectors were built
+    # with, so it is written only by an opener that matches their recorded
+    # identity (#2619). A populated store whose identity rows name another
+    # provider, or are only half there, keeps the row missing until a matching
+    # opener or ``embedding-reset --mode apply-current`` writes it. Rows a
+    # mismatched opener already wrote cannot be told from genuine ones and are
+    # left alone.
     if embedding_policy_fingerprint:
         stored_policy = meta.get_meta("embedding_policy_fingerprint")
-        if stored_policy is None:
+        recorded_provider = meta.get_meta("embedding_provider")
+        recorded_model = meta.get_meta("embedding_model")
+        identity_recorded = recorded_provider is not None or recorded_model is not None
+        opener_mismatch = identity_recorded and (
+            not embedding_identity_complete(recorded_provider, recorded_model)
+            or (recorded_provider or "").strip().lower()
+            != (embedding_provider or "").strip().lower()
+        )
+        if stored_policy is None and not (vec_exists and opener_mismatch):
             if vec_exists and (embedding_provider or "").lower() == "onnx":
                 meta.set_meta("embedding_policy_fingerprint", "onnx:v1:max_sequence_tokens=0")
                 meta.set_meta("embedding_max_sequence_tokens", "0")

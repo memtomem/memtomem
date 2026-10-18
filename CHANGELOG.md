@@ -88,6 +88,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Opening a populated store under a different provider no longer records
+  that provider's policy for its vectors (#2619).** A store created before
+  policies were recorded has no policy row, and the first config to open it
+  wrote its own policy there. So an ONNX store first opened with
+  `provider=none` was recorded as `none:v1`, which says nothing true about
+  its vectors. The row is now written only by an opener whose provider
+  matches the store's recorded identity. An opener that differs, or a store
+  whose identity is only half recorded, leaves it missing. Status surfaces
+  then report the policy as unknown instead of the opener's value. Reverting
+  to the stored embedding on such a store is refused, since the server would
+  otherwise run without the check that stops writes under the wrong policy.
+  Rows that a mismatched opener already wrote cannot be told apart from
+  genuine ones and are left as they are.
 - **`mm index <file>` clears the `stale_index` that `mm memory doctor`
   reports when another build of the same release wrote the index (#2773).**
   The index receipt identified the code by its release version only, so a

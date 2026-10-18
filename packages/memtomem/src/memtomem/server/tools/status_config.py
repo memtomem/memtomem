@@ -1381,6 +1381,15 @@ async def _revert_to_stored_locked(
         ),
     }
     vector_count = on_disk["vectors"]
+    # Vectors without a recorded policy (#2619): adopting ``""`` as the runtime
+    # policy would switch off the write fence, so a later restamp by another
+    # process could no longer stop this server writing under the wrong one.
+    if vector_count and not on_disk["policy_fingerprint"]:
+        raise _revert_refusal(
+            "the database does not record the embedding policy its vectors were "
+            "built with; restart with the stored provider configured so it records "
+            'one, or reset with mem_embedding_reset(mode="apply_current")'
+        )
     restamped, restamped_indexing = await _revert_candidate(
         config, stored, vector_count=vector_count
     )

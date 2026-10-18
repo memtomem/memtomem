@@ -91,11 +91,18 @@ class MetaManager:
         dimension: int,
         provider: str,
         model: str,
-        policy_fingerprint: str = "",
         max_sequence_tokens: int | None = None,
     ) -> dict:
-        """Return the embedding config actually stored in the DB."""
+        """Return the embedding config actually stored in the DB.
+
+        A missing policy row is reported as ``None``, not as the opener's
+        policy: the row is the only record of what the vectors were built with,
+        and a store opened by a config that does not match them keeps it
+        missing (#2619). ``max_sequence_tokens`` is ``None`` with it, and falls
+        back to the opener's only when the policy row exists without a cap row.
+        """
         stored_max = self.get_meta("embedding_max_sequence_tokens")
+        stored_policy = self.get_meta("embedding_policy_fingerprint")
         stored_provider = self.get_meta("embedding_provider")
         stored_model = self.get_meta("embedding_model")
         if stored_provider is not None or stored_model is not None:
@@ -107,11 +114,12 @@ class MetaManager:
             "dimension": dimension,
             "provider": provider,
             "model": model,
-            "policy_fingerprint": self.get_meta("embedding_policy_fingerprint")
-            or policy_fingerprint,
-            "max_sequence_tokens": int(stored_max)
-            if stored_max is not None
-            else max_sequence_tokens,
+            "policy_fingerprint": stored_policy,
+            # The cap belongs to the policy: without the policy row a surviving
+            # cap row describes nothing it can be checked against.
+            "max_sequence_tokens": None
+            if stored_policy is None
+            else (int(stored_max) if stored_max is not None else max_sequence_tokens),
         }
 
     # ---- reset ---------------------------------------------------------------

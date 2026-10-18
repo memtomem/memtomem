@@ -432,6 +432,13 @@ class SqliteBackend(
             None  # (stored_prov, stored_model, cfg_prov, cfg_model)
         )
         self._policy_mismatch: tuple[str, str, int | None, int | None] | None = None
+        # Whether the store recorded a policy row when this backend opened it
+        # (#2619). Read only while a mismatch is being reported, and never
+        # updated: a successful reset or revert clears the report, so the
+        # snapshot cannot outlive it there. After a failed one it can at worst
+        # report a row that was written as unknown, never a missing row as
+        # recorded.
+        self._stored_policy_recorded = True
         self._meta: MetaManager | None = None
         self._ns: NamespaceOps | None = None
         # ``transaction()`` is task-affine.  The owner is also the guard for
@@ -573,6 +580,7 @@ class SqliteBackend(
                 column[1]: column[0] for column in self._db.execute("PRAGMA table_info(chunks)")
             }
             stored_policy = self._meta.get_meta("embedding_policy_fingerprint")
+            self._stored_policy_recorded = stored_policy is not None
             stored_max_raw = self._meta.get_meta("embedding_max_sequence_tokens")
             stored_max = int(stored_max_raw) if stored_max_raw is not None else None
             if self._policy_differs(stored_policy):
@@ -983,7 +991,6 @@ class SqliteBackend(
             self._dimension,
             self._embedding_provider,
             self._embedding_model,
-            self._embedding_policy_fingerprint,
             self._embedding_max_sequence_tokens,
         )
 
@@ -1002,10 +1009,17 @@ class SqliteBackend(
         stored_model = self._model_mismatch[1] if self._model_mismatch else self._embedding_model
         cfg_prov = self._model_mismatch[2] if self._model_mismatch else self._embedding_provider
         cfg_model = self._model_mismatch[3] if self._model_mismatch else self._embedding_model
+        # Without a policy mismatch the stored row equals the configured
+        # policy, or was missing at open; a missing row is reported as unknown
+        # (#2619). The open-time snapshot, not a live read: this property is
+        # read on the search path, where a live read would take the writer
+        # connection another task may own, and a row another process wrote
+        # since would be reported as this backend's own policy.
+        policy_recorded = self._policy_mismatch is not None or self._stored_policy_recorded
         stored_policy = (
             self._policy_mismatch[0]
             if self._policy_mismatch
-            else self._embedding_policy_fingerprint
+            else (self._embedding_policy_fingerprint if policy_recorded else None)
         )
         cfg_policy = (
             self._policy_mismatch[1]
@@ -1015,7 +1029,7 @@ class SqliteBackend(
         stored_max = (
             self._policy_mismatch[2]
             if self._policy_mismatch
-            else self._embedding_max_sequence_tokens
+            else (self._embedding_max_sequence_tokens if policy_recorded else None)
         )
         cfg_max = (
             self._policy_mismatch[3]

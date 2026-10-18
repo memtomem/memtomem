@@ -1671,7 +1671,7 @@ async def get_embedding_status(storage=Depends(get_storage)) -> EmbeddingStatusR
             dimension=stored_info["dimension"],
             provider=stored_info["provider"],
             model=stored_info["model"],
-            policy_fingerprint=stored_info.get("policy_fingerprint", ""),
+            policy_fingerprint=stored_info.get("policy_fingerprint") or "",
             max_sequence_tokens=stored_info.get("max_sequence_tokens"),
         )
         if stored_info
@@ -1704,7 +1704,13 @@ async def get_embedding_status(storage=Depends(get_storage)) -> EmbeddingStatusR
         dimension_mismatch=mismatch["dimension_mismatch"],
         model_mismatch=mismatch["model_mismatch"],
         policy_mismatch=mismatch.get("policy_mismatch", False),
-        stored=EmbeddingConfigInfo(**mismatch["stored"]),
+        # A store may not record its policy (#2619): ``None`` renders as "".
+        stored=EmbeddingConfigInfo(
+            **{
+                **mismatch["stored"],
+                "policy_fingerprint": mismatch["stored"].get("policy_fingerprint") or "",
+            }
+        ),
         configured=EmbeddingConfigInfo(**mismatch["configured"]),
         coverage=coverage_out,
     )
