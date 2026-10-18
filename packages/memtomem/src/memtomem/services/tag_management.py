@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 from uuid import UUID
 
-from memtomem.search.visibility import chunk_in_scope_boundary, chunk_withheld
+from memtomem.search.visibility import chunk_in_scope_boundary
 
 if TYPE_CHECKING:
     from memtomem.models import Chunk
@@ -253,12 +253,8 @@ async def replace_chunk_tags(
         # atomic SQL predicate, because ``memory-migrate`` does not take this
         # process-local tag lock and may re-scope the row after this fetch.
         # A redaction hold (#2777) is screened at both points the same way.
-        chunk = await storage.get_chunk(chunk_id)
-        if (
-            chunk is None
-            or not chunk_in_scope_boundary(chunk.metadata, project_context_root)
-            or await chunk_withheld(storage, chunk.metadata)
-        ):
+        chunk = await storage.get_chunk(chunk_id, exclude_withheld=True)
+        if chunk is None or not chunk_in_scope_boundary(chunk.metadata, project_context_root):
             return None
 
         if tuple(chunk.metadata.tags) == deduped:

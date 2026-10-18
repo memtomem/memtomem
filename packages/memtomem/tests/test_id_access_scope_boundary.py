@@ -66,7 +66,6 @@ def _app_returning(chunk: Chunk | None, *, context: Path | None) -> MagicMock:
     app.config.indexing.project_memory_dirs = (
         [] if context is None else [context / ".memtomem" / "memories"]
     )
-    app.storage.is_source_withheld = AsyncMock(return_value=False)
     app.storage.get_chunk = AsyncMock(return_value=chunk)
     return app
 
@@ -182,7 +181,6 @@ class TestRelations:
         mine = _chunk("mine")
         foreign = _foreign()
         app = _app_returning(None, context=MINE)
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunk = AsyncMock(side_effect=[mine, foreign])
         app.storage.add_relation = AsyncMock()
         _pin_context(monkeypatch, MINE)
@@ -202,7 +200,6 @@ class TestRelations:
         mine = _chunk("mine")
         foreign = _foreign()
         app = _app_returning(None, context=MINE)
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunk = AsyncMock(side_effect=[mine, foreign])
         app.storage.delete_relation = AsyncMock(return_value=True)
         _pin_context(monkeypatch, MINE)
@@ -231,10 +228,8 @@ class TestRelations:
         deleted_id = uuid4()
 
         app = _app_returning(None, context=MINE)
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
-        app.storage.get_chunk = AsyncMock(
-            side_effect=[anchor, visible, foreign, None]  # anchor, then each relation
-        )
+        rows = {c.id: c for c in (anchor, visible, foreign)}
+        app.storage.get_chunk = AsyncMock(side_effect=lambda cid, **_kwargs: rows.get(cid))
         app.storage.get_related = AsyncMock(
             return_value=[
                 (visible.id, "related"),
@@ -274,13 +269,12 @@ class TestReflect:
         # ``mem_reflect`` hands ``get_chunk`` the raw string from the hub row,
         # so the stub normalises rather than relying on a call-order list that
         # would hide the difference.
-        def _lookup(cid):
+        def _lookup(cid, **_kwargs):
             try:
                 return chunks.get(UUID(str(cid)))
             except (ValueError, TypeError):
                 return None
 
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunk = AsyncMock(side_effect=_lookup)
         # Present but never expected to fire: the tool must not go back to the
         # graph to recount a degree the aggregate already computed.
@@ -477,10 +471,7 @@ class TestMutationLock:
             id=in_boundary.id,
             embedding=[0.1] * 768,
         )
-        storage = SimpleNamespace(
-            get_chunk=AsyncMock(side_effect=[in_boundary, migrated]),
-            is_source_withheld=AsyncMock(return_value=False),
-        )
+        storage = SimpleNamespace(get_chunk=AsyncMock(side_effect=[in_boundary, migrated]))
 
         async with locked_source_chunk(
             storage, in_boundary.id, project_context_root=MINE, index_guard=None

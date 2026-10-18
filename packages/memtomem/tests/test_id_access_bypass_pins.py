@@ -60,7 +60,6 @@ def _make_chunk(
 def _app_with(chunk: Chunk, *, listed: list[Chunk] | None = None) -> MagicMock:
     app = MagicMock()
     app.config.search.system_namespace_prefixes = ["archive:", "agent-runtime:"]
-    app.storage.is_source_withheld = AsyncMock(return_value=False)
     app.storage.get_chunk = AsyncMock(return_value=chunk)
     app.storage.get_context_windows = fake_context_windows(listed or [chunk])
     return app
@@ -220,7 +219,6 @@ class TestScopeAxisIsTheOneThatBinds:
         storage.recall_chunks = AsyncMock(return_value=[])
         # ``get_chunk`` must not be the route's resolver — pinning it as a
         # tripwire rather than trusting the call-shape assertion alone.
-        storage.is_source_withheld = AsyncMock(return_value=False)
         storage.get_chunk = AsyncMock(side_effect=AssertionError("must resolve via recall_chunks"))
         config = SimpleNamespace(indexing=SimpleNamespace(project_memory_dirs=[]))
         chunk_id = uuid4()

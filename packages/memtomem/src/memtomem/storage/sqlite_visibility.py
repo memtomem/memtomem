@@ -73,7 +73,8 @@ VISIBLE_SOURCE_CHUNKS = _visible_source_sql("chunks")
 # the guard refused the file's current state, and the retained chunks can
 # carry text that same edit deleted. A policy summary derived from such a
 # source is withheld with it, the way ``_visible_source_sql`` hides it with
-# any hold. ``SqliteBackend.is_source_withheld`` is the per-row twin.
+# any hold. It belongs in the statement that reads the row (``get_chunk``,
+# ``get_chunks_batch``, the context-window seek), not in a check beside it.
 def _not_withheld_sql(alias: str) -> str:
     # Only the two fixed table spellings below reach this SQL fragment.
     if alias not in {"c", "chunks"}:
@@ -93,7 +94,6 @@ def _not_withheld_sql(alias: str) -> str:
     )
 
 
-NOT_WITHHELD_C = _not_withheld_sql("c")
 NOT_WITHHELD_CHUNKS = _not_withheld_sql("chunks")
 
 

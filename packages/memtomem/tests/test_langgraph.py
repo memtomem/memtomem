@@ -862,7 +862,6 @@ class TestGetDelete:
             metadata=ChunkMetadata(source_file=Path("n/a.md"), tags=("x",), namespace="ns"),
         )
         comp = MagicMock()
-        comp.storage.is_source_withheld = AsyncMock(return_value=False)
         comp.storage.get_chunk = AsyncMock(return_value=chunk)
         store = MemtomemStore()
         store._components = comp
@@ -880,14 +879,13 @@ class TestGetDelete:
             # ``delete`` will demand ``confirm_project_shared``.
             "scope": "user",
         }
-        comp.storage.get_chunk.assert_awaited_once_with(chunk.id)
+        comp.storage.get_chunk.assert_awaited_once_with(chunk.id, exclude_withheld=True)
 
     @pytest.mark.asyncio
     async def test_get_missing_returns_none(self):
         from memtomem.integrations.langgraph import MemtomemStore
 
         comp = MagicMock()
-        comp.storage.is_source_withheld = AsyncMock(return_value=False)
         comp.storage.get_chunk = AsyncMock(return_value=None)
         store = MemtomemStore()
         store._components = comp
@@ -910,7 +908,6 @@ class TestGetDelete:
         comp = MagicMock()
         # Delete screens the chunk first (ADR-0036), so the row has to exist
         # and be in-boundary before ``delete_chunks`` is reached at all.
-        comp.storage.is_source_withheld = AsyncMock(return_value=False)
         comp.storage.get_chunk = AsyncMock(
             return_value=Chunk(
                 content="c",
@@ -940,7 +937,6 @@ class TestGetDelete:
         cid = uuid4()
         comp = MagicMock()
         comp.config.indexing.project_memory_dirs = []
-        comp.storage.is_source_withheld = AsyncMock(return_value=False)
         comp.storage.get_chunk = AsyncMock(
             return_value=Chunk(
                 content="another project's note",
@@ -2234,7 +2230,6 @@ class TestDeleteGateBUnderTheLock:
 
         monkeypatch.setattr(project_context, "_resolve_project_context_root", lambda comp: tmp_path)
         comp = MagicMock()
-        comp.storage.is_source_withheld = AsyncMock(return_value=False)
         comp.storage.get_chunk = AsyncMock(side_effect=list(chunks))
         comp.storage.delete_chunks = AsyncMock(return_value=deleted_rows)
         # Sync predicate on the real engine: a bare MagicMock returns a truthy

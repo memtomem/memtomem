@@ -14,11 +14,7 @@ from uuid import UUID
 from pathlib import Path
 
 from memtomem.models import Chunk
-from memtomem.search.visibility import (
-    chunk_in_scope_boundary,
-    chunk_withheld,
-    resolve_visible_chunk,
-)
+from memtomem.search.visibility import chunk_in_scope_boundary, resolve_visible_chunk
 
 
 def not_found(chunk_id: str) -> str:
@@ -64,17 +60,10 @@ def caller_boundary(app) -> Path | None:
 
 
 def in_boundary(chunk: Chunk, project_context_root: Path | None) -> bool:
-    """Whether ``chunk`` is inside ``project_context_root``'s boundary."""
-    return chunk_in_scope_boundary(chunk.metadata, project_context_root)
+    """Whether ``chunk`` is inside ``project_context_root``'s boundary.
 
-
-async def readable(app, chunk: Chunk, project_context_root: Path | None) -> bool:
-    """Whether a chunk this surface fetched itself may be shown or written.
-
-    :func:`in_boundary` plus the redaction-hold screen that
-    :func:`resolve_chunk` applies (#2777). A ``False`` renders as
-    :func:`not_found`, or the chunk is skipped in a batch.
+    A surface that fetches its own rows pairs this with
+    ``get_chunk(..., exclude_withheld=True)``, the redaction-hold half of what
+    :func:`resolve_chunk` applies (#2777).
     """
-    return in_boundary(chunk, project_context_root) and not await chunk_withheld(
-        app.storage, chunk.metadata
-    )
+    return chunk_in_scope_boundary(chunk.metadata, project_context_root)

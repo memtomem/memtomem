@@ -270,7 +270,6 @@ class TestMemExpand:
         target = chunks[2]
 
         app = MagicMock()
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunk = AsyncMock(return_value=target)
         app.storage.get_context_windows = fake_context_windows(chunks)
 
@@ -296,7 +295,6 @@ class TestMemExpand:
         target = chunks[0]
 
         app = MagicMock()
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunk = AsyncMock(return_value=target)
         app.storage.get_context_windows = fake_context_windows(chunks)
 
@@ -315,7 +313,6 @@ class TestMemExpand:
         from memtomem.server.tools.search import mem_expand
 
         app = MagicMock()
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunk = AsyncMock(return_value=None)
 
         ctx = SimpleNamespace()
@@ -336,7 +333,6 @@ class TestMemExpand:
         app.config.search.system_namespace_prefixes = (
             ["archive:", "agent-runtime:"] if prefixes is None else prefixes
         )
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunk = AsyncMock(return_value=chunks[anchor_index])
         app.storage.get_context_windows = fake_context_windows(chunks)
 
@@ -382,7 +378,6 @@ class TestMemExpand:
 
         app = MagicMock()
         app.config.search.system_namespace_prefixes = ["archive:", "agent-runtime:"]
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunk = AsyncMock(return_value=chunks[1])
         app.storage.get_context_windows = fake_context_windows(chunks)
         monkeypatch.setattr(
@@ -443,7 +438,6 @@ class TestMemExpand:
         ]
         app = MagicMock()
         app.config.search.system_namespace_prefixes = []
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunk = AsyncMock(return_value=chunks[1])
         app.storage.get_context_windows = fake_context_windows(chunks)
         monkeypatch.setattr(
@@ -495,7 +489,6 @@ class TestMemExpand:
         ]
         app = MagicMock()
         app.config.search.system_namespace_prefixes = []
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunk = AsyncMock(return_value=chunks[1])
         app.storage.get_context_windows = fake_context_windows(chunks)
         monkeypatch.setattr(
@@ -524,7 +517,6 @@ class TestMemExpand:
         ]
         app = MagicMock()
         app.config.search.system_namespace_prefixes = []
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunk = AsyncMock(return_value=chunks[1])
         app.storage.get_context_windows = fake_context_windows(chunks)
         monkeypatch.setattr(
@@ -548,7 +540,6 @@ class TestMemExpand:
         ]
         app = MagicMock()
         app.config.search.system_namespace_prefixes = []
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunk = AsyncMock(return_value=chunks[1])
         app.storage.get_context_windows = fake_context_windows(chunks)
         monkeypatch.setattr(
@@ -625,7 +616,6 @@ class TestMemIncrementAccess:
         # Ids are screened before the boost lands (ADR-0036), so the mock
         # has to answer the lookup with an in-boundary chunk.
         ids = [str(uuid4()), str(uuid4()), str(uuid4())]
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunks_batch = AsyncMock(
             return_value={UUID(i): _make_chunk("in boundary") for i in ids}
         )
@@ -651,7 +641,6 @@ class TestMemIncrementAccess:
         app = MagicMock()
         app.storage.increment_access = AsyncMock()
         valid_id = str(uuid4())
-        app.storage.is_source_withheld = AsyncMock(return_value=False)
         app.storage.get_chunks_batch = AsyncMock(
             return_value={UUID(valid_id): _make_chunk("in boundary")}
         )

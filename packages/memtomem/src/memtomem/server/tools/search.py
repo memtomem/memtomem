@@ -15,11 +15,7 @@ from memtomem.models import (
     NamespaceFilter,
     ScopeFilter,
 )
-from memtomem.search.visibility import (
-    chunk_in_scope_boundary,
-    chunk_withheld,
-    neighbor_visible,
-)
+from memtomem.search.visibility import chunk_in_scope_boundary, neighbor_visible
 
 # Shared by the MCP tools, the CLI, the web routes, and the in-process
 # LangGraph adapter; re-exported from this module so the long-standing
@@ -383,11 +379,10 @@ async def mem_expand(
 
     source_file = chunk.metadata.source_file
     spec = _expand_visibility_spec(app)
+    # The neighbours are read after the anchor; storage leaves out any row a
+    # redaction hold withholds at that read, so one committed in between stops
+    # at the anchor already read while it was readable (#2777).
     windows = await app.storage.get_context_windows(source_file, [uid], window, **spec)
-    # The neighbours were read after the anchor was screened, and they share
-    # its source: a redaction hold committed in between must not reach them.
-    if await chunk_withheld(app.storage, chunk.metadata):
-        return not_found(chunk_id)
     rows = windows.get(uid)
     if rows is None:
         return f"Chunk {chunk_id} not found in source file listing."
@@ -481,20 +476,14 @@ async def mem_increment_access(
 
     # One batched read rather than a fetch per id: the argument is an
     # unbounded list, and this is a boost, not a page the caller is reading.
-    rows = await app.storage.get_chunks_batch(valid)
+    rows = await app.storage.get_chunks_batch(valid, exclude_withheld=True)
     project_context_root = _resolve_project_context_root(app)
-    # Asked once per (source, origin): the list is unbounded, its sources are not.
-    withheld: dict[tuple[str, str | None], bool] = {}
-    in_boundary_ids = []
-    for cid in valid:
-        row = rows.get(cid)
-        if row is None or not chunk_in_scope_boundary(row.metadata, project_context_root):
-            continue
-        key = (str(row.metadata.source_file), row.metadata.origin)
-        if key not in withheld:
-            withheld[key] = await chunk_withheld(app.storage, row.metadata)
-        if not withheld[key]:
-            in_boundary_ids.append(cid)
+    in_boundary_ids = [
+        cid
+        for cid in valid
+        if (row := rows.get(cid)) is not None
+        and chunk_in_scope_boundary(row.metadata, project_context_root)
+    ]
     if in_boundary_ids:
         await app.storage.increment_access(in_boundary_ids)
 

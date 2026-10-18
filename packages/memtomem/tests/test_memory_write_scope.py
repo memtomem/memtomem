@@ -356,7 +356,7 @@ def _stage_edit_chunk(
     )
     calls = {"n": 0}
 
-    async def _get_chunk(_uid):
+    async def _get_chunk(_uid, **_kwargs):
         calls["n"] += 1
         return probe if calls["n"] < _MEM_EDIT_FRESH_FETCH else fresh
 

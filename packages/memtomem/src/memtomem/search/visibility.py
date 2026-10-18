@@ -24,7 +24,11 @@ its root is unavailable) is a retrieval default like the two above, so a held
 chunk stays readable by id for recovery. A redaction hold is not: the guard
 refused the file's current content, and the chunks kept from the last clean
 index can carry text that edit deleted. Those resolve by id exactly as a
-nonexistent id does (#2777, :func:`chunk_withheld`).
+nonexistent id does (#2777). The rule lives in the statement that reads the
+row (``get_chunk(..., exclude_withheld=True)``), never in a check beside it:
+a hold can be committed, or released together with the row's deletion,
+between two statements, and either way a separate check judges a row other
+than the one being returned.
 
 Within adjacency the split is between *visibility* and *selection*. Visibility
 filters say what the caller may see and apply to neighbours; selection filters
@@ -49,22 +53,11 @@ from memtomem.models import (
 
 
 class _ChunkSource(Protocol):
-    """The storage methods :func:`resolve_visible_chunk` needs."""
+    """The one storage method :func:`resolve_visible_chunk` needs."""
 
-    async def get_chunk(self, chunk_id: UUID) -> Chunk | None: ...
-
-    async def is_source_withheld(self, source_file: Path, *, origin: str | None) -> bool: ...
-
-
-async def chunk_withheld(storage: _ChunkSource, metadata: ChunkMetadata) -> bool:
-    """Whether a chunk is withheld from id access by a redaction hold (#2777).
-
-    Callers that fetch a chunk without :func:`resolve_visible_chunk` ask this
-    next to their boundary check and answer ``True`` the way they answer an
-    out-of-boundary id. A caller that holds the source lock asks it again on
-    the row it re-fetched under the lock.
-    """
-    return await storage.is_source_withheld(metadata.source_file, origin=metadata.origin)
+    async def get_chunk(
+        self, chunk_id: UUID, *, exclude_withheld: bool = False
+    ) -> Chunk | None: ...
 
 
 def chunk_valid_at(metadata: ChunkMetadata, as_of_unix: int) -> bool:
@@ -158,12 +151,10 @@ async def resolve_visible_chunk(
     it — a scope change that lands while the lock is held has to be judged on
     the value that will actually be written.
     """
-    chunk = await storage.get_chunk(chunk_id)
+    chunk = await storage.get_chunk(chunk_id, exclude_withheld=True)
     if chunk is None:
         return None
     if not chunk_in_scope_boundary(chunk.metadata, project_context_root):
-        return None
-    if await chunk_withheld(storage, chunk.metadata):
         return None
     return chunk
 

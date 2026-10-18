@@ -95,9 +95,40 @@ class TestStorage:
         held_path, held = await _redaction_held(comp, mem_dir)
         avail_path, avail = await _availability_held(comp, mem_dir)
 
-        assert await comp.storage.is_source_withheld(held_path, origin=None)
-        assert not await comp.storage.is_source_withheld(avail_path, origin=None)
+        assert await comp.storage.get_chunk(held.id, exclude_withheld=True) is None
+        assert (await comp.storage.get_chunk(held.id)).id == held.id
+        assert (await comp.storage.get_chunk(avail.id, exclude_withheld=True)).id == avail.id
+        batch = await comp.storage.get_chunks_batch([held.id, avail.id], exclude_withheld=True)
+        assert list(batch) == [avail.id]
         assert await _hold_reason(comp, held_path) == REDACTION_BLOCKED_HOLD
+        assert avail_path.exists()
+
+    async def test_a_release_right_after_the_read_cannot_return_the_old_row(
+        self, stack, monkeypatch
+    ):
+        """Round 3's interleaving: read, then a clean re-index deletes the row
+        and releases the hold, then the answer is formed.
+
+        A check run after the read would see no hold and pass the old row on.
+        With the predicate in the read, the row was withheld when it was read.
+        """
+        comp, mem_dir, ctx = stack
+        path, held = await _redaction_held(comp, mem_dir)
+        real = comp.storage.get_chunk
+
+        async def read_then_release(chunk_id, **kwargs):
+            row = await real(chunk_id, **kwargs)
+            path.write_text("# N\n\ntokFixed1 fact.\n", encoding="utf-8")
+            assert not (await comp.index_engine.index_file(path)).errors
+            return row
+
+        monkeypatch.setattr(comp.storage, "get_chunk", read_then_release)
+
+        read = await browse.mem_read(chunk_id=str(held.id), ctx=ctx)
+
+        assert await _hold_reason(comp, path) is None  # the release did land
+        assert "tokHeld1" not in read
+        assert read == f"Chunk {held.id} not found."
 
     async def test_a_symlink_put_at_the_held_path_does_not_lift_the_screen(self, stack):
         """The stored path is compared as stored, never re-resolved."""
@@ -193,14 +224,14 @@ class TestReads:
         assert expand == await search.mem_expand(chunk_id=cid, ctx=ctx)
 
     @pytest.mark.parametrize("reason", [REDACTION_BLOCKED_HOLD, "scan_missing"])
-    async def test_mem_expand_rechecks_after_reading_the_neighbours(
+    async def test_mem_expand_leaves_out_neighbours_held_before_their_read(
         self, stack, monkeypatch, reason
     ):
-        """A hold committed between the anchor screen and the window read.
+        """A hold committed between the anchor read and the window read.
 
-        The neighbours are read after the anchor was judged; under a redaction
-        hold the window must not come back. An availability hold landing at the
-        same point changes nothing.
+        The anchor was read while readable and may be shown; the neighbours
+        read under a redaction hold may not. An availability hold landing at
+        the same point changes nothing.
         """
         comp, mem_dir, ctx = stack
         path = mem_dir / "win.md"
@@ -220,11 +251,44 @@ class TestReads:
 
         expand = await search.mem_expand(chunk_id=str(anchor.id), ctx=ctx)
 
+        assert "tokWin0" in expand
         if reason == REDACTION_BLOCKED_HOLD:
-            assert "tokWin1" not in expand and "tokWin0" not in expand
-            assert expand == f"Chunk {anchor.id} not found."
+            assert "tokWin1" not in expand
+            assert "### After" not in expand
         else:
-            assert "tokWin0" in expand and "tokWin1" in expand
+            assert "tokWin1" in expand
+
+    async def test_mem_expand_keeps_physical_adjacency_and_counts(self, stack):
+        """A withheld row inside the window is dropped, not stepped over.
+
+        One virtual source holding ordinary rows around a policy summary whose
+        parent is redaction-held. Filtering before the ``LIMIT`` would return
+        the next ordinary row as adjacent; counting without the predicate would
+        report a position over rows the caller cannot read.
+        """
+        comp, mem_dir, ctx = stack
+        parent = mem_dir / "mix.md"
+        await _index(comp, parent, "# P\n\ntokMixParent fact.\n")
+        virtual = mem_dir / "mix.md.consolidated.md"
+        body = "".join(f"## S{i}\n\ntokMix{i} " + "word " * 300 + "\n\n" for i in range(3))
+        virtual.write_text(f"# M\n\n{body}", encoding="utf-8")
+        assert not (await comp.index_engine.index_file(virtual)).errors
+        rows = await comp.storage.list_chunks_by_source(virtual.resolve())
+        by_token = {t: next(r for r in rows if t in r.content) for t in ("tokMix0", "tokMix1")}
+        db = comp.storage._get_db()
+        db.execute(
+            "UPDATE chunks SET origin=? WHERE id=?",
+            (ORIGIN_CONSOLIDATION_POLICY, str(by_token["tokMix1"].id)),
+        )
+        db.commit()
+        assert await comp.storage.hold_source(parent, REDACTION_BLOCKED_HOLD)
+
+        expand = await search.mem_expand(chunk_id=str(by_token["tokMix0"].id), window=1, ctx=ctx)
+
+        assert "tokMix0" in expand
+        assert "tokMix1" not in expand
+        assert "tokMix2" not in expand
+        assert f"chunk 1/{len(rows) - 1} " in expand
 
     async def test_mem_related_drops_a_withheld_target(self, stack):
         comp, mem_dir, ctx = stack
@@ -306,12 +370,12 @@ class TestWrites:
         real = comp.storage.get_chunk
         calls = 0
 
-        async def hold_after_probe(chunk_id):
+        async def hold_after_probe(chunk_id, **kwargs):
             nonlocal calls
             calls += 1
             if calls == 2:  # the re-fetch under the lock
                 await comp.storage.hold_source(path, REDACTION_BLOCKED_HOLD)
-            return await real(chunk_id)
+            return await real(chunk_id, **kwargs)
 
         monkeypatch.setattr(comp.storage, "get_chunk", hold_after_probe)
 
@@ -393,12 +457,12 @@ class TestWrites:
         real = comp.storage.get_chunk
         calls = 0
 
-        async def hold_at(chunk_id):
+        async def hold_at(chunk_id, **kwargs):
             nonlocal calls
             calls += 1
             if calls == hold_at_fetch:
                 await comp.storage.hold_source(path, REDACTION_BLOCKED_HOLD)
-            return await real(chunk_id)
+            return await real(chunk_id, **kwargs)
 
         monkeypatch.setattr(comp.storage, "get_chunk", hold_at)
 
@@ -410,15 +474,15 @@ class TestWrites:
         assert calls == hold_at_fetch
 
     @pytest.mark.parametrize("hold", [True, False])
-    async def test_web_edit_response_does_not_fall_back_to_withheld_content(
+    async def test_web_edit_response_never_echoes_a_row_read_under_the_hold(
         self, stack, monkeypatch, hold
     ):
-        """A hold committed after the write, before the response re-fetch → 404.
+        """A hold committed after the write, before the response re-fetch.
 
-        Without a hold the route's ordinary fallback (the pre-edit row) stands.
+        The re-fetch reads under the hold and gets nothing, so the response is
+        the route's ordinary fallback: the pre-edit row, read while readable.
+        The edited row is never echoed. Without a hold, the same fallback.
         """
-        from fastapi import HTTPException
-
         from memtomem.web.routes import chunks as chunk_routes
         from memtomem.web.schemas.sources import EditRequest
 
@@ -439,7 +503,7 @@ class TestWrites:
 
         monkeypatch.setattr(chunk_routes, "resolve_visible_chunk", response_fetch)
 
-        call = chunk_routes.edit_chunk(
+        out = await chunk_routes.edit_chunk(
             chunk.id,
             EditRequest(new_content="tokWeb2 edited."),
             storage=comp.storage,
@@ -447,13 +511,9 @@ class TestWrites:
             search_pipeline=comp.search_pipeline,
             config=comp.config,
         )
-        if hold:
-            with pytest.raises(HTTPException) as caught:
-                await call
-            assert caught.value.status_code == 404
-        else:
-            out = await call
-            assert out.content == chunk.content
+
+        assert out.content == chunk.content
+        assert "tokWeb2" not in out.content
         assert calls == 2
 
 

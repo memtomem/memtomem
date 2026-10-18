@@ -8,7 +8,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
-from memtomem.server.tools._id_access import caller_boundary, readable, resolve_chunk
+from memtomem.server.tools._id_access import caller_boundary, in_boundary, resolve_chunk
 
 logger = logging.getLogger(__name__)
 
@@ -101,15 +101,15 @@ async def mem_reflect(
                 from uuid import UUID
 
                 UUID(row["chunk_id"])
-                chunk = await storage.get_chunk(row["chunk_id"])
+                chunk = await storage.get_chunk(row["chunk_id"], exclude_withheld=True)
             except (ValueError, TypeError):
                 pass
             # An unresolved hub is dropped, never degraded to its id prefix.
             # That fallback would print the uuid of a row the caller may not
             # be allowed to know about, next to its degree — the two things
             # ADR-0036 says a listing must not carry. The query already left
-            # redaction-held hubs out; this catches a hold committed since.
-            if chunk is None or not await readable(app, chunk, boundary):
+            # redaction-held hubs out; the fetch above catches one held since.
+            if chunk is None or not in_boundary(chunk, boundary):
                 continue
             links = row["link_count"]
             preview = chunk.content[:50].replace("\n", " ")

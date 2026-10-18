@@ -78,6 +78,7 @@ from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
 from memtomem.storage.sqlite_namespace import NamespaceOps
 from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority_case
 from memtomem.storage.sqlite_visibility import (
+    NOT_WITHHELD_CHUNKS,
     VISIBLE_SOURCE_C,
     VISIBLE_SOURCE_CHUNKS,
     VISIBLE_SOURCE_PATH,
@@ -2032,14 +2033,28 @@ class SqliteBackend(
                 ) from exc
         return len(changed)
 
-    async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
+    async def get_chunk(self, chunk_id: UUID, *, exclude_withheld: bool = False) -> Chunk | None:
+        """Fetch one chunk by id.
+
+        ``exclude_withheld=True`` is the read for a caller that will hand the
+        row out by id (#2777): the redaction-hold predicate is part of this
+        statement, so a returned row was not withheld at the instant it was
+        read. A separate check afterwards could not say that — a hold can be
+        committed, or released together with the row's deletion, in between.
+        """
         db = self._get_read_db()
-        row = db.execute("SELECT * FROM chunks WHERE id=?", (str(chunk_id),)).fetchone()
+        withheld = f" AND {NOT_WITHHELD_CHUNKS}" if exclude_withheld else ""
+        row = db.execute(
+            f"SELECT * FROM chunks WHERE id=?{withheld}",  # nosec B608
+            (str(chunk_id),),
+        ).fetchone()
         if not row:
             return None
         return self._row_to_chunk(row)
 
-    async def get_chunks_batch(self, chunk_ids: Sequence[UUID]) -> dict[UUID, Chunk]:
+    async def get_chunks_batch(
+        self, chunk_ids: Sequence[UUID], *, exclude_withheld: bool = False
+    ) -> dict[UUID, Chunk]:
         """Fetch multiple chunks by ID.
 
         One query where the id list fits SQLite's host-parameter ceiling, and
@@ -2048,6 +2063,7 @@ class SqliteBackend(
         so a single ``IN (...)`` would turn a large input into a hard error
         rather than a slow call. Ids are deduplicated first: repeats cost a
         placeholder each and collapse in the returned mapping anyway.
+        ``exclude_withheld`` is :meth:`get_chunk`'s, applied in each query.
         """
         if not chunk_ids:
             return {}
@@ -2056,9 +2072,10 @@ class SqliteBackend(
         # order — same rows either way, but reproducible in a log or a trace.
         ids_str = list(dict.fromkeys(str(cid) for cid in chunk_ids))
         out: dict[UUID, Chunk] = {}
+        withheld = f" AND {NOT_WITHHELD_CHUNKS}" if exclude_withheld else ""
         for batch in _param_batches(ids_str):
             rows = db.execute(
-                f"SELECT * FROM chunks WHERE id IN ({placeholders(len(batch))})",
+                f"SELECT * FROM chunks WHERE id IN ({placeholders(len(batch))}){withheld}",  # nosec B608
                 batch,
             ).fetchall()
             out.update({UUID(row[0]): self._row_to_chunk(row) for row in rows})
@@ -2501,34 +2518,6 @@ class SqliteBackend(
                 "SELECT 1 FROM held_sources WHERE source_file=? UNION "
                 "SELECT 1 FROM pending_source_checks WHERE source_file=? LIMIT 1",
                 (source, source),
-            ).fetchone()
-            is not None
-        )
-
-    async def is_source_withheld(self, source_file: Path, *, origin: str | None) -> bool:
-        """Whether a chunk at ``source_file`` is withheld from id access (#2777).
-
-        The per-row twin of ``NOT_WITHHELD_C``: true under a redaction hold,
-        or for a policy summary (``origin``) whose parent source has one.
-        Availability holds return ``False`` — their chunks stay readable by id.
-
-        ``source_file`` is a chunk's stored path and is compared as stored, the
-        way the SQL twin compares columns. Re-resolving it would follow
-        whatever now sits at that path: a symlink put there after the hold
-        resolves elsewhere and misses the hold row.
-        """
-        db = self._get_read_db()
-        source = str(source_file)
-        if origin == ORIGIN_CONSOLIDATION_POLICY and source.endswith(CONSOLIDATED_SUFFIX):
-            candidates: tuple[str, ...] = (source, source[: -len(CONSOLIDATED_SUFFIX)])
-        else:
-            candidates = (source,)
-        placeholders = ",".join("?" * len(candidates))
-        return (
-            db.execute(
-                f"SELECT 1 FROM held_sources WHERE source_file IN ({placeholders}) "  # nosec B608
-                "AND reason=? LIMIT 1",
-                (*candidates, REDACTION_BLOCKED_HOLD),
             ).fetchone()
             is not None
         )
@@ -3814,6 +3803,10 @@ class SqliteBackend(
         :class:`ContextWindowRows`), so the caller's unconditional ``+ 1``
         carries the #2236 carve-out without either side second-guessing the
         other about whether the anchor is visible.
+
+        A row withheld by a redaction hold (#2777) is neither counted nor
+        returned as a neighbour, and each statement judges that in its own
+        snapshot, so no neighbour is returned that was withheld when read.
         """
         if not anchor_ids:
             return {}
@@ -3853,7 +3846,8 @@ class SqliteBackend(
                        SUM(vis) OVER () AS visible_all
                 FROM (
                     SELECT id, start_line, rowid AS rid,
-                           CASE WHEN {vis_sql} THEN 1 ELSE 0 END AS vis
+                           CASE WHEN ({vis_sql}) AND {NOT_WITHHELD_CHUNKS}
+                                THEN 1 ELSE 0 END AS vis
                     FROM chunks WHERE source_file=?
                 )
             )
@@ -3904,14 +3898,22 @@ class SqliteBackend(
         ``start_line`` in place, keeping its ``rowid``. A re-index landing in
         between would move the anchor past its own key and hand it back as one
         of its neighbours — the match rendered as its own context.
+
+        The physical window is chosen first and withheld rows are dropped
+        from it after, in the same statement: filtering before the ``LIMIT``
+        would reach past a withheld row for a more distant one and present it
+        as adjacent (#2777).
         """
         if window <= 0:
             return []
         start_line, rid, anchor_id = anchor
         op, direction = ("<", "DESC") if before else (">", "ASC")
         rows = db.execute(
-            f"SELECT * FROM chunks WHERE source_file=? AND (start_line, rowid) {op} (?, ?) "
-            f"AND id <> ? ORDER BY start_line {direction}, rowid {direction} LIMIT ?",
+            "SELECT * FROM chunks WHERE rowid IN ("
+            f"SELECT rowid FROM chunks WHERE source_file=? AND (start_line, rowid) {op} (?, ?) "
+            f"AND id <> ? ORDER BY start_line {direction}, rowid {direction} LIMIT ?"
+            f") AND {NOT_WITHHELD_CHUNKS} "  # nosec B608
+            f"ORDER BY start_line {direction}, rowid {direction}",
             (norm_source, start_line, rid, anchor_id, window),
         ).fetchall()
         chunks = [self._row_to_chunk(row) for row in rows]

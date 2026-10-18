@@ -199,7 +199,7 @@ async def test_a_chunk_re_scoped_into_a_protected_root_under_the_lock_is_refused
     real_get_chunk = comp.storage.get_chunk
     calls = {"n": 0}
 
-    async def get_chunk(uid):
+    async def get_chunk(uid, **_kwargs):
         calls["n"] += 1
         # First call is the pre-lock probe and must look writable; every later
         # one is a re-fetch under the lock and reports the move.

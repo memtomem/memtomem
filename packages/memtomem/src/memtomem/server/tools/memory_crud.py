@@ -18,7 +18,7 @@ from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _announce_dim_mismatch_once, _check_embedding_mismatch
 from memtomem.server.tool_registry import register
-from memtomem.server.tools._id_access import caller_boundary, readable
+from memtomem.server.tools._id_access import caller_boundary, in_boundary
 from memtomem.server.tools._provenance import (
     capture_session_and_namespace,
     capture_session_for_untracked_write,
@@ -290,8 +290,8 @@ async def _locked_chunk(
     )
 
     boundary = caller_boundary(app)
-    chunk = await app.storage.get_chunk(uid)
-    if chunk is None or not await readable(app, chunk, boundary):
+    chunk = await app.storage.get_chunk(uid, exclude_withheld=True)
+    if chunk is None or not in_boundary(chunk, boundary):
         yield None, f"Error: chunk {chunk_id} not found.", False
         return
     source_file = chunk.metadata.source_file
@@ -316,8 +316,8 @@ async def _locked_chunk(
                 async with async_memory_file_lock(
                     source_file, timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
                 ) as cross_process_held:
-                    fresh = await app.storage.get_chunk(uid)
-                    if fresh is None or not await readable(app, fresh, boundary):
+                    fresh = await app.storage.get_chunk(uid, exclude_withheld=True)
+                    if fresh is None or not in_boundary(fresh, boundary):
                         yield None, f"Error: chunk {chunk_id} not found.", cross_process_held
                         return
                     if AppContext.memory_file_lock_key(fresh.metadata.source_file) == key:
