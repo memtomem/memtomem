@@ -81,8 +81,10 @@ async def merge_duplicates(
     try:
         deleted = await dedup_scanner.merge(keep_uuid, delete_uuids)
     finally:
-        # ``merge`` upserts the kept chunk's merged tags before deleting the
-        # losers, so even a failed call may have committed a search-visible
-        # write (#2157). The MCP twin invalidates on this path too.
+        # ``merge`` commits the kept chunk's merged tags and the deletes
+        # together, so a failed call normally leaves nothing written. The
+        # invalidation stays anyway (#2157): it costs a cache rebuild and does
+        # not depend on where the failure happened. The MCP twin invalidates
+        # on this path too.
         search_pipeline.invalidate_cache()
     return MergeResponse(deleted=deleted, kept_id=body.keep_id)

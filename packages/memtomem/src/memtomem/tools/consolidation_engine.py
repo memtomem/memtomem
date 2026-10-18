@@ -291,18 +291,20 @@ async def link_consolidation_relations(
     create the summary chunk (virtual upsert vs. file-first via ``mem_add``)
     but converge here to establish the relation graph.
 
-    Lenient mode (the default, and the agent-path contract): invalid UUIDs are
-    logged at DEBUG (harmless — they can appear if scratch state leaks stale
-    data), storage-level exceptions at WARNING, and both are skipped so a
-    single bad row can't tank the whole group. The caller reports the returned
-    count and a human decides what to do about a partial link.
+    Lenient mode (the default): invalid UUIDs are logged at DEBUG, storage-level
+    exceptions at WARNING, and both are skipped so a single bad row can't tank
+    the whole group. Never use it inside ``transaction()``: an error that ends
+    the transaction would be swallowed, and the next write would open a fresh
+    one that no longer covers the caller's earlier checks.
 
-    Strict mode: nothing is caught. ``apply_consolidation`` calls it this way
-    because its summary is idempotency-keyed by source hash — a summary that
-    committed while an edge was missing would be skipped by every later policy
-    run, so the hole would be permanent rather than retried (#2158). Invalid
-    UUIDs raise there too: that path builds its ids from real ``Chunk.id``
-    values, so a bad one is a programming error, not leaked scratch state.
+    Strict mode: nothing is caught. Both apply paths call it this way, inside a
+    transaction. ``apply_consolidation``'s summary is idempotency-keyed by
+    source hash — a summary that committed while an edge was missing would be
+    skipped by every later policy run, so the hole would be permanent rather
+    than retried (#2158). ``mem_consolidate_apply`` passes only originals it
+    has just read back under its hold check, so a missing original no longer
+    needs skipping there. Invalid UUIDs raise too: both paths build their ids
+    from validated UUIDs, so a bad one is a programming error.
     """
     linked = 0
     for cid in source_ids:

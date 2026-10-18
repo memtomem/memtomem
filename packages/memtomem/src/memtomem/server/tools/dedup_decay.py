@@ -116,9 +116,11 @@ async def mem_dedup_merge(
     try:
         would_or_did = await app.dedup_scanner.merge(keep_uuid, delete_uuids, dry_run=dry_run)
     except (Exception, asyncio.CancelledError):
-        # ``merge`` upserts the kept chunk's merged tags before deleting the
-        # losers, so a failed apply may have committed a search-visible write
-        # (#2157). A dry run writes nothing however it ends.
+        # ``merge`` commits the kept chunk's merged tags and the deletes
+        # together, so a failed apply normally leaves nothing written. The
+        # invalidation stays anyway (#2157): it costs a cache rebuild and does
+        # not depend on where the failure happened. A dry run writes nothing
+        # however it ends.
         if not dry_run:
             app.search_pipeline.invalidate_cache()
         raise

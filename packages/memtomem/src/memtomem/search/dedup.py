@@ -116,50 +116,66 @@ class DedupScanner:
         if not delete_ids:
             return 0
 
-        # Batch-fetch all chunks in a single query
-        all_ids = [keep_id, *delete_ids]
-        chunks_map = await self._storage.get_chunks_batch(all_ids)
-
-        keep_chunk = chunks_map.get(keep_id)
-        if keep_chunk is None:
-            return 0
-        # A held row is retained for recovery, not a candidate to keep or
-        # merge away. Recheck at apply time because a scan result may be stale.
-        for chunk in chunks_map.values():
-            if await self._storage.is_source_held(chunk.metadata.source_file):
-                raise ValueError("Cannot merge chunks from a held source")
-
-        # Collect tags from chunks being deleted
-        merged_tags: set[str] = set(keep_chunk.metadata.tags)
-        for del_id in delete_ids:
-            del_chunk = chunks_map.get(del_id)
-            if del_chunk is not None:
-                merged_tags.update(del_chunk.metadata.tags)
-
         if dry_run:
+            # Writes nothing, so it has no write to protect and does not take
+            # the write lock; the apply below repeats every check under it.
+            chunks_map = await self._storage.get_chunks_batch([keep_id, *delete_ids])
+            if keep_id not in chunks_map:
+                return 0
+            await self._refuse_hidden(chunks_map)
             return sum(1 for d in delete_ids if d in chunks_map)
 
-        # Update keep chunk if tags changed
-        if merged_tags != set(keep_chunk.metadata.tags):
-            # ``replace`` rather than a field-by-field rebuild: this merge only
-            # changes tags, and enumerating the fields silently dropped every
-            # one added since it was written (overlap, validity window, scope,
-            # project_root — and ``origin``, whose loss would leave a
-            # consolidation summary unowned and fail its next regeneration
-            # closed, #2161). A new metadata field must not need an edit here.
-            new_meta = replace(keep_chunk.metadata, tags=tuple(sorted(merged_tags)))
-            updated = Chunk(
-                content=keep_chunk.content,
-                metadata=new_meta,
-                id=keep_chunk.id,
-                content_hash=keep_chunk.content_hash,
-                embedding=keep_chunk.embedding,
-                created_at=keep_chunk.created_at,
-                updated_at=datetime.now(timezone.utc),
-            )
-            await self._storage.upsert_chunks([updated])
+        # One write transaction from the read to the delete. A held row is
+        # retained for recovery, not a candidate to keep or merge away, and a
+        # scan result may be stale; checked beside the writes, a hold committed
+        # after the check would still lose its rows to the delete. Reading
+        # under the lock also keeps a concurrent tag edit on the keeper from
+        # being overwritten by the merged tags.
+        async with self._storage.transaction():
+            chunks_map = await self._storage.get_chunks_batch([keep_id, *delete_ids])
+            keep_chunk = chunks_map.get(keep_id)
+            if keep_chunk is None:
+                return 0
+            await self._refuse_hidden(chunks_map)
 
-        return await self._storage.delete_chunks(delete_ids)
+            # Collect tags from chunks being deleted
+            merged_tags: set[str] = set(keep_chunk.metadata.tags)
+            for del_id in delete_ids:
+                del_chunk = chunks_map.get(del_id)
+                if del_chunk is not None:
+                    merged_tags.update(del_chunk.metadata.tags)
+
+            # Update keep chunk if tags changed
+            if merged_tags != set(keep_chunk.metadata.tags):
+                # ``replace`` rather than a field-by-field rebuild: this merge
+                # only changes tags, and enumerating the fields silently dropped
+                # every one added since it was written (overlap, validity
+                # window, scope, project_root — and ``origin``, whose loss would
+                # leave a consolidation summary unowned and fail its next
+                # regeneration closed, #2161). A new metadata field must not
+                # need an edit here.
+                new_meta = replace(keep_chunk.metadata, tags=tuple(sorted(merged_tags)))
+                updated = Chunk(
+                    content=keep_chunk.content,
+                    metadata=new_meta,
+                    id=keep_chunk.id,
+                    content_hash=keep_chunk.content_hash,
+                    embedding=keep_chunk.embedding,
+                    created_at=keep_chunk.created_at,
+                    updated_at=datetime.now(timezone.utc),
+                )
+                await self._storage.upsert_chunks([updated])
+
+            # The delete is final, so a source it empties is cleaned up now,
+            # as it was when this delete ran outside a transaction.
+            return await self._storage.delete_chunks(delete_ids, finalize_emptied=True)
+
+    async def _refuse_hidden(self, chunks_map: dict[UUID, Chunk]) -> None:
+        # The scan's rule (``exclude_hidden``): a held or pending source, and a
+        # consolidation-policy summary whose parent is one.
+        for chunk in chunks_map.values():
+            if await self._storage.is_source_hidden(chunk.metadata.source_file):
+                raise ValueError("Cannot merge chunks from a held source")
 
     # ------------------------------------------------------------------
     # Internal helpers

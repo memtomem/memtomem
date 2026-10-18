@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,6 +52,8 @@ class _FakeStorage:
         self._without_vector = without_vector or set()
         self.dense_enabled = dense_enabled
         self.held_sources = held_sources or set()
+        self.transactions = 0
+        self.finalized: list[bool] = []
         self.lookups: list[list[str]] = []
         self.probes: list[dict] = []
 
@@ -65,8 +68,13 @@ class _FakeStorage:
             return []
         return [chunk for chunk in self._chunks if chunk.metadata.source_file == source][:limit]
 
-    async def is_source_held(self, source: Path) -> bool:
+    async def is_source_hidden(self, source: Path) -> bool:
         return source in self.held_sources
+
+    @asynccontextmanager
+    async def transaction(self):
+        self.transactions += 1
+        yield
 
     async def get_chunks_batch(self, ids: list[UUID]) -> dict[UUID, Chunk]:
         by_id = {c.id: c for c in self._chunks}
@@ -80,7 +88,8 @@ class _FakeStorage:
             else:
                 self._chunks.append(c)
 
-    async def delete_chunks(self, ids: list[UUID]) -> int:
+    async def delete_chunks(self, ids: list[UUID], *, finalize_emptied: bool = False) -> int:
+        self.finalized.append(finalize_emptied)
         target = set(ids)
         before = len(self._chunks)
         self._chunks[:] = [c for c in self._chunks if c.id not in target]

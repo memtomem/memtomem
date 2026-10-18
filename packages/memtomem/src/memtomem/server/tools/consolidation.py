@@ -15,6 +15,10 @@ from memtomem.server.tool_registry import register
 logger = logging.getLogger(__name__)
 
 
+class _SourceUnavailable(Exception):
+    """A consolidation source became hidden after its summary was published."""
+
+
 @mcp.tool()
 @tool_handler
 @register("maintenance")
@@ -199,7 +203,7 @@ async def mem_consolidate_apply(
     group = next((g for g in groups if g["group_id"] == group_id), None)
     if group is None:
         return f"Error: group_id {group_id} not found. Run mem_consolidate again."
-    if await app.storage.is_source_held(Path(group["source"])):
+    if await app.storage.is_source_hidden(Path(group["source"])):
         return "Error: source is unavailable. Run mem_consolidate after it returns."
 
     # ADR-0011 cross-scope check. Load source chunks by id (the
@@ -213,7 +217,7 @@ async def mem_consolidate_apply(
         return f"Error: group {group_id} contains invalid chunk_ids."
     chunks_map = await app.storage.get_chunks_batch(chunk_uuids) if chunk_uuids else {}
     for chunk in chunks_map.values():
-        if await app.storage.is_source_held(chunk.metadata.source_file):
+        if await app.storage.is_source_hidden(chunk.metadata.source_file):
             return "Error: source is unavailable. Run mem_consolidate after it returns."
     source_scopes = {(c.metadata.scope or "user") for c in chunks_map.values()}
     if len(source_scopes) > 1:
@@ -325,7 +329,7 @@ async def mem_consolidate_apply(
     run_namespaces = [group.get("namespace") or "default"]
 
     try:
-        if await app.storage.is_source_held(Path(group["source"])):
+        if await app.storage.is_source_hidden(Path(group["source"])):
             return "Error: source is unavailable. Run mem_consolidate after it returns."
         add_result, stats = await _mem_add_core(
             content=summary,
@@ -395,24 +399,65 @@ async def mem_consolidate_apply(
 
         summary_id = stats.new_chunk_ids[0]
 
-        # Link originals → summary via the shared helper (same edge type that
-        # execute_auto_consolidate uses, so queries like mem_related / mem_expand
-        # work uniformly across both flows).
-        linked = await link_consolidation_relations(
-            app.storage,
-            group["chunk_ids"],
-            summary_id,
-        )
-
+        # The checks above ran before the summary was published; a hold can
+        # land in between. The summary was written from what the agent read
+        # while the source was visible, so it stays. The edges and the decay
+        # write to the originals' rows, so they run in one write transaction
+        # that re-checks the hold first: no hold can commit between that check
+        # and these writes.
         decayed_ids: list[str] = []
-        if not keep_originals and group["chunk_ids"]:
-            scores = await app.storage.get_importance_scores(group["chunk_ids"])
-            if scores:
-                floored = {
-                    cid: max(score * DECAY_FACTOR, DECAY_FLOOR) for cid, score in scores.items()
-                }
-                await app.storage.update_importance_scores(floored)
-                decayed_ids = [str(cid) for cid in floored]
+        try:
+            async with app.storage.transaction():
+                live = await app.storage.get_chunks_batch(chunk_uuids) if chunk_uuids else {}
+                unavailable = await app.storage.is_source_hidden(Path(group["source"]))
+                for chunk in live.values():
+                    unavailable = unavailable or await app.storage.is_source_hidden(
+                        chunk.metadata.source_file
+                    )
+                if unavailable:
+                    raise _SourceUnavailable
+                # Only ids that still resolve: a re-index can drop an original
+                # after mem_consolidate, and its edge would fail the foreign
+                # key. With those gone, linking is strict — a lenient loop that
+                # swallowed an error which ended the transaction would let the
+                # next write open a fresh one, outside the check above.
+                live_ids = [str(cid) for cid in chunk_uuids if cid in live]
+                # Same edge type that execute_auto_consolidate uses, so queries
+                # like mem_related / mem_expand work uniformly across both flows.
+                linked = await link_consolidation_relations(
+                    app.storage, live_ids, summary_id, strict=True
+                )
+                if not keep_originals and live_ids:
+                    scores = await app.storage.get_importance_scores(live_ids)
+                    if scores:
+                        floored = {
+                            cid: max(score * DECAY_FACTOR, DECAY_FLOOR)
+                            for cid, score in scores.items()
+                        }
+                        await app.storage.update_importance_scores(floored)
+                        decayed_ids = [str(cid) for cid in floored]
+        except _SourceUnavailable:
+            await app.storage.maintenance_run_finish(
+                run_id,
+                status="ok",
+                affected_count=0,
+                namespaces=run_namespaces,
+                summary={
+                    **run_summary,
+                    "summary_id": str(summary_id),
+                    "linked": 0,
+                    "warning": "source_unavailable",
+                },
+            )
+            # A retry would publish a second summary.
+            await app.storage.scratch_delete("consolidation_groups")
+            return (
+                f"Consolidation applied for group {group_id} (unlinked).\n"
+                f"{add_result}\n"
+                f"- Original chunks: {group['chunk_count']}\n"
+                "- Warning: the source became unavailable after the summary was written; "
+                "originals were not linked or decayed."
+            )
     except Exception as exc:
         # The mutation may have partly landed — ``_mem_add_core`` can have
         # appended and indexed the summary before the failure — so the row

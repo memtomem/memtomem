@@ -2067,10 +2067,13 @@ class SqliteBackend(
         rather than a slow call. Ids are deduplicated first: repeats cost a
         placeholder each and collapse in the returned mapping anyway.
         ``exclude_withheld`` is :meth:`get_chunk`'s, applied in each query.
+        Inside the caller's own ``transaction()`` this reads the writer, so a
+        write gate taken under that lock sees the rows as they are now, not a
+        pool connection's older snapshot.
         """
         if not chunk_ids:
             return {}
-        db = self._get_read_db()
+        db = self._get_txn_read_db()
         # ``dict.fromkeys`` rather than ``set`` so the query sees a stable
         # order — same rows either way, but reproducible in a log or a trace.
         ids_str = list(dict.fromkeys(str(cid) for cid in chunk_ids))
@@ -2084,7 +2087,16 @@ class SqliteBackend(
             out.update({UUID(row[0]): self._row_to_chunk(row) for row in rows})
         return out
 
-    async def delete_chunks(self, chunk_ids: Sequence[UUID]) -> int:
+    async def delete_chunks(
+        self, chunk_ids: Sequence[UUID], *, finalize_emptied: bool = False
+    ) -> int:
+        """Delete chunks by id and return how many existed.
+
+        ``finalize_emptied=True`` runs the cleanup for a source that lost its
+        last chunk even inside the caller's ``transaction()``, for a caller
+        whose delete is final there (a dedup merge) rather than half of a
+        delete-and-re-upsert.
+        """
         if not chunk_ids:
             return 0
 
@@ -2158,8 +2170,9 @@ class SqliteBackend(
             # explicit ``delete_by_source``, or session-end
             # ``reset_all``) is responsible for resolving the cache
             # state once the multi-step operation completes. Standalone
-            # ``delete_chunks`` calls (web chunk-delete fallback,
-            # dedup, decay sweeps) hit the cleanup branch as before.
+            # ``delete_chunks`` calls (web chunk-delete fallback, decay
+            # sweeps) and a ``finalize_emptied`` caller (dedup, whose
+            # delete runs in its own transaction) hit the cleanup branch.
             #
             # ``source_file`` is already in normalised form in the
             # chunks table (see ``upsert_chunks`` → ``norm_path``),
@@ -2167,7 +2180,7 @@ class SqliteBackend(
             # re-resolving (resolving here would mismatch on macOS
             # symlink cases like ``/tmp`` → ``/private/tmp`` because
             # the original chunk row was stored as resolved already).
-            if not self._in_transaction:
+            if finalize_emptied or not self._in_transaction:
                 for source_norm in affected_sources:
                     remaining = db.execute(
                         "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1",
@@ -2490,9 +2503,10 @@ class SqliteBackend(
     async def is_source_hidden(self, source_file: Path) -> bool:
         """Include a policy summary's parent in path-level visibility.
 
-        ``source_file`` is compared as stored, like :meth:`is_source_held`.
+        ``source_file`` is compared as stored, like :meth:`is_source_held`, and
+        read the same way.
         """
-        db = self._get_read_db()
+        db = self._get_txn_read_db()
         source = str(source_file)
         if (
             db.execute(
@@ -2522,8 +2536,13 @@ class SqliteBackend(
         Callers pass a path read back from the store. Resolving it again would
         follow a symlink placed at a held source's path to some other file and
         miss the hold; a caller holding a filesystem path normalises it first.
+
+        Inside the caller's own ``transaction()`` this reads the writer. A pool
+        connection with another thread's statement still open keeps an older
+        snapshot, so a check meant to run under the write lock could otherwise
+        miss a hold committed before the lock was taken.
         """
-        db = self._get_read_db()
+        db = self._get_txn_read_db()
         source = str(source_file)
         return (
             db.execute(
