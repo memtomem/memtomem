@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +79,47 @@ def code_fingerprint() -> str:
         return _tree_fingerprint(Path(location).parent)
     except (OSError, ValueError):
         return "unavailable"
+
+
+# Third-party packages whose presence or version changes chunk output, as
+# top-level module name -> distribution name. Each one is imported lazily
+# under ``chunking/`` and the chunker falls back when it is absent, so an
+# install, removal or upgrade changes chunks without touching memtomem's own
+# source (#2774). ``tests/test_receipt_chunker_versions.py`` keeps the keys
+# equal to the third-party modules imported directly under ``chunking/``.
+CHUNKER_DISTRIBUTIONS: dict[str, str] = {
+    "tokenizers": "tokenizers",
+    "tree_sitter": "tree-sitter",
+    "tree_sitter_javascript": "tree-sitter-javascript",
+    "tree_sitter_python": "tree-sitter-python",
+    "tree_sitter_typescript": "tree-sitter-typescript",
+    "yaml": "PyYAML",
+}
+
+
+def chunker_versions() -> dict[str, str | None]:
+    """Installed version of each third-party chunker dependency, for the receipt policy.
+
+    Keyed by distribution name; ``None`` when the distribution is not
+    installed. Read from distribution metadata rather than by importing: the
+    chunkers import these lazily on purpose, and this runs while the indexing
+    engine is imported. A distribution whose metadata is present but whose
+    import fails is therefore recorded by its version, not by the fallback the
+    chunker will take.
+
+    No failure may escape. A metadata error other than "not installed"
+    records ``"unavailable"`` for that entry, which still differs from both a
+    version and ``None``.
+    """
+    versions: dict[str, str | None] = {}
+    for dist in sorted(set(CHUNKER_DISTRIBUTIONS.values())):
+        try:
+            versions[dist] = metadata.version(dist)
+        except metadata.PackageNotFoundError:
+            versions[dist] = None
+        except Exception:
+            versions[dist] = "unavailable"
+    return versions
 
 
 def content_hash(text: str) -> str:
