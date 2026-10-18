@@ -43,7 +43,7 @@ from memtomem.errors import (
 from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.indexing.redaction_exemption import declared_exemption
-from memtomem.indexing.source_receipt import code_fingerprint
+from memtomem.indexing.source_receipt import chunker_versions, code_fingerprint
 from memtomem.models import Chunk, IndexingStats, stored_namespace
 from memtomem.storage.sqlite_helpers import norm_dir_prefix as _norm_dir_prefix
 from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
@@ -70,6 +70,12 @@ _MAX_INDEX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 # before or after this line are covered only if their files did not change in
 # between, so a server must be restarted after its source is edited.
 _CODE_FINGERPRINT = code_fingerprint()
+
+# Versions of the third-party parsers the chunkers import lazily, read at the
+# same moment and for the same reason. The same caveat applies: a parser
+# installed, removed or upgraded under a running process is not seen until it
+# restarts, and a chunker may already have loaded the old one.
+_CHUNKER_VERSIONS = chunker_versions()
 
 # Max files whose ``_index_file`` pipelines run concurrently in a bulk
 # ``index_path`` run. Also the default and upper bound for the embedding
@@ -2835,6 +2841,9 @@ class IndexEngine:
                     # one (a ``main`` checkout and the release it follows)
                     # reuse each other's receipts across a chunker change.
                     "source": _CODE_FINGERPRINT,
+                    # Chunk output also depends on parsers outside memtomem,
+                    # which a chunker silently falls back from when absent.
+                    "chunkers": _CHUNKER_VERSIONS,
                     "indexing": self._config.model_dump(mode="python"),
                     "namespace": self._ns_config.model_dump(mode="python"),
                     "namespace_target": ns_decision.target,

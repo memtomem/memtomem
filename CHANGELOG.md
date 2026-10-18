@@ -89,6 +89,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ### Fixed
 
 - **`mm index <file>` clears the `stale_index` that `mm memory doctor`
+  reports after a parser is installed, removed or upgraded (#2774).** The
+  code and JavaScript chunkers fall back to coarser chunks when
+  `tree-sitter` or one of its grammars is missing, and the structured and
+  bounded chunkers depend on `PyYAML` and `tokenizers`. None of these was part
+  of the index receipt, so after installing the `code` extra an unchanged
+  source kept the chunks made without the parser: `mm index` reused them,
+  while the doctor re-chunked with the parser and printed a remedy that could
+  not clear the finding. The receipt now records the installed version of
+  each of these packages, read when the indexer loads, so the next plain
+  `mm index` re-chunks unchanged sources once; a server already running keeps
+  the versions it started with until restarted. Chunks whose text and context
+  still match keep their vectors. As before, a re-chunk that would remove a
+  chunk referenced by a link is refused and needs an explicit link migration.
+- **`mm index <file>` clears the `stale_index` that `mm memory doctor`
   reports when another build of the same release wrote the index (#2773).**
   The index receipt identified the code by its release version only, so a
   source checkout of unreleased changes reused receipts written by the
