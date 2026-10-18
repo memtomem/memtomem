@@ -329,8 +329,10 @@ def _metadata_filter_sql(
     return " AND ".join(conditions), params
 
 
-def _ai_summary_key(source_file: Path) -> str:
-    return f"{_AI_SUMMARY_KEY_PREFIX}{norm_path(source_file)}"
+def _ai_summary_key(source_file: Path, *, as_stored: bool = False) -> str:
+    # ``as_stored``: the caller already holds the stored key (taken before a
+    # slow step), and resolving it again could name a different file.
+    return f"{_AI_SUMMARY_KEY_PREFIX}{str(source_file) if as_stored else norm_path(source_file)}"
 
 
 def _rebuild_fts_retrieval(content: str, hierarchy_json: str) -> str:
@@ -2533,6 +2535,10 @@ class SqliteBackend(
         )
 
     async def is_source_pending(self, source_file: Path) -> bool:
+        """Take a filesystem path and normalise it as ``hold_source`` keys rows.
+
+        Unlike :meth:`is_source_held`, whose callers pass stored paths.
+        """
         db = self._get_read_db()
         return (
             db.execute(
@@ -2550,6 +2556,7 @@ class SqliteBackend(
         return int(row[0]) if row else 0
 
     async def source_hold_generation(self, source_file: Path) -> int:
+        """Take a filesystem path, normalised like :meth:`is_source_pending`."""
         db = self._get_read_db()
         row = db.execute(
             "SELECT generation FROM source_visibility_generations WHERE source_file=?",
@@ -2561,7 +2568,8 @@ class SqliteBackend(
         """Return one source's generation only when it is hidden.
 
         Visibility and generation come from one SQLite statement so a watcher
-        delete cannot slip between separate reads at index start.
+        delete cannot slip between separate reads at index start. Takes the
+        filesystem path being indexed, normalised like :meth:`is_source_pending`.
         """
         db = self._get_read_db()
         source = norm_path(source_file)
@@ -3780,6 +3788,7 @@ class SqliteBackend(
         limit: int | None = 50,
         *,
         exclude_hidden: bool = False,
+        as_stored: bool = False,
     ) -> list[Chunk]:
         # ``limit=None`` reads the whole source in one snapshot — for callers
         # that must cover it completely (the entity scan), where paging would
@@ -3787,13 +3796,19 @@ class SqliteBackend(
         # treats a negative LIMIT as unbounded. ``rowid`` tie-break: chunks of
         # a virtual source can share one ``start_line``. ``exclude_hidden``
         # judges the path-level hold in this statement, so a hold committed
-        # after a caller's own check still returns no rows.
+        # after a caller's own check still returns no rows. ``as_stored`` is
+        # for a path read back from the store: it is matched as stored, since
+        # resolving it again would follow a symlink placed at that path and
+        # read some other file's rows under this file's name.
         db = self._get_read_db()
         hidden_clause = f" AND {VISIBLE_SOURCE_PATH}" if exclude_hidden else ""
         rows = db.execute(
             f"SELECT * FROM chunks WHERE source_file=?{hidden_clause} "  # nosec B608
             "ORDER BY start_line, rowid LIMIT ?",
-            (norm_path(source_file), -1 if limit is None else limit),
+            (
+                str(source_file) if as_stored else norm_path(source_file),
+                -1 if limit is None else limit,
+            ),
         ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
 
@@ -4358,7 +4373,7 @@ class SqliteBackend(
             json.dumps(dict(list(descriptions.items())[:256])),
         )
 
-    async def get_ai_summary(self, source_file: Path) -> dict | None:
+    async def get_ai_summary(self, source_file: Path, *, as_stored: bool = False) -> dict | None:
         """Return the cached AI summary record for ``source_file``, or None.
 
         Record shape: ``{"summary": str, "signature": str, "language": str,
@@ -4366,7 +4381,7 @@ class SqliteBackend(
         is corrupt — callers treat both as "no cache, regenerate".
         """
         assert self._meta is not None
-        key = _ai_summary_key(source_file)
+        key = _ai_summary_key(source_file, as_stored=as_stored)
         raw = self._meta.get_meta(key)
         if not raw:
             return None
@@ -4389,6 +4404,8 @@ class SqliteBackend(
         summary: str,
         signature: str,
         language: str,
+        *,
+        as_stored: bool = False,
     ) -> None:
         """Persist an AI summary record. Overwrites any prior value."""
         from datetime import datetime, timezone
@@ -4400,9 +4417,9 @@ class SqliteBackend(
             "language": language,
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        self._meta.set_meta(_ai_summary_key(source_file), json.dumps(record))
+        self._meta.set_meta(_ai_summary_key(source_file, as_stored=as_stored), json.dumps(record))
 
-    async def delete_ai_summary(self, source_file: Path) -> None:
+    async def delete_ai_summary(self, source_file: Path, *, as_stored: bool = False) -> None:
         """Drop the AI summary cache row for ``source_file``, if any.
 
         Called from the indexing pipeline when a refresh determines the
@@ -4416,7 +4433,7 @@ class SqliteBackend(
         with self._rolls_back_if_standalone(db):
             db.execute(
                 "DELETE FROM _memtomem_meta WHERE key=?",
-                (_ai_summary_key(source_file),),
+                (_ai_summary_key(source_file, as_stored=as_stored),),
             )
             self._commit_if_standalone(db)
 

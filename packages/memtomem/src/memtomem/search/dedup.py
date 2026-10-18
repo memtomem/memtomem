@@ -173,10 +173,15 @@ class DedupScanner:
             remaining = max_count - len(chunks)
             if remaining <= 0:
                 break
-            if await self._storage.is_source_held(source):
-                continue
             # Only what is still missing: the slice below used to discard the rest.
-            chunks.extend(await self._storage.list_chunks_by_source(source, limit=remaining))
+            # The read judges the hold itself, and matches the stored path as
+            # stored, so a symlink placed at a held path cannot return another
+            # file's rows here (they would be scanned twice, against themselves).
+            chunks.extend(
+                await self._storage.list_chunks_by_source(
+                    source, limit=remaining, exclude_hidden=True, as_stored=True
+                )
+            )
         return chunks[:max_count]
 
     def _find_exact_duplicates(

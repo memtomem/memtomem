@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
 
 from memtomem.llm.utils import strip_llm_response
+from memtomem.storage.sqlite_helpers import norm_path
 
 if TYPE_CHECKING:
     from memtomem.config import IndexingConfig
@@ -168,17 +169,23 @@ async def maybe_update_ai_summary(
     if not config.auto_summarize or llm is None:
         return
 
+    # The summary key, taken once before the LLM call and used as stored
+    # from here on. Resolving ``source_path`` again after that wait would
+    # follow a symlink placed there meanwhile and file this source's prose
+    # under another source's key.
+    stored = Path(norm_path(source_path))
+
     if not chunks:
         # Source emptied or became unchunkable. Engine's transactional
         # ``delete_chunks`` defers cache cleanup to this hook (so a
         # rewrite isn't spuriously cleared mid-transaction); a genuine
         # "now empty" reindex hits this branch and clears the row.
-        if await storage.get_ai_summary(source_path) is not None:
-            await storage.delete_ai_summary(source_path)
+        if await storage.get_ai_summary(stored, as_stored=True) is not None:
+            await storage.delete_ai_summary(stored, as_stored=True)
         return
 
     signature = compute_source_signature(chunks)
-    cached = await storage.get_ai_summary(source_path)
+    cached = await storage.get_ai_summary(stored, as_stored=True)
     if cached and cached.get("signature") == signature:
         return
 
@@ -188,7 +195,7 @@ async def maybe_update_ai_summary(
         # Cached prose (if any) describes content that no longer exists,
         # so drop it.
         if cached is not None:
-            await storage.delete_ai_summary(source_path)
+            await storage.delete_ai_summary(stored, as_stored=True)
         return
 
     summary = await _generate(llm, body, config.summary_language, config.summary_max_tokens)
@@ -202,14 +209,15 @@ async def maybe_update_ai_summary(
         # Clear it so the heuristic excerpt takes over until the next
         # successful refresh.
         if cached is not None:
-            await storage.delete_ai_summary(source_path)
+            await storage.delete_ai_summary(stored, as_stored=True)
         return
 
     await storage.set_ai_summary(
-        source_path,
+        stored,
         summary=summary,
         signature=signature,
         language=config.summary_language,
+        as_stored=True,
     )
 
 
@@ -270,11 +278,14 @@ async def regenerate_for_paths(
             continue
 
         signature = compute_source_signature(chunks)
+        # ``paths`` are stored summary keys, so the write must not resolve
+        # them again after the LLM call.
         await storage.set_ai_summary(
             path,
             summary=summary,
             signature=signature,
             language=config.summary_language,
+            as_stored=True,
         )
         processed += 1
         if progress is not None:

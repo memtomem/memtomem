@@ -63,9 +63,11 @@ async def mem_consolidate(
     for path, count, updated, ns, avg_tok, _, _ in sources:
         if count < min_group_size:
             continue
-        if await app.storage.is_source_held(path):
-            continue
-        chunks = await app.storage.list_chunks_by_source(path, limit=20)
+        # A held source is screened in the read, so its rows never reach the
+        # previews below even if the hold lands after the listing above.
+        chunks = await app.storage.list_chunks_by_source(
+            path, limit=20, exclude_hidden=True, as_stored=True
+        )
         if len(chunks) < min_group_size:
             continue
 

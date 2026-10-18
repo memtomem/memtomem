@@ -88,6 +88,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Dedup, consolidation, export, the entity scan and summary regeneration
+  no longer read a held source's chunks (#2783).** Each of them listed the
+  store's sources and then read each source's chunks, with the hold checked
+  in a separate call beside that read. A hold landing between the two let held
+  text into dedup and consolidation previews, an export bundle, the entity
+  extractor or the summary LLM. Each read now screens the hold itself and
+  matches the stored path as stored. Before this, a symlink placed at a held
+  path could make dedup scan another file's chunks against themselves, and
+  make an export carry that file twice. An export still counts a held source
+  whose chunks match its filters as omitted. A source's AI summary is now
+  filed under the key taken before the LLM call, so a symlink placed during
+  the call no longer files one source's prose under another source's name.
+  Decay expiry is unchanged: it reports counts only, and age-based expiry
+  applies to held chunks as it did (#2547).
 - **A held source's chunks no longer surface through reports, tag tools or
   the web source views (#2781).** Search already hid the chunks of a missing
   source, a source waiting on a watcher check, and a file the redaction guard

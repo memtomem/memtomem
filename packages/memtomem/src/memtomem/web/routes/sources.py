@@ -469,8 +469,10 @@ async def _run_summary_regen(
     async def _chunks_for(p: Path):
         # Unbounded ``limit_per_file`` would risk loading enormous files
         # into memory; the summarizer only consumes the first 5 chunks
-        # anyway, so cap conservatively.
-        return await storage.list_chunks_by_source(p, limit=64)
+        # anyway, so cap conservatively. ``p`` is a stored summary key: read
+        # it as stored, and skip a hidden source (its text would go to the
+        # LLM; an empty read counts as skipped and leaves its summary alone).
+        return await storage.list_chunks_by_source(p, limit=64, exclude_hidden=True, as_stored=True)
 
     def _progress(processed: int, total: int, failed: int) -> None:
         state["done"] = processed

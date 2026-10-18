@@ -453,10 +453,11 @@ async def execute_auto_consolidate(
 
     for g in raw_groups:
         source_path = Path(g["source"])
-        if await storage.is_source_held(source_path):
-            continue
-
-        chunks = await storage.list_chunks_by_source(source_path, limit=20)
+        # The hold is judged in the read; the recheck before the write below
+        # covers a hold that lands while the summary is generated.
+        chunks = await storage.list_chunks_by_source(
+            source_path, limit=20, exclude_hidden=True, as_stored=True
+        )
         if len(chunks) < min_group_size:
             continue
 

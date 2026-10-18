@@ -87,7 +87,11 @@ async def mem_entity_scan(
             # one query is one snapshot, where OFFSET pages would each read the
             # store anew and a concurrent re-index between them could make the
             # walk skip or repeat rows while still reporting completion.
-            chunks = await storage.list_chunks_by_source(source, limit=None)
+            # Held sources are skipped in the read: their text does not go to
+            # the extractor and no entities are written for them.
+            chunks = await storage.list_chunks_by_source(
+                source, limit=None, exclude_hidden=True, as_stored=True
+            )
             if namespace:
                 chunks = [c for c in chunks if c.metadata.namespace == namespace]
             if not chunks:

@@ -154,21 +154,30 @@ async def export_chunks(
     for source in sorted(source_files):
         if source_filter and not match_source_filter_substring(source_filter, str(source)):
             continue
-        chunks = await storage.list_chunks_by_source(source, limit=100_000)
-        selected = [
-            chunk
-            for chunk in chunks
-            if (not tag_filter or tag_filter in chunk.metadata.tags)
-            and (not since or chunk.created_at >= since)
-            and (not namespace_filter or chunk.metadata.namespace == namespace_filter)
-        ]
+
+        def matches(chunk) -> bool:
+            return (
+                (not tag_filter or tag_filter in chunk.metadata.tags)
+                and (not since or chunk.created_at >= since)
+                and (not namespace_filter or chunk.metadata.namespace == namespace_filter)
+            )
+
         # Bundles carry chunks but no source visibility state. Exporting held
-        # rows would make deleted or renamed-away content searchable on import.
-        # Count only sources with chunks matching these export filters.
-        if await source_hidden(storage, source):
-            omitted_held_sources += bool(selected)
+        # rows would make deleted or renamed-away content searchable on import,
+        # so the read itself leaves a hidden source out: a hold that lands
+        # after any check here still keeps its rows out of the bundle.
+        chunks = await storage.list_chunks_by_source(
+            source, limit=100_000, exclude_hidden=True, as_stored=True
+        )
+        if not chunks:
+            # Count only hidden sources with rows matching these export
+            # filters. This read decides that count and nothing else; its
+            # rows never reach ``records``.
+            if await source_hidden(storage, source):
+                held = await storage.list_chunks_by_source(source, limit=100_000, as_stored=True)
+                omitted_held_sources += any(matches(chunk) for chunk in held)
             continue
-        records.extend(_chunk_to_dict(chunk) for chunk in selected)
+        records.extend(_chunk_to_dict(chunk) for chunk in chunks if matches(chunk))
 
     marker: dict | None = None
     if stamp_provenance:

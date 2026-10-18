@@ -266,9 +266,15 @@ class StorageBackend(Protocol):
     async def search_source_files_by_content(
         self, query: str, limit: int = 10000
     ) -> list[Path]: ...
-    # ``exclude_hidden`` judges the path-level hold in the same statement.
+    # ``exclude_hidden`` judges the path-level hold in the same statement;
+    # ``as_stored`` matches a path read back from the store without resolving it.
     async def list_chunks_by_source(
-        self, source_file: Path, limit: int | None = 50, *, exclude_hidden: bool = False
+        self,
+        source_file: Path,
+        limit: int | None = 50,
+        *,
+        exclude_hidden: bool = False,
+        as_stored: bool = False,
     ) -> list[Chunk]: ...
     async def count_chunks_by_source(
         self, source_file: Path, *, exclude_hidden: bool = False

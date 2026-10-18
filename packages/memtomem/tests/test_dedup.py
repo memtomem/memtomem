@@ -57,7 +57,12 @@ class _FakeStorage:
     async def get_all_source_files(self) -> list[Path]:
         return sorted({chunk.metadata.source_file for chunk in self._chunks})
 
-    async def list_chunks_by_source(self, source: Path, limit: int) -> list[Chunk]:
+    async def list_chunks_by_source(
+        self, source: Path, limit: int, *, exclude_hidden: bool = False, as_stored: bool = False
+    ) -> list[Chunk]:
+        # The real read screens holds in its own statement; mirror that here.
+        if exclude_hidden and source in self.held_sources:
+            return []
         return [chunk for chunk in self._chunks if chunk.metadata.source_file == source][:limit]
 
     async def is_source_held(self, source: Path) -> bool:
@@ -358,9 +363,9 @@ class TestStoredVectorsAndCoverage:
         limits: list[int] = []
         real = storage.list_chunks_by_source
 
-        async def spy(source, limit):
+        async def spy(source, limit, **kwargs):
             limits.append(limit)
-            return await real(source, limit)
+            return await real(source, limit, **kwargs)
 
         monkeypatch.setattr(storage, "list_chunks_by_source", spy)
 
