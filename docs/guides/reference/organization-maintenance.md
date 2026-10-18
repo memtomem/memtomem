@@ -266,9 +266,11 @@ Over MCP, the same cleanup is `mem_do(action="cleanup_orphans")` for the
 preview and `mem_do(action="cleanup_orphans", params={"dry_run": false,
 "confirm_purge": true})` to delete. `dry_run=false` alone still previews.
 Storage `get_chunk`, MCP `mem_read`, `mem_edit`, `mem_delete`, and `mem_related`
-can still access held content by ID until it is purged. The exception is a file
-held because the redaction guard refused its new content: reading or editing one
-of its chunks by ID reports the chunk as not found and changes nothing. Remove the
+can still access held content by ID until it is purged. The MCP tools and Web
+routes make one exception: when a file is held because the redaction guard
+refused its new content, reading or editing one of its chunks by ID reports the
+chunk as not found and changes nothing. Storage `get_chunk` itself still returns
+those rows. Remove the
 flagged text and run `mm index <file>` to lift that hold. Ordinary search and
 the Web source browser and chunk endpoints hide held chunks. A running watcher
 checks held files in batches of 100 every five minutes. In degraded mode or

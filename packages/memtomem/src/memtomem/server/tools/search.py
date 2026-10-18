@@ -479,13 +479,18 @@ async def mem_increment_access(
     # unbounded list, and this is a boost, not a page the caller is reading.
     rows = await app.storage.get_chunks_batch(valid)
     project_context_root = _resolve_project_context_root(app)
-    in_boundary_ids = [
-        cid
-        for cid in valid
-        if (row := rows.get(cid)) is not None
-        and chunk_in_scope_boundary(row.metadata, project_context_root)
-        and not await chunk_withheld(app.storage, row.metadata)
-    ]
+    # Asked once per (source, origin): the list is unbounded, its sources are not.
+    withheld: dict[tuple[str, str | None], bool] = {}
+    in_boundary_ids = []
+    for cid in valid:
+        row = rows.get(cid)
+        if row is None or not chunk_in_scope_boundary(row.metadata, project_context_root):
+            continue
+        key = (str(row.metadata.source_file), row.metadata.origin)
+        if key not in withheld:
+            withheld[key] = await chunk_withheld(app.storage, row.metadata)
+        if not withheld[key]:
+            in_boundary_ids.append(cid)
     if in_boundary_ids:
         await app.storage.increment_access(in_boundary_ids)
 

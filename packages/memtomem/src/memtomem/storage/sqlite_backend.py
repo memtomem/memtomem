@@ -2511,9 +2511,14 @@ class SqliteBackend(
         The per-row twin of ``NOT_WITHHELD_C``: true under a redaction hold,
         or for a policy summary (``origin``) whose parent source has one.
         Availability holds return ``False`` — their chunks stay readable by id.
+
+        ``source_file`` is a chunk's stored path and is compared as stored, the
+        way the SQL twin compares columns. Re-resolving it would follow
+        whatever now sits at that path: a symlink put there after the hold
+        resolves elsewhere and misses the hold row.
         """
         db = self._get_read_db()
-        source = norm_path(source_file)
+        source = str(source_file)
         if origin == ORIGIN_CONSOLIDATION_POLICY and source.endswith(CONSOLIDATED_SUFFIX):
             candidates: tuple[str, ...] = (source, source[: -len(CONSOLIDATED_SUFFIX)])
         else:

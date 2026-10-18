@@ -99,6 +99,25 @@ class TestStorage:
         assert not await comp.storage.is_source_withheld(avail_path, origin=None)
         assert await _hold_reason(comp, held_path) == REDACTION_BLOCKED_HOLD
 
+    async def test_a_symlink_put_at_the_held_path_does_not_lift_the_screen(self, stack):
+        """The stored path is compared as stored, never re-resolved."""
+        comp, mem_dir, ctx = stack
+        path, held = await _redaction_held(comp, mem_dir)
+        elsewhere = mem_dir / "elsewhere.txt"
+        elsewhere.write_text("unrelated\n", encoding="utf-8")
+        path.unlink()
+        try:
+            path.symlink_to(elsewhere)
+        except OSError:
+            pytest.skip("symlinks unavailable on this platform")
+
+        read = await browse.mem_read(chunk_id=str(held.id), ctx=ctx)
+
+        assert "tokHeld1" not in read
+        assert read == await _as_if_absent(
+            comp, held.id, lambda: browse.mem_read(chunk_id=str(held.id), ctx=ctx)
+        )
+
     async def test_a_policy_summary_follows_its_parent(self, stack):
         comp, mem_dir, ctx = stack
         parents = {}
