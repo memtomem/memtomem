@@ -115,6 +115,13 @@ async def mem_scratch_promote(
 
     if entry is None:
         return f"Key '{key}' not found in working memory."
+    if entry.get("promoted"):
+        # Promoted means its body is already in a memory file — also after an
+        # append the indexer refused. Appending it again would duplicate it.
+        return (
+            f"Error: '{key}' was already promoted to long-term memory; nothing was "
+            "written. Its entry is in the memory file it was promoted to."
+        )
 
     # Save to long-term through the core ``mem_add`` wraps, so a refusal (an
     # excluded target #2488, a namespace mix, the redaction guard) is told apart

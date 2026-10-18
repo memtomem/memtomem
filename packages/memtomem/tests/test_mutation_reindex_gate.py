@@ -538,3 +538,23 @@ class TestAForcedWriteCoversOnlyItsOwnBytes:
         assert rewrite_valve_text(judged, Rewrite("## A\n\nalpha\n", "x")) == "x"
         assert rewrite_valve_text(judged, Rewrite("## A\n\nalpha\nmore\n", "x")) is None
         assert rewrite_valve_text(judged, None) is None
+
+
+class TestScratchPromotionIsNotRepeatable:
+    @pytest.mark.asyncio
+    async def test_mcp(self, bm25_only_components):
+        from memtomem.server.tools.scratch import mem_scratch_promote
+
+        comp, mem_dir = bm25_only_components
+        ctx = StubCtx(AppContext.from_components(comp))
+        await comp.storage.scratch_set("note", "scratch-body-marker")
+
+        first = await mem_scratch_promote(  # type: ignore[arg-type]
+            key="note", title="password: hunter2-title-value", ctx=ctx
+        )
+        assert "appended" in first
+        retried = await mem_scratch_promote(key="note", title="clean", ctx=ctx)  # type: ignore[arg-type]
+
+        assert "already promoted" in retried
+        on_disk = sum(p.read_text().count("scratch-body-marker") for p in mem_dir.glob("*.md"))
+        assert on_disk == 1

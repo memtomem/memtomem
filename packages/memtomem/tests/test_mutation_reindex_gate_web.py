@@ -114,3 +114,21 @@ async def test_scratch_promote_after_append_is_marked_promoted(bm25_only_compone
     written = [p for p in mem_dir.glob("*.md") if "scratch-body-marker" in p.read_text()]
     assert len(written) == 1
     assert "hunter2-title-value" not in await _stored(comp, written[0])
+
+
+async def test_a_refused_promotion_cannot_be_promoted_again(bm25_only_components):
+    """Its body is already in the file: a retry must not append it a second time."""
+    comp, mem_dir = bm25_only_components
+    await comp.storage.scratch_set("note", "scratch-body-marker")
+
+    async with _web_client(comp) as client:
+        first = await client.post(
+            "/api/scratch/note/promote", json={"title": "password: hunter2-title-value"}
+        )
+        _assert_index_blocked(first, written=True)
+        retried = await client.post("/api/scratch/note/promote", json={"title": "clean"})
+
+    assert retried.status_code == 409, retried.text
+    assert "already promoted" in retried.json()["detail"]
+    on_disk = sum(p.read_text().count("scratch-body-marker") for p in mem_dir.glob("*.md"))
+    assert on_disk == 1

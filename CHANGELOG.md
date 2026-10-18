@@ -400,7 +400,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   - Titles and tags the tools write are now judged with the rest of the
     file. An entry refused that way stays appended but unindexed, and the
     tool says so; the web routes answer `409 index_blocked` instead of the
-    `403 redaction_blocked` that offers a force-unsafe retry.
+    `403 redaction_blocked` that offers a force-unsafe retry. A scratch entry
+    refused that way is marked promoted, and promoting an entry that is
+    already promoted is now refused on the web and MCP surfaces, so its body
+    is not appended twice.
   - Content this bug already stored stays stored until the file is indexed
     again. Running `mm index` over your memory directories after upgrading
     judges every file: a file holding such content is reported as blocked

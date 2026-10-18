@@ -162,6 +162,17 @@ async def promote_scratch(
             # ``None`` is the untagged carve-out; passing it back would re-enter
             # rule resolution, so pass the namespace it is stored as.
             write_ns = stored_namespace(resolved_ns)
+            # Read again under the lock, right before the append: promoted means
+            # the body is already in a memory file (also after an append the
+            # indexer refused), and a second promote must not add it again.
+            current = await storage.scratch_get(key)
+            if not current:
+                raise HTTPException(status_code=404, detail=f"Key '{key}' not found")
+            if current.get("promoted"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Key '{key}' was already promoted to long-term memory.",
+                )
             # The re-index after the append judges the whole file; refuse a file
             # whose content may not be indexed before anything is written. The
             # entry stays in scratch, unpromoted.
