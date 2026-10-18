@@ -175,6 +175,7 @@ async def import_notion(
     symlink_paths: list[str] | None = None,
     read_only_paths: list[str] | None = None,
     source_symlink_paths: list[str] | None = None,
+    written_text: dict[Path, str] | None = None,
 ) -> list[Path]:
     """Import a Notion export (ZIP or directory) into markdown files.
 
@@ -274,6 +275,10 @@ async def import_notion(
             continue
         atomic_write_text(target, final, mode=0o600)
         imported.append(target)
+        if written_text is not None:
+            # The exact text the guard scanned and the file now holds, so an
+            # indexer honouring ``force_unsafe`` can bind the valve to it.
+            written_text[target] = final
 
     logger.info("Imported %d files from Notion export", len(imported))
     return imported
@@ -291,6 +296,7 @@ async def import_obsidian(
     symlink_paths: list[str] | None = None,
     read_only_paths: list[str] | None = None,
     source_symlink_paths: list[str] | None = None,
+    written_text: dict[Path, str] | None = None,
 ) -> list[Path]:
     """Import an Obsidian vault into memtomem-compatible markdown.
 
@@ -352,6 +358,10 @@ async def import_obsidian(
             continue
         atomic_write_text(target, final, mode=0o600)
         imported.append(target)
+        if written_text is not None:
+            # The exact text the guard scanned and the file now holds, so an
+            # indexer honouring ``force_unsafe`` can bind the valve to it.
+            written_text[target] = final
 
     logger.info("Imported %d files from Obsidian vault", len(imported))
     return imported

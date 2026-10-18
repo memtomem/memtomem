@@ -36,7 +36,7 @@ async def indexed_source(bm25_only_components):
     comp, directory = bm25_only_components
     source = directory / "note.md"
     source.write_text(ORIGINAL, encoding="utf-8")
-    stats = await comp.index_engine.index_file(source, already_scanned=True)
+    stats = await comp.index_engine.index_file(source, ingress_guarded=True)
     assert not stats.errors
     (chunk,) = await comp.storage.list_chunks_by_source(source)
     assert chunk.metadata.source_span_hash
@@ -126,7 +126,7 @@ async def test_plain_reindex_adopts_legacy_evidence_and_allows_write(indexed_sou
         .fetchone()
     )
     _assert_stale(await _request(comp, surface, chunk.id))
-    stats = await comp.index_engine.index_file(source, already_scanned=True)
+    stats = await comp.index_engine.index_file(source, ingress_guarded=True)
     assert not stats.errors
     assert stats.mutated
     assert stats.indexed_chunks == 0  # No forced re-embedding to backfill evidence.
@@ -152,13 +152,13 @@ async def test_plain_reindex_refreshes_hash_when_retrieval_content_is_unchanged(
     comp, source, chunk = indexed_source
     # Wikilink aliases have the same indexed text but different source spelling.
     source.write_text(ORIGINAL.replace("Alpha body", "[[target|Alpha body]]"), encoding="utf-8")
-    stats = await comp.index_engine.index_file(source, already_scanned=True)
+    stats = await comp.index_engine.index_file(source, ingress_guarded=True)
     fresh = await comp.storage.get_chunk(chunk.id)
     assert fresh is not None and fresh.content == chunk.content
     assert fresh.metadata.source_span_hash != chunk.metadata.source_span_hash
     assert stats.mutated and stats.indexed_chunks == 0
     assert fresh.updated_at == chunk.updated_at
-    assert not (await comp.index_engine.index_file(source, already_scanned=True)).mutated
+    assert not (await comp.index_engine.index_file(source, ingress_guarded=True)).mutated
 
 
 @pytest.mark.parametrize("surface", SURFACES)
@@ -221,7 +221,7 @@ async def test_transformed_chunks_keep_original_span_evidence(
     text = text if final else text.rstrip("\n")
     original = text.replace("\n", newline).encode()
     source.write_bytes(original)
-    stats = await comp.index_engine.index_file(source, already_scanned=True)
+    stats = await comp.index_engine.index_file(source, ingress_guarded=True)
     assert not stats.errors
     chunks = await comp.storage.list_chunks_by_source(source)
     assert chunks

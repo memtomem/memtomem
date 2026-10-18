@@ -624,6 +624,10 @@ async function promoteScratchEntry(key) {
     loadHarnessScratch();
   } catch (e) {
     toast('Error: ' + e.message, 'error');
+    // 409 ``index_blocked``: the server may have appended the entry and marked
+    // it promoted although the result could not be indexed. Reload so the
+    // Promote button reflects that instead of inviting a second append.
+    if (e.status === 409) loadHarnessScratch();
   }
 }
 

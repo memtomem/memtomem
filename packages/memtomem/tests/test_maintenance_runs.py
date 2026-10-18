@@ -319,3 +319,57 @@ class TestConsolidateApplyRunRecord:
         assert run["status"] == "error"
         assert run["error"] == "RuntimeError: write failed"
         assert run["completed_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_appended_refusal_discards_the_preview(self, components, monkeypatch):
+        """The summary landed but may not be indexed: a retry must not append it again."""
+        from pathlib import Path as _P
+
+        import memtomem.server.tools.memory_crud as memory_crud
+        from memtomem.indexing.engine import PrivacyRejection
+        from memtomem.server.tools.consolidation import mem_consolidate_apply
+
+        from tests.test_tools_logic import _fake_ctx
+
+        await self._stash_group(components.storage, [])
+
+        async def appended_then_refused(*args, **kwargs):
+            exc = PrivacyRejection(path=_P("day.md"), hit_count=1, scope="user", decision="blocked")
+            exc.mutation_outcome = "appended"
+            raise exc
+
+        monkeypatch.setattr(memory_crud, "_mem_add_core", appended_then_refused)
+        out = await mem_consolidate_apply(group_id=0, summary="x", ctx=_fake_ctx(components))
+
+        assert "appended" in out and "preview was discarded" in out
+        assert "internal error" not in out
+        assert await components.storage.scratch_get("consolidation_groups") is None
+        (run,) = await components.storage.maintenance_run_latest(kind="consolidate_apply")
+        assert run["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_appended_refusal_says_so_when_the_preview_stays(self, components, monkeypatch):
+        from pathlib import Path as _P
+
+        import memtomem.server.tools.memory_crud as memory_crud
+        from memtomem.indexing.engine import PrivacyRejection
+        from memtomem.server.tools.consolidation import mem_consolidate_apply
+
+        from tests.test_tools_logic import _fake_ctx
+
+        await self._stash_group(components.storage, [])
+
+        async def appended_then_refused(*args, **kwargs):
+            exc = PrivacyRejection(path=_P("day.md"), hit_count=1, scope="user", decision="blocked")
+            exc.mutation_outcome = "appended"
+            raise exc
+
+        async def cannot_delete(_key):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(memory_crud, "_mem_add_core", appended_then_refused)
+        monkeypatch.setattr(components.storage, "scratch_delete", cannot_delete)
+        out = await mem_consolidate_apply(group_id=0, summary="x", ctx=_fake_ctx(components))
+
+        assert "could not be discarded" in out
+        assert "was discarded" not in out

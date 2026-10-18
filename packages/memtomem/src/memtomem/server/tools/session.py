@@ -550,7 +550,7 @@ async def _end_session_phase(
     elif effective_summary and prepared_archive is not None:
         try:
             summary_chunk_line, summary_chunk_id = await _write_summary_archive(
-                app, prepared_archive
+                app, prepared_archive, force_unsafe=force_unsafe
             )
         except Exception:
             logger.warning(
@@ -947,12 +947,16 @@ def _guard_and_prepare_summary(
 async def _write_summary_archive(
     app: AppContext,
     prepared: _SummaryArchive,
+    *,
+    force_unsafe: bool = False,
 ) -> tuple[str | None, UUID | None]:
     """Persist a pre-built, already-guarded summary archive as a chunk.
 
-    The caller ran :func:`_guard_and_prepare_summary` and only reaches here
-    on a pass, so this does no redaction scan of its own (``already_scanned``
-    on the index call). Writes the markdown file and indexes it under
+    The caller ran :func:`_guard_and_prepare_summary` over these exact bytes
+    and only reaches here when it did not refuse. The index still judges the
+    file under its own scope; ``valve_text`` keeps the caller's
+    ``force_unsafe`` to the bytes it scanned, since the index runs without the
+    file's lock. Writes the markdown file and indexes it under
     ``archive:session:<session_id>`` (an ``archive:`` default system
     namespace, hidden from ``mem_search`` without an explicit
     ``namespace_filter``). Returns ``(status_line, summary_chunk_id)``; both
@@ -974,7 +978,11 @@ async def _write_summary_archive(
 
     await asyncio.to_thread(atomic_write_text, prepared.target, prepared.content, 0o600)
     stats = await app.index_engine.index_file(
-        prepared.target, namespace=prepared.namespace, already_scanned=True
+        prepared.target,
+        namespace=prepared.namespace,
+        ingress_guarded=True,
+        force_unsafe=force_unsafe,
+        valve_text=prepared.content,
     )
     app.search_pipeline.invalidate_cache()
 

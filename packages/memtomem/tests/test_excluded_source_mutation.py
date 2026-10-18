@@ -84,7 +84,7 @@ async def excluded_source(request, bm25_only_components, tmp_path):
 
 
 async def _index(comp, source: Path) -> None:
-    stats = await comp.index_engine.index_file(source, already_scanned=True)
+    stats = await comp.index_engine.index_file(source, ingress_guarded=True)
     assert not stats.errors
     assert stats.indexed_chunks == 1
 

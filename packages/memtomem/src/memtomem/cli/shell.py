@@ -236,9 +236,41 @@ async def _cmd_add(comp, args: list[str]) -> None:
         return
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    append_entry(target, content)
-    # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
-    stats = await comp.index_engine.index_file(target, already_scanned=True)
+    from memtomem.context._atomic import (
+        _CRUD_SIDECAR_LOCK_BUDGET_S,
+        async_file_lock,
+        memory_lock_path,
+    )
+    from memtomem.indexing.engine import PrivacyRejection
+    from memtomem.tools.memory_mutation import preflight_refusal
+
+    # Held across the preflight, the append and the re-index, like every other
+    # memory write: the preflight's answer is about the file as it stands, and
+    # only the lock keeps it standing until the re-index reads it.
+    try:
+        async with async_file_lock(memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+            refusal = await preflight_refusal(
+                comp.index_engine, target, op="add", needs_valve=False
+            )
+            if refusal is not None:
+                comp.search_pipeline.invalidate_cache()
+                click.secho(refusal.removeprefix("Error: "), fg="red")
+                return
+            append_entry(target, content)
+            try:
+                stats = await comp.index_engine.index_file(
+                    target, ingress_guarded=True, lock_held=True
+                )
+            except PrivacyRejection as exc:
+                comp.search_pipeline.invalidate_cache()
+                click.secho(
+                    exc.mutation_detail("add", outcome="appended").removeprefix("Error: "),
+                    fg="red",
+                )
+                return
+    except TimeoutError:
+        click.secho(f"{target.name} is locked by another writer; retry.", fg="red")
+        return
     # #2141: unlike one-shot ``mm add``, the shell keeps one process — and one
     # warmed search cache — alive across commands.
     if stats.mutated:

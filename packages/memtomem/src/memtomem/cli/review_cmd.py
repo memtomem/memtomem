@@ -143,6 +143,7 @@ async def _recover(stale_after_minutes: int, limit: int, actor: str) -> None:
 
 async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) -> None:
     from memtomem.cli._bootstrap import cli_components
+    from memtomem.indexing.engine import PrivacyRejection
     from memtomem.pinned import PinnedContextStore
     from memtomem.server.tools.search import _resolve_project_context_root
     from memtomem.tools.memory_writer import append_entry
@@ -238,9 +239,19 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                         raise RuntimeError("daily target was not resolved before the claim")
                     target = daily_target
                     write_location = str(target)
+                    from memtomem.tools.memory_mutation import preflight_refusal
+
                     async with async_file_lock(
                         memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
                     ):
+                        # The re-index judges the whole file: refuse a file whose
+                        # content may not be indexed before appending (the claim
+                        # is released below, nothing was written).
+                        refusal = await preflight_refusal(
+                            comp.index_engine, target, op="approve", needs_valve=False
+                        )
+                        if refusal is not None:
+                            raise click.ClickException(refusal.removeprefix("Error: "))
                         await asyncio.to_thread(
                             append_entry,
                             target,
@@ -248,9 +259,40 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                             title=f"Approved {candidate['kind']}",
                             tags=["formation-approved", candidate["kind"]],
                         )
-                        await comp.index_engine.index_file(
-                            target, already_scanned=True, lock_held=True
-                        )
+                        try:
+                            await comp.index_engine.index_file(
+                                target, ingress_guarded=True, lock_held=True
+                            )
+                        except PrivacyRejection as exc:
+                            # Appended, unindexed. Quarantine the claim rather than
+                            # releasing it, or a re-approval appends it again.
+                            detail = exc.mutation_detail("approve", outcome="appended")
+                            # Recovery may already have moved the claim back to
+                            # ``pending``; quarantine it from there too. A
+                            # quarantine that raises must not reach the release
+                            # below: the append is durable either way.
+                            try:
+                                quarantined: bool | None = (
+                                    await comp.storage.mark_claimed_candidate_write_uncertain(
+                                        candidate_id, actor="cli-approve", reason=detail
+                                    )
+                                    or await comp.storage.mark_memory_candidate_write_uncertain(
+                                        candidate_id, actor="cli-approve", reason=detail
+                                    )
+                                )
+                            except Exception:
+                                quarantined = None
+                            if quarantined is None:
+                                suffix = (
+                                    " The candidate could not be quarantined; do not re-approve it."
+                                )
+                            elif quarantined:
+                                suffix = " Candidate moved to write_uncertain."
+                            else:
+                                suffix = " Candidate state changed again; inspect the review queue."
+                            raise _WriteSettled(detail.removeprefix("Error: ") + suffix) from exc
+            except _WriteSettled as exc:
+                raise click.ClickException(str(exc)) from exc
             except asyncio.CancelledError:
                 await comp.storage.release_memory_candidate(candidate_id)
                 raise
@@ -280,6 +322,10 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
             if not changed:
                 raise click.ClickException("Candidate state changed concurrently")
         click.echo(json.dumps({"ok": True, "status": decision}))
+
+
+class _WriteSettled(Exception):
+    """An approval whose claim is already settled; the handler must not release it."""
 
 
 @review.command("approve")

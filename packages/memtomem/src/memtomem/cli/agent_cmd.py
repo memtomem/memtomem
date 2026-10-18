@@ -462,12 +462,32 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                 )
                 if mix_err is not None:
                     raise click.ClickException(mix_err)
-                append_entry(path, chunk.content, title=title, tags=tags)
-                # Guarded above (``enforce_write_guard``); skip the engine gate
-                # (ADR-0006 PR-A).
-                stats = await comp.index_engine.index_file(
-                    path, namespace=target, already_scanned=True, lock_held=True
+                from memtomem.indexing.engine import PrivacyRejection
+                from memtomem.tools.memory_mutation import preflight_refusal
+
+                # The re-index after the append judges the whole file: refuse a
+                # file whose content may not be indexed before writing anything.
+                needs_valve = guard.decision == "bypassed"
+                refusal = await preflight_refusal(
+                    comp.index_engine, path, op="mm agent share", needs_valve=needs_valve
                 )
+                if refusal is not None:
+                    raise click.ClickException(refusal.removeprefix("Error: "))
+                append_entry(path, chunk.content, title=title, tags=tags)
+                try:
+                    stats = await comp.index_engine.index_file(
+                        path,
+                        namespace=target,
+                        ingress_guarded=True,
+                        force_unsafe=needs_valve,
+                        lock_held=True,
+                    )
+                except PrivacyRejection as exc:
+                    raise click.ClickException(
+                        exc.mutation_detail("mm agent share", outcome="appended").removeprefix(
+                            "Error: "
+                        )
+                    ) from exc
         except TimeoutError as exc:
             raise click.ClickException(
                 f"{path} is locked by another process (another server or migrate in flight); retry."

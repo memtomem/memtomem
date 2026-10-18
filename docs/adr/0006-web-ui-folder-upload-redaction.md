@@ -531,9 +531,10 @@ Axes A–E are decided but only **partially built**:
   `IndexingStats.blocked_files` / `blocked_paths`, so one flagged file does not
   abort the run; single-file `index_file` lets it propagate so callers roll back
   or surface it rather than silently succeeding. Callers that already ran
-  `enforce_write_guard` at their ingress layer pass `already_scanned=True` to
-  skip the gate (see the outline note below). `mm index --force-unsafe` ships the
-  bulk escape hatch.
+  `enforce_write_guard` at their ingress layer originally skipped the gate
+  (`already_scanned=True`); that skip was the gap GHSA-6wq5-pc5r-4fgp closed —
+  see the 2026-10-18 note under the outline below. `mm index --force-unsafe`
+  ships the bulk escape hatch.
 - **Import (Axis F.3) — built (#1490).** Both ingresses — MCP `mem_import` and
   web `POST /api/export/import` — route through `tools/export_import.py`
   `import_chunks`, which verifies the local-provenance marker and, for an
@@ -604,6 +605,23 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
       The guarded set: `mem_add` / `mem_edit` / `mem_batch_add` / `mem_delete`,
       `upload_files`, compose/`add_memory`, web chunk edit/delete, CLI `mm mem add`,
       CLI agent `share`, and LangGraph `add`.
+    - **Superseded 2026-10-18 (GHSA-6wq5-pc5r-4fgp).** The skip covered the whole
+      file while the ingress had scanned only the caller's own text, so content
+      already in the file that nobody scanned was stored on the next write. The
+      flag is gone: every index runs the gate over the whole file
+      (`ingress_guarded=True` now only stops a write being counted twice). A tool
+      that changes an existing file calls `IndexEngine.preflight_mutation` under its
+      lock first and refuses, holding the file, when the file as it stands may not
+      be indexed — so judging the whole result afterwards re-litigates nothing a
+      clean file did not already pass. The caller's `force_unsafe` reaches the
+      engine only when the file held nothing flagged or masked; writers that
+      replace a whole file bind it to the text they guarded (`valve_text`). The
+      cost is that a file holding a deliberately forced secret cannot be changed
+      through the tools at all until the secret is removed by hand; `mm index
+      --force-unsafe` only re-indexes it and lifts the hold. Persisted "already adjudicated" state
+      was considered and rejected: a deletion can join two lines into a new match,
+      and regex hits do not delimit a secret's value, so no stored key could be
+      bound to exactly what was authorized.
     - **Blocked files are a return-path aggregate for bulk, a raised exception for
       single-file.** `PrivacyRejection` (path + hit count, never the matched bytes)
       is raised in `_index_file`; `index_path` / `index_path_stream` catch it per

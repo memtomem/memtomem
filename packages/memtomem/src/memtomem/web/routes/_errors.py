@@ -202,3 +202,49 @@ def _error(status_code: int, error_kind: str, message: str, **extra: Any) -> HTT
         status_code=status_code,
         detail={"error_kind": error_kind, "message": message, **extra},
     )
+
+
+INDEX_BLOCKED = "index_blocked"
+
+
+def index_blocked_http(
+    message: str,
+    *,
+    hits: int | None = None,
+    held: bool | None = None,
+    written: bool = False,
+    file: str | None = None,
+) -> HTTPException:
+    """409 for a memory write whose result the indexer may not store.
+
+    A detail of its own, not ``redaction_blocked``: the SPA answers that one by
+    offering ``force_unsafe`` and resending, which is wrong here — the refused
+    content is not the caller's (or the write already landed, ``written``), and
+    resending would append the entry a second time.
+    """
+    return HTTPException(
+        status_code=409,
+        detail={
+            "detail": INDEX_BLOCKED,
+            "message": message,
+            "hits": hits,
+            "held": held,
+            "written": written,
+            # The bare name: this body is echoed to the browser, and host paths
+            # stay out of web responses.
+            "file": file,
+        },
+    )
+
+
+def privacy_index_blocked_http(exc: Any, op: str) -> HTTPException:
+    """:func:`index_blocked_http` for an indexing ``PrivacyRejection``."""
+    outcome = exc.mutation_outcome or "not_written"
+    return index_blocked_http(
+        exc.mutation_detail(op, outcome=outcome),
+        hits=exc.hit_count,
+        held=exc.held,
+        # Whether this write's bytes may still be in the file.
+        written=outcome in ("appended", "not_rolled_back"),
+        file=exc.path.name,
+    )

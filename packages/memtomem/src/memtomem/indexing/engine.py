@@ -12,6 +12,7 @@ import os
 import sqlite3
 import stat as stat_module
 import time
+from dataclasses import dataclass, field
 from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,7 +43,7 @@ from memtomem.errors import (
 )
 from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
-from memtomem.indexing.redaction_exemption import declared_exemption
+from memtomem.indexing.redaction_exemption import declared_exemption, indexer_text
 from memtomem.indexing.source_receipt import chunker_versions, code_fingerprint
 from memtomem.models import Chunk, IndexingStats, stored_namespace
 from memtomem.storage.sqlite_helpers import norm_dir_prefix as _norm_dir_prefix
@@ -833,6 +834,11 @@ def _distinct_sorted(values: Iterable[str | None]) -> list[str | None]:
 _UNHIDDEN_BLOCKED_ERROR = "could not hide the indexed chunks of this blocked file; retry"
 
 
+def _read_text_view(text: str) -> str:
+    """``text`` with the newline translation ``Path.read_text`` applies on read."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 class PrivacyRejection(Exception):
     """Raised by :meth:`IndexEngine._index_file` when a file's content trips the
     secret-redaction guard during **un-adjudicated** indexing (ADR-0006 PR-A).
@@ -840,8 +846,9 @@ class PrivacyRejection(Exception):
     Bulk entrypoints (``index_path`` / ``index_path_stream``) catch this per file
     and aggregate it into :attr:`IndexingStats.blocked_files`; single-file
     ``index_file`` callers let it propagate so their own rollback / error
-    surfacing runs. Callers that already ran ``privacy.enforce_write_guard`` at
-    their ingress layer pass ``already_scanned=True`` and never trigger this.
+    surfacing runs. Memory tools that modify an existing file meet it twice:
+    from :meth:`IndexEngine.preflight_mutation` before they write, and from the
+    re-index after it, which judges the whole file like every other index.
 
     Carries only the hit **count** and file path — never the matched bytes
     (secret-in-log hygiene).
@@ -861,6 +868,9 @@ class PrivacyRejection(Exception):
         self.decision = decision
         self.held: bool | None = None
         self.retryable = False
+        # Set by a memory tool that re-raises this to its route: what became of
+        # the write it stopped (see ``mutation_detail``).
+        self.mutation_outcome: MutationOutcome | None = None
         super().__init__(f"redaction_blocked: {path.name} (hits={hit_count}, decision={decision})")
 
     def error_detail(self) -> str:
@@ -891,6 +901,105 @@ class PrivacyRejection(Exception):
         self.held = False
         self.retryable = True
         self.args = (f"{self.args[0]}; {_UNHIDDEN_BLOCKED_ERROR}",)
+
+    def mutation_detail(self, op: str, *, outcome: MutationOutcome) -> str:
+        """The refusal a memory tool reports when this rejection stopped its write.
+
+        ``outcome`` says what became of the write: ``not_written`` (refused by
+        the preflight, the file is as it was), ``rolled_back`` (refused after
+        the write, the pre-image was put back), ``not_rolled_back`` (refused
+        after the write and the restore failed, so the file may still hold it),
+        ``superseded`` (another process removed or replaced the file while the
+        write ran; nothing was written back over it) or ``appended`` (refused
+        after a durable append, which stays on disk unindexed). Hit count only, never
+        the matched bytes. The remedy depends on the tier: ``force_unsafe`` is
+        refused for ``project_shared``, so it is not offered there.
+        """
+        if outcome == "not_written":
+            subject = f"{self.path.name} holds content"
+            result = "nothing was written"
+        elif outcome == "rolled_back":
+            subject = f"the result would hold content in {self.path.name}"
+            result = "the change was rolled back"
+        elif outcome == "not_rolled_back":
+            subject = f"the result would hold content in {self.path.name}"
+            result = "the rollback failed, so the file may still hold the change"
+        elif outcome == "superseded":
+            subject = f"the result would hold content in {self.path.name}"
+            result = (
+                "another process removed or replaced the file while the change ran, "
+                "so nothing was written back over it"
+            )
+        else:
+            subject = f"the result holds content in {self.path.name}"
+            result = "the entry was appended to the file but NOT indexed"
+        parts = [
+            f"Error: {op} refused: {subject} matching {self.hit_count} privacy "
+            f"pattern(s) that the current policy does not allow to be indexed; {result}."
+        ]
+        if self.held is True:
+            parts.append("Its indexed chunks are held until the file indexes cleanly.")
+        elif self.held is False:
+            parts.append(f"Also: {_UNHIDDEN_BLOCKED_ERROR}.")
+        if self.scope == "project_shared":
+            parts.append("Remove that content, then run mem_index.")
+        else:
+            parts.append(
+                "Remove that content and run mem_index, or authorize it with "
+                "`mm index --force-unsafe <file>`."
+            )
+        return " ".join(parts)
+
+
+MutationOutcome = Literal["not_written", "rolled_back", "not_rolled_back", "superseded", "appended"]
+
+
+class MutationBlockedError(Exception):
+    """A memory-tool write the preflight forbids for a reason other than privacy.
+
+    ``detail`` is the user-facing refusal (:meth:`MutationPreflight.blocker`).
+    Nothing was written.
+    """
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(detail)
+
+
+@dataclass(frozen=True)
+class MutationPreflight:
+    """What :meth:`IndexEngine.preflight_mutation` decided about a file as it stands.
+
+    ``rejection`` — the file may not be indexed now; the tool must not write,
+    and calls :meth:`IndexEngine.refuse_mutation` to record and hold.
+    ``masking_locked`` — a reviewed masking manifest masks part of the file.
+    The manifest is bound to the file's exact digest, so any change drops the
+    masking and the masked text would be judged, and possibly stored, raw.
+    ``valve_ok`` — the file holds nothing flagged and nothing masked, so every
+    hit in the result of this write comes from the write itself and the
+    caller's ``force_unsafe`` may cover it.
+    """
+
+    rejection: PrivacyRejection | None
+    masking_locked: bool
+    valve_ok: bool
+    replay: Callable[[], object] | None = field(default=None, repr=False, compare=False)
+
+    def blocker(self, op: str, name: str, *, needs_valve: bool) -> str | None:
+        """The refusal text for a write the preflight forbids, other than ``rejection``."""
+        if self.masking_locked:
+            return (
+                f"Error: {op} refused: {name} is under a reviewed masking manifest, "
+                "which any change would invalidate; nothing was written. Edit it by "
+                "hand and review the manifest again."
+            )
+        if needs_valve and not self.valve_ok:
+            return (
+                f"Error: {op} refused: force_unsafe covers only a file that holds "
+                f"nothing flagged or masked, and {name} does; nothing was written. "
+                "Write the forced content to a file of its own."
+            )
+        return None
 
 
 class NamespaceMixedUnderForceError(Exception):
@@ -1630,8 +1739,7 @@ class IndexEngine:
 
         ``exempt`` says the caller already adjudicated this content and it must
         be stored verbatim: a ``force_unsafe`` valve, a file-declared
-        frontmatter exemption, or an ingress that ran the write guard itself
-        (``already_scanned``). It is a no-op while the projection is off, and
+        frontmatter exemption. It is a no-op while the projection is off, and
         is threaded anyway so that turning the projection on cannot silently
         make an explicit allow-this into a lossy write — the store would hold a
         masked projection while the audit log said "bypass", and that
@@ -1775,7 +1883,8 @@ class IndexEngine:
         namespace: str | None = None,
         on_chunk_progress: Callable[[int, int], None] | None = None,
         force_unsafe: bool = False,
-        already_scanned: bool = False,
+        ingress_guarded: bool = False,
+        valve_text: str | None = None,
         lock_held: bool = False,
         path_scope: PathScope = "configured",
         reassign_namespaces: bool = False,
@@ -1837,7 +1946,8 @@ class IndexEngine:
                     namespace=namespace,
                     on_chunk_progress=on_chunk_progress,
                     force_unsafe=force_unsafe,
-                    already_scanned=already_scanned,
+                    ingress_guarded=ingress_guarded,
+                    valve_text=valve_text,
                     path_scope=path_scope,
                     # Engine-scoped, so the #1783 embedding cap holds across every
                     # entry point now that a bulk run can overlap an ``index_file``
@@ -2026,7 +2136,8 @@ class IndexEngine:
         namespace: str | None = None,
         *,
         force_unsafe: bool = False,
-        already_scanned: bool = False,
+        ingress_guarded: bool = False,
+        valve_text: str | None = None,
         lock_held: bool = False,
         path_scope: PathScope = "configured",
         reassign_namespaces: bool = False,
@@ -2046,13 +2157,22 @@ class IndexEngine:
         ``mm index <file>``, importers) leave it ``False`` and this method takes
         the sidecar itself, off the event loop, bounded.
 
-        ``already_scanned=True`` skips the ADR-0006 redaction gate for callers
-        that already ran ``privacy.enforce_write_guard`` on the new content at
-        their own ingress layer (``mem_add`` / ``mem_edit`` / upload / chunk
-        edit, …); the whole-file reindex must not re-litigate or double-count
-        that content. Un-adjudicated single-file callers (``mem_fetch``, file
-        import, ``mm index <file>``) leave it ``False`` and must catch the
-        resulting :class:`PrivacyRejection`.
+        Every call runs the ADR-0006 redaction gate over the whole file; no
+        caller can switch it off. A caller that scanned only the text it wrote
+        cannot speak for the rest of the file, and that skip once let content
+        nobody scanned be stored on the next memory-tool write. Single-file
+        callers must catch the resulting :class:`PrivacyRejection`.
+
+        ``ingress_guarded=True`` says the write being indexed was already
+        counted by its own ingress guard: the gate then counts only a refusal,
+        and still emits every audit line. It changes no decision.
+
+        ``valve_text`` binds ``force_unsafe`` to the text the caller guarded:
+        when given, the valve applies only if the file the engine reads is that
+        text (after the newline translation ``read_text`` performs), and the
+        call is judged without it otherwise. Writers that replace a whole file
+        and then index it without holding its lock pass it, so a delayed forced
+        index cannot cover somebody else's later write.
 
         ``force=True`` re-embeds every chunk in the file but preserves chunk
         identity (UUID) and per-chunk personalization (``access_count``,
@@ -2115,7 +2235,8 @@ class IndexEngine:
                 force,
                 namespace=namespace,
                 force_unsafe=force_unsafe,
-                already_scanned=already_scanned,
+                ingress_guarded=ingress_guarded,
+                valve_text=valve_text,
                 lock_held=lock_held,
                 path_scope=path_scope,
                 reassign_namespaces=reassign_namespaces,
@@ -2641,7 +2762,8 @@ class IndexEngine:
         *,
         on_chunk_progress: Callable[[int, int], None] | None = None,
         force_unsafe: bool = False,
-        already_scanned: bool = False,
+        ingress_guarded: bool = False,
+        valve_text: str | None = None,
         path_scope: PathScope = "configured",
         embed_semaphore: asyncio.Semaphore | None = None,
         reassign_namespaces: bool = False,
@@ -2804,60 +2926,71 @@ class IndexEngine:
         if self._registry.get(decision_path.suffix) is None:
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
-        # ADR-0006 Axes A.3/B.2 — secret-redaction trust boundary for
-        # un-adjudicated indexing. Resolve scope first (needed both here and by
-        # ``_apply_scope`` below) so a ``force_unsafe`` bulk index of a
-        # ``project_shared`` file is hard-refused, then scan the raw content
-        # before any chunk/embed/store work. Callers that already ran
-        # ``privacy.enforce_write_guard`` at their own ingress layer pass
-        # ``already_scanned=True`` to skip this — the boundary is enforced there,
-        # and re-scanning the whole file would double-count and re-litigate
-        # already-stored content (e.g. a prior ``force_unsafe`` write elsewhere
-        # in the same file). See ADR-0006 "Implementation outline (PR-A)".
+        # ADR-0006 Axes A.3/B.2 — secret-redaction trust boundary. Every index
+        # runs it over the whole file: bulk, watcher, single file, and the
+        # re-index a memory tool performs after its write. Resolve scope first
+        # (needed both here and by ``_apply_scope`` below) so a ``force_unsafe``
+        # index of a ``project_shared`` file is hard-refused, then scan the raw
+        # content before any chunk/embed/store work. The memory tools used to
+        # skip this because their ingress had scanned the text they wrote; the
+        # rest of the file was then stored unscanned. Their preflight
+        # (``preflight_mutation``) now refuses a file that may not be indexed
+        # before they write, so judging the whole result here re-litigates
+        # nothing a clean file did not already pass.
         #
         # A file may also declare its own exemption in frontmatter (#2076,
         # ADR-0006 Axis E.5). Unlike ``force_unsafe`` — which no surface can
         # pass to the watcher, the debounce drain, or ``mem_index`` — the
         # declaration travels with the content the gate already reads, so it
-        # reaches every un-adjudicated surface at once. The guard still
-        # decides: it honours the declaration only for label-shaped hits, and
-        # hard-refuses it for ``project_shared`` exactly as it does the valve.
+        # reaches every surface at once. The guard still decides: it honours
+        # the declaration only for label-shaped hits, and hard-refuses it for
+        # ``project_shared`` exactly as it does the valve.
         scope_val, project_root = self._resolve_scope(decision_path)
-        exempted = False
-        # Verbatim storage is the caller's explicit decision in three cases: an
-        # ingress that already ran the guard, a file that declares its own
-        # frontmatter exemption, and the ``force_unsafe`` valve. Carried out of
-        # this block so the chunker below gets the same answer the guard got.
-        masking_exempt = already_scanned
-        if not already_scanned:
-            declared = declared_exemption(decision_path, content)
-            projection = self._prepare_index_projection(decision_path, content, scope_val)
-            masking_exempt = bool(declared) or force_unsafe
-            guard = privacy.enforce_write_guard(
-                content if masking_exempt else projection.guard_content,
-                surface="index",
-                force_unsafe=force_unsafe,
-                scope=scope_val,
-                declared_exemption=declared,
-                audit_context={"path": str(file_path)},
+        if force_unsafe and valve_text is not None and content != _read_text_view(valve_text):
+            # The file is no longer the text the caller guarded and forced:
+            # someone wrote after it. The valve covered that caller's bytes only.
+            logger.warning(
+                "force_unsafe dropped for %s: the file changed after the caller guarded it",
+                file_path.name,
             )
-            exempted = guard.decision == "exempted"
-            if guard.decision in ("blocked", "blocked_project_shared"):
-                # Never log the matched bytes — only the hit count.
-                logger.warning(
-                    "redaction_blocked: %s (hits=%d, scope=%s)",
-                    file_path.name,
-                    len(guard.hits),
-                    scope_val,
-                )
-                raise PrivacyRejection(
-                    path=file_path,
-                    hit_count=len(guard.hits),
-                    scope=scope_val,
-                    decision=guard.decision,
-                )
-            if guard.decision not in ("pass", "bypassed", "exempted"):
-                raise RuntimeError(f"unexpected enforce_write_guard decision: {guard.decision!r}")
+            force_unsafe = False
+        declared = declared_exemption(decision_path, content)
+        projection = self._prepare_index_projection(decision_path, content, scope_val)
+        # Verbatim storage is the caller's explicit decision in two cases: a
+        # file that declares its own frontmatter exemption, and the
+        # ``force_unsafe`` valve. Carried out of this block so the chunker below
+        # gets the same answer the guard got.
+        masking_exempt = bool(declared) or force_unsafe
+        guard = privacy.enforce_write_guard(
+            content if masking_exempt else projection.guard_content,
+            surface="index",
+            force_unsafe=force_unsafe,
+            scope=scope_val,
+            declared_exemption=declared,
+            audit_context={"path": str(file_path)},
+            count_outcome=not ingress_guarded,
+        )
+        exempted = guard.decision == "exempted"
+        if guard.decision in ("blocked", "blocked_project_shared"):
+            if ingress_guarded:
+                # The ingress counted the text it wrote, not this refusal of
+                # the whole file, which is new information.
+                privacy.record(guard.decision, "index")
+            # Never log the matched bytes — only the hit count.
+            logger.warning(
+                "redaction_blocked: %s (hits=%d, scope=%s)",
+                file_path.name,
+                len(guard.hits),
+                scope_val,
+            )
+            raise PrivacyRejection(
+                path=file_path,
+                hit_count=len(guard.hits),
+                scope=scope_val,
+                decision=guard.decision,
+            )
+        if guard.decision not in ("pass", "bypassed", "exempted"):
+            raise RuntimeError(f"unexpected enforce_write_guard decision: {guard.decision!r}")
 
         # ``force`` no longer skips preservation (#2061): it re-embeds, and only
         # ``reassign_namespaces`` re-resolves through the rules. This lookup runs
@@ -2893,7 +3026,7 @@ class IndexEngine:
             receipt_storage is not None
             and not force
             and not force_unsafe
-            and not already_scanned
+            and not ingress_guarded
             and namespace is None
             and not reassign_namespaces
             and new_source_namespace is None
@@ -3829,6 +3962,37 @@ class IndexEngine:
             )
         return prepare_index_content(content, scope=scope)
 
+    def _judge_as_it_stands(self, file_path: Path, content: str, *, surface: str):
+        """The gate's inputs for ``content`` at ``file_path``, and a recorder.
+
+        Shared by the two read-only twins of the gate in ``_index_file`` —
+        :meth:`preview_redaction_decision` and :meth:`preflight_mutation` — so
+        they resolve the canonical path, scope, frontmatter exemption and
+        projection the same way the gate does. Returns the projection, the
+        unrecorded guard result, and a callable that runs the same guard with
+        recording on (counter and audit lines, exactly once).
+        """
+        try:
+            decision_path = file_path.resolve()
+        except OSError:  # pragma: no cover - defensive: unreadable parent
+            decision_path = file_path
+        scope_val, _ = self._resolve_scope(decision_path)
+        declared = declared_exemption(decision_path, content)
+        projection = self._prepare_index_projection(decision_path, content, scope_val)
+        guard_input = content if declared else projection.guard_content
+
+        def _guard(record: bool) -> privacy.WriteGuardResult:
+            return privacy.enforce_write_guard(
+                guard_input,
+                surface=surface,
+                scope=scope_val,
+                declared_exemption=declared,
+                audit_context={"path": str(file_path)},
+                record_outcome=record,
+            )
+
+        return scope_val, projection, _guard(False), lambda: _guard(True)
+
     def preview_redaction_decision(self, file_path: Path, content: str) -> str:
         """What would the redaction gate decide for ``content`` at ``file_path``?
 
@@ -3849,21 +4013,69 @@ class IndexEngine:
         the audit counters and emits no bypass/exemption log line. A read-only
         command must not look like a write in the audit trail.
         """
-        try:
-            decision_path = file_path.resolve()
-        except OSError:  # pragma: no cover - defensive: unreadable parent
-            decision_path = file_path
-        scope_val, _ = self._resolve_scope(decision_path)
+        _, _, guard, _ = self._judge_as_it_stands(file_path, content, surface="memory_doctor")
+        return guard.decision
 
-        declared = declared_exemption(decision_path, content)
-        projection = self._prepare_index_projection(decision_path, content, scope_val)
-        return privacy.enforce_write_guard(
-            content if declared else projection.guard_content,
-            surface="memory_doctor",
-            scope=scope_val,
-            declared_exemption=declared,
-            record_outcome=False,
-        ).decision
+    def preflight_mutation(self, file_path: Path, pre_image: bytes) -> MutationPreflight:
+        """May a memory tool modify ``file_path``, whose bytes are ``pre_image``?
+
+        Called under the caller's sidecar lock, before it writes. Judges the
+        file as it stands with the gate's own rules, read-only and unrecorded:
+        the text view is the engine's (UTF-8 with the same replacement fallback
+        and universal newlines), so the preflight and the re-index after the
+        write read the same characters. ``pre_image == b""`` is a new or empty
+        file and always clean.
+
+        A file that holds content the gate refuses must not be written to: the
+        re-index after the write would refuse the whole result anyway, and the
+        write itself would already be on disk. See :class:`MutationPreflight`
+        for the other two answers.
+        """
+        if not pre_image or self._registry.get(file_path.suffix) is None:
+            return MutationPreflight(None, False, True)
+        text = indexer_text(pre_image, errors="replace")
+        scope_val, projection, guard, replay = self._judge_as_it_stands(
+            file_path, text, surface="index"
+        )
+        rejection = None
+        if guard.decision in ("blocked", "blocked_project_shared"):
+            rejection = PrivacyRejection(
+                path=file_path,
+                hit_count=len(guard.hits),
+                scope=scope_val,
+                decision=guard.decision,
+            )
+        masking_locked = bool(self._config.index_masking_manifest_path) and bool(
+            projection.redaction_count
+        )
+        valve_ok = not privacy.scan(text) and not projection.redaction_count
+        return MutationPreflight(rejection, masking_locked, valve_ok, replay)
+
+    async def refuse_mutation(
+        self, file_path: Path, preflight: MutationPreflight
+    ) -> PrivacyRejection:
+        """Settle a preflight refusal: record it, then hold the file's chunks.
+
+        The preflight records nothing, so this replays the same guard with
+        recording on — one counter increment and every audit line it would
+        have emitted on an index, under ``index``. The file's content may not
+        be indexed, so its older chunks are held exactly as the index would
+        hold them (#2629). The caller still holds the sidecar; nothing here
+        takes it.
+        """
+        rejection = preflight.rejection
+        if rejection is None:
+            raise ValueError("refuse_mutation needs a preflight that refused")
+        if preflight.replay is not None:
+            preflight.replay()
+        logger.warning(
+            "redaction_blocked: %s (hits=%d, scope=%s)",
+            file_path.name,
+            rejection.hit_count,
+            rejection.scope,
+        )
+        await self._hold_blocked_source(file_path, rejection)
+        return rejection
 
     def _resolve_scope(self, file_path: Path) -> tuple[str, Path | None]:
         """Classify ``file_path`` into ``(scope, project_root)`` (ADR-0011 §2).

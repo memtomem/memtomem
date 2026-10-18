@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from helpers import StubCtx, set_home
+from helpers import StubCtx, clean_preflight, set_home
 from memtomem.memory_scope import day_file_name, namespace_mix_error, namespace_mix_refusal
 
 
@@ -130,10 +130,10 @@ class TestEarlierEntryKeepsItsNamespace:
         comp, mem_dir = bm25_only_components
         target = mem_dir / "notes.md"
         append_entry(target, _ALPHA, title=None, tags=[])
-        await comp.index_engine.index_file(target, namespace="aaa", already_scanned=True)
+        await comp.index_engine.index_file(target, namespace="aaa", ingress_guarded=True)
 
         append_entry(target, "a second observation about the same deploy", title=None, tags=[])
-        await comp.index_engine.index_file(target, already_scanned=True)
+        await comp.index_engine.index_file(target, ingress_guarded=True)
 
         stored = await comp.storage.namespaces_for_source(target)
         assert stored == ["aaa"], f"re-index without a namespace restamped the file: {stored}"
@@ -159,7 +159,7 @@ class TestEarlierEntryKeepsItsNamespace:
                 title=f"H{i}",
                 tags=[],
             )
-        await comp.index_engine.index_file(target, namespace="aaa", already_scanned=True)
+        await comp.index_engine.index_file(target, namespace="aaa", ingress_guarded=True)
         chunks = await comp.storage.list_chunks_by_source(target)
         assert len(chunks) > 1, "the regression needs survivors to lose their namespace"
 
@@ -173,7 +173,7 @@ class TestEarlierEntryKeepsItsNamespace:
             expected_source_span_hash=victim.metadata.source_span_hash,
         )
         await comp.index_engine.index_file(
-            target, force=True, namespace=preserved, already_scanned=True
+            target, force=True, namespace=preserved, ingress_guarded=True
         )
 
         assert await comp.storage.namespaces_for_source(target) == ["aaa"]
@@ -194,7 +194,7 @@ class TestEarlierEntryKeepsItsNamespace:
         before = await comp.index_engine.effective_namespace_for(target)
 
         append_entry(target, _ALPHA, title=None, tags=[])
-        await comp.index_engine.index_file(target, already_scanned=True)
+        await comp.index_engine.index_file(target, ingress_guarded=True)
 
         assert await comp.storage.namespaces_for_source(target) == ["default"]
         assert await comp.index_engine.effective_namespace_for(target) == before
@@ -227,10 +227,10 @@ class TestEarlierEntryKeepsItsNamespace:
         comp, mem_dir = bm25_only_components
         target = mem_dir / "rules.md"
         append_entry(target, _ALPHA, title=None, tags=[])
-        await comp.index_engine.index_file(target, namespace="aaa", already_scanned=True)
+        await comp.index_engine.index_file(target, namespace="aaa", ingress_guarded=True)
 
         await comp.index_engine.index_file(
-            target, force=True, namespace="ccc", already_scanned=True
+            target, force=True, namespace="ccc", ingress_guarded=True
         )
 
         assert await comp.storage.namespaces_for_source(target) == ["ccc"]
@@ -248,9 +248,9 @@ class TestEarlierEntryKeepsItsNamespace:
         agent_ns = "agent-runtime:planner"
         target = mem_dir / day_file_name(agent_ns, "default", date_str=_DATE)
         append_entry(target, _ALPHA, title=None, tags=[])
-        await comp.index_engine.index_file(target, namespace=agent_ns, already_scanned=True)
+        await comp.index_engine.index_file(target, namespace=agent_ns, ingress_guarded=True)
 
-        await comp.index_engine.index_file(target, force=True, already_scanned=True)
+        await comp.index_engine.index_file(target, force=True, ingress_guarded=True)
 
         assert await comp.storage.namespaces_for_source(target) == [agent_ns]
 
@@ -472,7 +472,7 @@ class TestMcpSurface:
 
         target = comp.config.indexing.memory_dirs[0] / name
         append_entry(target, _ALPHA, title=None, tags=[])
-        await comp.index_engine.index_file(target, namespace="aaa", already_scanned=True)
+        await comp.index_engine.index_file(target, namespace="aaa", ingress_guarded=True)
         return target
 
     @pytest.mark.asyncio
@@ -607,6 +607,7 @@ class TestCliSurface:
                 effective_namespace_for=AsyncMock(side_effect=lambda p, ns=None, **k: ns),
                 is_excluded=lambda path: False,
                 is_read_only_source=lambda path: False,
+                preflight_mutation=clean_preflight,
             ),
             storage=SimpleNamespace(
                 list_chunks_by_source=AsyncMock(return_value=[]),
@@ -620,7 +621,6 @@ class TestCliSurface:
         from contextlib import asynccontextmanager
 
         from click.testing import CliRunner
-
         from memtomem.cli.memory import add as add_cmd
 
         @asynccontextmanager
@@ -909,7 +909,7 @@ class TestLangGraphSurface:
 
         held = mem_dir / "held.md"
         append_entry(held, _ALPHA, title=None, tags=[])
-        await comp.index_engine.index_file(held, namespace="aaa", already_scanned=True)
+        await comp.index_engine.index_file(held, namespace="aaa", ingress_guarded=True)
         refused = await store.add(_BETA, namespace="bbb", file=str(held))
         assert refused.get("error") == "namespace_mix_refused"
 
@@ -923,7 +923,7 @@ class TestWebSurface:
         comp, mem_dir = bm25_only_components
         target = mem_dir / "shared.md"
         append_entry(target, _ALPHA, title=None, tags=[])
-        await comp.index_engine.index_file(target, namespace="aaa", already_scanned=True)
+        await comp.index_engine.index_file(target, namespace="aaa", ingress_guarded=True)
 
         # The route's own call shape — the guard is shared, so this pins the
         # arguments the web surface passes rather than re-testing the rule.
@@ -950,7 +950,7 @@ class TestNamespacesForSource:
         comp, mem_dir = bm25_only_components
         a = mem_dir / "a.md"
         append_entry(a, _ALPHA, title=None, tags=[])
-        await comp.index_engine.index_file(a, namespace="aaa", already_scanned=True)
+        await comp.index_engine.index_file(a, namespace="aaa", ingress_guarded=True)
 
         assert await comp.storage.namespaces_for_source(a) == ["aaa"]
 

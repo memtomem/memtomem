@@ -835,6 +835,10 @@ def emit_project_shared_confirmation(
     )
 
 
+def _record_outcome(outcome: str, tool: str) -> None:
+    record(outcome, tool)
+
+
 def enforce_write_guard(
     content: str,
     *,
@@ -844,6 +848,7 @@ def enforce_write_guard(
     declared_exemption: str | None = None,
     audit_context: dict[str, object] | None = None,
     record_outcome: bool = True,
+    count_outcome: bool = True,
 ) -> WriteGuardResult:
     """Trust-boundary content scan + counter increment + audit log.
 
@@ -911,7 +916,17 @@ def enforce_write_guard(
     :func:`record` once it has decided whether to commit the whole
     batch. This preserves the "no pass record on rejected batch"
     invariant the batch path relies on for clean audit semantics.
+
+    ``count_outcome=False`` drops only the counter increment and keeps every
+    audit line. The indexer passes it when the write it is indexing was already
+    counted at its own ingress, so one write is not counted twice while the
+    whole-file bypass and exemption lines still reach the log.
     """
+
+    def record(outcome: str, tool: str) -> None:
+        if count_outcome:
+            _record_outcome(outcome, tool)
+
     hits = scan(content)
     if not hits:
         if record_outcome:

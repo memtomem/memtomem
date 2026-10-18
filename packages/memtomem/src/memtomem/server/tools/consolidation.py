@@ -473,6 +473,25 @@ async def mem_consolidate_apply(
         except Exception:
             # Best-effort: the original failure is the one worth raising.
             logger.warning("could not finalize maintenance run %s", run_id, exc_info=True)
+        from memtomem.indexing.engine import PrivacyRejection
+
+        if isinstance(exc, PrivacyRejection) and exc.mutation_outcome == "appended":
+            # The summary is in the file but its result may not be indexed;
+            # say so rather than surfacing an internal error. The preview goes:
+            # applying it again would append a second summary.
+            try:
+                await app.storage.scratch_delete("consolidation_groups")
+            except Exception:
+                logger.warning("could not drop the consolidation preview", exc_info=True)
+                after = (
+                    " The preview could not be discarded; do not apply it again, or the "
+                    "summary is appended a second time."
+                )
+            else:
+                after = (
+                    " The preview was discarded; run mem_consolidate again once the file is clean."
+                )
+            return exc.mutation_detail("mem_consolidate_apply", outcome="appended") + after
         raise
 
     # Finalized before the cache/scratch cleanup below: the decay above is the

@@ -202,6 +202,8 @@ async def _add(
     from memtomem.cli._bootstrap import cli_components
     from memtomem.cli._session_state import resolve_session_write_namespace
     from memtomem.constants import InvalidNameError, validate_namespace
+    from memtomem.indexing.engine import PrivacyRejection
+    from memtomem.tools.memory_mutation import preflight_refusal
     from memtomem.tools.memory_writer import append_entry
 
     if namespace is not None:
@@ -402,6 +404,15 @@ async def _add(
                     )
                     if mix_err is not None:
                         raise click.ClickException(mix_err)
+                    # The re-index after the append judges the whole file, so
+                    # refuse a file whose content may not be indexed before
+                    # writing anything.
+                    needs_valve = guard.decision == "bypassed"
+                    refusal = await preflight_refusal(
+                        comp.index_engine, target, op="mm add", needs_valve=needs_valve
+                    )
+                    if refusal is not None:
+                        raise click.ClickException(refusal.removeprefix("Error: "))
                     target.parent.mkdir(parents=True, exist_ok=True)
                     # Counted the way chunk ``start_line`` is, not ``str.splitlines``,
                     # which also breaks at U+0085, ``\x0c`` and friends.
@@ -413,10 +424,21 @@ async def _add(
                         else 0
                     )
                     await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
-                    # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
-                    stats = await comp.index_engine.index_file(
-                        target, namespace=effective_ns, already_scanned=True, lock_held=True
-                    )
+                    try:
+                        stats = await comp.index_engine.index_file(
+                            target,
+                            namespace=effective_ns,
+                            ingress_guarded=True,
+                            force_unsafe=needs_valve,
+                            lock_held=True,
+                        )
+                    except PrivacyRejection as exc:
+                        # On disk, unindexed: e.g. a title the ingress never scanned.
+                        raise click.ClickException(
+                            exc.mutation_detail("mm add", outcome="appended").removeprefix(
+                                "Error: "
+                            )
+                        ) from exc
 
                     # The chunker tags the entry from its ``> tags:`` header, except when
                     # ``content`` opens with its own ``## `` heading: ``format_entry_block``

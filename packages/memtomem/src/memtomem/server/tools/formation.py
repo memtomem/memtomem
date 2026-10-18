@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 
 from memtomem.formation import (
@@ -18,6 +19,9 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+
+
+logger = logging.getLogger(__name__)
 
 
 @mcp.tool()
@@ -287,6 +291,8 @@ async def mem_candidate_review(
     claimed = await app.storage.claim_memory_candidate(candidate_id, reviewer, reason)
     if claimed is None:
         return json.dumps({"ok": False, "reason": "candidate state changed concurrently"})
+    from memtomem.indexing.engine import PrivacyRejection
+
     try:
         if candidate["destination"] == "pinned":
             from memtomem.server.tools.search import _resolve_project_context_root
@@ -321,6 +327,41 @@ async def mem_candidate_review(
     except asyncio.CancelledError:
         await app.storage.release_memory_candidate(candidate_id)
         raise
+    except PrivacyRejection as exc:
+        if exc.mutation_outcome != "appended":
+            await app.storage.release_memory_candidate(candidate_id)
+            raise
+        # The candidate is in the file but its result may not be indexed.
+        # Releasing the claim would let a re-approval append it again.
+        detail = exc.mutation_detail("approve", outcome="appended")
+        # Stale-claim recovery may already have moved the claim back to
+        # ``pending`` while the append ran; quarantine it from there too, or a
+        # re-approval would append it a second time.
+        # A quarantine that cannot be recorded must not fall through to the
+        # release below: the append is durable either way.
+        try:
+            quarantined: bool | None = await app.storage.mark_claimed_candidate_write_uncertain(
+                candidate_id, actor="mcp-approve", reason=detail
+            ) or await app.storage.mark_memory_candidate_write_uncertain(
+                candidate_id, actor="mcp-approve", reason=detail
+            )
+        except Exception:
+            logger.warning("could not quarantine candidate %s", candidate_id, exc_info=True)
+            quarantined = None
+        if quarantined is None:
+            status = "quarantine_failed"
+            detail += " The candidate could not be quarantined; do not re-approve it."
+        else:
+            status = "write_uncertain" if quarantined else "state_changed"
+        return json.dumps(
+            {
+                "ok": False,
+                "status": status,
+                "durable_write_persisted": True,
+                "reason": detail,
+            },
+            ensure_ascii=False,
+        )
     except Exception:
         await app.storage.release_memory_candidate(candidate_id)
         raise

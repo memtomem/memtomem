@@ -5,9 +5,9 @@ Bulk / un-adjudicated indexing (``index_path`` / ``index_file`` /
 secret-bearing files unless ``force_unsafe`` — closing the gap where
 ``mm reindex`` / the watcher / ``mem_index`` / ``mem_fetch`` pulled arbitrary
 secrets into the store, bypassing the trust boundary the write ingresses
-already enforce. Ingress-guarded callers pass ``already_scanned=True`` so the
-whole-file reindex neither re-litigates already-adjudicated content nor breaks
-their exception-based rollback.
+already enforce. The memory tools' re-index runs the same gate over the whole
+file (their ingress scanned only the text they wrote); they refuse a file
+that may not be indexed before writing to it.
 
 Pins:
 - bulk ``index_path`` skips a secret file (raise → aggregated) and still
@@ -15,8 +15,8 @@ Pins:
 - ``force_unsafe=True`` bypasses (bulk indexes the secret anyway).
 - single-file ``index_file`` propagates ``PrivacyRejection`` (so callers can
   roll back / surface, rather than silently succeeding).
-- ``already_scanned=True`` skips the gate (regression guard for the
-  ingress-guarded mutation callers).
+- ``ingress_guarded=True`` still judges the whole file and changes only what
+  is counted.
 - ``project_shared`` + ``force_unsafe=True`` is still hard-refused
   (ADR-0011 §5 — the bypass valve never applies to the git-tracked tier).
 """
@@ -135,18 +135,37 @@ class TestBulkIndexRedactionGate:
         # The exception message must not echo the matched secret bytes.
         assert _SECRET not in str(ei.value)
 
-    async def test_already_scanned_skips_gate(self, bm25_only_components):
-        # Ingress-guarded callers (mem_add / mem_edit / upload / chunk edit)
-        # already adjudicated the content upstream; the whole-file reindex must
-        # NOT re-block it — else their rollback fires and storage goes stale.
+    async def test_ingress_guarded_index_still_judges_the_whole_file(self, bm25_only_components):
+        # A memory tool's ingress scanned only the text it wrote. Its re-index
+        # used to skip the gate for the whole file, storing content nobody
+        # scanned; ``ingress_guarded`` changes counting, never the decision.
         comp, mem_dir = bm25_only_components
         leak = mem_dir / "leak.md"
         leak.write_text(_LEAK)
 
-        stats = await comp.index_engine.index_file(leak, already_scanned=True)
+        with pytest.raises(PrivacyRejection) as ei:
+            await comp.index_engine.index_file(leak, ingress_guarded=True)
 
-        assert stats.blocked_files == 0
-        assert stats.indexed_chunks > 0  # indexed despite the secret
+        assert ei.value.decision == "blocked"
+        assert not await comp.storage.list_chunks_by_source(leak, limit=None)
+
+    async def test_ingress_guarded_counts_only_refusals(self, bm25_only_components):
+        # The write's own ingress already counted it, so a pass is not counted
+        # again; a refusal of the whole file is new and counted once.
+        comp, mem_dir = bm25_only_components
+        clean = mem_dir / "clean.md"
+        clean.write_text("# Notes\n\nnothing sensitive here\n")
+        leak = mem_dir / "leak.md"
+        leak.write_text(_LEAK)
+        privacy.reset_for_tests()
+
+        await comp.index_engine.index_file(clean, ingress_guarded=True)
+        with pytest.raises(PrivacyRejection):
+            await comp.index_engine.index_file(leak, ingress_guarded=True)
+
+        outcomes = privacy.snapshot()["outcomes"]
+        assert outcomes["pass"] == 0
+        assert outcomes["blocked"] == 1
 
     async def test_project_shared_force_unsafe_hard_refused(
         self, bm25_only_components, monkeypatch
@@ -596,20 +615,17 @@ class TestDeclaredExemptionIndexing:
         assert second.indexed_chunks == 0
         assert second.exempted_files == 1
 
-    async def test_already_scanned_ingress_does_not_consult_the_declaration(
-        self, bm25_only_components
-    ):
-        # The feature is scoped to un-adjudicated indexing. An ingress-guarded
-        # caller adjudicated request content upstream; the reindex must not
-        # re-decide, in either direction.
+    async def test_ingress_guarded_index_honours_the_declaration(self, bm25_only_components):
+        # Every index judges the file, so the declaration the file carries is
+        # read on a memory tool's re-index too, exactly as on a bulk index.
         comp, mem_dir = bm25_only_components
         declared = mem_dir / "declared.md"
         declared.write_text(_DECLARED)
 
-        stats = await comp.index_engine.index_file(declared, already_scanned=True)
+        stats = await comp.index_engine.index_file(declared, ingress_guarded=True)
 
         assert stats.indexed_chunks > 0
-        assert stats.exempted_files == 0
+        assert stats.exempted_files == 1
 
 
 @pytest.mark.skipif(

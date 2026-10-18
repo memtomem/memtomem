@@ -73,6 +73,7 @@ async def mem_import_notion(
     symlink_paths: list[str] = []
     read_only_paths: list[str] = []
     source_symlink_paths: list[str] = []
+    written_text: dict[Path, str] = {}
     imported = await import_notion(
         export_path,
         output_dir,
@@ -84,6 +85,7 @@ async def mem_import_notion(
         symlink_paths=symlink_paths,
         read_only_paths=read_only_paths,
         source_symlink_paths=source_symlink_paths,
+        written_text=written_text,
     )
 
     # Refusals first: an import that also hit the redaction guard must still say
@@ -104,9 +106,10 @@ async def mem_import_notion(
     if not imported:
         return "No markdown files found in the Notion export."
 
-    # Index all imported files. ADR-0006 PR-A: imported content is
-    # un-adjudicated, so the engine redaction gate is active; skip + count
-    # secret-bearing files rather than aborting the whole import.
+    # Index all imported files. The import guarded each file's exact text; the
+    # engine judges it again under its own scope, and ``valve_text`` keeps a
+    # forced import's valve to those bytes. Refused files are skipped and
+    # counted rather than aborting the whole import.
     from memtomem.indexing.engine import PrivacyRejection
 
     effective_ns = namespace or "notion"
@@ -116,7 +119,11 @@ async def mem_import_notion(
     for f in imported:
         try:
             stats = await app.index_engine.index_file(
-                f, namespace=effective_ns, already_scanned=True
+                f,
+                namespace=effective_ns,
+                ingress_guarded=True,
+                force_unsafe=force_unsafe,
+                valve_text=written_text.get(f),
             )
         except PrivacyRejection:
             blocked += 1
@@ -219,6 +226,7 @@ async def mem_import_obsidian(
     symlink_paths: list[str] = []
     read_only_paths: list[str] = []
     source_symlink_paths: list[str] = []
+    written_text: dict[Path, str] = {}
     imported = await import_obsidian(
         vault,
         output_dir,
@@ -230,6 +238,7 @@ async def mem_import_obsidian(
         symlink_paths=symlink_paths,
         read_only_paths=read_only_paths,
         source_symlink_paths=source_symlink_paths,
+        written_text=written_text,
     )
 
     # Refusals first: an import that also hit the redaction guard must still say
@@ -250,9 +259,10 @@ async def mem_import_obsidian(
     if not imported:
         return "No markdown files found in the Obsidian vault."
 
-    # Index all imported files. ADR-0006 PR-A: imported content is
-    # un-adjudicated, so the engine redaction gate is active; skip + count
-    # secret-bearing files rather than aborting the whole import.
+    # Index all imported files. The import guarded each file's exact text; the
+    # engine judges it again under its own scope, and ``valve_text`` keeps a
+    # forced import's valve to those bytes. Refused files are skipped and
+    # counted rather than aborting the whole import.
     from memtomem.indexing.engine import PrivacyRejection
 
     effective_ns = namespace or "obsidian"
@@ -262,7 +272,11 @@ async def mem_import_obsidian(
     for f in imported:
         try:
             stats = await app.index_engine.index_file(
-                f, namespace=effective_ns, already_scanned=True
+                f,
+                namespace=effective_ns,
+                ingress_guarded=True,
+                force_unsafe=force_unsafe,
+                valve_text=written_text.get(f),
             )
         except PrivacyRejection:
             blocked += 1

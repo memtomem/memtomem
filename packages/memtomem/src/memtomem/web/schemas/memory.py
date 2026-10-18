@@ -47,6 +47,24 @@ class RedactionBlockedResponse(BaseModel):
     surface: str
 
 
+class IndexBlockedResponse(BaseModel):
+    """Body shape returned with HTTP 409 when the indexer may not store a write's
+    result: the file already holds content the redaction guard refuses, it is
+    under a reviewed masking manifest, or the write's own result is refused.
+
+    ``written`` says whether the write itself stayed on disk (an append that is
+    now unindexed). ``held`` mirrors the source hold (#2629). Matched bytes are
+    never echoed.
+    """
+
+    detail: str = "index_blocked"
+    message: str
+    hits: int | None = None
+    held: bool | None = None
+    written: bool = False
+    file: str | None = None
+
+
 class ProjectTierBlockedResponse(BaseModel):
     """Body shape returned with HTTP 403 when ``/api/add`` is rejected
     for a ``scope='project_shared'`` write without an explicit

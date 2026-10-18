@@ -44,6 +44,7 @@ _MUST_GATE = {
     ("tools/memory_mutation.py", "locked_source_chunk"),
     ("cli/memory.py", "_add"),
     ("cli/agent_cmd.py", "_run_share"),
+    ("cli/shell.py", "_cmd_add"),
     ("cli/review_cmd.py", "_decide"),
     ("integrations/langgraph.py", "add"),
     ("web/routes/system.py", "add_memory"),

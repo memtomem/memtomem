@@ -28,7 +28,7 @@ def _web_client(comp):
 async def _index(comp, path: Path, text: str) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-    stats = await comp.index_engine.index_file(path, already_scanned=True)
+    stats = await comp.index_engine.index_file(path, ingress_guarded=True)
     return stats.indexed_chunks
 
 

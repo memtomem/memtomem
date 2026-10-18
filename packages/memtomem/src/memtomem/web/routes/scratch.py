@@ -12,7 +12,11 @@ from memtomem.models import stored_namespace
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL, READ_ONLY_TARGET_DETAIL
 from memtomem.web.deps import get_config, get_index_engine, get_search_pipeline, get_storage
-from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL
+from memtomem.web.routes._errors import (
+    NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
+    index_blocked_http,
+    privacy_index_blocked_http,
+)
 from memtomem.web.schemas.scratch import (
     ScratchDeleteResponse,
     ScratchEntryOut,
@@ -158,12 +162,41 @@ async def promote_scratch(
             # ``None`` is the untagged carve-out; passing it back would re-enter
             # rule resolution, so pass the namespace it is stored as.
             write_ns = stored_namespace(resolved_ns)
+            # The re-index after the append judges the whole file; refuse a file
+            # whose content may not be indexed before anything is written. The
+            # entry stays in scratch, unpromoted.
+            from memtomem.indexing.engine import PrivacyRejection
+            from memtomem.tools.memory_writer import read_pre_image_or_empty
+
+            needs_valve = guard.decision == "bypassed"
+            pre = await _asyncio.to_thread(read_pre_image_or_empty, target)
+            preflight = await _asyncio.to_thread(index_engine.preflight_mutation, target, pre)
+            if preflight.rejection is not None:
+                rejection = await index_engine.refuse_mutation(target, preflight)
+                search_pipeline.invalidate_cache()
+                raise privacy_index_blocked_http(rejection, "promote")
+            blocker = preflight.blocker("promote", target.name, needs_valve=needs_valve)
+            if blocker is not None:
+                raise index_blocked_http(blocker)
             await _asyncio.to_thread(
                 append_entry, target, entry["value"], title=body.title, tags=body.tags
             )
-            stats = await index_engine.index_file(
-                target, namespace=write_ns, already_scanned=True, lock_held=True
-            )
+            try:
+                stats = await index_engine.index_file(
+                    target,
+                    namespace=write_ns,
+                    ingress_guarded=True,
+                    force_unsafe=needs_valve,
+                    lock_held=True,
+                )
+            except PrivacyRejection as exc:
+                # The entry is now in the file, unindexed. Mark it promoted so a
+                # second promote cannot append it again, then refuse with a 409
+                # the SPA will not answer by resending with force_unsafe.
+                search_pipeline.invalidate_cache()
+                await storage.scratch_promote(key)
+                exc.mutation_outcome = "appended"
+                raise privacy_index_blocked_http(exc, "promote") from exc
             # #2141: a warmed query must not answer as if the entry was never added.
             if stats.mutated:
                 search_pipeline.invalidate_cache()

@@ -370,11 +370,26 @@ async def _flag_imprecise_write(
         await mark_provenance_incomplete(app, session_id)
 
 
+async def _preflight_refusal(
+    app: AppContext, path: Path, *, op: str, needs_valve: bool
+) -> str | None:
+    """:func:`~memtomem.tools.memory_mutation.preflight_refusal`, dropping warmed
+    queries when a refusal held the file."""
+    from memtomem.tools.memory_mutation import preflight_refusal
+
+    refusal = await preflight_refusal(app.index_engine, path, op=op, needs_valve=needs_valve)
+    if refusal is not None:
+        app.search_pipeline.invalidate_cache()
+    return refusal
+
+
 async def _mutate_file_and_reindex(
     app: AppContext,
     source_file: Path,
     mutate: Callable[[PreImage], None],
     op: str,
+    *,
+    force_unsafe: bool = False,
 ) -> tuple[IndexingStats | None, str | None]:
     """Backup-read → ``mutate`` → incremental re-index, rolling back on failure.
 
@@ -408,11 +423,22 @@ async def _mutate_file_and_reindex(
     write recreates a removed source just as a plain restore did. A refusal is
     reported through the same vocabulary and takes no restore: it wrote nothing.
 
+    Before ``mutate`` runs, the engine judges the file as it stands
+    (:meth:`~memtomem.indexing.engine.IndexEngine.preflight_mutation`). A file
+    whose content may not be indexed is refused untouched, and held: the
+    re-index after the write would judge the whole file and refuse it anyway,
+    and the caller's ingress scanned only its own ``new_content``.
+    ``force_unsafe`` is the caller's valve, already decided at its ingress; it
+    reaches the re-index only when the preflight found nothing flagged or
+    masked, so it covers this write and nothing else.
+
     Returns ``(stats, None)`` on success or ``(None, error_message)`` after
-    a rollback; ``op`` ("edit"/"delete") only shapes the messages.
+    a refusal or a rollback; ``op`` ("edit"/"delete") only shapes the messages.
     """
     # Before any write: a source indexing now skips would take the mutation and
     # then re-index to zeroed stats, leaving the old chunks searchable (#2488).
+    from memtomem.indexing.engine import PrivacyRejection
+
     if app.index_engine.is_excluded(source_file):
         return None, f"Error: {EXCLUDED_SOURCE_DETAIL}"
     # Likewise before any write, and asked of the config rather than the stored
@@ -426,11 +452,23 @@ async def _mutate_file_and_reindex(
     # inherit a mutation that happened in its predecessor.
     provenance_session_id = await capture_session_for_untracked_write(app)
     pre_image = await asyncio.to_thread(read_pre_image, source_file)
+    preflight = await asyncio.to_thread(
+        app.index_engine.preflight_mutation, source_file, pre_image.data
+    )
+    if preflight.rejection is not None:
+        rejection = await app.index_engine.refuse_mutation(source_file, preflight)
+        app.search_pipeline.invalidate_cache()
+        return None, rejection.mutation_detail(f"mem_{op}", outcome="not_written")
+    blocker = preflight.blocker(f"mem_{op}", source_file.name, needs_valve=force_unsafe)
+    if blocker is not None:
+        return None, blocker
     mutation_completed = False
     try:
         await asyncio.to_thread(mutate, pre_image)
         mutation_completed = True
-        stats = await app.index_engine.index_file(source_file, already_scanned=True, lock_held=True)
+        stats = await app.index_engine.index_file(
+            source_file, ingress_guarded=True, force_unsafe=force_unsafe, lock_held=True
+        )
         app.search_pipeline.invalidate_cache()
         await flag_untracked_write(app, provenance_session_id)
         return stats, None
@@ -455,11 +493,22 @@ async def _mutate_file_and_reindex(
             outcome = exc.outcome
         else:
             outcome = await asyncio.to_thread(restore_pre_image_quietly, source_file, pre_image)
+        if isinstance(exc, PrivacyRejection):
+            # The result of this write may not be indexed. The pre-image passed
+            # the preflight and its chunks are the ones in the store, so there
+            # is nothing to re-index: doing so would only lift the hold the
+            # refusal just placed while ``exc.held`` still reported it.
+            app.search_pipeline.invalidate_cache()
+            if outcome is RestoreOutcome.restored:
+                return None, exc.mutation_detail(f"mem_{op}", outcome="rolled_back")
+            return None, _rollback_error(
+                op, source_file, exc, outcome, reconciled=False, held=bool(exc.held)
+            )
         reconciled = True
         held = False
         try:
             rollback_stats = await app.index_engine.index_file(
-                source_file, already_scanned=True, lock_held=True
+                source_file, ingress_guarded=True, lock_held=True
             )
         except Exception:
             reconciled = False
@@ -899,6 +948,8 @@ async def _mem_add_core(
         # from (issue #2005). Nothing durable happens before the append and the
         # idempotency claim is taken *after* the re-target check, so an aborted
         # attempt leaves no trace — not on disk, and not in the ledger.
+        from memtomem.indexing.engine import PrivacyRejection
+
         for _attempt in range(NS_RETARGET_ATTEMPTS):
             # Re-asked each attempt, not only before the loop: a retarget moves
             # ``target`` to a different day file, and the next acquire resolves
@@ -955,6 +1006,17 @@ async def _mem_add_core(
                     )
                     if mix_err is not None:
                         return (mix_err, None)
+                    # The re-index after the append judges the whole file, so a
+                    # file whose content may not be indexed is refused here,
+                    # before anything durable — and, like the mix refusal, before
+                    # the claim. ``force_unsafe`` covers this write only when the
+                    # file holds nothing flagged or masked.
+                    needs_valve = guard.decision == "bypassed"
+                    refusal = await _preflight_refusal(
+                        app, target, op="mem_add", needs_valve=needs_valve
+                    )
+                    if refusal is not None:
+                        return (refusal, None)
                     # Idempotency claim under the lock (issue #1573). The claim is a
                     # global (tool, key) row, not a file lock, so it also blocks a
                     # concurrent same-key call that targets a *different* file: exactly
@@ -993,8 +1055,23 @@ async def _mem_add_core(
                     # record of a write it half-performed.
                     try:
                         stats = await app.index_engine.index_file(
-                            target, namespace=effective_ns, already_scanned=True, lock_held=True
+                            target,
+                            namespace=effective_ns,
+                            ingress_guarded=True,
+                            force_unsafe=needs_valve,
+                            lock_held=True,
                         )
+                    except PrivacyRejection as exc:
+                        # The entry is on disk and the result may not be indexed
+                        # (e.g. a title the ingress never scanned). Raised, not
+                        # returned: ``stats is None`` tells callers nothing landed
+                        # (formation, agent share and scratch release or retry on
+                        # it), and here something did. The claim stays pending, as
+                        # for any failure after the durable append.
+                        await mark_provenance_incomplete(app, provenance_session_id)
+                        app.search_pipeline.invalidate_cache()
+                        exc.mutation_outcome = "appended"
+                        raise
                     except Exception:
                         await mark_provenance_incomplete(app, provenance_session_id)
                         raise
@@ -1144,21 +1221,28 @@ async def mem_add(
     Returns a confirmation message, plus a duplicate warning when a highly
     similar memory (≥90% match) already exists.
     """
-    message, _stats = await _mem_add_core(
-        content=content,
-        title=title,
-        tags=tags,
-        file=file,
-        namespace=namespace,
-        template=template,
-        force_unsafe=force_unsafe,
-        scope=scope,
-        confirm_project_shared=confirm_project_shared,
-        idempotency_key=idempotency_key,
-        allow_namespace_mix=allow_namespace_mix,
-        ctx=ctx,
-        event_type="add",
-    )
+    from memtomem.indexing.engine import PrivacyRejection
+
+    try:
+        message, _stats = await _mem_add_core(
+            content=content,
+            title=title,
+            tags=tags,
+            file=file,
+            namespace=namespace,
+            template=template,
+            force_unsafe=force_unsafe,
+            scope=scope,
+            confirm_project_shared=confirm_project_shared,
+            idempotency_key=idempotency_key,
+            allow_namespace_mix=allow_namespace_mix,
+            ctx=ctx,
+            event_type="add",
+        )
+    except PrivacyRejection as exc:
+        if exc.mutation_outcome != "appended":
+            raise
+        return exc.mutation_detail("mem_add", outcome="appended")
     return message
 
 
@@ -1328,6 +1412,7 @@ async def mem_edit(
                 expected_source_span_hash=meta.source_span_hash,
                 expected_identity=pre.identity,
             ),
+            force_unsafe=guard.decision == "bypassed",
             op="edit",
         )
         if mutate_err:
@@ -1892,6 +1977,8 @@ async def mem_batch_add(
         # Bounded re-target loop, same contract as ``_mem_add_core``
         # (issue #2005): the day file's name depends on the namespace, which
         # is only authoritative once resolved inside the lock.
+        from memtomem.indexing.engine import PrivacyRejection
+
         for _attempt in range(NS_RETARGET_ATTEMPTS):
             # Before the sidecar acquire: ``memory_lock_path`` RESOLVES the target, so a day file that is a symlink into a protected root gets its ``.lock`` created inside that root — a write into the directory we are about to refuse to write. The in-lock gate stays authoritative for the final target.
             if app.index_engine.is_read_only_source(target):
@@ -1934,6 +2021,17 @@ async def mem_batch_add(
                     )
                     if mix_err is not None:
                         return mix_err
+                    # The re-index after the append judges the whole file, so a
+                    # file whose content may not be indexed is refused here,
+                    # before anything durable — and, like the mix refusal, before
+                    # the claim. ``force_unsafe`` covers this write only when the
+                    # file holds nothing flagged or masked.
+                    needs_valve = any(d[1] == "bypassed" for d in decisions)
+                    refusal = await _preflight_refusal(
+                        app, target, op="mem_batch_add", needs_valve=needs_valve
+                    )
+                    if refusal is not None:
+                        return refusal
                     # Idempotency claim under the lock (issue #1573), same protocol as
                     # ``_mem_add_core``: the global (tool, key) claim blocks a concurrent
                     # same-key batch even when it targets a different file. Taken after
@@ -1965,8 +2063,19 @@ async def mem_batch_add(
                     # record of a write it half-performed.
                     try:
                         stats = await app.index_engine.index_file(
-                            target, namespace=effective_ns, already_scanned=True, lock_held=True
+                            target,
+                            namespace=effective_ns,
+                            ingress_guarded=True,
+                            force_unsafe=needs_valve,
+                            lock_held=True,
                         )
+                    except PrivacyRejection as exc:
+                        # The entry is on disk and the result may not be indexed
+                        # (e.g. a title the ingress never scanned). The claim stays
+                        # pending, as for any failure after the durable append.
+                        await mark_provenance_incomplete(app, provenance_session_id)
+                        app.search_pipeline.invalidate_cache()
+                        return exc.mutation_detail("mem_batch_add", outcome="appended")
                     except Exception:
                         await mark_provenance_incomplete(app, provenance_session_id)
                         raise

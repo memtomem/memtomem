@@ -94,11 +94,10 @@ class TestMemAddRedactionGuard:
     @pytest.mark.asyncio
     async def test_force_unsafe_content_is_actually_indexed(self, bm25_only_components):
         """ADR-0006 PR-A regression: ``mem_add(force_unsafe=True)`` writes AND
-        indexes the content. The new engine-layer redaction gate must NOT
-        silently re-block the post-write reindex — ``mem_add`` passes
-        ``already_scanned=True`` because it already adjudicated the content at
-        ingress. Without that thread the file would exist on disk but never
-        make it into the store.
+        indexes the content. The engine judges the whole file on the post-write
+        reindex, so ``mem_add`` forwards its valve (the file held nothing
+        flagged beforehand, so every hit is this entry's). Without that the
+        file would exist on disk but never make it into the store.
         """
         comp, mem_dir = bm25_only_components
         app = AppContext.from_components(comp)

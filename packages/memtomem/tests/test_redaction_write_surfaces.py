@@ -33,7 +33,7 @@ from memtomem import privacy
 from memtomem.server.context import AppContext
 from memtomem.server.tools.memory_crud import mem_edit
 
-from helpers import StubCtx, set_home
+from helpers import StubCtx, clean_preflight, set_home
 
 _SECRET_SAMPLE = "Notes on token: sk-" + "a" * 30
 _CLEAN_SAMPLE = "Met with the team about Q2 deploy plans."
@@ -346,6 +346,7 @@ class TestCliMmAddRedactionGuard:
             comp.index_engine = AsyncMock()
             comp.index_engine.is_excluded = MagicMock(return_value=False)
             comp.index_engine.is_read_only_source = MagicMock(return_value=False)
+            comp.index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
             comp.storage = AsyncMock()
             comp.index_engine.index_file = AsyncMock(return_value=MagicMock(indexed_chunks=1))
             comp.storage.list_chunks_by_source = AsyncMock(return_value=[])
@@ -504,6 +505,7 @@ class TestLangGraphAddRedactionGuard:
         index_engine = AsyncMock()
         index_engine.is_excluded = MagicMock(return_value=False)
         index_engine.is_read_only_source = MagicMock(return_value=False)
+        index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
         mem._ensure_init = AsyncMock(  # type: ignore[attr-defined]
             return_value=MagicMock(
                 config=MagicMock(indexing=MagicMock(memory_dirs=[memory_dir])),

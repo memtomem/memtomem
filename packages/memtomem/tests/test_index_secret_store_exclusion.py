@@ -33,7 +33,7 @@ async def test_secret_store_file_is_excluded(secret_file):
 @pytest.mark.parametrize("secret_file", STORES, indirect=True)
 async def test_secret_store_file_is_not_indexed_directly(secret_file):
     comp, _, path = secret_file
-    stats = await comp.index_engine.index_file(path, already_scanned=True)
+    stats = await comp.index_engine.index_file(path, ingress_guarded=True)
     assert stats.indexed_chunks == 0
     assert await comp.storage.list_chunks_by_source(path, limit=None) == []
 

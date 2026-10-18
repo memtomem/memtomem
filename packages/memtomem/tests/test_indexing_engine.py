@@ -1752,7 +1752,7 @@ class TestBulkNamespacePrepass:
             # the move, so the stream's own pass has an upsert to stamp.
             if not moved and ev.get("type") == "progress":
                 b.write_text("# B\n\nfirst\n\nmoved entry", encoding="utf-8")
-                await engine.index_file(b, namespace="aaa", already_scanned=True)
+                await engine.index_file(b, namespace="aaa", ingress_guarded=True)
                 b.write_text("# B\n\nfirst\n\nmoved entry\n\nnewer entry", encoding="utf-8")
                 moved = True
 
@@ -1947,7 +1947,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "kept.md"
         fp.write_text("# K\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        await engine.index_file(fp, namespace="personal", ingress_guarded=True)
         fp.write_text("# K\n\nfirst entry\n\nsecond entry", encoding="utf-8")
         monkeypatch.setattr(
             components.storage,
@@ -2134,7 +2134,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "kept.md"
         fp.write_text("# K\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        await engine.index_file(fp, namespace="personal", ingress_guarded=True)
         _install_rules(
             engine,
             [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
@@ -2159,7 +2159,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "moved.md"
         fp.write_text("# M\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        await engine.index_file(fp, namespace="personal", ingress_guarded=True)
         _install_rules(
             engine,
             [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
@@ -2179,7 +2179,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "2026-08-19--agent-runtime-planner-abcdef0123456789.md"
         fp.write_text("# D\n\ndecision: use Envoy instead of Kong", encoding="utf-8")
-        await engine.index_file(fp, namespace="agent-runtime:planner", already_scanned=True)
+        await engine.index_file(fp, namespace="agent-runtime:planner", ingress_guarded=True)
 
         stats = await engine.index_path(memory_dir, recursive=True, force=True)
 
@@ -2192,7 +2192,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "moved.md"
         fp.write_text("# M\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        await engine.index_file(fp, namespace="personal", ingress_guarded=True)
         _install_rules(
             engine,
             [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
@@ -2212,7 +2212,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "untouched.md"
         fp.write_text("# U\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        await engine.index_file(fp, namespace="personal", ingress_guarded=True)
         _install_rules(
             engine,
             [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
@@ -2247,7 +2247,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "agrees.md"
         fp.write_text("# A\n\nentry", encoding="utf-8")
-        await engine.index_file(fp, namespace="ruled", already_scanned=True)
+        await engine.index_file(fp, namespace="ruled", ingress_guarded=True)
         _install_rules(
             engine,
             [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
@@ -2320,7 +2320,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "emptied.md"
         fp.write_text("# E\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="aaa", already_scanned=True)
+        await engine.index_file(fp, namespace="aaa", ingress_guarded=True)
         fp.write_text("", encoding="utf-8")
 
         async def _stored(path):
@@ -2360,7 +2360,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "moved.md"
         fp.write_text("# M\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        await engine.index_file(fp, namespace="personal", ingress_guarded=True)
         _install_rules(
             engine,
             [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
@@ -2382,7 +2382,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "moved.md"
         fp.write_text("# M\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        await engine.index_file(fp, namespace="personal", ingress_guarded=True)
         _install_rules(
             engine,
             [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
@@ -2401,7 +2401,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "moved.md"
         fp.write_text("# M\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        await engine.index_file(fp, namespace="personal", ingress_guarded=True)
         _install_rules(
             engine,
             [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
@@ -2425,7 +2425,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "moved.md"
         fp.write_text("# M\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        await engine.index_file(fp, namespace="personal", ingress_guarded=True)
         _install_rules(
             engine,
             [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
@@ -2450,7 +2450,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "2026-08-19--agent-runtime-planner-abcdef0123456789.md"
         fp.write_text("# D\n\ndecision: use Envoy", encoding="utf-8")
-        await engine.index_file(fp, namespace="agent-runtime:planner", already_scanned=True)
+        await engine.index_file(fp, namespace="agent-runtime:planner", ingress_guarded=True)
 
         stats = await engine.index_path(memory_dir, recursive=True, force=True)
 
@@ -2466,7 +2466,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "moved.md"
         fp.write_text("# M\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        await engine.index_file(fp, namespace="personal", ingress_guarded=True)
         _install_rules(
             engine,
             [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
@@ -2532,7 +2532,7 @@ class TestBulkNamespacePrepass:
         engine = components.index_engine
         fp = memory_dir / "moved.md"
         fp.write_text("# M\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        await engine.index_file(fp, namespace="personal", ingress_guarded=True)
         _install_rules(
             engine,
             [NamespacePolicyRule(path_glob=f"{memory_dir.as_posix()}/**", namespace="ruled")],
@@ -2585,11 +2585,11 @@ class TestBoundNewSourceNamespace:
         engine = components.index_engine
         kept = memory_dir / "kept.md"
         kept.write_text("# K\n\npersonal note", encoding="utf-8")
-        await engine.index_file(kept, namespace="personal", already_scanned=True)
+        await engine.index_file(kept, namespace="personal", ingress_guarded=True)
         other_agent = memory_dir / "other.md"
         other_agent.write_text("# O\n\nanother agent's note", encoding="utf-8")
         await engine.index_file(
-            other_agent, namespace="agent-runtime:builder", already_scanned=True
+            other_agent, namespace="agent-runtime:builder", ingress_guarded=True
         )
         fresh = memory_dir / "fresh.md"
         fresh.write_text("# F\n\nwritten during this session", encoding="utf-8")
@@ -2621,7 +2621,7 @@ class TestBoundNewSourceNamespace:
         engine = components.index_engine
         fp = memory_dir / "edited.md"
         fp.write_text("# E\n\nfirst entry", encoding="utf-8")
-        await engine.index_file(fp, namespace="personal", already_scanned=True)
+        await engine.index_file(fp, namespace="personal", ingress_guarded=True)
         fp.write_text("# E\n\nfirst entry\n\nsecond entry", encoding="utf-8")
 
         await engine.index_path(
@@ -2636,7 +2636,7 @@ class TestBoundNewSourceNamespace:
         engine = components.index_engine
         stored = memory_dir / "stored.md"
         stored.write_text("# S\n\nentry", encoding="utf-8")
-        await engine.index_file(stored, namespace="personal", already_scanned=True)
+        await engine.index_file(stored, namespace="personal", ingress_guarded=True)
         fresh = memory_dir / "fresh.md"
         fresh.write_text("# F\n\nentry", encoding="utf-8")
 
@@ -2711,7 +2711,7 @@ class TestBoundNewSourceNamespace:
         engine = components.index_engine
         stored = memory_dir / "stored.md"
         stored.write_text("# S\n\nentry", encoding="utf-8")
-        await engine.index_file(stored, namespace="personal", already_scanned=True)
+        await engine.index_file(stored, namespace="personal", ingress_guarded=True)
         fresh = memory_dir / "fresh.md"
         fresh.write_text("# F\n\nentry", encoding="utf-8")
 
@@ -2739,7 +2739,7 @@ class TestBoundNewSourceNamespace:
         engine = components.index_engine
         stored = memory_dir / "stored.md"
         stored.write_text("# S\n\nentry", encoding="utf-8")
-        await engine.index_file(stored, namespace="personal", already_scanned=True)
+        await engine.index_file(stored, namespace="personal", ingress_guarded=True)
         fresh = memory_dir / "fresh.md"
         fresh.write_text("# F\n\nentry", encoding="utf-8")
 

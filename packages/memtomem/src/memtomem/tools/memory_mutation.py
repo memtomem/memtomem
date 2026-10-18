@@ -38,6 +38,7 @@ from memtomem.tools.memory_writer import (
 )
 
 if TYPE_CHECKING:
+    from memtomem.indexing.engine import MutationOutcome
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
     from uuid import UUID
@@ -145,6 +146,8 @@ async def mutate_source_and_reindex(
     index_engine,
     source_file: Path,
     mutate: Callable[[PreImage], None],
+    *,
+    force_unsafe: bool = False,
 ) -> IndexingStats:
     """Backup-read → ``mutate`` (in a worker thread) → incremental re-index with
     ``lock_held=True``, restoring the pre-image and re-raising on failure.
@@ -179,17 +182,40 @@ async def mutate_source_and_reindex(
     a read-only index root raises :class:`ReadOnlySourceError` in the same
     place and for the same reason — refusing before the read is what keeps a
     write off a file another tool owns, whatever the stored per-chunk flag says.
+    Before ``mutate`` runs, the engine judges the file as it stands, as in the
+    MCP twin: content that may not be indexed is recorded, held, and raised as
+    :class:`~memtomem.indexing.engine.PrivacyRejection` with
+    ``mutation_outcome="not_written"``; a reviewed masking manifest, or a forced
+    edit of a file that already holds something flagged, raises
+    :class:`~memtomem.indexing.engine.MutationBlockedError`. A refusal of the
+    result after the write restores the pre-image and re-raises with
+    ``mutation_outcome="rolled_back"``, without the rollback re-index that would
+    lift the hold the refusal placed.
     """
     if index_engine.is_excluded(source_file):
         raise ExcludedSourceError(str(source_file))
     if index_engine.is_read_only_source(source_file):
         raise ReadOnlySourceError(str(source_file))
+    from memtomem.indexing.engine import MutationBlockedError, PrivacyRejection
+
     pre_image = await asyncio.to_thread(read_pre_image, source_file)
+    preflight = await asyncio.to_thread(
+        index_engine.preflight_mutation, source_file, pre_image.data
+    )
+    if preflight.rejection is not None:
+        rejection = await index_engine.refuse_mutation(source_file, preflight)
+        rejection.mutation_outcome = "not_written"
+        raise rejection
+    blocker = preflight.blocker("edit", source_file.name, needs_valve=force_unsafe)
+    if blocker is not None:
+        raise MutationBlockedError(blocker)
     mutation_completed = False
     try:
         await asyncio.to_thread(mutate, pre_image)
         mutation_completed = True
-        return await index_engine.index_file(source_file, already_scanned=True, lock_held=True)
+        return await index_engine.index_file(
+            source_file, ingress_guarded=True, force_unsafe=force_unsafe, lock_held=True
+        )
     except Exception as exc:
         if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:
             # No byte was written. In particular, do not reindex here: doing
@@ -211,10 +237,15 @@ async def mutate_source_and_reindex(
             outcome = exc.outcome
         else:
             outcome = await asyncio.to_thread(restore_pre_image_quietly, source_file, pre_image)
-        try:
-            await index_engine.index_file(source_file, already_scanned=True, lock_held=True)
-        except Exception:
-            logger.warning("Rollback re-index also failed", exc_info=True)
+        if isinstance(exc, PrivacyRejection):
+            # The pre-image passed the preflight and its chunks are the ones in
+            # the store; re-indexing it would only lift the hold just placed.
+            exc.mutation_outcome = outcome_after_restore(outcome)
+        else:
+            try:
+                await index_engine.index_file(source_file, ingress_guarded=True, lock_held=True)
+            except Exception:
+                logger.warning("Rollback re-index also failed", exc_info=True)
         if outcome is RestoreOutcome.failed:
             logger.error(
                 "%s: the rollback failed after %s; the file may still hold the partial edit",
@@ -229,3 +260,32 @@ async def mutate_source_and_reindex(
                 outcome,
             )
         raise
+
+
+async def preflight_refusal(index_engine, path: Path, *, op: str, needs_valve: bool) -> str | None:
+    """Ask the engine whether ``path`` may take a write; the refusal text if not.
+
+    For memory tools that append to or edit a file and then re-index it. The
+    caller holds ``path``'s sidecar. The re-index judges the whole file, so a
+    file whose content may not be indexed is refused before anything is
+    written, and recorded and held (``refuse_mutation``); so is a file under a
+    reviewed masking manifest, and a forced write (``needs_valve``) into a file
+    that already holds something flagged or masked. ``None`` means write.
+    """
+    from memtomem.tools.memory_writer import read_pre_image_or_empty
+
+    pre = await asyncio.to_thread(read_pre_image_or_empty, path)
+    preflight = await asyncio.to_thread(index_engine.preflight_mutation, path, pre)
+    if preflight.rejection is not None:
+        rejection = await index_engine.refuse_mutation(path, preflight)
+        return rejection.mutation_detail(op, outcome="not_written")
+    return preflight.blocker(op, path.name, needs_valve=needs_valve)
+
+
+def outcome_after_restore(restore: RestoreOutcome) -> MutationOutcome:
+    """What a refused write's caller is told, given what the restore did."""
+    if restore is RestoreOutcome.restored:
+        return "rolled_back"
+    if restore is RestoreOutcome.failed:
+        return "not_rolled_back"
+    return "superseded"

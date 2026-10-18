@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from click.testing import CliRunner
-from helpers import set_home
+from helpers import clean_preflight, set_home
 
 from memtomem import privacy
 from memtomem.cli._session_state import _write_current_session
@@ -69,6 +69,7 @@ def _components(tmp_path: Path, session_row: dict | None = None) -> SimpleNamesp
             effective_namespace_for=AsyncMock(side_effect=lambda p, ns=None, **k: ns),
             is_excluded=lambda path: False,
             is_read_only_source=lambda path: False,
+            preflight_mutation=clean_preflight,
         ),
         storage=SimpleNamespace(
             list_chunks_by_source=AsyncMock(return_value=[]),

@@ -229,6 +229,42 @@ class FormationMixin:
             self._commit_if_standalone(db)
         return cursor.rowcount > 0
 
+    async def mark_claimed_candidate_write_uncertain(
+        self,
+        candidate_id: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> bool:
+        """Quarantine a claim whose durable write landed but could not be finished.
+
+        The ``writing`` twin of :meth:`mark_memory_candidate_write_uncertain`:
+        the write is on disk (an append the indexer then refused), so releasing
+        the claim back to ``pending`` would let a re-approval write it again.
+        """
+        self._require_transaction_idle("mark_claimed_candidate_write_uncertain")
+        db = self._get_db()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._rolls_back_if_standalone(db):
+            cursor = db.execute(
+                "UPDATE memory_candidates SET status='write_uncertain', reviewer=?, "
+                "decision_reason=?, decided_at=?, claim_started_at=NULL "
+                "WHERE id=? AND status='writing'",
+                (actor, reason, now, candidate_id),
+            )
+            if cursor.rowcount > 0:
+                self._record_candidate_transition(
+                    db,
+                    candidate_id,
+                    "writing",
+                    "write_uncertain",
+                    actor,
+                    reason,
+                    now,
+                )
+            self._commit_if_standalone(db)
+        return cursor.rowcount > 0
+
     async def finalize_memory_candidate(self, candidate_id: str) -> bool:
         """Finalize a successfully persisted candidate claim."""
         # The claim state machine brackets a durable write that happens

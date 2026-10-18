@@ -506,16 +506,25 @@ async def mem_agent_share(
     # if ``_mem_add_core`` raises after its append lands, releasing would let a
     # retry duplicate the copy. ``stats is None`` (a handled error *return*)
     # means nothing landed and is released below.
-    result, stats = await _mem_add_core(
-        content=chunk.content,
-        title=_build_shared_title(chunk.metadata.heading_hierarchy),
-        tags=inherited_tags,
-        file=None,
-        namespace=target,
-        template=None,
-        ctx=ctx,
-        event_type="agent_share",
-    )
+    from memtomem.indexing.engine import PrivacyRejection
+
+    try:
+        result, stats = await _mem_add_core(
+            content=chunk.content,
+            title=_build_shared_title(chunk.metadata.heading_hierarchy),
+            tags=inherited_tags,
+            file=None,
+            namespace=target,
+            template=None,
+            ctx=ctx,
+            event_type="agent_share",
+        )
+    except PrivacyRejection as exc:
+        if exc.mutation_outcome != "appended":
+            raise
+        # The copy landed but is unindexed. The claim is kept, not released,
+        # for the reason above: a retry must not append it again.
+        return exc.mutation_detail("mem_agent_share", outcome="appended")
 
     # Record the structured link (PR-2 of the chunk_links series). The
     # markdown ``shared-from=`` audit tag is still written into content

@@ -119,16 +119,25 @@ async def mem_scratch_promote(
     # Save to long-term through the core ``mem_add`` wraps, so a refusal (an
     # excluded target #2488, a namespace mix, the redaction guard) is told apart
     # from a save: nothing was written, so the entry must not be marked promoted.
-    result, stats = await _mem_add_core(
-        content=entry["value"],
-        title=title or key,
-        tags=tags,
-        file=file,
-        namespace=None,
-        template=None,
-        ctx=ctx,
-        event_type="scratch_promote",
-    )
+    from memtomem.indexing.engine import PrivacyRejection
+
+    try:
+        result, stats = await _mem_add_core(
+            content=entry["value"],
+            title=title or key,
+            tags=tags,
+            file=file,
+            namespace=None,
+            template=None,
+            ctx=ctx,
+            event_type="scratch_promote",
+        )
+    except PrivacyRejection as exc:
+        if exc.mutation_outcome != "appended":
+            raise
+        # In the file, unindexed: marked promoted so a retry cannot append it twice.
+        await app.storage.scratch_promote(key)
+        return exc.mutation_detail("mem_scratch_promote", outcome="appended")
     if stats is None:
         return result
 

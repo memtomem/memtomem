@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import click
 import pytest
+from helpers import clean_preflight
 
 from memtomem.context import _atomic
 from memtomem.context._atomic import (
@@ -272,6 +273,7 @@ async def test_mutate_source_and_reindex_success(tmp_path):
     engine = AsyncMock()
     engine.is_excluded = MagicMock(return_value=False)  # sync on the real engine (#2488)
     engine.is_read_only_source = MagicMock(return_value=False)  # likewise sync
+    engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     engine.index_file = AsyncMock(return_value=_stats())
 
     def mutate(_pre):
@@ -292,6 +294,7 @@ async def test_mutate_source_and_reindex_rolls_back_on_failure(tmp_path):
     engine = AsyncMock()
     engine.is_excluded = MagicMock(return_value=False)  # sync on the real engine (#2488)
     engine.is_read_only_source = MagicMock(return_value=False)  # likewise sync
+    engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     # Forward reindex raises; the rollback reindex (2nd call) succeeds.
     engine.index_file = AsyncMock(side_effect=[RuntimeError("boom"), _stats()])
 
@@ -317,6 +320,7 @@ async def test_mutate_source_and_reindex_does_not_recreate_a_source_removed_mid_
     engine = AsyncMock()
     engine.is_excluded = MagicMock(return_value=False)  # sync on the real engine (#2488)
     engine.is_read_only_source = MagicMock(return_value=False)  # likewise sync
+    engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
 
     async def index_file(path, **kwargs):
         if engine.index_file.await_count == 1:
@@ -348,6 +352,7 @@ async def test_mutate_source_and_reindex_reports_the_body_error_when_the_parent_
     engine = AsyncMock()
     engine.is_excluded = MagicMock(return_value=False)  # sync on the real engine (#2488)
     engine.is_read_only_source = MagicMock(return_value=False)  # likewise sync
+    engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     engine.index_file = AsyncMock(side_effect=[RuntimeError("boom"), _stats()])
 
     def mutate(_pre):
@@ -372,6 +377,7 @@ async def test_mutate_source_and_reindex_still_raises_the_body_error_when_the_re
     engine = AsyncMock()
     engine.is_excluded = MagicMock(return_value=False)  # sync on the real engine (#2488)
     engine.is_read_only_source = MagicMock(return_value=False)  # likewise sync
+    engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     engine.index_file = AsyncMock(side_effect=[RuntimeError("boom"), _stats()])
     monkeypatch.setattr(
         memory_mutation, "restore_pre_image_quietly", lambda *_: RestoreOutcome.failed
@@ -428,6 +434,7 @@ async def test_mutate_source_and_reindex_hands_the_pre_image_to_the_callback(tmp
     engine = AsyncMock()
     engine.is_excluded = MagicMock(return_value=False)  # sync on the real engine (#2488)
     engine.is_read_only_source = MagicMock(return_value=False)  # likewise sync
+    engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     engine.index_file = AsyncMock(return_value=_stats())
     seen = {}
 
@@ -454,6 +461,7 @@ async def test_a_refused_write_is_re_raised_without_a_restore(tmp_path, monkeypa
     engine = AsyncMock()
     engine.is_excluded = MagicMock(return_value=False)  # sync on the real engine (#2488)
     engine.is_read_only_source = MagicMock(return_value=False)  # likewise sync
+    engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     engine.index_file = AsyncMock(return_value=_stats())
     restores: list[int] = []
     monkeypatch.setattr(
@@ -488,6 +496,7 @@ async def test_a_refusal_after_the_write_landed_is_still_rolled_back(tmp_path):
     engine = AsyncMock()
     engine.is_excluded = MagicMock(return_value=False)  # sync on the real engine (#2488)
     engine.is_read_only_source = MagicMock(return_value=False)  # likewise sync
+    engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     engine.index_file = AsyncMock(side_effect=[SourceRemovedError("late"), _stats()])
 
     def mutate(_pre):

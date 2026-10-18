@@ -708,6 +708,13 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "Added with the #2005 namespace guard, which has to inspect the same "
         "file the append lands in.",
     ),
+    ("cli/shell.py", "_cmd_add", 0, "async_file_lock"): (
+        MEMORY_L2,
+        "",
+        "Memory FILE lock (L2) — the day file shell ``add`` appends to, held "
+        "across the preflight, the append and the re-index so the preflight's "
+        "answer still describes the file the re-index reads.",
+    ),
     ("integrations/langgraph.py", "MemtomemStore.add", 0, "async_file_lock"): (
         MEMORY_L2,
         "",

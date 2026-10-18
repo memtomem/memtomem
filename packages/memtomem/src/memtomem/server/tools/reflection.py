@@ -164,16 +164,23 @@ async def mem_reflect_save(
     # excluded ``reflections.md`` #2488, a namespace mix, the redaction guard)
     # apart from a save. On a refusal nothing was written, so there is no
     # insight to link — ``recent[0]`` below would be some older chunk.
-    result, stats = await _mem_add_core(
-        content=insight,
-        title="Reflection",
-        tags=all_tags,
-        file="reflections.md",
-        namespace=None,
-        template=None,
-        ctx=ctx,
-        event_type="reflect_save",
-    )
+    from memtomem.indexing.engine import PrivacyRejection
+
+    try:
+        result, stats = await _mem_add_core(
+            content=insight,
+            title="Reflection",
+            tags=all_tags,
+            file="reflections.md",
+            namespace=None,
+            template=None,
+            ctx=ctx,
+            event_type="reflect_save",
+        )
+    except PrivacyRejection as exc:
+        if exc.mutation_outcome != "appended":
+            raise
+        return exc.mutation_detail("mem_reflect_save", outcome="appended")
     if stats is None:
         return result
 

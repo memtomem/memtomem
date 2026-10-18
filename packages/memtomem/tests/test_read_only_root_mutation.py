@@ -34,7 +34,7 @@ SURFACES = ("mcp_edit", "mcp_delete", "web_edit", "web_delete")
 
 
 async def _index(comp, source: Path) -> None:
-    stats = await comp.index_engine.index_file(source, already_scanned=True)
+    stats = await comp.index_engine.index_file(source, ingress_guarded=True)
     assert not stats.errors
     assert stats.indexed_chunks == 1
 

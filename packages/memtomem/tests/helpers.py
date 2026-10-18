@@ -457,3 +457,14 @@ def filesystem_folds_unicode_forms(parent: Path) -> bool:
     probe.mkdir()
     (probe / CAFE_NFD).mkdir()
     return (probe / CAFE_NFC).exists()
+
+
+def clean_preflight(*_args, **_kwargs):
+    """A fake engine's ``preflight_mutation``: the file holds nothing flagged.
+
+    The real method is synchronous; an ``AsyncMock`` attribute would hand the
+    memory tools a coroutine, and a ``MagicMock`` a truthy ``rejection``.
+    """
+    from memtomem.indexing.engine import MutationPreflight
+
+    return MutationPreflight(None, False, True)

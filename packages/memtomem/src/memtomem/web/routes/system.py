@@ -61,7 +61,12 @@ from memtomem.web.deps import (
     get_storage,
     require_configured,
 )
-from memtomem.web.routes._errors import NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL, _redact_message
+from memtomem.web.routes._errors import (
+    NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
+    _redact_message,
+    index_blocked_http,
+    privacy_index_blocked_http,
+)
 from memtomem.web.routes._locks import _config_lock
 from memtomem.web.schemas.config import (
     BuiltinExcludePatternsResponse,
@@ -2348,6 +2353,7 @@ async def upload_files(
     for the whole batch with audit logging.
     """
     from memtomem import privacy
+    from memtomem.indexing.engine import PrivacyRejection
     from memtomem.web.upload_quarantine import (
         UploadQuarantineError,
         QuarantinedUpload,
@@ -2367,22 +2373,23 @@ async def upload_files(
 
     try:
         async with quarantine_uploads(request, upload_dir) as quarantined:
-            decisions: list[tuple[QuarantinedUpload, str, bool, str | None]] = []
+            # (item, name, accepted, error, the text guarded, whether the valve was used)
+            decisions: list[tuple[QuarantinedUpload, str, bool, str | None, str, bool]] = []
             for item in quarantined:
                 fname = item.filename
                 suffix = Path(fname).suffix.lower()
                 if suffix not in _ALLOWED_UPLOAD_EXTS:
-                    decisions.append((item, fname, False, f"Unsupported type: {suffix}"))
+                    decisions.append((item, fname, False, f"Unsupported type: {suffix}", "", False))
                     continue
                 try:
                     content = await _asyncio.to_thread(item.path.read_bytes)
                     text = content.decode("utf-8")
                 except UnicodeDecodeError as exc:
-                    decisions.append((item, fname, False, f"Decode failed: {exc}"))
+                    decisions.append((item, fname, False, f"Decode failed: {exc}", "", False))
                     continue
                 except Exception:
                     logger.exception("Upload adjudication failed for %s", fname)
-                    decisions.append((item, fname, False, "Upload processing failed"))
+                    decisions.append((item, fname, False, "Upload processing failed", "", False))
                     continue
 
                 try:
@@ -2394,17 +2401,24 @@ async def upload_files(
                     )
                 except Exception:
                     logger.exception("Upload privacy check failed for %s", fname)
-                    decisions.append((item, fname, False, "Upload processing failed"))
+                    decisions.append((item, fname, False, "Upload processing failed", "", False))
                     continue
                 if guard.decision == "blocked":
                     decisions.append(
-                        (item, fname, False, f"redaction_blocked (hits={len(guard.hits)})")
+                        (
+                            item,
+                            fname,
+                            False,
+                            f"redaction_blocked (hits={len(guard.hits)})",
+                            "",
+                            False,
+                        )
                     )
                 else:
-                    decisions.append((item, fname, True, None))
+                    decisions.append((item, fname, True, None, text, guard.decision == "bypassed"))
 
             results: list[UploadFileResult] = []
-            for item, fname, accepted, error in decisions:
+            for item, fname, accepted, error, guarded_text, bypassed in decisions:
                 if not accepted:
                     results.append(UploadFileResult(filename=fname, indexed_chunks=0, error=error))
                     continue
@@ -2413,7 +2427,16 @@ async def upload_files(
                     dest = promote_no_overwrite(
                         item.path, upload_dir, fname, index_guard=index_engine
                     )
-                    stats = await index_engine.index_file(dest, already_scanned=True)
+                    # The engine judges the file again under its own scope.
+                    # ``valve_text`` keeps this upload's valve to this upload's
+                    # bytes: the index runs without the file's lock, so another
+                    # writer may have changed it since the promote.
+                    stats = await index_engine.index_file(
+                        dest,
+                        ingress_guarded=True,
+                        force_unsafe=bypassed,
+                        valve_text=guarded_text,
+                    )
                     # Per file (#2141): a later file in the batch can raise,
                     # and the files already promoted are already searchable.
                     if stats.mutated:
@@ -2430,6 +2453,17 @@ async def upload_files(
                     # file exists only in quarantine, which context cleanup removes.
                     results.append(
                         UploadFileResult(filename=fname, indexed_chunks=0, error="source_excluded")
+                    )
+                except PrivacyRejection as exc:
+                    # Promoted but refused by the indexer (e.g. a project tier
+                    # where the valve is not honoured); the file is held.
+                    results.append(
+                        UploadFileResult(
+                            filename=fname,
+                            indexed_chunks=0,
+                            path=str(dest) if dest is not None else None,
+                            error=exc.error_detail(),
+                        )
                     )
                 except ReadOnlySourceError:
                     # Same shape as the refusal above, and ahead of the generic
@@ -2742,16 +2776,44 @@ async def add_memory(
                 _revalidate_add_target(base, target)
             except (OSError, ValueError) as exc:
                 raise HTTPException(status_code=422, detail=_ADD_PATH_ERROR) from exc
+            # The re-index after the append judges the whole file: refuse a
+            # file whose content may not be indexed before anything is written,
+            # and let the valve cover this entry only in a file with nothing
+            # flagged or masked in it.
+            from memtomem.indexing.engine import PrivacyRejection
+            from memtomem.tools.memory_writer import read_pre_image_or_empty
+
+            needs_valve = guard.decision == "bypassed"
+            pre = await _asyncio.to_thread(read_pre_image_or_empty, target)
+            preflight = await _asyncio.to_thread(index_engine.preflight_mutation, target, pre)
+            if preflight.rejection is not None:
+                rejection = await index_engine.refuse_mutation(target, preflight)
+                search_pipeline.invalidate_cache()
+                raise privacy_index_blocked_http(rejection, "add")
+            blocker = preflight.blocker("add", target.name, needs_valve=needs_valve)
+            if blocker is not None:
+                raise index_blocked_http(blocker)
             pre_lines = (
                 len(target.read_text(encoding="utf-8", errors="replace").splitlines())
                 if target.exists()
                 else 0
             )
-            # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
             await _asyncio.to_thread(append_entry, target, req.content, title=req.title, tags=tags)
-            stats = await index_engine.index_file(
-                target, namespace=write_ns, already_scanned=True, lock_held=True
-            )
+            try:
+                stats = await index_engine.index_file(
+                    target,
+                    namespace=write_ns,
+                    ingress_guarded=True,
+                    force_unsafe=needs_valve,
+                    lock_held=True,
+                )
+            except PrivacyRejection as exc:
+                # The entry is on disk; its result may not be indexed (a title
+                # the ingress never scanned). A 409 of its own, so the SPA does
+                # not resend the append with force_unsafe.
+                search_pipeline.invalidate_cache()
+                exc.mutation_outcome = "appended"
+                raise privacy_index_blocked_http(exc, "add") from exc
             # #2141, before the tag merge below: that merge can raise (or the
             # lock can time out) *after* the chunk write committed, and the
             # 500 the caller then sees must not leave a warmed query answering

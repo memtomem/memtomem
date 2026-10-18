@@ -34,6 +34,7 @@ from memtomem.web.app import create_app
 from .helpers import (
     CAFE_NFC,
     CAFE_NFD,
+    clean_preflight,
     consent_lines,
     filesystem_keeps_unicode_forms_apart,
     isolate_config_paths,
@@ -281,6 +282,7 @@ def app(_isolated_config_paths: Path):
     # the read-only-root gate is the second one.
     index_engine.is_excluded = MagicMock(return_value=False)
     index_engine.is_read_only_source = MagicMock(return_value=False)
+    index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     # ``mutated=True`` mirrors what an engine that indexed chunks really
     # returns; the index routes gate their cache invalidation on it (#2141).
     index_engine.index_path = AsyncMock(

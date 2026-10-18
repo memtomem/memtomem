@@ -379,6 +379,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- **Memory writes no longer index content that nobody let through the redaction
+  guard (GHSA-6wq5-pc5r-4fgp).** The write tools scanned only the text they
+  wrote, then re-indexed the whole file with the guard switched off, so a
+  secret already in that file (written by hand or by another program) was
+  stored, searchable and embedded on the next `mem_add`, `mem_edit`,
+  `mem_delete` or their web, CLI and LangGraph counterparts. Every index now
+  judges the whole file, and a tool that changes an existing file first asks
+  the engine whether the file may be indexed as it stands: if not, nothing is
+  written, the file's chunks are held as a blocked index would hold them, and
+  the tool says how to clear it. Consequences worth knowing:
+  - `force_unsafe` covers the caller's own write only when the target file
+    holds nothing flagged or masked; a forced write into such a file is
+    refused, so keep forced content in a file of its own. A file that holds a
+    deliberately forced secret can no longer be changed through the tools;
+    edit it by hand and run `mm index --force-unsafe <file>`.
+  - The tools refuse to modify a file whose reviewed masking manifest masks
+    anything: the manifest is bound to the file's exact contents, and the
+    change would have stored the masked text verbatim.
+  - Titles and tags the tools write are now judged with the rest of the
+    file. An entry refused that way stays appended but unindexed, and the
+    tool says so; the web routes answer `409 index_blocked` instead of the
+    `403 redaction_blocked` that offers a force-unsafe retry.
+  - Content this bug already stored stays stored until the file is indexed
+    again. Running `mm index` over your memory directories after upgrading
+    judges every file: a file holding such content is reported as blocked
+    and its chunks are held until the file is cleaned and re-indexed.
 - **Webhook delivery refuses hosts that resolve to private addresses
   (#2728).** The URL check only ever saw IP literals, so `http://localtest.me/`,
   `http://127.1/`, `http://2130706433/` or any public hostname whose DNS

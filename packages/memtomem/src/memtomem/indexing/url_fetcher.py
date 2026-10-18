@@ -341,7 +341,32 @@ async def fetch_url(
     scope: str = "user",
     index_guard: WriteTargetGuard | None = None,
 ) -> Path:
+    """Fetch a URL into a markdown file and return its path (see :func:`fetch_url_with_text`)."""
+    file_path, _ = await fetch_url_with_text(
+        url,
+        output_dir,
+        client=client,
+        force_unsafe=force_unsafe,
+        scope=scope,
+        index_guard=index_guard,
+    )
+    return file_path
+
+
+async def fetch_url_with_text(
+    url: str,
+    output_dir: Path,
+    *,
+    client: httpx.AsyncClient | None = None,
+    force_unsafe: bool = False,
+    scope: str = "user",
+    index_guard: WriteTargetGuard | None = None,
+) -> tuple[Path, str]:
     """Fetch a URL, convert HTML to markdown, and save to a file.
+
+    Returns the path and the exact text written, which is the text the redaction
+    guard scanned: an indexer told to honour ``force_unsafe`` binds the valve to
+    those bytes (``IndexEngine.index_file(valve_text=…)``).
 
     DNS-pinning: hostname is resolved once at validation time and the resulting
     IP is used for the actual TCP connection. Each redirect hop is re-validated
@@ -422,7 +447,7 @@ async def fetch_url(
             raise FetchTargetRefusedError(file_path, refusal)
     atomic_write_text(file_path, final, mode=0o600)
 
-    return file_path
+    return file_path, final
 
 
 def _url_to_slug(url: str) -> str:

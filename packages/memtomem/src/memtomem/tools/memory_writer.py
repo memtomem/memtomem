@@ -475,6 +475,18 @@ def read_pre_image(file_path: Path) -> PreImage:
     return PreImage(data=data, identity=identity)
 
 
+def read_pre_image_or_empty(file_path: Path) -> bytes:
+    """``file_path``'s bytes, or ``b""`` when there is no file yet.
+
+    For an append that may create its target: the preflight judges what is
+    there before the write, and a file that does not exist holds nothing.
+    """
+    try:
+        return read_pre_image(file_path).data
+    except FileNotFoundError:
+        return b""
+
+
 def restore_pre_image_quietly(file_path: Path, pre_image: PreImage) -> RestoreOutcome:
     """Put *pre_image* back at *file_path*, reporting rather than raising (#2347).
 

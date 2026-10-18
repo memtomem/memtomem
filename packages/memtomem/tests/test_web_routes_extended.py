@@ -23,7 +23,7 @@ from memtomem.models import Chunk, ChunkMetadata
 from memtomem.search.dedup import DedupCoverage
 from memtomem.storage.base import NamespaceRenameResult
 from memtomem.web.app import create_app
-from .helpers import isolate_config_paths, set_home
+from .helpers import clean_preflight, isolate_config_paths, set_home
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +273,7 @@ def app(_isolated_config_paths: Path):
     # coroutine and read as "excluded" to every write guard (#2488).
     index_engine.is_excluded = MagicMock(return_value=False)
     index_engine.is_read_only_source = MagicMock(return_value=False)
+    index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
 
     # -- dedup scanner mock --
     dedup_scanner = AsyncMock()

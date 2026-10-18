@@ -82,7 +82,7 @@ async def day_file(bm25_only_components):
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     source = mem_dir / f"{date_str}.md"
     source.write_text(EXISTING, encoding="utf-8")
-    stats = await comp.index_engine.index_file(source, already_scanned=True)
+    stats = await comp.index_engine.index_file(source, ingress_guarded=True)
     assert stats.indexed_chunks == 1
     return comp, mem_dir, source
 

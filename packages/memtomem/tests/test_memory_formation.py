@@ -1024,3 +1024,201 @@ async def test_candidate_evidence_inherits_the_accessor_lazy_expiry(storage, mon
     await formation_tools.mem_candidate_evidence(candidate["id"])
     after = await storage.get_memory_candidate(candidate["id"])
     assert after["status"] == "expired"
+
+
+@pytest.mark.asyncio
+async def test_a_claimed_write_that_landed_is_quarantined_not_released(storage):
+    await storage.create_session("session", "agent", "default")
+    await storage.add_session_event("session", "note", "Decision: appended once")
+    candidate = (await scan_session_candidates(storage, "session"))[0]
+    assert await storage.claim_memory_candidate(candidate["id"], "alice") is not None
+
+    assert await storage.mark_claimed_candidate_write_uncertain(
+        candidate["id"], actor="cli-approve", reason="appended but not indexed"
+    )
+
+    row = await storage.get_memory_candidate(candidate["id"])
+    assert row["status"] == "write_uncertain"
+    assert await storage.claim_memory_candidate(candidate["id"], "bob") is None
+    # Only a claim in flight moves; a second call finds nothing to move.
+    assert not await storage.mark_claimed_candidate_write_uncertain(
+        candidate["id"], actor="cli-approve", reason="again"
+    )
+
+
+def _appended_rejection():
+    from memtomem.indexing.engine import PrivacyRejection
+
+    exc = PrivacyRejection(path=Path("day.md"), hit_count=1, scope="user", decision="blocked")
+    exc.mutation_outcome = "appended"
+    return exc
+
+
+@pytest.mark.asyncio
+async def test_mcp_approve_quarantines_an_append_the_indexer_refused(monkeypatch):
+    from memtomem.server.tools.formation import mem_candidate_review
+
+    storage = SimpleNamespace(
+        get_memory_candidate=AsyncMock(
+            return_value={
+                "id": "candidate-1",
+                "status": "pending",
+                "destination": "memory",
+                "content": "Decision: appended once",
+                "kind": "decision",
+            }
+        ),
+        claim_memory_candidate=AsyncMock(return_value={"status": "writing"}),
+        release_memory_candidate=AsyncMock(),
+        finalize_memory_candidate=AsyncMock(),
+        mark_claimed_candidate_write_uncertain=AsyncMock(return_value=True),
+    )
+    app = SimpleNamespace(storage=storage, ensure_initialized=AsyncMock())
+    ctx = SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
+    monkeypatch.setattr(
+        "memtomem.server.tools.memory_crud._mem_add_core",
+        AsyncMock(side_effect=_appended_rejection()),
+    )
+
+    result = json.loads(
+        await mem_candidate_review("candidate-1", "approve", reviewer="alice", ctx=ctx)
+    )
+
+    assert result["status"] == "write_uncertain"
+    assert result["durable_write_persisted"] is True
+    storage.mark_claimed_candidate_write_uncertain.assert_awaited_once()
+    storage.release_memory_candidate.assert_not_awaited()
+    storage.finalize_memory_candidate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_landed_write_whose_claim_was_recovered_is_still_quarantined(storage):
+    """Recovery moved the claim back to ``pending`` while the append ran."""
+    await storage.create_session("session", "agent", "default")
+    await storage.add_session_event("session", "note", "Decision: appended during recovery")
+    candidate = (await scan_session_candidates(storage, "session"))[0]
+    assert await storage.claim_memory_candidate(candidate["id"], "alice") is not None
+    old = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(timespec="seconds")
+    storage._get_db().execute(
+        "UPDATE memory_candidates SET claim_started_at=? WHERE id=?", (old, candidate["id"])
+    )
+    storage._get_db().commit()
+    assert await storage.recover_stale_memory_candidates(
+        stale_before=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    ) == [candidate["id"]]
+
+    assert not await storage.mark_claimed_candidate_write_uncertain(
+        candidate["id"], actor="mcp-approve", reason="appended but not indexed"
+    )
+    assert await storage.mark_memory_candidate_write_uncertain(
+        candidate["id"], actor="mcp-approve", reason="appended but not indexed"
+    )
+    assert (await storage.get_memory_candidate(candidate["id"]))["status"] == "write_uncertain"
+
+
+@pytest.mark.asyncio
+async def test_mcp_approve_quarantines_from_pending_when_the_claim_was_recovered(monkeypatch):
+    from memtomem.server.tools.formation import mem_candidate_review
+
+    storage = SimpleNamespace(
+        get_memory_candidate=AsyncMock(
+            return_value={
+                "id": "candidate-1",
+                "status": "pending",
+                "destination": "memory",
+                "content": "Decision: appended once",
+                "kind": "decision",
+            }
+        ),
+        claim_memory_candidate=AsyncMock(return_value={"status": "writing"}),
+        release_memory_candidate=AsyncMock(),
+        finalize_memory_candidate=AsyncMock(),
+        mark_claimed_candidate_write_uncertain=AsyncMock(return_value=False),
+        mark_memory_candidate_write_uncertain=AsyncMock(return_value=True),
+    )
+    app = SimpleNamespace(storage=storage, ensure_initialized=AsyncMock())
+    ctx = SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
+    monkeypatch.setattr(
+        "memtomem.server.tools.memory_crud._mem_add_core",
+        AsyncMock(side_effect=_appended_rejection()),
+    )
+
+    result = json.loads(
+        await mem_candidate_review("candidate-1", "approve", reviewer="alice", ctx=ctx)
+    )
+
+    assert result["status"] == "write_uncertain"
+    storage.mark_memory_candidate_write_uncertain.assert_awaited_once()
+    storage.release_memory_candidate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_approve_keeps_the_claim_when_quarantine_fails(monkeypatch):
+    from memtomem.server.tools.formation import mem_candidate_review
+
+    storage = SimpleNamespace(
+        get_memory_candidate=AsyncMock(
+            return_value={
+                "id": "candidate-1",
+                "status": "pending",
+                "destination": "memory",
+                "content": "Decision: appended once",
+                "kind": "decision",
+            }
+        ),
+        claim_memory_candidate=AsyncMock(return_value={"status": "writing"}),
+        release_memory_candidate=AsyncMock(),
+        finalize_memory_candidate=AsyncMock(),
+        mark_claimed_candidate_write_uncertain=AsyncMock(side_effect=RuntimeError("locked")),
+        mark_memory_candidate_write_uncertain=AsyncMock(),
+    )
+    app = SimpleNamespace(storage=storage, ensure_initialized=AsyncMock())
+    ctx = SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
+    monkeypatch.setattr(
+        "memtomem.server.tools.memory_crud._mem_add_core",
+        AsyncMock(side_effect=_appended_rejection()),
+    )
+
+    result = json.loads(
+        await mem_candidate_review("candidate-1", "approve", reviewer="alice", ctx=ctx)
+    )
+
+    assert result["status"] == "quarantine_failed"
+    assert result["durable_write_persisted"] is True
+    assert "do not re-approve" in result["reason"]
+    storage.release_memory_candidate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cli_approve_keeps_the_claim_when_quarantine_fails(bm25_only_components, monkeypatch):
+    """The append is durable; a quarantine that raises must not release the claim."""
+    import click
+
+    from memtomem.cli.review_cmd import _decide
+
+    comp, _ = bm25_only_components
+    storage = comp.storage
+    await storage.create_session("session", "agent", "default")
+    await storage.add_session_event("session", "note", "Decision: appended once")
+    candidate = (await scan_session_candidates(storage, "session"))[0]
+
+    monkeypatch.setattr(
+        comp.index_engine, "index_file", AsyncMock(side_effect=_appended_rejection())
+    )
+    monkeypatch.setattr(
+        storage,
+        "mark_claimed_candidate_write_uncertain",
+        AsyncMock(side_effect=RuntimeError("database is locked")),
+    )
+
+    @asynccontextmanager
+    async def fake_components():
+        yield comp
+
+    monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake_components)
+
+    with pytest.raises(click.ClickException, match="could not be quarantined"):
+        await _decide(candidate["id"], "approved", "alice", "")
+
+    row = await storage.get_memory_candidate(candidate["id"])
+    assert row["status"] == "writing", "released to pending, a re-approval would append again"

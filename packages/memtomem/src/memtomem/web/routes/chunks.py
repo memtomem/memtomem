@@ -27,8 +27,10 @@ from memtomem.tools.memory_writer import (
     SourceChangedError,
     SourceRemovedError,
     SourceReplacedError,
+    read_pre_image,
     remove_lines,
     replace_chunk_body,
+    restore_pre_image_quietly,
 )
 from memtomem.web.deps import (
     get_config,
@@ -44,6 +46,8 @@ from memtomem.web.routes._errors import (
     NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
     SOURCE_REMOVED_DURING_WRITE_DETAIL,
     SOURCE_REPLACED_DURING_WRITE_DETAIL,
+    index_blocked_http,
+    privacy_index_blocked_http,
 )
 from memtomem.web.schemas.core import (
     ChunkOut,
@@ -258,6 +262,8 @@ async def edit_chunk(
                 audit_context={"chunk_id": str(chunk_id)},
             )
 
+        from memtomem.indexing.engine import MutationBlockedError, PrivacyRejection
+
         guard = privacy.enforce_write_guard(
             body.new_content,
             surface="web_api_chunk_edit",
@@ -306,8 +312,8 @@ async def edit_chunk(
             # surfaces ``chunk.content`` (already header-stripped by the
             # chunker), so saving without preservation would silently erase
             # the metadata header on disk. Prefix ``new_content`` with ``## ``
-            # to override the heading explicitly. Guarded above; skip the engine
-            # gate (ADR-0006 PR-A). Rolls back the file on reindex failure.
+            # to override the heading explicitly. The helper asks the engine about
+            # the file before writing and rolls it back on a reindex failure.
             stats = await mutate_source_and_reindex(
                 index_engine,
                 meta.source_file,
@@ -322,6 +328,7 @@ async def edit_chunk(
                     expected_source_span_hash=meta.source_span_hash,
                     expected_identity=pre.identity,
                 ),
+                force_unsafe=guard.decision == "bypassed",
             )
             # #2141, the web twin of ``memory_crud._mutate_file_and_reindex``:
             # the edit rewrote chunk text (or only its tags / line ranges,
@@ -364,6 +371,14 @@ async def edit_chunk(
                     else SOURCE_REPLACED_DURING_WRITE_DETAIL
                 ),
             ) from exc
+        except PrivacyRejection as exc:
+            # The file holds content the indexer may not store (nothing was
+            # written), or the edit's result does (rolled back). The source is
+            # held either way, so a warmed query must drop it.
+            search_pipeline.invalidate_cache()
+            raise privacy_index_blocked_http(exc, "edit") from exc
+        except MutationBlockedError as exc:
+            raise index_blocked_http(exc.detail) from exc
         except NamespaceResolutionError as exc:
             # Before the generic handler below, and the web twin of the MCP
             # ``_mutate_file_and_reindex`` re-raise (#2005 follow-up): the
@@ -698,6 +713,23 @@ async def delete_chunk(
                             "namespace has its own, then retry."
                         ),
                     )
+                # The re-index below judges the whole file, so a file whose
+                # content may not be indexed is refused before the line comes
+                # out, and held, as in the edit route's helper.
+                from memtomem.indexing.engine import PrivacyRejection
+                from memtomem.tools.memory_mutation import outcome_after_restore
+
+                pre_image = await asyncio.to_thread(read_pre_image, source)
+                preflight = await asyncio.to_thread(
+                    index_engine.preflight_mutation, source, pre_image.data
+                )
+                if preflight.rejection is not None:
+                    mutation_attempted = True  # the hold changes what search may serve
+                    rejection = await index_engine.refuse_mutation(source, preflight)
+                    raise privacy_index_blocked_http(rejection, "delete")
+                blocker = preflight.blocker("delete", source.name, needs_valve=False)
+                if blocker is not None:
+                    raise index_blocked_http(blocker)
                 try:
                     # Armed before the call, not after: a partial write that
                     # then raises is exactly the case the flag must cover.
@@ -784,9 +816,20 @@ async def delete_chunk(
                         stats = await index_engine.index_file(
                             source,
                             force=True,
-                            already_scanned=True,
+                            ingress_guarded=True,
                             lock_held=True,
                         )
+                    except PrivacyRejection as exc:
+                        # Removing the line made the rest of the file refusable
+                        # (two lines joined into a match). Put the line back;
+                        # the pre-image passed the preflight and its chunks are
+                        # the ones stored, so the row stays and the hold the
+                        # refusal placed is what the caller is told about.
+                        restored = await asyncio.to_thread(
+                            restore_pre_image_quietly, source, pre_image
+                        )
+                        exc.mutation_outcome = outcome_after_restore(restored)
+                        raise privacy_index_blocked_http(exc, "delete") from exc
                     except Exception as exc:
                         logger.warning("Re-index failed after deleting chunk %s: %s", chunk_id, exc)
                     else:

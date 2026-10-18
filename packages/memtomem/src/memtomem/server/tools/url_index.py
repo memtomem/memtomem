@@ -42,7 +42,7 @@ async def mem_fetch(
             combination is hard-refused, because git history cannot be
             retracted from clones.
     """
-    from memtomem.indexing.url_fetcher import fetch_url
+    from memtomem.indexing.url_fetcher import fetch_url_with_text
 
     if not url.startswith(("http://", "https://")):
         return "Error: URL must start with http:// or https://"
@@ -62,7 +62,7 @@ async def mem_fetch(
 
     scope, _ = classify_scope(output_dir, app.config.indexing.project_memory_dirs)
     try:
-        file_path = await fetch_url(
+        file_path, fetched_text = await fetch_url_with_text(
             url,
             output_dir,
             force_unsafe=force_unsafe,
@@ -88,9 +88,11 @@ async def mem_fetch(
     except Exception as exc:
         return f"Error fetching URL: {exc}"
 
-    # Index the fetched file. ADR-0006 PR-A: fetched content is un-adjudicated,
-    # so the engine redaction gate is active — a secret-bearing page is saved
-    # but not indexed, and surfaced here instead of silently reporting success.
+    # Index the fetched file. The fetch guarded the exact text it wrote; the
+    # engine judges the file again under its own scope, and ``valve_text`` keeps
+    # a ``force_unsafe`` fetch's valve to those bytes, since another writer could
+    # touch the file before this index reads it. A refused page is saved but not
+    # indexed, and surfaced here instead of silently reporting success.
     from memtomem.indexing.engine import PrivacyRejection
 
     # The gauge closes only after the tag merge below: that re-upserts the
@@ -101,7 +103,11 @@ async def mem_fetch(
         provenance_session_id, effective_ns = await capture_session_and_namespace(app, namespace)
         try:
             stats = await app.index_engine.index_file(
-                file_path, namespace=effective_ns, already_scanned=True
+                file_path,
+                namespace=effective_ns,
+                ingress_guarded=True,
+                force_unsafe=force_unsafe,
+                valve_text=fetched_text,
             )
         except PrivacyRejection as exc:
             app.search_pipeline.invalidate_cache()
