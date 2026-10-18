@@ -33,14 +33,16 @@ from memtomem.models import (
     ScopeFilter,
 )
 from memtomem.storage.base import StorageBackend
+from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
 
 from .sqlite_helpers import escape_like
 from .sqlite_scope import _scopes_glob_clause, _scopes_in_clause
 
 
 # A missing source is retained for recovery but hidden from ranked search,
-# entity search, and maintenance discovery. ID-addressed storage and MCP reads
-# still reach held chunks until an explicit purge.
+# entity search, and maintenance discovery. ID-addressed reads still reach
+# chunks under an availability hold until an explicit purge; a redaction hold
+# is the exception, see ``_not_withheld_sql`` below.
 def _visible_source_sql(alias: str) -> str:
     # Only the two fixed table spellings below reach this SQL fragment.
     if alias not in {"c", "chunks"}:
@@ -63,6 +65,36 @@ def _visible_source_sql(alias: str) -> str:
 
 VISIBLE_SOURCE_C = _visible_source_sql("c")
 VISIBLE_SOURCE_CHUNKS = _visible_source_sql("chunks")
+
+
+# The one hold that also applies to chunks reached by id (#2777). An
+# availability hold says only that the file cannot be seen right now, so its
+# chunks stay readable for recovery. A redaction hold is about the content:
+# the guard refused the file's current state, and the retained chunks can
+# carry text that same edit deleted. A policy summary derived from such a
+# source is withheld with it, the way ``_visible_source_sql`` hides it with
+# any hold. ``SqliteBackend.is_source_withheld`` is the per-row twin.
+def _not_withheld_sql(alias: str) -> str:
+    # Only the two fixed table spellings below reach this SQL fragment.
+    if alias not in {"c", "chunks"}:
+        raise ValueError("unsupported source visibility table alias")
+    source = f"{alias}.source_file"
+    original = f"substr({source}, 1, length({source}) - length('{CONSOLIDATED_SUFFIX}'))"
+
+    def withheld(path: str) -> str:
+        return (
+            f"EXISTS (SELECT 1 FROM held_sources w WHERE w.source_file={path} "  # nosec B608
+            f"AND w.reason='{REDACTION_BLOCKED_HOLD}')"
+        )
+
+    return (
+        f"(NOT {withheld(source)} AND ({alias}.origin IS NULL OR {alias}.origin <> "
+        f"'{ORIGIN_CONSOLIDATION_POLICY}' OR NOT {withheld(original)}))"  # nosec B608
+    )
+
+
+NOT_WITHHELD_C = _not_withheld_sql("c")
+NOT_WITHHELD_CHUNKS = _not_withheld_sql("chunks")
 
 
 # Per-path twin of ``SqliteBackend.get_hidden_source_files``: that query returns

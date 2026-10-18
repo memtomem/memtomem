@@ -12,6 +12,7 @@ from memtomem.errors import StorageError
 from memtomem.models import Chunk
 from memtomem.storage.sqlite_helpers import utc_stamp
 from memtomem.storage.sqlite_scope import scope_context_sql
+from memtomem.storage.sqlite_visibility import NOT_WITHHELD_CHUNKS
 
 
 class RelationMixin:
@@ -157,8 +158,10 @@ class RelationMixin:
         authorization read. SQLite therefore judges the row after any writer
         it waited for has committed: a same-project migration still permits
         the tag change, while a move outside the caller's ADR-0011 boundary
-        makes the statement match nothing. Only ``tags`` and ``updated_at``
-        are written, so a migration's source/scope metadata cannot be restored.
+        makes the statement match nothing. A redaction hold (#2777) is in the
+        same predicate, so one committed after the service's read refuses the
+        write too. Only ``tags`` and ``updated_at`` are written, so a
+        migration's source/scope metadata cannot be restored.
 
         The service owns ``_tag_write_lock`` and performs the exact no-op
         check. This raw primitive must not acquire that lock again.
@@ -169,7 +172,8 @@ class RelationMixin:
         updated: Chunk | None = None
         with self._rolls_back_if_standalone(db):
             cursor = db.execute(
-                f"UPDATE chunks SET tags=?, updated_at=? WHERE id=? AND {scope_fragment}",
+                "UPDATE chunks SET tags=?, updated_at=? WHERE id=? "
+                f"AND {scope_fragment} AND {NOT_WITHHELD_CHUNKS}",  # nosec B608
                 [
                     json.dumps(list(tags)),
                     utc_stamp(now),

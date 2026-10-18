@@ -109,6 +109,22 @@ them unable to do the job they are named for.
 Whether they should grow an *optional* scope filter is a real question, deferred
 with a TRACKER row rather than answered here.
 
+### 4. A redaction hold applies; an availability hold does not (amended 2026-10-18, #2777)
+
+Source holds (#2498) came later than this ADR and split along the same line as
+§1 and §2. A hold for a missing or unavailable source (`scan_missing`,
+`source_missing`, `watch_root_removed` and the other availability reasons) says
+only that the file cannot be seen right now. Like the axes in §2 it is a
+retrieval default, and its chunks stay readable by id so they can be recovered.
+
+A `redaction_blocked` hold (#2629) is about the content. The guard refused the
+file's current state, and the chunks kept from its last clean index can carry
+text that the same edit deleted. Those chunks, and a consolidation-policy
+summary derived from such a source, resolve by id exactly as a nonexistent id
+does, on reads and writes alike. A write has to be refused as well, because
+rewriting and re-indexing the file is what the guard refused. Fixing the file
+and re-indexing it cleanly lifts the hold and restores id access.
+
 ## What this guarantee is, and is not
 
 **It is a context boundary and leak hygiene.** It stops a foreign project's

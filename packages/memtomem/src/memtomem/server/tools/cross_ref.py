@@ -11,8 +11,8 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.tools._id_access import (
     caller_boundary,
-    in_boundary,
     not_found,
+    readable,
     resolve_chunk,
 )
 
@@ -141,12 +141,13 @@ async def mem_related(
     # allows twice over: ``chunk_relations`` is ON DELETE CASCADE, so a
     # dangling id means "deleted" — reusing it for a live row would report
     # the row as gone while printing its full uuid. A count that included it
-    # would leak the same existence more quietly.
+    # would leak the same existence more quietly. A target under a redaction
+    # hold leaves both the same way (#2777).
     boundary = caller_boundary(app)
     visible: list[tuple[str, str, Chunk | None]] = []
     for related_id, rel_type in relations:
         related = await app.storage.get_chunk(related_id)
-        if related is not None and not in_boundary(related, boundary):
+        if related is not None and not await readable(app, related, boundary):
             continue
         visible.append((str(related_id), rel_type, related))
 

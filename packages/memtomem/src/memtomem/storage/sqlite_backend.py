@@ -2505,6 +2505,29 @@ class SqliteBackend(
             is not None
         )
 
+    async def is_source_withheld(self, source_file: Path, *, origin: str | None) -> bool:
+        """Whether a chunk at ``source_file`` is withheld from id access (#2777).
+
+        The per-row twin of ``NOT_WITHHELD_C``: true under a redaction hold,
+        or for a policy summary (``origin``) whose parent source has one.
+        Availability holds return ``False`` — their chunks stay readable by id.
+        """
+        db = self._get_read_db()
+        source = norm_path(source_file)
+        if origin == ORIGIN_CONSOLIDATION_POLICY and source.endswith(CONSOLIDATED_SUFFIX):
+            candidates: tuple[str, ...] = (source, source[: -len(CONSOLIDATED_SUFFIX)])
+        else:
+            candidates = (source,)
+        placeholders = ",".join("?" * len(candidates))
+        return (
+            db.execute(
+                f"SELECT 1 FROM held_sources WHERE source_file IN ({placeholders}) "  # nosec B608
+                "AND reason=? LIMIT 1",
+                (*candidates, REDACTION_BLOCKED_HOLD),
+            ).fetchone()
+            is not None
+        )
+
     async def is_source_pending(self, source_file: Path) -> bool:
         db = self._get_read_db()
         return (

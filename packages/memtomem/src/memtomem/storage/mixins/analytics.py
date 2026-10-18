@@ -8,7 +8,7 @@ from pathlib import Path
 
 from memtomem.storage.sqlite_helpers import placeholders, project_boundary_key
 from memtomem.storage.sqlite_scope import scope_context_sql
-from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_CHUNKS
+from memtomem.storage.sqlite_visibility import NOT_WITHHELD_CHUNKS, VISIBLE_SOURCE_CHUNKS
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +216,10 @@ class AnalyticsMixin:
         ranking and ``limit`` are applied after that screen rather than
         before it. A hub whose every edge leaves the boundary has no visible
         degree and is absent from the result — it is never reported as zero.
-        Callers therefore do not need to over-fetch and re-rank.
+        Callers therefore do not need to over-fetch and re-rank. A chunk under
+        a redaction hold (#2777) is outside that screen too, as a hub and as
+        an endpoint; the caller still screens each hub it hydrates, since a
+        hold can commit between this query and that fetch.
         """
         db = self._get_txn_read_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root)
@@ -232,7 +235,7 @@ class AnalyticsMixin:
         # actually follow, and with it the ranking.
         rows = db.execute(
             "SELECT chunk_id, link_count FROM (WITH visible AS (SELECT id FROM chunks WHERE "
-            f"{visible_sql}), adjacency AS ("  # nosec B608
+            f"{visible_sql} AND {NOT_WITHHELD_CHUNKS}), adjacency AS ("  # nosec B608
             "  SELECT r.source_id AS chunk_id, r.target_id AS neighbour_id, "
             "         r.relation_type AS rel FROM chunk_relations r "
             "  JOIN visible s ON s.id = r.source_id JOIN visible t ON t.id = r.target_id "

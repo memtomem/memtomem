@@ -19,6 +19,13 @@ boundary survives there — the other two axes are relevance defaults an
 explicit ``namespace=`` already lifts, and a rule a caller can switch off is
 not one to enforce against them.
 
+Source holds split the same way. An availability hold (the file is missing or
+its root is unavailable) is a retrieval default like the two above, so a held
+chunk stays readable by id for recovery. A redaction hold is not: the guard
+refused the file's current content, and the chunks kept from the last clean
+index can carry text that edit deleted. Those resolve by id exactly as a
+nonexistent id does (#2777, :func:`chunk_withheld`).
+
 Within adjacency the split is between *visibility* and *selection*. Visibility
 filters say what the caller may see and apply to neighbours; selection filters
 (chunk types, tags, created-date bounds) say what the caller searched for, and
@@ -42,9 +49,22 @@ from memtomem.models import (
 
 
 class _ChunkSource(Protocol):
-    """The one storage method :func:`resolve_visible_chunk` needs."""
+    """The storage methods :func:`resolve_visible_chunk` needs."""
 
     async def get_chunk(self, chunk_id: UUID) -> Chunk | None: ...
+
+    async def is_source_withheld(self, source_file: Path, *, origin: str | None) -> bool: ...
+
+
+async def chunk_withheld(storage: _ChunkSource, metadata: ChunkMetadata) -> bool:
+    """Whether a chunk is withheld from id access by a redaction hold (#2777).
+
+    Callers that fetch a chunk without :func:`resolve_visible_chunk` ask this
+    next to their boundary check and answer ``True`` the way they answer an
+    out-of-boundary id. A caller that holds the source lock asks it again on
+    the row it re-fetched under the lock.
+    """
+    return await storage.is_source_withheld(metadata.source_file, origin=metadata.origin)
 
 
 def chunk_valid_at(metadata: ChunkMetadata, as_of_unix: int) -> bool:
@@ -123,13 +143,14 @@ async def resolve_visible_chunk(
     *,
     project_context_root: Path | None,
 ) -> Chunk | None:
-    """Fetch a chunk by id, or ``None`` if it is outside the caller's boundary.
+    """Fetch a chunk by id, or ``None`` if the caller may not read it by id.
 
     The single resolver for ADR-0036's rule on the id-addressed surface. The
-    two answers are deliberately indistinguishable: a caller cannot tell an id
-    that does not exist from one belonging to another project, so callers must
-    render both with the same message. Ids address rows; they do not certify
-    that the holder may read one.
+    answers are deliberately indistinguishable: a caller cannot tell an id
+    that does not exist from one belonging to another project, or from one
+    withheld by a redaction hold, so callers must render all three with the
+    same message. Ids address rows; they do not certify that the holder may
+    read one.
 
     ``storage`` is duck-typed to whatever provides ``get_chunk`` so this module
     stays free of a storage import, and so the mutation paths can screen the
@@ -141,6 +162,8 @@ async def resolve_visible_chunk(
     if chunk is None:
         return None
     if not chunk_in_scope_boundary(chunk.metadata, project_context_root):
+        return None
+    if await chunk_withheld(storage, chunk.metadata):
         return None
     return chunk
 

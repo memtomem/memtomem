@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from memtomem.embedding.probe import embed_document_probe
 from memtomem.errors import NamespaceResolutionError
-from memtomem.search.visibility import resolve_visible_chunk
+from memtomem.search.visibility import chunk_withheld, resolve_visible_chunk
 from memtomem.storage.sqlite_visibility import source_hidden
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
@@ -401,7 +401,11 @@ async def edit_chunk(
     # succeeded, so this only decides whether the response echoes the fresh
     # row or the pre-edit one; a chunk re-scoped out from under us during the
     # write falls back rather than returning a row the caller may not read.
+    # The fallback carries pre-edit content, so a redaction hold committed
+    # since the lock was released answers 404 instead (#2777).
     updated = await resolve_visible_chunk(storage, chunk_id, project_context_root=_boundary(config))
+    if updated is None and await chunk_withheld(storage, chunk.metadata):
+        raise HTTPException(status_code=404, detail="Chunk not found")
     return chunk_to_out(updated if updated is not None else chunk)
 
 

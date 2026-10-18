@@ -195,6 +195,7 @@ def app(_isolated_config_paths: Path):
     storage = AsyncMock()
     storage.get_stats = AsyncMock(return_value={"total_chunks": 42, "total_sources": 3})
     storage.get_chunk_size_distribution = AsyncMock(return_value=[])
+    storage.is_source_withheld = AsyncMock(return_value=False)
     storage.get_chunk = AsyncMock(return_value=_make_test_chunk())
     storage.recall_chunks = AsyncMock(return_value=[_make_test_chunk()])
     storage.get_all_source_files = AsyncMock(return_value=[Path("/tmp/test.md")])
@@ -2435,6 +2436,7 @@ class TestSimilarChunks:
     def _wire(self, app, *, stored: dict, chunk: Chunk | None = None, mismatch=None):
         storage = app.state.storage
         source = chunk or _make_test_chunk()
+        storage.is_source_withheld = AsyncMock(return_value=False)
         storage.get_chunk = AsyncMock(return_value=source)
         storage.get_embeddings_for_chunks = AsyncMock(return_value=stored)
         neighbour = _make_test_chunk(chunk_id=uuid.uuid4(), content="neighbour")
@@ -2520,6 +2522,7 @@ class TestSimilarChunks:
 
     async def test_unknown_chunk_is_404_before_any_vector_lookup(self, app, client):
         self._wire(app, stored={str(CHUNK_ID): self.STORED})
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(return_value=None)
 
         resp = await client.get(f"/api/chunks/{CHUNK_ID}/similar")
@@ -2628,6 +2631,7 @@ class TestEditChunkNamespaceLookupFailure:
 class TestDeleteChunk:
     async def test_delete_chunk(self, app, client: AsyncClient, tmp_path: Path):
         chunk = _make_test_chunk(source=str(tmp_path / "missing.md"))
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, chunk, None])
 
         resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
@@ -2659,6 +2663,7 @@ class TestDeleteChunk:
         )
         # Route lookup, unlocked + fresh lookups in ``locked_source_chunk``,
         # then the post-condition probe after the forced re-index.
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, None])
         return source, chunk
 
@@ -2761,6 +2766,7 @@ class TestDeleteChunk:
             chunk,
             metadata=dataclasses.replace(chunk.metadata, start_line=start_line, end_line=end_line),
         )
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk])
         before = source.read_text(encoding="utf-8")
 
@@ -2774,6 +2780,7 @@ class TestDeleteChunk:
         self, app, client: AsyncClient, tmp_path: Path, monkeypatch
     ):
         source, chunk = self._real_source_chunk(app, tmp_path)
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk])
         before = source.read_text(encoding="utf-8")
         real_stat = Path.stat
@@ -2817,6 +2824,7 @@ class TestDeleteChunk:
         reindex_outcome: str,
     ):
         source, chunk = self._real_source_chunk(app, tmp_path)
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, chunk, None])
         if reindex_outcome == "raises":
             app.state.index_engine.index_file = AsyncMock(side_effect=RuntimeError("boom"))
@@ -2835,6 +2843,7 @@ class TestDeleteChunk:
         self, app, client: AsyncClient, tmp_path: Path
     ):
         source, chunk = self._real_source_chunk(app, tmp_path)
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, chunk])
         app.state.index_engine.index_file = AsyncMock(side_effect=RuntimeError("reindex failed"))
         app.state.storage.delete_chunks = AsyncMock(side_effect=RuntimeError("delete failed"))
@@ -2932,6 +2941,7 @@ class TestDeleteChunk:
         )
         from memtomem.web.routes import chunks as chunks_route
 
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, None])
         monkeypatch.setattr(chunks_route, "_boundary", lambda _config: proj)
 
@@ -3256,6 +3266,7 @@ class TestEditChunkProjectSharedGateB:
             calls["n"] += 1
             return probe if calls["n"] < self.FRESH_FETCH else fresh
 
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(side_effect=_get_chunk)
         from memtomem.web.routes import chunks as chunks_route
 
@@ -7534,6 +7545,7 @@ class TestChunkCrudCrossProcessLock:
         src = tmp_path / "note.md"
         src.write_text("## H\n\nbody\n", encoding="utf-8")
         chunk = self._chunk_on(src)
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(return_value=chunk)
         monkeypatch.setattr("memtomem.context._atomic._CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
 
@@ -7557,6 +7569,7 @@ class TestChunkCrudCrossProcessLock:
         cid = uuid.uuid4()
         # Pre-check + unlocked fetch see the real (non-symlink) path; the
         # under-lock re-fetch sees the symlink (resolves to the same target).
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(
             side_effect=[
                 self._chunk_on(real, cid),
@@ -7580,6 +7593,7 @@ class TestChunkCrudCrossProcessLock:
         # Three fetches: the route's symlink/404 pre-check and locked_source_chunk's
         # unlocked fetch both see a.md; the re-fetch under the lock sees b.md
         # (a concurrent migrate moved it) → the route reports 409 retry.
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(
             side_effect=[
                 self._chunk_on(srca, cid),
@@ -7597,6 +7611,7 @@ class TestChunkCrudCrossProcessLock:
         original = "## H\n\nold body\n"
         src.write_text(original, encoding="utf-8")
         chunk = self._chunk_on(src)
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(return_value=chunk)
         # Forward reindex raises; the rollback reindex (2nd call) succeeds.
         app.state.index_engine.index_file = AsyncMock(
@@ -7642,6 +7657,7 @@ class TestChunkCrudCrossProcessLock:
         # before/after pair around ``delete_chunks``. Same accounting as
         # ``TestDeleteChunk::test_delete_chunk``; a short list would make the
         # row read as already absent and skip the delete under test.
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, chunk, None])
 
         resp = await client.delete(f"/api/chunks/{chunk.id}")
@@ -7670,6 +7686,7 @@ class TestChunkCrudCrossProcessLock:
         """
         src = tmp_path / "gone" / "note.md"
         chunk = self._chunk_on(src)
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(return_value=chunk)
 
         resp = await client.patch(f"/api/chunks/{chunk.id}", json={"new_content": "updated"})
@@ -7691,6 +7708,7 @@ class TestChunkCrudCrossProcessLock:
         src.parent.mkdir()
         src.write_text("## H\n\nbody\n", encoding="utf-8")
         chunk = self._chunk_on(src)
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(return_value=chunk)
 
         resp = await client.patch(f"/api/chunks/{chunk.id}", json={"new_content": "updated"})
@@ -7727,6 +7745,7 @@ class TestChunkCrudCrossProcessLock:
                 src.write_text("## H\n\nrecreated by another writer\n", encoding="utf-8")
             return answers.pop(0)
 
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(side_effect=get_chunk)
 
         resp = await client.delete(f"/api/chunks/{chunk.id}")
@@ -7745,6 +7764,7 @@ class TestChunkCrudCrossProcessLock:
         src = tmp_path / "note.md"
         src.write_text("## H\n\nbody\n", encoding="utf-8")
         chunk = self._chunk_on(src)
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(return_value=chunk)
         monkeypatch.setattr("memtomem.context._atomic._CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
 
@@ -7800,6 +7820,7 @@ class TestChunkCrudCrossProcessLock:
         src = tmp_path / "note.md"
         src.write_text("## H\n\nold body\n", encoding="utf-8")
         chunk = self._chunk_on(src)
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(return_value=chunk)
         self._sabotage_after_pre_image(monkeypatch, lambda path: path.unlink())
         from memtomem.web.routes._errors import SOURCE_REMOVED_DURING_WRITE_DETAIL
@@ -7817,6 +7838,7 @@ class TestChunkCrudCrossProcessLock:
         src = tmp_path / "note.md"
         src.write_text("## H\n\nold body\n", encoding="utf-8")
         chunk = self._chunk_on(src)
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(return_value=chunk)
         stranger = {}
         self._sabotage_after_pre_image(
@@ -7845,6 +7867,7 @@ class TestChunkCrudCrossProcessLock:
                 return None
             return chunk
 
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(side_effect=get_chunk)
 
     async def test_delete_chunk_finishes_index_only_when_the_source_is_removed_mid_span(
@@ -8188,6 +8211,7 @@ class TestIndexRoutesInvalidateSearchCache:
         source = tmp_path / "edit.md"
         source.write_text("# Heading\n\nBody one.\nBody two.\nBody three.\n", encoding="utf-8")
         chunk = _make_test_chunk(source=str(source))
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(return_value=chunk)
         app.state.index_engine.index_file = AsyncMock(
             side_effect=NamespaceResolutionError("store down")
@@ -8201,6 +8225,7 @@ class TestIndexRoutesInvalidateSearchCache:
 
     async def test_delete_chunk_invalidates(self, app, client: AsyncClient, tmp_path: Path):
         chunk = _make_test_chunk(source=str(tmp_path / "missing.md"))
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(side_effect=[chunk, chunk, chunk, chunk, None])
         app.state.search_pipeline.invalidate_cache.reset_mock()
 
@@ -8219,6 +8244,7 @@ class TestIndexRoutesInvalidateSearchCache:
         # The row is still present on the read before the delete, so the
         # route deletes it; the *post-delete* verification read is what blows
         # up — rows gone, caller gets a 500.
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(
             side_effect=[chunk, chunk, chunk, chunk, RuntimeError("store blip")]
         )
@@ -8244,6 +8270,7 @@ class TestIndexRoutesInvalidateSearchCache:
         chunk = dataclasses.replace(
             chunk, metadata=dataclasses.replace(chunk.metadata, start_line=0)
         )
+        app.state.storage.is_source_withheld = AsyncMock(return_value=False)
         app.state.storage.get_chunk = AsyncMock(return_value=chunk)
         app.state.search_pipeline.invalidate_cache.reset_mock()
 

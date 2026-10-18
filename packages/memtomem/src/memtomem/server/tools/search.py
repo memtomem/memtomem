@@ -15,7 +15,11 @@ from memtomem.models import (
     NamespaceFilter,
     ScopeFilter,
 )
-from memtomem.search.visibility import chunk_in_scope_boundary, neighbor_visible
+from memtomem.search.visibility import (
+    chunk_in_scope_boundary,
+    chunk_withheld,
+    neighbor_visible,
+)
 
 # Shared by the MCP tools, the CLI, the web routes, and the in-process
 # LangGraph adapter; re-exported from this module so the long-standing
@@ -356,9 +360,10 @@ async def mem_expand(
     Use mem_search(namespace=..., context_window=N) to read around one.
 
     The addressed chunk must itself be inside the caller's project boundary
-    (ADR-0011); an id from another project reads as not-found. A hidden or
-    expired anchor still expands — those axes are search-relevance defaults,
-    not boundaries (ADR-0036).
+    (ADR-0011); an id from another project reads as not-found, and so does a
+    chunk under a redaction hold. A hidden or expired anchor, or one whose
+    source is only missing or unavailable, still expands — those are
+    search-relevance defaults, not boundaries (ADR-0036).
 
     Args:
         chunk_id: The UUID of the chunk to expand (from mem_search results)
@@ -446,7 +451,8 @@ async def mem_increment_access(
     Idempotency / per-event capping is the caller's responsibility.
 
     Ids outside the caller's project boundary are dropped (ADR-0036) —
-    boosting a foreign chunk's ranking is a write to it. The reported count
+    boosting a foreign chunk's ranking is a write to it — and so are ids
+    under a redaction hold (#2777). The reported count
     is of ids accepted for submission, not rows changed, so a caller cannot
     read the difference as "that id exists elsewhere".
 
@@ -478,6 +484,7 @@ async def mem_increment_access(
         for cid in valid
         if (row := rows.get(cid)) is not None
         and chunk_in_scope_boundary(row.metadata, project_context_root)
+        and not await chunk_withheld(app.storage, row.metadata)
     ]
     if in_boundary_ids:
         await app.storage.increment_access(in_boundary_ids)

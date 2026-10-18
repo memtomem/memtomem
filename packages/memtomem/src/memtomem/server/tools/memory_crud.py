@@ -18,7 +18,7 @@ from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _announce_dim_mismatch_once, _check_embedding_mismatch
 from memtomem.server.tool_registry import register
-from memtomem.server.tools._id_access import caller_boundary, in_boundary
+from memtomem.server.tools._id_access import caller_boundary, readable
 from memtomem.server.tools._provenance import (
     capture_session_and_namespace,
     capture_session_for_untracked_write,
@@ -280,7 +280,9 @@ async def _locked_chunk(
     can re-scope a chunk into another project while we wait for L2, and the
     write would land on the fresh chunk the screen never saw. Out-of-boundary
     reports the same "not found" as a missing id — a caller must not be able
-    to tell the two apart.
+    to tell the two apart. A redaction hold (#2777) is screened at the same
+    two fetches with the same answer: a write would re-index a file the guard
+    refused, and a hold that commits while we wait is judged on the fresh row.
     """
     from memtomem.context._atomic import (
         _CRUD_SIDECAR_LOCK_BUDGET_S,
@@ -289,7 +291,7 @@ async def _locked_chunk(
 
     boundary = caller_boundary(app)
     chunk = await app.storage.get_chunk(uid)
-    if chunk is None or not in_boundary(chunk, boundary):
+    if chunk is None or not await readable(app, chunk, boundary):
         yield None, f"Error: chunk {chunk_id} not found.", False
         return
     source_file = chunk.metadata.source_file
@@ -315,7 +317,7 @@ async def _locked_chunk(
                     source_file, timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
                 ) as cross_process_held:
                     fresh = await app.storage.get_chunk(uid)
-                    if fresh is None or not in_boundary(fresh, boundary):
+                    if fresh is None or not await readable(app, fresh, boundary):
                         yield None, f"Error: chunk {chunk_id} not found.", cross_process_held
                         return
                     if AppContext.memory_file_lock_key(fresh.metadata.source_file) == key:

@@ -88,6 +88,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A chunk held because the redaction guard refused its file can no longer
+  be read or changed by its id (#2777).** Search hid those chunks, but
+  `mem_read`, `mem_expand`, `mem_related`, the `memtomem://chunks/{id}`
+  resource and the other tools that take a chunk id still returned them,
+  including text the same edit had deleted from the file. They now answer for
+  such a chunk exactly as for an id that does not exist. The same applies to
+  writes: `mem_edit`, `mem_delete`, `mem_link`, `mem_unlink`, and the web
+  edit, delete and tag routes refuse it. A delete used to go through when the chunk's
+  own lines were unchanged, re-index the file past the guard and release the
+  hold. `mem_reflect` no longer lists or counts such chunks among the most
+  connected, and access boosts skip them. A policy summary derived from such
+  a file is withheld with it. Chunks of a missing or unavailable source are
+  unaffected and stay readable by id until they are purged. A clean re-index
+  of the fixed file lifts the hold and restores access.
 - **A file the redaction guard refuses on re-index no longer keeps serving
   its older chunks (#2629).** When an edit added secret-shaped text to a file
   that was already indexed, the guard refused the new content but the chunks
@@ -99,7 +113,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   or left the configured roots, does not. If the hold itself cannot be
   written, the run reports a separate retryable error, and the watcher
   retries the file. A file refused on its first index has nothing to hold.
-  Reading a held chunk by its id is still possible (#2777).
 - **`mm index <file>` clears the `stale_index` that `mm memory doctor`
   reports after a parser is installed, removed or upgraded (#2774).** The
   code and JavaScript chunkers fall back to coarser chunks when

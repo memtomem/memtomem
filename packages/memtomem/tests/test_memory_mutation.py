@@ -46,6 +46,7 @@ def _stats() -> IndexingStats:
 @pytest.mark.asyncio
 async def test_locked_source_chunk_not_found():
     storage = AsyncMock()
+    storage.is_source_withheld = AsyncMock(return_value=False)
     storage.get_chunk = AsyncMock(return_value=None)
     async with locked_source_chunk(
         storage, uuid4(), project_context_root=None, index_guard=None
@@ -67,6 +68,7 @@ async def test_locked_source_chunk_times_out(tmp_path, monkeypatch):
     src.write_text("## H\n\nbody\n", encoding="utf-8")
     chunk = Chunk(content="body", metadata=ChunkMetadata(source_file=src, start_line=1, end_line=3))
     storage = AsyncMock()
+    storage.is_source_withheld = AsyncMock(return_value=False)
     storage.get_chunk = AsyncMock(return_value=chunk)
     monkeypatch.setattr(_atomic, "_CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
 
@@ -93,6 +95,7 @@ async def test_locked_source_chunk_propagates_body_timeout(tmp_path):
     src.write_text("body\n", encoding="utf-8")
     chunk = Chunk(content="body", metadata=ChunkMetadata(source_file=src, start_line=1, end_line=1))
     storage = AsyncMock()
+    storage.is_source_withheld = AsyncMock(return_value=False)
     storage.get_chunk = AsyncMock(return_value=chunk)
 
     with pytest.raises(TimeoutError, match="from body"):
@@ -123,6 +126,7 @@ async def test_locked_source_chunk_does_not_resurrect_a_removed_parent(tmp_path)
     src = tmp_path / "gone" / "orphan.md"
     chunk = Chunk(content="body", metadata=ChunkMetadata(source_file=src, start_line=1, end_line=3))
     storage = AsyncMock()
+    storage.is_source_withheld = AsyncMock(return_value=False)
     storage.get_chunk = AsyncMock(return_value=chunk)
 
     async with locked_source_chunk(
@@ -156,6 +160,7 @@ async def test_locked_source_chunk_serializes_a_degraded_span(tmp_path, monkeypa
     src = tmp_path / "gone" / "orphan.md"
     chunk = Chunk(content="body", metadata=ChunkMetadata(source_file=src, start_line=1, end_line=3))
     storage = AsyncMock()
+    storage.is_source_withheld = AsyncMock(return_value=False)
     storage.get_chunk = AsyncMock(return_value=chunk)
     monkeypatch.setattr(_atomic, "_CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
 
@@ -190,6 +195,7 @@ async def test_locked_source_chunk_reports_that_it_holds_no_cross_process_lock(t
         content="body", metadata=ChunkMetadata(source_file=gone, start_line=1, end_line=3)
     )
     storage = AsyncMock()
+    storage.is_source_withheld = AsyncMock(return_value=False)
     storage.get_chunk = AsyncMock(return_value=chunk)
 
     async with locked_source_chunk(
@@ -209,6 +215,7 @@ async def test_locked_source_chunk_reports_that_it_holds_no_cross_process_lock(t
     chunk = Chunk(
         content="body", metadata=ChunkMetadata(source_file=live, start_line=1, end_line=3)
     )
+    storage.is_source_withheld = AsyncMock(return_value=False)
     storage.get_chunk = AsyncMock(return_value=chunk)
 
     async with locked_source_chunk(
@@ -233,6 +240,7 @@ async def test_locked_source_chunk_reports_no_lock_on_every_refusal(tmp_path, mo
     from memtomem.models import Chunk, ChunkMetadata
 
     storage = AsyncMock()
+    storage.is_source_withheld = AsyncMock(return_value=False)
     storage.get_chunk = AsyncMock(return_value=None)
     async with locked_source_chunk(
         storage, uuid4(), project_context_root=None, index_guard=None
@@ -247,6 +255,7 @@ async def test_locked_source_chunk_reports_no_lock_on_every_refusal(tmp_path, mo
     src = tmp_path / "n.md"
     src.write_text("## H\n\nbody\n", encoding="utf-8")
     chunk = Chunk(content="body", metadata=ChunkMetadata(source_file=src, start_line=1, end_line=3))
+    storage.is_source_withheld = AsyncMock(return_value=False)
     storage.get_chunk = AsyncMock(return_value=chunk)
     monkeypatch.setattr(_atomic, "_CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
 
