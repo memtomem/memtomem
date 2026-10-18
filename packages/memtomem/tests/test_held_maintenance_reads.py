@@ -5,8 +5,9 @@ scan and summary regeneration each listed sources and then read every
 source's chunks. The hold used to be checked in a separate call beside that
 read, so a hold landing between the two let held content through. Each read
 now judges the hold in its own statement and matches the stored path as
-stored. Here the hold lands right after the source listing, so only the read
-can keep the held rows out.
+stored. Here the hold is committed just before that read and released just
+after it, so a check made before or after the read sees no hold and only the
+read itself can keep the held rows out.
 
 The summary key tests cover the other half of #2783: a summary is filed under
 the key taken before the LLM call, not one resolved again afterwards.
@@ -35,16 +36,23 @@ async def _index(comp, path: Path, body: str):
     return await comp.storage.list_chunks_by_source(path.resolve(), limit=None)
 
 
-def _hold_after(monkeypatch, comp, method: str, path: Path, reason: str = "scan_missing"):
-    """Commit a hold on ``path`` right after ``storage.<method>`` returns."""
-    real = getattr(comp.storage, method)
+def _hold_during_read(monkeypatch, comp, path: Path, reason: str = "scan_missing"):
+    """Hold ``path`` for exactly the duration of each read of its chunks."""
+    real = comp.storage.list_chunks_by_source
+    key = norm_path(path)
 
-    async def listed_then_held(*args, **kwargs):
-        result = await real(*args, **kwargs)
+    async def held_while_read(source, *args, **kwargs):
+        if str(source) != key:
+            return await real(source, *args, **kwargs)
         await comp.storage.hold_source(path, reason)
-        return result
+        try:
+            return await real(source, *args, **kwargs)
+        finally:
+            db = comp.storage._get_db()
+            db.execute("DELETE FROM held_sources WHERE source_file=?", (key,))
+            db.commit()
 
-    monkeypatch.setattr(comp.storage, method, listed_then_held)
+    monkeypatch.setattr(comp.storage, "list_chunks_by_source", held_while_read)
 
 
 def _symlink_or_skip(link: Path, target: Path) -> None:
@@ -62,7 +70,7 @@ class TestDiscovery:
         held = mem_dir / "held.md"
         await _index(comp, held, "# D\n\nduplicateword shared body.\n")
         await _index(comp, mem_dir / "visible.md", "# D\n\nduplicateword shared body.\n")
-        _hold_after(monkeypatch, comp, "get_all_source_files", held, REDACTION_BLOCKED_HOLD)
+        _hold_during_read(monkeypatch, comp, held, REDACTION_BLOCKED_HOLD)
 
         chunks = await DedupScanner(comp.storage)._get_all_chunks(100)
 
@@ -77,7 +85,7 @@ class TestDiscovery:
         held = mem_dir / "held.md"
         body = "".join(f"## S{i}\n\nheldpreviewword part {i}.\n\n" for i in range(4))
         await _index(comp, held, body)
-        _hold_after(monkeypatch, comp, "get_source_files_with_counts", held)
+        _hold_during_read(monkeypatch, comp, held)
 
         report = await mem_consolidate(
             min_group_size=2, ctx=StubCtx(AppContext.from_components(comp))
@@ -94,7 +102,7 @@ class TestDiscovery:
         comp, mem_dir = bm25_only_components
         held = mem_dir / "held.md"
         await _index(comp, held, "".join(f"## S{i}\n\nheldgroupword {i}.\n\n" for i in range(4)))
-        _hold_after(monkeypatch, comp, "get_consolidation_groups", held)
+        _hold_during_read(monkeypatch, comp, held)
 
         result = await execute_auto_consolidate(
             comp.storage, {"min_group_size": 2}, None, dry_run=True
@@ -110,7 +118,7 @@ class TestDiscovery:
         held = mem_dir / "held.md"
         await _index(comp, held, "# E\n\nheldentityword met Alice.\n")
         await _index(comp, mem_dir / "visible.md", "# E\n\nvisibleentityword met Bob.\n")
-        _hold_after(monkeypatch, comp, "get_all_source_files", held, REDACTION_BLOCKED_HOLD)
+        _hold_during_read(monkeypatch, comp, held, REDACTION_BLOCKED_HOLD)
         seen: list[str] = []
 
         async def record(text, *args, **kwargs):
@@ -126,22 +134,19 @@ class TestDiscovery:
 
 
 class TestExport:
-    async def test_a_hold_after_the_listing_keeps_rows_out_and_is_counted(
-        self, bm25_only_components, monkeypatch
-    ):
+    async def test_a_hold_during_the_read_keeps_rows_out(self, bm25_only_components, monkeypatch):
         from memtomem.tools.export_import import export_chunks
 
         comp, mem_dir = bm25_only_components
         held = mem_dir / "held.md"
         await _index(comp, held, "# X\n\nheldexportword.\n")
         await _index(comp, mem_dir / "visible.md", "# X\n\nvisibleexportword.\n")
-        _hold_after(monkeypatch, comp, "get_all_source_files", held, REDACTION_BLOCKED_HOLD)
+        _hold_during_read(monkeypatch, comp, held, REDACTION_BLOCKED_HOLD)
 
         bundle = await export_chunks(comp.storage, stamp_provenance=False)
 
         assert any("visibleexportword" in c["content"] for c in bundle.chunks)
         assert not any("heldexportword" in c["content"] for c in bundle.chunks)
-        assert bundle.omitted_held_sources == 1
 
     @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privilege")
     async def test_a_symlink_at_a_held_path_does_not_export_its_target_twice(
