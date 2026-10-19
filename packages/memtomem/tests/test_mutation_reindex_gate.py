@@ -335,12 +335,12 @@ class TestValveBinding:
                 target, ingress_guarded=True, force_unsafe=True, valve_text=guarded
             )
 
-        target.write_text(guarded.replace("\n", "\r\n") + f"aws {_KEY}\r\n", encoding="utf-8")
+        # Bytes, not write_text: text mode on Windows would turn each "\r\n"
+        # into "\r\r\n", which reads back as two newlines.
+        crlf = guarded.replace("\n", "\r\n") + f"aws {_KEY}\r\n"
+        target.write_bytes(crlf.encode("utf-8"))
         stats = await comp.index_engine.index_file(
-            target,
-            ingress_guarded=True,
-            force_unsafe=True,
-            valve_text=guarded.replace("\n", "\r\n") + f"aws {_KEY}\r\n",
+            target, ingress_guarded=True, force_unsafe=True, valve_text=crlf
         )
         assert stats.indexed_chunks > 0
 
@@ -558,3 +558,35 @@ class TestScratchPromotionIsNotRepeatable:
         assert "already promoted" in retried
         on_disk = sum(p.read_text().count("scratch-body-marker") for p in mem_dir.glob("*.md"))
         assert on_disk == 1
+
+    @pytest.mark.asyncio
+    async def test_mcp_marks_only_the_value_it_wrote(self, bm25_only_components, monkeypatch):
+        import memtomem.server.tools.memory_crud as memory_crud
+        from memtomem.server.tools.scratch import mem_scratch_promote
+
+        comp, mem_dir = bm25_only_components
+        ctx = StubCtx(AppContext.from_components(comp))
+        await comp.storage.scratch_set("note", "original-value-marker")
+        real_core = memory_crud._mem_add_core
+
+        async def add_then_replace(*args, **kwargs):
+            result = await real_core(*args, **kwargs)
+            await comp.storage.scratch_set("note", "replacement-value-marker")
+            return result
+
+        monkeypatch.setattr(memory_crud, "_mem_add_core", add_then_replace)
+        await mem_scratch_promote(key="note", ctx=ctx)  # type: ignore[arg-type]
+
+        entry = await comp.storage.scratch_get("note")
+        assert entry["value"] == "replacement-value-marker"
+        assert entry["promoted"] is False, "the replacement was never written"
+
+    @pytest.mark.asyncio
+    async def test_storage_marks_only_the_expected_value(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        await comp.storage.scratch_set("note", "new")
+
+        assert not await comp.storage.scratch_promote("note", expected_value="old")
+        assert (await comp.storage.scratch_get("note"))["promoted"] is False
+        assert await comp.storage.scratch_promote("note", expected_value="new")
+        assert (await comp.storage.scratch_get("note"))["promoted"] is True

@@ -95,10 +95,22 @@ class ScratchMixin:
             self._commit_if_standalone(db)
         return total
 
-    async def scratch_promote(self, key: str) -> bool:
-        """Mark a working memory entry as promoted."""
+    async def scratch_promote(self, key: str, *, expected_value: str | None = None) -> bool:
+        """Mark a working memory entry as promoted.
+
+        ``expected_value`` marks it only while the entry still holds that value,
+        in the same statement: a promotion that wrote one value must not mark a
+        value that replaced it meanwhile (``scratch_set`` replaces the row and
+        clears ``promoted``), or the replacement could never be promoted.
+        """
         db = self._get_db()
         with self._rolls_back_if_standalone(db):
-            cursor = db.execute("UPDATE working_memory SET promoted = 1 WHERE key = ?", (key,))
+            if expected_value is None:
+                cursor = db.execute("UPDATE working_memory SET promoted = 1 WHERE key = ?", (key,))
+            else:
+                cursor = db.execute(
+                    "UPDATE working_memory SET promoted = 1 WHERE key = ? AND value = ?",
+                    (key, expected_value),
+                )
             self._commit_if_standalone(db)
         return cursor.rowcount > 0

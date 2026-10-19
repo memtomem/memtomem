@@ -132,3 +132,27 @@ async def test_a_refused_promotion_cannot_be_promoted_again(bm25_only_components
     assert "already promoted" in retried.json()["detail"]
     on_disk = sum(p.read_text().count("scratch-body-marker") for p in mem_dir.glob("*.md"))
     assert on_disk == 1
+
+
+async def test_a_value_replaced_while_waiting_is_not_promoted(bm25_only_components, monkeypatch):
+    """The value the request guarded is gone: write nothing, leave the new one promotable."""
+    comp, mem_dir = bm25_only_components
+    await comp.storage.scratch_set("note", "original-value-marker")
+    real_lookup = comp.index_engine.effective_namespace_for
+
+    async def lookup_then_replace(*args, **kwargs):
+        # Runs under the target file's lock, before the route re-reads the entry.
+        await comp.storage.scratch_set("note", "replacement-value-marker")
+        return await real_lookup(*args, **kwargs)
+
+    monkeypatch.setattr(comp.index_engine, "effective_namespace_for", lookup_then_replace)
+    async with _web_client(comp) as client:
+        resp = await client.post("/api/scratch/note/promote", json={})
+
+    assert resp.status_code == 409, resp.text
+    assert "changed while it was being promoted" in resp.json()["detail"]
+    on_disk = "".join(p.read_text() for p in mem_dir.glob("*.md"))
+    assert "original-value-marker" not in on_disk
+    entry = await comp.storage.scratch_get("note")
+    assert entry["value"] == "replacement-value-marker"
+    assert entry["promoted"] is False

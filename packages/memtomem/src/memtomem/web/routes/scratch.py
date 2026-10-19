@@ -173,6 +173,14 @@ async def promote_scratch(
                     status_code=409,
                     detail=f"Key '{key}' was already promoted to long-term memory.",
                 )
+            if current.get("value") != entry["value"]:
+                # Replaced while this request waited for the lock: the value it
+                # guarded is no longer the entry's, so promote nothing.
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Key '{key}' changed while it was being promoted; nothing "
+                    "was written. Promote it again.",
+                )
             # The re-index after the append judges the whole file; refuse a file
             # whose content may not be indexed before anything is written. The
             # entry stays in scratch, unpromoted.
@@ -207,7 +215,7 @@ async def promote_scratch(
                 # second promote cannot append it again, then refuse with a 409
                 # the SPA will not answer by resending with force_unsafe.
                 search_pipeline.invalidate_cache()
-                await storage.scratch_promote(key)
+                await storage.scratch_promote(key, expected_value=entry["value"])
                 exc.mutation_outcome = "appended"
                 raise privacy_index_blocked_http(exc, "promote") from exc
             # #2141: a warmed query must not answer as if the entry was never added.
@@ -218,8 +226,8 @@ async def promote_scratch(
             status_code=503, detail="Memory file is locked by another writer; try again."
         ) from exc
 
-    # Mark as promoted
-    await storage.scratch_promote(key)
+    # Mark as promoted — only the value that was written.
+    await storage.scratch_promote(key, expected_value=entry["value"])
 
     return ScratchPromoteResponse(
         key=key,

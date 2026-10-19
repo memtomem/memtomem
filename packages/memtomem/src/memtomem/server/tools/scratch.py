@@ -143,12 +143,14 @@ async def mem_scratch_promote(
         if exc.mutation_outcome != "appended":
             raise
         # In the file, unindexed: marked promoted so a retry cannot append it twice.
-        await app.storage.scratch_promote(key)
+        await app.storage.scratch_promote(key, expected_value=entry["value"])
         return exc.mutation_detail("mem_scratch_promote", outcome="appended")
     if stats is None:
         return result
 
     # Mark as promoted
-    await app.storage.scratch_promote(key)
+    # Only the value that was written: an entry replaced meanwhile keeps its own
+    # promotable state (``scratch_set`` cleared it).
+    await app.storage.scratch_promote(key, expected_value=entry["value"])
 
     return f"Promoted '{key}' to long-term memory.\n{result}"
