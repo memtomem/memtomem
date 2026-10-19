@@ -7,14 +7,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
-- **The handoff skill accepts `s` and `r` for `save` and `resume`.** The
+- **The handoff skill accepts `s` and `r` for `save` and `resume` (#2776).** The
   alias counts only as the first word of the arguments
   (`/memtomem:handoff s to codex-cli`, `/memtomem:handoff r <ID>`); a lone `s`
   or `r` elsewhere in the request is not read as an operation, so free-form
   requests are interpreted as before. The Claude Code `argument-hint` lists
   both forms.
+- **`mm search` and `mm recall` take `--json`, and a few commands answer to a
+  second group (#2726).** `--json` is shorthand for `--format json`.
+  `mm mem doctor` runs `mm memory doctor`, and `mm memory init`, `rescan` and
+  `rescan-files` run the `mm mem` commands of the same name.
+  `mem_do(action="help", params={"action": "<name>"})` describes one action.
 
 ### Changed
+
+- **`mm search --format json` and `mm recall --format json` carry the whole
+  chunk in `content` (#2726).** `content` used to hold the first 200
+  characters; that cut is now in `content_preview`. A script that relied on
+  the short `content` reads `content_preview` instead.
+- **Tool errors show a vetted message where one exists (#2726).** When an MCP
+  tool fails with an error that carries text meant for the caller, the
+  `Error:` line shows that text instead of the raw exception message. Compact
+  `mem_recall` output now ends content cut at 400 characters with `...`.
 
 - **`mem_list` returns one page of files instead of the whole store (#2745).**
   Every call used to aggregate every indexed source and filter the result
@@ -23,9 +37,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   hidden-source, `source_filter` and namespace rules now run in the query, ahead
   of a page limit: `limit` (1–500, default 50) sets the page size, and a page
   that is not the whole listing is labelled with its own counts and ends with a
-  `More: mem_list(cursor=…)` line that repeats the filters. The rules
-  themselves are unchanged, comma-joined namespace values included. A store
-  with no more than `limit` visible files gets the same output as before. Pages
+  `More: mem_list(cursor=…)` line that repeats the filters. Which files are
+  visible changed earlier in this release (#2726): `mem_list` now drops held
+  and pending sources and, without `namespace=`, sources whose chunks are all
+  in system namespaces. Paging keeps those rules, comma-joined namespace values
+  included, so a store with no more than `limit` visible files gets the same
+  list as an unpaged call. Pages
   follow stored-path order: a traversal never repeats a file, but misses one
   added before its cursor. The `memtomem://sources` resource is paged the same
   way (#2753, below).
@@ -88,6 +105,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A dedup merge can no longer delete the chunk it keeps (#2787).**
+  `mem_dedup_merge` and the web merge route deleted every id in `delete_ids`,
+  so listing the kept chunk there deleted it as well, and the dry-run count
+  counted a repeated id twice. `delete_ids` is now deduplicated, and a kept id
+  inside it is refused before anything is read: the web route returns 400 and
+  the MCP tool an `Error:` message. A merge whose delete would also remove the
+  kept chunk through the emptied-source cleanup (a consolidation-policy summary
+  whose parent source loses its last chunk) is rolled back as a whole. The dry
+  run cannot foresee that case, so its count does not promise that the merge
+  succeeds.
+- **Dedup merge and `mem_consolidate_apply` check a source's hold in the
+  transaction that writes (#2786).** Both checked whether a source was held
+  and then wrote in a separate call, so a hold committed in between was
+  missed: the merge deleted a retained or redaction-held chunk, and the apply
+  wrote `consolidated_into` links and decayed scores onto held originals. The
+  merge now reads, checks, merges the tags and deletes in one write
+  transaction, which also stops a concurrent tag edit on the kept chunk from
+  being overwritten. The apply still publishes the summary first, then
+  re-checks the hold and writes the links and the decay in one transaction. If
+  the source has become held, both are rolled back, the run is recorded with
+  `warning: source_unavailable`, and the pending groups are dropped so a retry
+  does not publish a second summary. A storage error on one link used to be
+  logged and skipped; it now fails the apply after the summary was published.
+  The consolidation policy's own in-transaction check could read an older
+  snapshot and miss a hold; it now reads under the write lock too.
 - **Dedup, consolidation, export, the entity scan and summary regeneration
   no longer read a held source's chunks (#2783).** Each of them listed the
   store's sources and then read each source's chunks, with the hold checked
@@ -236,6 +278,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   triggers a shared refresh and an explicit retry message across JSON, streaming,
   upload, Context Gateway, wiki and settings requests. Writes are never replayed
   automatically; Host/Origin and privacy/consent refusals retain their handling.
+  The minimum `mcp` version rises from 2.0.0 to 2.2.0.
 
 - **Files under `.aws/` and `.gnupg/` are no longer indexed (#2734).** The two
   secret-store directories were excluded only by the recursive directory walk,
@@ -330,8 +373,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the upgrade keeps its old ranges until it is next indexed. The index
   receipt records the release, so the first `mm index` after upgrading
   re-chunks every file, edited or not, and updates the ranges without
-  re-embedding; `mm index --force` is not needed for this and re-embeds every
-  chunk.
+  re-embedding the chunks whose text and context are unchanged; chunks that
+  other fixes in this release change or add (wikilinks, symbol names,
+  TypeScript declarations, below) are embedded then. `mm index --force` is not
+  needed for this and re-embeds every chunk.
 - **A Markdown wikilink that crosses a line break no longer shifts later line
   numbers (#2696).** Chunking resolves `[[target|alias]]` to `alias`, and the
   pattern let the target span a newline, so `[[tar\nget|alias]]` removed a
@@ -340,6 +385,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   crosses a line break stays in the chunk as written. Files without such a
   link chunk to the same text as before. In a file with one, the chunk holding
   it now keeps the raw link and is re-embedded when the file is next indexed.
+- **Line numbers count only `\n` as a line break (#2699).** The chunkers split
+  text with `str.splitlines()`, which also breaks at U+2028, U+2029, U+0085,
+  form feed, vertical tab, `\x1c`–`\x1e` and a lone `\r`, while editors and the
+  web source view count `\n` only. In a file holding one of those characters,
+  every later chunk was placed one line low per character, the character was
+  rewritten to `\n` in the chunk text, Python and JavaScript bodies were sliced
+  from the wrong lines, and a `# H` after U+2028 was read as a Markdown heading.
+  LF and CRLF files keep their line numbers, content and hashes.
+- **reStructuredText fragments split at the exact token cap start on the lines
+  they hold (#2695).** The RST chunker drops a heading's underline (and
+  overline) from the section body but did not record where the body's lines
+  came from, so every fragment after the first was placed one line early per
+  dropped line. An overlined title on the first line of a file no longer keeps
+  its underline in the body, and a title made only of punctuation is no longer
+  taken for an overline, which dropped the body below it.
+- **Code chunks keep their symbol names after a non-ASCII character (#2700).**
+  The Python and JavaScript/TypeScript chunkers cut names out of the decoded
+  text at the parser's byte offsets, so one multi-byte character earlier in a
+  file garbled every later name (`# é` before `def first()` gave `irst(`). The
+  name is the heading prepended to a chunk's indexed text, so those chunks
+  missed searches for the symbol. ASCII files are unaffected.
+- **TypeScript declarations are chunked and named (#2704, #2706).** In `.ts`
+  and `.tsx` files, classes, interfaces and type aliases got no name. `abstract
+  class`, `interface`, `type` and `enum` declarations, `declare` statements,
+  `module M {}` and top-level `namespace N {}` were left out of every chunk
+  when the file also held another declaration, so they were never indexed; a
+  file holding only the first four became one whole-file chunk. Each is now a
+  named chunk of its own, with or without `export`. In JavaScript too,
+  `export function*` and `export var` now get a name, and a destructuring
+  declaration such as `const {a, b} = obj;` is no longer named `obj`.
 - **A failed search leg no longer echoes its exception text to callers
   (#2675).** When keyword or semantic search failed, `mem_search` (its
   empty-result note, structured `hints` and verbose `pipeline:` line) and the
@@ -356,6 +431,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   it appended to, so tagging one new note re-tagged everything already in
   that file. Only chunks that begin after the existing content now receive
   the tags.
+- **`mm add --tags` tags only the entry it adds (#2726).** It merged the tags
+  into every chunk of the target file, so earlier entries in a day file picked
+  up later entries' tags. The boundary is counted at `\n` only, so a file
+  holding U+0085 or a form feed no longer pushes it past the new entry and
+  leaves the entry untagged.
 - **Promoting a scratch entry from the web makes it searchable at once
   (#2492).** `POST /api/scratch/{key}/promote` appended the entry to a memory
   file without indexing it and reported `indexed_chunks: 1` regardless. It
@@ -439,8 +519,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   link-local, multicast and unspecified IP literals. A refused URL disables
   webhooks at startup with a `Webhook URL rejected` warning in the server
   log, so a webhook that pointed at a local service stops firing after the
-  upgrade. A public hostname that resolves to a private address is still
-  accepted (#2728).
+  upgrade unless `webhook.allow_private_hosts` or `webhook.proxy` is set
+  (#2728); either one skips this startup check. A public hostname that
+  resolves to a private address passes it and is refused at delivery instead
+  (#2728, above).
 - **The web source preview no longer serves a masked source's unmasked file
   (#2724).** `GET /api/sources/content` returns the file on disk. For a
   source whose chunks are a masked projection it now refuses with
