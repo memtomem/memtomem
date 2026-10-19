@@ -3817,6 +3817,7 @@ class SqliteBackend(
         *,
         exclude_hidden: bool = False,
         as_stored: bool = False,
+        exclude_consolidated: bool = False,
     ) -> list[Chunk]:
         # ``limit=None`` reads the whole source in one snapshot — for callers
         # that must cover it completely (the entity scan), where paging would
@@ -3828,10 +3829,19 @@ class SqliteBackend(
         # for a path read back from the store: it is matched as stored, since
         # resolving it again would follow a symlink placed at that path and
         # read some other file's rows under this file's name.
+        # ``exclude_consolidated`` drops originals of a ``consolidated_into``
+        # edge in the statement, so a summarised head of the file cannot use up
+        # the limit and hide the rows after it. Only the outgoing side counts: a
+        # summary is the edge's target and stays listed.
         db = self._get_read_db()
-        hidden_clause = f" AND {VISIBLE_SOURCE_PATH}" if exclude_hidden else ""
+        filters = f" AND {VISIBLE_SOURCE_PATH}" if exclude_hidden else ""
+        if exclude_consolidated:
+            filters += (
+                " AND NOT EXISTS (SELECT 1 FROM chunk_relations r WHERE r.source_id = chunks.id"
+                " AND r.relation_type = 'consolidated_into')"
+            )
         rows = db.execute(
-            f"SELECT * FROM chunks WHERE source_file=?{hidden_clause} "  # nosec B608
+            f"SELECT * FROM chunks WHERE source_file=?{filters} "  # nosec B608
             "ORDER BY start_line, rowid LIMIT ?",
             (
                 str(source_file) if as_stored else norm_path(source_file),

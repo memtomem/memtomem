@@ -269,7 +269,9 @@ class StorageBackend(Protocol):
         self, query: str, limit: int = 10000
     ) -> list[Path]: ...
     # ``exclude_hidden`` judges the path-level hold in the same statement;
-    # ``as_stored`` matches a path read back from the store without resolving it.
+    # ``as_stored`` matches a path read back from the store without resolving it;
+    # ``exclude_consolidated`` leaves out chunks a summary already covers, before
+    # the limit is applied.
     async def list_chunks_by_source(
         self,
         source_file: Path,
@@ -277,6 +279,7 @@ class StorageBackend(Protocol):
         *,
         exclude_hidden: bool = False,
         as_stored: bool = False,
+        exclude_consolidated: bool = False,
     ) -> list[Chunk]: ...
     async def count_chunks_by_source(
         self, source_file: Path, *, exclude_hidden: bool = False
@@ -419,6 +422,10 @@ class StorageBackend(Protocol):
         self, source_id: UUID, target_id: UUID, relation_type: str = "related"
     ) -> None: ...
     async def get_related(self, chunk_id: UUID) -> list[tuple[UUID, str]]: ...
+    # Outgoing ``consolidated_into`` edges only: original -> summaries covering it.
+    async def get_consolidation_targets(
+        self, chunk_ids: Sequence[UUID]
+    ) -> dict[UUID, list[UUID]]: ...
     async def delete_relation(self, source_id: UUID, target_id: UUID) -> bool: ...
 
     # Share lineage (chunk_links)

@@ -48,6 +48,32 @@ class RelationMixin:
         ).fetchall()
         return [(UUID(row[0]), row[1]) for row in rows]
 
+    async def get_consolidation_targets(self, chunk_ids: Sequence[UUID]) -> dict[UUID, list[UUID]]:
+        """Map each of *chunk_ids* that a summary covers to those summaries.
+
+        Only outgoing ``consolidated_into`` edges count: an original points at
+        its summary, so the summary itself is not reported as consolidated —
+        unlike :meth:`get_related`, which reads both directions. The edge is the
+        marker by design; ``mem_link`` can replace or add one, which is the
+        caller editing its own graph. Reads through the caller's transaction, so
+        a check inside ``transaction()`` sees what the writer sees.
+        """
+        from memtomem.storage.sqlite_backend import _param_batches
+
+        db = self._get_txn_read_db()
+        targets: dict[UUID, list[UUID]] = {}
+        for batch in _param_batches([str(cid) for cid in chunk_ids]):
+            marks = ",".join("?" * len(batch))
+            rows = db.execute(
+                "SELECT source_id, target_id FROM chunk_relations "  # nosec B608
+                f"WHERE relation_type = 'consolidated_into' AND source_id IN ({marks}) "
+                "ORDER BY source_id, target_id",
+                batch,
+            ).fetchall()
+            for source_id, target_id in rows:
+                targets.setdefault(UUID(source_id), []).append(UUID(target_id))
+        return targets
+
     async def delete_relation(self, source_id: UUID, target_id: UUID) -> bool:
         db = self._get_db()
         with self._rolls_back_if_standalone(db):
