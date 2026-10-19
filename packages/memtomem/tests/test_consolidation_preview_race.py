@@ -1,10 +1,12 @@
 """An apply deletes only the consolidation preview it read (#2798).
 
 ``mem_consolidate`` stores its groups under one scratch key, and a second scan
-replaces the row. ``mem_consolidate_apply`` used to delete that key on every
-exit, so a scan that ran while an apply was in flight lost its preview, and its
-caller was later told to run ``mem_consolidate`` first. Each exit below lets a
-rescan replace the preview mid-apply and checks that the newer one survives.
+replaces the row. ``mem_consolidate_apply`` used to delete that key whenever
+it finished with the preview, so a scan that ran while an apply was in flight
+lost its preview, and its caller was later told to run ``mem_consolidate``
+first. At four exits a real rescan replaces the preview mid-apply; the expiry
+exit returns right after its read, so there the replacement is written between
+the read and the delete. Each test checks that the newer preview survives.
 """
 
 from __future__ import annotations
