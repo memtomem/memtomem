@@ -90,10 +90,10 @@ on the MCP entry named `memtomem` through Hermes's own MCP client, with `record=
 It owns no server. If the `memtomem` entry has not started yet, the first recall makes Hermes
 start it, and that first turn gets no recall while memtomem loads its models (a few seconds).
 
-The query is the turn's message, and it goes to whatever server the `memtomem` entry names.
-The provider does not check that entry's transport or host: if your `mcp_servers.memtomem`
-points at a remote server, each recall call sends the turn's full message there, whatever
-that server's search configuration.
+The query is the turn's full message, and it goes to whichever server Hermes connects for
+the `memtomem` entry (see [Which entry it uses](#which-entry-it-uses)). The provider does not
+check that server's transport or host: when the entry Hermes uses points at a remote server,
+each recall call sends the message there, whatever that server's search configuration.
 
 What that call reaches is whatever the entry's memtomem configuration reaches: its store,
 the `.env` memtomem loads, and the network paths that configuration enables. The memtomem
