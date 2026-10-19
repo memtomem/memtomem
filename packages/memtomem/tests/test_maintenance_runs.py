@@ -364,7 +364,7 @@ class TestConsolidateApplyRunRecord:
             exc.mutation_outcome = "appended"
             raise exc
 
-        async def cannot_delete(_key):
+        async def cannot_delete(_key, **_kw):
             raise RuntimeError("database is locked")
 
         monkeypatch.setattr(memory_crud, "_mem_add_core", appended_then_refused)

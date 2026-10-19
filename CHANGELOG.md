@@ -7,6 +7,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_consolidate_apply` no longer deletes a preview it did not read
+  (#2798).** `mem_consolidate` keeps one preview, under the scratch key
+  `consolidation_groups`, and the apply deleted that key unconditionally when
+  it finished with the preview (on success, after a write, or once the preview
+  had expired). A `mem_consolidate` that ran while an apply was in flight lost
+  its preview, and a later `mem_consolidate_apply(group_id=...)` answered "run
+  mem_consolidate first". Each scan now stores its groups with a fresh
+  `preview_id`, and the apply deletes the key only while it still holds the
+  value it read (`scratch_delete` takes `expected_value`, as `scratch_promote`
+  already did). After a refusal whose summary was appended, the message no
+  longer says the preview was discarded when a newer one took its place. This
+  keeps a concurrent preview; it does not make an apply idempotent, so a kept
+  preview that lists the group just applied would publish a second summary, as
+  a scan taken after the apply already would.
 - **A memory tool's privacy refusal names a remedy the caller can run
   (#2797).** The refusal 0.6.9 added told every caller to "run mem_index, or
   authorize it with `mm index --force-unsafe <file>`": an MCP tool name on the

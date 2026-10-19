@@ -32,6 +32,17 @@ class TestScratch:
         assert await storage.scratch_get("del_me") is None
 
     @pytest.mark.asyncio
+    async def test_delete_expected_value_takes_only_the_value_read(self, storage):
+        await storage.scratch_set("k", "read")
+        await storage.scratch_set("k", "newer")  # replaced after it was read
+
+        assert await storage.scratch_delete("k", expected_value="read") is False
+        assert (await storage.scratch_get("k"))["value"] == "newer"
+        assert await storage.scratch_delete("k", expected_value="newer") is True
+        assert await storage.scratch_get("k") is None
+        assert await storage.scratch_delete("k", expected_value="newer") is False
+
+    @pytest.mark.asyncio
     async def test_ttl_cleanup(self, storage):
         past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(timespec="seconds")
         await storage.scratch_set("expired", "old", expires_at=past)

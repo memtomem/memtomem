@@ -64,10 +64,22 @@ class ScratchMixin:
             for r in rows
         ]
 
-    async def scratch_delete(self, key: str) -> bool:
+    async def scratch_delete(self, key: str, *, expected_value: str | None = None) -> bool:
+        """Delete a working memory entry; ``True`` when a row went.
+
+        ``expected_value`` deletes it only while the entry still holds that
+        value, in the same statement, as :meth:`scratch_promote` does: a caller
+        done with the value it read must not delete one that replaced it.
+        """
         db = self._get_db()
         with self._rolls_back_if_standalone(db):
-            cursor = db.execute("DELETE FROM working_memory WHERE key = ?", (key,))
+            if expected_value is None:
+                cursor = db.execute("DELETE FROM working_memory WHERE key = ?", (key,))
+            else:
+                cursor = db.execute(
+                    "DELETE FROM working_memory WHERE key = ? AND value = ?",
+                    (key, expected_value),
+                )
             self._commit_if_standalone(db)
         return cursor.rowcount > 0
 

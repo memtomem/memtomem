@@ -19,6 +19,15 @@ class _SourceUnavailable(Exception):
     """A consolidation source became hidden after its summary was published."""
 
 
+async def _drop_preview(app: Any, entry: dict) -> bool:
+    """Delete the consolidation preview if it still holds ``entry``'s value.
+
+    A ``mem_consolidate`` that ran meanwhile replaced the row with its own
+    preview, which this apply never read and must not delete (#2798).
+    """
+    return await app.storage.scratch_delete("consolidation_groups", expected_value=entry["value"])
+
+
 @mcp.tool()
 @tool_handler
 @register("maintenance")
@@ -118,11 +127,14 @@ async def mem_consolidate(
     # Persist groups to scratch storage (survives restart, auto-expires in 1 hour)
     import json
     from datetime import datetime, timedelta, timezone
+    from uuid import uuid4
 
     expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(timespec="seconds")
+    # ``preview_id`` makes every scan's value unique, even one that finds the
+    # same groups: the apply deletes only the value it read (#2798).
     await app.storage.scratch_set(
         "consolidation_groups",
-        json.dumps(groups, default=str),
+        json.dumps({"preview_id": uuid4().hex, "groups": groups}, default=str),
         expires_at=expires,
     )
 
@@ -195,10 +207,12 @@ async def mem_consolidate_apply(
     if entry.get("expires_at"):
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if entry["expires_at"] < now:
-            await app.storage.scratch_delete("consolidation_groups")
+            await _drop_preview(app, entry)
             return "Error: consolidation groups are stale (>1 hour). Run mem_consolidate again."
 
-    groups = json.loads(entry["value"])
+    preview = json.loads(entry["value"])
+    # A bare list is the shape before ``preview_id``.
+    groups = preview["groups"] if isinstance(preview, dict) else preview
 
     group = next((g for g in groups if g["group_id"] == group_id), None)
     if group is None:
@@ -376,7 +390,7 @@ async def mem_consolidate_apply(
                 namespaces=run_namespaces,
                 summary={**run_summary, "summary_id": None, "linked": 0, "warning": "unlinked"},
             )
-            await app.storage.scratch_delete("consolidation_groups")
+            await _drop_preview(app, entry)
             return (
                 f"Consolidation applied for group {group_id} (unlinked).\n"
                 f"{add_result}\n"
@@ -450,7 +464,7 @@ async def mem_consolidate_apply(
                 },
             )
             # A retry would publish a second summary.
-            await app.storage.scratch_delete("consolidation_groups")
+            await _drop_preview(app, entry)
             return (
                 f"Consolidation applied for group {group_id} (unlinked).\n"
                 f"{add_result}\n"
@@ -480,7 +494,7 @@ async def mem_consolidate_apply(
             # say so rather than surfacing an internal error. The preview goes:
             # applying it again would append a second summary.
             try:
-                await app.storage.scratch_delete("consolidation_groups")
+                dropped = await _drop_preview(app, entry)
             except Exception:
                 logger.warning("could not drop the consolidation preview", exc_info=True)
                 after = (
@@ -488,9 +502,17 @@ async def mem_consolidate_apply(
                     "summary is appended a second time."
                 )
             else:
-                after = (
-                    " The preview was discarded; run mem_consolidate again once the file is clean."
-                )
+                if dropped:
+                    after = (
+                        " The preview was discarded; run mem_consolidate again once the file "
+                        "is clean."
+                    )
+                else:
+                    after = (
+                        " The preview had been replaced or removed meanwhile; if a newer "
+                        "mem_consolidate preview lists this group, do not apply it, or the "
+                        "summary is appended a second time."
+                    )
             return (
                 exc.mutation_detail("mem_consolidate_apply", outcome="appended", surface="mcp")
                 + after
@@ -513,7 +535,7 @@ async def mem_consolidate_apply(
     )
 
     app.search_pipeline.invalidate_cache()
-    await app.storage.scratch_delete("consolidation_groups")
+    await _drop_preview(app, entry)
 
     return (
         f"Consolidation applied for group {group_id}.\n"
