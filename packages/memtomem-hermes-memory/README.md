@@ -19,7 +19,13 @@ hand-written.
   nothing, mirrors nothing and adds no line to the system prompt. Saving notes is what the
   memtomem MCP tools are for.
 - It waits for the search at most 300 ms by default (`budget_ms`). A search that takes
-  longer is not used for that turn.
+  longer is not used for that turn, but it is not cancelled: the call keeps running in the
+  background and its late result is discarded. `rpc_timeout_seconds` (10 s by default) is
+  the timeout the provider passes to Hermes's MCP call, not a deadline for the whole
+  background call, which first reads Hermes's config and prepares the call. Until the call
+  ends it holds the entry's one recall slot (see
+  [Sharing the connection with the model](#sharing-the-connection-with-the-model)). When
+  the provider shuts down it detaches from a call in flight rather than cancelling it.
 
 ## Requirements
 
@@ -83,6 +89,11 @@ on the MCP entry named `memtomem` through Hermes's own MCP client, with `record=
 
 It owns no server. If the `memtomem` entry has not started yet, the first recall makes Hermes
 start it, and that first turn gets no recall while memtomem loads its models (a few seconds).
+
+The query is the turn's message, and it goes to whatever server the `memtomem` entry names.
+The provider does not check that entry's transport or host: if your `mcp_servers.memtomem`
+points at a remote server, each recall call sends the turn's full message there, whatever
+that server's search configuration.
 
 What that call reaches is whatever the entry's memtomem configuration reaches: its store,
 the `.env` memtomem loads, and the network paths that configuration enables. The memtomem
@@ -209,6 +220,11 @@ message. Warnings name the configuration key to change.
 - Hermes 0.21.5 hands a memory provider a registration context without MCP access, so the
   provider builds Hermes's documented `PluginContext` itself to call `call_mcp`. That
   constructor is not part of Hermes's plugin compatibility contract; `call_mcp` is.
+- To tell whether a portable plugin supplies the `memtomem` entry, the availability check
+  reads Hermes's `get_plugin_manager().get_portable_mcp_servers()`, which is not part of that
+  contract either. If the lookup fails, returns something unexpected or returns an empty mapping
+  (Hermes fills it during its own discovery), the check reports the provider available and
+  the per-turn check decides.
 - Hermes supports Python 3.11 to 3.13; the provider uses the standard library only and is
   tested on 3.11.
 
