@@ -667,6 +667,7 @@ async def _mem_add_core(
     *,
     event_type: str,
     confirmation_surface: str = "mem_add",
+    file_name: str | None = None,
 ) -> tuple[str, "IndexingStats | None"]:
     """Core logic for ``mem_add`` — also usable from internal callers that
     need the ``IndexingStats`` (e.g. ``mem_consolidate_apply`` linking new
@@ -705,6 +706,15 @@ async def _mem_add_core(
     Instrumenting here rather than in each tool is what makes the
     attribution correct: the session id has to be captured under the file
     lock, after the wait, and that only exists inside this function.
+
+    ``file_name`` replaces the day file as the default target, relative to
+    the same scope base and behind the same registration check. It is for
+    internal callers whose entry must sit in a file of its own: a
+    consolidation summary in the shared day file can be re-chunked together
+    with a neighbouring entry, and the new chunk id drops the summary's
+    ``consolidated_into`` edges (#2802). The file holds one namespace by
+    construction, so it is never re-targeted the way a day file is (#2005).
+    Ignored when ``file`` is given.
 
     Returns:
         Tuple of ``(user_facing_message, stats)``. ``stats`` is ``None``
@@ -924,18 +934,35 @@ async def _mem_add_core(
                     f"Error: {project_tier_registration_error(base, effective_scope)}",
                     None,
                 )
-        # Issue #2005: a day file is shared by every write of the day, and
-        # ``index_file`` stamps one namespace across the whole file — so two
-        # namespaces in one day file lose one of them as soon as chunk
-        # merging joins their entries. Give each namespace its own day file.
-        # The namespace here is only a *guess* (the authoritative one is
-        # resolved inside the lock, #1991); the lock block re-targets if the
-        # guess turns out wrong.
-        day_base = base
-        _, candidate_ns = await capture_session_and_namespace(app, namespace)
-        target = base / day_file_name(
-            candidate_ns, app.config.namespace.default_namespace, date_str=date_str
-        )
+        if file_name is not None:
+            # Judged where it resolves: a link at a component of ``file_name``
+            # would carry the write out of ``base``, past the scope the gates
+            # above were run for.
+            target = (base / file_name).resolve()
+            if (
+                not target.is_relative_to(base.resolve())
+                or classify_scope(target, pmdirs)[0] != effective_scope
+            ):
+                return (
+                    f"Error: {base / file_name} resolves to {target}, which is not in "
+                    f"the {effective_scope} memory directory {base}; nothing was "
+                    "written. Replace the link on that path with a directory, or "
+                    "remove it.",
+                    None,
+                )
+        else:
+            # Issue #2005: a day file is shared by every write of the day, and
+            # ``index_file`` stamps one namespace across the whole file — so two
+            # namespaces in one day file lose one of them as soon as chunk
+            # merging joins their entries. Give each namespace its own day file.
+            # The namespace here is only a *guess* (the authoritative one is
+            # resolved inside the lock, #1991); the lock block re-targets if the
+            # guess turns out wrong.
+            day_base = base
+            _, candidate_ns = await capture_session_and_namespace(app, namespace)
+            target = base / day_file_name(
+                candidate_ns, app.config.namespace.default_namespace, date_str=date_str
+            )
 
     assert target is not None
 

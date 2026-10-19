@@ -124,7 +124,7 @@ async def mem_consolidate(
 
     lines = [f"Consolidation candidates: {len(groups)} groups\n"]
     for g in groups:
-        lines.append(f"### Group {g['group_id']}: {g['source'].split('/')[-1]}")
+        lines.append(f"### Group {g['group_id']}: {Path(g['source']).name}")
         lines.append(f"  Chunks: {g['chunk_count']}, ~{g['total_tokens']} tokens")
         if g["namespace"]:
             lines.append(f"  Namespace: {g['namespace']}")
@@ -162,11 +162,11 @@ async def mem_consolidate_apply(
     """Apply a consolidation by creating a summary chunk for a group.
 
     The agent writes the summary; this tool persists it via the normal
-    ``mem_add`` path — the summary becomes a real markdown entry in the
-    user's first ``memory_dirs`` daily notes file, and each original chunk
-    gets a ``consolidated_into`` relation pointing to the summary. This
-    preserves the file-based mental model: consolidation events are visible
-    in the filesystem and in git history, and the summary can be
+    ``mem_add`` path — the summary becomes a real markdown entry in a file
+    of its own under ``consolidated/`` in its scope's memory directory, and
+    each original chunk gets a ``consolidated_into`` relation pointing to the
+    summary. This preserves the file-based mental model: consolidation events
+    are visible in the filesystem and in git history, and the summary can be
     hand-edited like any other markdown entry.
 
     ADR-0011 cross-scope rejection: source chunks are loaded by
@@ -340,15 +340,16 @@ async def mem_consolidate_apply(
             "proceed."
         )
 
-    # Agent path is file-first: append to a daily notes file + index. We use
+    # Agent path is file-first: write a summary file + index. We use
     # ``_mem_add_core`` (not the MCP ``mem_add`` tool) so we can grab the
     # IndexingStats and recover the new chunk id without the old
     # ``recall_chunks(limit=1)`` trick, which raced with any concurrent
     # write between mem_add and the lookup — silent data corruption
     # territory.
+    from memtomem.memory_scope import consolidation_file_name
     from memtomem.server.tools.memory_crud import _mem_add_core
 
-    source_name = group["source"].split("/")[-1]
+    source_name = Path(group["source"]).name
     # Applied-run record (#2132). Opened after the scope checks above so a
     # refused call leaves no row; the policy path records its own runs through
     # ``run_policy``, which this handler deliberately does not go through.
@@ -380,6 +381,14 @@ async def mem_consolidate_apply(
             # the shared core emits must name it (#2306). ``mem_add`` never
             # saw this call.
             confirmation_surface="mem_consolidate_apply",
+            # A file of its own, not the day file: there the summary can be
+            # re-chunked with a neighbouring entry, and the new chunk id
+            # drops the edges written below (#2802).
+            file_name=consolidation_file_name(
+                source_name,
+                run_id,
+                date_str=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            ),
         )
 
         if stats is None:

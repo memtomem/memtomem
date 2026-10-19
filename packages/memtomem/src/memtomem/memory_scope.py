@@ -20,6 +20,7 @@ import hashlib
 import logging
 import re
 import stat as stat_mod
+import uuid
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -245,6 +246,35 @@ def day_file_name(namespace: str | None, default_namespace: str, *, date_str: st
     slug = _FS_UNSAFE_RE.sub("-", namespace).strip("-")
     slug = slug.encode("utf-8")[:_NS_SLUG_MAX_BYTES].decode("utf-8", "ignore").strip("-")
     return f"{date_str}--{slug}-{digest}.md" if slug else f"{date_str}--{digest}.md"
+
+
+#: Directory, under a scope's memory base, that holds agent consolidation summaries.
+CONSOLIDATION_DIR = "consolidated"
+
+
+def consolidation_file_name(source_name: str, run_id: int, *, date_str: str) -> str:
+    """Return the file, relative to a scope base, for one agent consolidation summary.
+
+    Each summary gets a file of its own (#2802): in the shared day file a
+    summary can be re-chunked together with a neighbouring entry, and its new
+    chunk id drops the ``consolidated_into`` edges that mark its originals as
+    covered. The source name is only a readable hint, slugged like a day
+    file's namespace. The run id names the ``maintenance_runs`` row, and the
+    random token keeps the name fresh when a reset store reuses run ids, since
+    an append into an existing file would put two entries in it again. The
+    name never ends in ``.consolidated.md``, the policy's virtual summary
+    suffix.
+    """
+    stem = Path(source_name).stem
+    slug = _FS_UNSAFE_RE.sub("-", stem).strip("-")
+    slug = slug.encode("utf-8")[:_NS_SLUG_MAX_BYTES].decode("utf-8", "ignore").strip("-")
+    token = uuid.uuid4().hex[:12]
+    name = (
+        f"{date_str}-{slug}-run{run_id}-{token}.md"
+        if slug
+        else f"{date_str}-run{run_id}-{token}.md"
+    )
+    return f"{CONSOLIDATION_DIR}/{name}"
 
 
 def namespace_mix_error(

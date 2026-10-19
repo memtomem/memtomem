@@ -1039,8 +1039,11 @@ async def test_mem_consolidate_apply_project_shared_requires_confirm(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tier", "tier_dir"), [("project_shared", "memories"), ("project_local", "memories.local")]
+)
 async def test_mem_consolidate_apply_pins_summary_to_source_project(
-    bm25_only_components, monkeypatch, tmp_path
+    bm25_only_components, monkeypatch, tmp_path, tier, tier_dir
 ):
     """ADR-0011 PR-D review round 7 pin: cross-project leak fix.
 
@@ -1057,10 +1060,10 @@ async def test_mem_consolidate_apply_pins_summary_to_source_project(
 
     comp, _ = bm25_only_components
     proj_a = tmp_path / "proj_a"
-    proj_a_dir = proj_a / ".memtomem" / "memories"
+    proj_a_dir = proj_a / ".memtomem" / tier_dir
     proj_a_dir.mkdir(parents=True)
     proj_b = tmp_path / "proj_b"
-    proj_b_dir = proj_b / ".memtomem" / "memories"
+    proj_b_dir = proj_b / ".memtomem" / tier_dir
     proj_b_dir.mkdir(parents=True)
     src = proj_a_dir / "rules.md"
     src.write_text("## hi\n\nproject content\n")
@@ -1077,8 +1080,8 @@ async def test_mem_consolidate_apply_pins_summary_to_source_project(
     )
 
     chunks = [
-        _fake_chunk("project_shared", src, "shared one"),
-        _fake_chunk("project_shared", src, "shared two"),
+        _fake_chunk(tier, src, "shared one"),
+        _fake_chunk(tier, src, "shared two"),
     ]
     await _stage_consolidate_group(comp, chunks, group_id=0)
 
@@ -1087,13 +1090,15 @@ async def test_mem_consolidate_apply_pins_summary_to_source_project(
     out = await consolidation.mem_consolidate_apply(
         group_id=0,
         summary="combined team rule",
-        confirm_project_shared=True,
+        confirm_project_shared=tier == "project_shared",
         ctx=ctx,
     )
     assert "Consolidation applied" in out or "Memory added to" in out, out
     # Summary file path mentions proj_a's directory, not proj_b's.
     assert str(proj_a_dir) in out, f"summary did not land in proj_a tier: {out}"
     assert str(proj_b_dir) not in out, f"summary leaked into proj_b tier (cross-project): {out}"
+    # In its own file under the tier's ``consolidated/`` directory (#2802).
+    assert str(proj_a_dir / "consolidated") in out, out
 
 
 @pytest.mark.asyncio

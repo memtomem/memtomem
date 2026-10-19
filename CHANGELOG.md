@@ -17,11 +17,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   own; a summary chunk stays listed. The apply refuses a group whose originals
   are covered, and checks again under the write lock that links them: when a
   concurrent apply of the same preview linked them first, the second keeps its
-  summary but links and decays nothing, and says so. Its summary text is then a
-  duplicate in the notes file, since the file write happens before that lock.
+  summary but links and decays nothing, and says so. Its summary file then
+  duplicates the other one, since the file write happens before that lock.
   A group now carries every chunk the scan listed rather than the five it
   previews, so an apply links (and with `keep_originals=False` decays) all of
   them: "Originals linked" reads `8/8` where it read `5/8`.
+  **Each summary is now written to a file of its own,**
+  `consolidated/<date>-<source>-run<id>-<token>.md` under its scope's memory
+  directory, instead of being appended to the daily notes file. The edges
+  point at the summary's chunk, and in the shared day file that chunk could be
+  re-indexed together with a neighbouring entry under a new id, which deleted
+  its edges: two summaries of one source on one day did exactly that, so the
+  first group was listed again, and an apply that finished while another was
+  writing had its originals linked and decayed a second time. The `run<id>`
+  part names the run in `maintenance_runs`. An apply whose summary path
+  resolves out of its scope's memory directory, through a link at
+  `consolidated/`, is refused and writes nothing. The heading's file name is also
+  taken from the path rather than split on `/`, which on Windows put the whole
+  path in it.
 - **`mem_consolidate_apply` no longer deletes a preview it did not read
   (#2798).** `mem_consolidate` keeps one preview, under the scratch key
   `consolidation_groups`, and the apply deleted that key unconditionally when
