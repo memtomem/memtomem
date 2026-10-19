@@ -17,7 +17,7 @@ write-time indexing.
 ## What this plugin runs and connects to
 
 - **One local MCP server.** Claude Code starts `memtomem-server` over stdio with
-  `uvx --from 'memtomem[onnx]==0.6.8'`. On first launch uv downloads that exact
+  `uvx --from 'memtomem[onnx]==0.6.9'`. On first launch uv downloads that exact
   version and its dependencies from PyPI (or the package index your own uv
   configuration names) and caches them. If the machine has no Python 3.12 or
   newer, uv also downloads a managed CPython build from Astral's
@@ -28,11 +28,14 @@ write-time indexing.
 - **Local search history.** The same database records each `mem_search`: the
   query text, its embedding when an embedding provider is configured, and for
   each result its ID, score, file name and headings (not the memory text). It
-  also counts how often each memory is returned. `mem_add` records one such
-  search too, for its duplicate check, with the new note's text as the query;
-  deleting the memory later does not remove that entry. memtomem only
-  occasionally deletes history rows older than 90 days, so treat the history
-  as kept indefinitely. A search made with `record=false` records none of this.
+  also counts how often each memory is returned. A search made with
+  `record=false` records none of this. Each recorded search deletes history
+  rows older than 90 days; a store that records no searches keeps the rows it
+  has. Bundles before memtomem 0.6.9 also recorded `mem_add`'s duplicate check
+  as a search, with the new note's text as the query, and deleted old rows only
+  occasionally. Rows they wrote stay after an upgrade until a later recorded
+  search finds them older than 90 days; deleting the memory does not remove
+  them.
 - **What Claude receives.** Search, recall and read results, including memory
   text, headings and source file paths, are returned to Claude Code. They
   become part of the conversation, which Claude Code sends to the model
@@ -73,7 +76,7 @@ Before installing, inspect existing servers with `/mcp` in Claude Code, then
 run the read-only diagnostic from the project you want to inspect:
 
 ```bash
-uvx --from "memtomem[all]==0.6.8" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.9" mm doctor --claude-mcp
 ```
 
 The pin is there because installing the plugin does not put `mm` on your PATH —
@@ -88,7 +91,7 @@ existing uv installation; resolve any manual MCP registration shown by the
 check before installing. The check does not intercept `/plugin install`.
 
 Before installation, doctor compares manual registrations with the launch this
-release's plugin bundles (`memtomem[onnx]==0.6.8`). After installation, it reads
+release's plugin bundles (`memtomem[onnx]==0.6.9`). After installation, it reads
 the actual plugin manifest. Use `/mcp` to verify the session, and repeat the
 diagnostic after installation.
 
@@ -109,8 +112,8 @@ Model artifacts are fetched only when the configured workflow needs them.
 On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```bash
-uvx --from 'memtomem[onnx]==0.6.8' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.6.8' mm status
+uvx --from 'memtomem[onnx]==0.6.9' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem[onnx]==0.6.9' mm status
 ```
 
 The plugin intentionally cannot perform this trust-establishing step over MCP.
@@ -121,7 +124,7 @@ gitignored local tier explicitly:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem[onnx]==0.6.8' mm mem init --scope project_local
+uvx --from 'memtomem[onnx]==0.6.9' mm mem init --scope project_local
 ```
 
 After that, `/memtomem:setup /path/to/notes` performs a one-shot index and

@@ -5,6 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.6.9] — 2026-10-19
+
+### Upgrading
+
+- **Run `mm index` over your memory directories once after upgrading.** It
+  judges every file with the redaction guard, so content the memory tools
+  stored without that check (GHSA-6wq5-pc5r-4fgp, under Security) is reported
+  as blocked and held until the file is cleaned and re-indexed. The same run
+  re-chunks every file once for this release's chunking fixes; chunks whose
+  text and context are unchanged keep their vectors, so `--force` is not
+  needed.
+- **Scripts that read `mm search` or `mm recall` JSON:** `content` now holds
+  the whole chunk, and the old 200-character cut is in `content_preview`
+  (#2726, under Changed).
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.10 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.6.9;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.6.9`, confirm with `mm --version`, then start a new
+  Claude Code session — the compatibility check is refreshed at session start,
+  and until then those hooks are skipped. See the
+  [CLI reference](docs/guides/reference/data-config-cli.md#cli-reference) for
+  what `mm upgrade` preserves and stops.
+
 ### Added
 
 - **The handoff skill accepts `s` and `r` for `save` and `resume` (#2776).** The
