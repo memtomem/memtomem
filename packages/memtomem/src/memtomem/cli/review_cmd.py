@@ -248,7 +248,11 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                         # content may not be indexed before appending (the claim
                         # is released below, nothing was written).
                         refusal, _ = await preflight_refusal(
-                            comp.index_engine, target, op="approve", needs_valve=False
+                            comp.index_engine,
+                            target,
+                            op="approve",
+                            needs_valve=False,
+                            surface="cli",
                         )
                         if refusal is not None:
                             raise click.ClickException(refusal.removeprefix("Error: "))
@@ -266,7 +270,14 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                         except PrivacyRejection as exc:
                             # Appended, unindexed. Quarantine the claim rather than
                             # releasing it, or a re-approval appends it again.
-                            detail = exc.mutation_detail("approve", outcome="appended")
+                            detail = exc.mutation_detail(
+                                "approve", outcome="appended", surface="cli"
+                            )
+                            # Stored, and read back by ``mem_candidate_list`` as
+                            # well as here: it names no surface's command.
+                            reason = exc.mutation_detail(
+                                "approve", outcome="appended", surface="neutral"
+                            )
                             # Recovery may already have moved the claim back to
                             # ``pending``; quarantine it from there too. A
                             # quarantine that raises must not reach the release
@@ -274,10 +285,10 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                             try:
                                 quarantined: bool | None = (
                                     await comp.storage.mark_claimed_candidate_write_uncertain(
-                                        candidate_id, actor="cli-approve", reason=detail
+                                        candidate_id, actor="cli-approve", reason=reason
                                     )
                                     or await comp.storage.mark_memory_candidate_write_uncertain(
-                                        candidate_id, actor="cli-approve", reason=detail
+                                        candidate_id, actor="cli-approve", reason=reason
                                     )
                                 )
                             except Exception:

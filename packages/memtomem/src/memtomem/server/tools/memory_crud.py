@@ -377,7 +377,9 @@ async def _preflight_refusal(
     queries when a refusal held the file."""
     from memtomem.tools.memory_mutation import preflight_refusal
 
-    refusal, pre = await preflight_refusal(app.index_engine, path, op=op, needs_valve=needs_valve)
+    refusal, pre = await preflight_refusal(
+        app.index_engine, path, op=op, needs_valve=needs_valve, surface="mcp"
+    )
     if refusal is not None:
         app.search_pipeline.invalidate_cache()
     return refusal, pre
@@ -459,7 +461,7 @@ async def _mutate_file_and_reindex(
     if preflight.rejection is not None:
         rejection = await app.index_engine.refuse_mutation(source_file, preflight)
         app.search_pipeline.invalidate_cache()
-        return None, rejection.mutation_detail(f"mem_{op}", outcome="not_written")
+        return None, rejection.mutation_detail(f"mem_{op}", outcome="not_written", surface="mcp")
     blocker = preflight.blocker(f"mem_{op}", source_file.name, needs_valve=force_unsafe)
     if blocker is not None:
         return None, blocker
@@ -506,11 +508,13 @@ async def _mutate_file_and_reindex(
             # the preflight and its chunks are the ones in the store, so there
             # is nothing to re-index: doing so would only lift the hold the
             # refusal just placed while ``exc.held`` still reported it.
+            # Worded as the web twin words it (``mutate_source_and_reindex``):
+            # what the restore did, what the hold did, and the remedy.
+            from memtomem.tools.memory_mutation import outcome_after_restore
+
             app.search_pipeline.invalidate_cache()
-            if outcome is RestoreOutcome.restored:
-                return None, exc.mutation_detail(f"mem_{op}", outcome="rolled_back")
-            return None, _rollback_error(
-                op, source_file, exc, outcome, reconciled=False, held=bool(exc.held)
+            return None, exc.mutation_detail(
+                f"mem_{op}", outcome=outcome_after_restore(outcome), surface="mcp"
             )
         reconciled = True
         held = False
@@ -1256,7 +1260,7 @@ async def mem_add(
     except PrivacyRejection as exc:
         if exc.mutation_outcome != "appended":
             raise
-        return exc.mutation_detail("mem_add", outcome="appended")
+        return exc.mutation_detail("mem_add", outcome="appended", surface="mcp")
     return message
 
 
@@ -2094,7 +2098,9 @@ async def mem_batch_add(
                         # pending, as for any failure after the durable append.
                         await mark_provenance_incomplete(app, provenance_session_id)
                         app.search_pipeline.invalidate_cache()
-                        return exc.mutation_detail("mem_batch_add", outcome="appended")
+                        return exc.mutation_detail(
+                            "mem_batch_add", outcome="appended", surface="mcp"
+                        )
                     except Exception:
                         await mark_provenance_incomplete(app, provenance_session_id)
                         raise

@@ -524,7 +524,7 @@ async def mem_agent_share(
             raise
         # The copy landed but is unindexed. The claim is kept, not released,
         # for the reason above: a retry must not append it again.
-        return exc.mutation_detail("mem_agent_share", outcome="appended")
+        return exc.mutation_detail("mem_agent_share", outcome="appended", surface="mcp")
 
     # Record the structured link (PR-2 of the chunk_links series). The
     # markdown ``shared-from=`` audit tag is still written into content

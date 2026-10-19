@@ -491,7 +491,10 @@ async def mem_consolidate_apply(
                 after = (
                     " The preview was discarded; run mem_consolidate again once the file is clean."
                 )
-            return exc.mutation_detail("mem_consolidate_apply", outcome="appended") + after
+            return (
+                exc.mutation_detail("mem_consolidate_apply", outcome="appended", surface="mcp")
+                + after
+            )
         raise
 
     # Finalized before the cache/scratch cleanup below: the decay above is the

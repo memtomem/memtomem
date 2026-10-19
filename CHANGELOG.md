@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **A memory tool's privacy refusal names a remedy the caller can run
+  (#2797).** The refusal 0.6.9 added told every caller to "run mem_index, or
+  authorize it with `mm index --force-unsafe <file>`": an MCP tool name on the
+  CLI, a shell command over MCP, and both in the web UI. The CLI now names
+  `mm index <path>` (and `mm shell` adds "outside the shell"), MCP names
+  `mem_index(path=...)` with the file's full path and, since `mem_index` has
+  no `force_unsafe`, the CLI command for a bypass; the web names the Index tab
+  and its "Index without privacy gate" option. The `project_shared` tier is
+  still offered no bypass. The reason stored on a quarantined formation
+  candidate names no command, because `mm review` and `mem_candidate_list`
+  both read it. Two neighbours had the same defect and are fixed with it:
+  when a refused `mem_edit` / `mem_delete` could not restore the file, its
+  message described the rollback but offered no privacy remedy; and
+  `mem_fetch` offered `mm index --force-unsafe` without a path (and for
+  `project_shared`).
+
 ## [0.6.9] — 2026-10-19
 
 ### Upgrading

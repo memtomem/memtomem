@@ -52,6 +52,11 @@ def _assert_index_blocked(resp, *, written: bool):
     assert "refused" in detail["message"]
     assert "/" not in (detail["file"] or "/"), "a bare name, never a host path"
     assert _KEY not in resp.text
+    # The SPA shows ``message`` as is: the remedy names web controls, not a
+    # command a browser user cannot run (#2797).
+    for foreign in ("mm ", "mem_", "`"):
+        assert foreign not in detail["message"], foreign
+    assert "Index tab" in detail["message"]
 
 
 async def test_add_refuses_before_appending(bm25_only_components):

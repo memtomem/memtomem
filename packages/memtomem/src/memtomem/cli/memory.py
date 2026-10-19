@@ -409,7 +409,11 @@ async def _add(
                     # writing anything.
                     needs_valve = guard.decision == "bypassed"
                     refusal, pre = await preflight_refusal(
-                        comp.index_engine, target, op="mm add", needs_valve=needs_valve
+                        comp.index_engine,
+                        target,
+                        op="mm add",
+                        needs_valve=needs_valve,
+                        surface="cli",
                     )
                     if refusal is not None:
                         raise click.ClickException(refusal.removeprefix("Error: "))
@@ -440,9 +444,9 @@ async def _add(
                     except PrivacyRejection as exc:
                         # On disk, unindexed: e.g. a title the ingress never scanned.
                         raise click.ClickException(
-                            exc.mutation_detail("mm add", outcome="appended").removeprefix(
-                                "Error: "
-                            )
+                            exc.mutation_detail(
+                                "mm add", outcome="appended", surface="cli"
+                            ).removeprefix("Error: ")
                         ) from exc
 
                     # The chunker tags the entry from its ``> tags:`` header, except when

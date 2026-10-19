@@ -33,6 +33,7 @@ from memtomem.config import (
     provider_for_category,
 )
 from memtomem import privacy
+from memtomem._runtime_paths import _hint_quote
 from memtomem import __version__ as _memtomem_version
 from memtomem.embedding.probe import embed_document_probe
 from memtomem.errors import (
@@ -833,6 +834,43 @@ def _distinct_sorted(values: Iterable[str | None]) -> list[str | None]:
 
 _UNHIDDEN_BLOCKED_ERROR = "could not hide the indexed chunks of this blocked file; retry"
 
+#: Whose vocabulary a privacy refusal names its remedy in. ``shell`` is the CLI
+#: read from inside ``mm shell``, where a typed ``mm index`` would run a search;
+#: ``neutral`` names no command, for a caller that may not share the ambient
+#: config (``MemtomemStore``) and for text persisted where another surface reads it.
+RemedySurface = Literal["cli", "shell", "mcp", "web", "neutral"]
+
+
+def privacy_remedy(surface: RemedySurface, *, path: Path, bypassable: bool) -> str:
+    """The sentence telling ``surface`` how to index ``path`` after a privacy refusal.
+
+    The hold lifts once the file indexes cleanly, so the remedy is a re-index of
+    this exact file: ``mem_index`` defaults to the server's cwd and a relative
+    name can resolve elsewhere, so commands carry the full path. ``bypassable``
+    is false for ``project_shared``, whose ``force_unsafe`` is refused, so no
+    bypass is offered there. ``mem_index`` has no ``force_unsafe``: an MCP
+    caller's bypass is the CLI's. The web names its own control and the bare
+    file name only (host paths stay out of web responses).
+    """
+    if surface in ("cli", "shell", "mcp"):
+        target = _hint_quote(path)
+        if surface == "mcp":
+            reindex = f"call `mem_index(path={json.dumps(str(path))})`"
+            force = f"authorize it from the CLI with `mm index --force-unsafe {target}`"
+        else:
+            where = " (outside the shell)" if surface == "shell" else ""
+            reindex = f"run `mm index {target}`{where}"
+            force = f"authorize it with `mm index --force-unsafe {target}`{where}"
+    elif surface == "web":
+        reindex = "re-index the file from the Index tab"
+        force = "index it there with 'Index without privacy gate' (Advanced options)"
+    else:
+        reindex = "re-index the file"
+        force = "index a reviewed false positive with the privacy gate bypassed"
+    if not bypassable:
+        return f"Remove that content, then {reindex}."
+    return f"Remove that content and {reindex}, or {force}."
+
 
 def _read_text_view(text: str) -> str:
     """``text`` with the newline translation ``Path.read_text`` applies on read."""
@@ -902,7 +940,7 @@ class PrivacyRejection(Exception):
         self.retryable = True
         self.args = (f"{self.args[0]}; {_UNHIDDEN_BLOCKED_ERROR}",)
 
-    def mutation_detail(self, op: str, *, outcome: MutationOutcome) -> str:
+    def mutation_detail(self, op: str, *, outcome: MutationOutcome, surface: RemedySurface) -> str:
         """The refusal a memory tool reports when this rejection stopped its write.
 
         ``outcome`` says what became of the write: ``not_written`` (refused by
@@ -912,8 +950,8 @@ class PrivacyRejection(Exception):
         ``superseded`` (another process removed or replaced the file while the
         write ran; nothing was written back over it) or ``appended`` (refused
         after a durable append, which stays on disk unindexed). Hit count only, never
-        the matched bytes. The remedy depends on the tier: ``force_unsafe`` is
-        refused for ``project_shared``, so it is not offered there.
+        the matched bytes. The remedy is :func:`privacy_remedy` in ``surface``'s
+        vocabulary.
         """
         if outcome == "not_written":
             subject = f"{self.path.name} holds content"
@@ -941,13 +979,9 @@ class PrivacyRejection(Exception):
             parts.append("Its indexed chunks are held until the file indexes cleanly.")
         elif self.held is False:
             parts.append(f"Also: {_UNHIDDEN_BLOCKED_ERROR}.")
-        if self.scope == "project_shared":
-            parts.append("Remove that content, then run mem_index.")
-        else:
-            parts.append(
-                "Remove that content and run mem_index, or authorize it with "
-                "`mm index --force-unsafe <file>`."
-            )
+        parts.append(
+            privacy_remedy(surface, path=self.path, bypassable=self.scope != "project_shared")
+        )
         return " ".join(parts)
 
 

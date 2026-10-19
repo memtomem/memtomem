@@ -39,7 +39,7 @@ from memtomem.tools.memory_writer import (
 )
 
 if TYPE_CHECKING:
-    from memtomem.indexing.engine import MutationOutcome
+    from memtomem.indexing.engine import MutationOutcome, RemedySurface
     from memtomem.tools.memory_writer import Rewrite
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
@@ -272,7 +272,7 @@ async def mutate_source_and_reindex(
 
 
 async def preflight_refusal(
-    index_engine, path: Path, *, op: str, needs_valve: bool
+    index_engine, path: Path, *, op: str, needs_valve: bool, surface: RemedySurface
 ) -> tuple[str | None, bytes]:
     """Ask the engine whether ``path`` may take a write; the refusal text if not.
 
@@ -285,6 +285,7 @@ async def preflight_refusal(
 
     Also returns the bytes the preflight judged: a caller forwarding its valve
     binds it to them (:func:`appended_valve_text`), not to a later re-read.
+    ``surface`` is the caller's, for the remedy the refusal names.
     """
     from memtomem.tools.memory_writer import read_pre_image_or_empty
 
@@ -292,7 +293,7 @@ async def preflight_refusal(
     preflight = await asyncio.to_thread(index_engine.preflight_mutation, path, pre)
     if preflight.rejection is not None:
         rejection = await index_engine.refuse_mutation(path, preflight)
-        return rejection.mutation_detail(op, outcome="not_written"), pre
+        return rejection.mutation_detail(op, outcome="not_written", surface=surface), pre
     return preflight.blocker(op, path.name, needs_valve=needs_valve), pre
 
 

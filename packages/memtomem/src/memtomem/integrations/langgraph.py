@@ -636,7 +636,7 @@ class MemtomemStore:
                 # file whose content may not be indexed before writing anything.
                 needs_valve = guard.decision == "bypassed"
                 refusal, pre = await preflight_refusal(
-                    comp.index_engine, target, op="add", needs_valve=needs_valve
+                    comp.index_engine, target, op="add", needs_valve=needs_valve, surface="neutral"
                 )
                 if refusal is not None:
                     comp.search_pipeline.invalidate_cache()
@@ -655,7 +655,7 @@ class MemtomemStore:
                     comp.search_pipeline.invalidate_cache()
                     return {
                         "error": "index_blocked",
-                        "detail": exc.mutation_detail("add", outcome="appended"),
+                        "detail": exc.mutation_detail("add", outcome="appended", surface="neutral"),
                         "written": True,
                         "file": str(target),
                     }

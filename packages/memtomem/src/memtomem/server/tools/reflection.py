@@ -180,7 +180,7 @@ async def mem_reflect_save(
     except PrivacyRejection as exc:
         if exc.mutation_outcome != "appended":
             raise
-        return exc.mutation_detail("mem_reflect_save", outcome="appended")
+        return exc.mutation_detail("mem_reflect_save", outcome="appended", surface="mcp")
     if stats is None:
         return result
 

@@ -93,7 +93,7 @@ async def mem_fetch(
     # a ``force_unsafe`` fetch's valve to those bytes, since another writer could
     # touch the file before this index reads it. A refused page is saved but not
     # indexed, and surfaced here instead of silently reporting success.
-    from memtomem.indexing.engine import PrivacyRejection
+    from memtomem.indexing.engine import PrivacyRejection, privacy_remedy
 
     # The gauge closes only after the tag merge below: that re-upserts the
     # very chunks the provenance ids name, so "the write has landed" is not
@@ -111,12 +111,12 @@ async def mem_fetch(
             )
         except PrivacyRejection as exc:
             app.search_pipeline.invalidate_cache()
+            remedy = privacy_remedy("mcp", path=exc.path, bypassable=exc.scope != "project_shared")
             # Nothing was indexed, so there is no provenance to record.
             return (
                 f"Fetched but NOT indexed — blocked by the redaction guard: {url}\n"
                 f"- Saved to: {file_path}\n"
-                f"- Secret-pattern hits: {exc.hit_count}. Review the file; re-index "
-                f"with 'mm index --force-unsafe' if it is a false positive."
+                f"- Secret-pattern hits: {exc.hit_count}. Review the file. {remedy}"
             )
 
         # Apply tags if provided

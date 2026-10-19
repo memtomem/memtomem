@@ -469,7 +469,11 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                 # file whose content may not be indexed before writing anything.
                 needs_valve = guard.decision == "bypassed"
                 refusal, pre = await preflight_refusal(
-                    comp.index_engine, path, op="mm agent share", needs_valve=needs_valve
+                    comp.index_engine,
+                    path,
+                    op="mm agent share",
+                    needs_valve=needs_valve,
+                    surface="cli",
                 )
                 if refusal is not None:
                     raise click.ClickException(refusal.removeprefix("Error: "))
@@ -485,9 +489,9 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                     )
                 except PrivacyRejection as exc:
                     raise click.ClickException(
-                        exc.mutation_detail("mm agent share", outcome="appended").removeprefix(
-                            "Error: "
-                        )
+                        exc.mutation_detail(
+                            "mm agent share", outcome="appended", surface="cli"
+                        ).removeprefix("Error: ")
                     ) from exc
         except TimeoutError as exc:
             raise click.ClickException(

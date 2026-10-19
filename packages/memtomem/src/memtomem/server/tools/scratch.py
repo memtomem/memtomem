@@ -144,7 +144,7 @@ async def mem_scratch_promote(
             raise
         # In the file, unindexed: marked promoted so a retry cannot append it twice.
         await app.storage.scratch_promote(key, expected_value=entry["value"])
-        return exc.mutation_detail("mem_scratch_promote", outcome="appended")
+        return exc.mutation_detail("mem_scratch_promote", outcome="appended", surface="mcp")
     if stats is None:
         return result
 

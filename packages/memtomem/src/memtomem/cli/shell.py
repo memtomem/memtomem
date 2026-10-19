@@ -250,7 +250,7 @@ async def _cmd_add(comp, args: list[str]) -> None:
     try:
         async with async_file_lock(memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
             refusal, _ = await preflight_refusal(
-                comp.index_engine, target, op="add", needs_valve=False
+                comp.index_engine, target, op="add", needs_valve=False, surface="shell"
             )
             if refusal is not None:
                 comp.search_pipeline.invalidate_cache()
@@ -264,7 +264,9 @@ async def _cmd_add(comp, args: list[str]) -> None:
             except PrivacyRejection as exc:
                 comp.search_pipeline.invalidate_cache()
                 click.secho(
-                    exc.mutation_detail("add", outcome="appended").removeprefix("Error: "),
+                    exc.mutation_detail("add", outcome="appended", surface="shell").removeprefix(
+                        "Error: "
+                    ),
                     fg="red",
                 )
                 return

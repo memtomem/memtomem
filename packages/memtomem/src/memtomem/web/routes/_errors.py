@@ -241,7 +241,7 @@ def privacy_index_blocked_http(exc: Any, op: str) -> HTTPException:
     """:func:`index_blocked_http` for an indexing ``PrivacyRejection``."""
     outcome = exc.mutation_outcome or "not_written"
     return index_blocked_http(
-        exc.mutation_detail(op, outcome=outcome),
+        exc.mutation_detail(op, outcome=outcome, surface="web"),
         hits=exc.hit_count,
         held=exc.held,
         # Whether this write's bytes may still be in the file.

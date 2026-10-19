@@ -333,7 +333,10 @@ async def mem_candidate_review(
             raise
         # The candidate is in the file but its result may not be indexed.
         # Releasing the claim would let a re-approval append it again.
-        detail = exc.mutation_detail("approve", outcome="appended")
+        detail = exc.mutation_detail("approve", outcome="appended", surface="mcp")
+        # The stored reason is read back by ``mm review`` as well as here, so it
+        # names no surface's command.
+        reason = exc.mutation_detail("approve", outcome="appended", surface="neutral")
         # Stale-claim recovery may already have moved the claim back to
         # ``pending`` while the append ran; quarantine it from there too, or a
         # re-approval would append it a second time.
@@ -341,9 +344,9 @@ async def mem_candidate_review(
         # release below: the append is durable either way.
         try:
             quarantined: bool | None = await app.storage.mark_claimed_candidate_write_uncertain(
-                candidate_id, actor="mcp-approve", reason=detail
+                candidate_id, actor="mcp-approve", reason=reason
             ) or await app.storage.mark_memory_candidate_write_uncertain(
-                candidate_id, actor="mcp-approve", reason=detail
+                candidate_id, actor="mcp-approve", reason=reason
             )
         except Exception:
             logger.warning("could not quarantine candidate %s", candidate_id, exc_info=True)
