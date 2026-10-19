@@ -2206,9 +2206,18 @@ class SqliteBackend(
                 db.rollback()
             raise StorageError(f"delete_chunks failed, transaction rolled back: {exc}") from exc
         if policy_summaries_deleted:
-            logger.info(
-                "Deleted %d policy summary chunks with their source", policy_summaries_deleted
-            )
+            if self._in_transaction:
+                # Not durable yet: the caller's transaction can still roll the
+                # removal back (a dedup merge does when it would take the keeper).
+                logger.info(
+                    "Removing %d policy summary chunks with their source, "
+                    "pending the caller's commit",
+                    policy_summaries_deleted,
+                )
+            else:
+                logger.info(
+                    "Deleted %d policy summary chunks with their source", policy_summaries_deleted
+                )
         return len(rows)
 
     def _delete_policy_summaries_for_source(self, db: sqlite3.Connection, source: str) -> int:

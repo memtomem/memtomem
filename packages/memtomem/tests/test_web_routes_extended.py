@@ -690,9 +690,27 @@ class TestDedup:
         assert resp.status_code == 422
         app.state.search_pipeline.invalidate_cache.assert_not_called()
 
+    async def test_dedup_merge_keeper_in_delete_ids_is_400(self, app, client: AsyncClient):
+        """The scanner's refusal reaches the client as a 400 with its reason (#2787)."""
+        from memtomem.search.dedup import DedupScanner
+        from test_dedup import _FakeStorage, _mk
+
+        keep, dup = _mk("same"), _mk("same")
+        storage = _FakeStorage([keep, dup])
+        app.state.dedup_scanner = DedupScanner(storage)
+
+        resp = await client.post(
+            "/api/dedup/merge",
+            json={"keep_id": str(keep.id), "delete_ids": [str(keep.id), str(dup.id)]},
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"].startswith("keep_id is also listed in delete_ids")
+        assert {c.id for c in storage._chunks} == {keep.id, dup.id}
+
     async def test_dedup_merge_failure_still_invalidates(self, app, client: AsyncClient):
-        """``merge`` upserts the kept chunk's tags before deleting, so even a
-        failed call may have committed a search-visible write (#2157)."""
+        """A failed merge normally writes nothing, but the invalidation does
+        not depend on where the failure happened (#2157)."""
         app.state.dedup_scanner.merge = AsyncMock(side_effect=RuntimeError("boom"))
         with pytest.raises(RuntimeError, match="boom"):
             await client.post(
