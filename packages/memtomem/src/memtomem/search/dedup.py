@@ -111,10 +111,21 @@ class DedupScanner:
         tag-merge upsert on ``keep_id`` nor the deletion of ``delete_ids``.
         The return value is the count of ``delete_ids`` that resolve to
         existing chunks — the same value the non-dry path's
-        ``storage.delete_chunks`` would return.
+        ``storage.delete_chunks`` would return. It does not promise that the
+        apply succeeds: a refusal decided by the delete itself (below) shows
+        only there.
+
+        A repeated id counts once. ``ValueError`` when ``keep_id`` is also in
+        ``delete_ids``, when any chunk's source is held, or when the delete
+        would take the kept chunk with it (the last chunk of a source whose
+        consolidation-policy summary is the keeper); nothing is written then.
         """
         if not delete_ids:
             return 0
+        # The same list drives the preview count, the tag union and the delete.
+        delete_ids = list(dict.fromkeys(delete_ids))
+        if keep_id in delete_ids:
+            raise ValueError("keep_id is also listed in delete_ids; the kept chunk is not deleted")
 
         if dry_run:
             # Writes nothing, so it has no write to protect and does not take
@@ -168,7 +179,17 @@ class DedupScanner:
 
             # The delete is final, so a source it empties is cleaned up now,
             # as it was when this delete ran outside a transaction.
-            return await self._storage.delete_chunks(delete_ids, finalize_emptied=True)
+            deleted = await self._storage.delete_chunks(delete_ids, finalize_emptied=True)
+            # That cleanup can take the keeper too: emptying a source removes
+            # its consolidation-policy summary. Checked after the delete rather
+            # than predicted, so a cascade added there later is caught as well;
+            # raising rolls back the tag merge and the delete together.
+            if keep_id not in await self._storage.get_chunks_batch([keep_id]):
+                raise ValueError(
+                    "merging would delete the kept chunk too (the delete's cleanup removed it); "
+                    "nothing was merged"
+                )
+            return deleted
 
     async def _refuse_hidden(self, chunks_map: dict[UUID, Chunk]) -> None:
         # The scan's rule (``exclude_hidden``): a held or pending source, and a

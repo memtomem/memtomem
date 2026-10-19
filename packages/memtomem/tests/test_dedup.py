@@ -54,6 +54,8 @@ class _FakeStorage:
         self.held_sources = held_sources or set()
         self.transactions = 0
         self.finalized: list[bool] = []
+        self.batch_reads: list[list[UUID]] = []
+        self.deletes: list[list[UUID]] = []
         self.lookups: list[list[str]] = []
         self.probes: list[dict] = []
 
@@ -77,6 +79,7 @@ class _FakeStorage:
         yield
 
     async def get_chunks_batch(self, ids: list[UUID]) -> dict[UUID, Chunk]:
+        self.batch_reads.append(list(ids))
         by_id = {c.id: c for c in self._chunks}
         return {i: by_id[i] for i in ids if i in by_id}
 
@@ -90,6 +93,7 @@ class _FakeStorage:
 
     async def delete_chunks(self, ids: list[UUID], *, finalize_emptied: bool = False) -> int:
         self.finalized.append(finalize_emptied)
+        self.deletes.append(list(ids))
         target = set(ids)
         before = len(self._chunks)
         self._chunks[:] = [c for c in self._chunks if c.id not in target]
@@ -641,8 +645,8 @@ class TestMcpMergeInvalidation:
 
     @pytest.mark.asyncio
     async def test_failed_apply_invalidates(self, monkeypatch):
-        """The kept chunk's merged tags are upserted before the losers are
-        deleted, so a failed apply may already be search-visible."""
+        """A failed apply normally writes nothing, but the invalidation does
+        not depend on where the failure happened."""
         app = self._app()
         app.dedup_scanner.merge = AsyncMock(side_effect=RuntimeError("delete failed"))
         dedup_decay = self._patch(monkeypatch, app)
@@ -667,3 +671,89 @@ class TestMcpMergeInvalidation:
 
         assert "scan failed" in out
         app.search_pipeline.invalidate_cache.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_keeper_in_delete_ids_is_an_error_string(self, monkeypatch):
+        keep, dup = _mk("same"), _mk("same")
+        storage = _FakeStorage([keep, dup])
+        app = self._app()
+        app.dedup_scanner = DedupScanner(storage)
+        dedup_decay = self._patch(monkeypatch, app)
+
+        out = await dedup_decay.mem_dedup_merge(
+            keep_id=str(keep.id), delete_ids=[str(keep.id), str(dup.id)], dry_run=False, ctx=None
+        )
+
+        assert out.startswith("Error: keep_id is also listed in delete_ids")
+        assert {c.id for c in storage._chunks} == {keep.id, dup.id}
+
+
+class TestMergeIdNormalisation:
+    """A keeper listed for deletion is refused, and repeated ids count once (#2787)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("dry_run", [True, False])
+    @pytest.mark.parametrize("with_dup", [True, False])
+    async def test_keeper_in_delete_ids_is_refused_before_any_read(self, dry_run, with_dup):
+        keep, dup = _mk("same"), _mk("same")
+        storage = _FakeStorage([keep, dup])
+        delete_ids = [keep.id, dup.id] if with_dup else [keep.id]
+
+        with pytest.raises(ValueError, match="keep_id is also listed in delete_ids"):
+            await DedupScanner(storage).merge(keep.id, delete_ids, dry_run=dry_run)
+
+        assert {c.id for c in storage._chunks} == {keep.id, dup.id}
+        assert storage.batch_reads == []
+        assert storage.transactions == 0
+        assert storage.deletes == []
+
+    @pytest.mark.asyncio
+    async def test_repeated_ids_count_once_in_preview_and_apply(self):
+        keep, d, e = _mk("same"), _mk("same"), _mk("same")
+        storage = _FakeStorage([keep, d, e])
+        scanner = DedupScanner(storage)
+
+        assert await scanner.merge(keep.id, [d.id, e.id, d.id], dry_run=True) == 2
+        assert await scanner.merge(keep.id, [d.id, e.id, d.id]) == 2
+        assert storage.deletes == [[d.id, e.id]]
+
+
+@pytest.mark.asyncio
+async def test_merge_that_would_cascade_to_the_keeper_is_rolled_back(
+    components, memory_dir, caplog
+):
+    """Emptying a source removes its policy summary; a summary kept by the merge must survive."""
+    import logging
+
+    from memtomem.models import CONSOLIDATED_SUFFIX, ORIGIN_CONSOLIDATION_POLICY
+    from memtomem.storage.sqlite_helpers import norm_path
+
+    storage = components.storage
+    parent = memory_dir / "parent.md"
+    keep = Chunk(
+        content="same body",
+        metadata=ChunkMetadata(
+            source_file=Path(norm_path(parent) + CONSOLIDATED_SUFFIX),
+            origin=ORIGIN_CONSOLIDATION_POLICY,
+            tags=("summary",),
+        ),
+        embedding=[0.1] * 1024,
+    )
+    last = Chunk(
+        content="same body",
+        metadata=ChunkMetadata(source_file=parent, tags=("from-parent",)),
+        embedding=[0.1] * 1024,
+    )
+    await storage.upsert_chunks([keep, last])
+
+    caplog.set_level(logging.INFO, logger="memtomem.storage.sqlite_backend")
+    with pytest.raises(ValueError, match="would delete the kept chunk"):
+        await DedupScanner(storage).merge(keep.id, [last.id])
+
+    left = await storage.get_chunks_batch([keep.id, last.id])
+    assert set(left) == {keep.id, last.id}
+    assert left[keep.id].metadata.tags == ("summary",)
+    # The removal was rolled back, so no log line may report it as done.
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("pending the caller's commit" in m for m in messages)
+    assert not any(m.startswith("Deleted") and "policy summary" in m for m in messages)
