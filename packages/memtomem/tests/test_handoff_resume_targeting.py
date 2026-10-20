@@ -890,3 +890,38 @@ def test_the_count_cannot_vouch_for_a_record_saved_without_a_field(tmp_path, e5_
     assert any(c.startswith("blockers: none\n") for c in contents[1:]), "re-pick the padding"
     assert _record_is_whole(contents)
     assert _parse_fields(contents[::-1])["blockers"] == "none"
+
+
+async def test_a_failure_report_needs_the_chunk_id_to_locate_the_file(monkeypatch) -> None:
+    """Resume step 4 reports each row's ``source`` and ``chunk_id`` (#2815).
+
+    The structured recall resume reads gives ``source`` as the file name only,
+    so a report of ``source`` alone cannot locate the file. Reading the chunk
+    by its ``chunk_id`` gives the full path and the line range.
+    """
+    from pathlib import PurePosixPath
+    from unittest.mock import MagicMock
+
+    from memtomem.models import Chunk, ChunkMetadata
+    from memtomem.server.formatters import _format_recall_structured
+    from memtomem.server.tools import browse
+
+    path = PurePosixPath("/Users/x/work/project/.memtomem/memories.local/2026-10-20.md")
+    chunk = Chunk(
+        content=f"handoff_id: {_TARGET_ID}",
+        metadata=ChunkMetadata(source_file=path, start_line=12, end_line=27),
+    )
+
+    row = json.loads(_format_recall_structured([chunk]))["results"][0]
+    assert row["source"] == path.name
+    assert row["chunk_id"] == str(chunk.id)
+
+    app = MagicMock()
+    app.config.search.system_namespace_prefixes = []
+    app.storage.get_chunk = AsyncMock(return_value=chunk)
+    monkeypatch.setattr(browse, "_get_app_initialized", AsyncMock(return_value=app))
+
+    read = await browse.mem_read(chunk_id=row["chunk_id"], ctx=None)
+
+    assert f"- Source: {path}" in read
+    assert "- Lines: 12-27" in read

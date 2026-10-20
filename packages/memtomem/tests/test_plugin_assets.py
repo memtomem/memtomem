@@ -467,6 +467,11 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "silently become a second OR term",
         "union of the selected rows' lines",
         "Never fall back to another record",
+        # Structured recall's ``source`` is a bare file name (#2815), so a
+        # failure report needs the row ids to be traceable.
+        "report the record as unusable together with each row's `source` and `chunk_id`",
+        "`source` is only the file's name, not its path",
+        "reading a chunk by its `chunk_id` shows the full path and line range",
         # Whole clauses, not keywords: each of these encodes a decision that a
         # plausible-looking edit would silently undo (dropping the page size
         # back to 1, calling the tool before validating, checking the tag
@@ -536,6 +541,8 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
     # The row-start rule it replaced: three review rounds each found a torn row
     # it accepted.
     assert "a row begins mid-value" not in flat
+    # It promised a readable path from a field that carries only a file name.
+    assert "so the file can be read directly" not in flat
     assert 'scope="user"' in body and "Never fall back" in body
     assert "mem_do" not in body
     assert "delete, acknowledge, consume, edit" in body

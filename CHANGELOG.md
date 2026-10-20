@@ -7,6 +7,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A handoff resume that fails now reports each row's `chunk_id` as well as
+  its `source` (#2815).** The workflow told the agent to report `source` "so
+  the file can be read directly", but the structured `mem_recall` output that
+  resume reads gives `source` as the file name only. Reading a chunk by its
+  `chunk_id` shows the full path and line range, so the report now carries the
+  ids and says so. The skill's tool allowlist is unchanged.
+
 - **The handoff workflow no longer says the fence keeps a record in one chunk
   (#2814).** That holds for the character-based markdown pass only. Under an
   exact token budget, which the E5 profile sets at 384 tokens, a record over
