@@ -2126,6 +2126,41 @@ class TestAutoConsolidate:
         assert await storage.get_consolidation_targets([late.id]) == {late.id: [racing.id]}
         assert await storage.get_importance_scores(ids) == before
 
+    async def test_auto_consolidate_in_transaction_collision_outranks_coverage(
+        self, storage, monkeypatch
+    ):
+        """A path taken over meanwhile fails the group even when coverage also arrived.
+
+        The pre-check reports a collision before coverage; the recheck under the
+        write lock keeps that order, so the group is not reported as a clean skip.
+        """
+        chunks = [make_chunk(f"regen note {i}", source="regen.md") for i in range(3)]
+        racing = make_chunk("an agent summary written meanwhile", source="consolidated/race.md")
+        squatter = make_chunk("a real file at the summary path", source="regen.md.consolidated.md")
+        await storage.upsert_chunks([*chunks, racing])
+        real_held = storage.is_source_held
+        raced: list[bool] = []
+
+        async def both_land_meanwhile(path):
+            if not raced:
+                raced.append(True)
+                await storage.upsert_chunks([squatter])
+                await storage.add_relation(chunks[0].id, racing.id, "consolidated_into")
+            return await real_held(path)
+
+        monkeypatch.setattr(storage, "is_source_held", both_land_meanwhile)
+
+        result = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+
+        assert raced == [True]
+        assert result.outcome == {"failed": ["regen.md"]}
+        assert result.error == "1 group(s) failed: regen.md"
+        assert [
+            c.id for c in await storage.list_chunks_by_source(Path("/tmp/regen.md.consolidated.md"))
+        ] == [squatter.id]
+
 
 # ── mem_add core + mem_consolidate_apply integration ─────────────────
 #

@@ -365,11 +365,11 @@ def covered_elsewhere(targets: dict[UUID, list[UUID]], replaced: set[UUID]) -> b
     return any(target not in replaced for found in targets.values() for target in found)
 
 
-async def _clear_policy_summaries(
+async def _owned_policy_summaries(
     storage: StorageBackend,
     virtual_path: Path,
-) -> None:
-    """Empty the virtual summary path so this run's summary replaces the last.
+) -> list[Chunk]:
+    """Return the summaries at the virtual path, refusing a path the policy does not own.
 
     Called inside ``apply_consolidation``'s transaction, and reading there on
     purpose: a chunk id read before the write lock can be stale by the time the
@@ -395,6 +395,15 @@ async def _clear_policy_summaries(
             f"policy-owned summaries (origin != {ORIGIN_CONSOLIDATION_POLICY!r}) — a real "
             f"file or another writer's chunks appear to occupy it"
         )
+    return existing
+
+
+async def _clear_policy_summaries(
+    storage: StorageBackend,
+    virtual_path: Path,
+    existing: list[Chunk],
+) -> None:
+    """Empty the virtual summary path of *existing*, from :func:`_owned_policy_summaries`."""
     if existing:
         await storage.delete_chunks([c.id for c in existing])
     # ``delete_chunks`` skips its AI-summary cache cleanup while a transaction
@@ -511,28 +520,22 @@ async def apply_consolidation(
         # summary derived from chunks that are now hidden.
         if await storage.is_source_held(Path(group["source"])):
             raise StorageError("consolidation source became unavailable")
+        # Ownership before coverage, in the order the caller's pre-check uses:
+        # a path the policy does not own fails the group whatever else holds.
+        existing = await _owned_policy_summaries(storage, virtual_path)
         # The caller checked coverage before generating the summary, which can
         # take an LLM call; an agent apply can link these originals meanwhile.
         # Read again under the write lock, before the clear drops the edges
-        # that tell the replaced summary's coverage from anyone else's. Every
-        # row at the path counts as replaced here: one the policy does not own
-        # is refused by the clear as a collision, which the caller reports
-        # before coverage too.
-        replaced = {
-            c.id
-            for c in await storage.list_chunks_by_source(
-                virtual_path, limit=SUMMARY_PATH_SCAN_LIMIT
-            )
-        }
+        # that tell the replaced summary's coverage from anyone else's.
         if source_ids and covered_elsewhere(
             await storage.get_consolidation_targets([UUID(cid) for cid in source_ids]),
-            replaced,
+            {c.id for c in existing},
         ):
             raise CoveredElsewhere(group["source"])
         # Clear the path first so a regeneration replaces rather than
         # duplicates, and so the old summary is only gone once its replacement
         # has landed.
-        await _clear_policy_summaries(storage, virtual_path)
+        await _clear_policy_summaries(storage, virtual_path, existing)
         await storage.upsert_chunks([summary_chunk])
         # The summary is a virtual chunk that never passes through the indexing
         # engine, so this is its only chance at entities (#2155) — without it, a
