@@ -108,12 +108,80 @@ class TestCarry:
         assert await components.storage.update_chunks_scope_for_source(src, tgt, "user", None)
         assert await _targets(components, originals) == {c.id: [summary.id] for c in originals}
 
-        await mem_edit(
+        out = await mem_edit(
             chunk_id=str(summary.id), new_content="edited after the move", ctx=_ctx(components)
         )
 
+        assert "Memory updated" in out
+        assert await components.storage.get_chunk(summary.id) is None
         edited = await _only_chunk(components, tgt)
+        assert "edited after the move" in edited.content
         assert await _targets(components, originals) == {c.id: [edited.id] for c in originals}
+
+    async def test_a_failure_after_the_carry_rolls_it_back(
+        self, components, memory_dir, monkeypatch
+    ):
+        """The carry commits with the delete and the upserts, or not at all."""
+        originals, summary = await _apply(components, memory_dir)
+        path = Path(summary.metadata.source_file)
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("the first summary", "rewritten"),
+            encoding="utf-8",
+        )
+        engine = components.index_engine
+        carried: list[int] = []
+        real_carry = components.storage.carry_consolidation_edges
+
+        async def carry(source_ids, target_id):
+            carried.append(await real_carry(source_ids, target_id))
+            return carried[-1]
+
+        async def fail_after(_path):
+            raise RuntimeError("injected: failure after the carry")
+
+        monkeypatch.setattr(components.storage, "carry_consolidation_edges", carry)
+        monkeypatch.setattr(engine, "_record_source_commit", fail_after)
+        with pytest.raises(RuntimeError, match="after the carry"):
+            await engine.index_file(path)
+
+        assert carried == [3]
+        assert await components.storage.get_chunk(summary.id) is not None
+        assert await _targets(components, originals) == {c.id: [summary.id] for c in originals}
+
+    async def test_a_row_added_during_the_reindex_cancels_the_carry(
+        self, components, memory_dir, monkeypatch
+    ):
+        """A writer without the file's lock can add a row after the diff's snapshot."""
+        from memtomem.models import Chunk, ChunkMetadata
+
+        storage = components.storage
+        originals, summary = await _apply(components, memory_dir)
+        path = Path(summary.metadata.source_file)
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("the first summary", "rewritten"),
+            encoding="utf-8",
+        )
+        intruder = Chunk(
+            content="imported meanwhile",
+            metadata=ChunkMetadata(source_file=summary.metadata.source_file, start_line=90),
+            embedding=[0.1] * 1024,
+        )
+        real_state = storage.get_chunk_index_state
+        calls: list[int] = []
+
+        async def state_then_import(source_file):
+            state = await real_state(source_file)
+            if not calls:
+                await storage.upsert_chunks([intruder])
+            calls.append(len(state))
+            return state
+
+        monkeypatch.setattr(storage, "get_chunk_index_state", state_then_import)
+        await components.index_engine.index_file(path)
+
+        assert calls[:2] == [1, 2]
+        assert await storage.get_chunk(intruder.id) is not None
+        assert await _targets(components, originals) == {}
 
     async def test_a_failed_carry_rolls_the_reindex_back(self, components, memory_dir, monkeypatch):
         from memtomem.server.tools.memory_crud import mem_edit
@@ -214,7 +282,12 @@ class TestNoCarry:
 
 class TestTarget:
     async def test_the_first_stored_chunk_is_the_target(self, components, memory_dir):
-        """An upsert the store ignored has no row; the carry skips it for the next chunk."""
+        """An upsert the store ignored has no row; the carry skips it for the next chunk.
+
+        Called directly: through ``_index_file`` an ignored upsert needs a row
+        already holding its identity, and the in-transaction recount declines
+        the carry first. This pins the guard behind that one.
+        """
         from memtomem.models import Chunk, ChunkMetadata
 
         originals, summary = await _apply(components, memory_dir)

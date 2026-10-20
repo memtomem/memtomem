@@ -17,9 +17,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   That covers `mem_edit`, a web edit, a hand edit picked up by the watcher or
   `mm index`, and a chunker setting change. It applies only when the file is
   named like one `mem_consolidate_apply` writes (`memory-migrate` keeps the
-  name) and held exactly one chunk; a summary file with a second entry, or a
-  summary already split across chunks, keeps the old behaviour, so deleting
-  the summary beside another entry still relists its originals. Edges other
+  name) and was stored as exactly one chunk. A file stored as more than one
+  chunk keeps the old behaviour — a second entry long enough to be its own
+  chunk, or a summary already split — so deleting the summary beside such an
+  entry still relists its originals. (A short entry merged into the summary's
+  chunk is part of that chunk, and the edges already pointed at it.) Edges other
   than `consolidated_into`, and an edited original's own edge, are dropped as
   before.
 

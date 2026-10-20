@@ -2799,6 +2799,7 @@ class IndexEngine:
 
     async def _summary_coverage_to_carry(
         self,
+        file_path: Path,
         decision_path: Path,
         existing_state: Mapping[str, object],
         diff_result: DiffResult,
@@ -2811,10 +2812,18 @@ class IndexEngine:
         one. Each summary has a file of its own, so the file's chunk after the
         re-index is the same summary — but only when that is unambiguous: the
         file is named like one :func:`consolidation_file_name` writes, and it held
-        exactly one chunk, which this re-index deletes. A second entry appended to
-        the file, or a summary already split across chunks, carries nothing, so
-        deleting the summary beside a surviving entry relists its originals
-        rather than covering them with unrelated text.
+        exactly one stored chunk, which this re-index deletes. A file stored as
+        more than one chunk — a second entry appended to it, or a summary already
+        split — carries nothing, so deleting the summary beside a surviving entry
+        relists its originals rather than covering them with unrelated text. (A
+        short entry that merged into the summary's chunk is part of that chunk,
+        and the edges already pointed at it.)
+
+        *existing_state* is the snapshot the diff was computed from, read before
+        the embedding. Called inside the write transaction, this reads the
+        file's rows again through the writer: a writer that does not take the
+        file's lock, such as a bundle import, can add a row in between, and a
+        carry judged on the old snapshot would then cover unrelated text.
         """
         from memtomem.memory_scope import is_consolidation_summary_file
 
@@ -2823,6 +2832,8 @@ class IndexEngine:
         deleted = set(diff_result.to_delete)
         (only,) = existing_state
         if UUID(only) not in deleted:
+            return []
+        if set(await self._storage.get_chunk_index_state(file_path)) != {only}:
             return []
         sources = await self._storage.get_consolidation_sources(list(deleted))
         return [sid for sid in sources if sid not in deleted]
@@ -3488,7 +3499,7 @@ class IndexEngine:
         async with self._storage.transaction():
             await self._validate_source_commit(file_path)
             carried_sources = await self._summary_coverage_to_carry(
-                decision_path, existing_state, diff_result
+                file_path, decision_path, existing_state, diff_result
             )
             if diff_result.to_delete:
                 if isinstance(self._storage, SqliteBackend):
