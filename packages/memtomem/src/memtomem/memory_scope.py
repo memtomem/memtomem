@@ -186,6 +186,43 @@ def resolve_memory_scope_dir(
     raise MemoryScopeError(f"unsupported memory scope: {scope!r}")
 
 
+def resolve_scope_target(
+    base: Path,
+    name: str | Path,
+    *,
+    scope: str | None,
+    project_memory_dirs: Sequence[Path | str],
+) -> Path:
+    """Return ``base / name`` resolved, refusing a link that carries it elsewhere.
+
+    For a target a writer derives rather than one its caller names: the day
+    file, a summary's own file. The gates were run for the scope that chose
+    ``base``, so the write is judged where it resolves (#2807): a link at the
+    target, or at a component of ``name``, must not carry it out of ``base``
+    or into a tier nested inside it. ``scope=None`` checks containment only,
+    for a caller that classifies the resolved target and gates that tier
+    itself.
+
+    The check is made when the target is chosen; nothing binds it to the
+    later ``open``, so a link swapped in between is not caught.
+
+    Raises:
+        MemoryScopeError: When the resolved target is outside ``base``, or
+            classifies to a scope other than ``scope``.
+    """
+    target = (base / name).resolve()
+    if target.is_relative_to(base.resolve()) and (
+        scope is None or classify_scope(target, project_memory_dirs)[0] == scope
+    ):
+        return target
+    where = "the memory directory" if scope is None else f"the {scope} memory directory"
+    raise MemoryScopeError(
+        f"{base / name} resolves to {target}, which is not in {where} {base}; nothing "
+        "was written. Remove the link on that path, or replace it with a regular file "
+        "or directory."
+    )
+
+
 _FS_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 # Digest length and readable-slug budget for per-namespace day files. 16 hex

@@ -281,7 +281,24 @@ async def _add(
             pmdirs = comp.config.indexing.project_memory_dirs
             if not is_project_tier_registered(base, pmdirs):
                 raise click.ClickException(project_tier_registration_error(base, scope))
-        from memtomem.memory_scope import day_file_name, namespace_mix_refusal
+        from memtomem.memory_scope import (
+            day_file_name,
+            namespace_mix_refusal,
+            resolve_scope_target,
+        )
+
+        def _day_file(ns: str | None) -> Path:
+            # Judged where it resolves (#2807): a link at the day file must not
+            # carry the write past the scope the confirmation below is asked for.
+            try:
+                return resolve_scope_target(
+                    base,
+                    day_file_name(ns, default_ns, date_str=date_str),
+                    scope=scope,
+                    project_memory_dirs=comp.config.indexing.project_memory_dirs,
+                )
+            except MemoryScopeError as exc:
+                raise click.ClickException(str(exc)) from exc
 
         # Only set for the default day-file target: the base the day file is
         # rebuilt under when the in-lock namespace disagrees with the pre-lock
@@ -304,7 +321,7 @@ async def _add(
             # namespace across everything it re-chunks.
             day_base = base
             candidate_ns = namespace or await resolve_session_write_namespace(comp.storage)
-            target = (base / day_file_name(candidate_ns, default_ns, date_str=date_str)).resolve()
+            target = _day_file(candidate_ns)
 
         # ADR-0011 PR-D review round 7: Gate B for project_shared must
         # require an explicit ``--confirm-project-shared`` regardless of
@@ -371,9 +388,7 @@ async def _add(
                     # namespace rules in charge, which is the pre-#1991 behavior.
                     effective_ns = namespace or await resolve_session_write_namespace(comp.storage)
                     if day_base is not None:
-                        desired = (
-                            day_base / day_file_name(effective_ns, default_ns, date_str=date_str)
-                        ).resolve()
+                        desired = _day_file(effective_ns)
                         if desired != target:
                             # The session changed namespaces while we waited;
                             # re-acquire on the day file that namespace owns

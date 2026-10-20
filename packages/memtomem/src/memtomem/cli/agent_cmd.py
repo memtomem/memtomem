@@ -407,7 +407,13 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
 
         from memtomem.cli._errors import raise_cli_error
         from memtomem.errors import ConfigError
-        from memtomem.memory_scope import day_file_name, namespace_mix_refusal, require_user_base
+        from memtomem.memory_scope import (
+            MemoryScopeError,
+            day_file_name,
+            namespace_mix_refusal,
+            require_user_base,
+            resolve_scope_target,
+        )
 
         try:
             base = require_user_base(
@@ -422,7 +428,18 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         # in the plain day file would move that day's other entries into
         # ``target`` as soon as chunk merging joined them.
         default_ns = comp.config.namespace.default_namespace
-        path = base / day_file_name(target, default_ns, date_str=date_str)
+        # Judged where it resolves (#2807): this write takes no scope and no
+        # confirmation, so a link at the day file must not carry it out of
+        # the user tier.
+        try:
+            path = resolve_scope_target(
+                base,
+                day_file_name(target, default_ns, date_str=date_str),
+                scope="user",
+                project_memory_dirs=comp.config.indexing.project_memory_dirs,
+            )
+        except MemoryScopeError as exc:
+            raise_cli_error(exc)
 
         from memtomem.context._atomic import (
             _CRUD_SIDECAR_LOCK_BUDGET_S,

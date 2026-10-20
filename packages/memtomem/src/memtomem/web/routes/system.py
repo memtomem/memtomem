@@ -2687,13 +2687,20 @@ async def add_memory(
         # namespace as soon as chunk merging joins two entries. The web surface
         # has no session-derived namespace, so unlike the CLI/MCP paths the
         # name is final here and needs no in-lock re-target.
-        from memtomem.memory_scope import day_file_name
+        from memtomem.memory_scope import MemoryScopeError, day_file_name, resolve_scope_target
 
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        target = (
-            base
-            / day_file_name(req.namespace, config.namespace.default_namespace, date_str=date_str)
-        ).resolve()
+        # Judged where it resolves (#2807): a link at the day file must not
+        # carry the write past the scope Gate B was run for.
+        try:
+            target = resolve_scope_target(
+                base,
+                day_file_name(req.namespace, config.namespace.default_namespace, date_str=date_str),
+                scope=req.scope,
+                project_memory_dirs=config.indexing.project_memory_dirs,
+            )
+        except MemoryScopeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     from memtomem.context._atomic import (
         _CRUD_SIDECAR_LOCK_BUDGET_S,

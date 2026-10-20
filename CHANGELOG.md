@@ -7,6 +7,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A write to the day file no longer follows a link past the target scope's
+  gates (#2807).** Writers that append to the day file without a caller-named
+  target ran the ADR-0011 gates for the scope that chose the base directory,
+  then appended to the day file as spelled. A link at that path carried the
+  write elsewhere: a default `mem_add` with today's file linked into a
+  registered `project_shared` tier appended there and indexed it as
+  `project_shared`, without `confirm_project_shared`. The day file is now
+  resolved and refused, with nothing written, when it leaves the base
+  directory or classifies to another scope; that includes the file an in-lock
+  namespace re-target moves to. This covers `mem_add`, `mem_batch_add`, web
+  `POST /api/add`, `mm add`, `mm shell`'s `add`, `mm agent share`,
+  `mm review approve`, web scratch promote and LangGraph `MemtomemStore.add`;
+  LangGraph refuses a link out of its base and otherwise gates the tier the
+  link lands in. A link that stays inside its own tier still works. The MCP
+  tools now report the resolved path, as the CLI and web already did. The
+  check is made when the target is chosen, not bound to the file the append
+  then opens.
+
 - **`mem_consolidate_apply` with `keep_originals=False` no longer decays a
   summary listed among its originals (#2811).** The scan keeps a summary chunk
   listed, so a group can hold one: a summary appended to the day file before

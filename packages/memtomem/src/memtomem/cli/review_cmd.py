@@ -195,7 +195,11 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
             # cannot split the exclusion check from the file it guards.
             daily_target: Path | None = None
             if candidate["destination"] != "pinned":
-                from memtomem.memory_scope import require_user_base
+                from memtomem.memory_scope import (
+                    MemoryScopeError,
+                    require_user_base,
+                    resolve_scope_target,
+                )
                 from memtomem.source_provenance import (
                     EXCLUDED_TARGET_DETAIL,
                     READ_ONLY_TARGET_DETAIL,
@@ -205,7 +209,18 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                     comp.config.indexing.memory_dirs,
                     comp.config.indexing.project_memory_dirs,
                 )
-                daily_target = base / f"{datetime.now(timezone.utc):%Y-%m-%d}.md"
+                # Judged where it resolves (#2807): this write takes no scope and
+                # no confirmation, so a link at the day file must not carry it
+                # out of the user tier.
+                try:
+                    daily_target = resolve_scope_target(
+                        base,
+                        f"{datetime.now(timezone.utc):%Y-%m-%d}.md",
+                        scope="user",
+                        project_memory_dirs=comp.config.indexing.project_memory_dirs,
+                    )
+                except MemoryScopeError as exc:
+                    raise click.ClickException(str(exc)) from exc
                 # #2488: an excluded target would take the append and re-index to
                 # zeroed stats, leaving the entry unindexed.
                 if comp.index_engine.is_excluded(daily_target):

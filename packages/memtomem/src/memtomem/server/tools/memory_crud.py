@@ -11,7 +11,7 @@ from uuid import UUID
 
 from memtomem.config import TargetScope
 from memtomem.errors import RetryableError
-from memtomem.memory_scope import NS_RETARGET_ATTEMPTS
+from memtomem.memory_scope import NS_RETARGET_ATTEMPTS, MemoryScopeError
 from memtomem.memory_scope import NS_RETARGET_EXHAUSTED_ERROR as _NS_RETARGET_EXHAUSTED
 from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
@@ -181,6 +181,7 @@ def _day_file_retarget(
     day_base: Path | None,
     date_str: str,
     effective_ns: str | None,
+    scope: str,
 ) -> Path | None:
     """Day file this write belongs in, if it is not ``target`` (issue #2005).
 
@@ -193,13 +194,19 @@ def _day_file_retarget(
     keyed to the file. So the caller picks a file from a pre-lock guess,
     and this reports the disagreement so it can re-acquire on the right
     one instead of appending to a file named for someone else's namespace.
+
+    The new day file is judged where it resolves, like the first one (#2807):
+    raises ``MemoryScopeError`` when it leaves ``day_base`` or ``scope``.
     """
     if day_base is None:
         return None
-    from memtomem.memory_scope import day_file_name
+    from memtomem.memory_scope import day_file_name, resolve_scope_target
 
-    desired = day_base / day_file_name(
-        effective_ns, app.config.namespace.default_namespace, date_str=date_str
+    desired = resolve_scope_target(
+        day_base,
+        day_file_name(effective_ns, app.config.namespace.default_namespace, date_str=date_str),
+        scope=scope,
+        project_memory_dirs=app.config.indexing.project_memory_dirs,
     )
     return desired if desired != target else None
 
@@ -896,12 +903,12 @@ async def _mem_add_core(
         # CLI/MCP divergence flagged in PR-D review.
         from memtomem.errors import ConfigError
         from memtomem.memory_scope import (
-            MemoryScopeError,
             day_file_name,
             is_project_tier_registered,
             project_tier_registration_error,
             require_user_base,
             resolve_memory_scope_dir,
+            resolve_scope_target,
         )
         from memtomem.server.tools.search import _resolve_project_context_root
 
@@ -935,21 +942,7 @@ async def _mem_add_core(
                     None,
                 )
         if file_name is not None:
-            # Judged where it resolves: a link at a component of ``file_name``
-            # would carry the write out of ``base``, past the scope the gates
-            # above were run for.
-            target = (base / file_name).resolve()
-            if (
-                not target.is_relative_to(base.resolve())
-                or classify_scope(target, pmdirs)[0] != effective_scope
-            ):
-                return (
-                    f"Error: {base / file_name} resolves to {target}, which is not in "
-                    f"the {effective_scope} memory directory {base}; nothing was "
-                    "written. Replace the link on that path with a directory, or "
-                    "remove it.",
-                    None,
-                )
+            name = file_name
         else:
             # Issue #2005: a day file is shared by every write of the day, and
             # ``index_file`` stamps one namespace across the whole file — so two
@@ -960,9 +953,18 @@ async def _mem_add_core(
             # guess turns out wrong.
             day_base = base
             _, candidate_ns = await capture_session_and_namespace(app, namespace)
-            target = base / day_file_name(
+            name = day_file_name(
                 candidate_ns, app.config.namespace.default_namespace, date_str=date_str
             )
+        # Judged where it resolves (#2807): a link at the target, or at a
+        # component of ``file_name``, would carry the write out of ``base``,
+        # past the scope the gates above were run for.
+        try:
+            target = resolve_scope_target(
+                base, name, scope=effective_scope, project_memory_dirs=pmdirs
+            )
+        except MemoryScopeError as exc:
+            return (f"Error: {exc}", None)
 
     assert target is not None
 
@@ -1016,13 +1018,17 @@ async def _mem_add_core(
                     provenance_session_id, effective_ns = await capture_session_and_namespace(
                         app, namespace
                     )
-                    retarget = _day_file_retarget(
-                        app,
-                        target=target,
-                        day_base=day_base,
-                        date_str=date_str,
-                        effective_ns=effective_ns,
-                    )
+                    try:
+                        retarget = _day_file_retarget(
+                            app,
+                            target=target,
+                            day_base=day_base,
+                            date_str=date_str,
+                            effective_ns=effective_ns,
+                            scope=effective_scope,
+                        )
+                    except MemoryScopeError as exc:
+                        return (f"Error: {exc}", None)
                     if retarget is not None:
                         target = retarget
                         continue
@@ -1943,12 +1949,12 @@ async def mem_batch_add(
         # the user-tier path.
         from memtomem.errors import ConfigError
         from memtomem.memory_scope import (
-            MemoryScopeError,
             day_file_name,
             is_project_tier_registered,
             project_tier_registration_error,
             require_user_base,
             resolve_memory_scope_dir,
+            resolve_scope_target,
         )
         from memtomem.server.tools.search import _resolve_project_context_root
 
@@ -1975,9 +1981,18 @@ async def mem_batch_add(
         # pre-lock-guess/in-lock-retarget split as ``_mem_add_core``.
         day_base = base
         _, candidate_ns = await capture_session_and_namespace(app, namespace)
-        target = base / day_file_name(
-            candidate_ns, app.config.namespace.default_namespace, date_str=date_str
-        )
+        # Judged where it resolves, as in ``_mem_add_core`` (#2807).
+        try:
+            target = resolve_scope_target(
+                base,
+                day_file_name(
+                    candidate_ns, app.config.namespace.default_namespace, date_str=date_str
+                ),
+                scope=effective_scope,
+                project_memory_dirs=pmdirs,
+            )
+        except MemoryScopeError as exc:
+            return f"Error: {exc}"
 
     assert target is not None
 
@@ -2044,13 +2059,17 @@ async def mem_batch_add(
                     provenance_session_id, effective_ns = await capture_session_and_namespace(
                         app, namespace
                     )
-                    retarget = _day_file_retarget(
-                        app,
-                        target=target,
-                        day_base=day_base,
-                        date_str=date_str,
-                        effective_ns=effective_ns,
-                    )
+                    try:
+                        retarget = _day_file_retarget(
+                            app,
+                            target=target,
+                            day_base=day_base,
+                            date_str=date_str,
+                            effective_ns=effective_ns,
+                            scope=effective_scope,
+                        )
+                    except MemoryScopeError as exc:
+                        return f"Error: {exc}"
                     if retarget is not None:
                         target = retarget
                         continue

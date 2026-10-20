@@ -497,7 +497,12 @@ class MemtomemStore:
             effective_scope = resolved
         else:
             from memtomem.errors import ConfigError
-            from memtomem.memory_scope import day_file_name, require_user_base
+            from memtomem.memory_scope import (
+                MemoryScopeError,
+                day_file_name,
+                require_user_base,
+                resolve_scope_target,
+            )
 
             try:
                 # ``allow_project_tier``: this adapter gates the derived
@@ -516,7 +521,18 @@ class MemtomemStore:
             # Issue #2005: one day file per namespace. The adapter resolves
             # its namespace before choosing the file (no session can change
             # it mid-write here), so no in-lock re-target is needed.
-            target = base / day_file_name(effective_namespace, default_ns, date_str=date_str)
+            # Judged where it resolves (#2807): a link at the day file must not
+            # carry the write out of the base. Containment only — the tier is
+            # classified, and gated, by ``_gate_scope_for`` below.
+            try:
+                target = resolve_scope_target(
+                    base,
+                    day_file_name(effective_namespace, default_ns, date_str=date_str),
+                    scope=None,
+                    project_memory_dirs=comp.config.indexing.project_memory_dirs,
+                )
+            except MemoryScopeError as exc:
+                return {"error": "target_outside_memory_dir", "detail": str(exc)}
             # Resolved the same way an explicit target is, not assumed.
             # ``memory_dirs`` and ``project_memory_dirs`` may name the same
             # directory, and when they do this day file really is in the

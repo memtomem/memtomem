@@ -207,7 +207,7 @@ async def _cmd_add(comp, args: list[str]) -> None:
         return
 
     from memtomem.errors import ConfigError
-    from memtomem.memory_scope import require_user_base
+    from memtomem.memory_scope import MemoryScopeError, require_user_base, resolve_scope_target
 
     # The shell's ``add`` takes no ``--scope``, so its destination must be
     # the user tier or nothing: an overlapping config would otherwise make
@@ -221,7 +221,18 @@ async def _cmd_add(comp, args: list[str]) -> None:
         click.secho(str(exc), fg="red")
         return
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    target = base / f"{date_str}.md"
+    # Judged where it resolves, for the same reason (#2807): a link at the day
+    # file must not carry the write out of the user tier.
+    try:
+        target = resolve_scope_target(
+            base,
+            f"{date_str}.md",
+            scope="user",
+            project_memory_dirs=comp.config.indexing.project_memory_dirs,
+        )
+    except MemoryScopeError as exc:
+        click.secho(str(exc), fg="red")
+        return
     # #2488: an excluded target would take the append and re-index to zeroed
     # stats, reporting "0 chunks indexed" for an entry search never sees.
     if comp.index_engine.is_excluded(target):

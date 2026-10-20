@@ -125,13 +125,24 @@ async def promote_scratch(
                 status_code=403, detail="Path is outside configured memory directories"
             )
     else:
-        from memtomem.memory_scope import require_user_base
+        from memtomem.memory_scope import MemoryScopeError, require_user_base, resolve_scope_target
 
         # ConfigError → the app-level 409 handler; the "index nothing"
         # state has no default promotion destination (#1768).
         base = require_user_base(config.indexing.memory_dirs, config.indexing.project_memory_dirs)
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        target = base / f"{date_str}.md"
+        # Judged where it resolves (#2807), with the same status as the
+        # explicit-target refusals above: a link at the day file must not
+        # carry the promotion out of the user tier.
+        try:
+            target = resolve_scope_target(
+                base,
+                f"{date_str}.md",
+                scope="user",
+                project_memory_dirs=config.indexing.project_memory_dirs,
+            )
+        except MemoryScopeError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     # #2488: indexing skips an excluded target, so the promoted entry would never
     # become searchable while the scratch row is marked promoted. Refuse first.
