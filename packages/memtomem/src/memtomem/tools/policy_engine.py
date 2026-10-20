@@ -390,7 +390,8 @@ async def execute_auto_consolidate(
     - ``max_groups`` (int, default 10): cap on groups processed per run.
     - ``max_bullets`` (int, default 20): cap on bullets in the summary.
     - ``keep_originals`` (bool, default True): if False, halve importance
-      scores of originals (floor 0.3) so decay can evict them later.
+      scores of originals (floor 0.3) so decay can evict them later; an
+      original that is itself a summary keeps its score.
       Never a hard delete — see ``feedback_compression_priority.md``.
     - ``summary_namespace`` (str, default ``archive:summary``): target
       namespace for summary chunks. Keeps summaries out of default search

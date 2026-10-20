@@ -217,6 +217,36 @@ class TestApply:
 
         assert "Originals linked: 3/3" in out
 
+    async def test_a_summary_in_the_group_is_linked_but_not_decayed(self, components, memory_dir):
+        """``keep_originals=False`` decays the ordinary notes only (#2811)."""
+        from memtomem.server.tools.consolidation import mem_consolidate, mem_consolidate_apply
+        from memtomem.tools.consolidation_engine import DECAY_FACTOR, DECAY_FLOOR
+
+        storage = components.storage
+        chunks = await _originals(components, memory_dir / "notes.md", 3)
+        elsewhere = await _originals(components, memory_dir / "other.md", 1)
+        await storage.add_relation(elsewhere[0].id, chunks[0].id, "consolidated_into")
+        await storage.update_importance_scores({str(c.id): 0.8 for c in chunks})
+        ctx = _ctx(components)
+        await mem_consolidate(min_group_size=3, source_filter="notes.md", ctx=ctx)
+
+        out = await mem_consolidate_apply(
+            group_id=0, summary="the summary", keep_originals=False, ctx=ctx
+        )
+
+        assert "Originals linked: 3/3" in out
+        summary_id = UUID(out.split("Summary chunk id: ")[1].split("\n")[0])
+        targets = await storage.get_consolidation_targets([c.id for c in chunks])
+        assert targets == {c.id: [summary_id] for c in chunks}
+        scores = await storage.get_importance_scores([str(c.id) for c in chunks])
+        decayed = max(0.8 * DECAY_FACTOR, DECAY_FLOOR)
+        assert scores == {
+            str(chunks[0].id): pytest.approx(0.8),
+            **{str(c.id): pytest.approx(decayed) for c in chunks[1:]},
+        }
+        [run] = await storage.maintenance_run_latest(kind="consolidate_apply")
+        assert sorted(run["summary"]["decayed_ids"]) == sorted(str(c.id) for c in chunks[1:])
+
     @pytest.mark.parametrize(
         "bodies",
         [

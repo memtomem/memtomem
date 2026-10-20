@@ -7,6 +7,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_consolidate_apply` with `keep_originals=False` no longer decays a
+  summary listed among its originals (#2811).** The scan keeps a summary chunk
+  listed, so a group can hold one: a summary appended to the day file before
+  each summary got a file of its own (#2802), or a multi-chunk summary under
+  `consolidated/`. The apply halved its importance with the ordinary notes'.
+  It now applies the rule `auto_consolidate` got in #2806: a chunk that a
+  `consolidated_into` edge points at is linked to the new summary but keeps
+  its importance, and the run record's `decayed_ids` leaves it out.
+
 - **A handoff resume that fails now reports each row's `chunk_id` as well as
   its `source` (#2815).** The workflow told the agent to report `source` "so
   the file can be read directly", but the structured `mem_recall` output that

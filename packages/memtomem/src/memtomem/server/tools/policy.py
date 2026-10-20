@@ -84,7 +84,8 @@ async def mem_policy_add(
         added/removed chunks trigger regeneration.
       - Mixed-namespace sources are skipped with a warning.
       - keep_originals=false soft-decays originals
-        (importance_score *= 0.5, floor 0.3) instead of deleting.
+        (importance_score *= 0.5, floor 0.3) instead of deleting;
+        an original that is itself a summary keeps its score.
       - Summaries default to the ``archive:summary`` namespace so
         they don't pollute default search results.
 

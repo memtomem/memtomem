@@ -95,7 +95,7 @@ mem_policy_add(name="consolidate-sources", policy_type="auto_consolidate",
 
 - `min_group_size`: minimum chunks per source file to qualify (default 3).
 - `max_groups`: cap on groups processed per run (default 10).
-- `keep_originals`: if `false`, soft-decays originals (importance *= 0.5, floor 0.3) instead of deleting.
+- `keep_originals`: if `false`, soft-decays originals (importance *= 0.5, floor 0.3) instead of deleting. An original that is itself a summary (the target of a `consolidated_into` edge) keeps its importance.
 - `summary_namespace`: target namespace for summaries (default `"archive:summary"`) — excluded from default search.
 
 **auto_tag** — tag untagged chunks:

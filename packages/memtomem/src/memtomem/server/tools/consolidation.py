@@ -207,7 +207,8 @@ async def mem_consolidate_apply(
         summary: The consolidated summary written by the agent.
         keep_originals: Keep original chunks (default True). If False,
             originals are soft-decayed (``importance_score *= 0.5``, floor
-            0.3); never a hard delete.
+            0.3); never a hard delete. An original that is itself a summary
+            (the target of a ``consolidated_into`` edge) keeps its importance.
         confirm_project_shared: Required when the group's source chunks
             live in scope='project_shared'. The summary inherits the
             same scope and lands in the project's git-tracked memory
@@ -447,7 +448,13 @@ async def mem_consolidate_apply(
                     app.storage, live_ids, summary_id, strict=True
                 )
                 if not keep_originals and live_ids:
-                    scores = await app.storage.get_importance_scores(live_ids)
+                    # A chunk another consolidation points at is a summary. It is
+                    # summarized with the rest, but it is the record of that other
+                    # consolidation, so it keeps its importance (as on the policy
+                    # path, apply_consolidation).
+                    summaries = await app.storage.get_consolidation_summaries(list(live))
+                    decayed = [cid for cid in live_ids if UUID(cid) not in summaries]
+                    scores = await app.storage.get_importance_scores(decayed) if decayed else {}
                     if scores:
                         floored = {
                             cid: max(score * DECAY_FACTOR, DECAY_FLOOR)
