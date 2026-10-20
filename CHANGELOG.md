@@ -163,10 +163,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   [GHSA-698v-4r3x-3vcv](https://osv.dev/vulnerability/GHSA-698v-4r3x-3vcv) and
   [GHSA-r825-w8mm-5pxw](https://osv.dev/vulnerability/GHSA-r825-w8mm-5pxw).
   vite is dev-only; nothing shipped depends on it.
-- Nine pillow advisories published on 2026-10-20 (TIFF, JPEG, GIF, EPS and PDF
-  decoder flaws) are fixed only in pillow 13.0.0, and fastembed, through which
-  the `onnx` and `all` extras pull pillow 12.3.0, requires `pillow<13` up to
-  its latest 0.9.0. memtomem embeds text only and never decodes an image, so
+- Nine pillow advisories published on 2026-10-20 are fixed only in pillow
+  13.0.0. Each is reached by opening, saving or processing an image — TIFF,
+  JPEG, GIF, EPS and PPM decoding, TIFF and PDF saving, `ImageMorph` — and
+  fastembed, through which the `onnx` and `all` extras pull pillow 12.3.0,
+  requires `pillow<13` up to its latest 0.9.0. memtomem embeds text only and
+  handles no images, so
   they are recorded as reviewed exceptions in `tools/osv-exceptions.toml`,
   expiring on 2026-11-20. Published constraints are unchanged; the lockfile is
   not shipped in the wheel and does not upgrade existing environments.
