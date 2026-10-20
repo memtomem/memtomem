@@ -314,6 +314,18 @@ def consolidation_file_name(source_name: str, run_id: int, *, date_str: str) -> 
     return f"{CONSOLIDATION_DIR}/{name}"
 
 
+#: The basename :func:`consolidation_file_name` writes. The directory is not part
+#: of it: ``memory-migrate`` moves a file to ``<to_dir>/<same name>``.
+_CONSOLIDATION_FILE_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}-(?:[A-Za-z0-9._-]+-)?run\d+-[0-9a-f]{12}\.md"
+)
+
+
+def is_consolidation_summary_file(path: Path) -> bool:
+    """Whether *path* is named like a file :func:`consolidation_file_name` wrote."""
+    return _CONSOLIDATION_FILE_RE.fullmatch(path.name) is not None
+
+
 def namespace_mix_error(
     target: Path,
     existing: Iterable[str],

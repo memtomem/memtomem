@@ -7,6 +7,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Editing an agent consolidation summary no longer relists its originals
+  (#2808).** `mem_consolidate` leaves out an original whose `consolidated_into`
+  edge points at a summary, and the edge points at the summary's chunk id. An
+  edit changes the summary's text, so the re-index gave it a new id and the
+  edges were deleted with the old row: the group was listed again, and a
+  second apply wrote a second summary. A re-index of a summary's own file now
+  moves those edges to the chunk that replaces it, in the same transaction.
+  That covers `mem_edit`, a web edit, a hand edit picked up by the watcher or
+  `mm index`, and a chunker setting change. It applies only when the file is
+  named like one `mem_consolidate_apply` writes (`memory-migrate` keeps the
+  name) and held exactly one chunk; a summary file with a second entry, or a
+  summary already split across chunks, keeps the old behaviour, so deleting
+  the summary beside another entry still relists its originals. Edges other
+  than `consolidated_into`, and an edited original's own edge, are dropped as
+  before.
+
 - **`auto_consolidate` no longer regenerates a summary over a source an agent
   apply has since covered (#2812).** It deferred to an agent apply only while
   the source had no policy summary yet. An agent apply refuses originals the

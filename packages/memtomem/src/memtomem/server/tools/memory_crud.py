@@ -1315,6 +1315,10 @@ async def mem_edit(
     prefix ``new_content`` with ``## `` and the call reverts to a
     full replacement of the chunk's line range.
 
+    Editing an agent consolidation summary keeps its originals covered: the
+    re-index moves their ``consolidated_into`` edges to the summary's new
+    chunk, when the summary is the only chunk of its own file.
+
     ``new_content`` passes through the same trust-boundary redaction
     guard as ``mem_add``. A match rejects the edit unless
     ``force_unsafe=True``; bypass events are audit-logged. See
