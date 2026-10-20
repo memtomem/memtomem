@@ -7,6 +7,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`auto_consolidate` no longer regenerates a summary over a source an agent
+  apply has since covered (#2812).** It deferred to an agent apply only while
+  the source had no policy summary yet. An agent apply refuses originals the
+  policy summary covers, but chunks added after the policy run are uncovered,
+  and once it had summarized them the next run saw the source as stale,
+  summarized them again and, with `keep_originals: false`, decayed them. The
+  coverage check now runs on the stale path too, and counts every outgoing
+  `consolidated_into` edge except those to the policy's own summary at the
+  source's virtual path; the stale summary is left in place. The check is made
+  again inside the write transaction, so an agent apply that lands while the
+  summary is generated also wins the source, and the run reports it as
+  skipped rather than writing over it.
+
 - **A write to the day file no longer follows a link past the target scope's
   gates (#2807).** Writers that append to the day file without a caller-named
   target ran the ADR-0011 gates for the scope that chose the base directory,

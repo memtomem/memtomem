@@ -406,8 +406,10 @@ async def execute_auto_consolidate(
         DEFAULT_SUMMARY_NAMESPACE,
         CONSOLIDATED_SUFFIX,
         SUMMARY_PATH_SCAN_LIMIT,
+        CoveredElsewhere,
         apply_consolidation,
         compute_source_hash,
+        covered_elsewhere,
         is_policy_summary,
         make_heuristic_summary,
         make_llm_summary,
@@ -514,36 +516,42 @@ async def execute_auto_consolidate(
             if len(existing) == 1 and parse_source_hash(existing[0].content) == current_hash:
                 continue  # idempotent — same inputs, same output
             stale = True  # regenerate below
-        else:
-            # Idempotency layer 2 — agent-driven consolidation already covers
-            # this source. When there is no policy-owned virtual summary but
-            # some original chunk already carries an outgoing
-            # ``consolidated_into`` edge, the agent ran
-            # ``mem_consolidate_apply`` for this source already. We defer to
-            # their work rather than overwriting it with a heuristic summary;
-            # ``any`` covered chunk is enough, so even a partial agent
-            # consolidation is kept. Only the outgoing direction counts: a
-            # chunk an edge points *at* is a summary, and a source that holds
-            # one is not consolidated by it. Re-runs after the user adds more
-            # chunks will flow through layer 1 once the user creates a
-            # policy-owned summary again (or the agent regenerates theirs).
-            try:
-                covered = await storage.get_consolidation_targets([c.id for c in chunks])
-            except Exception:
-                # Unknown coverage is not "uncovered": a heuristic summary
-                # here could sit over the agent's, and decay its originals.
-                logger.warning(
-                    "auto_consolidate: could not read consolidation coverage for %s",
-                    source_path,
-                    exc_info=True,
-                )
-                detail_parts.append(f"{source_path.name} (FAILED)")
-                failed.append(f"{source_path.name} (coverage unreadable)")
-                continue
-            if covered:
-                detail_parts.append(f"{source_path.name} (SKIP: agent-consolidated)")
-                skipped.append(f"{source_path.name} (agent-consolidated)")
-                continue
+
+        # Idempotency layer 2 — agent-driven consolidation already covers this
+        # source. When some original carries an outgoing ``consolidated_into``
+        # edge to a summary other than the policy's own at the virtual path,
+        # the agent ran ``mem_consolidate_apply`` over it. We defer to their
+        # work rather than overwriting it with a heuristic summary; ``any``
+        # covered chunk is enough, so even a partial agent consolidation is
+        # kept. Only the outgoing direction counts: a chunk an edge points *at*
+        # is a summary, and a source that holds one is not consolidated by it.
+        #
+        # This holds on a stale source too. An agent apply refuses originals the
+        # policy summary already covers, but chunks added after the policy run
+        # are uncovered, and an apply over them used to be followed by a
+        # regeneration that summarized them again and, with
+        # ``keep_originals: false``, decayed them. The stale policy summary is
+        # left as it is: a skip writes nothing, and that summary still describes
+        # the chunks it was made from. A migrated source whose old-path policy
+        # summary still covers it is reported under the same label
+        # (``covered_elsewhere``).
+        try:
+            covered = await storage.get_consolidation_targets([c.id for c in chunks])
+        except Exception:
+            # Unknown coverage is not "uncovered": a heuristic summary
+            # here could sit over the agent's, and decay its originals.
+            logger.warning(
+                "auto_consolidate: could not read consolidation coverage for %s",
+                source_path,
+                exc_info=True,
+            )
+            detail_parts.append(f"{source_path.name} (FAILED)")
+            failed.append(f"{source_path.name} (coverage unreadable)")
+            continue
+        if covered_elsewhere(covered, {c.id for c in existing}):
+            detail_parts.append(f"{source_path.name} (SKIP: agent-consolidated)")
+            skipped.append(f"{source_path.name} (agent-consolidated)")
+            continue
 
         if dry_run:
             applied += 1
@@ -585,6 +593,12 @@ async def execute_auto_consolidate(
                 extract_entities=extract_entities,
                 summary_namespace=summary_namespace,
             )
+        except CoveredElsewhere:
+            # An agent apply linked these originals while the summary was being
+            # generated; the transaction rolled back, so this is the skip above.
+            detail_parts.append(f"{source_path.name} (SKIP: agent-consolidated)")
+            skipped.append(f"{source_path.name} (agent-consolidated)")
+            continue
         except Exception:
             logger.warning(
                 "auto_consolidate: failed to consolidate %s",

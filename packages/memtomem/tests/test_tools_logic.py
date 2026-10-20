@@ -1974,6 +1974,158 @@ class TestAutoConsolidate:
         assert second.affected_count == 0
         assert "agent-consolidated" not in second.details
 
+    @staticmethod
+    async def _summarize_then_add_a_chunk(storage):
+        """A policy-summarized source (originals at 0.8, so 0.4 after) plus one later chunk.
+
+        An agent apply refuses originals the policy summary covers, so the chunk
+        it can reach is one added after the policy run.
+        """
+        originals = [make_chunk(f"regen note {i}", source="regen.md") for i in range(3)]
+        await storage.upsert_chunks(originals)
+        await storage.update_importance_scores({str(c.id): 0.8 for c in originals})
+        config = {"min_group_size": 3, "keep_originals": False}
+        first = await execute_auto_consolidate(storage, config, namespace=None, dry_run=False)
+        assert first.details == "Consolidated 1 groups: regen.md"
+        virtual = Path("/tmp/regen.md.consolidated.md")
+        (policy_summary,) = await storage.list_chunks_by_source(virtual, limit=5)
+
+        later = make_chunk("a later regen note", source="regen.md")
+        await storage.upsert_chunks([later])
+        await storage.update_importance_scores({str(later.id): 0.8})
+        return config, virtual, policy_summary, [*originals, later]
+
+    async def test_auto_consolidate_defers_to_an_agent_apply_on_a_stale_source(
+        self, storage, monkeypatch
+    ):
+        """A stale source an agent apply has since covered is skipped, not regenerated."""
+        import memtomem.tools.consolidation_engine as engine
+
+        config, virtual, policy_summary, chunks = await self._summarize_then_add_a_chunk(storage)
+        agent_summary = make_chunk("an agent summary", source="consolidated/agent.md")
+        await storage.upsert_chunks([agent_summary])
+        await storage.add_relation(chunks[3].id, agent_summary.id, "consolidated_into")
+        ids = [str(c.id) for c in chunks]
+        before = await storage.get_importance_scores(ids)
+        assert before == {**{cid: pytest.approx(0.4) for cid in ids[:3]}, ids[3]: 0.8}
+        summarized: list[Path] = []
+        real = engine.make_heuristic_summary
+
+        def spy(group_chunks, source, **kwargs):
+            summarized.append(source)
+            return real(group_chunks, source, **kwargs)
+
+        monkeypatch.setattr(engine, "make_heuristic_summary", spy)
+
+        preview = await execute_auto_consolidate(storage, config, namespace=None, dry_run=True)
+        assert preview.details == "Would consolidate 0 groups: regen.md (SKIP: agent-consolidated)"
+
+        result = await execute_auto_consolidate(storage, config, namespace=None, dry_run=False)
+
+        assert result.details == "Consolidated 0 groups: regen.md (SKIP: agent-consolidated)"
+        assert result.outcome == {"skipped": ["regen.md (agent-consolidated)"]}
+        assert result.error is None
+        assert summarized == []
+        assert [c.id for c in await storage.list_chunks_by_source(virtual, limit=5)] == [
+            policy_summary.id
+        ]
+        assert await storage.get_consolidation_targets([c.id for c in chunks]) == {
+            **{c.id: [policy_summary.id] for c in chunks[:3]},
+            chunks[3].id: [agent_summary.id],
+        }
+        assert await storage.get_importance_scores(ids) == before
+
+    async def test_auto_consolidate_stale_source_coverage_unreadable_fails(
+        self, storage, monkeypatch
+    ):
+        """The stale path reads coverage too, and a failed read leaves the summary."""
+        import sqlite3
+
+        config, virtual, policy_summary, _ = await self._summarize_then_add_a_chunk(storage)
+
+        async def unreadable(chunk_ids):
+            raise sqlite3.OperationalError("injected: relations unreadable")
+
+        monkeypatch.setattr(storage, "get_consolidation_targets", unreadable)
+
+        result = await execute_auto_consolidate(storage, config, namespace=None, dry_run=False)
+
+        assert result.details == "Consolidated 0 groups: regen.md (FAILED)"
+        assert result.outcome == {"failed": ["regen.md (coverage unreadable)"]}
+        assert [c.id for c in await storage.list_chunks_by_source(virtual, limit=5)] == [
+            policy_summary.id
+        ]
+
+    async def test_auto_consolidate_defers_to_a_policy_summary_at_another_path(self, storage):
+        """A migrated source still covered at its old summary path is not summarized again.
+
+        A context migration moves a source's chunks with their ids and edges and
+        leaves the policy summary at the old path, so only the summary at this
+        source's own path is one a run replaces.
+        """
+        moved = [make_chunk(f"moved note {i}", source="moved.md") for i in range(3)]
+        old_summary = make_chunk(
+            "the policy summary written before the move",
+            source="old.md.consolidated.md",
+            namespace=DEFAULT_SUMMARY_NAMESPACE,
+            origin=ORIGIN_CONSOLIDATION_POLICY,
+        )
+        await storage.upsert_chunks([*moved, old_summary])
+        for chunk in moved:
+            await storage.add_relation(chunk.id, old_summary.id, "consolidated_into")
+
+        result = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=False
+        )
+
+        assert result.outcome == {"skipped": ["moved.md (agent-consolidated)"]}
+        assert await storage.list_chunks_by_source(Path("/tmp/moved.md.consolidated.md")) == []
+
+    @pytest.mark.parametrize("stale", [False, True], ids=["no-summary", "stale"])
+    async def test_auto_consolidate_rechecks_coverage_in_its_transaction(
+        self, storage, monkeypatch, stale
+    ):
+        """An agent apply that lands while the summary is generated wins the source."""
+        virtual = Path("/tmp/regen.md.consolidated.md")
+        if stale:
+            config, _, policy_summary, chunks = await self._summarize_then_add_a_chunk(storage)
+            expected_summaries = [policy_summary.id]
+        else:
+            config = {"min_group_size": 3, "keep_originals": False}
+            chunks = [make_chunk(f"regen note {i}", source="regen.md") for i in range(3)]
+            await storage.upsert_chunks(chunks)
+            await storage.update_importance_scores({str(c.id): 0.8 for c in chunks})
+            expected_summaries = []
+        late = chunks[-1]
+        racing = make_chunk("an agent summary written meanwhile", source="consolidated/race.md")
+        await storage.upsert_chunks([racing])
+        ids = [str(c.id) for c in chunks]
+        before = await storage.get_importance_scores(ids)
+        real_held = storage.is_source_held
+        raced: list[bool] = []
+
+        async def agent_applies_meanwhile(path):
+            # The policy's own hold check runs after the summary is generated and
+            # before apply_consolidation opens its transaction: commit the agent's
+            # edge there, once, outside any transaction.
+            if not raced:
+                raced.append(True)
+                await storage.add_relation(late.id, racing.id, "consolidated_into")
+            return await real_held(path)
+
+        monkeypatch.setattr(storage, "is_source_held", agent_applies_meanwhile)
+
+        result = await execute_auto_consolidate(storage, config, namespace=None, dry_run=False)
+
+        assert raced == [True]
+        assert result.outcome == {"skipped": ["regen.md (agent-consolidated)"]}
+        assert result.error is None
+        assert [
+            c.id for c in await storage.list_chunks_by_source(virtual, limit=5)
+        ] == expected_summaries
+        assert await storage.get_consolidation_targets([late.id]) == {late.id: [racing.id]}
+        assert await storage.get_importance_scores(ids) == before
+
 
 # ── mem_add core + mem_consolidate_apply integration ─────────────────
 #
