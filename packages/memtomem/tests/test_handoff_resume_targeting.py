@@ -568,11 +568,38 @@ _FIELDS = (
 _FASTEMBED_CACHE_ENV = ("MEMTOMEM_FASTEMBED_CACHE", "FASTEMBED_CACHE_PATH")
 
 
+def _verified_cached_e5_tokenizer() -> str | None:
+    """A copy of the pinned tokenizer already in a fastembed cache, read only.
+
+    Looks where the product would (the non-empty overrides, then the default
+    ``~/.memtomem/cache/fastembed``) without creating or writing anything, and
+    returns a file only when its checksum is the pinned one.
+    """
+    import hashlib
+    from pathlib import Path
+
+    from memtomem.embedding.profiles import E5_MODEL, E5_REVISION, E5_TOKENIZER_SHA256
+
+    roots = [os.environ[name] for name in _FASTEMBED_CACHE_ENV if os.environ.get(name)]
+    roots.append(str(Path.home() / ".memtomem" / "cache" / "fastembed"))
+    snapshot = Path("models--" + E5_MODEL.replace("/", "--"), "snapshots", E5_REVISION)
+    for root in roots:
+        candidate = Path(root).expanduser() / snapshot / "tokenizer.json"
+        if not candidate.is_file():
+            continue
+        with candidate.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() == E5_TOKENIZER_SHA256:
+                return str(candidate)
+    return None
+
+
 @pytest.fixture(scope="session")
 def _e5_tokenizer_file(tmp_path_factory) -> str:
     """The pinned E5 ``tokenizer.json``, checksum-verified, as a plain path.
 
-    Skips only when the file cannot be fetched. A checksum mismatch
+    Reuses a verified copy from an existing cache without writing to it;
+    otherwise downloads into a temporary cache, never the developer's. Skips
+    only when the file cannot be fetched. A checksum mismatch on the download
     (``ValueError``) is a real failure and propagates.
     """
     pytest.importorskip("tokenizers")
@@ -582,12 +609,13 @@ def _e5_tokenizer_file(tmp_path_factory) -> str:
 
     from memtomem.embedding.profiles import E5_TOKENIZER, resolve_tokenizer
 
+    cached = _verified_cached_e5_tokenizer()
+    if cached is not None:
+        return cached
     with pytest.MonkeyPatch.context() as mp:
-        # The download goes to the fastembed cache, which defaults to the real
-        # ``~/.memtomem``. Production ignores an empty override, so only a
-        # non-empty one counts as the developer choosing a cache.
-        if not any(os.environ.get(name) for name in _FASTEMBED_CACHE_ENV):
-            mp.setenv("MEMTOMEM_FASTEMBED_CACHE", str(tmp_path_factory.mktemp("fastembed")))
+        # ``MEMTOMEM_FASTEMBED_CACHE`` outranks ``FASTEMBED_CACHE_PATH``, so
+        # this alone keeps the download out of any cache the developer uses.
+        mp.setenv("MEMTOMEM_FASTEMBED_CACHE", str(tmp_path_factory.mktemp("fastembed")))
         try:
             path = resolve_tokenizer(E5_TOKENIZER)
         except (HfHubHTTPError, LocalEntryNotFoundError, OSError, httpx.TransportError) as exc:

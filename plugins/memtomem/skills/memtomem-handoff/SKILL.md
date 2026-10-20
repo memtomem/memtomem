@@ -61,8 +61,9 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    (`indexing.hard_max_chunk_tokens`, 384 on the E5 profile): a record over that budget is
    re-split, fence included, and the split prefers line boundaries. A full-size record, or a
    shorter one with Korean text or a long root, can be stored as two or three rows that all
-   carry the same tags, each starting at a field key or a fence line (a last row can hold
-   only the closing fence); resume reads the union of those rows.
+   carry the same tags; resume reads the union of those rows. While every field line fits
+   the budget, each row starts at a field key or a fence line (a last row can hold only the
+   closing fence).
    The complete record has a hard maximum of 1,200 characters: shorten values
    until it fits, and never call `mem_add` with an oversized record. Apply these value caps:
    `objective` 100 characters, `completed` 240, `changed_files` 180 and at most 10 paths,
