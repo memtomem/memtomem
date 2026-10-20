@@ -411,7 +411,6 @@ async def execute_auto_consolidate(
         make_heuristic_summary,
         make_llm_summary,
         parse_source_hash,
-        source_has_consolidation_relations,
     )
 
     min_group_size = config.get("min_group_size", 3)
@@ -517,16 +516,30 @@ async def execute_auto_consolidate(
         else:
             # Idempotency layer 2 — agent-driven consolidation already covers
             # this source. When there is no policy-owned virtual summary but
-            # some original chunk already carries a ``consolidated_into``
-            # edge, the agent ran ``mem_consolidate_apply`` for this source
-            # already. We defer to their work rather than overwriting it
-            # with a heuristic summary. Re-runs after the user adds more
+            # some original chunk already carries an outgoing
+            # ``consolidated_into`` edge, the agent ran
+            # ``mem_consolidate_apply`` for this source already. We defer to
+            # their work rather than overwriting it with a heuristic summary;
+            # ``any`` covered chunk is enough, so even a partial agent
+            # consolidation is kept. Only the outgoing direction counts: a
+            # chunk an edge points *at* is a summary, and a source that holds
+            # one is not consolidated by it. Re-runs after the user adds more
             # chunks will flow through layer 1 once the user creates a
             # policy-owned summary again (or the agent regenerates theirs).
-            if await source_has_consolidation_relations(
-                storage,
-                [c.id for c in chunks],
-            ):
+            try:
+                covered = await storage.get_consolidation_targets([c.id for c in chunks])
+            except Exception:
+                # Unknown coverage is not "uncovered": a heuristic summary
+                # here could sit over the agent's, and decay its originals.
+                logger.warning(
+                    "auto_consolidate: could not read consolidation coverage for %s",
+                    source_path,
+                    exc_info=True,
+                )
+                detail_parts.append(f"{source_path.name} (FAILED)")
+                failed.append(f"{source_path.name} (coverage unreadable)")
+                continue
+            if covered:
                 detail_parts.append(f"{source_path.name} (SKIP: agent-consolidated)")
                 skipped.append(f"{source_path.name} (agent-consolidated)")
                 continue

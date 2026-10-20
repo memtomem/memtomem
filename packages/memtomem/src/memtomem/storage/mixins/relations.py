@@ -74,6 +74,27 @@ class RelationMixin:
                 targets.setdefault(UUID(source_id), []).append(UUID(target_id))
         return targets
 
+    async def get_consolidation_summaries(self, chunk_ids: Sequence[UUID]) -> set[UUID]:
+        """Return those of *chunk_ids* that a ``consolidated_into`` edge points at.
+
+        The reverse of :meth:`get_consolidation_targets`: these chunks are
+        summaries, whatever else they cover themselves. Reads through the
+        caller's transaction, like that method.
+        """
+        from memtomem.storage.sqlite_backend import _param_batches
+
+        db = self._get_txn_read_db()
+        summaries: set[UUID] = set()
+        for batch in _param_batches([str(cid) for cid in chunk_ids]):
+            marks = ",".join("?" * len(batch))
+            rows = db.execute(
+                "SELECT DISTINCT target_id FROM chunk_relations "  # nosec B608
+                f"WHERE relation_type = 'consolidated_into' AND target_id IN ({marks})",
+                batch,
+            ).fetchall()
+            summaries.update(UUID(row[0]) for row in rows)
+        return summaries
+
     async def delete_relation(self, source_id: UUID, target_id: UUID) -> bool:
         db = self._get_db()
         with self._rolls_back_if_standalone(db):

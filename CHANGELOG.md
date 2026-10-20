@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`auto_consolidate` no longer skips a source for holding a summary
+  (#2806).** It skips a source as `agent-consolidated` when an agent apply
+  already covers it, and read that from edges in both directions, so a chunk
+  that *is* an agent summary counted too. Until each summary got a file of its
+  own (#2802), the apply appended it to the day file, next to ordinary notes,
+  so once that file held one summary every later run skipped the whole file.
+  Only an original's outgoing `consolidated_into` edge counts now. The summary
+  is summarized with the rest of its file, but with `keep_originals: false` it
+  is not decayed, on a regeneration either. A source whose coverage cannot be
+  read is reported as failed and left alone, where it used to be read as
+  uncovered and consolidated.
+
 - **`mem_consolidate_apply` no longer leaves its run record `running`, or
   rewrites an applied one as `error` (#2805).** When the source was held right
   after the apply opened its `maintenance_runs` row, the apply refused without

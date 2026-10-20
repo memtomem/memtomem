@@ -489,6 +489,21 @@ class TestStorage:
             c.id: [summary.id] for c in originals[:4]
         }
 
+    async def test_summaries_are_incoming_typed_and_batched(self, storage, tmp_path, monkeypatch):
+        from memtomem.storage import sqlite_backend
+
+        monkeypatch.setattr(sqlite_backend, "_SQL_MAX_PARAMS", 2)
+        originals = [_chunk(f"note {i}", tmp_path / "a.md") for i in range(3)]
+        summaries = [_chunk(f"summary {i}", tmp_path / "s.md") for i in range(3)]
+        linked = _chunk("linked", tmp_path / "o.md")
+        await storage.upsert_chunks([*originals, *summaries, linked])
+        for original, summary in zip(originals, summaries):
+            await storage.add_relation(original.id, summary.id, "consolidated_into")
+        await storage.add_relation(originals[0].id, linked.id, "related")
+
+        ids = [c.id for c in originals] + [c.id for c in summaries] + [linked.id]
+        assert await storage.get_consolidation_summaries(ids) == {c.id for c in summaries}
+
     async def test_targets_read_the_writer_inside_a_transaction(
         self, storage, tmp_path, monkeypatch
     ):

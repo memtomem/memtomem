@@ -322,33 +322,6 @@ async def link_consolidation_relations(
     return linked
 
 
-async def source_has_consolidation_relations(
-    storage: StorageBackend,
-    chunk_ids: list[UUID],
-) -> bool:
-    """Return True if any chunk in the group already has a ``consolidated_into``
-    edge — the idempotency fallback used by ``execute_auto_consolidate``.
-
-    Used specifically for the "has this source been consolidated by anyone?"
-    question when the policy handler's own virtual summary is absent (e.g.
-    the agent ran ``mem_consolidate_apply`` for this source already). The
-    ``any`` threshold is intentional: even a partial consolidation from the
-    agent's end is enough to defer to their work rather than overwriting it
-    with a heuristic summary. Source-hash staleness on the policy-owned
-    virtual summary is a separate signal and takes priority when the virtual
-    summary exists.
-    """
-    for cid in chunk_ids:
-        try:
-            related = await storage.get_related(cid)
-        except Exception:
-            logger.warning("get_related failed for %r", cid, exc_info=True)
-            continue
-        if any(rel == "consolidated_into" for _, rel in related):
-            return True
-    return False
-
-
 #: Ownership has to be established over the *whole* path, so the scan asks for
 #: more rows than a summary path can hold and treats hitting the cap as
 #: "cannot establish ownership" rather than as a clean read.
@@ -481,7 +454,8 @@ async def apply_consolidation(
         keep_originals: If ``False``, apply a soft decay to originals by
             halving their importance score with a ``DECAY_FLOOR`` floor of
             0.3 so already-low chunks don't get evicted instantly. Never a
-            hard delete.
+            hard delete. An original that is itself a summary (the target of
+            a ``consolidated_into`` edge) is not decayed.
         summary_namespace: Namespace for the new summary chunk. Default
             ``archive:summary``.
         extract_entities: Write ``chunk_entities`` for the summary. Carries
@@ -529,7 +503,13 @@ async def apply_consolidation(
         await link_consolidation_relations(storage, source_ids, summary_chunk.id, strict=True)
 
         if not keep_originals and source_ids:
-            scores = await storage.get_importance_scores(source_ids)
+            # A chunk another consolidation points at is a summary (an agent
+            # apply's, appended to the day file before each summary got a file
+            # of its own). It is summarized here with the rest, but it is the
+            # record of that other consolidation, so it keeps its importance.
+            summaries = await storage.get_consolidation_summaries([UUID(cid) for cid in source_ids])
+            decayed = [cid for cid in source_ids if UUID(cid) not in summaries]
+            scores = await storage.get_importance_scores(decayed) if decayed else {}
             if scores:
                 floored = {
                     cid: max(score * DECAY_FACTOR, DECAY_FLOOR) for cid, score in scores.items()

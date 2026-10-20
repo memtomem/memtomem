@@ -1178,29 +1178,6 @@ class TestConsolidationEngineUnit:
         assert parse_source_hash(without_hash) is None
 
 
-class TestSourceHasConsolidationRelationsLogging:
-    @pytest.mark.asyncio
-    async def test_get_related_failure_logs_warning(self, caplog):
-        """get_related errors must be visible at warning level."""
-        import logging
-        from unittest.mock import AsyncMock
-        from uuid import uuid4
-
-        from memtomem.tools.consolidation_engine import source_has_consolidation_relations
-
-        storage = AsyncMock()
-        storage.get_related = AsyncMock(side_effect=RuntimeError("db error"))
-
-        with caplog.at_level(logging.WARNING, logger="memtomem.tools.consolidation_engine"):
-            result = await source_has_consolidation_relations(storage, [uuid4()])
-
-        assert result is False
-        assert any("get_related failed" in r.message for r in caplog.records)
-        assert all(
-            r.levelno >= logging.WARNING for r in caplog.records if "get_related" in r.message
-        )
-
-
 # ── auto_consolidate handler (integration with storage) ──────────────
 
 
@@ -1877,6 +1854,83 @@ class TestAutoConsolidate:
         )
         assert summaries == []
 
+    async def test_auto_consolidate_a_source_holding_a_summary_is_not_skipped(self, storage):
+        """Only an original's outgoing edge marks its source consolidated.
+
+        A source whose chunk is the *target* of a ``consolidated_into`` edge
+        holds a summary (before each summary got a file of its own, the agent
+        apply appended it to the day file, next to ordinary notes); it is not
+        itself consolidated.
+        """
+        source = "daily.md"
+        chunks = [make_chunk(f"daily note {i}", source=source) for i in range(3)]
+        original = make_chunk("an original in another file", source="notes.md")
+        await storage.upsert_chunks([*chunks, original])
+        await storage.add_relation(original.id, chunks[0].id, "consolidated_into")
+
+        result = await execute_auto_consolidate(
+            storage, {"min_group_size": 3}, namespace=None, dry_run=True
+        )
+
+        assert result.details == "Would consolidate 1 groups: daily.md"
+
+    async def test_auto_consolidate_does_not_decay_a_summary_it_summarizes(self, storage):
+        """The summary in a consolidated source keeps its importance, on a regen too."""
+        summary = make_chunk("an agent summary", source="daily.md")
+        notes = [make_chunk(f"daily note {i}", source="daily.md") for i in range(2)]
+        original = make_chunk("an original in another file", source="notes.md")
+        await storage.upsert_chunks([summary, *notes, original])
+        await storage.add_relation(original.id, summary.id, "consolidated_into")
+        await storage.update_importance_scores(
+            {str(c.id): 0.8 for c in [summary, *notes, original]}
+        )
+        config = {"min_group_size": 3, "keep_originals": False}
+
+        first = await execute_auto_consolidate(storage, config, namespace=None, dry_run=False)
+        assert first.affected_count == 1
+        scores = await storage.get_importance_scores([str(c.id) for c in [summary, *notes]])
+        assert scores == {
+            str(summary.id): 0.8,
+            str(notes[0].id): pytest.approx(0.4),
+            str(notes[1].id): pytest.approx(0.4),
+        }
+
+        await storage.upsert_chunks([make_chunk("a later note", source="daily.md")])
+        second = await execute_auto_consolidate(storage, config, namespace=None, dry_run=False)
+        assert "daily.md (regen)" in second.details
+        assert (await storage.get_importance_scores([str(summary.id)])) == {str(summary.id): 0.8}
+
+    async def test_auto_consolidate_skips_a_source_its_coverage_check_cannot_read(
+        self, storage, monkeypatch, caplog
+    ):
+        """A failed coverage read skips that source as failed; it is not read as uncovered."""
+        import logging
+        import sqlite3
+
+        broken = [make_chunk(f"broken chunk {i}", source="broken.md") for i in range(3)]
+        fine = [make_chunk(f"fine chunk {i}", source="fine.md") for i in range(3)]
+        await storage.upsert_chunks([*broken, *fine])
+        broken_ids = {c.id for c in broken}
+        real = storage.get_consolidation_targets
+
+        async def fail_for_broken(chunk_ids):
+            if set(chunk_ids) & broken_ids:
+                raise sqlite3.OperationalError("injected: relations unreadable")
+            return await real(chunk_ids)
+
+        monkeypatch.setattr(storage, "get_consolidation_targets", fail_for_broken)
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.tools.policy_engine"):
+            result = await execute_auto_consolidate(
+                storage, {"min_group_size": 3}, namespace=None, dry_run=False
+            )
+
+        assert result.affected_count == 1
+        assert "broken.md (FAILED)" in result.details
+        assert result.outcome["failed"] == ["broken.md (coverage unreadable)"]
+        assert [Path(g["source"]).name for g in result.outcome["groups"]] == ["fine.md"]
+        assert any("broken.md" in r.getMessage() for r in caplog.records)
+
     async def test_auto_consolidate_agent_any_not_all(self, storage):
         """Only one chunk in a group needs a consolidated_into edge for the
         whole group to be deferred (``any``, not ``all``)."""
@@ -1900,7 +1954,7 @@ class TestAutoConsolidate:
         originals. A subsequent re-run must find the virtual summary FIRST
         (layer 1) and compare hashes, not match layer 2 on its own edges. The
         first run creates + links, the second run must skip via hash match,
-        not via the ``source_has_consolidation_relations`` fallback."""
+        not via the layer-2 coverage check."""
         source = "own-relations.md"
         chunks = [make_chunk(f"own chunk {i}", source=source) for i in range(3)]
         await storage.upsert_chunks(chunks)
