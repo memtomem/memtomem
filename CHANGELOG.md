@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_consolidate_apply` no longer leaves its run record `running`, or
+  rewrites an applied one as `error` (#2805).** When the source was held right
+  after the apply opened its `maintenance_runs` row, the apply refused without
+  finishing the row, which then read as an apply still in flight; it is now
+  finished as `error` with the refusal. And when discarding the preview failed
+  after a summary was published but not linked (source held, already
+  consolidated, no chunk id recovered), the row recorded as `ok` was
+  overwritten as `error` without its `summary_id`; it now keeps the outcome
+  that happened to memory, and the failure is still reported to the caller.
+
 - **`mem_consolidate` no longer lists, and `mem_consolidate_apply` no longer
   applies, a group a summary already covers (#2802).** The scan built its
   groups without looking at `consolidated_into` edges and the apply linked a
