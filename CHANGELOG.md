@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Upgrading
+
+- **A `.env` file now contributes only its `MEMTOMEM_*` keys (#2824, under
+  Security).** If you kept anything else there for memtomem's sake — proxy or
+  certificate variables (`HTTPS_PROXY`, `SSL_CERT_FILE`), `LANGFUSE_*` keys,
+  `HF_*` or `FASTEMBED_CACHE_PATH` — export it in the server's real
+  environment or in your MCP client's `env:` for the server instead. The
+  server names the keys it left out in one startup log line. Under Hermes
+  Agent this matters most: Hermes passes MCP servers only a short allowlist
+  of variables, so `.env` was how those values reached memtomem; set them in
+  a Hermes secret source or a manual `mcp_servers.memtomem` entry's `env:`.
+  Claude Code started from a shell passes that shell's exported variables to
+  the server, so only values kept in `.env` alone are affected there.
+
 ### Fixed
 
 - **`auto_consolidate` no longer regenerates a summary over a source an agent
@@ -151,6 +165,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   message described the rollback but offered no privacy remedy; and
   `mem_fetch` offered `mm index --force-unsafe` without a path (and for
   `project_shared`).
+
+### Security
+
+- **The server no longer copies a whole `.env` file into its environment
+  (#2824).** It loaded the nearest `.env` with python-dotenv, which for a
+  `uvx` launch is usually `~/.env`, and every key there that was not already
+  set entered the server process and every subprocess it starts — API keys
+  for unrelated tools included, whatever environment filtering the MCP client
+  applied. Only `MEMTOMEM_*` keys (any case) are applied now; values are
+  resolved before anything is set, so the other keys never enter the
+  environment, and the left-out names are logged once at startup. Discovery,
+  `${VAR}` interpolation, `PYTHON_DOTENV_DISABLED` and the rule that an
+  exported value wins are unchanged. A quoted key containing `=` used to raise
+  out of server startup after the keys before it were set; it is now left out.
 
 ## [0.6.9] — 2026-10-19
 

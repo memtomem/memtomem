@@ -90,10 +90,12 @@ directory; with a `uvx` launch that location is inside uv's cache (normally `~/.
 so the nearest `.env` among that cache's ancestor directories is applied — normally
 `~/.env`, unless a nearer one such as `~/.cache/.env` exists — while one in the plugin
 directory or where you start Hermes is not. A `MEMTOMEM_*` setting in
-`~/.env` therefore does reach this server. The file is applied whole, not only its
-`MEMTOMEM_*` lines: every variable in it that is not already set enters the server's
-environment, API keys included, regardless of Hermes's allowlist. A variable already set
-keeps its value.
+`~/.env` therefore does reach this server. Only the file's `MEMTOMEM_*` keys are applied:
+the other variables in it, API keys for other tools included, never enter the server's
+environment, and the server names the keys it left out in one startup log line. A variable
+already set keeps its value. Before the release that made this change (#2824), the file was
+applied whole, so with an older memtomem every unset variable in it reached the server
+regardless of Hermes's allowlist.
 
 ## Scope
 
