@@ -479,7 +479,27 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "every required field is present, and `to_runtime` is the current runtime or `any`",
         "a matching tag is not evidence that the content is the record you asked for",
         "Treat the record as torn",
-        "a row begins mid-value instead of at a `<field>:` key",
+        # Torn rows are found by counting, not by judging how a row starts: a
+        # torn value's continuation can begin with any text, including a fence
+        # line or a field key, and mem_recall returns rows newest first.
+        "Check by counting the non-blank lines of the union, in whatever order the rows arrive",
+        "Save writes every field exactly once",
+        "exactly one `<field>:` line per field, either exactly one ```text line and one ``` line",
+        "as a second line for some field, or as a second fence line",
+        "when any count is off",
+        # Its one blind spot, stated rather than hidden: the count assumes Save
+        # wrote every field.
+        "The count vouches only for a record Save wrote in full",
+        "a last row can hold only the closing fence",
+        # A fenced record is not one chunk under an exact token budget (#2814):
+        # the text must say it can split, where, and that tearing is possible
+        # on any record, not only legacy unfenced ones.
+        "its character-based pass never splits the record",
+        "The fence does not keep the record in one chunk under an exact token budget",
+        "re-split, fence included, and the split prefers line boundaries",
+        "resume reads the union of those rows",
+        "A split can also tear a *single* field line in half, on any record",
+        "when that line alone exceeds `indexing.hard_max_chunk_tokens`",
         "never reconstruct a torn value by guessing the join",
         '"handoff-to-<runtime-or-any>", "handoff-id-<handoff-id>"',
         "applied in SQL before the limit",
@@ -509,6 +529,13 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
     )
     for marker in required:
         assert marker in flat
+    # The claim #2814 disproved: false on the E5 profile, whose token pass
+    # re-splits any record over 384 tokens.
+    assert "stays one complete chunk" not in flat
+    assert "A legacy split can also tear" not in flat
+    # The row-start rule it replaced: three review rounds each found a torn row
+    # it accepted.
+    assert "a row begins mid-value" not in flat
     assert 'scope="user"' in body and "Never fall back" in body
     assert "mem_do" not in body
     assert "delete, acknowledge, consume, edit" in body

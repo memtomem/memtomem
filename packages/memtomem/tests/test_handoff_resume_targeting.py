@@ -30,10 +30,12 @@ selection is decidable from one bounded page.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import pytest
 from helpers import make_chunk
 
 _NAMESPACE = "shared:proj"
@@ -435,12 +437,14 @@ def _chunk_at_min_size(tmp_path, record: str):
 
 
 def test_fenced_record_stays_one_chunk_at_the_minimum_chunk_size(tmp_path) -> None:
-    """The fence is what makes ``limit``-bounded resume sound.
+    """The fence keeps the character-based markdown pass from splitting a record.
 
     ``indexing.max_chunk_tokens`` is user-settable down to 64, well under a
-    full-size record. A fenced block is atomic to the chunker, so the record
-    survives whole; unfenced it splits and a lookup can land on a fragment
-    (pinned by the sibling test below).
+    full-size record. A fenced block is atomic to the markdown chunker, so the
+    record survives that pass whole; unfenced it splits and a lookup can land
+    on a fragment (pinned by the sibling test below). This config has no exact
+    token budget; the E5 token pass, which does split a fenced record, is
+    pinned by the ``e5_budget`` tests at the end of this file.
     """
     tagged = _chunk_at_min_size(tmp_path, _max_size_record(fenced=True))
 
@@ -516,7 +520,12 @@ def test_legacy_record_with_a_long_value_tears_a_field_line(tmp_path) -> None:
 
 
 def test_fencing_prevents_the_torn_field_line(tmp_path) -> None:
-    """The Save-side fix for the case above: fenced, the long value survives."""
+    """The Save-side fix for the case above, on the character-based pass.
+
+    Fenced, the long value survives the markdown chunker. Under an exact token
+    budget a single line over that budget is torn even when fenced; see
+    ``test_normalization_expanding_line_is_torn_and_detectable``.
+    """
     long_root = "/Users/x/" + "/".join(f"deeply_nested_dir_{i}" for i in range(15))
     record = (
         "```text\n"
@@ -532,3 +541,324 @@ def test_fencing_prevents_the_torn_field_line(tmp_path) -> None:
 
     assert len(tagged) == 1
     assert f"project_root: {long_root}" in tagged[0].content
+
+
+# --- The E5 token pass (#2814) ---------------------------------------------
+#
+# The tests above use a config with no exact token budget, so only the
+# character-based markdown pass runs and the fence keeps a record whole. The
+# E5 profile adds ``bound_chunks``, which re-splits any chunk over
+# ``hard_max_chunk_tokens`` (384) and does not exempt a fence. These tests pin
+# what the workflow says about that pass, against the pinned tokenizer.
+
+_FIELDS = (
+    "handoff_id",
+    "from_runtime",
+    "to_runtime",
+    "project_root",
+    "objective",
+    "completed",
+    "changed_files",
+    "git_head",
+    "worktree_state",
+    "validation",
+    "blockers",
+    "next_action",
+)
+_FASTEMBED_CACHE_ENV = ("MEMTOMEM_FASTEMBED_CACHE", "FASTEMBED_CACHE_PATH")
+
+
+@pytest.fixture(scope="session")
+def _e5_tokenizer_file(tmp_path_factory) -> str:
+    """The pinned E5 ``tokenizer.json``, checksum-verified, as a plain path.
+
+    Skips only when the file cannot be fetched. A checksum mismatch
+    (``ValueError``) is a real failure and propagates.
+    """
+    pytest.importorskip("tokenizers")
+    pytest.importorskip("huggingface_hub")
+    httpx = pytest.importorskip("httpx")
+    from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+
+    from memtomem.embedding.profiles import E5_TOKENIZER, resolve_tokenizer
+
+    with pytest.MonkeyPatch.context() as mp:
+        # The download goes to the fastembed cache, which defaults to the real
+        # ``~/.memtomem``. Production ignores an empty override, so only a
+        # non-empty one counts as the developer choosing a cache.
+        if not any(os.environ.get(name) for name in _FASTEMBED_CACHE_ENV):
+            mp.setenv("MEMTOMEM_FASTEMBED_CACHE", str(tmp_path_factory.mktemp("fastembed")))
+        try:
+            path = resolve_tokenizer(E5_TOKENIZER)
+        except (HfHubHTTPError, LocalEntryNotFoundError, OSError, httpx.TransportError) as exc:
+            pytest.skip(f"pinned E5 tokenizer unavailable: {type(exc).__name__}: {exc}")
+    return str(path)
+
+
+@pytest.fixture
+def e5_budget(_e5_tokenizer_file):
+    """The E5 profile's indexing budget and a ``TokenBudget`` over it.
+
+    Built from the profile rather than copied numbers, then pointed at the
+    already verified file so no later step downloads again.
+    """
+    from memtomem.chunking.bounded import TokenBudget
+    from memtomem.config import EmbeddingConfig, Mem2MemConfig
+    from memtomem.embedding.profiles import E5_TOKENIZER
+
+    indexing = Mem2MemConfig(
+        embedding=EmbeddingConfig(provider="onnx", model="multilingual-e5-small")
+    ).indexing
+    assert indexing.chunk_tokenizer_path == E5_TOKENIZER
+    assert indexing.hard_max_chunk_tokens == 384
+    config = indexing.model_copy(update={"chunk_tokenizer_path": _e5_tokenizer_file})
+    return config, TokenBudget(config)
+
+
+def _korean(length: int) -> str:
+    """Korean prose of exactly *length* characters, the densest field text measured."""
+    sentence = "마이그레이션을 마치고 게이트웨이 경로를 검증한 뒤 리뷰를 올린다 "
+    return (sentence * (length // len(sentence) + 1))[:length]
+
+
+def _fenced_record(**values: str) -> str:
+    fields = {
+        "handoff_id": _TARGET_ID,
+        "from_runtime": "claude-code",
+        "to_runtime": "codex-cli",
+        "project_root": "/Users/x/work/project",
+        "git_head": "a1b2c3d4" * 5,
+        **values,
+    }
+    body = "".join(f"{key}: {fields.get(key, '')}\n" for key in _FIELDS)
+    return "```text\n" + body + "```\n"
+
+
+def _capped_korean_record() -> str:
+    """Every capped field filled to its cap with Korean text."""
+    return _fenced_record(
+        objective=_korean(100),
+        completed=_korean(240),
+        changed_files=", ".join(f"src/pkg/모듈_{i}.py" for i in range(10)),
+        worktree_state=_korean(80),
+        validation=_korean(120),
+        blockers=_korean(80),
+        next_action=_korean(120),
+    )
+
+
+def _e5_rows(tmp_path, record: str, config):
+    """The rows the engine stores: markdown pass, then the exact token pass.
+
+    The engine's ``_merge_short_chunks`` and overlap stages sit between these
+    two and only join chunks, so they cannot add a split.
+    """
+    from memtomem.chunking.bounded import bound_chunks
+    from memtomem.chunking.markdown import MarkdownChunker
+    from memtomem.tools.memory_writer import append_entry
+
+    target = tmp_path / "handoff.md"
+    append_entry(
+        target,
+        record,
+        title=f"Handoff {_TARGET_ID}",
+        tags=["handoff", "handoff-to-codex-cli", f"handoff-id-{_TARGET_ID}"],
+    )
+    chunks = MarkdownChunker(config).chunk_file(target, target.read_text(encoding="utf-8"))
+    return bound_chunks(chunks, config)
+
+
+_FENCE_LINES = ("```text", "```")
+
+
+def _record_is_whole(contents: list[str]) -> bool:
+    """Resume step 4: count the union's non-blank lines, in any row order.
+
+    Save writes every field exactly once, so a whole record has one line per
+    field key and either both fence lines once or neither. A torn value's
+    continuation begins a row with whatever text came next: a line that is no
+    field line, a second line for some field, or a second fence line. Each of
+    those breaks a count, so no row needs to be judged by how it starts.
+    """
+    lines = [line for content in contents for line in content.splitlines() if line.strip()]
+    fences = (lines.count("```text"), lines.count("```"))
+    keys = []
+    for line in lines:
+        if line not in _FENCE_LINES:
+            key, colon, _ = line.partition(":")
+            # A line with no colon is no field line, even when it is a bare key.
+            keys.append(key if colon else line + " (no colon)")
+    return fences in ((1, 1), (0, 0)) and sorted(keys) == sorted(_FIELDS)
+
+
+def _parse_fields(contents: list[str]) -> dict[str, str]:
+    """Resume step 3: read fields per line from the union of rows, in any order."""
+    assert _record_is_whole(contents), "torn record"
+    fields: dict[str, str] = {}
+    for content in contents:
+        for line in content.splitlines():
+            if line.strip() and line not in _FENCE_LINES:
+                key, _, value = line.partition(":")
+                fields[key] = value.removeprefix(" ")
+    return fields
+
+
+def test_e5_token_budget_splits_a_capped_record_between_field_lines(tmp_path, e5_budget):
+    """A fenced record within every cap is more than one row on E5.
+
+    The workflow used to say the fence kept it one chunk. It now says the
+    token pass re-splits it at line boundaries and resume reads the union.
+    """
+    config, budget = e5_budget
+    record = _capped_korean_record()
+    assert len(record) <= 1200, "fixture left the workflow's 1,200-character ceiling"
+
+    rows = _e5_rows(tmp_path, record, config)
+
+    assert len(rows) > 1, "a capped Korean record no longer splits; re-check the workflow text"
+    for row in rows:
+        assert budget.count(row.content) <= config.hard_max_chunk_tokens
+        assert f"handoff-id-{_TARGET_ID}" in row.metadata.tags
+    contents = [row.content for row in rows]
+    expected = _parse_fields([record])
+    assert len(expected) == len(_FIELDS)
+    assert _parse_fields(contents) == expected
+    # mem_recall returns rows newest first, not in file order.
+    assert _parse_fields(contents[::-1]) == expected
+
+
+def test_a_last_row_can_hold_only_the_closing_fence(tmp_path, e5_budget):
+    """A record just over the budget leaves the closing fence alone in a row.
+
+    That row is legitimate, so the count must accept it.
+    """
+    config, budget = e5_budget
+    record = _fenced_record(objective=_korean(100), completed=_korean(240), validation=_korean(103))
+
+    rows = _e5_rows(tmp_path, record, config)
+
+    assert [row.content for row in rows][-1:] == ["```"], "re-pick the padding"
+    assert budget.count(rows[0].content) == config.hard_max_chunk_tokens
+    assert _parse_fields([row.content for row in rows][::-1]) == _parse_fields([record])
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(_korean(240), id="korean-prose"),
+        pytest.param(("/깊은디렉터리이름" * 30)[:240], id="korean-path"),
+        pytest.param(("\U0001f469\u200d\U0001f469\u200d\U0001f467 " * 60)[:240], id="zwj-emoji"),
+        pytest.param(("a1b2c3d4e5f6" * 20)[:240], id="hex"),
+        pytest.param(("!@#$%^&*()_+-=[]{}|;':\",./<>?" * 9)[:240], id="punctuation"),
+    ],
+)
+def test_capped_ordinary_lines_fit_the_e5_line_budget(value, e5_budget):
+    """Why an ordinary token split falls between lines, never inside one.
+
+    The densest 240-character values measured cost at most 243 tokens with
+    their key, against a 384-token budget, so ``TokenBudget.spans`` can back
+    off to the preceding newline.
+    """
+    config, budget = e5_budget
+    assert len(value) == 240
+    assert budget.count(f"completed: {value}") < config.hard_max_chunk_tokens
+
+
+def test_normalization_expanding_line_is_torn_and_detectable(tmp_path, e5_budget):
+    """The case that makes resume's torn-record check apply to every record.
+
+    U+FDFA normalizes to 18 characters before tokenizing, so 240 of them cost
+    far more than the budget although the record is within every cap. The
+    line is torn mid-value. Nothing is lost, but the union now holds lines
+    that are no field line, which is what resume's count catches.
+    """
+    config, budget = e5_budget
+    value = "\ufdfa" * 240
+    record = _fenced_record(completed=value)
+    assert len(record) <= 1200
+    assert budget.count(f"completed: {value}") > config.hard_max_chunk_tokens
+
+    rows = _e5_rows(tmp_path, record, config)
+
+    assert len(rows) > 2
+    contents = [row.content for row in rows]
+    assert not _record_is_whole(contents)
+    assert not _record_is_whole(contents[::-1])
+    assert "".join(contents) == record.rstrip("\n")
+
+
+@pytest.mark.parametrize(
+    ("tail", "padding"),
+    [
+        pytest.param("```tail", 62, id="backticks"),
+        pytest.param("```", 62, id="closing-fence"),
+        pytest.param("```text", 62, id="opening-fence"),
+        pytest.param("blockers: none", 68, id="field-key"),
+    ],
+)
+def test_a_torn_continuation_that_looks_like_a_record_line_is_caught(
+    tail, padding, tmp_path, e5_budget
+):
+    """A torn row can start with text that looks like a whole record line.
+
+    The budget here falls exactly before *tail* inside ``completed``, so a row
+    starts with it. Judging rows by how they start accepted each of these in
+    turn; counting catches every one: ``tail`` is either no record line, a
+    second fence line, or a second line for an existing field.
+    """
+    config, _budget = e5_budget
+    record = _fenced_record(completed="\ufdfa" * 92 + "a" * padding + tail)
+
+    rows = _e5_rows(tmp_path, record, config)
+
+    contents = [row.content for row in rows]
+    # Past the first row, which starts with the record's real opening fence.
+    continuations = contents[1:]
+    assert any(c.startswith(tail + "\n") for c in continuations), "split moved; re-pick padding"
+    assert not _record_is_whole(contents)
+    assert not _record_is_whole(contents[::-1])
+    with pytest.raises(AssertionError, match="torn record"):
+        _parse_fields(contents)
+
+
+def test_fields_no_cap_shortens_fill_most_of_the_e5_budget(e5_budget):
+    """Why lowering the value caps cannot keep every record in one chunk.
+
+    With every capped value empty and a 240-character Korean ``project_root``,
+    the remaining fields, keys and fences already cost more than 340 of the
+    384 tokens.
+    """
+    config, budget = e5_budget
+    root = ("/Users/사용자/" + "/".join(f"깊은디렉터리이름{i}" for i in range(30)))[:240]
+    assert len(root) == 240
+
+    cost = budget.count(_fenced_record(project_root=root))
+
+    assert 340 < cost <= config.hard_max_chunk_tokens
+
+
+def test_a_bare_field_name_without_a_colon_is_not_a_field_line() -> None:
+    record = _fenced_record()
+    assert _record_is_whole([record])
+
+    assert not _record_is_whole([record.replace("blockers: \n", "blockers\n")])
+
+
+def test_the_count_cannot_vouch_for_a_record_saved_without_a_field(tmp_path, e5_budget):
+    """The blind spot resume step 4 states, pinned so the text stays honest.
+
+    Save writes every field, and the count leans on that. A record saved
+    without ``blockers`` whose torn ``completed`` continues with that key
+    passes every count, and the parse invents the field.
+    """
+    config, _budget = e5_budget
+    expanding = chr(0xFDFA)
+    record = _fenced_record(completed=expanding * 92 + "a" * 69 + "blockers: none")
+    record = record.replace("blockers: \n", "")
+
+    rows = _e5_rows(tmp_path, record, config)
+
+    contents = [row.content for row in rows]
+    assert any(c.startswith("blockers: none\n") for c in contents[1:]), "re-pick the padding"
+    assert _record_is_whole(contents)
+    assert _parse_fields(contents[::-1])["blockers"] == "none"

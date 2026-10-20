@@ -7,6 +7,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The handoff workflow no longer says the fence keeps a record in one chunk
+  (#2814).** That holds for the character-based markdown pass only. Under an
+  exact token budget, which the E5 profile sets at 384 tokens, a record over
+  the budget is re-split with the fence inside it, and a record filled to its
+  caps is stored as more than one row. The workflow now says the split prefers
+  line boundaries and that resume reads the union of rows sharing the
+  `handoff-id-<id>` tag, which it already did. It also says a single line can
+  still be torn on any record, not only on a legacy unfenced one. Resume used
+  to spot a torn row by how it began, which missed a continuation that happens
+  to begin with a fence line or a field key. It now counts the union's lines
+  instead, in any row order: one line per field, both fence lines once or
+  neither, and nothing else. The count assumes Save wrote every field, and the
+  workflow says so. The value caps and the 1,200-character limit are
+  unchanged: with a 240-character Korean `project_root`, the fields no cap
+  shortens already cost more than 340 of the 384 tokens, so no cap keeps every
+  record in one chunk. Tests run the real E5 tokenizer over capped records, over
+  a line of characters that expand under Unicode normalization, and over torn
+  continuations that look like record lines; they skip only when the tokenizer
+  cannot be downloaded.
+
 - **`auto_consolidate` no longer skips a source for holding a summary
   (#2806).** It skips a source as `agent-consolidated` when an agent apply
   already covers it, and read that from edges in both directions, so a chunk
