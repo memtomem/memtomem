@@ -45,10 +45,14 @@ def _entry(**overrides: str) -> str:
     return "[[exceptions]]\n" + "\n".join(f"{key} = {value}" for key, value in values.items())
 
 
-def test_committed_empty_default_is_valid_and_renders_empty_native_config() -> None:
-    entries = osv.load_exceptions(_ROOT / "tools" / "osv-exceptions.toml", today=_TODAY)
-    assert entries == []
-    assert "[[IgnoredVulns]]" not in osv.render_native(entries)
+def test_committed_exceptions_are_valid_and_each_renders() -> None:
+    path = _ROOT / "tools" / "osv-exceptions.toml"
+    entries = osv.load_exceptions(path)  # today: a committed entry must not be expired
+    rendered = osv.render_native(entries)
+    assert len(entries) == path.read_text(encoding="utf-8").count("\n[[exceptions]]\n")
+    assert rendered.count("[[IgnoredVulns]]") == len(entries)
+    for entry in entries:
+        assert f'id = "{entry.id}"' in rendered
 
 
 def test_complete_entry_is_converted_without_native_owner_key(tmp_path: Path) -> None:
