@@ -364,7 +364,18 @@ async def mem_consolidate_apply(
 
     try:
         if await app.storage.is_source_hidden(Path(group["source"])):
-            return "Error: source is unavailable. Run mem_consolidate after it returns."
+            # Held since the checks above, with the row already open: nothing
+            # was written, so the row records a refusal rather than staying
+            # ``running``.
+            refusal = "Error: source is unavailable. Run mem_consolidate after it returns."
+            await app.storage.maintenance_run_finish(
+                run_id,
+                status="error",
+                namespaces=run_namespaces,
+                summary=run_summary,
+                error=refusal,
+            )
+            return refusal
         add_result, stats = await _mem_add_core(
             content=summary,
             title=f"Consolidated: {source_name}",

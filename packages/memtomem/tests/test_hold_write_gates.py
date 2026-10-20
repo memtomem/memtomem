@@ -239,6 +239,40 @@ class TestConsolidateApply:
         assert run["summary"]["warning"] == "source_unavailable"
         assert run["summary"]["summary_id"] is not None
 
+    async def test_hold_after_the_run_opens_finishes_the_row(
+        self, components, memory_dir, monkeypatch
+    ):
+        """The re-check after the run row opens refuses, and the row does not stay running."""
+        from memtomem.server.tools.consolidation import mem_consolidate_apply
+
+        storage = components.storage
+        published: list[object] = []
+
+        async def record(path, stats):
+            published.append(stats)
+
+        ctx, originals = await self._setup(components, memory_dir, monkeypatch, record)
+        real_start = storage.maintenance_run_start
+
+        async def start_then_hold(*args, **kwargs):
+            run_id = await real_start(*args, **kwargs)
+            await storage.hold_source(memory_dir / "notes.md", "missing")
+            return run_id
+
+        monkeypatch.setattr(storage, "maintenance_run_start", start_then_hold)
+
+        out = await mem_consolidate_apply(
+            group_id=0, summary="the summary", keep_originals=False, ctx=ctx
+        )
+
+        assert out == "Error: source is unavailable. Run mem_consolidate after it returns."
+        assert published == []
+        assert await self._edges(storage, originals) == 0
+        [run] = await storage.maintenance_run_latest(kind="consolidate_apply")
+        assert run["status"] == "error"
+        assert run["error"] == out
+        assert run["completed_at"] is not None
+
     async def test_hold_after_the_final_check_cannot_commit_before_the_writes(
         self, components, memory_dir, monkeypatch
     ):
