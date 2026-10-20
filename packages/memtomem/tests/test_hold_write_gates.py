@@ -239,6 +239,36 @@ class TestConsolidateApply:
         assert run["summary"]["warning"] == "source_unavailable"
         assert run["summary"]["summary_id"] is not None
 
+    async def test_a_failed_cleanup_keeps_the_applied_row(
+        self, components, memory_dir, monkeypatch
+    ):
+        """The row says the summary was published even when dropping the preview fails."""
+        from memtomem.server.tools import consolidation
+        from memtomem.server.tools.consolidation import mem_consolidate_apply
+
+        storage = components.storage
+
+        async def hold(path, stats):
+            await storage.hold_source(path, "missing")
+
+        ctx, originals = await self._setup(components, memory_dir, monkeypatch, hold)
+
+        async def failing_drop(app, entry):
+            raise sqlite3.OperationalError("injected: scratch delete failed")
+
+        monkeypatch.setattr(consolidation, "_drop_preview", failing_drop)
+
+        out = await mem_consolidate_apply(
+            group_id=0, summary="the summary", keep_originals=False, ctx=ctx
+        )
+
+        assert "injected: scratch delete failed" in out
+        [run] = await storage.maintenance_run_latest(kind="consolidate_apply")
+        assert run["status"] == "ok"
+        assert run["error"] is None
+        assert run["summary"]["warning"] == "source_unavailable"
+        assert run["summary"]["summary_id"] is not None
+
     async def test_hold_after_the_run_opens_finishes_the_row(
         self, components, memory_dir, monkeypatch
     ):

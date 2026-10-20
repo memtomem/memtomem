@@ -38,7 +38,12 @@ _ALLOWED: dict[tuple[str, str, str], int] = {
     # sources before the summary is published; the second re-reads the sources
     # under the transaction that writes the edges and the decay. Each refuses
     # when a chunk's source is held, so held rows must be found, not screened.
-    ("server/tools/consolidation.py", "mem_consolidate_apply", "get_chunks_batch"): 2,
+    ("server/tools/consolidation.py", "mem_consolidate_apply", "get_chunks_batch"): 1,
+    (
+        "server/tools/consolidation.py",
+        "mem_consolidate_apply.link_published",
+        "get_chunks_batch",
+    ): 1,
     # Post-delete cleanup: checks that the index row is gone and deletes it if
     # not. A held row must be found here, or it would survive the delete.
     ("web/routes/chunks.py", "delete_chunk.ensure_index_row_absent", "get_chunk"): 2,

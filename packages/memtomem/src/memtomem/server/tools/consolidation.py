@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from memtomem.config import TargetScope
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+
+if TYPE_CHECKING:
+    from memtomem.models import IndexingStats
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,21 @@ class _SourceUnavailable(Exception):
 
 class _AlreadyConsolidated(Exception):
     """Another summary covered an original after this one was published."""
+
+
+@dataclass(frozen=True)
+class _ApplyOutcome:
+    """How one consolidation apply ended: its reply, its run row, and its cleanup."""
+
+    reply: str
+    status: str
+    summary: dict
+    affected_count: int = 0
+    error: str | None = None
+    # A published summary makes the preview stale: applying it again would
+    # write a second one.
+    drop_preview: bool = False
+    invalidate_cache: bool = False
 
 
 async def _drop_preview(app: Any, entry: dict) -> bool:
@@ -362,80 +381,22 @@ async def mem_consolidate_apply(
     }
     run_namespaces = [group.get("namespace") or "default"]
 
-    try:
-        if await app.storage.is_source_hidden(Path(group["source"])):
-            # Held since the checks above, with the row already open: nothing
-            # was written, so the row records a refusal rather than staying
-            # ``running``.
-            refusal = "Error: source is unavailable. Run mem_consolidate after it returns."
-            await app.storage.maintenance_run_finish(
-                run_id,
-                status="error",
-                namespaces=run_namespaces,
-                summary=run_summary,
-                error=refusal,
-            )
-            return refusal
-        add_result, stats = await _mem_add_core(
-            content=summary,
-            title=f"Consolidated: {source_name}",
-            tags=["consolidated", "summary"],
-            file=None,
-            namespace=group.get("namespace"),
-            template=None,
-            ctx=ctx,
-            scope=cast(TargetScope, derived_scope),
-            confirm_project_shared=confirm_project_shared,
-            project_root_override=project_root_override,
-            event_type="consolidate_apply",
-            # The consent was given to *this* tool, so the ADR-0011 §5 line
-            # the shared core emits must name it (#2306). ``mem_add`` never
-            # saw this call.
-            confirmation_surface="mem_consolidate_apply",
-            # A file of its own, not the day file: there the summary can be
-            # re-chunked with a neighbouring entry, and the new chunk id
-            # drops the edges written below (#2802).
-            file_name=consolidation_file_name(
-                source_name,
-                run_id,
-                date_str=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            ),
-        )
-
-        if stats is None:
-            # The core refused before writing anything (an excluded target
-            # #2488, a namespace mix, the redaction guard): nothing was
-            # consolidated, so neither record the run as applied nor drop the
-            # preview a retry needs.
-            await app.storage.maintenance_run_finish(
-                run_id,
-                status="error",
-                namespaces=run_namespaces,
-                summary=run_summary,
-                error=add_result,
-            )
-            return add_result
-
+    async def link_published(add_result: str, stats: IndexingStats) -> _ApplyOutcome:
         if not stats.new_chunk_ids:
             logger.warning(
                 "mem_consolidate_apply: mem_add produced no new chunk ids — "
                 "cannot link originals for group %s",
                 group_id,
             )
-            await app.storage.maintenance_run_finish(
-                run_id,
-                status="ok",
-                affected_count=0,
-                namespaces=run_namespaces,
-                summary={**run_summary, "summary_id": None, "linked": 0, "warning": "unlinked"},
-            )
-            await _drop_preview(app, entry)
-            return (
+            return _ApplyOutcome(
                 f"Consolidation applied for group {group_id} (unlinked).\n"
                 f"{add_result}\n"
                 f"- Original chunks: {group['chunk_count']}\n"
                 f"- Originals kept: {keep_originals}\n"
-                "- Warning: could not recover summary chunk id; relations not created."
+                "- Warning: could not recover summary chunk id; relations not created.",
+                status="ok",
+                summary={**run_summary, "summary_id": None, "linked": 0, "warning": "unlinked"},
+                drop_preview=True,
             )
 
         if len(stats.new_chunk_ids) > 1:
@@ -495,50 +456,102 @@ async def mem_consolidate_apply(
                         await app.storage.update_importance_scores(floored)
                         decayed_ids = [str(cid) for cid in floored]
         except _SourceUnavailable:
-            await app.storage.maintenance_run_finish(
-                run_id,
+            return _ApplyOutcome(
+                f"Consolidation applied for group {group_id} (unlinked).\n"
+                f"{add_result}\n"
+                f"- Original chunks: {group['chunk_count']}\n"
+                "- Warning: the source became unavailable after the summary was written; "
+                "originals were not linked or decayed.",
                 status="ok",
-                affected_count=0,
-                namespaces=run_namespaces,
                 summary={
                     **run_summary,
                     "summary_id": str(summary_id),
                     "linked": 0,
                     "warning": "source_unavailable",
                 },
-            )
-            # A retry would publish a second summary.
-            await _drop_preview(app, entry)
-            return (
-                f"Consolidation applied for group {group_id} (unlinked).\n"
-                f"{add_result}\n"
-                f"- Original chunks: {group['chunk_count']}\n"
-                "- Warning: the source became unavailable after the summary was written; "
-                "originals were not linked or decayed."
+                drop_preview=True,
             )
         except _AlreadyConsolidated:
-            await app.storage.maintenance_run_finish(
-                run_id,
-                status="ok",
-                affected_count=0,
-                namespaces=run_namespaces,
-                summary={
-                    **run_summary,
-                    "summary_id": str(summary_id),
-                    "linked": 0,
-                    "warning": "already_consolidated",
-                },
-            )
-            await _drop_preview(app, entry)
-            return (
+            return _ApplyOutcome(
                 f"Consolidation applied for group {group_id} (unlinked).\n"
                 f"{add_result}\n"
                 f"- Summary chunk id: {summary_id}\n"
                 f"- Original chunks: {group['chunk_count']}\n"
                 "- Warning: another summary covered these originals while this one was "
                 "written; originals were not linked or decayed, and this summary "
-                "duplicates it."
+                "duplicates it.",
+                status="ok",
+                summary={
+                    **run_summary,
+                    "summary_id": str(summary_id),
+                    "linked": 0,
+                    "warning": "already_consolidated",
+                },
+                drop_preview=True,
             )
+
+        return _ApplyOutcome(
+            f"Consolidation applied for group {group_id}.\n"
+            f"{add_result}\n"
+            f"- Summary chunk id: {summary_id}\n"
+            f"- Originals linked: {linked}/{group['chunk_count']}\n"
+            f"- Originals kept: {keep_originals}\n"
+            f"- Run id: {run_id}",
+            status="ok",
+            affected_count=linked,
+            summary={
+                **run_summary,
+                "summary_id": str(summary_id),
+                "linked": linked,
+                "decayed_ids": decayed_ids,
+            },
+            drop_preview=True,
+            invalidate_cache=True,
+        )
+
+    try:
+        if await app.storage.is_source_hidden(Path(group["source"])):
+            # Held since the checks above, with the row already open: nothing
+            # was written, so the row records a refusal rather than staying
+            # ``running``.
+            refusal = "Error: source is unavailable. Run mem_consolidate after it returns."
+            outcome = _ApplyOutcome(refusal, status="error", summary=run_summary, error=refusal)
+        else:
+            add_result, stats = await _mem_add_core(
+                content=summary,
+                title=f"Consolidated: {source_name}",
+                tags=["consolidated", "summary"],
+                file=None,
+                namespace=group.get("namespace"),
+                template=None,
+                ctx=ctx,
+                scope=cast(TargetScope, derived_scope),
+                confirm_project_shared=confirm_project_shared,
+                project_root_override=project_root_override,
+                event_type="consolidate_apply",
+                # The consent was given to *this* tool, so the ADR-0011 §5 line
+                # the shared core emits must name it (#2306). ``mem_add`` never
+                # saw this call.
+                confirmation_surface="mem_consolidate_apply",
+                # A file of its own, not the day file: there the summary can be
+                # re-chunked with a neighbouring entry, and the new chunk id
+                # drops the edges ``link_published`` writes (#2802).
+                file_name=consolidation_file_name(
+                    source_name,
+                    run_id,
+                    date_str=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                ),
+            )
+            if stats is None:
+                # The core refused before writing anything (an excluded target
+                # #2488, a namespace mix, the redaction guard): nothing was
+                # consolidated, so neither record the run as applied nor drop
+                # the preview a retry needs.
+                outcome = _ApplyOutcome(
+                    add_result, status="error", summary=run_summary, error=add_result
+                )
+            else:
+                outcome = await link_published(add_result, stats)
     except Exception as exc:
         # The mutation may have partly landed — ``_mem_add_core`` can have
         # appended and indexed the summary before the failure — so the row
@@ -586,29 +599,19 @@ async def mem_consolidate_apply(
             )
         raise
 
-    # Finalized before the cache/scratch cleanup below: the decay above is the
-    # last memory mutation, and the audit write must not hinge on cleanup.
+    # The one place a returned outcome finishes the row, outside the handler
+    # above and before the cleanup below: the row records what happened to
+    # memory, so a cleanup that fails must not rewrite it as an error.
     await app.storage.maintenance_run_finish(
         run_id,
-        status="ok",
-        affected_count=linked,
+        status=outcome.status,
+        affected_count=outcome.affected_count,
         namespaces=run_namespaces,
-        summary={
-            **run_summary,
-            "summary_id": str(summary_id),
-            "linked": linked,
-            "decayed_ids": decayed_ids,
-        },
+        summary=outcome.summary,
+        error=outcome.error,
     )
-
-    app.search_pipeline.invalidate_cache()
-    await _drop_preview(app, entry)
-
-    return (
-        f"Consolidation applied for group {group_id}.\n"
-        f"{add_result}\n"
-        f"- Summary chunk id: {summary_id}\n"
-        f"- Originals linked: {linked}/{group['chunk_count']}\n"
-        f"- Originals kept: {keep_originals}\n"
-        f"- Run id: {run_id}"
-    )
+    if outcome.invalidate_cache:
+        app.search_pipeline.invalidate_cache()
+    if outcome.drop_preview:
+        await _drop_preview(app, entry)
+    return outcome.reply
