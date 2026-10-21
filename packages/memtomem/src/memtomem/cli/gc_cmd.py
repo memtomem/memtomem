@@ -7,8 +7,8 @@ Exposes two subcommands:
   is dry-run; ``--apply`` requires interactive confirmation;
   ``--apply --yes`` is the non-interactive form.
 * ``mm gc orphan-sources`` — find indexed source files that no longer exist
-  and optionally remove their chunks. This is the terminal equivalent of
-  ``mem_cleanup_orphans``.
+  and optionally remove their chunks, confirming per owning memory dir.
+  This is the terminal equivalent of ``mem_cleanup_orphans``.
 
 Placed at the top level (not under ``mm context``) because the rows it
 cleans live in user-local storage, not the Context Gateway artifact
@@ -19,6 +19,7 @@ maintenance subcommands (#884 review point 1).
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
@@ -66,6 +67,14 @@ def orphan_projects(apply_: bool, assume_yes: bool) -> None:
     asyncio.run(_run(apply_=apply_, assume_yes=assume_yes))
 
 
+def _under_dirs(_ctx: click.Context, _param: click.Parameter, values: tuple[str, ...]):
+    # ``Path("")`` is the current directory, so an unset shell variable in
+    # ``--under "$DIR"`` would select everything below wherever this runs.
+    if any(not v.strip() for v in values):
+        raise click.BadParameter("must name a directory, not an empty string.")
+    return tuple(Path(v) for v in values)
+
+
 @gc.command("orphan-sources")
 @click.option(
     "--apply",
@@ -77,34 +86,61 @@ def orphan_projects(apply_: bool, assume_yes: bool) -> None:
     "--yes",
     "assume_yes",
     is_flag=True,
-    help="Skip the confirmation prompt. Requires --apply.",
+    help="Skip the per-root confirmation prompts. Requires --apply.",
 )
-def orphan_sources(apply_: bool, assume_yes: bool) -> None:
+@click.option(
+    "--under",
+    "under",
+    multiple=True,
+    callback=_under_dirs,
+    help="Only consider sources under this directory. Repeatable.",
+)
+def orphan_sources(apply_: bool, assume_yes: bool, under: tuple[Path, ...]) -> None:
     """Remove indexed chunks whose source file no longer exists.
 
     The scan checks missing sources twice to avoid treating a transiently
-    unavailable cloud or removable volume as deleted. Preview is the default;
-    deletion requires ``--apply`` and an explicit confirmation unless ``--yes``
-    is also supplied.
+    unavailable cloud or removable volume as deleted. Orphans are grouped by
+    the configured memory dir that owns them, plus one group for sources
+    outside every root. Preview is the default; deletion requires ``--apply``
+    and a confirmation per group unless ``--yes`` is also supplied.
+
+    Some memory dirs belong to tools that delete their own files, and there
+    the indexed chunks are the only copy left. Decline that group, or pass
+    ``--under`` so that ``--apply --yes`` deletes only the directories named.
     """
     if assume_yes and not apply_:
         raise click.UsageError("--yes requires --apply.")
-    asyncio.run(_run_orphan_sources(apply_=apply_, assume_yes=assume_yes))
+    asyncio.run(_run_orphan_sources(apply_=apply_, assume_yes=assume_yes, under=under))
 
 
-async def _run_orphan_sources(*, apply_: bool, assume_yes: bool) -> None:
+async def _run_orphan_sources(
+    *, apply_: bool, assume_yes: bool, under: tuple[Path, ...] = ()
+) -> None:
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.storage.orphan_detect import scan_orphans, source_state
+    from memtomem.storage.orphan_detect import group_orphans, scan_orphans, source_state
 
     async with cli_components() as comp:
         result = await scan_orphans(comp.storage)
-        orphaned = sorted(result.confirmed_orphans)
         unavailable = sorted(result.unavailable_sources)
-        if not orphaned:
-            click.secho(
-                f"No orphaned sources found ({result.total_sources} source files checked).",
-                fg="green",
-            )
+        groups, excluded = await asyncio.to_thread(
+            group_orphans,
+            result.confirmed_orphans,
+            comp.config.indexing.all_index_roots(),
+            under=under,
+        )
+        orphan_count = sum(len(g.sources) for g in groups)
+        if not orphan_count:
+            if excluded:
+                click.secho(
+                    "No orphaned sources under the given directories "
+                    f"({excluded} orphaned elsewhere).",
+                    fg="green",
+                )
+            else:
+                click.secho(
+                    f"No orphaned sources found ({result.total_sources} source files checked).",
+                    fg="green",
+                )
             if unavailable:
                 click.secho(
                     f"{len(unavailable)} source(s) could not be checked and are not eligible for purge.",
@@ -113,12 +149,16 @@ async def _run_orphan_sources(*, apply_: bool, assume_yes: bool) -> None:
             return
 
         click.echo(
-            f"Found {len(orphaned)} orphaned source "
-            f"{'file' if len(orphaned) == 1 else 'files'} "
+            f"Found {orphan_count} orphaned source "
+            f"{'file' if orphan_count == 1 else 'files'} "
             f"({result.total_sources} source files checked):"
         )
-        for source in orphaned:
-            click.echo(f"  - {source}")
+        for group in groups:
+            click.echo(f"\n{group.label} ({len(group.sources)}):")
+            for source in group.sources:
+                click.echo(f"  - {source}")
+        if excluded:
+            click.echo(f"\n{excluded} more orphaned source(s) are outside the given directories.")
         if unavailable:
             click.secho(
                 f"{len(unavailable)} additional source(s) could not be checked and will not be purged.",
@@ -126,32 +166,55 @@ async def _run_orphan_sources(*, apply_: bool, assume_yes: bool) -> None:
             )
 
         if not apply_:
-            click.echo("\nRun with --apply to delete their indexed chunks.")
+            click.echo(
+                "\nRun with --apply to delete their indexed chunks (per-group confirmation)."
+            )
             click.echo("Run with --apply --yes for non-interactive deletion.")
-            return
-
-        if not assume_yes and not click.confirm(
-            f"Delete indexed chunks for {len(orphaned)} missing source file(s)?",
-            default=False,
-        ):
-            click.echo("Cleanup cancelled; no chunks were deleted.")
+            if len(groups) > 1 and not under:
+                click.echo("Add --under DIR to limit either to the sources under DIR.")
             return
 
         deleted = 0
+        purged = 0
         skipped = 0
-        for source in orphaned:
-            if await asyncio.to_thread(source_state, source) != "missing":
-                skipped += 1
-                continue
-            deleted += await comp.storage.delete_by_source(source)
-        if deleted and getattr(comp, "search_pipeline", None) is not None:
-            comp.search_pipeline.invalidate_cache()
-        summary = (
-            f"Cleanup complete: {deleted} chunks deleted from {len(orphaned) - skipped} sources"
-        )
-        if skipped:
-            summary += f" ({skipped} recovered or unavailable; skipped)"
-        click.secho(summary + ".", fg="green")
+        declined = 0
+
+        def summary() -> str:
+            text = f"{deleted} chunks deleted from {purged} sources"
+            if skipped:
+                text += f" ({skipped} recovered or unavailable; skipped)"
+            if declined:
+                text += f"; {declined} group(s) declined"
+            return text
+
+        try:
+            for group in groups:
+                where = group.label if group.root is None else f"under {group.label}"
+                if not assume_yes and not click.confirm(
+                    f"Delete indexed chunks for {len(group.sources)} missing source file(s) "
+                    f"{where}?",
+                    default=False,
+                ):
+                    click.echo(f"  skipped: {group.label}")
+                    declined += 1
+                    continue
+                for source in group.sources:
+                    if await asyncio.to_thread(source_state, source) != "missing":
+                        skipped += 1
+                        continue
+                    deleted += await comp.storage.delete_by_source(source)
+                    purged += 1
+        except click.Abort:
+            # The groups confirmed before the interrupted prompt are already gone.
+            click.secho(f"\nStopped: {summary()}.", fg="yellow", err=True)
+            raise
+        finally:
+            if deleted and getattr(comp, "search_pipeline", None) is not None:
+                comp.search_pipeline.invalidate_cache()
+        if not purged and not skipped:
+            click.echo(f"Cleanup cancelled; no chunks were deleted ({declined} group(s) declined).")
+            return
+        click.secho(f"Cleanup complete: {summary()}.", fg="green")
 
 
 async def _run(*, apply_: bool, assume_yes: bool) -> None:

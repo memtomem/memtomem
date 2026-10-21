@@ -13,7 +13,7 @@ from memtomem.server.tools._provenance import (
     capture_session_for_untracked_write,
     flag_untracked_write,
 )
-from memtomem.storage.orphan_detect import scan_orphans, source_state
+from memtomem.storage.orphan_detect import group_orphans, scan_orphans, source_state
 
 
 @mcp.tool()
@@ -206,6 +206,24 @@ async def mem_decay_expire(
     )
 
 
+def _under_dirs(under: object) -> list[str]:
+    """Validate ``under`` as passed through ``mem_do``, which does not type-check it.
+
+    An empty value is refused rather than read as "no filter": a filter that
+    went missing on the way would otherwise purge every orphan.
+    """
+    if under is None:
+        return []
+    dirs = [under] if isinstance(under, str) else under
+    if (
+        not isinstance(dirs, list)
+        or not dirs
+        or not all(isinstance(d, str) and d.strip() for d in dirs)
+    ):
+        raise ValueError("under must be a directory path or a non-empty list of them")
+    return dirs
+
+
 @mcp.tool()
 @tool_handler
 @register("maintenance")
@@ -214,23 +232,39 @@ async def mem_cleanup_orphans(
     ctx: CtxType = None,
     *,
     confirm_purge: bool = False,
+    under: list[str] | None = None,
 ) -> str:
     """Find and remove orphaned chunks whose source files no longer exist.
 
-    Deletion requires both dry_run=False and confirm_purge=True.
+    Deletion requires both dry_run=False and confirm_purge=True. Orphans are
+    listed by the memory dir that owns them; some dirs belong to tools that
+    delete their own files, leaving the indexed chunks as the only copy.
 
     Args:
         dry_run: If True (default), only list orphaned files without deleting.
         confirm_purge: Explicit opt-in to erase confirmed-missing sources when dry_run is False.
+        under: Only consider sources under these directories (a path or a list).
     """
+    under_dirs = _under_dirs(under)
     app = await _get_app_initialized(ctx)
     # Two-pass scan keeps transient absence out of the explicit purge list.
     # A mass ratio cannot prove deletion or availability (#2498).
     result = await scan_orphans(app.storage)
-    orphaned = result.confirmed_orphans
+    groups, excluded = await asyncio.to_thread(
+        group_orphans,
+        result.confirmed_orphans,
+        app.config.indexing.all_index_roots(),
+        under=under_dirs,
+    )
+    orphaned = [source for group in groups for source in group.sources]
 
     if not orphaned:
-        message = f"No orphaned chunks found ({result.total_sources} source files checked)."
+        if excluded:
+            message = (
+                f"No orphaned chunks under the given directories ({excluded} orphaned elsewhere)."
+            )
+        else:
+            message = f"No orphaned chunks found ({result.total_sources} source files checked)."
         if result.unavailable_sources:
             message += f" {len(result.unavailable_sources)} source(s) unavailable and not eligible for purge."
         return message
@@ -238,9 +272,12 @@ async def mem_cleanup_orphans(
     # ``mem_do`` passes params through at runtime. Only actual JSON booleans
     # may opt into deletion; the string "false" must stay a preview.
     if dry_run is not False or confirm_purge is not True:
-        lines = [f"Orphaned files: {len(orphaned)} (dry-run, no deletions)\n"]
-        for sf in sorted(orphaned):
-            lines.append(f"  {sf}")
+        lines = [f"Orphaned files: {len(orphaned)} (dry-run, no deletions)"]
+        for group in groups:
+            lines.append(f"\n{group.label} ({len(group.sources)}):")
+            lines.extend(f"  {sf}" for sf in group.sources)
+        if excluded:
+            lines.append(f"\n{excluded} more orphaned file(s) are outside the given directories.")
         if result.unavailable_sources:
             lines.append(
                 f"\n{len(result.unavailable_sources)} additional source(s) could not be checked."

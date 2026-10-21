@@ -11,7 +11,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from memtomem.storage.orphan_detect import (
+    OrphanGroup,
     OrphanScanResult,
+    group_orphans,
     is_suspected_mass_orphan,
     scan_orphans,
 )
@@ -203,6 +205,7 @@ class TestInteractiveToolSkipsBrake:
         app = SimpleNamespace(
             storage=MagicMock(delete_by_source=AsyncMock(return_value=1)),
             search_pipeline=MagicMock(),
+            config=SimpleNamespace(indexing=SimpleNamespace(all_index_roots=lambda: [tmp_path])),
         )
 
         @asynccontextmanager
@@ -222,4 +225,146 @@ class TestInteractiveToolSkipsBrake:
         )
         out = await dedup_decay.mem_cleanup_orphans(dry_run=False, confirm_purge=True, ctx=None)
         assert "Recovered or unavailable: 1" in out
+        app.storage.delete_by_source.assert_not_awaited()
+
+
+class TestGroupOrphans:
+    """Grouping by owning root and the ``under`` filter of the explicit purge (#2833)."""
+
+    def test_groups_by_most_specific_root_with_outside_last(self, tmp_path):
+        work = tmp_path / "work"
+        notes = work / "notes"
+        plans = tmp_path / "plans"
+        orphans = [
+            notes / "b.md",
+            tmp_path / "elsewhere" / "x.md",
+            plans / "p.md",
+            work / "w.md",
+            notes / "a.md",
+        ]
+
+        groups, excluded = group_orphans(orphans, [work, notes, plans])
+
+        assert excluded == 0
+        assert groups == [
+            OrphanGroup(plans, [plans / "p.md"]),
+            OrphanGroup(work, [work / "w.md"]),
+            OrphanGroup(notes, [notes / "a.md", notes / "b.md"]),
+            OrphanGroup(None, [tmp_path / "elsewhere" / "x.md"]),
+        ]
+        assert groups[-1].label == "outside every configured root"
+
+    def test_under_keeps_only_sources_below_the_directories(self, tmp_path):
+        root = tmp_path / "root"
+        wt = tmp_path / "repo" / ".worktrees"
+        orphans = [root / "keep.md", wt / "a" / "gone.md", tmp_path / "tmpdir" / "t.md"]
+
+        groups, excluded = group_orphans(orphans, [root], under=[wt, tmp_path / "tmpdir"])
+
+        assert excluded == 1
+        assert groups == [OrphanGroup(None, [wt / "a" / "gone.md", tmp_path / "tmpdir" / "t.md"])]
+
+    def test_under_is_a_directory_not_a_string_prefix(self, tmp_path):
+        orphans = [tmp_path / "plans-old" / "p.md", tmp_path / "plans" / "q.md"]
+
+        groups, excluded = group_orphans(orphans, [], under=[tmp_path / "plans"])
+
+        assert excluded == 1
+        assert groups == [OrphanGroup(None, [tmp_path / "plans" / "q.md"])]
+
+    @pytest.mark.requires_symlinks
+    def test_under_matches_a_live_symlink_alias(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        alias = tmp_path / "alias"
+        alias.symlink_to(real, target_is_directory=True)
+        stored = real.resolve() / "gone.md"
+
+        groups, excluded = group_orphans([stored], [], under=[alias])
+        assert (excluded, groups) == (0, [OrphanGroup(None, [stored])])
+
+        # Once the alias is gone nothing resolves it to the stored path; the
+        # filter then selects nothing rather than everything.
+        alias.unlink()
+        groups, excluded = group_orphans([stored], [], under=[alias])
+        assert (excluded, groups) == (1, [])
+
+    def test_under_a_directory_that_no_longer_exists(self, tmp_path):
+        gone = tmp_path / "removed-worktree"
+        groups, excluded = group_orphans([gone / "f.md"], [], under=[gone])
+        assert (excluded, groups) == (0, [OrphanGroup(None, [gone / "f.md"])])
+
+
+class TestCleanupOrphansUnder:
+    """``mem_cleanup_orphans`` groups its preview and takes ``under`` (#2833)."""
+
+    @pytest.fixture
+    def app(self, monkeypatch, tmp_path):
+        from memtomem.server.tools import dedup_decay
+
+        plans = tmp_path / "plans"
+        self.plans = plans
+        self.orphans = [plans / "p.md", tmp_path / "wt" / "a.md", tmp_path / "wt" / "b.md"]
+        scan = OrphanScanResult(9, 3, list(self.orphans))
+        monkeypatch.setattr(dedup_decay, "scan_orphans", AsyncMock(return_value=scan))
+        monkeypatch.setattr(dedup_decay, "source_state", lambda _path: "missing")
+        monkeypatch.setattr(
+            dedup_decay, "capture_session_for_untracked_write", AsyncMock(return_value=None)
+        )
+        monkeypatch.setattr(dedup_decay, "flag_untracked_write", AsyncMock())
+        app = SimpleNamespace(
+            storage=MagicMock(delete_by_source=AsyncMock(return_value=2)),
+            search_pipeline=MagicMock(),
+            config=SimpleNamespace(indexing=SimpleNamespace(all_index_roots=lambda: [plans])),
+        )
+
+        async def fake_app(_ctx):
+            return app
+
+        monkeypatch.setattr(dedup_decay, "_get_app_initialized", fake_app)
+        return app
+
+    @pytest.mark.asyncio
+    async def test_preview_is_grouped(self, app, tmp_path):
+        from memtomem.server.tools import dedup_decay
+
+        out = await dedup_decay.mem_cleanup_orphans(ctx=None)
+
+        lines = out.splitlines()
+        start = lines.index(f"{self.plans} (1):")
+        assert lines[start : start + 6] == [
+            f"{self.plans} (1):",
+            f"  {self.plans / 'p.md'}",
+            "",
+            "outside every configured root (2):",
+            f"  {tmp_path / 'wt' / 'a.md'}",
+            f"  {tmp_path / 'wt' / 'b.md'}",
+        ]
+        app.storage.delete_by_source.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("as_list", [True, False])
+    async def test_under_limits_the_purge(self, app, tmp_path, as_list):
+        from memtomem.server.tools import dedup_decay
+
+        wt = str(tmp_path / "wt")
+        out = await dedup_decay.mem_cleanup_orphans(
+            dry_run=False, confirm_purge=True, under=[wt] if as_list else wt, ctx=None
+        )
+
+        assert "Orphaned files: 2" in out
+        deleted = [c.args[0] for c in app.storage.delete_by_source.await_args_list]
+        assert deleted == [tmp_path / "wt" / "a.md", tmp_path / "wt" / "b.md"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", [[], "", "  ", [""], ["ok", 3], 5, {"d": "x"}])
+    async def test_malformed_under_is_refused_not_unfiltered(self, app, bad):
+        from memtomem.server.tools import dedup_decay
+
+        out = await dedup_decay.mem_cleanup_orphans(
+            dry_run=False, confirm_purge=True, under=bad, ctx=None
+        )
+
+        assert out.startswith("Error")
+        assert "under must be" in out
         app.storage.delete_by_source.assert_not_awaited()

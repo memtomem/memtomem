@@ -258,13 +258,26 @@ expire automatically; after checking that a file was intentionally removed,
 purge it:
 
 ```
-mm gc orphan-sources             # preview (dry-run)
-mm gc orphan-sources --apply     # delete, with a confirmation prompt
+mm gc orphan-sources                                  # preview (dry-run)
+mm gc orphan-sources --apply                          # delete, confirming each group
+mm gc orphan-sources --apply --yes --under ~/work/repo/.worktrees   # delete only under a directory
 ```
+
+The preview groups missing files by the memory dir that owns them, with one
+more group for files outside every configured root (removed worktrees, temp
+dirs). `--apply` asks once per group, so you can purge one group and keep
+another. Some memory dirs, such as `~/.claude/plans`, belong to tools that delete
+their own files, and there the indexed chunks are the only copy left: decline
+that group rather than purging it. `--under DIR` (repeatable) limits the
+preview and the purge to sources under `DIR`, which is how to make
+`--apply --yes` delete less than everything. It matches the stored path, so a
+symlink alias for a directory matches only while the link exists.
 
 Over MCP, the same cleanup is `mem_do(action="cleanup_orphans")` for the
 preview and `mem_do(action="cleanup_orphans", params={"dry_run": false,
 "confirm_purge": true})` to delete. `dry_run=false` alone still previews.
+`under` takes a directory or a list of them and limits both; there is no
+per-group prompt over MCP, so pass `under` to purge less than every group.
 Storage `get_chunk`, MCP `mem_read`, `mem_edit`, `mem_delete`, and `mem_related`
 can still access held content by ID until it is purged. The MCP tools and Web
 routes make one exception: when a file is held because the redaction guard

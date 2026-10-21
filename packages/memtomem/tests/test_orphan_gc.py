@@ -485,12 +485,21 @@ class TestOrphanSourcesCli:
             AsyncMock(return_value=result),
         )
 
+    @staticmethod
+    def _comp(roots=(), deleted=0, invalidate=None):
+        return SimpleNamespace(
+            storage=SimpleNamespace(delete_by_source=AsyncMock(return_value=deleted)),
+            search_pipeline=SimpleNamespace(invalidate_cache=invalidate or Mock()),
+            config=SimpleNamespace(indexing=SimpleNamespace(all_index_roots=lambda: list(roots))),
+        )
+
+    @staticmethod
+    def _deleted(comp) -> list[Path]:
+        return [c.args[0] for c in comp.storage.delete_by_source.await_args_list]
+
     def test_dry_run_lists_without_deleting(self, monkeypatch, tmp_path):
         missing = tmp_path / "missing.md"
-        comp = SimpleNamespace(
-            storage=SimpleNamespace(delete_by_source=AsyncMock()),
-            search_pipeline=SimpleNamespace(invalidate_cache=lambda: None),
-        )
+        comp = self._comp()
         _patch_bootstrap(monkeypatch, comp)
         self._patch_scan(
             monkeypatch,
@@ -504,6 +513,34 @@ class TestOrphanSourcesCli:
         assert "Run with --apply" in result.output
         comp.storage.delete_by_source.assert_not_awaited()
 
+    def test_dry_run_groups_by_owning_root(self, monkeypatch, tmp_path):
+        """One header per root, the outside-every-root group last (#2833)."""
+        plans = tmp_path / "plans"
+        notes = tmp_path / "notes"
+        orphans = [notes / "n.md", tmp_path / "wt" / "w.md", plans / "b.md", plans / "a.md"]
+        comp = self._comp(roots=[plans, notes])
+        _patch_bootstrap(monkeypatch, comp)
+        self._patch_scan(monkeypatch, OrphanScanResult(10, 4, orphans))
+
+        result = CliRunner().invoke(cli, ["gc", "orphan-sources"])
+
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        start = lines.index(f"{notes} (1):")
+        assert lines[start : start + 9] == [
+            f"{notes} (1):",
+            f"  - {notes / 'n.md'}",
+            "",
+            f"{plans} (2):",
+            f"  - {plans / 'a.md'}",
+            f"  - {plans / 'b.md'}",
+            "",
+            "outside every configured root (1):",
+            f"  - {tmp_path / 'wt' / 'w.md'}",
+        ]
+        assert "Add --under DIR" in result.output
+        comp.storage.delete_by_source.assert_not_awaited()
+
     def test_apply_requires_confirmation(self, monkeypatch, tmp_path):
         """--apply without --yes prompts, and the default answer is No.
 
@@ -513,10 +550,7 @@ class TestOrphanSourcesCli:
         """
         missing = tmp_path / "missing.md"
         invalidate = Mock()
-        comp = SimpleNamespace(
-            storage=SimpleNamespace(delete_by_source=AsyncMock()),
-            search_pipeline=SimpleNamespace(invalidate_cache=invalidate),
-        )
+        comp = self._comp(roots=[tmp_path], invalidate=invalidate)
         _patch_bootstrap(monkeypatch, comp)
         self._patch_scan(
             monkeypatch,
@@ -526,18 +560,81 @@ class TestOrphanSourcesCli:
         result = CliRunner().invoke(cli, ["gc", "orphan-sources", "--apply"], input="\n")
 
         assert result.exit_code == 0, result.output
-        assert "Delete indexed chunks for 1 missing source file(s)?" in result.output
-        assert "Cleanup cancelled; no chunks were deleted." in result.output
+        assert f"Delete indexed chunks for 1 missing source file(s) under {tmp_path}?" in (
+            result.output
+        )
+        assert "Cleanup cancelled; no chunks were deleted (1 group(s) declined)." in result.output
         comp.storage.delete_by_source.assert_not_awaited()
         invalidate.assert_not_called()
+
+    def test_apply_confirms_each_group(self, monkeypatch, tmp_path):
+        """Declining one group keeps its sources; the others are deleted (#2833)."""
+        plans = tmp_path / "plans"
+        wt = tmp_path / "wt" / "w.md"
+        invalidate = Mock()
+        comp = self._comp(roots=[plans], deleted=3, invalidate=invalidate)
+        _patch_bootstrap(monkeypatch, comp)
+        self._patch_scan(monkeypatch, OrphanScanResult(5, 2, [plans / "p.md", wt]))
+
+        result = CliRunner().invoke(cli, ["gc", "orphan-sources", "--apply"], input="n\ny\n")
+
+        assert result.exit_code == 0, result.output
+        assert f"under {plans}?" in result.output
+        assert "missing source file(s) outside every configured root?" in result.output
+        assert f"  skipped: {plans}" in result.output
+        assert self._deleted(comp) == [wt]
+        invalidate.assert_called_once_with()
+        assert "3 chunks deleted from 1 sources; 1 group(s) declined." in result.output
+
+    def test_abort_after_an_accepted_group_still_invalidates(self, monkeypatch, tmp_path):
+        """EOF at a later prompt aborts, but the earlier group's deletes are not cached."""
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        invalidate = Mock()
+        comp = self._comp(roots=[a, b], deleted=2, invalidate=invalidate)
+        _patch_bootstrap(monkeypatch, comp)
+        self._patch_scan(monkeypatch, OrphanScanResult(5, 2, [a / "1.md", b / "2.md"]))
+
+        result = CliRunner().invoke(cli, ["gc", "orphan-sources", "--apply"], input="y\n")
+
+        assert result.exit_code != 0
+        assert self._deleted(comp) == [a / "1.md"]
+        invalidate.assert_called_once_with()
+        assert "Stopped: 2 chunks deleted from 1 sources." in result.output
+
+    def test_declining_every_group_reports_the_count(self, monkeypatch, tmp_path):
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        comp = self._comp(roots=[a, b])
+        _patch_bootstrap(monkeypatch, comp)
+        self._patch_scan(monkeypatch, OrphanScanResult(5, 2, [a / "1.md", b / "2.md"]))
+
+        result = CliRunner().invoke(cli, ["gc", "orphan-sources", "--apply"], input="n\nn\n")
+
+        assert result.exit_code == 0, result.output
+        assert "Cleanup cancelled; no chunks were deleted (2 group(s) declined)." in result.output
+        comp.storage.delete_by_source.assert_not_awaited()
+
+    @pytest.mark.parametrize("blank", ["", "  "])
+    def test_blank_under_is_refused(self, monkeypatch, tmp_path, blank):
+        """``Path("")`` is the cwd; an unset ``$DIR`` must not widen the purge."""
+        comp = self._comp(roots=[tmp_path])
+        _patch_bootstrap(monkeypatch, comp)
+        self._patch_scan(monkeypatch, OrphanScanResult(1, 1, [tmp_path / "a.md"]))
+        monkeypatch.chdir(tmp_path)
+
+        result = CliRunner().invoke(
+            cli, ["gc", "orphan-sources", "--apply", "--yes", "--under", blank]
+        )
+
+        assert result.exit_code == 2
+        assert "must name a directory" in result.output
+        comp.storage.delete_by_source.assert_not_awaited()
 
     def test_apply_yes_deletes_and_invalidates(self, monkeypatch, tmp_path):
         missing = tmp_path / "missing.md"
         invalidate = Mock()
-        comp = SimpleNamespace(
-            storage=SimpleNamespace(delete_by_source=AsyncMock(return_value=4)),
-            search_pipeline=SimpleNamespace(invalidate_cache=invalidate),
-        )
+        comp = self._comp(deleted=4, invalidate=invalidate)
         _patch_bootstrap(monkeypatch, comp)
         self._patch_scan(
             monkeypatch,
@@ -550,6 +647,47 @@ class TestOrphanSourcesCli:
         comp.storage.delete_by_source.assert_awaited_once_with(missing)
         invalidate.assert_called_once_with()
         assert "4 chunks deleted" in result.output
+
+    def test_under_limits_apply_yes(self, monkeypatch, tmp_path):
+        """--apply --yes --under deletes only the named directories (#2833)."""
+        plans = tmp_path / "plans"
+        wt = tmp_path / "repo" / ".worktrees"
+        orphans = [plans / "p.md", wt / "x" / "a.md", tmp_path / "t" / "b.md"]
+        comp = self._comp(roots=[plans], deleted=1)
+        _patch_bootstrap(monkeypatch, comp)
+        self._patch_scan(monkeypatch, OrphanScanResult(9, 3, orphans))
+
+        preview = CliRunner().invoke(
+            cli, ["gc", "orphan-sources", "--under", str(wt), "--under", str(tmp_path / "t")]
+        )
+        result = CliRunner().invoke(
+            cli,
+            ["gc", "orphan-sources", "--apply", "--yes", "--under", str(wt)],
+        )
+
+        assert preview.exit_code == 0, preview.output
+        assert str(plans / "p.md") not in preview.output
+        assert "1 more orphaned source(s) are outside the given directories." in preview.output
+        assert result.exit_code == 0, result.output
+        assert self._deleted(comp) == [wt / "x" / "a.md"]
+
+    def test_under_matching_nothing_deletes_nothing(self, monkeypatch, tmp_path):
+        comp = self._comp(roots=[tmp_path])
+        _patch_bootstrap(monkeypatch, comp)
+        self._patch_scan(
+            monkeypatch, OrphanScanResult(4, 2, [tmp_path / "a.md", tmp_path / "b.md"])
+        )
+
+        result = CliRunner().invoke(
+            cli,
+            ["gc", "orphan-sources", "--apply", "--yes", "--under", str(tmp_path / "other")],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "No orphaned sources under the given directories (2 orphaned elsewhere)." in (
+            result.output
+        )
+        comp.storage.delete_by_source.assert_not_awaited()
 
     def test_yes_requires_apply(self):
         result = CliRunner().invoke(cli, ["gc", "orphan-sources", "--yes"])

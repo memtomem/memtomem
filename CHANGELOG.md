@@ -19,6 +19,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Claude Code started from a shell passes that shell's exported variables to
   the server, so only values kept in `.env` alone are affected there.
 
+### Changed
+
+- **`mm gc orphan-sources` groups missing files by memory dir and confirms
+  each group (#2833).** Some memory dirs, such as `~/.claude/plans` and
+  `~/.codex/memories`, belong to tools that delete their own files, so their
+  indexed chunks are the only copy left. The single prompt for every orphan
+  meant that clearing out removed worktrees also purged those. The preview now
+  lists orphans under the configured root that owns them, plus a group for
+  files outside every root, and `--apply` asks once per group. The new
+  `--under DIR` option (repeatable) limits the preview and the purge to
+  sources under a directory, so `--apply --yes --under DIR` deletes only
+  those. `mem_cleanup_orphans` groups its preview the same way and takes an
+  `under` parameter; an empty `under` is an error, not "no filter".
+
 ### Fixed
 
 - **A restore from `mem_export` keeps the links between chunks, and with them
