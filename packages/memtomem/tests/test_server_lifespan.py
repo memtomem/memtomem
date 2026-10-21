@@ -379,6 +379,196 @@ def test_load_dotenv_does_not_override_existing_env(
         os.environ.update(snapshot)
 
 
+# ── .env: only MEMTOMEM_* keys (#2824) ────────────────────────────────
+
+
+@pytest.fixture
+def dotenv_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Point ``_load_dotenv`` at a scratch ``.env`` and restore ``os.environ``.
+
+    ``find_dotenv`` is patched because the real one starts at the installed
+    source file, which in a checkout can reach a developer's repo-root
+    ``.env`` (#1508). The loader writes ``os.environ`` directly, so the
+    snapshot is restored by hand rather than through ``monkeypatch``.
+    """
+    import dotenv
+
+    path = tmp_path / ".env"
+    find_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def fake_find_dotenv(*args: object, **kwargs: object) -> str:
+        find_calls.append((args, kwargs))
+        return str(path) if path.exists() else ""
+
+    monkeypatch.setattr(dotenv, "find_dotenv", fake_find_dotenv)
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    snapshot = dict(os.environ)
+    try:
+        yield path, find_calls
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
+
+
+_PARITY_ENV = """\
+MEMTOMEM_T2824_PLAIN=plain
+MEMTOMEM_T2824_EXPORTED=file-value
+MEMTOMEM_T2824_REF=${MEMTOMEM_T2824_EXPORTED}
+MEMTOMEM_T2824_EMPTY=
+MEMTOMEM_T2824_NOVALUE
+memtomem_t2824_lower=lower
+MEMTOMEM_T2824_UNICODE=é
+T2824_UNRELATED=unrelated-secret
+MEMTOMEM_T2824_FROM_UNRELATED=${T2824_UNRELATED}
+"""
+
+
+@pytest.mark.real_dotenv
+def test_dotenv_applies_the_memtomem_subset_of_load_dotenv(dotenv_file) -> None:
+    """Parity pin for the ``DotEnv`` resolver (#2824): python-dotenv is
+    capped at the tested minor because ``DotEnv`` is not public API, and
+    this is the test a widened range has to pass. Whatever ``load_dotenv()``
+    would set for a ``MEMTOMEM_*`` key, ``_load_dotenv`` sets identically —
+    interpolation with the exported value first, empty versus missing
+    values, a lowercase prefix, a non-ASCII value, and a reference to an
+    unrelated key resolved from the same file."""
+    from dotenv import load_dotenv
+
+    path, _ = dotenv_file
+    path.write_text(_PARITY_ENV, encoding="utf-8")
+    os.environ["MEMTOMEM_T2824_EXPORTED"] = "exported-value"
+    base = dict(os.environ)
+
+    load_dotenv(path)
+    expected = {k: v for k, v in os.environ.items() if k.upper().startswith("MEMTOMEM_T2824_")}
+    os.environ.clear()
+    os.environ.update(base)
+
+    left_out = lifespan_mod._load_dotenv()
+    actual = {k: v for k, v in os.environ.items() if k.upper().startswith("MEMTOMEM_T2824_")}
+
+    assert actual == expected
+    assert actual["MEMTOMEM_T2824_REF"] == "exported-value"
+    assert actual["MEMTOMEM_T2824_EMPTY"] == ""
+    assert "MEMTOMEM_T2824_NOVALUE" not in actual
+    assert os.environ.get("memtomem_t2824_lower") == "lower"
+    assert actual["MEMTOMEM_T2824_UNICODE"] == "é"
+    assert actual["MEMTOMEM_T2824_FROM_UNRELATED"] == "unrelated-secret"
+    assert "T2824_UNRELATED" not in os.environ
+    assert left_out == ["T2824_UNRELATED"]
+
+
+@pytest.mark.real_dotenv
+def test_dotenv_keeps_exported_values(dotenv_file) -> None:
+    path, _ = dotenv_file
+    path.write_text("T2824_SHARED=from-file\nMEMTOMEM_T2824_SET=from-file\n", encoding="utf-8")
+    os.environ["T2824_SHARED"] = "exported"
+    os.environ["MEMTOMEM_T2824_SET"] = "exported"
+
+    lifespan_mod._load_dotenv()
+
+    assert os.environ["T2824_SHARED"] == "exported"
+    assert os.environ["MEMTOMEM_T2824_SET"] == "exported"
+
+
+@pytest.mark.real_dotenv
+def test_dotenv_skips_illegal_names_instead_of_raising(dotenv_file) -> None:
+    """``load_dotenv()`` set keys one at a time and raised ``ValueError`` on
+    a quoted name containing ``=`` — after the earlier keys were already
+    set, and out of ``app_lifespan``, which does not catch it. Resolution
+    now writes nothing, and an illegal ``MEMTOMEM_*`` name is left out like
+    an unrelated key."""
+    path, _ = dotenv_file
+    path.write_text(
+        "MEMTOMEM_T2824_BEFORE=1\n'T2824_BAD=key'=x\n'MEMTOMEM_T2824_EQ=1'=y\nMEMTOMEM_T2824_AFTER=2\n",
+        encoding="utf-8",
+    )
+
+    left_out = lifespan_mod._load_dotenv()
+
+    assert os.environ["MEMTOMEM_T2824_BEFORE"] == "1"
+    assert os.environ["MEMTOMEM_T2824_AFTER"] == "2"
+    assert left_out == ["T2824_BAD=key", "MEMTOMEM_T2824_EQ=1"]
+
+
+@pytest.mark.real_dotenv
+@pytest.mark.parametrize(("flag", "loaded"), [("1", False), ("YES", False), ("0", True)])
+def test_dotenv_honours_python_dotenv_disabled(dotenv_file, flag: str, loaded: bool) -> None:
+    """``PYTHON_DOTENV_DISABLED`` is checked here, not by python-dotenv:
+    ``load_dotenv()`` honoured it, but the resolver this loader calls does
+    not."""
+    path, _ = dotenv_file
+    path.write_text("MEMTOMEM_T2824_FLAG=on\n", encoding="utf-8")
+    os.environ["PYTHON_DOTENV_DISABLED"] = flag
+
+    lifespan_mod._load_dotenv()
+
+    assert ("MEMTOMEM_T2824_FLAG" in os.environ) is loaded
+
+
+@pytest.mark.real_dotenv
+def test_dotenv_missing_file_is_a_no_op(dotenv_file) -> None:
+    before = dict(os.environ)
+
+    assert lifespan_mod._load_dotenv() == []
+    assert dict(os.environ) == before
+
+
+@pytest.mark.real_dotenv
+def test_dotenv_search_and_decoding_match_load_dotenv(
+    dotenv_file, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``find_dotenv()`` must be called with no arguments: ``usecwd`` left
+    false keeps the search starting at the installed package rather than
+    the CWD, as ``load_dotenv()``'s did. ``DotEnv`` must get UTF-8 spelled
+    out — its own default is the locale encoding, which on macOS is UTF-8
+    whatever ``LC_ALL`` says, so only the argument can be pinned here."""
+    import dotenv.main
+
+    path, find_calls = dotenv_file
+    path.write_text("MEMTOMEM_T2824_X=1\n", encoding="utf-8")
+    seen: list[dict[str, object]] = []
+    real_dotenv_cls = dotenv.main.DotEnv
+
+    def spy(*args: object, **kwargs: object):
+        seen.append(kwargs)
+        return real_dotenv_cls(*args, **kwargs)
+
+    monkeypatch.setattr(dotenv.main, "DotEnv", spy)
+
+    lifespan_mod._load_dotenv()
+
+    assert find_calls == [((), {})]
+    assert seen == [{"encoding": "utf-8", "interpolate": True, "override": False}]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_logs_left_out_dotenv_names(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The keys a ``.env`` no longer contributes are named once per process,
+    so a setup that relied on them (a proxy, a Langfuse key) can see why.
+    Every SSE connection enters its own lifespan, so overlapping and later
+    entries must not repeat the line. Only names reach the log: the loader
+    never returns values."""
+    monkeypatch.delenv("MEMTOMEM_WEBHOOK__ENABLED", raising=False)
+    monkeypatch.delenv("MEMTOMEM_WEBHOOK__URL", raising=False)
+    monkeypatch.setattr(lifespan_mod, "_load_dotenv", lambda: ["HTTPS_PROXY", "OPENAI_API_KEY"])
+    monkeypatch.setattr(lifespan_mod, "_setup_logging", lambda: None)
+    monkeypatch.setattr(lifespan_mod, "_dotenv_left_out_logged", False)
+    caplog.set_level("INFO", logger=lifespan_mod.logger.name)
+
+    async with lifespan_mod.app_lifespan(MagicMock()):
+        async with lifespan_mod.app_lifespan(MagicMock()):
+            pass
+    async with lifespan_mod.app_lifespan(MagicMock()):
+        pass
+
+    lines = [r.getMessage() for r in caplog.records if r.name == lifespan_mod.logger.name]
+    expected = ".env: applied only MEMTOMEM_* keys; left out 2: HTTPS_PROXY, OPENAI_API_KEY"
+    assert lines.count(expected) == 1
+
+
 # ── static-resource AppContext handle ─────────────────────────────────
 
 

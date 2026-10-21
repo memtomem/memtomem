@@ -31,6 +31,12 @@ dependencies = [
     "mcp[cli]>=2.2.0,<3",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
+    # Already pulled in by pydantic-settings; declared because the server's
+    # ``.env`` loader resolves values with ``dotenv.main.DotEnv``, which is
+    # not in the package's ``__all__`` (#2824). Capped at the tested minor:
+    # CI syncs the frozen lock, so a wider range would ship versions the
+    # parity test in ``test_server_lifespan.py`` never ran against.
+    "python-dotenv>=1.2,<1.3",
     "sqlite-vec>=0.1.6",
     "httpx>=0.28",
     # Both are httpx's own dependencies; declared because webhook delivery

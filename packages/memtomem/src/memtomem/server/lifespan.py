@@ -182,13 +182,57 @@ class _JsonFormatter(logging.Formatter):
 # ---------------------------------------------------------------------------
 
 
-def _load_dotenv() -> None:
-    try:
-        from dotenv import load_dotenv
+# python-dotenv's own truthy spellings for ``PYTHON_DOTENV_DISABLED``
+# (``dotenv.main._load_dotenv_disabled``), copied because that helper is private.
+_DOTENV_DISABLED_VALUES = frozenset({"1", "true", "t", "yes", "y"})
 
-        load_dotenv()
-    except ImportError:
-        pass
+# The left-out ``.env`` names are logged once per process: every SSE
+# connection enters its own lifespan and reloads the file.
+_dotenv_left_out_logged = False
+
+
+def _load_dotenv() -> list[str]:
+    """Apply the ``MEMTOMEM_*`` keys of the nearest ``.env``; return the names left out.
+
+    Only the prefixed keys reach ``os.environ`` (#2824): the file found is
+    usually ``~/.env``, and its other keys — API keys for unrelated tools —
+    would otherwise enter this process and every subprocess it starts,
+    whatever environment filtering the MCP client applied.
+
+    Everything else matches ``load_dotenv()``. ``find_dotenv()`` is called
+    from here, so the search still starts at this file rather than the CWD.
+    Values are resolved by python-dotenv's own ``DotEnv`` with
+    ``load_dotenv()``'s arguments spelled out: ``override=False`` keeps an
+    exported value ahead of the file inside ``${VAR}`` (``dotenv_values()``
+    would invert that), and the class's own defaults are a locale encoding
+    and ``override=True``. Resolving writes nothing, so an unrelated key never
+    enters the environment, even briefly. The prefix match is
+    case-insensitive like the settings binding, an exported value wins, and a
+    key with no value is not set.
+    """
+    from dotenv import find_dotenv
+    from dotenv.main import DotEnv
+
+    if os.environ.get("PYTHON_DOTENV_DISABLED", "").casefold() in _DOTENV_DISABLED_VALUES:
+        return []
+    path = find_dotenv()
+    if not path:
+        return []
+    values = DotEnv(path, encoding="utf-8", interpolate=True, override=False).dict()
+    left_out: list[str] = []
+    for key, value in values.items():
+        if not key.upper().startswith("MEMTOMEM_"):
+            left_out.append(key)
+            continue
+        if value is None or key in os.environ:
+            continue
+        try:
+            os.environ[key] = value
+        except ValueError:
+            # A quoted key containing ``=`` is not a legal variable name.
+            # ``load_dotenv()`` raised here, out of server startup.
+            left_out.append(key)
+    return left_out
 
 
 # ---------------------------------------------------------------------------
@@ -222,8 +266,16 @@ async def app_lifespan(_server: MCPServer[AppContext]) -> AsyncIterator[AppConte
     skip the other, and ``CancelledError`` propagates rather than being
     silently swallowed (see #406).
     """
-    _load_dotenv()
+    global _dotenv_left_out_logged
+    dotenv_left_out = _load_dotenv()
     _setup_logging()
+    if dotenv_left_out and not _dotenv_left_out_logged:
+        _dotenv_left_out_logged = True
+        logger.info(
+            ".env: applied only MEMTOMEM_* keys; left out %d: %s",
+            len(dotenv_left_out),
+            ", ".join(dotenv_left_out),
+        )
 
     state, ctx = await _acquire_server_runtime(_server)
 
