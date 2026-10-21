@@ -35,6 +35,7 @@ from memtomem.errors import (
 )
 from memtomem.storage.base import (
     ChunkAuditRow,
+    ChunkKeyRow,
     ContextWindowRows,
     NamespaceAssignResult,
     NamespaceChunkCandidate,
@@ -3515,27 +3516,35 @@ class SqliteBackend(
             state[chunk_id] = (content_hash, hierarchy, tags, valid_from, valid_to, context)
         return state
 
-    async def get_chunk_ids_by_hashes(self, content_hashes: Sequence[str]) -> dict[str, UUID]:
-        """Return ``{content_hash: chunk_id}`` for hashes present in the DB.
+    async def get_chunk_rows_by_hashes(
+        self, content_hashes: Sequence[str]
+    ) -> dict[str, list[ChunkKeyRow]]:
+        """Return every row holding each hash, with its uniqueness key, in rowid order.
 
         Used by import to dedup by content across instances (cross-PC merge,
-        idempotent re-import). If the same hash appears on multiple rows,
-        one of them is returned — the caller must treat hash match as
-        "an equivalent chunk exists," not "the unique row."
+        idempotent re-import). A hash can sit on several rows — the same text
+        at two lines of one file, or in two namespaces — and import has to
+        pick the one a bundle record *is*, so all of them come back.
         """
         if not content_hashes:
             return {}
         db = self._get_read_db()
         unique = list(set(content_hashes))
         # Batched: an import bundle hands over every hash it carries.
-        found: dict[str, UUID] = {}
+        rows: list[tuple] = []
         for batch in _param_batches(unique):
-            rows = db.execute(
-                f"SELECT content_hash, id FROM chunks "
-                f"WHERE content_hash IN ({placeholders(len(batch))})",
+            rows += db.execute(
+                f"SELECT content_hash, id, namespace, source_file, start_line, rowid "
+                f"FROM chunks WHERE content_hash IN ({placeholders(len(batch))})",
                 batch,
             ).fetchall()
-            found.update({row[0]: UUID(row[1]) for row in rows})
+        found: dict[str, list[ChunkKeyRow]] = {}
+        for content_hash, chunk_id, namespace, source_file, start_line, _ in sorted(
+            rows, key=lambda row: row[5]
+        ):
+            found.setdefault(content_hash, []).append(
+                ChunkKeyRow(UUID(chunk_id), namespace, source_file, start_line)
+            )
         return found
 
     async def get_stats(self) -> dict[str, int]:

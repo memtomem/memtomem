@@ -37,11 +37,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Re-importing a bundle with `on_conflict="skip"` puts lost edges back even
   when every chunk is skipped. A bundle that is not a verified self-export
   restores only edges between chunks it newly adds, and its relation types go
-  through the same redaction gate as its records. Two limits remain. A
-  re-import over a store that still holds two originals with the same text
-  matches both records to one of those rows, so the other can stay uncovered.
-  And an `auto_consolidate` summary embeds its originals' ids, so restoring a
-  self-export with fresh ids makes the next run regenerate it once, in place;
+  through the same redaction gate as its records. When the store already
+  holds several chunks with a record's text — two originals with the same
+  text at different lines, say — the record matches the one at the key it
+  writes (namespace, source file, start line), else, for a verified
+  self-export, the one its id names, so a re-import covers each original
+  (#2829). An `on_conflict="update"` re-import no longer rolls back when two
+  records match one row, or when the row it picked sat at a sibling's key; a
+  further record matched to a row already written counts as
+  `conflict_skipped` — as does one left over once every row with its text is
+  taken, so its metadata is not applied. A record whose `namespace` is not a
+  string (a JSON number or boolean, which no export writes) is skipped as
+  malformed. One limit remains: an
+  `auto_consolidate` summary embeds
+  its originals' ids, so restoring a self-export with fresh ids makes the
+  next run regenerate it once, in place;
   `preserve_ids=True` into an empty store keeps the ids and avoids that. (A
   bundle imported as foreign — the install's provenance key is gone or
   differs — brings the summary back without policy ownership, as before, and

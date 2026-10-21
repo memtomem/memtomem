@@ -403,7 +403,7 @@ def _hashes(storage, source: Path) -> list[str]:
     return [row[0] for row in rows]
 
 
-class TestGetChunkIdsByHashes:
+class TestGetChunkRowsByHashes:
     """Import dedups an incoming bundle by asking for every hash it carries."""
 
     async def test_matches_hashes_past_the_bound_variable_ceiling(self, storage):
@@ -411,9 +411,9 @@ class TestGetChunkIdsByHashes:
         hashes = _hashes(storage, Path("/tmp/import.md"))
         _force_historic_limit(storage)
 
-        found = await storage.get_chunk_ids_by_hashes(hashes)
+        found = await storage.get_chunk_rows_by_hashes(hashes)
 
-        assert {str(v) for v in found.values()} == set(ids)
+        assert {str(row.id) for rows in found.values() for row in rows} == set(ids)
 
     async def test_splits_the_lookup_at_the_configured_size(self, storage, monkeypatch):
         ids = _seed(storage, Path("/tmp/import-split.md"), 7)
@@ -422,9 +422,9 @@ class TestGetChunkIdsByHashes:
         counting = _Counting(storage._get_read_db(), "WHERE content_hash IN")
         monkeypatch.setattr(storage, "_get_read_db", lambda: counting)
 
-        found = await storage.get_chunk_ids_by_hashes(hashes)
+        found = await storage.get_chunk_rows_by_hashes(hashes)
 
-        assert {str(v) for v in found.values()} == set(ids)
+        assert {str(row.id) for rows in found.values() for row in rows} == set(ids)
         assert counting.seen == [3, 3, 1]
 
 

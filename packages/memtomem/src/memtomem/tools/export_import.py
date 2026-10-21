@@ -28,12 +28,14 @@ from uuid import UUID, uuid4
 
 from memtomem.errors import EmbeddingError, EmbeddingPolicyChangedError
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata, ChunkType
+from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.storage.sqlite_visibility import source_hidden
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 
 if TYPE_CHECKING:
     from memtomem.config import IndexingConfig
     from memtomem.embedding.base import EmbeddingProvider
+    from memtomem.storage.base import ChunkKeyRow
     from memtomem.storage.sqlite_backend import SqliteBackend
 
 logger = logging.getLogger(__name__)
@@ -382,7 +384,14 @@ async def import_chunks(
         no-op; merging bundles with overlap adds only the unique side.
       * ``"update"``: records matching an existing hash overwrite that
         existing row's metadata (tags, namespace, heading hierarchy,
-        source_file, created_at). The existing UUID is preserved.
+        source_file, created_at). The existing UUID is preserved. Each row
+        is written once; a further record matched to it counts as
+        ``conflict_skipped``.
+
+    When several rows hold a record's content, the record matches the one at
+    the key it writes, else (verified self-export only) the one its
+    ``chunk_id`` names, else one no other record took — see
+    :func:`_match_conflicts`.
       * ``"duplicate"``: no hash check at the import layer — every record
         is sent to ``upsert_chunks`` with a fresh UUID. This was the
         pre-v2 behaviour, but since #691 the storage layer now enforces
@@ -471,13 +480,18 @@ async def import_chunks(
 
     skipped = 0
     parsed: list[tuple[Chunk, str | None]] = []  # (chunk, bundle_chunk_id_or_None)
+    keys: list[tuple[str, str, str, int]] = []  # each parsed record's destination key
 
     for idx, record in enumerate(bundle.chunks):
         try:
             chunk, bundle_chunk_id = _dict_to_chunk(
                 record, namespace_override=namespace, allow_origin=is_self_export
             )
+            # Inside the boundary: ``norm_path`` raises on a path it cannot
+            # resolve (an embedded NUL), and that is one malformed record.
+            key = _destination_key(chunk)
             parsed.append((chunk, bundle_chunk_id))
+            keys.append(key)
         except Exception as exc:
             # Never interpolate ``exc`` into the log: parse errors raised by
             # ``datetime.fromisoformat`` / ``int()`` / ``ChunkType(...)`` embed
@@ -553,15 +567,23 @@ async def import_chunks(
         landed = {bid: c.id for c, bid in parsed if bid is not None}
     else:
         all_hashes = [c.content_hash for c, _ in parsed]
-        existing = await storage.get_chunk_ids_by_hashes(all_hashes)
+        matches = _match_conflicts(
+            parsed,
+            keys,
+            await storage.get_chunk_rows_by_hashes(all_hashes),
+            trust_ids=is_self_export,
+        )
 
         to_upsert = []
-        for chunk, bundle_chunk_id in parsed:
-            existing_id = existing.get(chunk.content_hash)
-            if existing_id is not None:
+        for (chunk, bundle_chunk_id), match in zip(parsed, matches):
+            if match is not None:
+                existing_id, writes = match
                 if bundle_chunk_id is not None:
                     landed[bundle_chunk_id] = existing_id
-                if on_conflict == "skip":
+                # One write per row: ``upsert_chunks`` replaces a row's vector
+                # once and then inserts one per occurrence, so the same id twice
+                # in a batch fails and rolls the whole import back.
+                if on_conflict == "skip" or not writes:
                     conflict_skipped += 1
                     continue
                 # on_conflict == "update": reuse the existing row's UUID so
@@ -735,6 +757,109 @@ def _land_relations(
     return edges
 
 
+def _destination_key(chunk: Chunk) -> tuple[str, str, str, int]:
+    """The ``UNIQUE(namespace, source_file, content_hash, start_line)`` key *chunk* writes.
+
+    The path goes through ``norm_path``, as ``upsert_chunks`` stores it.
+    """
+    meta = chunk.metadata
+    return (chunk.content_hash, meta.namespace, norm_path(meta.source_file), meta.start_line)
+
+
+def _match_conflicts(
+    parsed: list[tuple[Chunk, str | None]],
+    keys: list[tuple[str, str, str, int]],
+    rows_by_hash: dict[str, list[ChunkKeyRow]],
+    *,
+    trust_ids: bool,
+) -> list[tuple[UUID, bool] | None]:
+    """Pick, per record, the existing row holding its content, or None.
+
+    *keys* holds each record's :func:`_destination_key`. Each match is
+    ``(row id, writes)``. Records are grouped by the key they
+    would write, and every record of a group gets the same row: two rows
+    updated onto one key would fail the uniqueness index and roll the import
+    back. Each pass runs over all groups before the next, and a row one group
+    takes is not offered to another:
+
+    1. the row already at the group's key — always first, since an update
+       that moved any other row there would collide with it;
+    2. for a verified self-export only, the row whose id a record carries (a
+       namespace override, a moved source). A foreign bundle never names the
+       row an update overwrites;
+    3. the first row of that content no group took, else the first row of
+       that content — the content exists, so the record skips or updates onto
+       it as before.
+
+    ``writes`` is set on the first record of the group that took the row, so
+    an update writes each row once. A group that only shares a row taken by
+    another (case 3 with every row taken) lands there and writes nothing.
+    """
+    groups: dict[tuple[str, str, str, int], list[int]] = {}
+    for index, key in enumerate(keys):
+        groups.setdefault(key, []).append(index)
+
+    # Indexed once, so a bundle of many records with one text stays linear.
+    at_key: dict[tuple[str, str, str, int], UUID] = {}
+    hash_of: dict[UUID, str] = {}
+    for content_hash, rows in rows_by_hash.items():
+        for row in rows:
+            at_key[(content_hash, row.namespace, row.source_file, row.start_line)] = row.id
+            hash_of[row.id] = content_hash
+
+    owned: dict[tuple[str, str, str, int], UUID] = {}
+    shared: dict[tuple[str, str, str, int], UUID] = {}
+    taken: set[UUID] = set()
+
+    def take(key: tuple[str, str, str, int], row_id: UUID) -> None:
+        owned[key] = row_id
+        taken.add(row_id)
+
+    for key in groups:
+        occupant = at_key.get(key)
+        if occupant is not None:
+            take(key, occupant)
+
+    if trust_ids:
+        for key, members in groups.items():
+            if key in owned:
+                continue
+            for index in members:
+                try:
+                    candidate = UUID(parsed[index][1] or "")
+                except ValueError:
+                    continue
+                if hash_of.get(candidate) == key[0] and candidate not in taken:
+                    take(key, candidate)
+                    break
+
+    # Rows are only ever taken, so each hash's first free row moves forward.
+    cursor: dict[str, int] = {}
+    for key in groups:
+        rows = rows_by_hash.get(key[0])
+        if key in owned or not rows:
+            continue
+        position = cursor.get(key[0], 0)
+        while position < len(rows) and rows[position].id in taken:
+            position += 1
+        cursor[key[0]] = position
+        if position < len(rows):
+            take(key, rows[position].id)
+        else:
+            shared[key] = rows[0].id
+
+    matches: list[tuple[UUID, bool] | None] = []
+    first = {members[0] for members in groups.values()}
+    for index, key in enumerate(keys):
+        if key in owned:
+            matches.append((owned[key], index in first))
+        elif key in shared:
+            matches.append((shared[key], False))
+        else:
+            matches.append(None)
+    return matches
+
+
 def _dict_to_chunk(
     record: dict,
     namespace_override: str | None = None,
@@ -756,6 +881,11 @@ def _dict_to_chunk(
     self-export is held to the known constant.
     """
     ns = namespace_override or record.get("namespace", "default")
+    # A number or boolean would be stored in SQLite's text form of it, which
+    # no Python conversion reproduces, so the conflict match could miss the
+    # row already at that key. Every export writes a string.
+    if not isinstance(ns, str):
+        raise TypeError("namespace must be a string")
     raw_origin = record.get("origin")
     origin = (
         ORIGIN_CONSOLIDATION_POLICY

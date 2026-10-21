@@ -62,6 +62,25 @@ class ContextWindowRows:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkKeyRow:
+    """One stored chunk's place under the content uniqueness index.
+
+    Returned by :meth:`StorageBackend.get_chunk_rows_by_hashes`. With the
+    row's ``content_hash`` these are the columns of
+    ``UNIQUE(namespace, source_file, content_hash, start_line)``, so an
+    import can tell which of several rows holding the same text a record is,
+    and which key an update would move a row onto. ``source_file`` is the
+    stored string, already in :func:`memtomem.storage.sqlite_helpers.norm_path`
+    form.
+    """
+
+    id: UUID
+    namespace: str
+    source_file: str
+    start_line: int
+
+
+@dataclass(frozen=True, slots=True)
 class NamespaceRenameResult:
     """Outcome of :meth:`StorageBackend.rename_namespace`.
 
@@ -261,7 +280,9 @@ class StorageBackend(Protocol):
     async def get_chunk_index_state(
         self, source_file: Path
     ) -> dict[str, tuple[str, tuple[str, ...], tuple[str, ...], int | None, int | None, str]]: ...
-    async def get_chunk_ids_by_hashes(self, content_hashes: Sequence[str]) -> dict[str, UUID]: ...
+    async def get_chunk_rows_by_hashes(
+        self, content_hashes: Sequence[str]
+    ) -> dict[str, list[ChunkKeyRow]]: ...
     async def get_stats(self) -> dict[str, int]: ...
     async def get_all_source_files(self) -> set[Path]: ...
     async def get_orphan_candidate_source_files(self) -> set[Path]: ...

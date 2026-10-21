@@ -16,14 +16,23 @@ types are scanned by the same redaction gate as its records.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
 from memtomem import provenance
+from memtomem.storage.base import ChunkKeyRow
 from memtomem.storage.sqlite_backend import SqliteBackend
-from memtomem.tools.export_import import ImportPrivacyError, export_chunks, import_chunks
+from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.tools.export_import import (
+    ImportPrivacyError,
+    _destination_key,
+    _match_conflicts,
+    export_chunks,
+    import_chunks,
+)
 from test_import_provenance_gate import (
     _CLEAN,
     _SECRET,
@@ -608,3 +617,354 @@ class TestConsolidateAfterRestore:
         )
 
         assert "No consolidation candidates" in await mem_consolidate(min_group_size=2, ctx=ctx)
+
+
+def _rows(storage: SqliteBackend) -> dict[UUID, tuple[str, int, list[str]]]:
+    """Every row's ``(namespace, start_line, tags)``, by id."""
+    db = storage._get_db()
+    return {
+        UUID(cid): (ns, line, json.loads(tags))
+        for cid, ns, line, tags in db.execute("SELECT id, namespace, start_line, tags FROM chunks")
+    }
+
+
+def _edge_ids(storage: SqliteBackend) -> set[tuple[UUID, UUID, str]]:
+    db = storage._get_db()
+    return {
+        (UUID(s), UUID(t), rel)
+        for s, t, rel in db.execute(
+            "SELECT source_id, target_id, relation_type FROM chunk_relations"
+        )
+    }
+
+
+def _at(content: str, line: int, *, source: str = "notes.md", ns: str = "default"):
+    chunk = _make_chunk(content, source=source, ns=ns)
+    chunk.metadata = replace(chunk.metadata, start_line=line, end_line=line)
+    return chunk
+
+
+async def _export_records(storage: SqliteBackend, tmp_path: Path, key_path: Path) -> list[dict]:
+    bundle = await export_chunks(
+        storage, output_path=tmp_path / "export.json", provenance_key_path=key_path
+    )
+    return bundle.chunks
+
+
+class TestSameTextOriginals:
+    """Two rows holding one text: a record matches the row it is (#2829).
+
+    ``_edges`` reads ends by content and cannot tell these rows apart, so
+    everything here asserts by row id.
+    """
+
+    async def _store(self, tmp_path: Path):
+        storage = await _make_storage(tmp_path, "src")
+        a, b = _at("same text", 1), _at("same text", 10)
+        summary = _at("summary of the notes", 1, source="summary.md")
+        await storage.upsert_chunks([a, b, summary])
+        for original in (a, b):
+            await storage.add_relation(original.id, summary.id, "consolidated_into")
+        return storage, a.id, b.id, summary.id
+
+    async def test_a_skip_reimport_covers_both_originals(self, tmp_path):
+        key_path = tmp_path / "k.provenance_key"
+        storage, a, b, summary = await self._store(tmp_path)
+        bundle_path = tmp_path / "backup.json"
+        await export_chunks(storage, output_path=bundle_path, provenance_key_path=key_path)
+        storage._get_db().execute("DELETE FROM chunk_relations")
+        storage._get_db().commit()
+
+        stats = await import_chunks(
+            storage, _FakeEmbedder(), bundle_path, provenance_key_path=key_path
+        )
+
+        assert stats.restored_relations == 2
+        assert _edge_ids(storage) == {
+            (a, summary, "consolidated_into"),
+            (b, summary, "consolidated_into"),
+        }
+
+    async def test_an_update_reimport_writes_each_record_onto_its_own_row(self, tmp_path):
+        key_path = tmp_path / "k.provenance_key"
+        storage, a, b, _ = await self._store(tmp_path)
+        records = await _export_records(storage, tmp_path, key_path)
+        for record in records:
+            if record["chunk_id"] == str(b):
+                record["tags"] = ["edited"]
+        bundle_path = _signed_bundle(tmp_path / "b.json", key_path, records, [])
+
+        stats = await import_chunks(
+            storage,
+            _FakeEmbedder(),
+            bundle_path,
+            on_conflict="update",
+            provenance_key_path=key_path,
+        )
+
+        assert (stats.updated_chunks, stats.failed_chunks) == (3, 0)
+        rows = _rows(storage)
+        assert rows[a] == ("default", 1, [])
+        assert rows[b] == ("default", 10, ["edited"])
+
+    async def test_an_update_of_one_original_does_not_move_it_onto_its_sibling(self, tmp_path):
+        """Matching any row of the text could move it onto the other row's key."""
+        key_path = tmp_path / "k.provenance_key"
+        storage, a, b, _ = await self._store(tmp_path)
+        records = [r for r in await _export_records(storage, tmp_path, key_path)]
+        only_a = [r for r in records if r["chunk_id"] == str(a)]
+        only_a[0]["tags"] = ["edited"]
+        bundle_path = _signed_bundle(tmp_path / "a.json", key_path, only_a, [])
+
+        stats = await import_chunks(
+            storage,
+            _FakeEmbedder(),
+            bundle_path,
+            on_conflict="update",
+            provenance_key_path=key_path,
+        )
+
+        assert (stats.updated_chunks, stats.failed_chunks) == (1, 0)
+        rows = _rows(storage)
+        assert rows[a] == ("default", 1, ["edited"])
+        assert rows[b] == ("default", 10, [])
+
+    async def test_a_foreign_bundle_matches_by_key_not_by_its_ids(self, tmp_path):
+        key_path = tmp_path / "k.provenance_key"
+        storage, a, b, summary = await self._store(tmp_path)
+        records = await _export_records(storage, tmp_path, key_path)
+        record_b = next(r for r in records if r["chunk_id"] == str(b))
+        record_s = next(r for r in records if r["chunk_id"] == str(summary))
+        # Names row a by id, but sits at row b's key.
+        record_b["chunk_id"] = str(a)
+        record_b["tags"] = ["edited"]
+        bundle_path = _foreign_bundle(
+            tmp_path / "f.json", [record_b, record_s], [_rel(record_b, record_s, "related")]
+        )
+
+        stats = await import_chunks(
+            storage,
+            _FakeEmbedder(),
+            bundle_path,
+            on_conflict="update",
+            provenance_key_path=key_path,
+        )
+
+        assert stats.failed_chunks == 0
+        rows = _rows(storage)
+        assert rows[a] == ("default", 1, [])
+        assert rows[b] == ("default", 10, ["edited"])
+        # Both ends are rows the store already had: a foreign bundle links none.
+        assert stats.restored_relations == 0
+
+    async def test_a_foreign_id_does_not_choose_the_row_an_update_overwrites(self, tmp_path):
+        """At a key no row holds, the record falls back to a row, not the one it names."""
+        key_path = tmp_path / "k.provenance_key"
+        storage, a, b, _ = await self._store(tmp_path)
+        record = _record("same text")
+        record["chunk_id"] = str(b)
+        record["start_line"] = 50
+        bundle_path = _foreign_bundle(tmp_path / "f.json", [record], [])
+
+        stats = await import_chunks(
+            storage,
+            _FakeEmbedder(),
+            bundle_path,
+            on_conflict="update",
+            provenance_key_path=key_path,
+        )
+
+        assert stats.updated_chunks == 1
+        rows = _rows(storage)
+        assert rows[a][:2] == ("default", 50)
+        assert rows[b] == ("default", 10, [])
+
+    async def test_a_namespace_override_keeps_each_record_on_its_own_row(self, tmp_path):
+        """No row sits at the new key, so a self-export's ids decide."""
+        key_path = tmp_path / "k.provenance_key"
+        storage, a, b, _ = await self._store(tmp_path)
+        records = await _export_records(storage, tmp_path, key_path)
+        # Bundle order opposite to row order, so the fallback alone would swap them.
+        records.sort(key=lambda r: r["start_line"], reverse=True)
+        bundle_path = _signed_bundle(tmp_path / "o.json", key_path, records, [])
+
+        stats = await import_chunks(
+            storage,
+            _FakeEmbedder(),
+            bundle_path,
+            namespace="other",
+            on_conflict="update",
+            provenance_key_path=key_path,
+        )
+
+        assert stats.failed_chunks == 0
+        rows = _rows(storage)
+        assert rows[a][:2] == ("other", 1)
+        assert rows[b][:2] == ("other", 10)
+
+    async def test_an_occupied_key_wins_over_the_signed_id(self, tmp_path):
+        key_path = tmp_path / "k.provenance_key"
+        storage = await _make_storage(tmp_path, "src")
+        old, new = _at("same text", 1, ns="old"), _at("same text", 1, ns="new")
+        await storage.upsert_chunks([old, new])
+        records = [
+            r for r in await _export_records(storage, tmp_path, key_path) if r["namespace"] == "old"
+        ]
+        records[0]["tags"] = ["edited"]
+        bundle_path = _signed_bundle(tmp_path / "n.json", key_path, records, [])
+
+        stats = await import_chunks(
+            storage,
+            _FakeEmbedder(),
+            bundle_path,
+            namespace="new",
+            on_conflict="update",
+            provenance_key_path=key_path,
+        )
+
+        assert (stats.updated_chunks, stats.failed_chunks) == (1, 0)
+        rows = _rows(storage)
+        assert rows[old.id] == ("old", 1, [])
+        assert rows[new.id] == ("new", 1, ["edited"])
+
+    async def test_two_records_for_one_key_write_one_row_once(self, tmp_path):
+        """Both land on the one row; the vector table takes one write per row."""
+        key_path = tmp_path / "k.provenance_key"
+        storage = await _make_storage(tmp_path, "src")
+        row = _at("same text", 5)
+        await storage.upsert_chunks([row])
+        first, second = _record("same text", ns="fresh"), _record("same text", ns="fresh")
+        second["tags"] = ["second"]
+        bundle_path = _foreign_bundle(tmp_path / "d.json", [first, second], [])
+
+        stats = await import_chunks(
+            storage,
+            _FakeEmbedder(),
+            bundle_path,
+            on_conflict="update",
+            provenance_key_path=key_path,
+        )
+
+        assert (stats.updated_chunks, stats.conflict_skipped_chunks) == (1, 1)
+        assert stats.failed_chunks == 0
+        assert _rows(storage) == {row.id: ("fresh", 1, [])}
+
+    @pytest.mark.parametrize(("namespace", "stored"), [(1, "1"), (True, "1"), (1e20, "1.0e+20")])
+    async def test_a_namespace_that_is_not_a_string_is_a_malformed_record(
+        self, tmp_path, namespace, stored
+    ):
+        """SQLite stores such a value in a text form the match does not reproduce.
+
+        Admitted, the record would miss the row at its key, update the other
+        row onto that key, and roll the import back.
+        """
+        key_path = tmp_path / "k.provenance_key"
+        storage = await _make_storage(tmp_path, "src")
+        a, b = _at("same text", 2), _at("same text", 1, ns=stored)
+        await storage.upsert_chunks([a, b])
+        record = _record("same text")
+        record["namespace"] = namespace
+        record["tags"] = ["edited"]
+        bundle_path = _foreign_bundle(tmp_path / "i.json", [record], [])
+
+        stats = await import_chunks(
+            storage,
+            _FakeEmbedder(),
+            bundle_path,
+            on_conflict="update",
+            provenance_key_path=key_path,
+        )
+
+        assert (stats.skipped_chunks, stats.updated_chunks, stats.failed_chunks) == (1, 0, 0)
+        rows = _rows(storage)
+        assert rows[a.id] == ("default", 2, [])
+        assert rows[b.id] == (stored, 1, [])
+
+    async def test_a_path_that_cannot_resolve_is_one_malformed_record(self, tmp_path):
+        """A NUL in ``source_file`` fails ``norm_path``; the rest still imports."""
+        key_path = tmp_path / "k.provenance_key"
+        storage = await _make_storage(tmp_path, "src")
+        row = _at("same text", 1)
+        await storage.upsert_chunks([row])
+        broken = _record("same text", source="no\x00tes.md")
+        fresh = _record("a new note")
+        bundle_path = _foreign_bundle(tmp_path / "z.json", [broken, fresh], [])
+
+        stats = await import_chunks(
+            storage, _FakeEmbedder(), bundle_path, provenance_key_path=key_path
+        )
+
+        assert (stats.skipped_chunks, stats.imported_chunks, stats.failed_chunks) == (1, 1, 0)
+        assert set(_ids(storage)) == {"same text", "a new note"}
+
+    @pytest.mark.requires_symlinks
+    async def test_a_path_spelled_through_a_symlink_matches_its_row(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        (tmp_path / "link").symlink_to(real, target_is_directory=True)
+        key_path = tmp_path / "k.provenance_key"
+        storage = await _make_storage(tmp_path, "src")
+        a = _at("same text", 1, source=str(real / "notes.md"))
+        b = _at("same text", 10, source=str(real / "notes.md"))
+        await storage.upsert_chunks([a, b])
+        record = _record("same text", source=str(tmp_path / "link" / "notes.md"))
+        record["start_line"] = 10
+        record["tags"] = ["edited"]
+        bundle_path = _foreign_bundle(tmp_path / "l.json", [record], [])
+
+        await import_chunks(
+            storage,
+            _FakeEmbedder(),
+            bundle_path,
+            on_conflict="update",
+            provenance_key_path=key_path,
+        )
+
+        rows = _rows(storage)
+        assert rows[a.id] == ("default", 1, [])
+        assert rows[b.id] == ("default", 10, ["edited"])
+
+
+class TestMatchConflicts:
+    """The pass order of ``_match_conflicts``, on rows built by hand."""
+
+    @staticmethod
+    def _row(line: int) -> ChunkKeyRow:
+        return ChunkKeyRow(uuid4(), "default", norm_path(Path("notes.md")), line)
+
+    @staticmethod
+    def _parsed(line: int, chunk_id: str | None = None):
+        return (_at("same text", line), chunk_id)
+
+    @staticmethod
+    def _match(parsed, rows, *, trust_ids: bool):
+        keys = [_destination_key(chunk) for chunk, _ in parsed]
+        return _match_conflicts(parsed, keys, rows, trust_ids=trust_ids)
+
+    async def test_a_key_match_beats_an_earlier_records_fallback(self):
+        r1, r10 = self._row(1), self._row(10)
+        unplaced, placed = self._parsed(99), self._parsed(1)
+        rows = {placed[0].content_hash: [r1, r10]}
+
+        matches = self._match([unplaced, placed], rows, trust_ids=False)
+
+        assert matches == [(r10.id, True), (r1.id, True)]
+
+    async def test_an_unusable_id_falls_through_to_a_free_row(self):
+        r1, r10 = self._row(1), self._row(10)
+        other_text = self._row(99)  # free, but holding another text
+        parsed = [self._parsed(98, "not-a-uuid"), self._parsed(99, str(other_text.id))]
+        rows = {parsed[0][0].content_hash: [r1, r10], "other hash": [other_text]}
+
+        matches = self._match(parsed, rows, trust_ids=True)
+
+        assert matches == [(r1.id, True), (r10.id, True)]
+
+    async def test_records_past_the_last_free_row_share_one_and_write_nothing(self):
+        r1 = self._row(1)
+        parsed = [self._parsed(1), self._parsed(50)]
+        rows = {parsed[0][0].content_hash: [r1]}
+
+        matches = self._match(parsed, rows, trust_ids=False)
+
+        assert matches == [(r1.id, True), (r1.id, False)]
