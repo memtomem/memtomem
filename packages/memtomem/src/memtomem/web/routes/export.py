@@ -149,4 +149,7 @@ async def import_memories(
         failed_chunks=stats.failed_chunks,
         conflict_skipped_chunks=stats.conflict_skipped_chunks,
         updated_chunks=stats.updated_chunks,
+        restored_relations=stats.restored_relations,
+        skipped_relations=stats.skipped_relations,
+        failed_relations=stats.failed_relations,
     )

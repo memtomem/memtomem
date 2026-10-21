@@ -121,6 +121,9 @@ class ImportResponse(BaseModel):
     failed_chunks: int
     conflict_skipped_chunks: int = 0
     updated_chunks: int = 0
+    restored_relations: int = 0
+    skipped_relations: int = 0
+    failed_relations: int = 0
 
 
 class IndexRequest(BaseModel):

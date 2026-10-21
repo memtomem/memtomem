@@ -7,6 +7,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A restore from `mem_export` keeps the links between chunks, and with them
+  consolidation coverage (#2809).** Bundles held chunks but no
+  `chunk_relations` rows, so a restored store had every summary and original
+  and no `consolidated_into` edge between them: `mem_consolidate` listed every
+  consolidated group again, and an apply wrote a second summary over the same
+  originals. `mem_related` lost its links the same way. Bundles are now
+  version 3 and list the edges whose both ends are in the bundle; the
+  provenance marker signs them with the chunks, and a bundle without them
+  signs exactly as before, so older self-exports still verify. Import maps
+  each edge onto the rows its chunks landed on — fresh ids by default, or the
+  existing row a content-hash conflict matched — writes it in the chunks'
+  transaction, keeps an edge the store already holds for the pair, and
+  reports `restored_relations`, `skipped_relations` and `failed_relations`.
+  Re-importing a bundle with `on_conflict="skip"` puts lost edges back even
+  when every chunk is skipped. A bundle that is not a verified self-export
+  restores only edges between chunks it newly adds, and its relation types go
+  through the same redaction gate as its records. Two limits remain. A
+  re-import over a store that still holds two originals with the same text
+  matches both records to one of those rows, so the other can stay uncovered.
+  And an `auto_consolidate` summary embeds its originals' ids, so restoring a
+  self-export with fresh ids makes the next run regenerate it once, in place;
+  `preserve_ids=True` into an empty store keeps the ids and avoids that. (A
+  bundle imported as foreign — the install's provenance key is gone or
+  differs — brings the summary back without policy ownership, as before, and
+  the policy then reports its path as a collision whatever the ids.)
+
 - **Editing an agent consolidation summary no longer relists its originals
   (#2808).** `mem_consolidate` leaves out an original whose `consolidated_into`
   edge points at a summary, and the edge points at the summary's chunk id. An

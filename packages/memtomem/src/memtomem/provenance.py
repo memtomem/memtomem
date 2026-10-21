@@ -33,7 +33,8 @@ Threat model
   existing key (symlink / non-regular / wrong owner / loose mode) raises rather
   than signing with an attacker-influenced secret.
 * **Modification / injection.** The HMAC binds the entire canonical ``chunks``
-  list, so editing, adding, or removing any record invalidates the marker.
+  list, and the ``relations`` list when the bundle has one, so editing, adding,
+  or removing any record or edge invalidates the marker.
 * **Replay / lift (accepted property).** An *unchanged* self-export re-imports
   as self — that is the intended round-trip. A third party who holds your old
   export already holds its plaintext; re-importing it only restores data this
@@ -43,9 +44,11 @@ Threat model
 
 ``_canonical_chunks`` is deterministic for the *current* bundle-chunk schema
 (ints + strings + lists, no floats); it is not RFC-8785 canonical JSON. Any
-future change that makes import trust or behavior depend on a non-``chunks``
-bundle field (``version`` / ``exported_at`` / ``total_chunks``) must bump
-``SCHEME`` or fold that field into the signed payload.
+future change that makes import trust or behavior depend on another bundle
+field (``version`` / ``exported_at`` / ``total_chunks``) must bump ``SCHEME``
+or fold that field into the signed payload, as ``relations`` is folded: an
+empty list leaves the payload byte-identical to a bundle without one, so
+exports from before relations still verify.
 """
 
 from __future__ import annotations
@@ -216,19 +219,30 @@ def _canonical_chunks(chunks: list[dict]) -> bytes:
     )
 
 
-def sign_chunks(chunks: list[dict], key: bytes) -> str:
-    """HMAC-SHA256 hex digest over ``SCHEME + "\\n" + canonical(chunks)``."""
+def sign_chunks(chunks: list[dict], key: bytes, relations: list | None = None) -> str:
+    """HMAC-SHA256 hex digest over ``SCHEME + "\\n" + canonical(chunks)``.
+
+    Non-empty *relations* append ``"\\n" + canonical(relations)``. Canonical
+    JSON never holds a raw newline, so the join is unambiguous; an empty or
+    absent list signs exactly what a bundle without relations always signed.
+    """
     payload = SCHEME.encode("ascii") + b"\n" + _canonical_chunks(chunks)
+    if relations:
+        payload += b"\n" + _canonical_chunks(relations)
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
-def make_marker(chunks: list[dict], key: bytes) -> dict[str, str]:
-    """Build the bundle ``provenance`` marker for ``chunks``."""
-    return {"scheme": SCHEME, "algo": ALGO, "signature": sign_chunks(chunks, key)}
+def make_marker(chunks: list[dict], key: bytes, relations: list | None = None) -> dict[str, str]:
+    """Build the bundle ``provenance`` marker for ``chunks`` and ``relations``."""
+    return {"scheme": SCHEME, "algo": ALGO, "signature": sign_chunks(chunks, key, relations)}
 
 
-def verify_marker(chunks: list[dict], marker: object, key: bytes | None) -> bool:
-    """True iff ``marker`` is a valid local-provenance HMAC over ``chunks``.
+def verify_marker(
+    chunks: list[dict], marker: object, key: bytes | None, relations: list | None = None
+) -> bool:
+    """True iff ``marker`` is a valid local-provenance HMAC over ``chunks`` and ``relations``.
+
+    *relations* is the bundle's raw list, before any filtering or remapping.
 
     Returns ``False`` (foreign) on a missing key, a malformed/absent marker, a
     scheme/algo mismatch, or a signature mismatch — every non-self path is the
@@ -242,7 +256,7 @@ def verify_marker(chunks: list[dict], marker: object, key: bytes | None) -> bool
     if not isinstance(sig, str):
         return False
     try:
-        return hmac.compare_digest(sign_chunks(chunks, key), sig)
+        return hmac.compare_digest(sign_chunks(chunks, key, relations), sig)
     except TypeError:
         # ``hmac.compare_digest`` raises on a non-ASCII ``str`` — our digest is
         # always lowercase hex, so any non-ASCII signature is foreign, not ours.

@@ -72,7 +72,10 @@ async def mem_export(
         namespace_filter=namespace,
     )
 
-    result = f"Export complete:\n- Chunks exported: {bundle.total_chunks}\n- Output: {target}"
+    result = (
+        f"Export complete:\n- Chunks exported: {bundle.total_chunks}\n"
+        f"- Relations exported: {len(bundle.relations)}\n- Output: {target}"
+    )
     if bundle.omitted_held_sources:
         result += (
             f"\n- Warning: {bundle.omitted_held_sources} held or pending source(s) omitted. "
@@ -187,5 +190,7 @@ async def mem_import(
         f"- Updated:          {stats.updated_chunks}\n"
         f"- Conflict skipped: {stats.conflict_skipped_chunks}\n"
         f"- Malformed:        {stats.skipped_chunks}\n"
-        f"- Failed:           {stats.failed_chunks}"
+        f"- Failed:           {stats.failed_chunks}\n"
+        f"- Relations restored: {stats.restored_relations} "
+        f"(not restored: {stats.skipped_relations}, failed: {stats.failed_relations})"
     )

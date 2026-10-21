@@ -23,7 +23,10 @@ mem_export(output_file="~/work-backup.json", namespace="work")
 mem_export(output_file="~/recent.json", since="2026-03-01")
 ```
 
-Exports chunks with content, metadata, tags, and embeddings as a JSON bundle.
+Exports chunks with content, metadata, and tags as a JSON bundle, together with
+the links between them (`mem_link` relations and the `consolidated_into` edges
+that mark a consolidated group) when both ends are in the bundle. Embeddings
+are not exported; import computes them again.
 Sources that are held because their file is unavailable (missing, unreadable,
 or waiting for an availability check) are left out, and the result reports
 `N held or pending source(s) omitted`. For a complete backup, restore those
@@ -43,11 +46,18 @@ mem_import(input_file="~/backup.json", preserve_ids=True)             # keep bun
 
 Import re-embeds all chunks, so it works across different embedding models or machines.
 
+Import also restores the bundle's links, on whichever rows the chunks land:
+a new row, or the existing row a content match picked. A link the store
+already has between the same two chunks is kept. A bundle this install did
+not export restores only links between chunks it newly adds. The result
+reports how many links were restored, not restored, and failed.
+
 **Conflict resolution** (`on_conflict`, default `"skip"`):
 
 - `"skip"` — drops records whose content already exists in the DB. Re-importing
-  the same bundle is a no-op, and merging bundles with overlapping content
-  adds only the unique side. Recommended for cross-PC sync.
+  the same bundle adds no chunks, only links the store has lost, and merging
+  bundles with overlapping content adds only the unique side. Recommended for
+  cross-PC sync.
 - `"update"` — records matching an existing content hash overwrite that row's
   metadata (tags, namespace, heading hierarchy, source_file). The existing
   UUID is preserved.
@@ -55,8 +65,14 @@ Import re-embeds all chunks, so it works across different embedding models or ma
   Pre-v2 behaviour, produces row-level duplicates when re-importing.
 
 `preserve_ids=True` reuses the bundle's original chunk UUIDs for new inserts
-(v2 bundles only; UUID-identity across instances). Ignored in `"duplicate"`
-mode.
+(v2 and later bundles; UUID-identity across instances). Ignored in `"duplicate"`
+mode. For a full restore of this install's own export into an empty store,
+prefer it: an `auto_consolidate` summary records its originals' UUIDs, so with
+fresh UUIDs the next policy run regenerates it once (in place, not as a second
+summary). This assumes the bundle verifies as this install's export, which
+needs the provenance key file next to the database. Imported as foreign, the
+summary comes back without policy ownership, and the policy reports its path
+as a collision instead of regenerating it.
 
 ### Importing from Obsidian
 

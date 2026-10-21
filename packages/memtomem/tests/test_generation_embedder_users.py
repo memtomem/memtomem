@@ -168,15 +168,10 @@ class TestToolCallSitesHoldTheGeneration:
         seen: list[int] = []
 
         async def _import_chunks(*_a, **_kw):
+            from memtomem.tools.export_import import ImportStats
+
             seen.append(gen.leases)
-            return SimpleNamespace(
-                imported_chunks=0,
-                updated_chunks=0,
-                skipped_chunks=0,
-                conflict_skipped_chunks=0,
-                failed_chunks=0,
-                total_chunks=0,
-            )
+            return ImportStats(total_chunks=0, imported_chunks=0, skipped_chunks=0, failed_chunks=0)
 
         monkeypatch.setattr(
             import_mod, "_get_app_initialized", AsyncMock(return_value=app), raising=False

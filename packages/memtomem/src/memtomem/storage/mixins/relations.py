@@ -135,6 +135,52 @@ class RelationMixin:
             self._commit_if_standalone(db)
         return cursor.rowcount
 
+    async def get_relations_among(self, chunk_ids: Sequence[UUID]) -> list[tuple[UUID, UUID, str]]:
+        """Return the edges whose both ends are in *chunk_ids*, of every type.
+
+        For export: an edge with one end outside the set would dangle in the
+        bundle. Ordered by ``(source_id, target_id)`` so the same store yields
+        the same bundle, and with it the same provenance signature.
+        """
+        from memtomem.storage.sqlite_backend import _param_batches
+
+        db = self._get_txn_read_db()
+        members = {str(cid) for cid in chunk_ids}
+        edges: list[tuple[str, str, str]] = []
+        for batch in _param_batches(sorted(members)):
+            marks = ",".join("?" * len(batch))
+            rows = db.execute(
+                "SELECT source_id, target_id, relation_type FROM chunk_relations "  # nosec B608
+                f"WHERE source_id IN ({marks})",
+                batch,
+            ).fetchall()
+            edges.extend(row for row in rows if row[1] in members)
+        edges.sort(key=lambda row: (row[0], row[1]))
+        return [(UUID(sid), UUID(tid), rel) for sid, tid, rel in edges]
+
+    async def insert_relations(self, edges: Sequence[tuple[UUID, UUID, str]]) -> int:
+        """Insert *edges* whose both ends exist; return the edges inserted.
+
+        For import, inside its transaction. ``INSERT OR IGNORE`` for the same
+        reason as :meth:`carry_consolidation_edges`: a pair that already holds an
+        edge keeps it. The existence guard is in the statement because an end
+        can be an id the chunk upsert ignored, and with foreign keys on, a
+        dangling insert would abort the whole import.
+        """
+        db = self._get_db()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._rolls_back_if_standalone(db):
+            cursor = db.executemany(
+                "INSERT OR IGNORE INTO chunk_relations "
+                "(source_id, target_id, relation_type, created_at) "
+                "SELECT ?, ?, ?, ? "
+                "WHERE EXISTS (SELECT 1 FROM chunks WHERE id = ?) "
+                "AND EXISTS (SELECT 1 FROM chunks WHERE id = ?)",
+                [(str(sid), str(tid), rel, now, str(sid), str(tid)) for sid, tid, rel in edges],
+            )
+            self._commit_if_standalone(db)
+        return cursor.rowcount
+
     async def delete_relation(self, source_id: UUID, target_id: UUID) -> bool:
         db = self._get_db()
         with self._rolls_back_if_standalone(db):

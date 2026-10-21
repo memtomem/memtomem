@@ -2542,6 +2542,9 @@ class TestImport:
                 failed_chunks=0,
                 conflict_skipped_chunks=0,
                 updated_chunks=0,
+                restored_relations=3,
+                skipped_relations=2,
+                failed_relations=1,
             )
             resp = await client.post(
                 "/api/export/import",
@@ -2551,6 +2554,12 @@ class TestImport:
             data = resp.json()
             assert data["total_chunks"] == 5
             assert data["imported_chunks"] == 4
+            relation_counts = [
+                data["restored_relations"],
+                data["skipped_relations"],
+                data["failed_relations"],
+            ]
+            assert relation_counts == [3, 2, 1]
 
     async def test_a_moved_embedding_policy_is_a_409_with_its_recovery(self, client: AsyncClient):
         from memtomem.errors import EmbeddingPolicyChangedError

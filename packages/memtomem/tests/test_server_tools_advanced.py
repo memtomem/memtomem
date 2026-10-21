@@ -602,12 +602,14 @@ class TestExportImport:
             exported_at="2024-01-01T00:00:00+00:00",
             total_chunks=1,
             chunks=[{"content": "test", "source_file": "/tmp/t.md", "tags": []}],
+            relations=[{"source_id": "a", "target_id": "b", "relation_type": "related"}],
         )
         json_str = bundle.to_json()
         restored = ExportBundle.from_json(json_str)
         assert restored.total_chunks == 1
         assert restored.chunks[0]["content"] == "test"
-        assert restored.version == "2"
+        assert restored.relations == bundle.relations
+        assert restored.version == "3"
 
     async def test_export_preserves_metadata(self, storage):
         chunk = _chunk(

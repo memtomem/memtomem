@@ -3,13 +3,17 @@
 Export serialises chunks (without embeddings) to a JSON bundle.
 Import reads a bundle, re-embeds each chunk, and upserts to storage.
 
-Bundle schema v2 (current):
+Bundle schema v3 (current):
   * Records carry ``chunk_id`` and ``content_hash`` for cross-instance
     roundtrip fidelity and hash-based dedup.
+  * ``relations`` lists the ``chunk_relations`` edges whose both ends are
+    records of the bundle, by bundle ``chunk_id``. Import maps each end to the
+    row its record landed on, so a restore keeps consolidation coverage.
   * Import supports ``on_conflict`` in {"skip", "update", "duplicate"} to
     resolve hash collisions against the target DB.
-  * v1 bundles (no ``chunk_id`` / ``content_hash`` fields per record) are
-    still accepted; missing fields are derived on import.
+  * v2 bundles (no ``relations``) and v1 bundles (no ``chunk_id`` /
+    ``content_hash`` fields per record) are still accepted; missing fields are
+    derived on import, and such a bundle restores no edges.
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ logger = logging.getLogger(__name__)
 # Data types
 # ---------------------------------------------------------------------------
 
-_BUNDLE_VERSION = "2"
+_BUNDLE_VERSION = "3"
 
 OnConflict = Literal["skip", "update", "duplicate"]
 # Derived from the Literal so the type and the runtime validator cannot drift.
@@ -54,6 +58,9 @@ class ExportBundle:
     total_chunks: int = 0
     omitted_held_sources: int = 0
     chunks: list[dict] = field(default_factory=list)
+    # ``{"source_id", "target_id", "relation_type"}`` per edge, by bundle
+    # ``chunk_id``. Signed with ``chunks`` by the provenance marker.
+    relations: list[dict] = field(default_factory=list)
     # Local-provenance marker (ADR-0006 Axis F.3). Present on self-exports;
     # ``None`` on hand-crafted / pre-F.3 bundles, which then import as foreign.
     # See ``memtomem.provenance``.
@@ -71,6 +78,9 @@ class ExportBundle:
             total_chunks=data.get("total_chunks", 0),
             omitted_held_sources=data.get("omitted_held_sources", 0),
             chunks=data.get("chunks", []),
+            # Kept as found: ``import_chunks`` rejects a non-list before any
+            # write, and verifies the signature over exactly these items.
+            relations=data.get("relations", []),
             provenance=data.get("provenance"),
         )
 
@@ -84,6 +94,12 @@ class ImportStats:
     # New in v2 — zero for v1-shaped imports so back-compat callers still work.
     conflict_skipped_chunks: int = 0
     updated_chunks: int = 0
+    # Bundle edges written, not written (malformed, an end that did not land,
+    # guarded for a foreign bundle, or already present), and lost to a failed
+    # write. Zero for bundles without relations.
+    restored_relations: int = 0
+    skipped_relations: int = 0
+    failed_relations: int = 0
 
 
 class ImportPrivacyError(Exception):
@@ -92,9 +108,9 @@ class ImportPrivacyError(Exception):
     ADR-0006 Axis F.3: bundles without a valid local-provenance marker are
     scanned per-record on import and the whole import is rejected (atomically,
     mirroring ``mem_batch_add``) if any record contains a secret-shaped value,
-    unless ``force_unsafe=True``. ``blocked_records`` is a *record* count (not a
-    regex-span count) so each ingress can render its native error without
-    echoing the matched bytes.
+    unless ``force_unsafe=True``. ``blocked_records`` is a count of bundle
+    items — chunk records and relations — not of regex spans, so each ingress
+    can render its native error without echoing the matched bytes.
     """
 
     def __init__(self, blocked_records: int) -> None:
@@ -179,16 +195,27 @@ async def export_chunks(
             continue
         records.extend(_chunk_to_dict(chunk) for chunk in chunks if matches(chunk))
 
+    # Only edges between exported records: an edge to a chunk the filters or a
+    # hold left out would have nothing to land on at import.
+    edges = await storage.get_relations_among([UUID(r["chunk_id"]) for r in records])
+    relations = [
+        {"source_id": str(sid), "target_id": str(tid), "relation_type": rel}
+        for sid, tid, rel in edges
+    ]
+
     marker: dict | None = None
     if stamp_provenance:
         key_path = provenance_key_path or provenance.key_path_for_db(storage.db_path)
-        marker = provenance.make_marker(records, provenance.load_or_create_key_for_export(key_path))
+        marker = provenance.make_marker(
+            records, provenance.load_or_create_key_for_export(key_path), relations
+        )
 
     bundle = ExportBundle(
         exported_at=datetime.now(timezone.utc).isoformat(),
         total_chunks=len(records),
         omitted_held_sources=omitted_held_sources,
         chunks=records,
+        relations=relations,
         provenance=marker,
     )
 
@@ -266,6 +293,7 @@ def _import_scan_text(chunk: Chunk) -> str:
 
 def _enforce_import_redaction(
     parsed: list[tuple[Chunk, str | None]],
+    relations: list[tuple[str, str, str]],
     *,
     force_unsafe: bool,
     surface: str,
@@ -273,7 +301,12 @@ def _enforce_import_redaction(
     """Per-record redaction gate for a foreign bundle (ADR-0006 Axis F.2).
 
     Scans the full retrievable surface of each record (see
-    :func:`_import_scan_text`). Mirrors ``mem_batch_add``'s transactional shape:
+    :func:`_import_scan_text`), and each well-formed relation's
+    ``relation_type``, which is stored and printed by ``mem_related``. The edge
+    ends are not scanned: they are only looked up among the bundle's own
+    ``chunk_id`` values and never stored. Relations are scanned as found, before
+    any is dropped for an end that does not land, so the decision covers what
+    the bundle carries. Mirrors ``mem_batch_add``'s transactional shape:
     collect each record's decision with ``record_outcome=False``, reject the
     whole import on any block (recording ``blocked`` per blocked record and
     raising :class:`ImportPrivacyError`), and only commit per-record ``pass`` /
@@ -283,16 +316,20 @@ def _enforce_import_redaction(
     """
     from memtomem import privacy
 
-    decisions: list[tuple[str, int]] = []  # (decision, hit_count)
-    for chunk, _ in parsed:
+    # One decision set over records and relations, so a blocked relation stops
+    # the import before any record's ``pass`` is counted.
+    texts = [(_import_scan_text(chunk), len(chunk.content)) for chunk, _ in parsed]
+    texts += [(relation_type, len(relation_type)) for _, _, relation_type in relations]
+    decisions: list[tuple[str, int, int]] = []  # (decision, hit_count, content_chars)
+    for text, content_chars in texts:
         guard = privacy.enforce_write_guard(
-            _import_scan_text(chunk),
+            text,
             surface=surface,
             force_unsafe=force_unsafe,
             scope="user",
             record_outcome=False,
         )
-        decisions.append((guard.decision, len(guard.hits)))
+        decisions.append((guard.decision, len(guard.hits), content_chars))
 
     blocked = [d for d in decisions if d[0] == "blocked"]
     if blocked:
@@ -300,12 +337,12 @@ def _enforce_import_redaction(
             privacy.record("blocked", surface)
         raise ImportPrivacyError(blocked_records=len(blocked))
 
-    for (decision, hit_count), (chunk, _) in zip(decisions, parsed):
+    for decision, hit_count, content_chars in decisions:
         if decision == "bypassed":
             privacy.record("bypassed", surface)
             privacy.emit_bypass_audit(
                 surface=surface,
-                content_chars=len(chunk.content),
+                content_chars=content_chars,
                 hits=hit_count,
             )
         else:
@@ -362,6 +399,14 @@ async def import_chunks(
     UUID is assigned. In ``duplicate`` mode the flag is ignored — fresh
     UUIDs always.
 
+    Relations (v3 bundles) are restored after the ids are settled: each end is
+    mapped from its bundle ``chunk_id`` to the row that record landed on — a
+    new row, or the existing row a hash conflict matched. An edge is written
+    only when both ends exist, inside the same transaction as the chunks, and
+    an edge the store already holds for that pair is kept. A foreign bundle
+    restores only edges between rows this import newly added: it may describe
+    its own chunks, never link rows the store already had.
+
     Args:
         storage: StorageBackend instance.
         embedder: EmbeddingProvider instance.
@@ -381,10 +426,11 @@ async def import_chunks(
             behaviour as the indexer.
     Returns:
         ImportStats with total / imported / skipped / failed / conflict_skipped
-        / updated counts.
+        / updated counts, and restored / skipped / failed relation counts.
     Raises:
         ImportPrivacyError: a foreign bundle has secret-bearing record(s) and
             ``force_unsafe`` is not set.
+        ValueError: the bundle's ``relations`` is not a list.
     """
     if on_conflict not in _VALID_ON_CONFLICT:
         raise ValueError(
@@ -402,8 +448,12 @@ async def import_chunks(
     text = input_path.read_text(encoding="utf-8")
     bundle = ExportBundle.from_json(text)
 
+    if not isinstance(bundle.relations, list):
+        raise ValueError("Bundle 'relations' must be a list. No records were imported.")
+    relations = _parse_relations(bundle.relations)
+
     if not bundle.chunks:
-        return ImportStats(0, 0, 0, 0)
+        return ImportStats(0, 0, 0, 0, skipped_relations=len(bundle.relations))
 
     # ADR-0006 Axis F.3: a valid local-provenance marker (verified over the raw
     # bundle records, before any parse/mutation) means this is a self-export, so
@@ -413,7 +463,10 @@ async def import_chunks(
 
     key_path = provenance_key_path or provenance.key_path_for_db(storage.db_path)
     is_self_export = provenance.verify_marker(
-        bundle.chunks, bundle.provenance, provenance.load_key_for_verify(key_path)
+        bundle.chunks,
+        bundle.provenance,
+        provenance.load_key_for_verify(key_path),
+        bundle.relations,
     )
 
     skipped = 0
@@ -440,12 +493,13 @@ async def import_chunks(
             imported_chunks=0,
             skipped_chunks=skipped,
             failed_chunks=0,
+            skipped_relations=len(bundle.relations),
         )
 
     # Foreign bundles run the F.2 redaction gate on every well-formed record
-    # (malformed records were already dropped above and are never scanned).
+    # and relation (malformed ones were already dropped and are never scanned).
     if not is_self_export:
-        _enforce_import_redaction(parsed, force_unsafe=force_unsafe, surface=surface)
+        _enforce_import_redaction(parsed, relations, force_unsafe=force_unsafe, surface=surface)
 
     if indexing_config is not None and indexing_config.hard_max_chunk_tokens:
         from memtomem.chunking.bounded import TokenBudget
@@ -483,6 +537,9 @@ async def import_chunks(
     # stored value always wins: an import may replace a chunk's content, never
     # its writer.
     origin_carryover: list[Chunk] = []
+    # Bundle ``chunk_id`` -> the row that record lands on, for the relation
+    # ends. A skipped conflict lands on the existing row as much as an update.
+    landed: dict[str, UUID] = {}
 
     if on_conflict == "duplicate":
         # Back-compat path: every record gets a fresh UUID, no hash check
@@ -493,6 +550,7 @@ async def import_chunks(
         # caller surface still accepts it.
         to_upsert = [c for c, _ in parsed]
         newly_imported = list(to_upsert)
+        landed = {bid: c.id for c, bid in parsed if bid is not None}
     else:
         all_hashes = [c.content_hash for c, _ in parsed]
         existing = await storage.get_chunk_ids_by_hashes(all_hashes)
@@ -501,6 +559,8 @@ async def import_chunks(
         for chunk, bundle_chunk_id in parsed:
             existing_id = existing.get(chunk.content_hash)
             if existing_id is not None:
+                if bundle_chunk_id is not None:
+                    landed[bundle_chunk_id] = existing_id
                 if on_conflict == "skip":
                     conflict_skipped += 1
                     continue
@@ -522,6 +582,8 @@ async def import_chunks(
                     if candidate in clash:
                         candidate = uuid4()
                     chunk.id = candidate
+                if bundle_chunk_id is not None:
+                    landed[bundle_chunk_id] = chunk.id
                 to_upsert.append(chunk)
                 newly_imported.append(chunk)
 
@@ -532,7 +594,14 @@ async def import_chunks(
             if prior is not None:
                 chunk.metadata = replace(chunk.metadata, origin=prior.metadata.origin)
 
+    edges = _land_relations(
+        relations,
+        landed,
+        new_ids=None if is_self_export else {c.id for c in newly_imported},
+    )
+
     imported = failed = 0
+    restored_relations = failed_relations = 0
     if to_upsert:
         # Embed ``retrieval_content`` (heading-hierarchy prefix + body), matching
         # what the index engine embeds at ingest time (``IndexEngine`` uses
@@ -566,21 +635,30 @@ async def import_chunks(
                 failed_chunks=len(to_upsert),
                 conflict_skipped_chunks=conflict_skipped,
                 updated_chunks=0,
+                skipped_relations=len(bundle.relations),
             )
 
+    # Also with nothing to upsert: re-importing a bundle into a store that kept
+    # its chunks but lost their edges is a write of edges alone.
+    if to_upsert or edges:
         try:
-            # One transaction so a failure in either half leaves nothing behind:
-            # without it, a chunk write that committed before the entity write
-            # failed would be reported as a failed import while its rows stayed
-            # in the store.
+            # One transaction so a failure in any part leaves nothing behind:
+            # without it, a chunk write that committed before the entity or
+            # edge write failed would be reported as a failed import while its
+            # rows stayed in the store.
             async with storage.transaction():
-                await storage.upsert_chunks(to_upsert)
-                # Imported content never passes through the indexing engine, so
-                # this is the only place its entities can be written (#2155).
-                await sync_entities_for_chunks(storage, newly_imported, enabled=extract_entities)
+                if to_upsert:
+                    await storage.upsert_chunks(to_upsert)
+                    # Imported content never passes through the indexing engine,
+                    # so this is the only place its entities can be written (#2155).
+                    await sync_entities_for_chunks(
+                        storage, newly_imported, enabled=extract_entities
+                    )
+                written = await storage.insert_relations(edges) if edges else 0
             # "imported" counts only genuinely new rows; updates are tracked
             # separately so callers can distinguish merge from overwrite.
             imported = len(to_upsert) - updated
+            restored_relations = written
         except EmbeddingPolicyChangedError:
             # Not a per-import failure: the store left this process's policy,
             # and the caller has to see the recovery the error names.
@@ -590,6 +668,7 @@ async def import_chunks(
             failed = len(to_upsert)
             imported = 0
             updated = 0
+            failed_relations = len(edges)
 
     return ImportStats(
         total_chunks=len(bundle.chunks),
@@ -598,7 +677,62 @@ async def import_chunks(
         failed_chunks=failed,
         conflict_skipped_chunks=conflict_skipped,
         updated_chunks=updated,
+        restored_relations=restored_relations,
+        skipped_relations=len(bundle.relations) - restored_relations - failed_relations,
+        failed_relations=failed_relations,
     )
+
+
+def _parse_relations(items: list) -> list[tuple[str, str, str]]:
+    """Return the well-formed bundle relations as ``(source, target, type)``.
+
+    Well-formed is a dict with three ``str`` fields, nothing more: ``mem_link``
+    writes any ``relation_type``, empty included, and a self-export has to bring
+    back what was written. The ends are bundle ``chunk_id`` values, resolved
+    later against the records' own ids.
+    """
+    parsed: list[tuple[str, str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        source_id = item.get("source_id")
+        target_id = item.get("target_id")
+        relation_type = item.get("relation_type")
+        if (
+            isinstance(source_id, str)
+            and isinstance(target_id, str)
+            and isinstance(relation_type, str)
+        ):
+            parsed.append((source_id, target_id, relation_type))
+    return parsed
+
+
+def _land_relations(
+    relations: list[tuple[str, str, str]],
+    landed: dict[str, UUID],
+    *,
+    new_ids: set[UUID] | None,
+) -> list[tuple[UUID, UUID, str]]:
+    """Map each relation's ends onto the rows their records landed on.
+
+    Drops an edge with an end that did not land (a malformed record, an id no
+    record carries) and one whose ends landed on the same row, as two
+    same-content records matching one existing row do. *new_ids*, for a foreign
+    bundle, is the rows this import adds: an edge with an end outside it would
+    link a row the store already had, which the bundle cannot vouch for — a
+    ``consolidated_into`` edge onto a user's note hides it from
+    ``mem_consolidate``. ``None`` (a verified self-export) admits both kinds.
+    """
+    edges: list[tuple[UUID, UUID, str]] = []
+    for source, target, relation_type in relations:
+        source_id = landed.get(source)
+        target_id = landed.get(target)
+        if source_id is None or target_id is None or source_id == target_id:
+            continue
+        if new_ids is not None and not (source_id in new_ids and target_id in new_ids):
+            continue
+        edges.append((source_id, target_id, relation_type))
+    return edges
 
 
 def _dict_to_chunk(
