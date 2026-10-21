@@ -836,17 +836,17 @@ def _match_conflicts(
     # Rows are only ever taken, so each hash's first free row moves forward.
     cursor: dict[str, int] = {}
     for key in groups:
-        rows = rows_by_hash.get(key[0])
-        if key in owned or not rows:
+        bucket = rows_by_hash.get(key[0])
+        if key in owned or not bucket:
             continue
         position = cursor.get(key[0], 0)
-        while position < len(rows) and rows[position].id in taken:
+        while position < len(bucket) and bucket[position].id in taken:
             position += 1
         cursor[key[0]] = position
-        if position < len(rows):
-            take(key, rows[position].id)
+        if position < len(bucket):
+            take(key, bucket[position].id)
         else:
-            shared[key] = rows[0].id
+            shared[key] = bucket[0].id
 
     matches: list[tuple[UUID, bool] | None] = []
     first = {members[0] for members in groups.values()}
