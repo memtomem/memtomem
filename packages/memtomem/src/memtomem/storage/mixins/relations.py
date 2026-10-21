@@ -95,6 +95,46 @@ class RelationMixin:
             summaries.update(UUID(row[0]) for row in rows)
         return summaries
 
+    async def get_consolidation_sources(self, chunk_ids: Sequence[UUID]) -> list[UUID]:
+        """Return the originals whose ``consolidated_into`` edge points at any of *chunk_ids*.
+
+        Incoming edges only, deduplicated, in id order. Reads through the
+        caller's transaction, like :meth:`get_consolidation_targets`.
+        """
+        from memtomem.storage.sqlite_backend import _param_batches
+
+        db = self._get_txn_read_db()
+        sources: set[str] = set()
+        for batch in _param_batches([str(cid) for cid in chunk_ids]):
+            marks = ",".join("?" * len(batch))
+            rows = db.execute(
+                "SELECT DISTINCT source_id FROM chunk_relations "  # nosec B608
+                f"WHERE relation_type = 'consolidated_into' AND target_id IN ({marks})",
+                batch,
+            ).fetchall()
+            sources.update(row[0] for row in rows)
+        return [UUID(sid) for sid in sorted(sources)]
+
+    async def carry_consolidation_edges(self, source_ids: Sequence[UUID], target_id: UUID) -> int:
+        """Add a ``consolidated_into`` edge from each of *source_ids* to *target_id*.
+
+        For a re-index that re-mints a summary chunk, inside its transaction.
+        ``INSERT OR IGNORE``: the primary key is the pair without the type, so
+        a pair that already holds an edge — a user's ``related`` link, say —
+        keeps it rather than having it replaced. Returns the edges inserted.
+        """
+        db = self._get_db()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._rolls_back_if_standalone(db):
+            cursor = db.executemany(
+                "INSERT OR IGNORE INTO chunk_relations "
+                "(source_id, target_id, relation_type, created_at) "
+                "VALUES (?, ?, 'consolidated_into', ?)",
+                [(str(sid), str(target_id), now) for sid in source_ids],
+            )
+            self._commit_if_standalone(db)
+        return cursor.rowcount
+
     async def delete_relation(self, source_id: UUID, target_id: UUID) -> bool:
         db = self._get_db()
         with self._rolls_back_if_standalone(db):

@@ -13,7 +13,15 @@ import sqlite3
 import stat as stat_module
 import time
 from dataclasses import dataclass, field
-from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Sequence
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -45,7 +53,7 @@ from memtomem.errors import (
 from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.indexing.redaction_exemption import declared_exemption, indexer_text
-from memtomem.indexing.source_receipt import chunker_versions, code_fingerprint
+from memtomem.indexing.source_receipt import chunker_versions, code_fingerprint, digest
 from memtomem.models import Chunk, IndexingStats, stored_namespace
 from memtomem.storage.sqlite_helpers import norm_dir_prefix as _norm_dir_prefix
 from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
@@ -2789,6 +2797,81 @@ class IndexEngine:
             self._storage, chunks, enabled=self._config.extract_entities
         )
 
+    async def _summary_coverage_to_carry(
+        self,
+        file_path: Path,
+        decision_path: Path,
+        existing_state: Mapping[str, object],
+        diff_result: DiffResult,
+    ) -> list[UUID]:
+        """The originals a re-minted agent summary covers, read before its delete (#2808).
+
+        ``consolidated_into`` edges are the marker ``mem_consolidate`` reads, and
+        they cascade with the chunk they point at. Editing a summary changes its
+        text, so the diff gives it a new id and the edges would go with the old
+        one. Each summary has a file of its own, so the file's chunk after the
+        re-index is the same summary — but only when that is unambiguous: the
+        file is named like one :func:`consolidation_file_name` writes, and it held
+        exactly one stored chunk, which this re-index deletes. A file stored as
+        more than one chunk — a second entry appended to it, or a summary already
+        split — carries nothing, so deleting the summary beside a surviving entry
+        relists its originals rather than covering them with unrelated text. (A
+        short entry that merged into the summary's chunk is part of that chunk,
+        and the edges already pointed at it.)
+
+        *existing_state* is the snapshot the diff was computed from, read before
+        the embedding. Called inside the write transaction, this reads the
+        file's rows again through the writer: a writer that does not take the
+        file's lock, such as a bundle import, can add a row in between, and a
+        carry judged on the old snapshot would then cover unrelated text.
+        """
+        from memtomem.memory_scope import is_consolidation_summary_file
+
+        if len(existing_state) != 1 or not is_consolidation_summary_file(decision_path):
+            return []
+        deleted = set(diff_result.to_delete)
+        (only,) = existing_state
+        if UUID(only) not in deleted:
+            return []
+        if set(await self._storage.get_chunk_index_state(file_path)) != {only}:
+            return []
+        sources = await self._storage.get_consolidation_sources(list(deleted))
+        return [sid for sid in sources if sid not in deleted]
+
+    async def _carry_summary_coverage(
+        self,
+        file_path: Path,
+        new_chunks: Sequence[Chunk],
+        kept: Sequence[Chunk],
+        persisted_upserts: Sequence[Chunk],
+        sources: Sequence[UUID],
+    ) -> None:
+        """Re-link *sources* to the file's first stored chunk, as the apply links its first.
+
+        Called inside the chunk-write transaction, after the upserts: an upsert
+        the store ignored has no row, so the target is the first chunk in file
+        order that is either kept or was written.
+        """
+        stored = {c.id for c in kept} | {c.id for c in persisted_upserts}
+        target = next((c.id for c in new_chunks if c.id in stored), None)
+        if target is None:
+            logger.warning(
+                "summary %s left no stored chunk; %d original(s) lose consolidation coverage",
+                digest(str(file_path))[:12],
+                len(sources),
+            )
+            return
+        candidates = [sid for sid in sources if sid != target]
+        linked = await self._storage.carry_consolidation_edges(candidates, target)
+        if linked < len(candidates):
+            logger.warning(
+                "summary %s: %d of %d original(s) already had another edge to its new "
+                "chunk and keep it instead of consolidation coverage",
+                digest(str(file_path))[:12],
+                len(candidates) - linked,
+                len(candidates),
+            )
+
     async def _index_file(
         self,
         file_path: Path,
@@ -3415,6 +3498,9 @@ class IndexEngine:
         # Wrap delete+upsert in a single transaction for atomicity.
         async with self._storage.transaction():
             await self._validate_source_commit(file_path)
+            carried_sources = await self._summary_coverage_to_carry(
+                file_path, decision_path, existing_state, diff_result
+            )
             if diff_result.to_delete:
                 if isinstance(self._storage, SqliteBackend):
                     deleted_ids = json.dumps([str(i) for i in diff_result.to_delete])
@@ -3485,6 +3571,10 @@ class IndexEngine:
                 # same write already paid for.
                 if persisted_upserts:
                     await self._extract_entities_for(persisted_upserts)
+            if carried_sources:
+                await self._carry_summary_coverage(
+                    file_path, new_chunks, hash_matched, persisted_upserts, carried_sources
+                )
             await self._record_source_commit(file_path)
             if receipt_policy and receipt_storage is not None:
                 from memtomem.indexing.source_receipt import record
