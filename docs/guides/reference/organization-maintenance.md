@@ -270,8 +270,9 @@ another. Some memory dirs, such as `~/.claude/plans`, belong to tools that delet
 their own files, and there the indexed chunks are the only copy left: decline
 that group rather than purging it. `--under DIR` (repeatable) limits the
 preview and the purge to sources under `DIR`, which is how to make
-`--apply --yes` delete less than everything. It matches the stored path, so a
-symlink alias for a directory matches only while the link exists.
+`--apply --yes` delete less than everything. It matches where each source
+resolves, which is also where the purge deletes, so a symlink alias for a
+directory matches only while the link exists.
 
 Over MCP, the same cleanup is `mem_do(action="cleanup_orphans")` for the
 preview and `mem_do(action="cleanup_orphans", params={"dry_run": false,

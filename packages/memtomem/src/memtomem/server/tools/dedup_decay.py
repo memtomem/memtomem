@@ -232,7 +232,7 @@ async def mem_cleanup_orphans(
     ctx: CtxType = None,
     *,
     confirm_purge: bool = False,
-    under: list[str] | None = None,
+    under: str | list[str] | None = None,
 ) -> str:
     """Find and remove orphaned chunks whose source files no longer exist.
 

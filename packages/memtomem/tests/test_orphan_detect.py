@@ -368,3 +368,13 @@ class TestCleanupOrphansUnder:
         assert out.startswith("Error")
         assert "under must be" in out
         app.storage.delete_by_source.assert_not_awaited()
+
+    @pytest.mark.parametrize("value", ["/some/dir", ["/a", "/b"], None])
+    def test_mcp_boundary_accepts_a_path_or_a_list(self, value):
+        """A direct MCP call is validated against the signature before the tool runs."""
+        from mcp.server.mcpserver.utilities.func_metadata import func_metadata
+
+        from memtomem.server.tools.dedup_decay import mem_cleanup_orphans
+
+        model = func_metadata(mem_cleanup_orphans).arg_model
+        assert model.model_validate({"under": value}).under == value

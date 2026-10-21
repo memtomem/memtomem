@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from memtomem.storage.sqlite_helpers import is_under_any_root
+from memtomem.storage.sqlite_helpers import norm_dir_prefix, norm_path
 
 if TYPE_CHECKING:
     from memtomem.storage.base import StorageBackend
@@ -146,20 +146,22 @@ def group_orphans(
     how many orphans ``under`` left out. An empty ``under`` keeps everything.
 
     Ownership is the longest-prefix rule doctor and the Sources tree use, so
-    each source lands in exactly one group. Containment is
-    :func:`is_under_any_root`, which resolves both the source's path and its
-    parent. A symlink alias for a directory therefore matches only while the
-    link still exists. Both rules stat the filesystem, so async callers run
-    this in a thread.
+    each source lands in exactly one group. Both rules judge a source by its
+    resolved path, the identity ``delete_by_source`` deletes by. A stored path
+    that has since become a symlink is therefore judged where it points, not
+    where the link sits; judging it by the link would let ``under`` select a
+    source whose purge deletes another source's chunks. A symlink alias for a
+    directory matches only while the link still exists. Both rules stat the
+    filesystem, so async callers run this in a thread.
     """
     from memtomem.indexing.engine import resolve_owning_memory_dir
 
     roots = list(roots)
-    under = [Path(d).expanduser() for d in under]
+    prefixes = [norm_dir_prefix(Path(d).expanduser()) for d in under]
     kept: list[Path] = []
     excluded = 0
     for source in orphans:
-        if under and not is_under_any_root(source, under):
+        if prefixes and not norm_path(source).startswith(tuple(prefixes)):
             excluded += 1
         else:
             kept.append(source)

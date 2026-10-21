@@ -693,3 +693,40 @@ class TestOrphanSourcesCli:
         result = CliRunner().invoke(cli, ["gc", "orphan-sources", "--yes"])
         assert result.exit_code != 0
         assert "--yes requires --apply" in result.output
+
+
+class TestOrphanSourcesUnderRealStorage:
+    @pytest.mark.requires_symlinks
+    async def test_under_judges_a_relinked_source_where_its_purge_lands(
+        self, backend, monkeypatch, tmp_path
+    ):
+        """A stored path that became a dangling symlink is judged by its target.
+
+        ``delete_by_source`` deletes by the resolved path, so a purge of
+        ``work/a.md`` here would delete ``plans/b.md``'s chunks. ``--under
+        work`` must therefore not select it, or the purge reaches a directory
+        the user left out (#2833).
+        """
+        from memtomem.cli import gc_cmd
+        from memtomem.storage import orphan_detect
+
+        monkeypatch.setattr(orphan_detect, "ORPHAN_RECHECK_DELAY_SECONDS", 0.0)
+        base = tmp_path.resolve()
+        work, plans = base / "work", base / "plans"
+        work.mkdir()
+        plans.mkdir()
+        a, b = work / "a.md", plans / "b.md"
+        _insert_chunk(backend, chunk_id="a", source_file=str(a), scope="user", project_root=None)
+        _insert_chunk(backend, chunk_id="b", source_file=str(b), scope="user", project_root=None)
+        a.symlink_to(b)  # b does not exist: both sources are missing
+        comp = SimpleNamespace(
+            storage=backend,
+            search_pipeline=SimpleNamespace(invalidate_cache=Mock()),
+            config=SimpleNamespace(indexing=SimpleNamespace(all_index_roots=lambda: [work, plans])),
+        )
+        _patch_bootstrap(monkeypatch, comp)
+
+        await gc_cmd._run_orphan_sources(apply_=True, assume_yes=True, under=(work,))
+
+        rows = backend._get_db().execute("SELECT id FROM chunks ORDER BY id").fetchall()
+        assert [r[0] for r in rows] == ["a", "b"]
