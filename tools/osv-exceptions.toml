@@ -12,3 +12,60 @@
 # owner = "github-handle"
 # reason = "No fixed release; affected path is not reachable"
 # ignoreUntil = 2026-08-01
+
+# pillow 12.3.0 via fastembed (onnx/all extras), published 2026-10-20. Remove these
+# when fastembed allows pillow>=13 and uv.lock moves to it.
+
+[[exceptions]]
+id = "GHSA-462x-pgg6-55fp"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-58r4-6rv3-gfh8"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-65qm-jvmh-6pqg"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-8g5g-8vmr-9782"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-c6hw-5grf-ff96"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-p4wg-p73j-c528"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-pchr-8j38-3x4p"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-q45j-58j2-45rg"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-vx6w-vv9f-6gvg"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
