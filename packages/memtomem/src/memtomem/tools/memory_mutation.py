@@ -29,6 +29,7 @@ from memtomem.search.visibility import chunk_in_scope_boundary
 from memtomem.source_provenance import (
     ExcludedSourceError,
     ReadOnlySourceError,
+    SourceMissingError,
     StaleSourceProvenanceError,
 )
 from memtomem.tools.memory_writer import (
@@ -200,7 +201,11 @@ async def mutate_source_and_reindex(
         raise ReadOnlySourceError(str(source_file))
     from memtomem.indexing.engine import MutationBlockedError, PrivacyRejection
 
-    pre_image = await asyncio.to_thread(read_pre_image, source_file)
+    try:
+        pre_image = await asyncio.to_thread(read_pre_image, source_file)
+    except FileNotFoundError as exc:
+        # Nothing read, nothing written (#2833).
+        raise SourceMissingError(str(source_file)) from exc
     preflight = await asyncio.to_thread(
         index_engine.preflight_mutation, source_file, pre_image.data
     )

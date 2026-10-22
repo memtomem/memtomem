@@ -471,3 +471,48 @@ async def test_a_looping_retain_dir_neither_stops_compaction_nor_status(env, tmp
     assert not await _hidden(comp, kept)
     assert await comp.storage.is_source_held(Path(norm_path(gone)))
     assert report["config"]["retain_missing_dirs"][0] == str(loop)
+
+
+# --- commit review regressions --------------------------------------------------
+
+
+@pytest.mark.requires_symlinks
+async def test_an_unavailable_source_under_a_retain_dir_is_not_an_archive(env):
+    """``exists()`` is False for a symlink loop too; only absence is archived."""
+    from memtomem.server.tools.status_config import collect_status_report
+
+    comp, mem_dir = env
+    path = await _indexed(comp, mem_dir / "a.md")
+    path.unlink()
+    path.symlink_to(path)  # ELOOP: unavailable, not missing
+    app = AppContext.from_components(comp)
+
+    assert (await check_orphan_count(app)).value["orphaned"] == 1
+    report = await collect_status_report(app)
+    assert (report["index"]["orphaned_sources"], report["index"]["archived_sources"]) == (1, 0)
+
+
+@pytest.mark.parametrize("surface", ["mcp_edit", "web_edit", "mcp_delete"])
+async def test_a_file_removed_after_the_gates_is_refused_at_the_read(env, monkeypatch, surface):
+    """The absence is decided where the pre-image is read, not by an earlier check."""
+    from memtomem.tools import memory_mutation
+    from test_excluded_source_mutation import _request
+
+    comp, mem_dir = env
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+
+    def gone(_source):
+        raise FileNotFoundError(2, "No such file or directory", str(path))
+
+    monkeypatch.setattr(memory_crud, "read_pre_image", gone)
+    monkeypatch.setattr(memory_mutation, "read_pre_image", gone)
+
+    result = await _request(comp, surface, chunk.id)
+
+    if isinstance(result, str):
+        assert result == f"Error: {SOURCE_MISSING_DETAIL}"
+    else:
+        assert result.status_code == 409, result.text
+        assert result.json()["detail"] == SOURCE_MISSING_DETAIL
+    assert path.read_text(encoding="utf-8") == BODY

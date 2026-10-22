@@ -35,10 +35,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   unreadable file, an unavailable drive and a redaction-blocked file stay
   held, and a path that now holds a directory is handled as before. Default
   empty, so nothing changes until it is set.
-- **Editing a chunk whose source file is gone is refused with
-  `source_missing`.** `mem_edit` returned the raw `No such file or directory`
-  error with the absolute path, and the web editor a 500; both now refuse
-  before writing anything.
+- **Changing a chunk whose source file is gone is refused with
+  `source_missing`.** `mem_edit` and `mem_delete` returned the raw `No such
+  file or directory` error with the absolute path, and the web editor a 500;
+  they now refuse before writing anything. The absence is decided where the
+  file is read, so a file removed during the request is refused the same way.
+  The web UI's chunk delete still removes the chunk from the index alone.
 
 ### Changed
 

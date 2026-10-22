@@ -462,7 +462,12 @@ async def _mutate_file_and_reindex(
     # re-index would otherwise lose the flag, and one that starts would
     # inherit a mutation that happened in its predecessor.
     provenance_session_id = await capture_session_for_untracked_write(app)
-    pre_image = await asyncio.to_thread(read_pre_image, source_file)
+    try:
+        pre_image = await asyncio.to_thread(read_pre_image, source_file)
+    except FileNotFoundError:
+        # A missing source stays visible under ``retain_missing_dirs`` (#2833);
+        # nothing has been read or written yet.
+        return None, f"Error: {SOURCE_MISSING_DETAIL}"
     preflight = await asyncio.to_thread(
         app.index_engine.preflight_mutation, source_file, pre_image.data
     )
@@ -1449,11 +1454,6 @@ async def mem_edit(
                 "chunks (git history is forever). Move the chunk to a different "
                 "scope first, or hand-edit the canonical file with explicit review."
             )
-        # A missing source now stays visible under ``retain_missing_dirs``
-        # (#2833). Refused after the ingress guard has judged ``new_content``
-        # and before the read below would fail on the absent file.
-        if not await asyncio.to_thread(meta.source_file.exists):
-            return f"Error: {SOURCE_MISSING_DETAIL}"
         # ``replace_chunk_body`` preserves the heading + section-leading
         # blockquote header (``> created:`` / ``> tags:``) so that callers
         # supplying body-only ``new_content`` don't accidentally erase the

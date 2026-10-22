@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import stat
 from pathlib import Path
@@ -22,6 +21,7 @@ from memtomem.source_provenance import (
     SOURCE_READ_ONLY_DETAIL,
     STALE_SOURCE_PROVENANCE_DETAIL,
     ExcludedSourceError,
+    SourceMissingError,
     ReadOnlySourceError,
     StaleSourceProvenanceError,
 )
@@ -306,11 +306,6 @@ async def edit_chunk(
                     ),
                 },
             )
-        # A missing source now stays visible under ``retain_missing_dirs``
-        # (#2833). Refused after the lock and the ingress guard, as in
-        # ``mem_edit``, instead of failing on the read below with a 500.
-        if not await asyncio.to_thread(meta.source_file.exists):
-            raise HTTPException(status_code=409, detail=SOURCE_MISSING_DETAIL)
 
         try:
             # ``replace_chunk_body`` keeps the heading + section-leading
@@ -347,6 +342,10 @@ async def edit_chunk(
             # Raised before the helper reads or writes anything (#2488), so
             # there is nothing to invalidate.
             raise HTTPException(status_code=409, detail=EXCLUDED_SOURCE_DETAIL) from exc
+        except SourceMissingError as exc:
+            # A missing source stays visible under ``retain_missing_dirs``
+            # (#2833). Raised at the pre-image read, before anything is written.
+            raise HTTPException(status_code=409, detail=SOURCE_MISSING_DETAIL) from exc
         except ReadOnlySourceError as exc:
             # The gate above this ``try`` normally refuses first; this covers the
             # narrow window where the config was reloaded between the two (the

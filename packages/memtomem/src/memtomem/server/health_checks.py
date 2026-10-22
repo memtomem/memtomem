@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from memtomem.errors import TransactionOwnedError
 from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server.health_store import HealthSnapshot
-from memtomem.storage.orphan_detect import RetainRule, orphan_candidate_sources
+from memtomem.storage.orphan_detect import RetainRule, orphan_candidate_sources, source_state
 
 if TYPE_CHECKING:
     from memtomem.server.context import AppContext
@@ -108,8 +108,13 @@ async def check_orphan_count(app: AppContext) -> HealthSnapshot:
         rule = RetainRule.prepare(indexing)
         orphaned = 0
         for sf in source_files - known_hidden:
-            if not sf.exists() and not rule.retains_key(str(sf)):
-                orphaned += 1
+            if sf.exists():
+                continue
+            # ``exists()`` is also False for errors such as a symlink loop; only
+            # a confirmed absence makes a retained source an archive.
+            if rule.retains_key(str(sf)) and source_state(sf) == "missing":
+                continue
+            orphaned += 1
         return orphaned, len(source_files)
 
     orphaned, total = await asyncio.to_thread(_count_orphans)

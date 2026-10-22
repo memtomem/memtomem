@@ -26,8 +26,8 @@ STALE_SOURCE_PROVENANCE_DETAIL = (
 
 
 SOURCE_MISSING_DETAIL = (
-    "source_missing: the chunk's source file is gone from disk, so an edit has nothing to "
-    "rewrite. Nothing was written. Restore the file to edit it here; under "
+    "source_missing: the chunk's source file is gone from disk, so there is nothing to "
+    "rewrite. Nothing was written. Restore the file to change it here; under "
     "indexing.retain_missing_dirs its chunks stay searchable as an archive."
 )
 
@@ -65,6 +65,14 @@ class ExcludedSourceError(ValueError):
     Writing the file and then re-indexing it would return zeroed stats without
     raising, and the old chunks would stay searchable beside the new bytes
     (#2488). Refusing first keeps the file and the index in agreement.
+    """
+
+
+class SourceMissingError(ValueError):
+    """A rewrite refused before writing: the source file is gone from disk.
+
+    Raised where the pre-image is read, not from an earlier existence check,
+    so a file removed in between is refused the same way (#2833).
     """
 
 

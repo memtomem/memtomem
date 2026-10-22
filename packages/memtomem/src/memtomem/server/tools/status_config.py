@@ -30,7 +30,7 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.helpers import _set_config_key
 from memtomem.secret_masking import is_secret_key, mask_secrets
-from memtomem.storage.orphan_detect import RetainRule, orphan_candidate_sources
+from memtomem.storage.orphan_detect import RetainRule, orphan_candidate_sources, source_state
 
 if TYPE_CHECKING:
     from memtomem.config import EmbeddingConfig, Mem2MemConfig, SaveReceipt, SearchConfig
@@ -377,10 +377,18 @@ async def collect_status_report(app: AppContext) -> dict:
         logger.debug("Held-source status query failed", exc_info=True)
     try:
         missing = [sf for sf in source_files - hidden_paths if not sf.exists()]
+
         # Missing sources under ``retain_missing_dirs`` are archives the user
         # chose to keep, not orphans to clean up (#2833).
-        rule = await asyncio.to_thread(RetainRule.prepare, config.indexing)
-        archived = sum(1 for sf in missing if rule.retains_key(str(sf)))
+        # ``exists()`` is also False for errors such as a symlink loop; only a
+        # confirmed absence makes a retained source an archive.
+        def _count_archived() -> int:
+            rule = RetainRule.prepare(config.indexing)
+            return sum(
+                1 for sf in missing if rule.retains_key(str(sf)) and source_state(sf) == "missing"
+            )
+
+        archived = await asyncio.to_thread(_count_archived)
         orphaned = len(missing) - archived
     except Exception:
         logger.debug("Unheld orphan count failed", exc_info=True)

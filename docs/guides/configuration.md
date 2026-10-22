@@ -762,8 +762,9 @@ means "archived" instead:
 - **A rename inside such a directory keeps both paths.** The old path's
   chunks stay as an archive next to the new file's, so search can return
   the text twice.
-- **Archived chunks cannot be edited**, since there is no file to rewrite;
-  the edit is refused with `source_missing`.
+- **Archived chunks cannot be edited**, since there is no file to rewrite:
+  `mem_edit`, `mem_delete` and the web editor refuse with `source_missing`.
+  The web UI's chunk delete removes one from the index.
 
 ### Lock sidecars (`.<name>.lock`)
 
