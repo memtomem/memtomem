@@ -984,6 +984,35 @@ def _findings_by_check(report) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retained", [True, False])
+async def test_a_missing_source_under_a_retain_dir_is_archived_not_stale(doctor_env, retained):
+    """#2833: an archive the user chose to keep is info, not an exit-1 error."""
+    config, mem_dir = doctor_env
+    if retained:
+        config.indexing.retain_missing_dirs = [mem_dir]
+    backend = SqliteBackend(
+        config.storage, dimension=0, embedding_provider="none", embedding_model=""
+    )
+    await backend.initialize()
+    try:
+        _insert_chunk(backend, chunk_id="g1", source_file=mem_dir / "ghost.md")
+    finally:
+        await backend.close()
+
+    (report,) = [
+        r for r in _gather_reports(config=config, inspect_dirs=[mem_dir]) if r.path != "(unowned)"
+    ]
+    by = _findings_by_check(report)
+    ghost = [norm_path(mem_dir / "ghost.md")]
+    if retained:
+        assert "stale_source" not in by
+        assert (by["archived_source"].severity, by["archived_source"].items) == ("info", ghost)
+    else:
+        assert "archived_source" not in by
+        assert by["stale_source"].items == ghost
+
+
+@pytest.mark.asyncio
 async def test_present_but_held_source_is_reported(doctor_env):
     config, mem_dir = doctor_env
     backend = SqliteBackend(

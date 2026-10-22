@@ -113,18 +113,35 @@ def orphan_sources(apply_: bool, assume_yes: bool, under: tuple[Path, ...]) -> N
     asyncio.run(_run_orphan_sources(apply_=apply_, assume_yes=assume_yes, under=under))
 
 
+def _archived_line(count: int) -> str:
+    return f"{count} archived source(s) under retain_missing_dirs are kept."
+
+
+def _archived_chunks_line(count: int) -> str:
+    return f"{count} archived chunk(s) under retain_missing_dirs are kept."
+
+
 async def _run_orphan_sources(
     *, apply_: bool, assume_yes: bool, under: tuple[Path, ...] = ()
 ) -> None:
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.storage.orphan_detect import group_orphans, scan_orphans, source_state
+    from memtomem.storage.orphan_detect import (
+        RetainRule,
+        group_orphans,
+        scan_orphans,
+        source_state,
+    )
 
     async with cli_components() as comp:
         result = await scan_orphans(comp.storage)
         unavailable = sorted(result.unavailable_sources)
+        rule = await asyncio.to_thread(RetainRule.prepare, comp.config.indexing)
+        archived, candidates = await asyncio.to_thread(
+            rule.split_for_purge, result.confirmed_orphans
+        )
         groups, excluded = await asyncio.to_thread(
             group_orphans,
-            result.confirmed_orphans,
+            candidates,
             comp.config.indexing.all_index_roots(),
             under=under,
         )
@@ -141,6 +158,8 @@ async def _run_orphan_sources(
                     f"No orphaned sources found ({result.total_sources} source files checked).",
                     fg="green",
                 )
+            if archived:
+                click.echo(_archived_line(len(archived)))
             if unavailable:
                 click.secho(
                     f"{len(unavailable)} source(s) could not be checked and are not eligible for purge.",
@@ -159,6 +178,8 @@ async def _run_orphan_sources(
                 click.echo(f"  - {source}")
         if excluded:
             click.echo(f"\n{excluded} more orphaned source(s) are outside the given directories.")
+        if archived:
+            click.echo(_archived_line(len(archived)))
         if unavailable:
             click.secho(
                 f"{len(unavailable)} additional source(s) could not be checked and will not be purged.",
@@ -220,9 +241,17 @@ async def _run_orphan_sources(
 async def _run(*, apply_: bool, assume_yes: bool) -> None:
     from memtomem.cli._bootstrap import cli_components
 
-    async with cli_components() as comp:
-        reports = await comp.storage.find_orphan_project_roots()
+    from memtomem.storage.orphan_detect import RetainRule
 
+    async with cli_components() as comp:
+        rule = await asyncio.to_thread(RetainRule.prepare, comp.config.indexing)
+        keep = rule.retains_key if rule.retain else None
+        reports = await comp.storage.find_orphan_project_roots(keep=keep)
+        kept = sum(r.kept_rows for r in reports)
+        reports = [r for r in reports if r.total_rows]
+
+        if kept:
+            click.echo(_archived_chunks_line(kept))
         if not reports:
             click.secho("No orphan project_root entries found.", fg="green")
             return
@@ -251,7 +280,7 @@ async def _run(*, apply_: bool, assume_yes: bool) -> None:
                 ):
                     click.echo(f"  skipped: {report.project_root}")
                     continue
-            result = await comp.storage.sweep_orphan_project_root(report.project_root)
+            result = await comp.storage.sweep_orphan_project_root(report.project_root, keep=keep)
             click.echo(
                 f"  deleted: {result.chunks_deleted} chunks, "
                 f"{result.fts_deleted} fts rows, "

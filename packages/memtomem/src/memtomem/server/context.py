@@ -1001,11 +1001,14 @@ class AppContext:
             # config satisfies it, but a mix of fresh writable roots and a stale
             # read-only list need not — a directory moved from protected to
             # writable would sit in both, refused by the chunk-mutation gates
-            # while ingress writes it.
+            # while ingress writes it. ``retain_missing_dirs`` is compared and
+            # installed with them for the first reason only: a change to it
+            # alone must reach the engine and the held-source recheck (#2833).
             if (
                 _same_tier(fresh.indexing.memory_dirs, indexing.memory_dirs)
                 and _same_tier(fresh.indexing.project_memory_dirs, indexing.project_memory_dirs)
                 and _same_tier(fresh.indexing.read_only_memory_dirs, indexing.read_only_memory_dirs)
+                and _same_tier(fresh.indexing.retain_missing_dirs, indexing.retain_missing_dirs)
             ):
                 self._config_signature = signature
                 return
@@ -1013,9 +1016,11 @@ class AppContext:
             previous_memory_dirs = list(indexing.memory_dirs)
             previous_project_dirs = list(indexing.project_memory_dirs)
             previous_read_only_dirs = list(indexing.read_only_memory_dirs)
+            previous_retain_dirs = list(indexing.retain_missing_dirs)
             indexing.memory_dirs = list(fresh.indexing.memory_dirs)
             indexing.project_memory_dirs = list(fresh.indexing.project_memory_dirs)
             indexing.read_only_memory_dirs = list(fresh.indexing.read_only_memory_dirs)
+            indexing.retain_missing_dirs = list(fresh.indexing.retain_missing_dirs)
             try:
                 await watcher.reconfigure(indexing)
             except Exception:
@@ -1028,6 +1033,7 @@ class AppContext:
                 indexing.memory_dirs = previous_memory_dirs
                 indexing.project_memory_dirs = previous_project_dirs
                 indexing.read_only_memory_dirs = previous_read_only_dirs
+                indexing.retain_missing_dirs = previous_retain_dirs
                 logger.warning(
                     "Failed to reconcile watched roots after a config change — "
                     "still watching the previous set",

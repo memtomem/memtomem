@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 # in the leaf ``storage`` package, so this stays clear of the heavy
 # ``server`` import that would risk a scheduler ↔ server cycle.
 from memtomem.search.decay import expire_chunks
-from memtomem.storage.orphan_detect import scan_orphans
+from memtomem.storage.orphan_detect import hold_orphans, scan_orphans
 
 if TYPE_CHECKING:
     from memtomem.server.context import AppContext
@@ -110,17 +110,14 @@ class DedupScanParams(BaseModel):
 async def _run_compaction(app: AppContext) -> JobResult:
     """Hold missing or inaccessible sources; automatic cleanup never purges."""
     result = await scan_orphans(app.storage)
-    changed = False
-    for sf in result.confirmed_orphans:
-        changed |= await app.storage.hold_source(sf, "scan_missing")
-    for sf in result.unavailable_sources:
-        changed |= await app.storage.hold_source(sf, "scan_unavailable")
-    if changed:
+    outcome = await hold_orphans(app.storage, result, app.config.indexing)
+    if outcome.changed:
         app.search_pipeline.invalidate_cache()
     return {
         "sources_checked": result.total_sources,
-        "orphan_files": len(result.confirmed_orphans),
-        "held_sources": len(result.confirmed_orphans) + len(result.unavailable_sources),
+        "orphan_files": outcome.missing_held,
+        "held_sources": outcome.missing_held + outcome.unavailable_held,
+        "archived_sources": outcome.archived,
         "chunks_deleted": 0,
     }
 

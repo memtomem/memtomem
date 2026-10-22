@@ -61,6 +61,8 @@ Checks (per configured ``memory_dir``):
   counts only; matched bytes are never shown.
 * **stale_source** — DB chunks whose ``source_file`` is gone from disk and
   have not yet entered a visibility hold.
+* **archived_source** — DB chunks whose ``source_file`` is gone from disk
+  under ``indexing.retain_missing_dirs``, kept searchable on purpose. Info.
 * **held_source** — sources whose chunks are retained but hidden while
   availability or reindexing is unresolved, including present files that
   cannot be indexed. Advisory; repair and reindex wanted files, or explicitly
@@ -1485,7 +1487,11 @@ def _analyze_dir(
 
     # 3/4. DB-only sources — split into stale (deleted), convention violation
     # (meta file indexed), and an unexpected residue.
+    from memtomem.storage.orphan_detect import RetainRule
+
+    retain = RetainRule.prepare(config.indexing)
     stale: list[str] = []
+    archived: list[str] = []
     held_missing: list[str] = []
     held_present = [
         str(row[0])
@@ -1501,6 +1507,8 @@ def _analyze_dir(
         if not Path(src).exists():
             if k in (held_sources or set()):
                 held_missing.append(str(src))
+            elif retain.retains_key(str(src)):
+                archived.append(str(src))
             else:
                 stale.append(str(src))
         elif Path(src).name in excluded:
@@ -1518,6 +1526,18 @@ def _analyze_dir(
                     "(review with `mm gc orphan-sources`, then use `--apply` after confirming deletion)"
                 ),
                 items=sorted(stale),
+            )
+        )
+    if archived:
+        report.findings.append(
+            Finding(
+                check="archived_source",
+                severity="info",
+                summary=(
+                    f"{len(archived)} source(s) are missing on disk and kept searchable "
+                    "by `indexing.retain_missing_dirs` — their chunks are the only copy"
+                ),
+                items=sorted(archived),
             )
         )
     if held_missing or held_present:

@@ -29,6 +29,7 @@ from memtomem.server.tools._provenance import (
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
 from memtomem.source_provenance import (
     EXCLUDED_SOURCE_DETAIL,
+    SOURCE_MISSING_DETAIL,
     EXCLUDED_TARGET_DETAIL,
     READ_ONLY_TARGET_DETAIL,
     SOURCE_READ_ONLY_DETAIL,
@@ -1448,6 +1449,11 @@ async def mem_edit(
                 "chunks (git history is forever). Move the chunk to a different "
                 "scope first, or hand-edit the canonical file with explicit review."
             )
+        # A missing source now stays visible under ``retain_missing_dirs``
+        # (#2833). Refused after the ingress guard has judged ``new_content``
+        # and before the read below would fail on the absent file.
+        if not await asyncio.to_thread(meta.source_file.exists):
+            return f"Error: {SOURCE_MISSING_DETAIL}"
         # ``replace_chunk_body`` preserves the heading + section-leading
         # blockquote header (``> created:`` / ``> tags:``) so that callers
         # supplying body-only ``new_content`` don't accidentally erase the

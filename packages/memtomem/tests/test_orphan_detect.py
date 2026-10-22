@@ -205,7 +205,9 @@ class TestInteractiveToolSkipsBrake:
         app = SimpleNamespace(
             storage=MagicMock(delete_by_source=AsyncMock(return_value=1)),
             search_pipeline=MagicMock(),
-            config=SimpleNamespace(indexing=SimpleNamespace(all_index_roots=lambda: [tmp_path])),
+            config=SimpleNamespace(
+                indexing=SimpleNamespace(all_index_roots=lambda: [tmp_path], retain_missing_dirs=[])
+            ),
         )
 
         @asynccontextmanager
@@ -315,7 +317,9 @@ class TestCleanupOrphansUnder:
         app = SimpleNamespace(
             storage=MagicMock(delete_by_source=AsyncMock(return_value=2)),
             search_pipeline=MagicMock(),
-            config=SimpleNamespace(indexing=SimpleNamespace(all_index_roots=lambda: [plans])),
+            config=SimpleNamespace(
+                indexing=SimpleNamespace(all_index_roots=lambda: [plans], retain_missing_dirs=[])
+            ),
         )
 
         async def fake_app(_ctx):

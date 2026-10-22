@@ -710,3 +710,53 @@ async def test_config_d_vanishing_mid_sample_does_not_fail_the_tool_call(
         await ctx.reconcile_watched_roots()  # must not raise
 
     assert _roots(ctx) == {root.resolve()}
+
+
+def _write_retain_config(home: Path, memory_dirs: list[Path], retain: list[Path]) -> None:
+    path = home / ".memtomem" / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "indexing": {
+                    "memory_dirs": [str(d) for d in memory_dirs],
+                    "retain_missing_dirs": [str(d) for d in retain],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_retain_dir_change_alone_is_installed(
+    _isolated_config_home: Path, tmp_path: Path
+) -> None:
+    """#2833: without it in the comparison the edit was banked and never applied."""
+    root = tmp_path / "one"
+    root.mkdir()
+    ctx, watcher = await _make_app(_isolated_config_home, [root])
+    indexing = ctx.config.indexing
+
+    _write_retain_config(_isolated_config_home, [root], [root])
+    await ctx.reconcile_watched_roots()
+
+    watcher.reconfigure.assert_awaited_once()
+    assert ctx.config.indexing is indexing  # installed in place, shared by identity
+    assert [Path(p).expanduser().resolve() for p in indexing.retain_missing_dirs] == [
+        root.resolve()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_reconfigure_rolls_the_retain_dirs_back(
+    _isolated_config_home: Path, tmp_path: Path
+) -> None:
+    root = tmp_path / "one"
+    root.mkdir()
+    ctx, watcher = await _make_app(_isolated_config_home, [root])
+    watcher.reconfigure = AsyncMock(side_effect=RuntimeError("boom"))
+
+    _write_retain_config(_isolated_config_home, [root], [root])
+    await ctx.reconcile_watched_roots()
+
+    assert ctx.config.indexing.retain_missing_dirs == []

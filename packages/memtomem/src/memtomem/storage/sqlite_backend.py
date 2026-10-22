@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator, Mapping, Sequence, TypeGuard, TypeVar
+from typing import Any, AsyncIterator, Callable, Iterator, Mapping, Sequence, TypeGuard, TypeVar
 from uuid import UUID
 
 import sqlite_vec
@@ -75,7 +75,7 @@ from memtomem.storage.orphan_gc import (
     sweep_orphan_project_root,
 )
 from memtomem.storage.sqlite_meta import MetaManager
-from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
+from memtomem.storage.source_holds import ABSENCE_HOLD_REASONS, REDACTION_BLOCKED_HOLD
 from memtomem.storage.sqlite_namespace import NamespaceOps
 from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority_case
 from memtomem.storage.sqlite_visibility import (
@@ -2483,6 +2483,52 @@ class SqliteBackend(
             self._commit_if_standalone(db)
         return changed
 
+    async def release_absence_hold(self, source_key: str) -> bool:
+        """Show a retained source again while it is hidden only for being gone (#2833).
+
+        ``source_key`` is the stored spelling (a ``held_sources`` or
+        ``pending_source_checks`` row, or ``norm_path`` of the file for the
+        engine, which writes holds under that key). It is matched as is: a
+        stored key re-resolved after a parent became a symlink would name a
+        different row and leave this one hidden.
+
+        The held row goes only while its reason is in
+        :data:`ABSENCE_HOLD_REASONS`, checked under the writer lock, so a hold
+        that has since become ``scan_unavailable`` or ``redaction_blocked``
+        stays. The pending row (a journaled delete) goes only when no other
+        hold remains, because for a retained source a delete is what the
+        archive is for. ``hold_source`` still overwrites one availability
+        reason with another, so a concurrent absence hold can turn an
+        unavailable hold into a releasable one; that exposes only an archived
+        source the user chose to keep, never a redaction hold.
+        """
+        db = self._get_db()
+        if db.in_transaction and not self._in_transaction:
+            raise TransactionOwnedError("release_absence_hold refused an unowned transaction")
+        placeholders = ",".join("?" for _ in ABSENCE_HOLD_REASONS)
+        with self._rolls_back_if_standalone(db):
+            if not self._in_transaction:
+                db.execute("BEGIN IMMEDIATE")
+            held = db.execute(
+                f"DELETE FROM held_sources WHERE source_file=? AND reason IN ({placeholders})",
+                (source_key, *sorted(ABSENCE_HOLD_REASONS)),
+            ).rowcount
+            pending = 0
+            if (
+                db.execute(
+                    "SELECT 1 FROM held_sources WHERE source_file=?", (source_key,)
+                ).fetchone()
+                is None
+            ):
+                pending = db.execute(
+                    "DELETE FROM pending_source_checks WHERE source_file=?", (source_key,)
+                ).rowcount
+            changed = bool(held or pending)
+            if changed:
+                self._bump_source_visibility(db, source_key)
+            self._commit_if_standalone(db)
+        return changed
+
     async def get_held_sources(self) -> list[Path]:
         db = self._get_read_db()
         return [
@@ -2663,7 +2709,9 @@ class SqliteBackend(
             ).fetchall()
         ]
 
-    async def find_orphan_project_roots(self) -> list[OrphanProjectReport]:
+    async def find_orphan_project_roots(
+        self, *, keep: Callable[[str], bool] | None = None
+    ) -> list[OrphanProjectReport]:
         """Detect project-tier chunks whose ``project_root`` no longer exists on disk.
 
         Thin async wrapper around :func:`memtomem.storage.orphan_gc.find_orphan_project_roots`
@@ -2672,9 +2720,11 @@ class SqliteBackend(
         unit-testable against a synthetic ``sqlite3.Connection``. See
         ADR-0011 follow-up #884 for the surface contract.
         """
-        return find_orphan_project_roots(self._get_read_db())
+        return find_orphan_project_roots(self._get_read_db(), keep=keep)
 
-    async def sweep_orphan_project_root(self, project_root: str) -> SweepResult:
+    async def sweep_orphan_project_root(
+        self, project_root: str, *, keep: Callable[[str], bool] | None = None
+    ) -> SweepResult:
         """Delete every project-tier chunk under ``project_root`` in one transaction.
 
         Thin async wrapper around
@@ -2687,6 +2737,7 @@ class SqliteBackend(
             self._get_db(),
             project_root,
             has_vec_table=self._has_vec_table,
+            keep=keep,
         )
 
     async def list_scopes_by_source(self, source_file: Path) -> set[str]:

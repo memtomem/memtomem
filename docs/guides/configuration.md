@@ -97,6 +97,7 @@ top of the default:
 | `indexing.memory_dirs` | APPEND | Each fragment contributes more roots, dedup by path string |
 | `indexing.project_memory_dirs` | APPEND | Same, for project-scoped roots |
 | `indexing.read_only_memory_dirs` | APPEND | Same, for roots that are indexed but never rewritten; must stay disjoint from the writable roots |
+| `indexing.retain_missing_dirs` | APPEND | Same, for directories whose missing files stay searchable as an archive |
 | `indexing.exclude_patterns` | APPEND | Multiple denylists merge cleanly |
 | `search.system_namespace_prefixes` | APPEND | Integrations can add further hidden namespaces on top of the `archive:` / `agent-runtime:` defaults |
 | `namespace.rules` | APPEND | Fragments can add path-to-namespace rules |
@@ -672,7 +673,7 @@ Two rules are worth knowing before you set it:
   it. Two details worth being precise about, because "it reloads
   eventually" is not the same as "it is protected now":
   - The MCP server re-reads the file on its next tool call and installs
-    all three root lists together, so protection arrives one tool call
+    the root lists together, so protection arrives one tool call
     after the edit.
   - `mm web` reloads on config-related requests (for example
     `GET /api/config`), **not** on the chunk edit/delete routes. Editing
@@ -691,6 +692,7 @@ is no in-place retarget.
 |----------|---------|-------------|
 | `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` (+ provider folders selected in `mm init`) | Directories watched for reactive re-index (see above) |
 | `MEMTOMEM_INDEXING__READ_ONLY_MEMORY_DIRS` | `[]` | Index roots memtomem indexes and searches but never rewrites (see above); must be disjoint from the writable roots |
+| `MEMTOMEM_INDEXING__RETAIN_MISSING_DIRS` | `[]` | Directories whose files, once missing on disk, stay searchable instead of being held; see below |
 | `MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS` | `[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]` | File types accepted by the indexer and file watcher |
 | `MEMTOMEM_INDEXING__WATCHER_BACKEND` | `auto` | Watch backend: `auto` uses polling on macOS and native events elsewhere; set `native` or `polling` to override |
 | `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Approximate packing preference; use the hard limit for an exact ceiling |
@@ -712,6 +714,56 @@ is no in-place retarget.
 | `MEMTOMEM_INDEXING__SUMMARY_LANGUAGE` | `en` | Language for auto-generated per-source summaries |
 | `MEMTOMEM_INDEXING__SUMMARY_MAX_INPUT_CHARS` | `3000` | Clamp the leading source body to this many characters before generating the per-source summary |
 | `MEMTOMEM_INDEXING__SUMMARY_MAX_TOKENS` | `256` | Output token cap for each per-source summary |
+
+### `retain_missing_dirs` — keep chunks after their files vanish
+
+Some memory directories belong to tools that delete their own files:
+Claude Code removes old `~/.claude/plans/*.md`, Codex rewrites
+`~/.codex/memories/`. Once such a file is gone, its indexed chunks are the
+only copy left. By default memtomem treats a missing file as possibly
+unavailable (a disconnected drive, a cloud folder mid-sync) and **holds**
+its chunks: they stay in the database but leave ordinary search until the
+file returns or you purge them.
+
+`indexing.retain_missing_dirs` lists directories where a missing file
+means "archived" instead:
+
+```json
+{
+  "indexing": {
+    "memory_dirs": ["~/.claude/plans", "~/.codex/memories"],
+    "retain_missing_dirs": ["~/.claude/plans", "~/.codex/memories"]
+  }
+}
+```
+
+- **It applies only to files that are also under an index root.** Listing a
+  directory here does not index it; it changes what happens to files that
+  are indexed under it.
+- **Only confirmed absence counts.** A file that is gone (no such file) stays
+  searchable. A file that exists but cannot be read, or a drive that is
+  unavailable, is held as before, and so is a file whose content the
+  redaction guard refused. A path that now holds a directory is not an
+  archive either: as before, its chunks are deleted (or held, when the
+  change lands between memtomem's check and its read).
+- **It is not offered for purge.** `mm gc orphan-sources`,
+  `mem_cleanup_orphans` and `mm gc orphan-projects` leave these sources out
+  and say how many they kept. To drop them, remove the directory from this
+  list first.
+- **Reports call them archived.** `mm status` shows an `Archived` count and
+  `mm memory doctor` an `archived_source` finding (info, exit code `0`)
+  instead of `stale_source`.
+- **Holds placed before you set it are lifted** by the running server's
+  held-source recheck (100 sources every five minutes, sooner after a config
+  change) or by a compaction run. Plain CLI commands start neither, so
+  without a server run one compaction:
+  `mm schedule add --job compaction --cron "0 4 * * *"`, then
+  `mm schedule run-now <id>` with the id it prints.
+- **A rename inside such a directory keeps both paths.** The old path's
+  chunks stay as an archive next to the new file's, so search can return
+  the text twice.
+- **Archived chunks cannot be edited**, since there is no file to rewrite;
+  the edit is refused with `source_missing`.
 
 ### Lock sidecars (`.<name>.lock`)
 

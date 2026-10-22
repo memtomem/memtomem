@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import stat
 from pathlib import Path
@@ -17,6 +18,7 @@ from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
 from memtomem.source_provenance import (
     EXCLUDED_SOURCE_DETAIL,
+    SOURCE_MISSING_DETAIL,
     SOURCE_READ_ONLY_DETAIL,
     STALE_SOURCE_PROVENANCE_DETAIL,
     ExcludedSourceError,
@@ -304,6 +306,11 @@ async def edit_chunk(
                     ),
                 },
             )
+        # A missing source now stays visible under ``retain_missing_dirs``
+        # (#2833). Refused after the lock and the ingress guard, as in
+        # ``mem_edit``, instead of failing on the read below with a 500.
+        if not await asyncio.to_thread(meta.source_file.exists):
+            raise HTTPException(status_code=409, detail=SOURCE_MISSING_DETAIL)
 
         try:
             # ``replace_chunk_body`` keeps the heading + section-leading

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from memtomem.errors import TransactionOwnedError
 from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server.health_store import HealthSnapshot
-from memtomem.storage.orphan_detect import orphan_candidate_sources
+from memtomem.storage.orphan_detect import RetainRule, orphan_candidate_sources
 
 if TYPE_CHECKING:
     from memtomem.server.context import AppContext
@@ -100,11 +100,15 @@ async def check_orphan_count(app: AppContext) -> HealthSnapshot:
     ):
         hidden.update(await app.storage.get_pending_source_checks())
     known_hidden = source_files & hidden
+    indexing = app.config.indexing
 
     def _count_orphans() -> tuple[int, int]:
+        # A retained source that is missing is an archive, not an orphan; counting
+        # it would keep firing a cleanup that only shows it again (#2833).
+        rule = RetainRule.prepare(indexing)
         orphaned = 0
         for sf in source_files - known_hidden:
-            if not sf.exists():
+            if not sf.exists() and not rule.retains_key(str(sf)):
                 orphaned += 1
         return orphaned, len(source_files)
 

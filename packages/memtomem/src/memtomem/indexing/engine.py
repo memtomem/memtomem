@@ -58,6 +58,8 @@ from memtomem.models import Chunk, IndexingStats, stored_namespace
 from memtomem.storage.sqlite_helpers import norm_dir_prefix as _norm_dir_prefix
 from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
 from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
+from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.orphan_detect import RetainRule
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 
 if TYPE_CHECKING:
@@ -2756,7 +2758,11 @@ class IndexEngine:
             )
 
     async def _delete_missing_source(
-        self, file_path: Path, *, path_scope: PathScope = "configured"
+        self,
+        file_path: Path,
+        *,
+        path_scope: PathScope = "configured",
+        absent: bool = True,
     ) -> IndexFileResult:
         """Hold chunks for a source whose absence cannot prove deletion.
 
@@ -2764,7 +2770,24 @@ class IndexEngine:
         applies equally to configured and explicit indexing scopes (#2498).
         ``path_scope`` remains for the public single-file/bulk call chain;
         absence no longer changes policy by scope.
+
+        A source that is ``absent`` (nothing at the path) under
+        ``retain_missing_dirs`` is shown instead: its chunks are the archive
+        the user asked to keep (#2833). A path that now holds a directory is
+        not absent and is held as before.
         """
+        if absent and self._config.retain_missing_dirs:
+            key = await asyncio.to_thread(self._retained_key, file_path)
+            if key is not None:
+                shown = await self._storage.release_absence_hold(key)
+                return {
+                    "total": 0,
+                    "indexed": 0,
+                    "skipped": 0,
+                    "deleted": 0,
+                    "errors": [],
+                    "mutated": shown,
+                }
         held = await self._storage.hold_source(file_path, "source_missing")
         if held:
             logger.warning("Source unavailable; holding indexed chunks: %s", file_path)
@@ -2776,6 +2799,16 @@ class IndexEngine:
             "errors": [],
             "mutated": held,
         }
+
+    def _retained_key(self, file_path: Path) -> str | None:
+        """The stored key of ``file_path`` if a retain dir keeps it, else ``None``.
+
+        Normalized once and judged on that key, so the key released is the one
+        that passed: a parent swapped for a symlink between two resolutions
+        could otherwise release a key outside every retain dir.
+        """
+        key = norm_path(file_path)
+        return key if RetainRule.prepare(self._config).retains_key(key) else None
 
     async def _extract_entities_for(self, chunks: Sequence[Chunk]) -> int:
         """Rewrite ``chunk_entities`` for chunks whose content was just written.
@@ -2996,12 +3029,14 @@ class IndexEngine:
         except UnicodeDecodeError:
             logger.warning("Non-UTF-8 content in %s, replacing invalid bytes", file_path.name)
             content = file_path.read_text(encoding="utf-8", errors="replace")
-        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
-            # File is gone as a *file*: unlinked between stat and read (TOCTOU),
-            # or the leaf path was replaced by a directory (``IsADirectoryError``
-            # — ``stat`` succeeds on the dir, the read fails). Either way the old
-            # source no longer exists, so purge its stale chunks. (#1566)
+        except (FileNotFoundError, NotADirectoryError):
+            # Unlinked between stat and read (TOCTOU). (#1566)
             return await self._delete_missing_source(file_path, path_scope=path_scope)
+        except IsADirectoryError:
+            # The leaf path was replaced by a directory: ``stat`` succeeded on
+            # the dir and the read failed. Something is at the path, so a
+            # retain dir does not show it as an archive (#2833).
+            return await self._delete_missing_source(file_path, path_scope=path_scope, absent=False)
         except OSError as exc:
             held = await self._storage.hold_source(file_path, f"read_error:{exc.errno}")
             return {

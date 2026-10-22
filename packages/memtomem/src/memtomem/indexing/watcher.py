@@ -379,7 +379,7 @@ class FileWatcher:
             logger.exception("Could not replay pending watcher source checks")
 
     async def _recheck_held_loop(self) -> None:
-        from memtomem.storage.orphan_detect import source_state
+        from memtomem.storage.orphan_detect import RetainRule, source_state
 
         storage = getattr(self._engine, "_storage", None)
         if storage is None:
@@ -414,6 +414,13 @@ class FileWatcher:
                     # since our last batch. Never spin on an empty list with
                     # a stale startup counter.
                     startup_remaining = min(startup_remaining, len(held))
+                # Prepared per pass, so a retain dir added by hot reload brings
+                # its held archives back on the next pass (#2833).
+                rule = (
+                    await asyncio.to_thread(RetainRule.prepare, self._config)
+                    if self._config.retain_missing_dirs
+                    else RetainRule()
+                )
                 if held:
                     batch = [
                         held[(self._held_cursor + i) % len(held)]
@@ -468,6 +475,19 @@ class FileWatcher:
                                 logger.debug("Held source still redaction-blocked: %s", path)
                             except Exception:
                                 logger.exception("Could not restore held source %s", path)
+                        elif state == "missing" and rule.retains_key(str(path)):
+                            # An archive the user chose to keep: lift the absence
+                            # hold. A refused one (redaction, unavailable) stays
+                            # held and must not wake the loop again.
+                            try:
+                                if await storage.release_absence_hold(str(path)):
+                                    if self._search_pipeline is not None:
+                                        self._search_pipeline.invalidate_cache()
+                                    self._recheck_wakeup.set()
+                                elif path in pending_checks:
+                                    await storage.hold_source(path, "watch_reindex_unresolved")
+                            except Exception:
+                                logger.exception("Could not show retained source %s", path)
                         elif path in pending_checks:
                             # A failed event settle may have left only a pending
                             # journal row. Turn it into a durable hold now.

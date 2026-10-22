@@ -25,6 +25,13 @@ STALE_SOURCE_PROVENANCE_DETAIL = (
 )
 
 
+SOURCE_MISSING_DETAIL = (
+    "source_missing: the chunk's source file is gone from disk, so an edit has nothing to "
+    "rewrite. Nothing was written. Restore the file to edit it here; under "
+    "indexing.retain_missing_dirs its chunks stay searchable as an archive."
+)
+
+
 EXCLUDED_SOURCE_DETAIL = (
     "source_excluded: indexing now skips this source (an exclude pattern, a built-in rule, "
     "or a nested git worktree), so an edit would not reach the index. Nothing was written. "

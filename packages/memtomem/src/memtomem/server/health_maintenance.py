@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from memtomem.storage.orphan_detect import scan_orphans
+from memtomem.storage.orphan_detect import hold_orphans, scan_orphans
 
 if TYPE_CHECKING:
     from memtomem.config import HealthWatchdogConfig
@@ -27,21 +27,20 @@ class MaintenanceExecutor:
     async def cleanup_orphans(self) -> dict:
         """Hold uncertain sources without deleting indexed chunks (#2498)."""
         result = await scan_orphans(self._app.storage)
-        changed = False
-        for sf in result.confirmed_orphans:
-            changed |= await self._app.storage.hold_source(sf, "scan_missing")
-        for sf in result.unavailable_sources:
-            changed |= await self._app.storage.hold_source(sf, "scan_unavailable")
-        if changed:
+        outcome = await hold_orphans(self._app.storage, result, self._app.config.indexing)
+        held = outcome.missing_held + outcome.unavailable_held
+        if outcome.changed:
             self._app.search_pipeline.invalidate_cache()
-        held = len(result.confirmed_orphans) + len(result.unavailable_sources)
-        if changed:
             logger.warning(
-                "Auto-maintenance: held %d unavailable source(s); no chunks deleted", held
+                "Auto-maintenance: held %d unavailable source(s), kept %d archived; "
+                "no chunks deleted",
+                held,
+                outcome.archived,
             )
         return {
-            "orphaned": len(result.confirmed_orphans),
+            "orphaned": outcome.missing_held,
             "held_sources": held,
+            "archived_sources": outcome.archived,
             "deleted_chunks": 0,
         }
 

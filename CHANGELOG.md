@@ -19,6 +19,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Claude Code started from a shell passes that shell's exported variables to
   the server, so only values kept in `.env` alone are affected there.
 
+### Added
+
+- **`indexing.retain_missing_dirs` keeps the chunks of vanished files
+  searchable (#2833).** Some memory dirs belong to tools that delete their own
+  files, such as `~/.claude/plans` and `~/.codex/memories`, and there the
+  indexed chunks are the only copy left. Every absence path held such a source,
+  which took it out of search: on one store 314 of 324 such sources were held.
+  A file confirmed missing under a listed directory that is also under an
+  index root now stays searchable, is left out of `mm gc orphan-sources`,
+  `mem_cleanup_orphans` and `mm gc orphan-projects`, and is reported as
+  archived (`mm status` `Archived`, doctor `archived_source` at info). Holds
+  placed before the setting are lifted by the server's held-source recheck or
+  a compaction run, without a re-index. Only absence holds are lifted: an
+  unreadable file, an unavailable drive and a redaction-blocked file stay
+  held, and a path that now holds a directory is handled as before. Default
+  empty, so nothing changes until it is set.
+- **Editing a chunk whose source file is gone is refused with
+  `source_missing`.** `mem_edit` returned the raw `No such file or directory`
+  error with the absolute path, and the web editor a 500; both now refuse
+  before writing anything.
+
 ### Changed
 
 - **`mm gc orphan-sources` groups missing files by memory dir and confirms

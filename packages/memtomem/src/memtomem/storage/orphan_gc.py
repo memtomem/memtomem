@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,6 +61,9 @@ class OrphanProjectReport:
     total_rows: int
     scope_counts: dict[str, int]
     sample_source_files: tuple[str, ...]
+    # Rows under ``retain_missing_dirs``, left out of the counts above and
+    # never swept (#2833).
+    kept_rows: int = 0
 
 
 @dataclass(frozen=True)
@@ -73,8 +77,13 @@ class SweepResult:
     ai_summaries_deleted: int
 
 
-def find_orphan_project_roots(db: sqlite3.Connection) -> list[OrphanProjectReport]:
+def find_orphan_project_roots(
+    db: sqlite3.Connection, *, keep: Callable[[str], bool] | None = None
+) -> list[OrphanProjectReport]:
     """Return reports for ``project_root`` values whose path no longer exists.
+
+    Rows whose ``source_file`` satisfies ``keep`` are counted in
+    ``kept_rows`` instead, and are neither sampled nor offered for the sweep.
 
     Read-only. The check uses :meth:`pathlib.Path.exists` — unmounted
     filesystems and removable disks therefore appear orphaned. The caller
@@ -86,40 +95,40 @@ def find_orphan_project_roots(db: sqlite3.Connection) -> list[OrphanProjectRepor
     """
     rows = db.execute(
         """
-        SELECT project_root, scope, COUNT(*) AS cnt
+        SELECT project_root, scope, source_file, COUNT(*) AS cnt
         FROM chunks
         WHERE scope IN ('project_shared', 'project_local')
           AND project_root IS NOT NULL
-        GROUP BY project_root, scope
+        GROUP BY project_root, scope, source_file
         """
     ).fetchall()
     if not rows:
         return []
 
     by_root: dict[str, dict[str, int]] = {}
-    for root, scope, count in rows:
-        by_root.setdefault(root, {})[scope] = count
+    sources_by_root: dict[str, set[str]] = {}
+    kept_by_root: dict[str, int] = {}
+    for root, scope, source, count in rows:
+        if keep is not None and source and keep(source):
+            kept_by_root[root] = kept_by_root.get(root, 0) + count
+            continue
+        scopes = by_root.setdefault(root, {})
+        scopes[scope] = scopes.get(scope, 0) + count
+        if source:
+            sources_by_root.setdefault(root, set()).add(source)
 
     reports: list[OrphanProjectReport] = []
-    for root, scope_counts in by_root.items():
+    for root in sorted(by_root.keys() | kept_by_root.keys()):
         if Path(root).exists():
             continue
-        sample_rows = db.execute(
-            """
-            SELECT DISTINCT source_file FROM chunks
-            WHERE project_root = ?
-              AND scope IN ('project_shared', 'project_local')
-            ORDER BY source_file
-            LIMIT ?
-            """,
-            (root, _SAMPLE_SIZE),
-        ).fetchall()
+        scope_counts = by_root.get(root, {})
         reports.append(
             OrphanProjectReport(
                 project_root=root,
                 total_rows=sum(scope_counts.values()),
                 scope_counts=dict(scope_counts),
-                sample_source_files=tuple(r[0] for r in sample_rows),
+                sample_source_files=tuple(sorted(sources_by_root.get(root, ()))[:_SAMPLE_SIZE]),
+                kept_rows=kept_by_root.get(root, 0),
             )
         )
     reports.sort(key=lambda r: r.project_root)
@@ -131,6 +140,7 @@ def sweep_orphan_project_root(
     project_root: str,
     *,
     has_vec_table: bool,
+    keep: Callable[[str], bool] | None = None,
 ) -> SweepResult:
     """Delete every project-tier chunk under ``project_root`` in one transaction.
 
@@ -163,6 +173,10 @@ def sweep_orphan_project_root(
             """,
             (project_root,),
         ).fetchall()
+
+        if keep is not None:
+            # Retained sources are archives the user chose to keep (#2833).
+            rows = [row for row in rows if not (row[2] and keep(row[2]))]
 
         if not rows:
             db.execute("COMMIT")

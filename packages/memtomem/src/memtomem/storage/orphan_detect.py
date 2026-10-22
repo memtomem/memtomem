@@ -9,6 +9,7 @@ remains for diagnostics and compatibility, never as an automatic delete gate.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from collections.abc import Iterable
 from pathlib import Path
@@ -17,7 +18,10 @@ from typing import TYPE_CHECKING
 from memtomem.storage.sqlite_helpers import norm_dir_prefix, norm_path
 
 if TYPE_CHECKING:
+    from memtomem.config import IndexingConfig
     from memtomem.storage.base import StorageBackend
+
+logger = logging.getLogger(__name__)
 
 # Delay between the two ``exists()`` passes. Matches the value that lived inline
 # in ``MaintenanceExecutor.cleanup_orphans`` before this module existed.
@@ -134,6 +138,132 @@ class OrphanGroup:
         return str(self.root) if self.root is not None else "outside every configured root"
 
 
+def _resolvable_prefixes(dirs: Iterable[str | Path]) -> tuple[str, ...]:
+    """``norm_dir_prefix`` of each dir, skipping one that cannot be resolved.
+
+    Python 3.12 raises ``RuntimeError`` for a symlink loop, which ``norm_path``
+    does not catch. One such entry must not stop every pass that prepares a
+    rule from holding or showing the other sources; skipping it retains
+    nothing under it, which is today's behavior.
+    """
+    prefixes: list[str] = []
+    for d in dirs:
+        try:
+            prefixes.append(norm_dir_prefix(Path(d).expanduser()))
+        except (OSError, RuntimeError):
+            logger.warning("Cannot resolve %s; nothing under it is retained", d)
+    return tuple(prefixes)
+
+
+def _under_any(source: Path, prefixes: tuple[str, ...]) -> bool:
+    return bool(prefixes) and norm_path(source).startswith(prefixes)
+
+
+@dataclass(frozen=True)
+class RetainRule:
+    """Which missing sources ``indexing.retain_missing_dirs`` keeps (#2833).
+
+    A source is retained when it lies under a retain dir **and** under an index
+    root, judged by its resolved path like :func:`group_orphans`. Without the
+    root clause a dir dropped from the config would keep its sources visible
+    with nothing left to manage them.
+
+    Build one per pass with :meth:`prepare`; nothing caches it, so a config
+    edited in place by hot reload is seen on the next pass. :meth:`prepare`
+    and :meth:`retains` resolve paths, so async callers run them in a thread.
+    :meth:`retains_key` takes a stored key, which ``norm_path`` already
+    resolved on write, and only compares strings.
+    """
+
+    retain: tuple[str, ...] = ()
+    roots: tuple[str, ...] = ()
+
+    @classmethod
+    def prepare(cls, indexing: IndexingConfig) -> RetainRule:
+        if not indexing.retain_missing_dirs:
+            return cls()
+        return cls(
+            retain=_resolvable_prefixes(indexing.retain_missing_dirs),
+            roots=_resolvable_prefixes(indexing.all_index_roots()),
+        )
+
+    def retains(self, source: Path) -> bool:
+        return bool(self.retain) and self.retains_key(norm_path(source))
+
+    def retains_key(self, key: str) -> bool:
+        return (
+            bool(self.retain)
+            and key.startswith(self.retain)
+            and bool(self.roots)
+            and key.startswith(self.roots)
+        )
+
+    def split(self, keys: Iterable[Path]) -> tuple[list[Path], list[Path]]:
+        """Split stored keys into ``(retained, others)``, preserving order."""
+        retained: list[Path] = []
+        others: list[Path] = []
+        for key in keys:
+            (retained if self.retains_key(str(key)) else others).append(key)
+        return retained, others
+
+    def split_for_purge(self, keys: Iterable[Path]) -> tuple[list[Path], list[Path]]:
+        """Like :meth:`split`, also keeping a key whose purge would land in a retain dir.
+
+        ``delete_by_source`` re-resolves the key it is given (#2835), so a
+        stored path that has since become a symlink into a retain dir would
+        delete the archive's chunks. Both identities must be outside every
+        retain dir. Resolves paths; run it in a thread.
+        """
+        if not self.retain:
+            return [], list(keys)
+        retained: list[Path] = []
+        others: list[Path] = []
+        for key in keys:
+            keep = self.retains_key(str(key)) or self.retains(key)
+            (retained if keep else others).append(key)
+        return retained, others
+
+
+@dataclass(frozen=True)
+class OrphanHoldOutcome:
+    """What automatic cleanup did with one :func:`scan_orphans` result."""
+
+    changed: bool
+    missing_held: int
+    unavailable_held: int
+    archived: int
+
+
+async def hold_orphans(
+    storage: StorageBackend, result: OrphanScanResult, indexing: IndexingConfig
+) -> OrphanHoldOutcome:
+    """Hold scanned-out sources, except the retained ones, which are shown (#2498, #2833).
+
+    Automatic cleanup never purges. A confirmed-missing source under
+    ``retain_missing_dirs`` has its absence hold lifted instead, which is also
+    how holds placed before the dir was retained come back into search.
+    Unavailable sources are held either way: something may still be there.
+    """
+    retained: list[Path] = []
+    missing = list(result.confirmed_orphans)
+    if indexing.retain_missing_dirs:
+        rule = await asyncio.to_thread(RetainRule.prepare, indexing)
+        retained, missing = rule.split(result.confirmed_orphans)
+    changed = False
+    for sf in retained:
+        changed |= await storage.release_absence_hold(str(sf))
+    for sf in missing:
+        changed |= await storage.hold_source(sf, "scan_missing")
+    for sf in result.unavailable_sources:
+        changed |= await storage.hold_source(sf, "scan_unavailable")
+    return OrphanHoldOutcome(
+        changed=changed,
+        missing_held=len(missing),
+        unavailable_held=len(result.unavailable_sources),
+        archived=len(retained),
+    )
+
+
 def group_orphans(
     orphans: Iterable[Path],
     roots: Iterable[str | Path],
@@ -161,7 +291,7 @@ def group_orphans(
     kept: list[Path] = []
     excluded = 0
     for source in orphans:
-        if prefixes and not norm_path(source).startswith(tuple(prefixes)):
+        if prefixes and not _under_any(source, tuple(prefixes)):
             excluded += 1
         else:
             kept.append(source)

@@ -396,6 +396,12 @@ class IndexingConfig(ConfigModel):
     # can hold a symlink into a protected one, so neither configured root
     # contains the other and the write still lands in the protected tree.
     read_only_memory_dirs: Annotated[list[Path], APPEND] = Field(default_factory=list)
+    # Dirs whose files other tools delete on their own (Claude Code plans,
+    # Codex memories), where the indexed chunks are the only copy left. A
+    # missing source under one of these that is also under an index root
+    # stays searchable instead of being held, and is not offered for purge.
+    # Not an index root itself (#2833).
+    retain_missing_dirs: Annotated[list[Path], APPEND] = Field(default_factory=list)
     supported_extensions: frozenset[str] = frozenset(
         {
             ".md",

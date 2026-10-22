@@ -200,7 +200,9 @@ async def test_policy_summary_tracks_source_hold_and_explicit_purge(components, 
     virtual.unlink()
 
     assert (await components.search_pipeline.search("summaryword"))[0]
-    health = await check_orphan_count(SimpleNamespace(storage=components.storage))
+    health = await check_orphan_count(
+        SimpleNamespace(storage=components.storage, config=components.config)
+    )
     assert health.value == {"orphaned": 0, "held": 0, "total_sources": 1}
     original.unlink()
     assert components.storage.queue_source_check_sync(original)
@@ -212,7 +214,9 @@ async def test_policy_summary_tracks_source_hold_and_explicit_purge(components, 
     bundle = await export_chunks(components.storage, stamp_provenance=False)
     assert bundle.total_chunks == 0
     assert bundle.omitted_held_sources == 2
-    health = await check_orphan_count(SimpleNamespace(storage=components.storage))
+    health = await check_orphan_count(
+        SimpleNamespace(storage=components.storage, config=components.config)
+    )
     assert health.value == {"orphaned": 0, "held": 1, "total_sources": 1}
 
     original.write_text("# Note\n\noriginalword content.\n", encoding="utf-8")
@@ -632,7 +636,11 @@ async def test_small_missing_batch_under_unregistered_nested_mount_is_held(
         path.unlink()
     assert nested.is_dir()  # A detached mount can leave an empty mountpoint.
 
-    app = SimpleNamespace(storage=components.storage, search_pipeline=components.search_pipeline)
+    app = SimpleNamespace(
+        storage=components.storage,
+        search_pipeline=components.search_pipeline,
+        config=components.config,
+    )
     result = await _run_compaction(app)
     assert result["chunks_deleted"] == 0
     assert result["held_sources"] == count

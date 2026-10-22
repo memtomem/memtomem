@@ -30,7 +30,7 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.helpers import _set_config_key
 from memtomem.secret_masking import is_secret_key, mask_secrets
-from memtomem.storage.orphan_detect import orphan_candidate_sources
+from memtomem.storage.orphan_detect import RetainRule, orphan_candidate_sources
 
 if TYPE_CHECKING:
     from memtomem.config import EmbeddingConfig, Mem2MemConfig, SaveReceipt, SearchConfig
@@ -341,8 +341,21 @@ async def collect_status_report(app: AppContext) -> dict:
             "source": "configured",
         }
 
+    # Resolved off the event loop: a stalled mount must not stall the report.
+    # An entry that cannot be resolved (a symlink loop) is shown as written.
+    def _display(p: Path) -> str:
+        try:
+            return str(Path(p).expanduser().resolve())
+        except (OSError, RuntimeError):
+            return str(p)
+
+    retain_dirs = await asyncio.to_thread(
+        lambda: [_display(p) for p in config.indexing.retain_missing_dirs]
+    )
+
     # Orphan check — count source files no longer on disk
     orphaned = 0
+    archived = 0
     held_sources = 0
     pending_sources = 0
     source_files: set[Path] = set()
@@ -363,7 +376,12 @@ async def collect_status_report(app: AppContext) -> dict:
     except Exception:
         logger.debug("Held-source status query failed", exc_info=True)
     try:
-        orphaned = sum(1 for sf in source_files - hidden_paths if not sf.exists())
+        missing = [sf for sf in source_files - hidden_paths if not sf.exists()]
+        # Missing sources under ``retain_missing_dirs`` are archives the user
+        # chose to keep, not orphans to clean up (#2833).
+        rule = await asyncio.to_thread(RetainRule.prepare, config.indexing)
+        archived = sum(1 for sf in missing if rule.retains_key(str(sf)))
+        orphaned = len(missing) - archived
     except Exception:
         logger.debug("Unheld orphan count failed", exc_info=True)
 
@@ -531,6 +549,7 @@ async def collect_status_report(app: AppContext) -> dict:
             "read_only_memory_dirs": [
                 str(Path(p).expanduser().resolve()) for p in config.indexing.read_only_memory_dirs
             ],
+            "retain_missing_dirs": retain_dirs,
             "watcher_backend": effective_watcher_backend(config.indexing),
         },
         "runtime": {
@@ -541,6 +560,7 @@ async def collect_status_report(app: AppContext) -> dict:
             "total_chunks": stats["total_chunks"],
             "total_sources": stats["total_sources"],
             "orphaned_sources": orphaned,
+            "archived_sources": archived,
             "held_sources": held_sources,
             "pending_source_checks": pending_sources,
             "dense_coverage": dense_coverage,
@@ -885,6 +905,11 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
     read_only_dirs = [str(path) for path in cfg.get("read_only_memory_dirs", [])]
     if read_only_dirs:
         lines.extend(_status_source_lines("Read-only roots", read_only_dirs, group_providers=False))
+    retain_dirs = [str(path) for path in cfg.get("retain_missing_dirs", [])]
+    if retain_dirs:
+        lines.extend(
+            _status_source_lines("Retain-missing dirs", retain_dirs, group_providers=False)
+        )
     lines += [
         StatusLine("blank"),
         StatusLine("section", value="Index stats", meta={"tone": "plain"}),
@@ -907,6 +932,16 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
             ),
         ),
     ]
+    archived = index.get("archived_sources", 0)
+    if archived:
+        lines.append(
+            StatusLine(
+                "kv",
+                key="Archived:".ljust(15),
+                value=str(archived),
+                suffix=" (missing on disk, kept searchable by retain_missing_dirs)",
+            )
+        )
 
     coverage = index["dense_coverage"]
     if coverage is not None:

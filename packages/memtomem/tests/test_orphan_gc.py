@@ -391,7 +391,10 @@ def _mock_components(reports, sweep_result=None):
             )
         ),
     )
-    return SimpleNamespace(storage=storage)
+    return SimpleNamespace(
+        storage=storage,
+        config=SimpleNamespace(indexing=SimpleNamespace(retain_missing_dirs=[])),
+    )
 
 
 def _patch_bootstrap(monkeypatch, comp):
@@ -466,7 +469,7 @@ class TestCli:
         assert result.exit_code == 0, result.output
         # No prompt prose when --yes is set.
         assert "Delete 2 chunks under" not in result.output
-        comp.storage.sweep_orphan_project_root.assert_awaited_once_with("/tmp/dead")
+        comp.storage.sweep_orphan_project_root.assert_awaited_once_with("/tmp/dead", keep=None)
         assert "Done: 2 chunks across 1 project root" in result.output
 
     def test_yes_without_apply_is_usage_error(self, monkeypatch):
@@ -490,7 +493,11 @@ class TestOrphanSourcesCli:
         return SimpleNamespace(
             storage=SimpleNamespace(delete_by_source=AsyncMock(return_value=deleted)),
             search_pipeline=SimpleNamespace(invalidate_cache=invalidate or Mock()),
-            config=SimpleNamespace(indexing=SimpleNamespace(all_index_roots=lambda: list(roots))),
+            config=SimpleNamespace(
+                indexing=SimpleNamespace(
+                    all_index_roots=lambda: list(roots), retain_missing_dirs=[]
+                )
+            ),
         )
 
     @staticmethod
@@ -689,10 +696,78 @@ class TestOrphanSourcesCli:
         )
         comp.storage.delete_by_source.assert_not_awaited()
 
+    def test_a_retained_source_is_kept_out_of_the_purge(self, monkeypatch, tmp_path):
+        """#2833: an archive under ``retain_missing_dirs`` is neither listed nor deleted."""
+        root = tmp_path.resolve()
+        kept = root / "plans" / "a.md"
+        gone = root / "notes" / "b.md"
+        comp = self._comp(roots=[root], deleted=1)
+        comp.config.indexing.retain_missing_dirs = [root / "plans"]
+        _patch_bootstrap(monkeypatch, comp)
+        self._patch_scan(monkeypatch, OrphanScanResult(5, 2, [kept, gone]))
+
+        result = CliRunner().invoke(cli, ["gc", "orphan-sources", "--apply", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert str(kept) not in result.output
+        assert "1 archived source(s) under retain_missing_dirs are kept." in result.output
+        assert self._deleted(comp) == [gone]
+
     def test_yes_requires_apply(self):
         result = CliRunner().invoke(cli, ["gc", "orphan-sources", "--yes"])
         assert result.exit_code != 0
         assert "--yes requires --apply" in result.output
+
+
+class TestOrphanProjectsKeepRetained:
+    """#2833: a retained source under a missing project root is never swept."""
+
+    async def test_kept_rows_are_reported_and_survive_the_sweep(self, backend):
+        dead = "/tmp/dead-project-2833"
+        _insert_chunk(
+            backend,
+            chunk_id="k1",
+            source_file=f"{dead}/plans/keep.md",
+            scope=_SHARED,
+            project_root=dead,
+        )
+        _insert_chunk(
+            backend,
+            chunk_id="g1",
+            source_file=f"{dead}/notes/gone.md",
+            scope=_SHARED,
+            project_root=dead,
+        )
+
+        def keep(source: str) -> bool:
+            return source.startswith(f"{dead}/plans/")
+
+        (report,) = await backend.find_orphan_project_roots(keep=keep)
+        assert (report.total_rows, report.kept_rows) == (1, 1)
+        assert report.sample_source_files == (f"{dead}/notes/gone.md",)
+
+        result = await backend.sweep_orphan_project_root(dead, keep=keep)
+
+        assert result.chunks_deleted == 1
+        rows = backend._get_db().execute("SELECT id FROM chunks ORDER BY id").fetchall()
+        assert [r[0] for r in rows] == ["k1"]
+
+    async def test_a_root_with_only_retained_rows_has_nothing_to_sweep(self, backend):
+        dead = "/tmp/dead-project-2833b"
+        _insert_chunk(
+            backend,
+            chunk_id="k1",
+            source_file=f"{dead}/keep.md",
+            scope=_LOCAL,
+            project_root=dead,
+        )
+
+        (report,) = await backend.find_orphan_project_roots(keep=lambda s: True)
+
+        assert (report.total_rows, report.kept_rows, report.scope_counts) == (0, 1, {})
+        assert (
+            await backend.sweep_orphan_project_root(dead, keep=lambda s: True)
+        ).chunks_deleted == 0
 
 
 class TestOrphanSourcesUnderRealStorage:
@@ -722,7 +797,11 @@ class TestOrphanSourcesUnderRealStorage:
         comp = SimpleNamespace(
             storage=backend,
             search_pipeline=SimpleNamespace(invalidate_cache=Mock()),
-            config=SimpleNamespace(indexing=SimpleNamespace(all_index_roots=lambda: [work, plans])),
+            config=SimpleNamespace(
+                indexing=SimpleNamespace(
+                    all_index_roots=lambda: [work, plans], retain_missing_dirs=[]
+                )
+            ),
         )
         _patch_bootstrap(monkeypatch, comp)
 

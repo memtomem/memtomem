@@ -13,7 +13,7 @@ from memtomem.server.tools._provenance import (
     capture_session_for_untracked_write,
     flag_untracked_write,
 )
-from memtomem.storage.orphan_detect import group_orphans, scan_orphans, source_state
+from memtomem.storage.orphan_detect import RetainRule, group_orphans, scan_orphans, source_state
 
 
 @mcp.tool()
@@ -250,11 +250,18 @@ async def mem_cleanup_orphans(
     # Two-pass scan keeps transient absence out of the explicit purge list.
     # A mass ratio cannot prove deletion or availability (#2498).
     result = await scan_orphans(app.storage)
+    rule = await asyncio.to_thread(RetainRule.prepare, app.config.indexing)
+    archived, candidates = await asyncio.to_thread(rule.split_for_purge, result.confirmed_orphans)
     groups, excluded = await asyncio.to_thread(
         group_orphans,
-        result.confirmed_orphans,
+        candidates,
         app.config.indexing.all_index_roots(),
         under=under_dirs,
+    )
+    archived_note = (
+        f"{len(archived)} archived source(s) under retain_missing_dirs are kept."
+        if archived
+        else ""
     )
     orphaned = [source for group in groups for source in group.sources]
 
@@ -265,6 +272,8 @@ async def mem_cleanup_orphans(
             )
         else:
             message = f"No orphaned chunks found ({result.total_sources} source files checked)."
+        if archived_note:
+            message += f" {archived_note}"
         if result.unavailable_sources:
             message += f" {len(result.unavailable_sources)} source(s) unavailable and not eligible for purge."
         return message
@@ -278,6 +287,8 @@ async def mem_cleanup_orphans(
             lines.extend(f"  {sf}" for sf in group.sources)
         if excluded:
             lines.append(f"\n{excluded} more orphaned file(s) are outside the given directories.")
+        if archived_note:
+            lines.append(f"\n{archived_note}")
         if result.unavailable_sources:
             lines.append(
                 f"\n{len(result.unavailable_sources)} additional source(s) could not be checked."
@@ -301,7 +312,8 @@ async def mem_cleanup_orphans(
         app.search_pipeline.invalidate_cache()
         await flag_untracked_write(app, provenance_session_id)
 
-    return (
+    message = (
         f"Cleanup complete:\n- Orphaned files: {len(orphaned)}"
         f"\n- Recovered or unavailable: {skipped}\n- Chunks deleted: {total_deleted}"
     )
+    return f"{message}\n{archived_note}" if archived_note else message
