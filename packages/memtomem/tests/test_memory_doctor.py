@@ -1013,41 +1013,38 @@ async def test_a_missing_source_under_a_retain_dir_is_archived_not_stale(doctor_
 
 
 @pytest.mark.asyncio
-@pytest.mark.requires_symlinks
-async def test_an_unreadable_source_under_a_retain_dir_stays_stale(doctor_env):
-    """``exists()`` is False for ELOOP too; only absence is an archive."""
+async def test_an_unreadable_source_under_a_retain_dir_stays_stale(doctor_env, monkeypatch):
+    """``exists()`` is also False for errors such as ELOOP; only absence is an archive.
+
+    The error is stubbed through ``source_state`` because the filesystem
+    behind it differs per platform (link-chain limits, ``resolve``).
+    """
+    from memtomem.storage import orphan_detect
+
     config, mem_dir = doctor_env
     config.indexing.retain_missing_dirs = [mem_dir]
-    loop = mem_dir / "loop.md"
-    loop.write_text("# loop\n", encoding="utf-8")
+    ghost = mem_dir / "ghost.md"
     backend = SqliteBackend(
         config.storage, dimension=0, embedding_provider="none", embedding_model=""
     )
     await backend.initialize()
     try:
-        _insert_chunk(backend, chunk_id="l1", source_file=loop)
+        _insert_chunk(backend, chunk_id="g1", source_file=ghost)
     finally:
         await backend.close()
-    # A chain longer than every platform's link limit (32 on macOS, 40 on
-    # Linux, 63 on Windows): ``stat`` fails with ELOOP
-    # (unavailable, not missing) while ``resolve`` still follows it, so the
-    # row stays owned by this root.
-    chain = mem_dir / "chain"
-    chain.mkdir()
-    target = chain / "end.md"  # never created
-    for i in range(70):
-        link = chain / f"l{i}"
-        link.symlink_to(target)
-        target = link
-    loop.unlink()
-    loop.symlink_to(target)
+    real_state = orphan_detect.source_state
+    monkeypatch.setattr(
+        orphan_detect,
+        "source_state",
+        lambda p: "unavailable" if Path(p).name == "ghost.md" else real_state(p),
+    )
 
     (report,) = [
         r for r in _gather_reports(config=config, inspect_dirs=[mem_dir]) if r.path != "(unowned)"
     ]
     by = _findings_by_check(report)
     assert "archived_source" not in by
-    assert str(loop) in by["stale_source"].items
+    assert by["stale_source"].items == [norm_path(ghost)]
 
 
 @pytest.mark.asyncio
