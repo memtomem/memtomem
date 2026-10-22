@@ -240,6 +240,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   they are recorded as reviewed exceptions in `tools/osv-exceptions.toml`,
   expiring on 2026-11-20. Published constraints are unchanged; the lockfile is
   not shipped in the wheel and does not upgrade existing environments.
+- Nineteen more pillow advisories, published on 2026-10-21 against the same
+  pillow 12.3.0, are likewise fixed only in 13.0.0 and reached only through
+  image handling: decoding (GIF, APNG, MSP, XBM, MIC, EPS through
+  Ghostscript, `P;2L`/`P;4L` palette data), saving (TIFF, GIF, PDF) and processing
+  (`Image.transform`, `Image.merge`, `Image.quantize`, rank filters, FreeType
+  glyph rendering). fastembed 0.9.0 still requires `pillow<13`, and memtomem
+  still handles no images, so they join the same exceptions with the same
+  2026-11-20 expiry.
 
 - **The server no longer copies a whole `.env` file into its environment
   (#2824).** It loaded the nearest `.env` with python-dotenv, which for a
