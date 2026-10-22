@@ -1013,6 +1013,44 @@ async def test_a_missing_source_under_a_retain_dir_is_archived_not_stale(doctor_
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_symlinks
+async def test_an_unreadable_source_under_a_retain_dir_stays_stale(doctor_env):
+    """``exists()`` is False for ELOOP too; only absence is an archive."""
+    config, mem_dir = doctor_env
+    config.indexing.retain_missing_dirs = [mem_dir]
+    loop = mem_dir / "loop.md"
+    loop.write_text("# loop\n", encoding="utf-8")
+    backend = SqliteBackend(
+        config.storage, dimension=0, embedding_provider="none", embedding_model=""
+    )
+    await backend.initialize()
+    try:
+        _insert_chunk(backend, chunk_id="l1", source_file=loop)
+    finally:
+        await backend.close()
+    # A chain longer than every platform's link limit (32 on macOS, 40 on
+    # Linux, 63 on Windows): ``stat`` fails with ELOOP
+    # (unavailable, not missing) while ``resolve`` still follows it, so the
+    # row stays owned by this root.
+    chain = mem_dir / "chain"
+    chain.mkdir()
+    target = chain / "end.md"  # never created
+    for i in range(70):
+        link = chain / f"l{i}"
+        link.symlink_to(target)
+        target = link
+    loop.unlink()
+    loop.symlink_to(target)
+
+    (report,) = [
+        r for r in _gather_reports(config=config, inspect_dirs=[mem_dir]) if r.path != "(unowned)"
+    ]
+    by = _findings_by_check(report)
+    assert "archived_source" not in by
+    assert str(loop) in by["stale_source"].items
+
+
+@pytest.mark.asyncio
 async def test_present_but_held_source_is_reported(doctor_env):
     config, mem_dir = doctor_env
     backend = SqliteBackend(

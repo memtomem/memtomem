@@ -124,7 +124,9 @@ async def test_a_pending_only_source_is_shown_and_an_unknown_key_changes_nothing
 
 
 def test_rule_needs_a_retain_dir_and_an_index_root(tmp_path, monkeypatch):
+    # ``expanduser`` reads USERPROFILE on Windows, HOME elsewhere.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     root = tmp_path / "root"
     plans = root / "plans"
     plans.mkdir(parents=True)

@@ -1487,7 +1487,7 @@ def _analyze_dir(
 
     # 3/4. DB-only sources — split into stale (deleted), convention violation
     # (meta file indexed), and an unexpected residue.
-    from memtomem.storage.orphan_detect import RetainRule
+    from memtomem.storage.orphan_detect import RetainRule, source_state
 
     retain = RetainRule.prepare(config.indexing)
     stale: list[str] = []
@@ -1507,7 +1507,9 @@ def _analyze_dir(
         if not Path(src).exists():
             if k in (held_sources or set()):
                 held_missing.append(str(src))
-            elif retain.retains_key(str(src)):
+            # ``exists()`` is also False for errors such as a symlink loop;
+            # only a confirmed absence makes a retained source an archive.
+            elif retain.retains_key(str(src)) and source_state(Path(src)) == "missing":
                 archived.append(str(src))
             else:
                 stale.append(str(src))
