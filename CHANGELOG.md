@@ -58,6 +58,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A source that is a symlink loop is held instead of crashing on Python 3.12
+  (#2841).** On 3.12 `Path.resolve()` raises `RuntimeError` for a loop, where
+  3.13 and later return a path. Path normalization caught only `OSError`, so
+  a source replaced by a link to itself made `index_file`, `hold_source`,
+  `delete_by_source` and `mm memory doctor` raise. The 3.12 error is now
+  answered with the path `os.path.realpath` computed, and the source is held
+  as unavailable with its chunks kept. A configured memory dir that is itself
+  a loop still fails on 3.12 (#2843).
 - **A restore from `mem_export` keeps the links between chunks, and with them
   consolidation coverage (#2809).** Bundles held chunks but no
   `chunk_relations` rows, so a restored store had every summary and original

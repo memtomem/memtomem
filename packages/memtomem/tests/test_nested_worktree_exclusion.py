@@ -950,9 +950,14 @@ def test_budget_audit_reports_an_unowned_worktree_row_as_excluded(
 UNRESOLVABLE = "unresolvable-source"
 
 
-@pytest.fixture(params=[ValueError, RuntimeError, OSError])
+@pytest.fixture(params=[ValueError, OSError])
 def unresolvable(request, monkeypatch: pytest.MonkeyPatch) -> type[Exception]:
-    """``Path.resolve`` raises for one path, the way a NUL or a symlink loop does."""
+    """Simulates ``Path.resolve`` failing for one path.
+
+    Not ``RuntimeError``: that is how 3.12 reports a symlink loop, which
+    ``resolve_path`` now answers with a path instead (#2841) — see
+    :func:`test_a_looping_secret_is_excluded_on_every_python`.
+    """
     real = Path.resolve
     error = request.param
 
@@ -1002,6 +1007,23 @@ def test_a_denylisted_file_is_not_indexable_beside_an_unresolvable_root(
     except (OSError, ValueError, RuntimeError):
         return
     assert answer is True
+
+
+def test_a_looping_secret_is_excluded_on_every_python(tmp_path: Path, spec) -> None:
+    """A denylisted name that is a symlink loop is excluded, not raised on (#2841).
+
+    3.12's ``Path.resolve`` raised here and 3.13+ return a path; either way
+    the denylist must still exclude it.
+    """
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    secret = notes / "id_rsa.md"
+    try:
+        os.symlink(secret.name, secret)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create a symlink loop here: {exc}")
+
+    assert _path_is_excluded(secret, [notes], spec) is True
 
 
 def test_purge_classifies_past_an_unresolvable_row_and_reports_it(unresolvable, repo: Path) -> None:

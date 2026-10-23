@@ -42,6 +42,7 @@ from memtomem._lock_errors import (
     is_lock_contention,
     raise_lock_io_failure,
 )
+from memtomem.storage.sqlite_helpers import resolve_path
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +311,7 @@ def memory_lock_path(data_path: Path) -> Path:
     resolves only the root and keys on the artifact NAME, so flat ``<name>.md``
     and dir ``<name>/`` share one lock (ADR-0030 §6).
     """
-    return _lock_path_for(data_path.expanduser().resolve())
+    return _lock_path_for(resolve_path(data_path.expanduser()))
 
 
 # --- Memory-file cross-process CRUD serialization (issue #1587) -------------

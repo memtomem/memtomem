@@ -58,6 +58,21 @@ def fold_path_form(path: str) -> str:
     return unicodedata.normalize("NFC", path) if FOLDS_UNICODE_FORMS else path
 
 
+def resolve_path(p: Path) -> Path:
+    """``p.resolve()`` without Python 3.12's ``RuntimeError`` for a symlink loop.
+
+    3.12 computes ``os.path.realpath`` and raises when that result fails
+    ``stat()`` with a symlink-loop error; the result is returned instead, so
+    it is a path that cannot be opened. 3.13+ return their own ``realpath``.
+    The two algorithms differ past a loop, so a loop is not promised the same
+    answer on every Python, nor the same answer when resolved twice (#2835).
+    """
+    try:
+        return p.resolve()
+    except RuntimeError:
+        return Path(os.path.realpath(p))
+
+
 def norm_path(p: Path) -> str:
     """Normalize path to a canonical string.
 
@@ -70,7 +85,7 @@ def norm_path(p: Path) -> str:
     forms are two paths and are kept apart — see :func:`fold_path_form`.
     """
     try:
-        resolved = str(p.resolve())
+        resolved = str(resolve_path(p))
     except OSError:
         resolved = str(p)
     return fold_path_form(resolved)

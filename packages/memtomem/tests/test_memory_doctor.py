@@ -1048,6 +1048,33 @@ async def test_an_unreadable_source_under_a_retain_dir_stays_stale(doctor_env, m
 
 
 @pytest.mark.asyncio
+async def test_a_source_that_is_a_symlink_loop_is_reported_stale(doctor_env):
+    """#2841: a real loop, which ``norm_path`` raised on under Python 3.12."""
+    config, mem_dir = doctor_env
+    config.indexing.retain_missing_dirs = [mem_dir]
+    loop = mem_dir / "loop.md"
+    backend = SqliteBackend(
+        config.storage, dimension=0, embedding_provider="none", embedding_model=""
+    )
+    await backend.initialize()
+    try:
+        _insert_chunk(backend, chunk_id="l1", source_file=loop)
+    finally:
+        await backend.close()
+    try:
+        os.symlink(loop.name, loop)
+    except (OSError, NotImplementedError) as exc:  # Windows without the privilege
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    (report,) = [
+        r for r in _gather_reports(config=config, inspect_dirs=[mem_dir]) if r.path != "(unowned)"
+    ]
+    by = _findings_by_check(report)
+    assert "archived_source" not in by
+    assert by["stale_source"].items == [norm_path(loop)]
+
+
+@pytest.mark.asyncio
 async def test_present_but_held_source_is_reported(doctor_env):
     config, mem_dir = doctor_env
     backend = SqliteBackend(

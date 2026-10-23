@@ -59,6 +59,7 @@ from memtomem.storage.sqlite_helpers import norm_dir_prefix as _norm_dir_prefix
 from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
 from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
 from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_helpers import resolve_path
 from memtomem.storage.orphan_detect import RetainRule
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 
@@ -168,7 +169,7 @@ def _exclude_match_keys(file_path: Path, memory_dirs: Iterable[str | Path]) -> l
     indexed root, or when ``index_file`` is invoked from the file watcher
     (which doesn't go through ``_discover_files``).
     """
-    resolved = file_path.resolve()
+    resolved = resolve_path(file_path)
     keys: list[str] = [resolved.as_posix().lower()]
     for mem_dir in memory_dirs:
         try:
@@ -2276,7 +2277,7 @@ class IndexEngine:
             )
         with self._active_run():
             result, duration = await self._index_file_locked(
-                file_path.resolve(),
+                resolve_path(file_path),
                 force,
                 namespace=namespace,
                 force_unsafe=force_unsafe,
