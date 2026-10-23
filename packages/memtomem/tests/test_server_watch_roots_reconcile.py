@@ -760,3 +760,223 @@ async def test_a_failed_reconfigure_rolls_the_retain_dirs_back(
     await ctx.reconcile_watched_roots()
 
     assert ctx.config.indexing.retain_missing_dirs == []
+
+
+def _write_backend_config(home: Path, memory_dirs: list[Path], backend: str) -> None:
+    path = home / ".memtomem" / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "indexing": {
+                    "memory_dirs": [str(d) for d in memory_dirs],
+                    "watcher_backend": backend,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_backend_change_alone_is_installed(
+    _isolated_config_home: Path, tmp_path: Path
+) -> None:
+    """#2838: with the roots unchanged, a backend edit was banked and never applied."""
+    root = tmp_path / "one"
+    root.mkdir()
+    ctx, watcher = await _make_app(_isolated_config_home, [root])
+    indexing = ctx.config.indexing
+    assert indexing.watcher_backend == "auto"
+
+    _write_backend_config(_isolated_config_home, [root], "native")
+    await ctx.reconcile_watched_roots()
+
+    watcher.reconfigure.assert_awaited_once()
+    (handed,) = watcher.reconfigure.await_args.args
+    assert handed is indexing  # installed in place, shared by identity
+    assert handed.watcher_backend == "native"
+
+    # Banked once applied: the next call costs only the signature.
+    with patch("memtomem.server.context.build_fresh_config") as rebuild:
+        await ctx.reconcile_watched_roots()
+    rebuild.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_reconfigure_rolls_the_watcher_backend_back(
+    _isolated_config_home: Path, tmp_path: Path
+) -> None:
+    root = tmp_path / "one"
+    root.mkdir()
+    ctx, watcher = await _make_app(_isolated_config_home, [root])
+    watcher.reconfigure = AsyncMock(side_effect=RuntimeError("boom"))
+
+    _write_backend_config(_isolated_config_home, [root], "native")
+    await ctx.reconcile_watched_roots()
+
+    assert ctx.config.indexing.watcher_backend == "auto"
+
+    # Unbanked: the next call tries again.
+    watcher.reconfigure = AsyncMock()
+    await ctx.reconcile_watched_roots()
+    watcher.reconfigure.assert_awaited_once()
+    assert ctx.config.indexing.watcher_backend == "native"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_reconfigure_rolls_back_and_is_retried(
+    _isolated_config_home: Path, tmp_path: Path
+) -> None:
+    """A tool call cancelled while ``reconfigure`` waits must not leave the new
+    values installed: they would match the file, and the next call would bank
+    them through the "nothing changed" shortcut without reconfiguring."""
+    first = tmp_path / "one"
+    second = tmp_path / "two"
+    first.mkdir()
+    second.mkdir()
+    ctx, watcher = await _make_app(_isolated_config_home, [first])
+
+    entered = asyncio.Event()
+
+    async def _never_returns(_config: object) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    watcher.reconfigure = AsyncMock(side_effect=_never_returns)
+    _write_backend_config(_isolated_config_home, [first, second], "native")
+
+    task = asyncio.create_task(ctx.reconcile_watched_roots())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ctx.config.indexing.watcher_backend == "auto"
+    assert _roots(ctx) == {first.resolve()}
+
+    watcher.reconfigure = AsyncMock()
+    await ctx.reconcile_watched_roots()
+    watcher.reconfigure.assert_awaited_once()
+    assert ctx.config.indexing.watcher_backend == "native"
+    assert second.resolve() in _roots(ctx)
+
+
+async def _make_real_watcher_app(
+    home: Path,
+    memory_dirs: list[Path],
+    backend: str,
+    built: list[tuple[str, object]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> AppContext:
+    """A context running a real ``FileWatcher`` whose observers are recorded.
+
+    Every observer is a fast ``PollingObserver`` whatever backend was asked
+    for, so the test never depends on FSEvents/inotify being available; what is
+    recorded is the backend ``FileWatcher`` selected, which is the thing under
+    test. Start and stop calls go into ``built`` too, to pin their order.
+    """
+    from watchdog.observers.polling import PollingObserver
+
+    from memtomem.indexing import watcher as watcher_mod
+
+    class _Recorded(PollingObserver):
+        def __init__(self, tag: str) -> None:
+            super().__init__(timeout=0.05)
+            self.tag = tag
+
+        def start(self) -> None:
+            built.append(("start", self))
+            super().start()
+
+        def stop(self) -> None:
+            built.append(("stop", self))
+            super().stop()
+
+    def _factory(config: object) -> PollingObserver:
+        observer = _Recorded(watcher_mod.effective_watcher_backend(config))  # type: ignore[arg-type]
+        built.append(("build", observer))
+        return observer
+
+    monkeypatch.setattr(watcher_mod, "_create_observer", _factory)
+    _write_backend_config(home, memory_dirs, backend)
+    config = Mem2MemConfig()
+    config.indexing.memory_dirs = list(memory_dirs)
+    config.indexing.watcher_backend = backend  # type: ignore[assignment]
+    components = Components(
+        config=config,
+        storage=object(),  # type: ignore[arg-type]
+        embedder=object(),  # type: ignore[arg-type]
+        index_engine=object(),  # type: ignore[arg-type]
+        search_pipeline=None,  # type: ignore[arg-type]
+    )
+    ctx = AppContext(config=config)
+    with patch(
+        "memtomem.server.component_factory.create_components",
+        return_value=components,
+    ):
+        await ctx.ensure_initialized()
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_a_backend_edit_swaps_the_running_observer(
+    _isolated_config_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: ``polling`` → ``native`` replaces the live observer, starting
+    the replacement before the old one stops. Explicit values rather than
+    ``auto``, which resolves to ``native`` on Linux and would swap nothing."""
+    root = tmp_path / "one"
+    root.mkdir()
+    built: list[tuple[str, object]] = []
+    ctx = await _make_real_watcher_app(_isolated_config_home, [root], "polling", built, monkeypatch)
+    try:
+        live = ctx._watcher
+        assert live is not None
+        (old,) = [o for event, o in built if event == "build"]
+        assert old.tag == "polling"  # type: ignore[attr-defined]
+
+        _write_backend_config(_isolated_config_home, [root], "native")
+        await ctx.reconcile_watched_roots()
+
+        builds = [o for event, o in built if event == "build"]
+        assert len(builds) == 2
+        new = builds[1]
+        assert new.tag == "native"  # type: ignore[attr-defined]
+        assert live._observer is new
+        assert live._observer_backend == "native"
+        assert built.index(("start", new)) < built.index(("stop", old))
+    finally:
+        await ctx.close()
+
+
+@pytest.mark.asyncio
+async def test_an_edit_that_keeps_the_effective_backend_installs_the_raw_value(
+    _isolated_config_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On macOS ``auto`` and ``polling`` both mean polling. The edit is still
+    installed and banked — comparing effective backends would drop it, and a
+    later edit back to ``auto`` would then read as no change — but no observer
+    is replaced."""
+    from memtomem.indexing import watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod.sys, "platform", "darwin")
+    root = tmp_path / "one"
+    root.mkdir()
+    built: list[tuple[str, object]] = []
+    ctx = await _make_real_watcher_app(_isolated_config_home, [root], "auto", built, monkeypatch)
+    try:
+        live = ctx._watcher
+        assert live is not None
+        (old,) = [o for event, o in built if event == "build"]
+
+        _write_backend_config(_isolated_config_home, [root], "polling")
+        await ctx.reconcile_watched_roots()
+
+        assert ctx.config.indexing.watcher_backend == "polling"
+        assert [o for event, o in built if event == "build"] == [old]
+        assert live._observer is old
+        with patch("memtomem.server.context.build_fresh_config") as rebuild:
+            await ctx.reconcile_watched_roots()
+        rebuild.assert_not_called()
+    finally:
+        await ctx.close()

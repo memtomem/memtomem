@@ -58,6 +58,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A running MCP server applies an `indexing.watcher_backend` change on the
+  next tool call instead of after a restart (#2838).** The server notices
+  config edits made by other processes by comparing the index roots, and the
+  backend was not part of that comparison: an edit that changed only the
+  backend was recorded as applied and ignored, and an edit that also changed
+  roots re-watched them under the old backend. On macOS this meant that
+  switching `auto` (polling) to `native` took effect only once every MCP
+  client session had restarted its server. A tool call cancelled during the
+  reconcile now also puts the previous roots and backend back, so the next
+  call retries the change instead of skipping it.
 - **A source that is a symlink loop is held instead of crashing on Python 3.12
   (#2841).** On 3.12 `Path.resolve()` raises `RuntimeError` for a loop, where
   3.13 and later return a path. Path normalization caught only `OSError`, so

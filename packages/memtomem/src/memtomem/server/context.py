@@ -936,7 +936,8 @@ class AppContext:
         would be watched and then rejected. Note this also moves the roots the
         rest of the runtime reads (default write destination, imports, session
         archives): the reconciled unit is root policy, not just watch
-        membership.
+        membership. ``watcher_backend`` travels with it, since the watcher
+        reads its observer type from the same config.
         """
         if self._runtime_owner is not None:
             await self._runtime_owner.reconcile_watched_roots()
@@ -1004,11 +1005,18 @@ class AppContext:
             # while ingress writes it. ``retain_missing_dirs`` is compared and
             # installed with them for the first reason only: a change to it
             # alone must reach the engine and the held-source recheck (#2833).
+            # ``watcher_backend`` is compared and installed because
+            # ``reconfigure`` picks the observer from the config it is handed:
+            # left out, a backend-only edit was banked unapplied, and a root
+            # edit swapped roots under the stale backend (#2838). The raw value
+            # is compared, not the effective backend, so ``auto`` → ``polling``
+            # on macOS is still installed even though nothing is swapped.
             if (
                 _same_tier(fresh.indexing.memory_dirs, indexing.memory_dirs)
                 and _same_tier(fresh.indexing.project_memory_dirs, indexing.project_memory_dirs)
                 and _same_tier(fresh.indexing.read_only_memory_dirs, indexing.read_only_memory_dirs)
                 and _same_tier(fresh.indexing.retain_missing_dirs, indexing.retain_missing_dirs)
+                and fresh.indexing.watcher_backend == indexing.watcher_backend
             ):
                 self._config_signature = signature
                 return
@@ -1017,23 +1025,31 @@ class AppContext:
             previous_project_dirs = list(indexing.project_memory_dirs)
             previous_read_only_dirs = list(indexing.read_only_memory_dirs)
             previous_retain_dirs = list(indexing.retain_missing_dirs)
+            previous_backend = indexing.watcher_backend
             indexing.memory_dirs = list(fresh.indexing.memory_dirs)
             indexing.project_memory_dirs = list(fresh.indexing.project_memory_dirs)
             indexing.read_only_memory_dirs = list(fresh.indexing.read_only_memory_dirs)
             indexing.retain_missing_dirs = list(fresh.indexing.retain_missing_dirs)
+            indexing.watcher_backend = fresh.indexing.watcher_backend
             try:
                 await watcher.reconfigure(indexing)
-            except Exception:
+            except BaseException as exc:
                 # ``reconfigure`` restores its own watch set, so leaving the new
                 # roots on the shared config would desync the engine from the
                 # watcher — the engine would accept files in a directory nobody
                 # watches. Put the roots back and leave the signature unbanked
                 # so the next tool call tries again rather than freezing the
-                # watch set until the user edits the file a second time.
+                # watch set until the user edits the file a second time. A
+                # cancelled tool call needs the same restore: left installed,
+                # the new values would match the file and the next call would
+                # bank them without ever reconfiguring.
                 indexing.memory_dirs = previous_memory_dirs
                 indexing.project_memory_dirs = previous_project_dirs
                 indexing.read_only_memory_dirs = previous_read_only_dirs
                 indexing.retain_missing_dirs = previous_retain_dirs
+                indexing.watcher_backend = previous_backend
+                if not isinstance(exc, Exception):
+                    raise
                 logger.warning(
                     "Failed to reconcile watched roots after a config change — "
                     "still watching the previous set",
@@ -1043,8 +1059,10 @@ class AppContext:
 
             self._config_signature = signature
             logger.info(
-                "Reconciled watched index roots after a config change: %d root(s)",
+                "Reconciled watched index roots after a config change: %d root(s), "
+                "watcher backend %s",
                 len(indexing.all_index_roots()),
+                indexing.watcher_backend,
             )
 
     async def _quarantine_failed_start(self, service: Any, label: str) -> None:
