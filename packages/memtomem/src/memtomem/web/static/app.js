@@ -3979,7 +3979,7 @@ function showDetail(r) {
   hide(qs('d-diff'));
   hide(qs('d-diff-btn'));
   qs('d-diff-btn').dataset.mode = 'source';
-  qs('d-diff-btn').textContent = 'Diff';
+  _setI18nLabel(qs('d-diff-btn'), 'search.detail_diff', 'Diff');
 
   // C1: On mobile, switch to detail panel view
   if (window.innerWidth <= 768) {
@@ -3990,7 +3990,8 @@ function showDetail(r) {
 function clearDetail() {
   hide(qs('detail-view'));
   show(qs('detail-empty'));
-  qs('detail-empty').querySelector('p').textContent = 'Select a result to view details';
+  _setI18nLabel(
+    qs('detail-empty').querySelector('p'), 'search.detail_empty', 'Select a result to view details');
   STATE.selectedChunkId = null;
 }
 
@@ -4048,6 +4049,7 @@ qs('d-reset-btn').addEventListener('click', () => {
   hide(qs('d-diff'));
   hide(qs('d-diff-btn'));
   qs('d-diff-btn').dataset.mode = 'source';
+  _setI18nLabel(qs('d-diff-btn'), 'search.detail_diff', 'Diff');
   _setDetailMode('edit');
   _updateWordCount();
   showToast(t('toast.content_restored'), 'info');
@@ -4059,6 +4061,18 @@ qs('d-copy-btn').addEventListener('click', () => copyToClipboard(qs('d-editor').
 // ── B4: Markdown Preview toggle ──
 // Preview merged into View — one toggle for both code highlighting and markdown rendering
 // STATE.detailViewSource now in STATE
+// The View/Edit and Diff/Edit toggles label the next action, so their i18n key
+// depends on state. Swap the data-i18n key itself rather than only the text:
+// applyDOM() rewrites every [data-i18n] element on langchange, and a fixed key
+// would put back the label of the other state. Until the locale cache loads,
+// t() returns the raw key, so show the English fallback; I18N.init() then
+// applies the translation through the key set here.
+function _setI18nLabel(el, key, fallback) {
+  el.dataset.i18n = key;
+  const txt = t(key);
+  el.textContent = txt !== key ? txt : fallback;
+}
+
 qs('d-view-btn').addEventListener('click', () => {
   const btn = qs('d-view-btn');
   const isViewing = btn.dataset.mode === 'view';
@@ -4077,7 +4091,7 @@ function _setDetailMode(mode) {
   if (mode === 'edit') {
     hide(codeView);
     show(editor);
-    btn.textContent = 'View';
+    _setI18nLabel(btn, 'search.detail_view', 'View');
     btn.dataset.mode = 'edit';
     // Show edit-only actions
     show(qs('d-save-btn'));
@@ -4097,7 +4111,7 @@ function _setDetailMode(mode) {
     }
     hide(editor);
     show(codeView);
-    btn.textContent = 'Edit';
+    _setI18nLabel(btn, 'search.detail_edit', 'Edit');
     btn.dataset.mode = 'view';
     // Hide edit-only actions in view mode
     hide(qs('d-save-btn'));
@@ -4185,14 +4199,14 @@ qs('d-diff-btn').addEventListener('click', () => {
   if (isShowing) {
     hide(qs('d-diff'));
     show(qs('d-editor'));
-    btn.textContent = 'Diff';
+    _setI18nLabel(btn, 'search.detail_diff', 'Diff');
     btn.dataset.mode = 'source';
   } else {
     const ops = diffLines(STATE.selectedOriginal, qs('d-editor').value);
     qs('d-diff').innerHTML = renderDiff(ops);
     hide(qs('d-editor'));
     show(qs('d-diff'));
-    btn.textContent = 'Edit';
+    _setI18nLabel(btn, 'search.detail_edit', 'Edit');
     btn.dataset.mode = 'diff';
   }
 });
@@ -4207,7 +4221,7 @@ qs('d-editor').addEventListener('input', () => {
     if (diffBtn.dataset.mode === 'diff') {
       hide(qs('d-diff'));
       show(qs('d-editor'));
-      diffBtn.textContent = 'Diff';
+      _setI18nLabel(diffBtn, 'search.detail_diff', 'Diff');
       diffBtn.dataset.mode = 'source';
     }
   }
@@ -9145,7 +9159,7 @@ qs('d-history-btn').addEventListener('click', () => {
         qs('d-diff').innerHTML = renderDiff(ops);
         show(qs('d-diff')); hide(qs('d-editor'));
         const diffBtn = qs('d-diff-btn');
-        show(diffBtn); diffBtn.textContent = 'Edit'; diffBtn.dataset.mode = 'diff';
+        show(diffBtn); _setI18nLabel(diffBtn, 'search.detail_edit', 'Edit'); diffBtn.dataset.mode = 'diff';
         showToast(t('toast.diff_shown'), 'info');
       });
     });

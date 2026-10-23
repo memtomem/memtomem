@@ -236,6 +236,7 @@
   "search.detail_view": "View",
   "search.detail_preview": "Preview",
   "search.detail_diff": "Diff",
+  "search.detail_edit": "Edit",
   "search.detail_history": "History",
   "search.detail_tags": "Tags",
   "search.detail_validity_label": "Valid",
