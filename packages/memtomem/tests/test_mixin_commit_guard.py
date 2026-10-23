@@ -65,10 +65,15 @@ import memtomem
 _STORAGE = Path(memtomem.__file__).parent / "storage"
 _MIXINS = _STORAGE / "mixins"
 
-#: The two non-mixin files under this guard (#2182). Named rather than globbed:
+#: The non-mixin files under this guard (#2182). Named rather than globbed:
 #: ``sqlite_namespace.py`` and ``sqlite_schema.py`` live beside them and are
 #: deliberately out of scope, so a glob would quietly adopt them.
-_BACKEND_FILES = ("sqlite_backend.py", "sqlite_meta.py")
+_BACKEND_FILES = (
+    "sqlite_backend.py",
+    "sqlite_meta.py",
+    "sqlite_source_holds_ops.py",
+    "sqlite_search_ops.py",
+)
 
 
 def _scanned_files() -> list[Path]:
@@ -196,7 +201,7 @@ OWNED_TRANSACTION_WRITERS: dict[tuple[str, str], tuple[str, str]] = {
         "file; the shared writer connection is never touched, and dispatch is "
         "refused while this backend owns a transaction.",
     ),
-    ("sqlite_backend.py", "SqliteBackend.queue_source_check_sync"): (
+    ("sqlite_source_holds_ops.py", "SourceHoldOps.queue_source_check_sync"): (
         PRIVATE,
         "The watcher callback journals on a short-lived sqlite3.connect rather "
         "than the task-owned writer connection.",
@@ -597,6 +602,10 @@ _FILE_HELPERS: dict[str, _Helpers] = {
         frozenset({_ROLLBACK_CM, "_write_guard"}),
         frozenset({_COMMIT_HELPER, "_commit"}),
     ),
+    "sqlite_source_holds_ops.py": _Helpers(
+        frozenset({_ROLLBACK_CM, "_write_guard"}),
+        frozenset({_COMMIT_HELPER, "_commit"}),
+    ),
 }
 
 
@@ -763,6 +772,12 @@ _PARTICIPANT_HELPERS: dict[tuple[str, str], str] = {
         "Updates the source visibility epoch within its caller's transaction."
     ),
     ("sqlite_backend.py", "SqliteBackend._clear_source_visibility"): (
+        "Deletes source holds and pending checks within its caller's transaction."
+    ),
+    ("sqlite_source_holds_ops.py", "SourceHoldOps._bump_source_visibility"): (
+        "Updates the source visibility epoch within its caller's transaction."
+    ),
+    ("sqlite_source_holds_ops.py", "SourceHoldOps._clear_source_visibility"): (
         "Deletes source holds and pending checks within its caller's transaction."
     ),
     ("sqlite_backend.py", "SqliteBackend._delete_policy_summaries_for_source"): (
@@ -1968,6 +1983,41 @@ class TestEveryMixinWriterCommitsThroughOwnership:
         wrong = [lineno for lineno, injected in constructions if injected != expected]
         assert not wrong, (
             "MetaManager built without this backend's own ownership-aware "
+            f"triple at sqlite_backend.py lines {wrong}"
+        )
+
+    def test_the_backend_injects_its_ownership_aware_source_hold_helpers(self) -> None:
+        """``SourceHoldOps`` must also receive the backend's ownership-aware helpers."""
+        tree = ast.parse((_STORAGE / "sqlite_backend.py").read_text(encoding="utf-8"))
+        constructions: list[tuple[int, set[str]]] = []
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "SourceHoldOps"
+            ):
+                continue
+            injected = {
+                f"{kw.arg}={kw.value.value.id}.{kw.value.attr}"
+                for kw in node.keywords
+                if kw.arg in {"commit", "write_guard"}
+                and isinstance(kw.value, ast.Attribute)
+                and isinstance(kw.value.value, ast.Name)
+            }
+            if node.args and isinstance(node.args[0], ast.Attribute):
+                first = node.args[0]
+                if isinstance(first.value, ast.Name):
+                    injected.add(f"get_db={first.value.id}.{first.attr}")
+            constructions.append((node.lineno, injected))
+        assert constructions, "no SourceHoldOps construction found in sqlite_backend.py"
+        expected = {
+            "get_db=self._get_db",
+            f"commit=self.{_COMMIT_HELPER}",
+            f"write_guard=self.{_ROLLBACK_CM}",
+        }
+        wrong = [lineno for lineno, injected in constructions if injected != expected]
+        assert not wrong, (
+            "SourceHoldOps built without this backend's own ownership-aware "
             f"triple at sqlite_backend.py lines {wrong}"
         )
 

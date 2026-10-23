@@ -187,7 +187,8 @@ class ShareLinkMixin:
             sql += "AND link_type = ? "
             params.append(link_type)
         sql += "ORDER BY source_id, created_at, target_id"
-        rows = self._get_read_db().execute(sql, params).fetchall()
+        async with self._lease_read_db() as db:
+            rows = db.execute(sql, params).fetchall()
         out: dict[UUID, list[ChunkLink]] = {}
         for row in rows:
             # Key from the raw column: rows matched the IN list, so

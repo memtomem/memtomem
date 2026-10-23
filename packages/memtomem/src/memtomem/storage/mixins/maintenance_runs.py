@@ -115,8 +115,8 @@ class MaintenanceRunMixin:
         """Return the most recent runs, newest first."""
         if limit <= 0:
             return []
-        db = self._get_read_db()
-        rows = db.execute(_LATEST_SQL, (kind, kind, policy_name, policy_name, limit)).fetchall()
+        async with self._lease_read_db() as db:
+            rows = db.execute(_LATEST_SQL, (kind, kind, policy_name, policy_name, limit)).fetchall()
         return [
             {
                 "id": r[0],

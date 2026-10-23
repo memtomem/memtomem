@@ -52,6 +52,7 @@ _ALLOWED_CALLSITES: set[tuple[str, str]] = {
 # recursively which is fine because the kwarg is already threaded.
 _ALLOWED_FILES: set[str] = {
     "memtomem/storage/sqlite_backend.py",  # backend internals; threading happens at the outer
+    "memtomem/storage/sqlite_search_ops.py",  # search ops mixin; threading happens at the outer
     "memtomem/search/pipeline.py",  # threaded inside, see _ALLOWED_CALLSITES above
     "memtomem/runtime/components.py",
     "memtomem/web/hot_reload.py",

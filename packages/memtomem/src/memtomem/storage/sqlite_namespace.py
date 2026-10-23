@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import AsyncContextManager, AsyncIterator, Callable, Sequence
 from uuid import UUID
 
 from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError, StorageError
@@ -107,6 +108,8 @@ class NamespaceOps:
         has_vec_table: Callable[[], bool],
         in_transaction: Callable[[], bool],
         get_read_db: Callable[[], sqlite3.Connection],
+        *,
+        lease_read_db: Callable[[], AsyncContextManager[sqlite3.Connection]] | None = None,
     ) -> None:
         self._get_db = get_db
         # Read-only counters route here when the current task holds no
@@ -115,6 +118,7 @@ class NamespaceOps:
         # the hidden-namespace search hint for the whole transaction span.
         # Required (no default), matching the two callables below.
         self._get_read_db = get_read_db
+        self._lease_read_db_cb = lease_read_db
         # Live lookup so reset_embedding_meta()'s flag flip is visible here
         # without re-construction. Required (no default) — sole caller is
         # SqliteBackend.initialize(); a default would silently regress the
@@ -126,11 +130,22 @@ class NamespaceOps:
         # caller can't silently regress to "always owns".
         self._in_transaction = in_transaction
 
+    @asynccontextmanager
+    async def _lease_txn_read_db(self) -> AsyncIterator[sqlite3.Connection]:
+        if self._in_transaction():
+            yield self._get_db()
+            return
+        if self._lease_read_db_cb is not None:
+            async with self._lease_read_db_cb() as db:
+                yield db
+            return
+        yield self._get_read_db()
+
     async def list_namespaces(self) -> list[tuple[str, int]]:
-        db = self._get_db() if self._in_transaction() else self._get_read_db()
-        rows = db.execute(
-            "SELECT namespace, COUNT(*) FROM chunks GROUP BY namespace ORDER BY namespace"
-        ).fetchall()
+        async with self._lease_txn_read_db() as db:
+            rows = db.execute(
+                "SELECT namespace, COUNT(*) FROM chunks GROUP BY namespace ORDER BY namespace"
+            ).fetchall()
         return [(row[0], row[1]) for row in rows]
 
     async def count_chunks_by_namespace(self, namespace: str) -> int:
@@ -157,13 +172,13 @@ class NamespaceOps:
             return 0
         # Pure read: answer from the pool unless this task's own transaction
         # must see its uncommitted writes.
-        db = self._get_db() if self._in_transaction() else self._get_read_db()
         clauses = " OR ".join("namespace LIKE ? ESCAPE '\\'" for _ in prefixes)
         params = [f"{escape_like(p)}%" for p in prefixes]
-        row = db.execute(
-            f"SELECT COUNT(*) FROM chunks WHERE {clauses}",
-            params,
-        ).fetchone()
+        async with self._lease_txn_read_db() as db:
+            row = db.execute(
+                f"SELECT COUNT(*) FROM chunks WHERE {clauses}",
+                params,
+            ).fetchone()
         return int(row[0]) if row else 0
 
     async def count_chunks_by_ns_prefix_detail(
@@ -189,16 +204,16 @@ class NamespaceOps:
         # on the default-namespace search hot path (the hidden-namespace
         # hint), where the writer connection both contends with writes and
         # fails closed while another task owns a transaction.
-        db = self._get_db() if self._in_transaction() else self._get_read_db()
         patterns = [f"{escape_like(p)}%" for p in prefixes]
         columns = ", ".join(
             "SUM(CASE WHEN namespace LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)" for _ in prefixes
         )
         clauses = " OR ".join("namespace LIKE ? ESCAPE '\\'" for _ in prefixes)
-        row = db.execute(
-            f"SELECT COUNT(*), {columns} FROM chunks WHERE {clauses}",
-            patterns + patterns,
-        ).fetchone()
+        async with self._lease_txn_read_db() as db:
+            row = db.execute(
+                f"SELECT COUNT(*), {columns} FROM chunks WHERE {clauses}",
+                patterns + patterns,
+            ).fetchone()
         if not row:
             return 0, {}
         by_prefix = {

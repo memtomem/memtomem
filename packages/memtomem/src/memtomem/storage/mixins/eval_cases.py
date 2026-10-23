@@ -449,7 +449,6 @@ class EvalCaseMixin:
 
     async def list_eval_cases(self, status: str | None = None) -> list[dict[str, Any]]:
         """Newest-first case summaries (no labels), optionally filtered by status."""
-        db = self._get_txn_read_db()
         query = (
             "SELECT case_id, name, query_text, top_k, source_run_id, version, status, "
             "created_at, updated_at, "
@@ -461,7 +460,8 @@ class EvalCaseMixin:
             query += " WHERE status = ?"
             params.append(status)
         query += " ORDER BY created_at DESC, case_id DESC"
-        rows = db.execute(query, params).fetchall()
+        async with self._lease_txn_read_db() as db:
+            rows = db.execute(query, params).fetchall()
         return [
             {
                 "case_id": r[0],
@@ -834,15 +834,12 @@ class EvalCaseMixin:
         project-tier chunks are retrievable — an identical row in a different
         project is a different retrieval state.
         """
-        return (
-            self._get_read_db()
-            .execute(
+        with self._lease_read_db_sync() as db:
+            return db.execute(
                 "SELECT content_hash, heading_hierarchy, namespace, scope, created_at, "
                 "updated_at, valid_from_unix, valid_to_unix, importance_score, tags, "
                 "source_file, start_line, project_root FROM chunks"
-            )
-            .fetchall()
-        )
+            ).fetchall()
 
     def read_vector_fingerprint_rows(self) -> list[tuple]:
         """(content_hash, namespace, source_file, start_line, embedding blob) per vector.
@@ -855,16 +852,16 @@ class EvalCaseMixin:
         namespaces. The ``chunks_vec.rowid = chunks.rowid`` join only recovers
         that identity; the rowid never enters the fingerprint.
         """
-        db = self._get_read_db()
-        has_vec = db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_vec'"
-        ).fetchone()
-        if not has_vec:
-            return []
-        return db.execute(
-            "SELECT c.content_hash, c.namespace, c.source_file, c.start_line, v.embedding "
-            "FROM chunks c JOIN chunks_vec v ON v.rowid = c.rowid"
-        ).fetchall()
+        with self._lease_read_db_sync() as db:
+            has_vec = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_vec'"
+            ).fetchone()
+            if not has_vec:
+                return []
+            return db.execute(
+                "SELECT c.content_hash, c.namespace, c.source_file, c.start_line, v.embedding "
+                "FROM chunks c JOIN chunks_vec v ON v.rowid = c.rowid"
+            ).fetchall()
 
     def read_fts_fingerprint_rows(self) -> list[tuple]:
         """(content_hash, namespace, source_file, start_line, fts_content) per FTS row.
@@ -873,14 +870,11 @@ class EvalCaseMixin:
         so FTS text that has drifted out of sync with its chunk registers, while
         a rekeyed rebuild does not.
         """
-        return (
-            self._get_read_db()
-            .execute(
+        with self._lease_read_db_sync() as db:
+            return db.execute(
                 "SELECT c.content_hash, c.namespace, c.source_file, c.start_line, f.content "
                 "FROM chunks c JOIN chunks_fts f ON f.rowid = c.rowid"
-            )
-            .fetchall()
-        )
+            ).fetchall()
 
     def read_link_topology_rows(self) -> list[tuple]:
         """chunk_links topology by DURABLE endpoint identity (rescue input).
@@ -891,18 +885,15 @@ class EvalCaseMixin:
         and dangling sources resolve to NULL columns via the LEFT JOIN — that
         null state is preserved in the fingerprint.
         """
-        return (
-            self._get_read_db()
-            .execute(
+        with self._lease_read_db_sync() as db:
+            return db.execute(
                 "SELECT s.content_hash, s.namespace, s.source_file, s.start_line, "
                 "t.content_hash, t.namespace, t.source_file, t.start_line, "
                 "l.link_type, l.namespace_target "
                 "FROM chunk_links l "
                 "LEFT JOIN chunks s ON s.id = l.source_id "
                 "JOIN chunks t ON t.id = l.target_id"
-            )
-            .fetchall()
-        )
+            ).fetchall()
 
     def read_access_counts(self) -> list[tuple]:
         """(content_hash, namespace, source_file, start_line, access_count) per chunk.
@@ -912,13 +903,10 @@ class EvalCaseMixin:
         access boosting ranks per chunk. Only an input when access/importance
         boost is enabled.
         """
-        return (
-            self._get_read_db()
-            .execute(
+        with self._lease_read_db_sync() as db:
+            return db.execute(
                 "SELECT content_hash, namespace, source_file, start_line, access_count FROM chunks"
-            )
-            .fetchall()
-        )
+            ).fetchall()
 
     def read_entity_rows(self) -> list[tuple]:
         """(content_hash, namespace, source_file, start_line, type, value, confidence) per entity.
@@ -928,15 +916,12 @@ class EvalCaseMixin:
         the boost never reads them, so they must not manufacture drift. Only an
         input when entity boost is enabled.
         """
-        return (
-            self._get_read_db()
-            .execute(
+        with self._lease_read_db_sync() as db:
+            return db.execute(
                 "SELECT c.content_hash, c.namespace, c.source_file, c.start_line, "
                 "e.entity_type, e.entity_value, e.confidence "
                 "FROM chunk_entities e JOIN chunks c ON c.id = e.chunk_id"
-            )
-            .fetchall()
-        )
+            ).fetchall()
 
     def validate_case_filters(self, filters: object) -> None:
         """Validate a case's ``filters`` against the portable vocabulary.
@@ -946,4 +931,5 @@ class EvalCaseMixin:
         callers such as the replay engine don't reach into ``_get_read_db``.
         Raises :class:`~memtomem.errors.EvalCaseError` on any violation.
         """
-        validate_portable_filters(self._get_read_db(), filters)
+        with self._lease_read_db_sync() as db:
+            validate_portable_filters(db, filters)

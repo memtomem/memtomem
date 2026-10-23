@@ -39,13 +39,13 @@ class RelationMixin:
             self._commit_if_standalone(db)
 
     async def get_related(self, chunk_id: UUID) -> list[tuple[UUID, str]]:
-        db = self._get_txn_read_db()
         cid = str(chunk_id)
-        rows = db.execute(
-            "SELECT target_id, relation_type FROM chunk_relations WHERE source_id = ? "
-            "UNION SELECT source_id, relation_type FROM chunk_relations WHERE target_id = ?",
-            (cid, cid),
-        ).fetchall()
+        async with self._lease_txn_read_db() as db:
+            rows = db.execute(
+                "SELECT target_id, relation_type FROM chunk_relations WHERE source_id = ? "
+                "UNION SELECT source_id, relation_type FROM chunk_relations WHERE target_id = ?",
+                (cid, cid),
+            ).fetchall()
         return [(UUID(row[0]), row[1]) for row in rows]
 
     async def get_consolidation_targets(self, chunk_ids: Sequence[UUID]) -> dict[UUID, list[UUID]]:
@@ -60,18 +60,18 @@ class RelationMixin:
         """
         from memtomem.storage.sqlite_backend import _param_batches
 
-        db = self._get_txn_read_db()
         targets: dict[UUID, list[UUID]] = {}
-        for batch in _param_batches([str(cid) for cid in chunk_ids]):
-            marks = ",".join("?" * len(batch))
-            rows = db.execute(
-                "SELECT source_id, target_id FROM chunk_relations "  # nosec B608
-                f"WHERE relation_type = 'consolidated_into' AND source_id IN ({marks}) "
-                "ORDER BY source_id, target_id",
-                batch,
-            ).fetchall()
-            for source_id, target_id in rows:
-                targets.setdefault(UUID(source_id), []).append(UUID(target_id))
+        async with self._lease_txn_read_db() as db:
+            for batch in _param_batches([str(cid) for cid in chunk_ids]):
+                marks = ",".join("?" * len(batch))
+                rows = db.execute(
+                    "SELECT source_id, target_id FROM chunk_relations "  # nosec B608
+                    f"WHERE relation_type = 'consolidated_into' AND source_id IN ({marks}) "
+                    "ORDER BY source_id, target_id",
+                    batch,
+                ).fetchall()
+                for source_id, target_id in rows:
+                    targets.setdefault(UUID(source_id), []).append(UUID(target_id))
         return targets
 
     async def get_consolidation_summaries(self, chunk_ids: Sequence[UUID]) -> set[UUID]:
@@ -83,16 +83,16 @@ class RelationMixin:
         """
         from memtomem.storage.sqlite_backend import _param_batches
 
-        db = self._get_txn_read_db()
         summaries: set[UUID] = set()
-        for batch in _param_batches([str(cid) for cid in chunk_ids]):
-            marks = ",".join("?" * len(batch))
-            rows = db.execute(
-                "SELECT DISTINCT target_id FROM chunk_relations "  # nosec B608
-                f"WHERE relation_type = 'consolidated_into' AND target_id IN ({marks})",
-                batch,
-            ).fetchall()
-            summaries.update(UUID(row[0]) for row in rows)
+        async with self._lease_txn_read_db() as db:
+            for batch in _param_batches([str(cid) for cid in chunk_ids]):
+                marks = ",".join("?" * len(batch))
+                rows = db.execute(
+                    "SELECT DISTINCT target_id FROM chunk_relations "  # nosec B608
+                    f"WHERE relation_type = 'consolidated_into' AND target_id IN ({marks})",
+                    batch,
+                ).fetchall()
+                summaries.update(UUID(row[0]) for row in rows)
         return summaries
 
     async def get_consolidation_sources(self, chunk_ids: Sequence[UUID]) -> list[UUID]:
@@ -103,16 +103,16 @@ class RelationMixin:
         """
         from memtomem.storage.sqlite_backend import _param_batches
 
-        db = self._get_txn_read_db()
         sources: set[str] = set()
-        for batch in _param_batches([str(cid) for cid in chunk_ids]):
-            marks = ",".join("?" * len(batch))
-            rows = db.execute(
-                "SELECT DISTINCT source_id FROM chunk_relations "  # nosec B608
-                f"WHERE relation_type = 'consolidated_into' AND target_id IN ({marks})",
-                batch,
-            ).fetchall()
-            sources.update(row[0] for row in rows)
+        async with self._lease_txn_read_db() as db:
+            for batch in _param_batches([str(cid) for cid in chunk_ids]):
+                marks = ",".join("?" * len(batch))
+                rows = db.execute(
+                    "SELECT DISTINCT source_id FROM chunk_relations "  # nosec B608
+                    f"WHERE relation_type = 'consolidated_into' AND target_id IN ({marks})",
+                    batch,
+                ).fetchall()
+                sources.update(row[0] for row in rows)
         return [UUID(sid) for sid in sorted(sources)]
 
     async def carry_consolidation_edges(self, source_ids: Sequence[UUID], target_id: UUID) -> int:
@@ -144,17 +144,17 @@ class RelationMixin:
         """
         from memtomem.storage.sqlite_backend import _param_batches
 
-        db = self._get_txn_read_db()
         members = {str(cid) for cid in chunk_ids}
         edges: list[tuple[str, str, str]] = []
-        for batch in _param_batches(sorted(members)):
-            marks = ",".join("?" * len(batch))
-            rows = db.execute(
-                "SELECT source_id, target_id, relation_type FROM chunk_relations "  # nosec B608
-                f"WHERE source_id IN ({marks})",
-                batch,
-            ).fetchall()
-            edges.extend(row for row in rows if row[1] in members)
+        async with self._lease_txn_read_db() as db:
+            for batch in _param_batches(sorted(members)):
+                marks = ",".join("?" * len(batch))
+                rows = db.execute(
+                    "SELECT source_id, target_id, relation_type FROM chunk_relations "  # nosec B608
+                    f"WHERE source_id IN ({marks})",
+                    batch,
+                ).fetchall()
+                edges.extend(row for row in rows if row[1] in members)
         edges.sort(key=lambda row: (row[0], row[1]))
         return [(UUID(sid), UUID(tid), rel) for sid, tid, rel in edges]
 

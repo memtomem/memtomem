@@ -154,14 +154,14 @@ class EntityMixin:
         each page on the writer connection inside its transaction before
         writing (``filter_unextracted_chunk_ids``).
         """
-        db = self._get_read_db()
-        rows = db.execute(
-            "SELECT chunks.rowid, chunks.* FROM chunks "
-            "WHERE chunks.rowid > ? AND NOT EXISTS "
-            "(SELECT 1 FROM chunk_entities e WHERE e.chunk_id = chunks.id) "
-            "ORDER BY chunks.rowid LIMIT ?",
-            (after_rowid, limit),
-        ).fetchall()
+        async with self._lease_read_db() as db:
+            rows = db.execute(
+                "SELECT chunks.rowid, chunks.* FROM chunks "
+                "WHERE chunks.rowid > ? AND NOT EXISTS "
+                "(SELECT 1 FROM chunk_entities e WHERE e.chunk_id = chunks.id) "
+                "ORDER BY chunks.rowid LIMIT ?",
+                (after_rowid, limit),
+            ).fetchall()
         return [(row[0], self._row_to_chunk(row[1:])) for row in rows]
 
     async def filter_unextracted_chunk_ids(self, chunk_ids: list[str]) -> set[str]:
@@ -197,10 +197,10 @@ class EntityMixin:
 
     async def entity_backfill_get_state(self) -> str | None:
         """Read the ``entity_backfill_v1`` marker (cursor, ``done``, ``stale``)."""
-        db = self._get_read_db()
-        row = db.execute(
-            "SELECT value FROM _memtomem_meta WHERE key = ?", (_ENTITY_BACKFILL_KEY,)
-        ).fetchone()
+        async with self._lease_read_db() as db:
+            row = db.execute(
+                "SELECT value FROM _memtomem_meta WHERE key = ?", (_ENTITY_BACKFILL_KEY,)
+            ).fetchone()
         return row[0] if row else None
 
     async def entity_backfill_set_state(self, value: str) -> None:
@@ -246,7 +246,6 @@ class EntityMixin:
         cross-project read; ``project_context_root`` is what the default merge
         resolves "this project" against.
         """
-        db = self._get_read_db()
         query = (
             "SELECT e.entity_type, e.entity_value, e.confidence, e.chunk_id, "
             "c.content, c.source_file, c.namespace "
@@ -284,7 +283,8 @@ class EntityMixin:
         query += f"ORDER BY e.confidence DESC, {scope_sort_priority_case('c.')}, e.id LIMIT ?"
         params.append(limit)
 
-        rows = db.execute(query, params).fetchall()
+        async with self._lease_read_db() as db:
+            rows = db.execute(query, params).fetchall()
         return [
             {
                 "entity_type": r[0],
@@ -299,12 +299,12 @@ class EntityMixin:
         ]
 
     async def get_entities_for_chunk(self, chunk_id: str) -> list[dict]:
-        db = self._get_read_db()
-        rows = db.execute(
-            "SELECT entity_type, entity_value, confidence, position "
-            "FROM chunk_entities WHERE chunk_id = ? ORDER BY position",
-            (chunk_id,),
-        ).fetchall()
+        async with self._lease_read_db() as db:
+            rows = db.execute(
+                "SELECT entity_type, entity_value, confidence, position "
+                "FROM chunk_entities WHERE chunk_id = ? ORDER BY position",
+                (chunk_id,),
+            ).fetchall()
         return [
             {"entity_type": r[0], "entity_value": r[1], "confidence": r[2], "position": r[3]}
             for r in rows
@@ -317,16 +317,16 @@ class EntityMixin:
         from memtomem.storage.sqlite_backend import _param_batches
         from memtomem.storage.sqlite_helpers import placeholders
 
-        db = self._get_read_db()
         # Batched: the entity scan asks about every chunk of a source.
         extracted: set[str] = set()
-        for batch in _param_batches(chunk_ids):
-            rows = db.execute(
-                "SELECT DISTINCT chunk_id FROM chunk_entities "
-                f"WHERE chunk_id IN ({placeholders(len(batch))})",
-                batch,
-            ).fetchall()
-            extracted.update(r[0] for r in rows)
+        async with self._lease_read_db() as db:
+            for batch in _param_batches(chunk_ids):
+                rows = db.execute(
+                    "SELECT DISTINCT chunk_id FROM chunk_entities "
+                    f"WHERE chunk_id IN ({placeholders(len(batch))})",
+                    batch,
+                ).fetchall()
+                extracted.update(r[0] for r in rows)
         return extracted
 
     async def get_matching_entities(
@@ -365,7 +365,6 @@ class EntityMixin:
             return {}
         from memtomem.storage.sqlite_helpers import placeholders
 
-        db = self._get_read_db()
         ph = placeholders(len(chunk_ids))
         key_clause = " OR ".join(
             ["(entity_type = ? AND entity_value = ? COLLATE NOCASE)"] * len(entity_keys)
@@ -374,12 +373,13 @@ class EntityMixin:
         for entity_type, value in entity_keys:
             params.extend((entity_type, value))
 
-        rows = db.execute(
-            f"SELECT DISTINCT chunk_id, entity_type, lower(entity_value) "
-            f"FROM chunk_entities "
-            f"WHERE chunk_id IN ({ph}) AND confidence >= ? AND ({key_clause})",
-            params,
-        ).fetchall()
+        async with self._lease_read_db() as db:
+            rows = db.execute(
+                f"SELECT DISTINCT chunk_id, entity_type, lower(entity_value) "
+                f"FROM chunk_entities "
+                f"WHERE chunk_id IN ({ph}) AND confidence >= ? AND ({key_clause})",
+                params,
+            ).fetchall()
 
         matches: dict[str, set[tuple[str, str]]] = {}
         for chunk_id, entity_type, value in rows:
@@ -388,8 +388,8 @@ class EntityMixin:
 
     async def get_entity_type_counts(self) -> dict[str, int]:
         """Return count of entities per type."""
-        db = self._get_read_db()
-        rows = db.execute(
-            "SELECT entity_type, COUNT(*) FROM chunk_entities GROUP BY entity_type ORDER BY COUNT(*) DESC"
-        ).fetchall()
+        async with self._lease_read_db() as db:
+            rows = db.execute(
+                "SELECT entity_type, COUNT(*) FROM chunk_entities GROUP BY entity_type ORDER BY COUNT(*) DESC"
+            ).fetchall()
         return {r[0]: r[1] for r in rows}

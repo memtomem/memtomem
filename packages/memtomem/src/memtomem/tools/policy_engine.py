@@ -298,7 +298,6 @@ async def execute_auto_tag(
     """Run auto-tagging on untagged chunks."""
     max_tags = config.get("max_tags", 5)
 
-    db = storage._get_read_db()
     # Same rows ``auto_tag_storage`` reads: it skips hidden sources whole.
     query = (
         "SELECT COUNT(*) FROM chunks WHERE (tags = '[]' OR tags = '') "
@@ -308,7 +307,8 @@ async def execute_auto_tag(
     if namespace:
         query += " AND namespace = ?"
         params.append(namespace)
-    count = db.execute(query, params).fetchone()[0]
+    async with storage._lease_read_db() as db:
+        count = db.execute(query, params).fetchone()[0]
     outcome: dict = {}
 
     if not dry_run and count > 0:

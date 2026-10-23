@@ -30,11 +30,11 @@ class PolicyMixin:
         return policy_id
 
     async def policy_list(self) -> list[dict]:
-        db = self._get_read_db()
-        rows = db.execute(
-            "SELECT id, name, policy_type, config, enabled, namespace_filter, last_run_at, created_at "
-            "FROM memory_policies ORDER BY created_at"
-        ).fetchall()
+        async with self._lease_read_db() as db:
+            rows = db.execute(
+                "SELECT id, name, policy_type, config, enabled, namespace_filter, last_run_at, created_at "
+                "FROM memory_policies ORDER BY created_at"
+            ).fetchall()
         return [
             {
                 "id": r[0],
@@ -50,12 +50,12 @@ class PolicyMixin:
         ]
 
     async def policy_get(self, name: str) -> dict | None:
-        db = self._get_read_db()
-        row = db.execute(
-            "SELECT id, name, policy_type, config, enabled, namespace_filter, last_run_at, created_at "
-            "FROM memory_policies WHERE name = ?",
-            (name,),
-        ).fetchone()
+        async with self._lease_read_db() as db:
+            row = db.execute(
+                "SELECT id, name, policy_type, config, enabled, namespace_filter, last_run_at, created_at "
+                "FROM memory_policies WHERE name = ?",
+                (name,),
+            ).fetchone()
         if row is None:
             return None
         return {
@@ -87,11 +87,11 @@ class PolicyMixin:
             self._commit_if_standalone(db)
 
     async def policy_get_enabled(self) -> list[dict]:
-        db = self._get_read_db()
-        rows = db.execute(
-            "SELECT id, name, policy_type, config, namespace_filter "
-            "FROM memory_policies WHERE enabled = 1 ORDER BY created_at"
-        ).fetchall()
+        async with self._lease_read_db() as db:
+            rows = db.execute(
+                "SELECT id, name, policy_type, config, namespace_filter "
+                "FROM memory_policies WHERE enabled = 1 ORDER BY created_at"
+            ).fetchall()
         return [
             {
                 "id": r[0],

@@ -72,48 +72,50 @@ class AnalyticsMixin:
         :func:`_unavailable_block`). Consumers must branch on ``available``
         before formatting the counts.
         """
-        db = self._get_txn_read_db()
         visible_sql, visible_params = _visible_chunks_where(namespace, project_context_root)
 
-        # Single query for chunk aggregate counts
-        agg = db.execute(
-            "SELECT COUNT(*), "
-            "SUM(CASE WHEN access_count > 0 THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN tags != '[]' AND tags != '' THEN 1 ELSE 0 END) "
-            f"FROM chunks WHERE {visible_sql}",
-            visible_params,
-        ).fetchone()
-        total_chunks, accessed, tagged = agg[0], agg[1] or 0, agg[2] or 0
-        access_pct = round(accessed / total_chunks * 100, 1) if total_chunks else 0
-        tag_pct = round(tagged / total_chunks * 100, 1) if total_chunks else 0
+        async with self._lease_txn_read_db() as db:
+            # Single query for chunk aggregate counts
+            agg = db.execute(
+                "SELECT COUNT(*), "
+                "SUM(CASE WHEN access_count > 0 THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN tags != '[]' AND tags != '' THEN 1 ELSE 0 END) "
+                f"FROM chunks WHERE {visible_sql}",
+                visible_params,
+            ).fetchone()
+            total_chunks, accessed, tagged = agg[0], agg[1] or 0, agg[2] or 0
+            access_pct = round(accessed / total_chunks * 100, 1) if total_chunks else 0
+            tag_pct = round(tagged / total_chunks * 100, 1) if total_chunks else 0
 
-        top_accessed = db.execute(
-            "SELECT id, content, access_count FROM chunks WHERE access_count > 0 AND "
-            f"{visible_sql} ORDER BY access_count DESC LIMIT 10",
-            visible_params,
-        ).fetchall()
-        top_list = [{"id": r[0], "content": r[1][:120], "access_count": r[2]} for r in top_accessed]
+            top_accessed = db.execute(
+                "SELECT id, content, access_count FROM chunks WHERE access_count > 0 AND "
+                f"{visible_sql} ORDER BY access_count DESC LIMIT 10",
+                visible_params,
+            ).fetchall()
+            top_list = [
+                {"id": r[0], "content": r[1][:120], "access_count": r[2]} for r in top_accessed
+            ]
 
-        ns_rows = db.execute(
-            "SELECT COALESCE(namespace, 'default'), COUNT(*) FROM chunks WHERE "
-            f"{visible_sql} GROUP BY namespace ORDER BY COUNT(*) DESC",
-            visible_params,
-        ).fetchall()
-        ns_dist = [{"namespace": r[0], "count": r[1]} for r in ns_rows]
+            ns_rows = db.execute(
+                "SELECT COALESCE(namespace, 'default'), COUNT(*) FROM chunks WHERE "
+                f"{visible_sql} GROUP BY namespace ORDER BY COUNT(*) DESC",
+                visible_params,
+            ).fetchall()
+            ns_dist = [{"namespace": r[0], "count": r[1]} for r in ns_rows]
 
-        total_sources = db.execute(
-            f"SELECT COUNT(DISTINCT source_file) FROM chunks WHERE {visible_sql}",
-            visible_params,
-        ).fetchone()[0]
+            total_sources = db.execute(
+                f"SELECT COUNT(DISTINCT source_file) FROM chunks WHERE {visible_sql}",
+                visible_params,
+            ).fetchone()[0]
 
-        relation_count = db.execute(
-            "SELECT relation_count FROM (WITH visible AS MATERIALIZED (SELECT id FROM chunks WHERE "
-            f"{visible_sql}) "
-            "SELECT COUNT(*) AS relation_count FROM chunk_relations r "
-            "JOIN visible s ON s.id = r.source_id "
-            "JOIN visible t ON t.id = r.target_id)",
-            visible_params,
-        ).fetchone()[0]
+            relation_count = db.execute(
+                "SELECT relation_count FROM (WITH visible AS MATERIALIZED (SELECT id FROM chunks WHERE "
+                f"{visible_sql}) "
+                "SELECT COUNT(*) AS relation_count FROM chunk_relations r "
+                "JOIN visible s ON s.id = r.source_id "
+                "JOIN visible t ON t.id = r.target_id)",
+                visible_params,
+            ).fetchone()[0]
 
         dead_pct = round((total_chunks - accessed) / total_chunks * 100, 1) if total_chunks else 0
 
@@ -146,7 +148,6 @@ class AnalyticsMixin:
         """Return most accessed chunks with hierarchy info — for reflection."""
         import json as _json
 
-        db = self._get_txn_read_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root)
         # ``visible_sql`` is built by ``scope_context_sql`` from fixed column
         # names with ``?`` placeholders; every caller value travels in
@@ -158,7 +159,8 @@ class AnalyticsMixin:
         )
         query += "GROUP BY heading_hierarchy, source_file ORDER BY total_access DESC LIMIT ?"
         params.append(limit)
-        rows = db.execute(query, params).fetchall()
+        async with self._lease_txn_read_db() as db:
+            rows = db.execute(query, params).fetchall()
         return [
             {
                 "hierarchy": _json.loads(r[0]) if r[0] else [],
@@ -174,7 +176,6 @@ class AnalyticsMixin:
         limit: int = 20,
     ) -> list[dict]:
         """Return agent activity summary — for reflection."""
-        db = self._get_txn_read_db()
         query = "SELECT agent_id, COUNT(*) as cnt, MAX(started_at) as last FROM sessions "
         params: list = []
         if since:
@@ -182,7 +183,8 @@ class AnalyticsMixin:
             params.append(since)
         query += "GROUP BY agent_id ORDER BY cnt DESC LIMIT ?"
         params.append(limit)
-        rows = db.execute(query, params).fetchall()
+        async with self._lease_txn_read_db() as db:
+            rows = db.execute(query, params).fetchall()
         return [{"agent_id": r[0], "session_count": r[1], "last_session": r[2]} for r in rows]
 
     async def get_knowledge_gaps(
@@ -229,7 +231,6 @@ class AnalyticsMixin:
         and as an endpoint; the caller still screens each hub it hydrates,
         since a hold can commit between this query and that fetch.
         """
-        db = self._get_txn_read_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root)
         # ``adjacency`` is the undirected neighbour set ``get_related`` returns,
         # restricted to visible endpoints: each stored row read from both ends,
@@ -241,19 +242,20 @@ class AnalyticsMixin:
         # ``mem_link`` writes one row, so that shape comes from linking the two
         # ends separately — inflating the degree above the links a caller can
         # actually follow, and with it the ranking.
-        rows = db.execute(
-            "SELECT chunk_id, link_count FROM (WITH visible AS MATERIALIZED (SELECT id FROM chunks WHERE "
-            f"{visible_sql}), adjacency AS ("  # nosec B608
-            "  SELECT r.source_id AS chunk_id, r.target_id AS neighbour_id, "
-            "         r.relation_type AS rel FROM chunk_relations r "
-            "  JOIN visible s ON s.id = r.source_id JOIN visible t ON t.id = r.target_id "
-            "  UNION "
-            "  SELECT r.target_id, r.source_id, r.relation_type FROM chunk_relations r "
-            "  JOIN visible s ON s.id = r.source_id JOIN visible t ON t.id = r.target_id"
-            ") SELECT chunk_id, COUNT(*) AS link_count FROM adjacency "
-            "GROUP BY chunk_id ORDER BY link_count DESC, chunk_id ASC LIMIT ?)",
-            [*params, limit],
-        ).fetchall()
+        async with self._lease_txn_read_db() as db:
+            rows = db.execute(
+                "SELECT chunk_id, link_count FROM (WITH visible AS MATERIALIZED (SELECT id FROM chunks WHERE "
+                f"{visible_sql}), adjacency AS ("  # nosec B608
+                "  SELECT r.source_id AS chunk_id, r.target_id AS neighbour_id, "
+                "         r.relation_type AS rel FROM chunk_relations r "
+                "  JOIN visible s ON s.id = r.source_id JOIN visible t ON t.id = r.target_id "
+                "  UNION "
+                "  SELECT r.target_id, r.source_id, r.relation_type FROM chunk_relations r "
+                "  JOIN visible s ON s.id = r.source_id JOIN visible t ON t.id = r.target_id"
+                ") SELECT chunk_id, COUNT(*) AS link_count FROM adjacency "
+                "GROUP BY chunk_id ORDER BY link_count DESC, chunk_id ASC LIMIT ?)",
+                [*params, limit],
+            ).fetchall()
         return [{"chunk_id": r[0], "link_count": r[1]} for r in rows]
 
     async def get_chunk_factors(
@@ -265,7 +267,6 @@ class AnalyticsMixin:
         """Return access_count, tag_count, relation_count per chunk — for importance scoring."""
         import json as _json2
 
-        db = self._get_txn_read_db()
         visible_sql, params = _visible_chunks_where(namespace, project_context_root, alias="c.")
         # Same contract as ``get_frequently_accessed`` above: structure is
         # interpolated, values stay bound in ``params``.
@@ -291,7 +292,8 @@ class AnalyticsMixin:
             "SELECT c.id, c.access_count, c.updated_at, c.tags, COALESCE(rc.cnt, 0) "
             "FROM visible c LEFT JOIN rel_counts rc ON rc.chunk_id = c.id)"
         )
-        rows = db.execute(query, params).fetchall()
+        async with self._lease_txn_read_db() as db:
+            rows = db.execute(query, params).fetchall()
         results = []
         for r in rows:
             tags = _json2.loads(r[3]) if r[3] else []
@@ -338,15 +340,15 @@ class AnalyticsMixin:
         # Imported here: ``sqlite_backend`` imports this mixin.
         from memtomem.storage.sqlite_backend import _param_batches
 
-        db = self._get_txn_read_db()
         # Batched: consolidation scores every chunk of a source group.
         scores: dict[str, float] = {}
-        for batch in _param_batches([str(cid) for cid in chunk_ids]):
-            rows = db.execute(
-                f"SELECT id, importance_score FROM chunks WHERE id IN ({placeholders(len(batch))})",
-                batch,
-            ).fetchall()
-            scores.update({row[0]: row[1] for row in rows})
+        async with self._lease_txn_read_db() as db:
+            for batch in _param_batches([str(cid) for cid in chunk_ids]):
+                rows = db.execute(
+                    f"SELECT id, importance_score FROM chunks WHERE id IN ({placeholders(len(batch))})",
+                    batch,
+                ).fetchall()
+                scores.update({row[0]: row[1] for row in rows})
         return scores
 
     async def get_activity_summary(
@@ -363,8 +365,6 @@ class AnalyticsMixin:
         Callers holding an exclusive instant must step back to the day it
         admits before passing it here.
         """
-        db = self._get_read_db()
-
         # Build date filter
         where_parts: list[str] = []
         params: list[str] = []
@@ -384,42 +384,43 @@ class AnalyticsMixin:
             (" AND " + " AND ".join(updated_where_parts)) if updated_where_parts else ""
         )
 
-        # Created per day
-        created_params = list(params)
-        if namespace:
-            created_params.append(namespace)
-        created_rows = db.execute(
-            f"SELECT DATE(created_at) as day, COUNT(*) FROM chunks WHERE 1=1{created_date_filter}{ns_clause} GROUP BY day ORDER BY day",
-            created_params,
-        ).fetchall()
-        created = {r[0]: r[1] for r in created_rows}
-
-        # Updated per day (exclude same-day creates)
-        updated_params = list(params)
-        if namespace:
-            updated_params.append(namespace)
-        updated_rows = db.execute(
-            f"SELECT DATE(updated_at) as day, COUNT(*) FROM chunks WHERE updated_at != created_at{updated_date_filter}{ns_clause} GROUP BY day ORDER BY day",
-            updated_params,
-        ).fetchall()
-        updated = {r[0]: r[1] for r in updated_rows}
-
-        # Accessed per day (from access_log)
-        access_params = list(params)
-        accessed: dict[str, int] = {}
-        try:
-            access_rows = db.execute(
-                f"SELECT DATE(created_at) as day, COUNT(*) FROM access_log WHERE 1=1{created_date_filter} GROUP BY day ORDER BY day",
-                access_params,
+        async with self._lease_read_db() as db:
+            # Created per day
+            created_params = list(params)
+            if namespace:
+                created_params.append(namespace)
+            created_rows = db.execute(
+                f"SELECT DATE(created_at) as day, COUNT(*) FROM chunks WHERE 1=1{created_date_filter}{ns_clause} GROUP BY day ORDER BY day",
+                created_params,
             ).fetchall()
-            accessed = {r[0]: r[1] for r in access_rows}
-        except sqlite3.OperationalError as exc:
-            # Only degrade for the expected missing-table case on a fresh
-            # DB; re-raise real query bugs (bad column, syntax) so they
-            # aren't hidden behind a partial timeline.
-            if "no such table" not in str(exc).lower():
-                raise
-            logger.debug("get_activity_summary: access_log table missing", exc_info=True)
+            created = {r[0]: r[1] for r in created_rows}
+
+            # Updated per day (exclude same-day creates)
+            updated_params = list(params)
+            if namespace:
+                updated_params.append(namespace)
+            updated_rows = db.execute(
+                f"SELECT DATE(updated_at) as day, COUNT(*) FROM chunks WHERE updated_at != created_at{updated_date_filter}{ns_clause} GROUP BY day ORDER BY day",
+                updated_params,
+            ).fetchall()
+            updated = {r[0]: r[1] for r in updated_rows}
+
+            # Accessed per day (from access_log)
+            access_params = list(params)
+            accessed: dict[str, int] = {}
+            try:
+                access_rows = db.execute(
+                    f"SELECT DATE(created_at) as day, COUNT(*) FROM access_log WHERE 1=1{created_date_filter} GROUP BY day ORDER BY day",
+                    access_params,
+                ).fetchall()
+                accessed = {r[0]: r[1] for r in access_rows}
+            except sqlite3.OperationalError as exc:
+                # Only degrade for the expected missing-table case on a fresh
+                # DB; re-raise real query bugs (bad column, syntax) so they
+                # aren't hidden behind a partial timeline.
+                if "no such table" not in str(exc).lower():
+                    raise
+                logger.debug("get_activity_summary: access_log table missing", exc_info=True)
 
         # Merge all days
         all_days = sorted(set(created) | set(updated) | set(accessed))

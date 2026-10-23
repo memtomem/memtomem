@@ -7,15 +7,18 @@ Organized into three tiers by cost: heartbeat (cheap), diagnostic (moderate), de
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
+import sqlite3
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncIterator
 
 from memtomem.errors import TransactionOwnedError
 from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server.health_store import HealthSnapshot
 from memtomem.storage.orphan_detect import RetainRule, orphan_candidate_sources, source_state
+from memtomem.storage.sqlite_backend import SqliteBackend
 
 if TYPE_CHECKING:
     from memtomem.server.context import AppContext
@@ -26,6 +29,16 @@ logger = logging.getLogger(__name__)
 _WAL_CRITICAL_BYTES = 50 * 1024 * 1024  # 50 MB
 _WAL_WARNING_BYTES = 20 * 1024 * 1024  # 20 MB
 
+
+@asynccontextmanager
+async def _lease_storage_reader(storage: object) -> AsyncIterator[sqlite3.Connection]:
+    if isinstance(storage, SqliteBackend) or "_lease_read_db" in getattr(storage, "__dict__", {}):
+        async with storage._lease_read_db() as db:  # type: ignore[attr-defined]
+            yield db
+        return
+    yield storage._get_read_db()  # type: ignore[attr-defined]
+
+
 # ---------------------------------------------------------------------------
 # Heartbeat tier — ~60s interval, near-zero cost
 # ---------------------------------------------------------------------------
@@ -35,8 +48,8 @@ async def check_sqlite_connectivity(app: AppContext) -> HealthSnapshot:
     """PRAGMA quick_check(1) on main DB."""
     now = time.time()
     try:
-        db = app.storage._get_read_db()
-        result = db.execute("PRAGMA quick_check(1)").fetchone()
+        async with _lease_storage_reader(app.storage) as db:
+            result = db.execute("PRAGMA quick_check(1)").fetchone()
         ok = result and result[0] == "ok"
         return HealthSnapshot(
             tier="heartbeat",
@@ -140,10 +153,10 @@ async def check_dead_memory_pct(app: AppContext) -> HealthSnapshot:
     now = time.time()
     # Pure read on a 5-minute cadence: the read pool, not the writer connection
     # every write has to contend for.
-    db = app.storage._get_read_db()
-    row = db.execute(
-        "SELECT COUNT(*), SUM(CASE WHEN access_count = 0 THEN 1 ELSE 0 END) FROM chunks"
-    ).fetchone()
+    async with _lease_storage_reader(app.storage) as db:
+        row = db.execute(
+            "SELECT COUNT(*), SUM(CASE WHEN access_count = 0 THEN 1 ELSE 0 END) FROM chunks"
+        ).fetchone()
     total = row[0] or 0
     dead = row[1] or 0
     pct = round(dead / total * 100, 1) if total > 0 else 0.0
@@ -272,10 +285,10 @@ async def check_trend_comparison(app: AppContext, store: HealthStore) -> HealthS
 async def check_db_fragmentation(app: AppContext) -> HealthSnapshot:
     """Check SQLite page usage and freelist."""
     now = time.time()
-    db = app.storage._get_read_db()
-    page_count = db.execute("PRAGMA page_count").fetchone()[0]
-    freelist = db.execute("PRAGMA freelist_count").fetchone()[0]
-    page_size = db.execute("PRAGMA page_size").fetchone()[0]
+    async with _lease_storage_reader(app.storage) as db:
+        page_count = db.execute("PRAGMA page_count").fetchone()[0]
+        freelist = db.execute("PRAGMA freelist_count").fetchone()[0]
+        page_size = db.execute("PRAGMA page_size").fetchone()[0]
 
     frag_pct = round(freelist / page_count * 100, 1) if page_count > 0 else 0.0
     db_mb = round(page_count * page_size / 1024 / 1024, 2)
