@@ -186,3 +186,93 @@ id = "GHSA-xvh5-g6gv-559v"
 owner = "memtomem"
 reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
 ignoreUntil = 2026-11-20
+
+# Eleven more against the same pillow 12.3.0, published 2026-10-22; same reasoning
+# and the same expiry as the batches above.
+
+[[exceptions]]
+id = "GHSA-24rc-8hj2-v98c"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-3j72-p6qg-6xp7"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-4rm8-3hmm-39fg"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-78g4-xqwv-q3g8"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-9v9v-9qvf-h2hj"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-g4qv-2jxx-769h"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-g7cr-3p24-7wf7"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-g842-9rc4-69pw"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-mrfp-p49p-3hf2"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-p8hx-v2p6-rp84"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-v9pv-5gc8-w2m6"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+# toml 4.3.0 in packages/opencode-memtomem/package-lock.json (dev), published
+# 2026-10-22. Remove when @opencode-ai/plugin moves to an effect that allows toml>=5.0.1.
+
+[[exceptions]]
+id = "GHSA-4qx8-w7c3-pj3p"
+owner = "memtomem"
+reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect 4.0.0-beta.83, which requires toml ^4.1.1 (plugin 1.19.4 still pins it); the plugin ships no dependencies and its build parses no untrusted TOML"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-9j65-hcg3-gc64"
+owner = "memtomem"
+reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect 4.0.0-beta.83, which requires toml ^4.1.1 (plugin 1.19.4 still pins it); the plugin ships no dependencies and its build parses no untrusted TOML"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-9qmh-m7c6-f92p"
+owner = "memtomem"
+reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect 4.0.0-beta.83, which requires toml ^4.1.1 (plugin 1.19.4 still pins it); the plugin ships no dependencies and its build parses no untrusted TOML"
+ignoreUntil = 2026-11-20

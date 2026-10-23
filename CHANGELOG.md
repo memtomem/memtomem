@@ -262,6 +262,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   glyph rendering). fastembed 0.9.0 still requires `pillow<13`, and memtomem
   still handles no images, so they join the same exceptions with the same
   2026-11-20 expiry.
+- Eleven more pillow advisories, published on 2026-10-22, are again fixed only
+  in pillow 13.0.0 and reached only through image handling (BMP, JPEG, PNG
+  EXIF, PDF, TarIO, Spider, MPO/DCX and other multi-frame decoding, and the
+  bundled libopenjp2). fastembed 0.9.0 still requires `pillow<13`, so they
+  join the same exceptions and expiry.
+- Three advisories against `toml` 4.3.0 (npm), published on 2026-10-22, are
+  quadratic or unbounded parsing of untrusted TOML. It is a dev-only
+  dependency of the OpenCode plugin, pulled by `@opencode-ai/plugin` through
+  `effect` 4.0.0-beta.83, which requires `toml ^4.1.1`; the fix is 5.0.1 and
+  even the latest plugin release still pins that `effect`. The plugin ships no
+  dependencies and its build parses no untrusted TOML, so they are recorded as
+  exceptions with the same 2026-11-20 expiry rather than forced past the
+  range `effect` declares.
 
 - **The server no longer copies a whole `.env` file into its environment
   (#2824).** It loaded the nearest `.env` with python-dotenv, which for a
