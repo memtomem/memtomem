@@ -117,6 +117,8 @@ class TestConsumerRegressionPin:
         # the memory-dirs/open allowlist) use ``all_index_roots()``; the
         # user-tier registry endpoints intentionally stay on ``memory_dirs``.
         "memtomem/web/routes/system.py",
+        "memtomem/web/routes/system_config.py",
+        "memtomem/web/routes/system_indexing.py",
         # Web app bootstrap — initializes the user-tier registry.
         "memtomem/web/app.py",
         # Filesystem browser allow-list — currently user-tier only.
@@ -226,8 +228,12 @@ class TestConsumerRegressionPin:
         assert "all_index_roots()" in src
 
     def test_web_routes_uses_all_index_roots(self):
-        """Functional pin: web/routes/system.py uses all_index_roots() for indexing-fan-out."""
-        src = (SRC_ROOT / "web" / "routes" / "system.py").read_text(encoding="utf-8")
+        """Functional pin: web/routes/system*.py uses all_index_roots() for indexing-fan-out."""
+        src = "\n".join(
+            (SRC_ROOT / "web" / "routes" / name).read_text(encoding="utf-8")
+            for name in ("system.py", "system_config.py", "system_indexing.py")
+            if (SRC_ROOT / "web" / "routes" / name).exists()
+        )
         # Registered-root status and reindex fan out across all tiers. Explicit
         # one-shot index/preview endpoints intentionally bypass registration.
         assert src.count("all_index_roots()") >= 2

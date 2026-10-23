@@ -47,7 +47,7 @@ _MUST_GATE = {
     ("cli/shell.py", "_cmd_add"),
     ("cli/review_cmd.py", "_decide"),
     ("integrations/langgraph.py", "add"),
-    ("web/routes/system.py", "add_memory"),
+    ("web/routes/system_indexing.py", "add_memory"),
     ("web/routes/scratch.py", "promote_scratch"),
 }
 

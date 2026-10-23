@@ -771,7 +771,7 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "span, the one of the three with no L1 above it, so the in-process "
         "layer the degraded cell keeps is its ONLY serializer.",
     ),
-    ("web/routes/system.py", "add_memory", 0, "async_file_lock"): (
+    ("web/routes/system_indexing.py", "add_memory", 0, "async_file_lock"): (
         MEMORY_L2,
         "",
         "Memory file (L2) on the web side.",
