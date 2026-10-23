@@ -32,6 +32,9 @@ from memtomem.context.scope_resolver import ArtifactKind
 from memtomem.context.transfer import TransferMode, TransferResult
 
 
+# ── migrate (PR-D C4) ───────────────────────────────────────────────────
+
+
 _MIGRATE_GLYPH: dict[str, tuple[str, str]] = {
     # state -> (glyph, click color)
     "migrate": ("→", "green"),
@@ -41,6 +44,13 @@ _MIGRATE_GLYPH: dict[str, tuple[str, str]] = {
     "skip_manual": ("?", "yellow"),
     "skip_orphan": ("?", "yellow"),
 }
+
+# Glyphs are intentionally distinct from `_STATUS_GLYPH` for cleanup_flat
+# (`±` vs status's `⚠`) so users running `mm context status` and `mm
+# context migrate` back-to-back don't conflate "stale-pin (red)" with
+# "flat+dir collision (yellow)". `✗` is shared but the colour differs
+# (status: yellow=dirty in dest tree; migrate: red=blocked by --force).
+
 
 _MIGRATE_ACTION_LABEL: dict[str, str] = {
     "migrate": "flat → dir",
@@ -58,7 +68,12 @@ def _migrate_action_label(row: MigrateRow) -> str:
 
 
 def _print_migrate_preview(rows: list[MigrateRow], *, skills_section: bool) -> None:
-    """Render the migrate dry-run / pre-apply preview."""
+    """Render the migrate dry-run / pre-apply preview.
+
+    Sectioned by asset_type alphabetically (matches `_classify_for_install_all`
+    convention). When ``skills_section`` is true, print an informational
+    footer noting that skills are always directory layout.
+    """
     click.echo("\nWill migrate (review; pass --apply to execute):")
     last_type: str | None = None
     for row in rows:
@@ -86,9 +101,17 @@ def _migrate_scope_dispatch(
     yes: bool,
     confirm_project_shared: bool,
 ) -> None:
-    """ADR-0011 PR-E4 scope-tier move for agents / commands / skills."""
+    """ADR-0011 PR-E4 scope-tier move for agents / commands / skills.
+
+    Calls :func:`memtomem.context.migrate.migrate_scope` after running the
+    project_shared confirmation gate. Click prompts and stdout writes
+    live here; the pure module stays prompt-free.
+    """
     project_root = _ctx._find_project_root()
 
+    # Pre-flight Gate B (project_shared opt-in, mirroring memory-migrate).
+    # Apply only — dry-run reads the same plan without touching disk and
+    # is the recommended way to inspect the move before opting in.
     if to_scope == "project_shared" and apply_ and not confirm_project_shared:
         if yes:
             raise click.ClickException(
@@ -102,6 +125,8 @@ def _migrate_scope_dispatch(
         ):
             raise click.Abort()
 
+    # ADR-0011 §5 Gate B consent (#2306). After the block, not inside it —
+    # the block runs only when the flag is absent. Apply-only, like the gate.
     if to_scope == "project_shared" and apply_:
         privacy.emit_project_shared_confirmation(
             surface="cli_context_migrate",
@@ -110,6 +135,11 @@ def _migrate_scope_dispatch(
             audit_context={"kind": asset_type, "name": name, "from_scope": from_scope},
         )
 
+    # On MigratePartialError the fan-out cleanup never ran (raise
+    # short-circuited), and the "Next: run sync ..." hint at the bottom
+    # of _print_migrate_scope_result is skipped because we exit before
+    # the result rendering — the user sees only the recovery hint
+    # embedded in exc.message.
     with _ctx._translate_to_click(
         FileNotFoundError,
         ValueError,
@@ -130,12 +160,25 @@ def _migrate_scope_dispatch(
 
     _ctx._print_migrate_scope_result(result, apply_=apply_)
 
+    # ADR-0011 project_local contract: ``.memtomem/*.local/`` and the
+    # staging dir must be gitignored. ``mm context init --scope
+    # project_local`` already appends the marker, but a user can land
+    # on project_local for the first time via ``mm context migrate
+    # <kind> <name> --to project_local --apply`` without ever running
+    # init — without this call the new local-draft tier shows up in
+    # ``git status`` and risks being committed by accident
+    # (#895 P2 review #3 fold).
     if apply_ and to_scope == "project_local":
         _ctx._ensure_local_tier_gitignored(project_root)
 
 
 def _print_migrate_scope_result(result: MigrateScopeResult, *, apply_: bool) -> None:
-    """User-facing summary for one scope-tier migration."""
+    """User-facing summary for one scope-tier migration.
+
+    Dry-run prints the plan + a "run with --apply" hint. Apply prints a
+    green-tick line plus any cleaned runtime fan-out paths so the user
+    sees both halves of the move (canonical + stale fan-out).
+    """
     layout_note = " (flat layout)" if result.layout == "flat" else ""
     click.echo(f"Plan: migrate {result.kind}/{result.name}{layout_note}")
     click.echo(f"  from {result.from_scope}: {result.src_path}")
@@ -193,7 +236,15 @@ def _migrate_memory_dispatch(
     yes: bool,
     confirm_project_shared: bool,
 ) -> None:
-    """ADR-0011 PR-E4 cross-link to ``mm context memory-migrate``."""
+    """ADR-0011 PR-E4 cross-link to ``mm context memory-migrate``.
+
+    The operand is a SOURCE PATH (not a name) since memory canonical
+    files are addressed by absolute path, not by an artifact-style name.
+    Both ``--from`` and ``--to`` are required (memory has no
+    auto-detection — paths can be ambiguous between user / project_shared
+    / project_local in nested layouts). Behaviour is byte-identical to
+    ``mm context memory-migrate`` since both call the same impl.
+    """
     if operand is None:
         raise click.UsageError(
             "source path argument is required for kind=memory (operand is a path, not a name)"
@@ -207,6 +258,7 @@ def _migrate_memory_dispatch(
     if from_scope == to_scope:
         raise click.ClickException("--from and --to must differ.")
 
+    # Narrow to literal scope types after validating required values.
     from_scope_t = cast(TargetScope, from_scope)
     to_scope_t = cast(TargetScope, to_scope)
 
@@ -327,12 +379,32 @@ def migrate_cmd(
     yes: bool,
     confirm_project_shared: bool,
 ) -> None:
-    """Migrate canonical context artifacts."""
+    """Migrate canonical context artifacts.
+
+    Two modes share this verb:
+
+    * **Flat→dir layout** (PR-D, default when ``--to`` is omitted) —
+      converts pre-PR-C ``agents/<name>.md`` to ``agents/<name>/agent.md``.
+      Skills are always directory layout (Agent Skills spec) and exit 0
+      with an informational message in this mode.
+    * **Scope-tier move** (PR-E4, when ``--to`` is set) — moves the
+      canonical between ADR-0011 tiers (``user`` /
+      ``project_shared`` / ``project_local``). Supports agents,
+      commands, skills, and memory (memory delegates to
+      ``mm context memory-migrate``'s impl with parity behaviour).
+      This mode is the within-project alias of ``mm context move``;
+      for copy semantics, cross-project destinations (--to-project),
+      or renamed copies (--as) use the dedicated ``copy`` / ``move``
+      verbs — ``mm context move --help`` has the full comparison.
+
+    Default mode is a dry-run preview; pass ``--apply`` to execute.
+    """
     if (force or yes) and not apply_:
         raise click.UsageError("--force / --yes are only valid with --apply")
     if name is not None and asset_type is None:
         raise click.UsageError("name argument requires asset_type")
 
+    # ── PR-E4 scope-mode dispatch ────────────────────────────────────
     if asset_type == "memory":
         if from_scope is None or to_scope is None:
             raise click.UsageError("--from and --to are both required for kind=memory")
@@ -374,6 +446,7 @@ def migrate_cmd(
         )
         return
 
+    # ── Flat→dir mode validation gates ───────────────────────────────
     if from_scope is not None:
         raise click.UsageError("--from requires --to (scope-tier mode)")
     if confirm_project_shared:
@@ -393,6 +466,8 @@ def migrate_cmd(
     except (FileNotFoundError, ValueError, InvalidNameError) as exc:
         raise click.ClickException(str(exc)) from exc
 
+    # When the user passes no asset_type, mention skills in the preview
+    # footer so the absence is explicit rather than silent.
     skills_section = asset_type is None
 
     if not rows:
@@ -423,6 +498,7 @@ def migrate_cmd(
             click.echo("Dirty/collision assets need --apply --force (creates .bak per dirty file).")
         return
 
+    # --apply path
     if needs_force and not force:
         click.secho(
             f"\n{len(needs_force)} entry(ies) have local edits since install; "
@@ -461,6 +537,7 @@ def migrate_cmd(
             skipped += 1
             continue
         if row.state == "refuse_dirty" and not force:
+            # Already gated above; defense in depth.
             click.secho(
                 f"  ✗  {row.asset_type}/{row.name}: dirty without --force",
                 fg="red",
@@ -499,9 +576,25 @@ def migrate_cmd(
         raise click.exceptions.Exit(1)
 
 
+# ── copy / move (campaign #1270 A-3, #1274) ─────────────────────────────
+#
+# CLI face of the ADR-0023 transfer engine. The two verbs share one option
+# surface (`_transfer_options`); copy adds --as. `migrate --to` stays as
+# the within-project alias — these verbs add copy semantics and the
+# cross-project `--to-project` destination.
+
+
 def _transfer_options(fn: Any) -> Any:
-    """Shared option surface for ``mm context copy`` / ``mm context move``."""
+    """Shared option surface for ``mm context copy`` / ``mm context move``.
+
+    #1274 contract: the verbs differ only in mode (and copy's ``--as``,
+    stacked separately). One decorator list keeps the surfaces from
+    drifting apart.
+    """
     decorators = [
+        # "mcp-servers" rides the engine kinds in the shared Choice; it is
+        # copy-only and cross-project-only — _transfer_dispatch enforces
+        # both (A-12 #1282) so `move` keeps one option surface.
         click.argument("asset_type", type=click.Choice([*SCOPE_MIGRATABLE_KINDS, "mcp-servers"])),
         click.argument("name"),
         click.option(
@@ -581,10 +674,24 @@ def _transfer_dispatch(
     yes: bool,
     confirm_project_shared: bool,
 ) -> None:
-    """Shared driver for ``mm context copy`` / ``mm context move`` (#1274)."""
+    """Shared driver for ``mm context copy`` / ``mm context move`` (#1274).
+
+    Surface-layer duties only (ADR-0023): option-combination gates,
+    destination-project resolution (the A-1 ``scope_id | path`` selector),
+    the destination-store pre-check, Gate B confirmation, engine-error
+    translation, and result rendering. The transfer itself is one
+    :func:`memtomem.context.transfer.transfer_artifact` call; Gate A and
+    all filesystem invariants live there.
+    """
     if yes and not apply_:
         raise click.UsageError("--yes is only valid with --apply")
 
+    # mcp-servers branch gates (A-12 #1282) — BEFORE the generic option
+    # combinators so every refusal speaks mcp vocabulary: the canonical
+    # is single-tier (project_shared, ADR-0016 §3 note), so tier flags
+    # are redundant-correct at best, move has no meaning, and the only
+    # transfer is cross-project copy via the adapter
+    # (:func:`memtomem.context.mcp_servers_copy.copy_mcp_server`).
     is_mcp = asset_type == "mcp-servers"
     if is_mcp:
         if mode != "copy":
@@ -623,6 +730,11 @@ def _transfer_dispatch(
             "--to-project cannot be combined with --to user: the user tier "
             "is global (~/.memtomem), not per-project."
         )
+    # Validate names BEFORE any path construction:
+    # the --to default pre-probe below builds candidate paths from the
+    # raw name, and a traversal shape like ``../x`` must never reach a
+    # filesystem probe. Same vocabulary as the engine's own
+    # ``validate_name`` calls, translated to the CLI error shape here.
     try:
         name_kind = "MCP server" if is_mcp else f"{asset_type[:-1]} name"
         _ctx.validate_name(name, kind=name_kind)
@@ -641,6 +753,10 @@ def _transfer_dispatch(
             )
         except UnknownProjectSelectorError as exc:
             raise click.ClickException(str(exc)) from exc
+        # An explicitly typed path is consent for an UNREGISTERED root
+        # (dst_scope_rec is None then); a paused REGISTERED destination
+        # still refuses — pausing said "stop syncing this project", and a
+        # transferred canonical would sit there without fan-out.
         if dst_scope_rec is not None and not dst_scope_rec.enabled:
             raise _ctx._paused_destination_error(
                 dst_scope_rec.scope_id, dst_root, "transferred artifact"
@@ -649,11 +765,17 @@ def _transfer_dispatch(
         dst_root = src_root
 
     if to_scope is None:
+        # Tier default: keep the source tier. The engine re-detects under
+        # its own lock; this pre-probe only resolves the CLI default (and
+        # shares the engine's missing/ambiguous error wording).
         to_scope, _src_path, _layout = _ctx._detect_source_scope(
             cast(ArtifactKind, asset_type),
             name,
             src_root,
             cast("TargetScope | None", from_scope),
+            # Same opt-in as the engine's own probe (ADR-0030 §10): a source
+            # mid-swap must resolve here too, or `--to-project` without `--to`
+            # fails at the CLI default before the engine can recover it.
             marker_counts_as_presence=True,
         )
         if to_scope == "user" and to_project is not None:
@@ -664,9 +786,16 @@ def _transfer_dispatch(
             )
     to_scope_t = cast(TargetScope, to_scope)
 
+    # #1274: a cross-project destination must already be a memtomem
+    # project. Within-project transfers keep migrate's behaviour (the
+    # store is implicitly created) — this gate is about not seeding a
+    # half-initialized `.memtomem/` into an arbitrary directory.
     if to_project is not None and to_scope_t != "user" and not (dst_root / ".memtomem").is_dir():
         raise _ctx._missing_store_error(dst_root)
 
+    # Pre-flight Gate B (project_shared opt-in) — same contract and
+    # wording as `mm context migrate --to project_shared`. Apply only:
+    # dry-run reads the same plan without touching disk.
     if to_scope_t == "project_shared" and apply_ and not confirm_project_shared:
         if yes:
             raise click.ClickException(
@@ -680,6 +809,8 @@ def _transfer_dispatch(
         ):
             raise click.Abort()
 
+    # ADR-0011 §5 Gate B consent (#2306). After the block, not inside it —
+    # the block runs only when the flag is absent. Apply-only, like the gate.
     if to_scope_t == "project_shared" and apply_:
         privacy.emit_project_shared_confirmation(
             surface=f"cli_context_{mode}",
@@ -689,6 +820,10 @@ def _transfer_dispatch(
         )
 
     result: TransferResult | McpServerCopyResult
+    # Same translation set as _migrate_scope_dispatch — the engine's
+    # validate_name raises InvalidNameError (not ClickException), and
+    # deep filesystem paths can surface OS errors; without this the
+    # CLI dies with a traceback instead of a one-line error.
     with _ctx._translate_to_click(
         FileNotFoundError,
         ValueError,
@@ -699,6 +834,10 @@ def _transfer_dispatch(
         StagingIdentityLostError,
     ):
         if is_mcp:
+            # Cross-project-only, copy-only; the adapter re-raises the
+            # engine's typed collision/not-found errors and the standard
+            # Gate A envelope, so the translation set is shared with
+            # transfer_artifact.
             result = _ctx.copy_mcp_server(
                 name,
                 src_project_root=src_root,
@@ -723,11 +862,20 @@ def _transfer_dispatch(
     _ctx._print_transfer_result(result, apply_=apply_)
 
     if apply_ and to_scope_t == "project_local":
+        # ADR-0011 project_local gitignore contract — at the DESTINATION
+        # project (#895 P2 review #3 lineage, cross-project aware).
         _ctx._ensure_local_tier_gitignored(dst_root)
 
 
 def _maybe_hint_adopt_untracked(result: TransferResult | McpServerCopyResult) -> None:
-    """One-line adopt follow-up under a transfer's untracked-landing warning (#1684)."""
+    """One-line adopt follow-up under a transfer's untracked-landing warning (#1684).
+
+    A shared→shared transfer whose provenance carry-over was refused lands
+    exactly in adopt's quadrant (dest without a lockfile entry); when the
+    destination bytes still match the wiki HEAD asset, adopt re-establishes
+    the pin without reinstalling. mcp-servers have no lockfile tracking, so
+    the hint is scoped to the artifact kinds.
+    """
     if result.kind == "mcp-servers":
         return
     singular = result.kind.removesuffix("s")
@@ -739,7 +887,25 @@ def _maybe_hint_adopt_untracked(result: TransferResult | McpServerCopyResult) ->
 
 
 def _print_transfer_result(result: TransferResult | McpServerCopyResult, *, apply_: bool) -> None:
-    """User-facing summary for one copy/move transfer (#1274)."""
+    """User-facing summary for one copy/move transfer (#1274).
+
+    Sibling of :func:`_print_migrate_scope_result` with the transfer
+    extras: mode verb, copy-rename name, engine ``notes``, the
+    engine's exact follow-up sync command (``TransferResult.sync_command``
+    — cd-prefixed for cross-project tiers until A-9 lands a ``--project``
+    selector on sync) instead of a hand-built one, and the shared→shared
+    provenance carry-over outcome (A-4 #1275; quiet when
+    ``not_applicable``, yellow with the engine's human reason when the
+    artifact lands untracked).
+
+    Also renders the mcp-servers copy result (A-12 #1282) — same field
+    surface by contract. Since #1311 the mcp-servers result carries a
+    runnable ``sync_command`` (``cd <dst> && mm context sync
+    --include=mcp-servers``), so it takes the same command branch as the
+    artifact transfers; ``sync_hint`` is its prose mirror for non-CLI
+    surfaces. ``(flat layout)`` is suppressed for mcp-servers because flat
+    is the only layout they have, not a legacy variant worth flagging.
+    """
     layout_note = (
         " (flat layout)" if result.layout == "flat" and result.kind != "mcp-servers" else ""
     )
@@ -769,6 +935,9 @@ def _print_transfer_result(result: TransferResult | McpServerCopyResult, *, appl
                 fg="yellow",
             )
             _ctx._maybe_hint_adopt_untracked(result)
+        # Engine caveats (copy-rename overrides, mcp .mcp.json disclosure)
+        # render in the PLAN too — a caveat the user only learns about
+        # after --apply is not a plan they confirmed.
         for note in result.notes:
             click.secho(f"  note: {note}", fg="yellow")
         confirm_note = " --confirm-project-shared" if result.to_scope == "project_shared" else ""
@@ -832,7 +1001,25 @@ def move_cmd(
     yes: bool,
     confirm_project_shared: bool,
 ) -> None:
-    """Move one canonical artifact to another tier and/or project."""
+    """Move one canonical artifact to another tier and/or project.
+
+    move / copy / migrate in one view:
+
+    \b
+      move     consumes the source and cleans its stale runtime fan-out;
+               destination fan-out is NOT generated — run the printed
+               sync command after.
+      copy     same surface, source never touched; supports a renamed
+               copy via --as.
+      migrate  legacy verb: flat→dir layout adoption, plus `--to <tier>`
+               as the within-project alias of move (kept working, not
+               deprecated).
+
+    Destination collisions always refuse (no --force valve). A
+    project_shared landing runs the privacy scan (Gate A) and requires
+    --confirm-project-shared with --apply (Gate B). Default is a
+    dry-run preview; pass --apply to execute.
+    """
     _ctx._transfer_dispatch(
         "move",
         asset_type,
@@ -871,7 +1058,19 @@ def copy_cmd(
     confirm_project_shared: bool,
     new_name: str | None,
 ) -> None:
-    """Copy one canonical artifact to another tier and/or project."""
+    """Copy one canonical artifact to another tier and/or project.
+
+    The source is never touched. Same option surface as ``mm context
+    move`` (its --help has the move/copy/migrate comparison), plus
+    ``--as NEW_NAME`` for a renamed copy. Default is a dry-run preview;
+    pass --apply to execute.
+
+    ASSET_TYPE ``mcp-servers`` copies one MCP server definition to
+    another project (--to-project required; copy-only, no --as, tier
+    flags fixed at project_shared). The result prints the runnable
+    follow-up that fans the canonical into the destination's .mcp.json
+    (``cd <dst> && mm context sync --include=mcp-servers``; #1311).
+    """
     _ctx._transfer_dispatch(
         "copy",
         asset_type,
@@ -916,7 +1115,16 @@ def copy_cmd(
 def export_cmd(
     asset_type: str, name: str, from_scope: str | None, out_path: Path, no_versions: bool
 ) -> None:
-    """Pack one canonical artifact into a portable bundle file (ADR-0037)."""
+    """Pack one canonical artifact into a portable bundle file (ADR-0037).
+
+    The bundle is a single JSON file with no absolute paths and no hostnames,
+    so it can be handed to a colleague or carried to another machine and landed
+    with ``mm context import``.
+
+    A secret anywhere in the artifact fails the export from EVERY source tier
+    and there is no force flag: a file you have handed over is as unretractable
+    as a pushed commit, so it is gated like a git-tracked write.
+    """
     with _ctx._translate_to_click(
         FileNotFoundError,
         ValueError,
@@ -1007,7 +1215,11 @@ def import_cmd(
     confirm_project_shared: bool,
     force_unsafe: bool,
 ) -> None:
-    """Land a context artifact bundle in a canonical store (ADR-0037)."""
+    """Land a context artifact bundle in a canonical store (ADR-0037).
+
+    A bundle is foreign by definition, so every entry is scanned no matter
+    which tier it lands in. Default is a dry-run preview; pass --apply.
+    """
     to_scope_t = cast(TargetScope, to_scope)
     if to_scope_t == "user" and to_project is not None:
         raise click.UsageError("--to user is the global tier; --to-project does not apply to it.")
@@ -1049,6 +1261,10 @@ def import_cmd(
         ):
             raise click.Abort()
 
+    # ADR-0011 §5 Gate B consent (#2306) — the gap ADR-0037 recorded and
+    # deferred. After the block, not inside it; apply-only, like the gate.
+    # The bundle is not parsed yet, so the artifact it carries has no name
+    # to record here.
     if to_scope_t == "project_shared" and apply_:
         privacy.emit_project_shared_confirmation(
             surface="cli_context_import",
@@ -1056,10 +1272,21 @@ def import_cmd(
             action="import",
         )
 
+    # The project_local tier is protected BEFORE anything can land in it — the
+    # marker is what keeps a received artifact out of a `git add -A`, so
+    # appending it after the write leaves a window where the bytes are present
+    # and unignored — but AFTER every gate has passed (ADR-0037 §6). Handed to
+    # the receipt as its pre-materialize step rather than run here: run here it
+    # fired before the bundle was even parsed, so a malformed, privacy-blocked
+    # or colliding import still edited the destination project's .gitignore.
+    # Dry-run never materializes, so it never asks for the marker.
     def _protect_local_tier() -> None:
         if to_scope_t == "project_local":
             _ctx._ensure_local_tier_gitignored(dst_root, required=True)
 
+    # BundlePrivacyError carries only the neutral condition; the CLI owns the
+    # flag spelling (#1869), so it is translated here rather than in the
+    # shared ladder below.
     try:
         with _ctx._translate_to_click(
             FileNotFoundError,
@@ -1080,7 +1307,9 @@ def import_cmd(
                 pre_materialize=_protect_local_tier,
             )
     except BundlePrivacyError as exc:
-        raise click.ClickException(_ctx.remediation.append_hint(exc.message, exc.code, "cli")) from exc
+        raise click.ClickException(
+            _ctx.remediation.append_hint(exc.message, exc.code, "cli")
+        ) from exc
 
     verb = "imported" if result.received else "would import"
     click.echo(

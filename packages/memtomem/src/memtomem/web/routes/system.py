@@ -34,6 +34,7 @@ from memtomem.config import (
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.search.reranker.factory import create_reranker
 from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.tools.memory_writer import append_entry
 from memtomem.web import hot_reload as _hot_reload
 from memtomem.web.deps import (
     get_config,
@@ -162,6 +163,7 @@ __all__ = [
     "_validate_reranker_ready",
     "add_memory",
     "add_memory_dir",
+    "append_entry",
     "assign_section_fields",
     "build_comparand",
     "coerce_and_validate",
@@ -214,14 +216,36 @@ router = APIRouter(tags=["system"])
     dependencies=[Depends(_require_localhost)],
 )
 async def get_ui_mode(request: Request) -> dict[str, str]:
-    """Return the current web UI mode (``prod`` or ``dev``)."""
+    """Return the current web UI mode (``prod`` or ``dev``).
+
+    The SPA fetches this on boot to decide which tabs and settings sections
+    to render. Falls back to ``prod`` if ``app.state.web_mode`` is missing.
+
+    Localhost-guarded for consistency with other ``system`` endpoints — the
+    SPA runs same-origin so this doesn't affect it, but it keeps external
+    scanners from fingerprinting which installs are in dev mode.
+    """
     mode = getattr(request.app.state, "web_mode", "prod")
     return {"mode": mode}
 
 
 @router.get("/session")
 async def get_session(request: Request) -> dict[str, str]:
-    """Return the per-process CSRF token + UI mode for SPA bootstrap."""
+    """Return the per-process CSRF token + UI mode for SPA bootstrap.
+
+    The SPA's ``api(...)`` helper calls this once on first unsafe request
+    and caches the token, threading ``X-Memtomem-CSRF`` through every
+    subsequent ``POST``/``PATCH``/``PUT``/``DELETE``. Token rotation is
+    by ``mm web`` restart — there is no in-process rotation surface (RFC
+    #787 explicitly out-of-scope).
+
+    Not localhost-guarded at the route layer: ``CSRFGuardMiddleware``
+    already covers the Origin / Host checks for every ``/api/*`` request,
+    including this one. Adding ``_require_localhost`` here would
+    duplicate the Host check and tie the token endpoint to a different
+    failure shape than the rest of the gate, making the AST registry's
+    "one seam, one surface" assertion harder to keep clean.
+    """
     return {
         "csrf": getattr(request.app.state, "csrf_token", ""),
         "mode": getattr(request.app.state, "web_mode", "prod"),
@@ -230,7 +254,12 @@ async def get_session(request: Request) -> dict[str, str]:
 
 @router.get("/bootstrap")
 async def get_bootstrap_state(request: Request) -> dict[str, Any]:
-    """Return one state snapshot that drives first-run and recovery UI."""
+    """Return one state snapshot that drives first-run and recovery UI.
+
+    This route deliberately has no ``require_configured`` dependency: the SPA
+    must be able to explain an unconfigured or degraded install instead of
+    discovering it through a cascade of unrelated 409/503 responses.
+    """
     configured = (Path.home() / ".memtomem" / "config.json").exists()
     startup_state = getattr(request.app.state, "startup_state", "not_started")
     config = getattr(request.app.state, "config", None)
@@ -404,6 +433,8 @@ async def get_stats(storage=Depends(get_storage), config=Depends(get_config)) ->
     distribution = await storage.get_chunk_size_distribution()
 
     pmdirs = config.indexing.project_memory_dirs
+    # Every index root owns its sources, matching ``GET /api/sources`` —
+    # a read-only or project root's files are not orphans. (#2522)
     indexed_dirs = sorted(
         (
             (norm_dir_prefix(d), str(Path(d).expanduser().resolve()), memory_dir_kind(d))

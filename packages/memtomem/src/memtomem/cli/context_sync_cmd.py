@@ -179,12 +179,42 @@ def _run_sync_legs(
     force_unsafe: bool = False,
     runtime_filter: tuple[str, ...] | None = None,
 ) -> bool:
-    """Run one project's sync legs (project memory + included artifact kinds)."""
+    """Run one project's sync legs (project memory + included artifact kinds).
+
+    Returns False only on the single-project missing-``context.md`` early
+    refusal (no legs ran — the caller must not print ``Synced.``, the
+    historical behavior Codex impl review caught a regression on, and now
+    exits non-zero so a script/CI can detect the refusal); True on every
+    path that ran the legs.
+
+    The extracted body of ``mm context sync`` — the single-project path
+    calls it once with ``batch=False`` and keeps its historical behavior
+    byte-identical. ``--all-projects`` (ADR-0025) calls it per project
+    with ``batch=True``, which changes exactly two things:
+
+    - a missing ``context.md`` is a yellow note (a registered project
+      without project memory is not a batch failure; the single-project
+      red "run init first" guidance stays single-only), and
+    - ``_warn_label_ineligible_kinds`` is suppressed — the batch
+      orchestrator prints it once, not once per project.
+
+    The batch caller passes ``scope_flag="project_shared"`` explicitly:
+    the settings leg resolves its scope via ``_resolve_cli_scope``, which
+    otherwise consults ``cfg.hooks.target_scope`` — a config-pinned
+    ``user`` value would fan the same host files out once per project
+    (the ADR-0025 tier pin; covered by the batch settings-scope test).
+    """
     ctx_path = _ctx._context_path(root)
 
     if ctx_path.exists():
         sections = _ctx.parse_context(ctx_path)
         if not sections:
+            # Mirror generate_cmd's empty-guard (line ~932). parse_context
+            # returns {} for any context.md with content but no ``## Heading``
+            # delimiters (a stub, all-prose, or a mid-edit file). Without this
+            # guard, gen.generate({}) yields header-only/empty output that would
+            # overwrite the user's existing CLAUDE.md/GEMINI.md/.cursorrules —
+            # silent data loss with no backup. Refuse instead.
             click.secho(
                 f"{CONTEXT_FILENAME} is empty — refusing to overwrite agent files.",
                 fg="yellow",
@@ -216,6 +246,11 @@ def _run_sync_legs(
     else:
         click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
+    # ADR-0011 PR-E3: resolve the canonical-artifact scope once and thread
+    # it through the three include helpers. Defaults to ``project_shared``
+    # via ``_resolve_artifact_cli_scope`` (NOT ``_resolve_cli_scope``,
+    # which leaks ``cfg.hooks.target_scope`` into the artifact axis —
+    # see ADR-0011 PR-E1).
     artifact_scope = _ctx._resolve_artifact_cli_scope(scope_flag)
     if not batch:
         _ctx._warn_label_ineligible_kinds(label, inc)
@@ -237,6 +272,10 @@ def _run_sync_legs(
 
     if "settings" in inc:
         click.echo("")
+        # Settings has its own (separate from artifact) scope axis — see
+        # ADR-0010. ``_resolve_cli_scope`` consults ``cfg.hooks.target_scope``;
+        # this is intentional for settings and intentionally NOT used for
+        # artifacts above.
         scope = _ctx._resolve_cli_scope(scope_flag)
         if _ctx._confirm_settings_host_writes(root, scope=scope, yes=yes):
             _ctx._print_settings_generate(root, scope=scope, allow_host_writes=True)
@@ -246,11 +285,17 @@ def _run_sync_legs(
     if "mcp-servers" in inc:
         click.echo("")
         if artifact_scope != "project_shared":
+            # mcp-servers canonicals are single-tier project_shared (ADR-0016
+            # §3): there is no other tier to honor, so --scope is ignored — not
+            # an error, because a mixed --include can still carry a real scope
+            # for the other kinds (mirrors _warn_label_ineligible_kinds).
             click.secho(
                 f"  note: --scope={artifact_scope} does not apply to mcp-servers "
                 "(single-tier project_shared); fanning out project_shared.",
                 fg="yellow",
             )
+        # Single-project runs treat the explicit --include as consent; a batch
+        # (--all-projects) confirms per target first (see the helper).
         if not batch or _ctx._confirm_mcp_servers_fanout(root, yes=yes):
             _ctx._print_mcp_servers_generate(root, surface=surface)
         else:
@@ -278,7 +323,19 @@ def _run_sync_all_projects(
     label: str | None,
     runtime_filter: tuple[str, ...] | None = None,
 ) -> None:
-    """Orchestrate ``mm context sync --all-projects`` (ADR-0025, #1279)."""
+    """Orchestrate ``mm context sync --all-projects`` (ADR-0025, #1279).
+
+    Cloned from the ``_run_update_all`` flow: discover → classify
+    (eligibility/health — NOT a dirty-diff preview) → preview table →
+    confirm → serial execute with per-project failure isolation →
+    summary, exit 1 if any project failed. Zero eligible projects exits
+    0 informationally (cron safety, the update-all precedent).
+
+    Discovery anchors at ``_find_project_root()`` — not raw ``Path.cwd()``
+    like ``mm context projects list`` — so running from a project
+    SUBDIRECTORY treats that project as the cwd scope, matching both
+    single-sync semantics (which walks up) and the web lifespan anchor.
+    """
     cfg = _ctx._projects_gateway_cfg()
     scopes = _ctx._projects_discover(cfg, cwd=_ctx._find_project_root())
     rows: list[tuple[ProjectScope, str | None]] = [(s, _ctx.sync_skip_reason(s)) for s in scopes]
@@ -321,9 +378,14 @@ def _run_sync_all_projects(
                 runtime_filter=runtime_filter,
             )
         except click.exceptions.Abort:
+            # Strict-drop legs raise Abort after printing their [strict]
+            # diagnostic; in a batch that fails the project, not the run.
             click.secho(f"  ✗ {s.root}: aborted (strict-drop)", fg="red")
             failures += 1
         except click.ClickException as exc:
+            # Privacy Gate A and engine refusals — this project's row fails,
+            # the batch continues (a secret in one project must not block
+            # clean siblings; the _run_update_all precedent).
             click.secho(f"  ✗ {s.root}: {exc.message}", fg="red")
             failures += 1
         except OSError as exc:

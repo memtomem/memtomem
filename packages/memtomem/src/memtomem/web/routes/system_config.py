@@ -960,7 +960,49 @@ async def remove_memory_dir(
     storage=Depends(get_storage),
     search_pipeline=Depends(get_search_pipeline),
 ):
-    """Remove a directory from ``memory_dirs``, optionally deleting its chunks."""
+    """Remove a directory from ``memory_dirs``, optionally deleting its chunks.
+
+    Body: ``{path: str, delete_chunks?: bool}``. ``delete_chunks=False`` (the
+    default) is the safe behaviour — only the registration is removed,
+    indexed chunks stay searchable. ``delete_chunks=True`` additionally
+    drops the chunks of every source under the removed dir that no
+    still-configured index root contains. A nested root, an enclosing root,
+    or the same path listed in another tier keeps its sources, since it would
+    index them again anyway (#2524, #2534). The dir's status
+    ``delete_chunk_count``, which the confirm dialog shows, is a preview of
+    that number, and the response's ``deleted_chunks`` is what the sweep did.
+    The underlying files on disk are never touched. The Web UI's delete confirm
+    shows a checkbox so the user opts in explicitly.
+
+    Known limits (#2534):
+
+    - Containment is decided on the stored, resolved path. A symlink in a
+      surviving root that points at a file under the removed one does not
+      keep that file's chunks. The surviving root's next walk, or the next
+      event on the link, indexes the file again.
+    - The sweep takes no indexing lock. Indexing that was already under way
+      when the dir was removed (a watcher flush that passed its root check, a
+      backfill ``index_path`` run) can write after the sweep read its rows.
+      Taking ``_index_lock`` would not close this, because the bulk path holds
+      only per-file sidecars (#2105).
+    - The dialog's count comes from an earlier status request, which reads
+      the config without reloading it. Roots or indexed files can change
+      before this request: another tab, the CLI, a ``config.json`` edit, or
+      the watcher. The sweep applies the rule to the roots and rows present
+      when it runs, so it can delete more or fewer chunks than the dialog
+      showed. More only when a nested root went away or files were indexed
+      under the dir, which leaves chunks under the dir that no remaining root
+      would index. The route does not re-check the count, because any
+      watcher write that changes the dir's chunks would fail it (#2537).
+
+    The path must still resolve to itself. Both Web UI callers send a path the
+    server returned already resolved. If that path, or one of its parents, has
+    since become a symlink or junction, it now names a different directory,
+    and removing or sweeping that one would act on a root the user did not
+    pick. The route answers 409 and changes nothing. A client that sends an
+    alias spelling, such as a symlinked prefix, gets the same 409 and has to
+    send the resolved path (#2539).
+    """
     sys_mod = _sys()
     hr = getattr(sys_mod, "_hot_reload", _hot_reload)
     body = await request.json()
@@ -1079,7 +1121,20 @@ async def remove_memory_dir(
 
 
 def _open_in_file_manager(path: Path) -> None:
-    """Spawn the platform's default file manager to reveal ``path``."""
+    """Spawn the platform's default file manager to reveal ``path``.
+
+    On macOS / Linux this uses ``subprocess.run`` with stderr captured
+    and a 5-second timeout so a non-zero exit (or a child that prints to
+    stderr but technically succeeds) surfaces as an explicit error
+    instead of a silent "Popen succeeded but Finder never opened"
+    failure mode. The launcher itself returns immediately once the
+    target app has been told to open — we're not waiting for the user
+    to close Finder.
+
+    Raises ``OSError`` for missing helpers (``xdg-open`` not installed,
+    etc.), non-zero exit status, or timeout. The route handler maps
+    these to a 500 with the captured stderr.
+    """
     if sys.platform == "darwin":
         cmd = ["open", str(path)]
     elif sys.platform == "win32":
@@ -1113,7 +1168,17 @@ def _open_in_file_manager(path: Path) -> None:
 
 @router.post("/memory-dirs/open", dependencies=[Depends(_require_localhost)])
 async def open_memory_dir(request: Request, config=Depends(get_config)):
-    """Reveal a configured index root in the OS file manager."""
+    """Reveal a configured index root in the OS file manager.
+
+    Body: ``{path: str}``. The path must already be one of
+    ``config.indexing.all_index_roots()`` — user, project, or read-only
+    (#2522: the Sources tree shows a group, and this button, for every
+    tier). Arbitrary filesystem paths cannot be opened through this
+    endpoint, since ``mm web`` is a local tool but defense-in-depth keeps
+    the route useful even if the bind host were ever changed away from
+    ``127.0.0.1``. Missing dirs return 404 rather than spawning a
+    file-manager pointed at nothing.
+    """
     body = await request.json()
     dir_path = body.get("path", "").strip()
     if not dir_path:
@@ -1153,7 +1218,34 @@ async def memory_dirs_status(
     config=Depends(get_config),
     storage=Depends(get_storage),
 ):
-    """Per-dir index status for the web widget."""
+    """Per-dir index status for the web widget.
+
+    Drives the "(N chunks)" / "(not indexed)" badges — users pick which
+    dirs need a manual reindex instead of paying a blind startup scan
+    cost across every provider memory dir.
+
+    Each entry carries ``tier`` — ``user`` (``memory_dirs``), ``project``
+    (``project_memory_dirs``) or ``read_only`` (``read_only_memory_dirs``)
+    — so the Sources tree can badge a group and offer "Remove from
+    memory_dirs" only where it applies. (#2522)
+
+    ``delete_chunk_count`` is a preview of what ``POST /memory-dirs/remove``
+    with ``delete_chunks`` would delete for that entry: 0 when another root
+    still contains the whole dir, and 0 for tiers the route cannot remove.
+    (#2534) It is computed from this request's config, which is not reloaded
+    here, and rows. The remove applies the same rule to what is configured
+    and indexed when it runs, and reports that number (#2537).
+
+    What the entry owns that ``GET /api/sources`` does not list by default is
+    counted under the rule that route applies
+    (:class:`~memtomem.web.source_visibility.SourceVisibility`):
+    ``hidden_chunk_count`` / ``hidden_source_file_count`` count every such
+    source once, so totals minus hidden are what the Sources tree lists for
+    the root. ``held_*`` counts the held or pending ones (#2561) and
+    ``project_local_*`` the ``project_local`` tier (#2567); a held draft is in
+    both. The delete count still includes hidden chunks, because the sweep
+    removes them.
+    """
     from memtomem.indexing.engine import memory_dir_stats, norm_dir_prefix, remove_sweeps_nothing
     from memtomem.web.source_visibility import load_source_visibility
 
@@ -1215,6 +1307,13 @@ async def get_embedding_status(storage=Depends(get_storage)) -> EmbeddingStatusR
         else None
     )
 
+    # Dense-vector coverage so the UI can flag "BM25-only" runs without
+    # forcing the user to peek at sqlite. ``get_dense_coverage`` falls
+    # back to ``with_dense=0`` when the vec virtual table is absent, so
+    # we always have a numeric pair to render. Storage backends that
+    # don't implement the method (e.g. mocked test doubles) leave the
+    # field at ``None`` rather than 500ing this endpoint — the warning
+    # banner the field feeds is informational, not load-bearing.
     coverage_out: EmbeddingCoverage | None = None
     if hasattr(storage, "get_dense_coverage"):
         try:
@@ -1246,6 +1345,12 @@ async def get_embedding_status(storage=Depends(get_storage)) -> EmbeddingStatusR
     )
 
 
+# Providers that route through the lazy fastembed loaders we instrumented
+# for #696 — i.e. ones where introspecting ``_model`` / ``_loading`` /
+# ``_load_error`` is meaningful. The embedder advertises this path as
+# ``"onnx"``; the reranker advertises it as ``"fastembed"``. Other
+# providers (Ollama/Cohere/local) have their own connection-based
+# readiness model and are reported as ``state="skipped"``.
 _INTROSPECTABLE_PROVIDERS = {"onnx", "fastembed"}
 
 
@@ -1256,7 +1361,13 @@ def _component_for(
     holder: object | None,
     enabled: bool,
 ) -> ModelComponent:
-    """Build a ``ModelComponent`` snapshot for one lazy loader."""
+    """Build a ``ModelComponent`` snapshot for one lazy loader.
+
+    ``holder`` is either an ``OnnxEmbedder`` / ``FastEmbedReranker`` (with
+    ``_model``, ``_loading``, ``_load_error`` flags introduced for #696)
+    or ``None`` when the component is disabled. ``enabled=False`` short-
+    circuits to ``state="skipped"`` regardless of the holder.
+    """
     from memtomem.embedding.aliases import approx_size_mb, resolve_embedder_id
     from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
     from memtomem.embedding.readiness import model_snapshot_present
@@ -1264,6 +1375,10 @@ def _component_for(
     if not enabled or provider not in _INTROSPECTABLE_PROVIDERS or holder is None:
         return ModelComponent(state="skipped", provider=provider, model=model)
 
+    # Embedder config stores either a short alias (``bge-m3``) or the
+    # raw fastembed id; the reranker config always stores the full
+    # fastembed id directly. ``resolve_embedder_id`` is a no-op for
+    # already-resolved ids, so it's safe to apply uniformly.
     fastembed_id = resolve_embedder_id(model) if model else None
     cache_present = False
     if fastembed_id:
@@ -1271,6 +1386,9 @@ def _component_for(
             cache_dir = resolve_fastembed_cache_dir()
             cache_present = model_snapshot_present(cache_dir, fastembed_id)
         except Exception:
+            # Resolving the cache dir or stat'ing it should never raise in
+            # practice; fall through to ``cache_present=False`` so the
+            # endpoint still returns a meaningful state.
             logger.debug("model_snapshot_present probe failed", exc_info=True)
 
     loaded = getattr(holder, "_model", None) is not None
@@ -1278,6 +1396,9 @@ def _component_for(
     load_error = getattr(holder, "_load_error", None)
 
     if loaded:
+        # A lazy loader can keep a stale ``_load_error`` from an earlier
+        # failed attempt even after a later search successfully constructs
+        # the model. Loaded-in-memory is the authoritative terminal state.
         state: ModelComponentState = "ready"
         load_error = None
     elif load_error:
@@ -1304,7 +1425,14 @@ async def get_model_readiness(
     config=Depends(get_config),
     pipeline=Depends(get_search_pipeline),
 ) -> ModelReadinessResponse:
-    """Snapshot the load state of the embedder + reranker (issue #696)."""
+    """Snapshot the load state of the embedder + reranker (issue #696).
+
+    Read-only: inspects the lazy loaders' ``_model`` / ``_loading`` /
+    ``_load_error`` flags and probes the fastembed cache directory. Never
+    triggers a model download itself — the Web UI banner polls this while
+    waiting for ``state="ready"`` so the user sees what's happening
+    instead of a frozen Search button.
+    """
     emb_cfg = config.embedding
     embedder_component = _component_for(
         provider=emb_cfg.provider,
@@ -1313,6 +1441,9 @@ async def get_model_readiness(
         enabled=True,
     )
 
+    # Reranker: lives on the SearchPipeline. ``app.state.search_pipeline``
+    # always exists (lifespan creates it), but ``_reranker`` is None when
+    # ``config.rerank.enabled is False`` — skip the readiness check then.
     rerank_cfg = config.rerank
     reranker_holder = getattr(pipeline, "_reranker", None) if pipeline else None
     reranker_component = _component_for(
@@ -1349,15 +1480,30 @@ async def reset_embedding(
         max_sequence_tokens=config.embedding.max_sequence_tokens,
     )
     message = "Embedding metadata reset. All indexed vectors deleted — run a forced re-index."
+    # A degraded startup leaves the watcher stopped, so auto-indexing is off
+    # until something starts it. The MCP server does that in-process from its
+    # own reset (#2181); this one does the same (#2188) rather than telling the
+    # user to restart. Ordered after the write on purpose: the watcher's
+    # startup backfill indexes immediately, and the mismatch must be gone
+    # before the indexer touches the store.
     resume_fn = getattr(_sys(), "_resume_watching", _resume_watching)
     message += await resume_fn(request.app.state)
     return EmbeddingResetResponse(ok=True, message=message)
 
 
 async def _resume_watching(state) -> str:
-    """Start the file watcher a degraded startup left stopped; report in words."""
+    """Start the file watcher a degraded startup left stopped; report in words.
+
+    Returns the sentence to append to the reset message, empty when the
+    watcher was already running and there is nothing to say.
+    """
     from memtomem.indexing.watcher import WatcherResumer
 
+    # Two resets arriving together must not both pass the "not started yet"
+    # check: ``start`` overwrites the observer and the processor task, so the
+    # second would strand the first pair with nothing able to stop them. Every
+    # app built by ``create_app`` publishes the lock; a hand-assembled state
+    # without one is single-caller by construction.
     lock = getattr(state, "file_watcher_resume_lock", None)
     if lock is None:
         return await _resume_watching_locked(state, WatcherResumer)
@@ -1367,11 +1513,14 @@ async def _resume_watching(state) -> str:
 
 async def _resume_watching_locked(state, resumer_cls) -> str:
     watcher = getattr(state, "file_watcher", None)
+    # Read inside the lock: the reset that went first may have just started it.
     started = getattr(state, "file_watcher_started", watcher is not None)
     blocked = getattr(state, "file_watcher_resume_blocked", False)
     if started:
         return ""
     if watcher is None or blocked:
+        # No instance to start, or an earlier attempt failed in a way that
+        # cannot be retried in this process.
         return (
             " File watching is off in this server and cannot be started here:"
             " restart `mm web` to resume auto-indexing."
@@ -1381,6 +1530,10 @@ async def _resume_watching_locked(state, resumer_cls) -> str:
     try:
         await resumer.resume()
     finally:
+        # In ``finally`` for the same reason the MCP side settles there: a
+        # cancellation mid-start still decides whether this instance may be
+        # started again, and losing that would let a later reset start over
+        # handles nothing can stop.
         state.file_watcher_started = resumer.started
         state.file_watcher_resume_blocked = not resumer.can_retry
     if resumer.started:
