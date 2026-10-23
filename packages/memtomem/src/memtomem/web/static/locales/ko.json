@@ -236,6 +236,7 @@
   "search.detail_view": "보기",
   "search.detail_preview": "미리보기",
   "search.detail_diff": "차이점",
+  "search.detail_edit": "편집",
   "search.detail_history": "기록",
   "search.detail_tags": "태그",
   "search.detail_validity_label": "유효",
