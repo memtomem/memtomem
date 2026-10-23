@@ -49,7 +49,7 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from memtomem.cli import context_cmd
+from memtomem.cli import context_cmd, context_settings_cmd
 from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.context.settings import MalformedHookMatcher
 from memtomem.context.settings_copy import HookCopyPlan, HookCopyResult, _sync_followup_command
@@ -62,6 +62,7 @@ from memtomem.context.settings_doctor import (
 from memtomem.context.settings_migrate import MigrateMove, MigratePlan, MigrateResult
 
 CLI_SOURCE = Path(context_cmd.__file__)
+CLI_SETTINGS_SOURCE = Path(context_settings_cmd.__file__)
 
 #: CLI functions that print settings-derived text.
 RENDERERS: frozenset[str] = frozenset(
@@ -703,10 +704,10 @@ def _copy_gate_a(monkeypatch, tmp_path):
 
 def test_every_settings_function_is_classified():
     """A renderer added under a settings name cannot slip past the registry."""
-    tree = ast.parse(CLI_SOURCE.read_text(encoding="utf-8"))
     defined = {
         node.name
-        for node in ast.walk(tree)
+        for src in (CLI_SOURCE, CLI_SETTINGS_SOURCE)
+        for node in ast.walk(ast.parse(src.read_text(encoding="utf-8")))
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     settings_named = {name for name in defined if _SETTINGS_NAME.search(name)}

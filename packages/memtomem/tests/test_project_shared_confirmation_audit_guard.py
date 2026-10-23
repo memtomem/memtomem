@@ -144,7 +144,7 @@ _DELEGATED_KEYS: frozenset[tuple[str, str]] = frozenset((rel, fn) for rel, fn, _
 NOT_A_GATE: frozenset[tuple[str, str]] = frozenset(
     {
         ("server/tools/context.py", "mem_context_artifact_migrate"),
-        ("cli/context_cmd.py", "migrate_cmd"),
+        ("cli/context_bundle_cmd.py", "migrate_cmd"),
     }
 )
 
@@ -466,7 +466,7 @@ def test_scan_reaches_the_sites_the_adr_names() -> None:
     assert ("cli/memory.py", "_add") in found
     assert ("server/tools/memory_crud.py", "_mem_add_core") in found
     assert ("cli/context_cmd.py", "pull_cmd") in found
-    assert ("cli/context_cmd.py", "settings_migrate_cmd") in found
+    assert ("cli/context_settings_cmd.py", "settings_migrate_cmd") in found
 
 
 # ── detector self-tests ───────────────────────────────────────────────────

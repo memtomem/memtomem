@@ -188,7 +188,14 @@ def _in_scope(rel: str) -> bool:
         return True
     if rel == "server/tools/context.py":
         return True
-    if rel in ("cli/context_cmd.py", "cli/sync_doctor_cmd.py"):
+    if rel in (
+        "cli/context_cmd.py",
+        "cli/context_sync_cmd.py",
+        "cli/context_install_cmd.py",
+        "cli/context_bundle_cmd.py",
+        "cli/context_settings_cmd.py",
+        "cli/sync_doctor_cmd.py",
+    ):
         return True
     if parts[:2] == ["web", "routes"] and parts[-1] in _CONTEXT_WEB_ROUTES:
         return True
@@ -865,7 +872,7 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "text (the install/update swap boundary). Recovery is translated, not "
         "demoted.",
     ),
-    ("cli/context_cmd.py", "_run_sync_all_projects", ("ClickException",), 0): (
+    ("cli/context_sync_cmd.py", "_run_sync_all_projects", ("ClickException",), 0): (
         _U,
         "no_recovery_callee",
         "Sync-all leg runner: this try does not textually reach a swap/transfer "
@@ -873,7 +880,7 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "_print_artifact_generate, which converts recovery to typed skips); a "
         "ClickException handler could not catch a SwapRecoveryError anyway.",
     ),
-    ("cli/context_cmd.py", "_run_sync_all_projects", ("OSError",), 0): (
+    ("cli/context_sync_cmd.py", "_run_sync_all_projects", ("OSError",), 0): (
         _U,
         "no_recovery_callee",
         "Sync-all leg runner OSError arm: same try; no recovery symbol is "
@@ -891,39 +898,39 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "no_recovery_callee",
         "adopt_flat_to_dir is a plain os.replace; flat layout, never skills swap.",
     ),
-    ("cli/context_cmd.py", "update_cmd", ("OSError",), 0): (
+    ("cli/context_install_cmd.py", "update_cmd", ("OSError",), 0): (
         _U,
         "no_recovery_callee",
         "Force-head advisory preflight (wiki head + lockfile read); the real "
         "update runs under a separate translator that carries the swap arm.",
     ),
-    ("cli/context_cmd.py", "_run_update_all", ("SwapRecoveryError",), 0): (
+    ("cli/context_install_cmd.py", "_run_update_all", ("SwapRecoveryError",), 0): (
         _T,
         "",
         "Batch update: typed swap_recovery row via swap_failure_text; precedes "
         "the broad OSError below.",
     ),
-    ("cli/context_cmd.py", "_run_update_all", ("OSError",), 0): (
+    ("cli/context_install_cmd.py", "_run_update_all", ("OSError",), 0): (
         _P,
         "swap",
         "Broad OSError after the SwapRecoveryError arm in the same try.",
     ),
-    ("cli/context_cmd.py", "_run_status_all_projects", ("Exception",), 0): (
+    ("cli/context_install_cmd.py", "_run_status_all_projects", ("Exception",), 0): (
         _U,
         "no_recovery_callee",
         "collect_project_status is read-only; " + _RO,
     ),
-    ("cli/context_cmd.py", "_run_install_all", ("SwapRecoveryError",), 0): (
+    ("cli/context_install_cmd.py", "_run_install_all", ("SwapRecoveryError",), 0): (
         _T,
         "",
         "Batch install: typed swap_recovery row; precedes the broad OSError.",
     ),
-    ("cli/context_cmd.py", "_run_install_all", ("OSError",), 0): (
+    ("cli/context_install_cmd.py", "_run_install_all", ("OSError",), 0): (
         _P,
         "swap",
         "Broad OSError after the SwapRecoveryError arm in the same try.",
     ),
-    ("cli/context_cmd.py", "_is_within", ("OSError",), 0): (_U, "no_recovery_callee", _RO),
+    ("cli/context_settings_cmd.py", "_is_within", ("OSError",), 0): (_U, "no_recovery_callee", _RO),
     ("cli/context_cmd.py", "_memory_migrate_run", ("Exception",), 0): (
         _U,
         "no_recovery_callee",
@@ -2391,8 +2398,8 @@ KNOWN_RECOVERY_BOUNDARIES: frozenset[tuple[str, str, tuple[str, ...], int]] = fr
         ("context/skills.py", "extract_skills_to_canonical", ("SwapRecoveryError",), 0),
         ("context/skills.py", "extract_skills_to_canonical", ("SwapRecoveryError",), 1),
         ("context/transfer.py", "transfer_artifact", ("SwapRecoveryError",), 0),
-        ("cli/context_cmd.py", "_run_update_all", ("SwapRecoveryError",), 0),
-        ("cli/context_cmd.py", "_run_install_all", ("SwapRecoveryError",), 0),
+        ("cli/context_install_cmd.py", "_run_update_all", ("SwapRecoveryError",), 0),
+        ("cli/context_install_cmd.py", "_run_install_all", ("SwapRecoveryError",), 0),
         ("cli/context_cmd.py", "seed_validation_cmd", ("SwapRecoveryError",), 0),
         ("server/tools/context.py", "mem_context_artifact_migrate", ("TransferRecoveryError",), 0),
         ("server/tools/context.py", "mem_context_artifact_transfer", ("TransferRecoveryError",), 0),

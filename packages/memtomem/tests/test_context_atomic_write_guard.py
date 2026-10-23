@@ -48,7 +48,7 @@ def _gateway_write_files() -> list[pathlib.Path]:
     * ``web/routes/context_*.py`` — the web mutators.
     """
     files = sorted((_SRC / "context").glob("*.py"))
-    files.append(_SRC / "cli" / "context_cmd.py")
+    files.extend(sorted((_SRC / "cli").glob("context*.py")))
     files.append(_SRC / "server" / "tools" / "context.py")
     files.extend(sorted((_SRC / "web" / "routes").glob("context_*.py")))
     return files
