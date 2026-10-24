@@ -1015,9 +1015,8 @@ class SqliteBackend(
                     pass
                 if not woken_cleanly and waiter.done() and not waiter.cancelled():
                     self._notify_writer_waiters()
-            if getattr(self, "_closing", False):
-                self._notify_writer_waiters()
-                raise StorageError("Database is closing")
+            # A waiter woken by ``close()`` returns too: the caller's
+            # ``_get_db()`` refuses a closing store and passes the slot on.
             if self._transaction_owner is None:
                 return
 

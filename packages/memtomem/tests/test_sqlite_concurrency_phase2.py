@@ -357,25 +357,32 @@ async def test_delete_by_namespace_is_refused_while_a_grant_is_pending(
 async def test_close_refuses_writers_queued_behind_a_released_owner(
     storage: SqliteBackend, tmp_path: Path
 ):
+    """The owner's exit grants only the head; ``close()`` must wake the rest itself."""
     order: list[str] = []
     entered, release = asyncio.Event(), asyncio.Event()
+    granted_after_close: list[bool] = []
 
     async def holder() -> None:
         async with storage.transaction():
             entered.set()
             await release.wait()
-        # close() before the granted waiter resumes; it has nothing to drain.
+        # close() before either waiter resumes; it has nothing to drain.
         await storage.close()
+        granted_after_close.extend(w.done() for w in storage._writer_waiters)
 
     holder_task = asyncio.create_task(holder())
     await entered.wait()
-    queued = asyncio.create_task(_queue_writer(storage, "queued", order, tmp_path))
-    await _until(lambda: len(storage._writer_waiters) == 1)
+    queued = []
+    for i, name in enumerate(["head", "behind"], start=1):
+        queued.append(asyncio.create_task(_queue_writer(storage, name, order, tmp_path)))
+        await _until(lambda i=i: len(storage._writer_waiters) == i)
 
     release.set()
     await asyncio.wait_for(holder_task, 5)
-    with pytest.raises(StorageError, match="Database is closing"):
-        await asyncio.wait_for(queued, 5)
+    assert granted_after_close == [True, True]
+    for task in queued:
+        with pytest.raises(StorageError, match="Database is closing"):
+            await asyncio.wait_for(task, 5)
     assert order == []
     assert not storage._writer_waiters
 
@@ -393,25 +400,83 @@ _TRANSACTION_SITES = {
 }
 
 
+def _transaction_sites(source: str, where: str) -> list[bool]:
+    """Whether each ``.transaction(...)`` call in ``source`` waits, in line order.
+
+    A form this cannot classify fails instead of being skipped: ``.transaction``
+    used other than as a direct call (an alias, a reference passed on),
+    ``getattr(..., "transaction")``, and unpacked or positional arguments.
+    """
+    tree = ast.parse(source)
+    called = {
+        id(n.func)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    sites: list[tuple[int, bool]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "transaction":
+            if id(node) not in called:
+                raise AssertionError(f"{where}:{node.lineno}: .transaction not called directly")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) > 1
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "transaction"
+        ):
+            raise AssertionError(f"{where}:{node.lineno}: transaction reached through getattr")
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "transaction"
+        ):
+            continue
+        if node.args or any(kw.arg is None for kw in node.keywords):
+            raise AssertionError(f"{where}:{node.lineno}: transaction() arguments not readable")
+        waits = [kw for kw in node.keywords if kw.arg == "wait"]
+        if waits and not (
+            isinstance(waits[0].value, ast.Name) and waits[0].value.id == "WRITER_WAIT_S"
+        ):
+            raise AssertionError(
+                f"{where}:{node.lineno}: waits on something other than WRITER_WAIT_S"
+            )
+        sites.append((node.lineno, bool(waits)))
+    return [waits for _, waits in sorted(sites)]
+
+
 def test_every_transaction_call_site_is_classified():
     src = Path(memtomem.__file__).parent
     found: dict[str, list[bool]] = {}
     for path in sorted(src.rglob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "transaction"
-            ):
-                continue
-            waits = [kw for kw in node.keywords if kw.arg == "wait"]
-            if waits:
-                assert isinstance(waits[0].value, ast.Name) and waits[0].value.id == (
-                    "WRITER_WAIT_S"
-                ), f"{path}:{node.lineno} waits on something other than WRITER_WAIT_S"
-            found.setdefault(path.relative_to(src).as_posix(), []).append(bool(waits))
+        rel = path.relative_to(src).as_posix()
+        sites = _transaction_sites(path.read_text(encoding="utf-8"), rel)
+        if sites:
+            found[rel] = sites
     assert found == _TRANSACTION_SITES
     assert WRITER_WAIT_S == 5.0
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'storage.transaction(**{"wait": WRITER_WAIT_S})',
+        "storage.transaction(WRITER_WAIT_S)",
+        'getattr(storage, "transaction")()',
+        "tx = storage.transaction\ntx()",
+        "run(storage.transaction)",
+        "storage.transaction(wait=1.0)",
+    ],
+)
+def test_call_site_scanner_refuses_what_it_cannot_classify(source: str):
+    with pytest.raises(AssertionError):
+        _transaction_sites(source, "<case>")
+
+
+def test_call_site_scanner_classifies_direct_calls():
+    source = "a.transaction(wait=WRITER_WAIT_S)\nb.transaction()\n"
+    assert _transaction_sites(source, "<case>") == [True, False]
 
 
 async def test_nested_same_task_transaction_refused_immediately(storage: SqliteBackend):
