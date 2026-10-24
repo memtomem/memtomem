@@ -133,11 +133,22 @@ Neither can be on unless `llm.enabled` is `true`.
   - The switch is independent of `session_summary.auto`, its `min_chunks`
     threshold, and whether a manual summary was given.
 
-For both uses, the privacy guard runs before the candidate is inserted. It scans
-the exact text that would be stored: the rationale, and, for a goal patch, the
-serialized goal file it would produce. A refusal inserts nothing and logs pattern
-names only. A model error or timeout also inserts nothing, and neither is
-reported as a failure of the session or scan that triggered it.
+For both uses, the privacy guard runs before anything is stored. It scans the
+exact text that would be stored: the rationale, and, for a goal patch, the
+serialized goal file it would produce. A refusal logs pattern names only.
+
+A failure — a privacy refusal, a model error or a timeout — removes only what the
+model was producing, never anything the deterministic path already produced:
+
+- **A conflict verdict is optional evidence.** The candidate it would annotate
+  came from a scan or an external proposal, and those do not depend on a model.
+  So when the verdict fails, the candidate is still inserted, without a verdict,
+  and records that its verdict is unavailable. The brief and
+  `mem_candidate_evidence` show that state instead of a verdict.
+- **A goal-progress proposal is the model's own output.** When it fails, no
+  candidate is inserted.
+
+Neither case is reported as a failure of the session or scan that triggered it.
 
 No setting applies a model output without review.
 

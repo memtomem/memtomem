@@ -58,19 +58,22 @@ read through `PinnedContextStore`. There is no goal table. The file is the
 record, a person can edit it, and a `project_shared` goal is committed with the
 repository like any other shared memory.
 
-Goals and ordinary blocks are separate kinds that share a directory tree and a
-budget. Ordinary blocks keep every behaviour they have today, including
-same-id shadowing across tiers and agents. The rules below apply to goals only.
-A goal and an ordinary block may carry the same `id` without affecting each
-other.
+Goals and ordinary blocks are separate kinds. They share the pinned root and the
+compose budget, but not directories: every goal lives under its own `goals/`
+subtree (§2), so the two never occupy the same path. Ordinary blocks keep every
+behaviour they have today, including same-id shadowing across tiers and agents.
+The rules below apply to goals only. A goal and an ordinary block may carry the
+same `id` without affecting each other.
 
-### 2. The pinned tree gains a namespace level
+### 2. Goals get their own subtree, with a namespace level
 
 ```text
-<scope_dir>/pinned/general/<id>.md                                  (today)
-<scope_dir>/pinned/agents/<agent_id>/<id>.md                        (today)
-<scope_dir>/pinned/namespaces/<ns-dir>/<id>.md                      (new)
-<scope_dir>/pinned/namespaces/<ns-dir>/agents/<agent_id>/<id>.md    (new)
+<scope_dir>/pinned/general/<id>.md                                      (today, ordinary)
+<scope_dir>/pinned/agents/<agent_id>/<id>.md                            (today, ordinary)
+<scope_dir>/pinned/goals/general/<id>.md                                (new, project-wide goal)
+<scope_dir>/pinned/goals/agents/<agent_id>/<id>.md                      (new)
+<scope_dir>/pinned/goals/namespaces/<ns-dir>/<id>.md                    (new)
+<scope_dir>/pinned/goals/namespaces/<ns-dir>/agents/<agent_id>/<id>.md  (new)
 ```
 
 `<ns-dir>` is the slug-plus-digest name ADR-0032 §1 defined for day files,
@@ -84,11 +87,13 @@ drift. The reasons ADR-0032 gave for the digest (`:` is not a legal Windows
 filename character, case-folding filesystems, the 255-byte component cap) apply
 unchanged.
 
-Only goals live under `namespaces/`. The ordinary pinned surfaces (`pinned
-list`, `get`, `set`, `delete` and their MCP twins) keep their current coordinates
-and do not read or write that subtree or any file whose frontmatter says
-`kind: goal`. Today's reader walks the pinned tree recursively, so the
-implementation has to exclude both explicitly.
+Only goals live under `goals/`, and goals live nowhere else. The ordinary pinned
+surfaces (`pinned list`, `get`, `set`, `delete` and their MCP twins) keep their
+current coordinates and do not read or write the `goals/` subtree. They also
+leave alone any file elsewhere whose frontmatter says `kind: goal`, for example
+one moved there by hand. Today's reader walks the pinned tree recursively, so the
+implementation has to exclude both explicitly. A goal file found outside
+`goals/` is not a goal either: `goal_get` reports it as misplaced.
 
 ADR-0032 rejected a directory per namespace because a sanitized directory name
 would feed `enable_auto_ns`'s parent-folder derivation and the `memory_dirs`
@@ -234,9 +239,10 @@ does not need to answer.
   `pinned delete`, `mem_edit` and `mem_delete`, the web chunk `PATCH` and
   `DELETE` routes, and any later writer addressed by chunk id. Maintenance
   policies (expire, archive, consolidate, tag) skip goal sources entirely.
-- **Diagnostics.** `goal_get` reports three conditions next to the goals it
-  returns: frontmatter that disagrees with its directory, rows whose stored
-  namespace differs from the declared one, and ambiguous ids. `mm doctor` is not
+- **Diagnostics.** `goal_get` reports four conditions next to the goals it
+  returns: frontmatter that disagrees with its directory, a `kind: goal` file
+  outside the `goals/` subtree, rows whose stored namespace differs from the
+  declared one, and ambiguous ids. `mm doctor` is not
   the home for these, because ADR-0035 gives it the runtime axis only.
 
 ### 7. Sessions show goals, read-only
