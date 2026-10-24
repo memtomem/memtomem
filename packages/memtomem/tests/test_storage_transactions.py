@@ -30,7 +30,6 @@ async def test_transaction_takes_immediate_write_lock_on_entry(storage):
 async def test_foreign_task_write_fails_closed_then_can_retry(storage):
     owner_ready = asyncio.Event()
     release_owner = asyncio.Event()
-    storage._writer_wait_timeout = 0.05
 
     async def owner() -> None:
         with pytest.raises(RuntimeError, match="roll back owner"):
@@ -64,7 +63,6 @@ async def test_foreign_task_write_fails_closed_then_can_retry(storage):
 async def test_foreign_unconditional_committer_cannot_flush_owner(storage):
     owner_ready = asyncio.Event()
     release_owner = asyncio.Event()
-    storage._writer_wait_timeout = 0.05
 
     async def owner() -> None:
         with pytest.raises(RuntimeError, match="roll back owner"):
@@ -106,7 +104,6 @@ async def test_foreign_namespace_writers_do_not_borrow_owner_transaction(storage
 
     owner_ready = asyncio.Event()
     release_owner = asyncio.Event()
-    storage._writer_wait_timeout = 0.05
 
     async def owner() -> None:
         with pytest.raises(RuntimeError, match="roll back owner"):
@@ -141,7 +138,6 @@ async def test_pooled_reader_sees_only_committed_state(storage):
     chunk = make_chunk(content="uncommitted transaction row")
     owner_ready = asyncio.Event()
     release_owner = asyncio.Event()
-    storage._writer_wait_timeout = 0.05
 
     async def owner() -> None:
         with pytest.raises(RuntimeError, match="roll back owner"):
@@ -1118,7 +1114,6 @@ async def test_ns_prefix_counters_answer_while_another_task_owns_a_transaction(s
 
     owner_ready = asyncio.Event()
     release_owner = asyncio.Event()
-    storage._writer_wait_timeout = 0.05
 
     async def owner() -> None:
         async with storage.transaction():
