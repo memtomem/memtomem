@@ -115,17 +115,23 @@ def _assert_writer_idle(storage: SqliteBackend) -> None:
 
 
 class _Holder:
-    """A task that owns the writer until ``release`` is set, then runs ``after``."""
+    """A task that owns the writer until ``release`` is set, then runs ``after``.
 
-    def __init__(self, storage: SqliteBackend, after=None) -> None:
+    ``before_exit`` runs synchronously as the last step inside the transaction,
+    so nothing else gets the loop between it and the exit.
+    """
+
+    def __init__(self, storage: SqliteBackend, after=None, before_exit=None) -> None:
         self.entered, self.release = asyncio.Event(), asyncio.Event()
-        self._storage, self._after = storage, after
+        self._storage, self._after, self._before_exit = storage, after, before_exit
         self.task: asyncio.Task[None] | None = None
 
     async def _run(self) -> None:
         async with self._storage.transaction():
             self.entered.set()
             await self.release.wait()
+            if self._before_exit is not None:
+                self._before_exit()
         # No await since the exit: the lock has been handed to the head waiter,
         # which has not resumed yet.
         if self._after is not None:
@@ -293,24 +299,37 @@ async def test_waiting_newcomer_in_the_handoff_window_enters_after_the_head(
 async def test_cancelled_sole_waiter_does_not_block_a_newcomer(storage: SqliteBackend, wait: float):
     """The sole waiter is cancelled, the owner exits before its cleanup runs.
 
-    With the writer idle, a newcomer must enter at once. The hand-rolled queue
-    left the cancelled future queued, refusing a ``wait=0`` newcomer and making
-    a ``wait > 0`` one wait out its whole budget.
+    The cancel is issued inside the owner's transaction, as its last step, and
+    the newcomer enters right after the exit with no await in between. So the
+    cancelled waiter's cleanup has not run, and its future is still queued, when
+    the newcomer arrives. With the writer idle, the newcomer must enter at once.
+    The hand-rolled queue let that stale future refuse a ``wait=0`` newcomer
+    and made a ``wait > 0`` one wait out its whole budget.
     """
     entered: list[float] = []
+    stale_queued_at_entry: list[bool] = []
     tasks: dict[str, asyncio.Task] = {}
 
+    def cancel_sole() -> None:
+        tasks["sole"].cancel()
+
     async def after() -> None:
+        waiters = list(storage._writer_lock._waiters or ())
+        assert waiters and all(w.cancelled() for w in waiters), "the race needs a stale waiter"
         async with storage.transaction(wait=wait):
+            # Still queued means the newcomer got in without yielding the loop.
+            stale_queued_at_entry.append(
+                any(w.cancelled() for w in storage._writer_lock._waiters or ())
+            )
             entered.append(wait)
 
-    holder = _Holder(storage, after)
+    holder = _Holder(storage, after, before_exit=cancel_sole)
     await holder.start()
     tasks["sole"] = await _queue(storage, _enter(storage, 5.0), 1)
-    tasks["sole"].cancel()  # its cleanup has not run yet
     holder.release.set()
     await asyncio.wait_for(holder.task, 5)
     assert entered == [wait]
+    assert stale_queued_at_entry == [True]
     with pytest.raises(asyncio.CancelledError):
         await tasks["sole"]
     _assert_writer_idle(storage)

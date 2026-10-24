@@ -1002,10 +1002,14 @@ class SqliteBackend(
         ``asyncio.Lock`` keeps it for that waiter. In that moment a ``wait=0``
         entry yields once and is refused, and a ``wait > 0`` entry queues
         behind the waiter. So a default caller behaves as it did before the
-        queue existed only while nobody has queued.
+        queue existed only while nobody has queued. ``delete_by_namespace``
+        is the production default caller that can meet that moment: its own
+        ``_get_db()`` sees no owner, so the refusal comes from here.
 
-        A queued entry whose wait runs out on a closing store gets "Database
-        is closing", not an ownership error. Nested same-task entry, an
+        ``close()`` does not wake queued entries. Each one acquires the lock in
+        turn, is refused by the closing store, and releases it to the next. A
+        queued entry whose wait runs out on a closing store gets "Database is
+        closing", not an ownership error. Nested same-task entry, an
         unowned open transaction on the writer, and a closing store are
         refused at once, whatever ``wait`` is.
 
