@@ -316,6 +316,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   dependencies and its build parses no untrusted TOML, so they are recorded as
   exceptions with the same 2026-11-20 expiry rather than forced past the
   range `effect` declares.
+- Three filelock advisories, published on 2026-10-23 against the locked
+  3.25.2, are fixed in 4.2.1, but the lockfile stays on 3.25.2. filelock is
+  pulled only by huggingface-hub, and 1.33.0, the last release fastembed's
+  `huggingface-hub<2.0` allows, hangs with filelock 4.2.1 and later on a
+  filesystem without `flock`: those releases read the empty lock file the Hub
+  creates before locking, or one left behind earlier, as a soft lock somebody
+  holds, and the Hub waits on it without a timeout. Two of the advisories are
+  reached only through `ReadWriteLock`, which neither memtomem nor
+  huggingface-hub uses; the third lets another local account delay a Windows
+  soft lock past its timeout, and huggingface-hub never takes a soft lock on
+  Windows. They are recorded as exceptions with the same 2026-11-20 expiry.
+- Two more pillow advisories, published on 2026-10-23, are again fixed only in
+  pillow 13.0.0 and reached only through image handling: FlashPix decoding,
+  which also needs the optional `olefile` package that nothing here installs,
+  and Arrow export with `PILLOW_ALIGNMENT` above 1. They join the same
+  exceptions and expiry.
+- An advisory against `zod` 4.1.8 (npm), revised on 2026-10-23, is unbounded
+  memory use while validating a large array against a schema without a length
+  limit; the fix is 4.6.6. It is a dev-only dependency of the OpenCode plugin,
+  and `@opencode-ai/plugin` pins `zod` at exactly 4.1.8, as its latest release
+  (1.19.4) still does. The plugin imports only types from that package and
+  ships no dependencies, so it is recorded as an exception with the same
+  2026-11-20 expiry rather than overridden past the pin.
 
 - **The server no longer copies a whole `.env` file into its environment
   (#2824).** It loaded the nearest `.env` with python-dotenv, which for a
