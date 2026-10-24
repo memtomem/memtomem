@@ -304,7 +304,10 @@ class SqliteBackend(
         # the single shared writer connection: another coroutine must never
         # observe, commit, or roll back this task's pending writes.
         self._transaction_owner: asyncio.Task[Any] | None = None
-        self._writer_waiters: deque[asyncio.Future[None]] = deque()
+        # Held for the whole owner span: acquired before ``_transaction_owner``
+        # is set, released after it is cleared. Its FIFO queue is where
+        # ``transaction(wait=...)`` callers wait (#2860).
+        self._writer_lock: asyncio.Lock = asyncio.Lock()
         self._read_pool: list[sqlite3.Connection] = []
         self._read_pool_idx = 0
         self._read_pool_lock = threading.Lock()
@@ -939,7 +942,6 @@ class SqliteBackend(
         self._require_transaction_idle("close")
         self._closing = True
         self._notify_reader_waiters(all_waiters=True)
-        self._notify_writer_waiters(all_waiters=True)
         # A cancel while readers drain is held until the cleanup below has run.
         # Leaving early would strand every connection open with ``_closing``
         # set, so the store refuses all later leases and nothing closes it.
@@ -980,46 +982,6 @@ class SqliteBackend(
 
     # ---- transaction ---------------------------------------------------------
 
-    def _notify_writer_waiters(self, *, all_waiters: bool = False) -> None:
-        for waiter in list(self._writer_waiters):
-            if not waiter.done():
-                waiter.set_result(None)
-                if not all_waiters:
-                    break
-
-    async def _wait_for_writer_slot(self, wait: float) -> None:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + wait
-        while True:
-            if getattr(self, "_closing", False):
-                raise StorageError("Database is closing")
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise TransactionOwnedError(
-                    "SQLite transaction is owned by another task; timed out waiting for writer lock"
-                )
-            waiter: asyncio.Future[None] = loop.create_future()
-            self._writer_waiters.append(waiter)
-            woken_cleanly = False
-            try:
-                await asyncio.wait_for(waiter, timeout=remaining)
-                woken_cleanly = True
-            except TimeoutError as exc:
-                raise TransactionOwnedError(
-                    "SQLite transaction is owned by another task; timed out waiting for writer lock"
-                ) from exc
-            finally:
-                try:
-                    self._writer_waiters.remove(waiter)
-                except ValueError:
-                    pass
-                if not woken_cleanly and waiter.done() and not waiter.cancelled():
-                    self._notify_writer_waiters()
-            # A waiter woken by ``close()`` returns too: the caller's
-            # ``_get_db()`` refuses a closing store and passes the slot on.
-            if self._transaction_owner is None:
-                return
-
     @asynccontextmanager
     async def transaction(self, *, wait: float = 0.0) -> AsyncIterator[None]:
         """Async context manager for atomic multi-operation transactions.
@@ -1030,14 +992,20 @@ class SqliteBackend(
 
         While another task owns the writer, ``wait`` decides what a competing
         entry does. At the default ``0`` it raises ``TransactionOwnedError``
-        at once and may retry after the owner exits. With ``wait > 0`` it joins
-        a FIFO queue and raises ``TransactionOwnedError`` only if no slot comes
-        free within ``wait`` seconds. Callers opt in one by one (#2860).
-        Newcomers never overtake the queue: while waiters are queued, even in
-        the moment after the owner exits and before the next waiter resumes, a
-        ``wait=0`` entry is refused and a ``wait > 0`` entry queues behind
-        them. A default caller therefore behaves as it did before the queue
-        existed only while nobody has queued. Nested same-task entry, an
+        at once and may retry after the owner exits. With ``wait > 0`` it
+        waits in the FIFO queue of ``_writer_lock`` and raises
+        ``TransactionOwnedError`` only if the lock is not free within
+        ``wait`` seconds. Callers opt in one by one (#2860).
+
+        Newcomers never overtake the queue. A lock that has just been
+        released to a waiter that has not yet resumed is not free:
+        ``asyncio.Lock`` keeps it for that waiter. In that moment a ``wait=0``
+        entry yields once and is refused, and a ``wait > 0`` entry queues
+        behind the waiter. So a default caller behaves as it did before the
+        queue existed only while nobody has queued.
+
+        A queued entry whose wait runs out on a closing store gets "Database
+        is closing", not an ownership error. Nested same-task entry, an
         unowned open transaction on the writer, and a closing store are
         refused at once, whatever ``wait`` is.
 
@@ -1069,13 +1037,29 @@ class SqliteBackend(
             raise StorageError(
                 "transaction() refused: the connection already has an open transaction"
             )
-        if self._transaction_owner is not None or self._writer_waiters:
-            # ``not wait > 0`` rather than ``wait <= 0`` so NaN refuses too.
-            if not wait > 0:
+        # ``wait > 0`` rather than ``wait <= 0`` so NaN refuses too.
+        budget = wait if wait > 0 else 0.0
+        if budget == 0 and self._writer_lock.locked():
+            # Without an await, exactly as before the queue: the lock is held
+            # for the owner's whole span.
+            raise TransactionOwnedError(
+                "SQLite transaction is owned by another task; retry after it completes"
+            )
+        try:
+            # ``asyncio.timeout(0)`` still lets a free lock be taken: an
+            # uncontended ``acquire()`` returns without suspending.
+            async with asyncio.timeout(budget):
+                await self._writer_lock.acquire()
+        except TimeoutError:
+            if getattr(self, "_closing", False):
+                raise StorageError("Database is closing") from None
+            if budget == 0:
                 raise TransactionOwnedError(
                     "SQLite transaction is owned by another task; retry after it completes"
-                )
-            await self._wait_for_writer_slot(wait)
+                ) from None
+            raise TransactionOwnedError(
+                "SQLite transaction is owned by another task; timed out waiting for writer lock"
+            ) from None
         try:
             db = self._get_db()
             if db.in_transaction:
@@ -1087,7 +1071,7 @@ class SqliteBackend(
             except sqlite3.Error as exc:
                 raise StorageError(f"transaction() could not take the write lock: {exc}") from exc
         except BaseException:
-            self._notify_writer_waiters()
+            self._writer_lock.release()
             raise
 
         self._transaction_owner = task
@@ -1119,7 +1103,7 @@ class SqliteBackend(
             raise
         finally:
             self._transaction_owner = None
-            self._notify_writer_waiters()
+            self._writer_lock.release()
 
     # ---- meta delegation -----------------------------------------------------
 
