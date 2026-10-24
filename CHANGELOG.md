@@ -31,9 +31,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mem_cleanup_orphans` and `mm gc orphan-projects`, and is reported as
   archived (`mm status` `Archived`, doctor `archived_source` at info). Holds
   placed before the setting are lifted by the server's held-source recheck or
-  a compaction run, without a re-index. Only absence holds are lifted: an
-  unreadable file, an unavailable drive and a redaction-blocked file stay
-  held, and a path that now holds a directory is handled as before. Default
+  a compaction run, without a re-index. Only absence holds are lifted: a
+  file whose check fails with an error other than "not found" (unreadable,
+  or on a drive the system reports as unavailable) and a redaction-blocked
+  file stay held, and a path that now holds a directory is handled as before.
+  A file on a drive that reads as not found counts as missing. Default
   empty, so nothing changes until it is set.
 - **Changing a chunk whose source file is gone is refused with
   `source_missing` (#2833).** `mem_edit` and `mem_delete` returned the raw `No such
@@ -62,7 +64,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   a worker thread on a pooled read-only connection. On a copy of that store,
   with four BM25 and four dense searches running at once, the longest stall
   of the loop fell from 858 ms to 1.3 ms. Each of the three pooled readers now
-  serves one read at a time, and a read that finds all three busy waits for
+  serves one read at a time, and a search that finds all three busy waits for
   one instead of sharing it. A cancelled search returns once its query has
   finished, since a running SQLite query is not interrupted.
   **Known issue (#2863):** a read made inside another operation's write
@@ -70,9 +72,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   writer. Policy consolidation (`auto_consolidate`) is the path where this
   was seen: with all three readers busy with searches, a write that arrived
   during that wait was refused with "SQLite transaction is owned by another
-  task". The callers listed in the next entry wait out a busy writer for up to
-  5 s, so for them this needs a longer stall; other writes, such as a
-  namespace delete, are still refused at once.
+  task". The five write transactions listed in the next entry wait out a busy
+  writer for up to 5 s. Any other call that needs the writer connection, such
+  as a namespace delete, is still refused at once, and that includes the
+  steps those five operations take before their transaction
+  (`mem_consolidate_apply` reading its preview, for one).
 - **Indexing, dedup merges, consolidation and import wait briefly for a busy
   writer instead of failing (#2860).** A write transaction that found another
   task holding the writer was refused at once. Five callers now wait in turn
@@ -80,9 +84,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mem_index` and a watcher reindex keep the embedding they paid for, where the
   watcher used to drop the change), `mem_dedup_merge`, `auto_consolidate`'s
   write of a group, `mem_consolidate_apply`'s linking of its summary, and an
-  import (`mem_import` and the web UI's import). A wait that runs out is
-  refused, and the message says it timed out. Every other caller is still
-  refused at once, with the same message as before.
+  import (`mem_import` and the web UI's import). A wait that runs out fails
+  as the refusal did, and an import then counts the chunk and relation
+  writes it had pending as failed (skipped records stay skipped). Every
+  other caller is still refused at once, with the same message as before.
 
 ### Fixed
 
@@ -293,7 +298,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   value it read (`scratch_delete` takes `expected_value`, as `scratch_promote`
   already did). After a refusal whose summary was already written, the message no
   longer says the preview was discarded when a newer one took its place. A kept
-  preview that lists the group just applied is refused when applied (#2802).
+  preview that lists the group just applied is refused when applied, once
+  that apply has linked the originals to its summary (#2802).
 - **A memory tool's privacy refusal names a remedy the caller can run
   (#2797).** The refusal 0.6.9 added told every caller to "run mem_index, or
   authorize it with `mm index --force-unsafe <file>`": an MCP tool name on the
