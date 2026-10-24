@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.6.10] — 2026-10-24
+
 ### Upgrading
 
 - **A `.env` file now contributes only its `MEMTOMEM_*` keys (#2824, under
@@ -18,6 +20,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   a Hermes secret source or a manual `mcp_servers.memtomem` entry's `env:`.
   Claude Code started from a shell passes that shell's exported variables to
   the server, so only values kept in `.env` alone are affected there.
+- **Upgrade every install that imports your exports before you export from
+  0.6.10.** Export bundles are now version 3 and carry the links between
+  chunks (#2809, under Fixed), and their provenance marker signs those links.
+  memtomem 0.6.9 and earlier ignore the links and, when a bundle has any,
+  cannot verify its marker, so they import your own export as a foreign
+  bundle: the links are lost, every record goes through the redaction check
+  (one flagged record refuses the whole import unless it is forced), and a
+  restored `auto_consolidate` summary loses its policy ownership. This
+  matters for a second device or a restore target still on an older release.
+  Bundles from older releases import on 0.6.10 as before.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.11 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.6.10;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.6.10`, confirm with `mm --version`, then start a new
+  Claude Code session — the compatibility check is refreshed at session start,
+  and until then those hooks are skipped. See the
+  [CLI reference](docs/guides/reference/data-config-cli.md#cli-reference) for
+  what `mm upgrade` preserves and stops.
 
 ### Added
 
@@ -31,12 +52,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mem_cleanup_orphans` and `mm gc orphan-projects`, and is reported as
   archived (`mm status` `Archived`, doctor `archived_source` at info). Holds
   placed before the setting are lifted by the server's held-source recheck or
-  a compaction run, without a re-index. Only absence holds are lifted: an
-  unreadable file, an unavailable drive and a redaction-blocked file stay
-  held, and a path that now holds a directory is handled as before. Default
+  a compaction run, without a re-index. Only absence holds are lifted: a
+  file whose check fails with an error other than "not found" (unreadable,
+  or on a drive the system reports as unavailable) and a redaction-blocked
+  file stay held, and a path that now holds a directory is handled as before.
+  A file on a drive that reads as not found counts as missing. Default
   empty, so nothing changes until it is set.
 - **Changing a chunk whose source file is gone is refused with
-  `source_missing`.** `mem_edit` and `mem_delete` returned the raw `No such
+  `source_missing` (#2833).** `mem_edit` and `mem_delete` returned the raw `No such
   file or directory` error with the absolute path, and the web editor a 500;
   they now refuse before writing anything. The absence is decided where the
   file is read, so a file removed during the request is refused the same way.
@@ -55,6 +78,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   sources under a directory, so `--apply --yes --under DIR` deletes only
   those. `mem_cleanup_orphans` groups its preview the same way and takes an
   `under` parameter; an empty `under` is an error, not "no filter".
+- **Search queries no longer block the server while they run (#2856).** BM25
+  and dense search SQL ran on the event loop, so every other tool call, web
+  request and watcher event waited for it: one BM25 search for a common word
+  held the loop for up to about 520 ms on a 47k-chunk store. Both now run in
+  a worker thread on a pooled read-only connection. On a copy of that store,
+  with four BM25 and four dense searches running at once, the longest stall
+  of the loop fell from 858 ms to 1.3 ms. Each of the three pooled readers now
+  serves one read at a time, and a search that finds all three busy waits for
+  one instead of sharing it. A cancelled search returns once its query has
+  finished, since a running SQLite query is not interrupted.
+  **Known issue (#2863):** a read made inside another operation's write
+  transaction can now wait for a pooled reader while that operation holds the
+  writer. Policy consolidation (`auto_consolidate`) is the path where this
+  was seen: with all three readers busy with searches, a write that arrived
+  during that wait was refused with "SQLite transaction is owned by another
+  task". The five write transactions listed in the next entry wait out a busy
+  writer for up to 5 s. Any other call that needs the writer connection, such
+  as a namespace delete, is still refused at once, and that includes the
+  steps those five operations take before their transaction
+  (`mem_consolidate_apply` reading its preview, for one).
+- **Indexing, dedup merges, consolidation and import wait briefly for a busy
+  writer instead of failing (#2860).** A write transaction that found another
+  task holding the writer was refused at once. Five callers now wait in turn
+  for up to 5 s first: `index_file` after its embedding (so `mem_add`,
+  `mem_index` and a watcher reindex keep the embedding they paid for, where the
+  watcher used to drop the change), `mem_dedup_merge`, `auto_consolidate`'s
+  write of a group, `mem_consolidate_apply`'s linking of its summary, and an
+  import (`mem_import` and the web UI's import). A wait that runs out fails
+  as the refusal did, and an import then counts the chunk and relation
+  writes it had pending as failed (skipped records stay skipped). Every
+  other caller is still refused at once, with the same message as before.
 
 ### Fixed
 
@@ -68,6 +122,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   client session had restarted its server. A tool call cancelled during the
   reconcile now also puts the previous roots and backend back, so the next
   call retries the change instead of skipping it.
+- **The search detail panel's View/Edit and Diff/Edit buttons keep the right
+  label after a language switch (#2852).** Each button names the action it
+  takes next, but its translation key was fixed, so switching the language
+  put back the other state's label: in diff mode the button that returns to
+  the editor read "차이점" after switching to Korean, and before any switch the
+  labels were English in the Korean UI. Reset also left the Diff button
+  labelled "Edit"; it is relabelled now.
 - **A source that is a symlink loop is held instead of crashing on Python 3.12
   (#2841).** On 3.12 `Path.resolve()` raises `RuntimeError` for a loop, where
   3.13 and later return a path. Path normalization caught only `OSError`, so
@@ -256,9 +317,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   mem_consolidate first". Each scan now stores its groups with a fresh
   `preview_id`, and the apply deletes the key only while it still holds the
   value it read (`scratch_delete` takes `expected_value`, as `scratch_promote`
-  already did). After a refusal whose summary was appended, the message no
+  already did). After a refusal whose summary was already written, the message no
   longer says the preview was discarded when a newer one took its place. A kept
-  preview that lists the group just applied is refused when applied (#2802).
+  preview that lists the group just applied is refused when applied, once
+  that apply has linked the originals to its summary (#2802).
 - **A memory tool's privacy refusal names a remedy the caller can run
   (#2797).** The refusal 0.6.9 added told every caller to "run mem_index, or
   authorize it with `mm index --force-unsafe <file>`": an MCP tool name on the
@@ -277,6 +339,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- **The server no longer copies a whole `.env` file into its environment
+  (#2824).** It loaded the nearest `.env` with python-dotenv, which for a
+  `uvx` launch is usually `~/.env`, and every key there that was not already
+  set entered the server process and every subprocess it starts — API keys
+  for unrelated tools included, whatever environment filtering the MCP client
+  applied. Only `MEMTOMEM_*` keys (any case) are applied now; values are
+  resolved before anything is set, so the other keys never enter the
+  environment, and the left-out names are logged once at startup. Discovery,
+  `${VAR}` interpolation, `PYTHON_DOTENV_DISABLED` and the rule that an
+  exported value wins are unchanged. A quoted key containing `=` used to raise
+  out of server startup after the keys before it were set; it is now left out.
+  The loader relies on python-dotenv internals, so memtomem now requires
+  `python-dotenv>=1.2,<1.3` directly; it was already installed through
+  pydantic-settings, which sets no upper bound. An environment that needs
+  python-dotenv 1.3 or later for another package cannot install this release
+  alongside it.
+- Update the vendored DOMPurify used by the Web UI from 3.4.16 to 3.4.17
+  (#2840) for
+  [GHSA-c6gr-qvv4-5v3f](https://osv.dev/vulnerability/GHSA-c6gr-qvv4-5v3f)
+  (the SMIL `attributeName=href` guard is skipped under the
+  `application/xhtml+xml` parser media type),
+  [GHSA-cg2g-xh64-v4q7](https://osv.dev/vulnerability/GHSA-cg2g-xh64-v4q7)
+  (a `SAFE_FOR_TEMPLATES` bypass through attached shadow-root content) and
+  [GHSA-mrv2-3pqr-j5jr](https://osv.dev/vulnerability/GHSA-mrv2-3pqr-j5jr)
+  (in `IN_PLACE` mode, a hook that removes a parent or sibling leaves the
+  detached subtree's event handlers armed; an incomplete fix for
+  GHSA-p98j-92pf-mc4p). The Web UI's own code calls `DOMPurify.sanitize` on
+  rendered Markdown strings with the default options and no hooks, so it did
+  not use any of these paths; the update moves the shipped copy out of the
+  affected range, and the file's cache key advanced so browsers load it. The
+  DOMPurify built into the vendored Swagger UI bundle is 3.4.0, inside the
+  range of the first and third advisories; Swagger UI sanitizes strings with
+  the default parser media type, not in `IN_PLACE` mode, and its one hook
+  only adds `rel` to elements with an `href`.
 - Update locked certifi 2026.2.25 to 2026.10.19 for
   [GHSA-6q48-6c7w-9gw2](https://osv.dev/vulnerability/GHSA-6q48-6c7w-9gw2), and
   vite 8.3.2 to 8.3.4 in the browser test suite's lockfile
@@ -339,18 +435,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (1.19.4) still does. The plugin imports only types from that package and
   ships no dependencies, so it is recorded as an exception with the same
   2026-11-20 expiry rather than overridden past the pin.
-
-- **The server no longer copies a whole `.env` file into its environment
-  (#2824).** It loaded the nearest `.env` with python-dotenv, which for a
-  `uvx` launch is usually `~/.env`, and every key there that was not already
-  set entered the server process and every subprocess it starts — API keys
-  for unrelated tools included, whatever environment filtering the MCP client
-  applied. Only `MEMTOMEM_*` keys (any case) are applied now; values are
-  resolved before anything is set, so the other keys never enter the
-  environment, and the left-out names are logged once at startup. Discovery,
-  `${VAR}` interpolation, `PYTHON_DOTENV_DISABLED` and the rule that an
-  exported value wins are unchanged. A quoted key containing `=` used to raise
-  out of server startup after the keys before it were set; it is now left out.
 
 ## [0.6.9] — 2026-10-19
 
