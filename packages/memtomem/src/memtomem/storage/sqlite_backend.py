@@ -304,6 +304,8 @@ class SqliteBackend(
         # the single shared writer connection: another coroutine must never
         # observe, commit, or roll back this task's pending writes.
         self._transaction_owner: asyncio.Task[Any] | None = None
+        self._writer_waiters: deque[asyncio.Future[None]] = deque()
+        self._writer_wait_timeout: float = 10.0
         self._read_pool: list[sqlite3.Connection] = []
         self._read_pool_idx = 0
         self._read_pool_lock = threading.Lock()
@@ -938,6 +940,7 @@ class SqliteBackend(
         self._require_transaction_idle("close")
         self._closing = True
         self._notify_reader_waiters(all_waiters=True)
+        self._notify_writer_waiters(all_waiters=True)
         # A cancel while readers drain is held until the cleanup below has run.
         # Leaving early would strand every connection open with ``_closing``
         # set, so the store refuses all later leases and nothing closes it.
@@ -978,14 +981,54 @@ class SqliteBackend(
 
     # ---- transaction ---------------------------------------------------------
 
+    def _notify_writer_waiters(self, *, all_waiters: bool = False) -> None:
+        for waiter in list(self._writer_waiters):
+            if not waiter.done():
+                waiter.set_result(None)
+                if not all_waiters:
+                    break
+
+    async def _wait_for_writer_slot(self, task: asyncio.Task[Any]) -> None:
+        if self._transaction_owner is None and not self._writer_waiters:
+            if getattr(self, "_closing", False):
+                raise StorageError("Database is closing")
+            return
+        loop = asyncio.get_running_loop()
+        while True:
+            if getattr(self, "_closing", False):
+                raise StorageError("Database is closing")
+            waiter: asyncio.Future[None] = loop.create_future()
+            self._writer_waiters.append(waiter)
+            woken_cleanly = False
+            try:
+                await asyncio.wait_for(waiter, timeout=self._writer_wait_timeout)
+                woken_cleanly = True
+            except TimeoutError as exc:
+                raise TransactionOwnedError(
+                    "SQLite transaction is owned by another task; timed out waiting for writer lock"
+                ) from exc
+            finally:
+                try:
+                    self._writer_waiters.remove(waiter)
+                except ValueError:
+                    pass
+                if not woken_cleanly and waiter.done() and not waiter.cancelled():
+                    self._notify_writer_waiters()
+            if getattr(self, "_closing", False):
+                self._notify_writer_waiters()
+                raise StorageError("Database is closing")
+            if self._transaction_owner is None:
+                return
+
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[None]:
         """Async context manager for atomic multi-operation transactions.
 
         The context takes SQLite's write lock before yielding and is owned by
         the task that entered it. Transaction-aware methods called by that
-        task suppress their individual commits/rollbacks. Other tasks using
-        the shared writer connection fail closed and may retry after exit.
+        task suppress their individual commits/rollbacks. Competing tasks
+        entering ``transaction()`` wait in a FIFO queue up to
+        ``_writer_wait_timeout`` before raising ``TransactionOwnedError``.
 
         Composition depends on every participating writer suppressing its own
         commit and rollback, which most storage writers do not yet do (#2162).
@@ -1009,19 +1052,21 @@ class SqliteBackend(
             raise StorageError("Database is closing")
         if self._transaction_owner is task:
             raise StorageError("Nested transactions are not supported")
-        if self._transaction_owner is not None:
-            raise TransactionOwnedError(
-                "SQLite transaction is owned by another task; retry after it completes"
-            )
-        db = self._get_db()
-        if db.in_transaction:
-            raise StorageError(
-                "transaction() refused: the connection already has an open transaction"
-            )
+        if self._transaction_owner is not None or self._writer_waiters:
+            await self._wait_for_writer_slot(task)
         try:
-            db.execute("BEGIN IMMEDIATE")
-        except sqlite3.Error as exc:
-            raise StorageError(f"transaction() could not take the write lock: {exc}") from exc
+            db = self._get_db()
+            if db.in_transaction:
+                raise StorageError(
+                    "transaction() refused: the connection already has an open transaction"
+                )
+            try:
+                db.execute("BEGIN IMMEDIATE")
+            except sqlite3.Error as exc:
+                raise StorageError(f"transaction() could not take the write lock: {exc}") from exc
+        except BaseException:
+            self._notify_writer_waiters()
+            raise
 
         self._transaction_owner = task
         try:
@@ -1052,6 +1097,7 @@ class SqliteBackend(
             raise
         finally:
             self._transaction_owner = None
+            self._notify_writer_waiters()
 
     # ---- meta delegation -----------------------------------------------------
 

@@ -1,18 +1,22 @@
 """Concurrency hardening tests for SqliteBackend's reader pool.
 
 Covers:
-1. Same-task nested ``transaction()`` fails immediately with ``StorageError``.
-2. Unowned ``db.in_transaction`` on the writer connection fails immediately
+1. Competing tasks entering ``transaction()`` serialize in FIFO order, and a
+   waiter that times out raises ``TransactionOwnedError`` without corrupting
+   the queue for the tasks behind it.
+2. Same-task nested ``transaction()`` fails immediately with ``StorageError``
+   (never self-deadlocks in the writer queue).
+3. Unowned ``db.in_transaction`` on the writer connection fails immediately
    with ``StorageError``.
-3. Concurrent ``bm25_search`` and ``dense_search`` calls lease distinct pool
+4. Concurrent ``bm25_search`` and ``dense_search`` calls lease distinct pool
    connections, queue when concurrency exceeds pool size, and run in worker
    threads without sharing a single ``sqlite3.Connection`` concurrently.
-4. A sync reader never receives a leased pool connection.
-5. Cancelling a caller whose read runs in a worker thread keeps the lease until
+5. A sync reader never receives a leased pool connection.
+6. Cancelling a caller whose read runs in a worker thread keeps the lease until
    the worker returns, so neither another lease nor ``close()`` gets the
    connection while the worker still uses it -- including when every Task is
    cancelled at once, as ``asyncio.run`` does on shutdown.
-6. ``close()`` waits for in-flight leased readers to drain before closing pool
+7. ``close()`` waits for in-flight leased readers to drain before closing pool
    connections, still closes them when it is cancelled mid-drain, and rejects
    new read/write requests during shutdown with
    ``StorageError("Database is closing")``.
@@ -31,7 +35,7 @@ from uuid import uuid4
 import pytest
 
 from memtomem.config import StorageConfig
-from memtomem.errors import StorageError
+from memtomem.errors import StorageError, TransactionOwnedError
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
 from memtomem.storage.sqlite_backend import SqliteBackend
 
@@ -67,6 +71,82 @@ async def storage(tmp_path: Path):
         yield backend
     finally:
         await backend.close()
+
+
+async def test_competing_transactions_serialize_fifo(storage: SqliteBackend, tmp_path: Path):
+    """Multiple tasks calling transaction() concurrently wait in FIFO order and succeed."""
+    order: list[str] = []
+    t1_entered = asyncio.Event()
+    release_t1 = asyncio.Event()
+    t2_queued = asyncio.Event()
+
+    async def writer_one() -> None:
+        async with storage.transaction():
+            order.append("t1_enter")
+            t1_entered.set()
+            await release_t1.wait()
+            chunk = _make_chunk("alpha transaction content", source=tmp_path / "a.md", line=1)
+            await storage.upsert_chunks([chunk])
+            order.append("t1_exit")
+
+    async def writer_two() -> None:
+        await t1_entered.wait()
+        t2_queued.set()
+        async with storage.transaction():
+            order.append("t2_enter")
+            chunk = _make_chunk(
+                "beta transaction content",
+                source=tmp_path / "b.md",
+                line=1,
+                embedding=[0.4, 0.3, 0.2, 0.1],
+            )
+            await storage.upsert_chunks([chunk])
+            order.append("t2_exit")
+
+    task1 = asyncio.create_task(writer_one())
+    task2 = asyncio.create_task(writer_two())
+
+    await t2_queued.wait()
+    # Let task2 reach the writer waiter queue before releasing task1
+    await asyncio.sleep(0.02)
+    release_t1.set()
+
+    await asyncio.gather(task1, task2)
+    assert order == ["t1_enter", "t1_exit", "t2_enter", "t2_exit"]
+    stats = await storage.get_stats()
+    assert stats["total_chunks"] == 2
+
+
+async def test_transaction_waiter_timeout_raises_and_recovers(
+    storage: SqliteBackend, tmp_path: Path
+):
+    """A task timing out on the writer queue raises TransactionOwnedError and leaves the queue healthy."""
+    storage._writer_wait_timeout = 0.05
+    t1_entered = asyncio.Event()
+    release_t1 = asyncio.Event()
+
+    async def holder() -> None:
+        async with storage.transaction():
+            t1_entered.set()
+            await release_t1.wait()
+
+    holder_task = asyncio.create_task(holder())
+    await t1_entered.wait()
+
+    with pytest.raises(TransactionOwnedError):
+        async with storage.transaction():
+            pass
+
+    release_t1.set()
+    await holder_task
+
+    # Subsequent transactions still succeed after a timed-out waiter
+    async with storage.transaction():
+        chunk = _make_chunk("post-timeout write", source=tmp_path / "c.md", line=1)
+        await storage.upsert_chunks([chunk])
+
+    stats = await storage.get_stats()
+    assert stats["total_chunks"] == 1
 
 
 async def test_nested_same_task_transaction_refused_immediately(storage: SqliteBackend):
