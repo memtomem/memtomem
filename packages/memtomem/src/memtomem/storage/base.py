@@ -175,13 +175,23 @@ def parse_tag_filter(tag_filter: str | None) -> tuple[str, ...]:
     return tuple(sorted({t.strip() for t in tag_filter.split(",") if t.strip()}))
 
 
+#: Seconds a ``transaction(wait=...)`` caller that opted in (#2860) waits for a
+#: busy writer before ``TransactionOwnedError``. No measured hold time backs
+#: the value. It is sized under two existing budgets: SQLite's own 10 s busy
+#: timeout on the writer connection, which can follow the wait, and the web
+#: UI's 30 s request timeout. A wait plus a full busy timeout (15 s) still fits.
+WRITER_WAIT_S: float = 5.0
+
+
 class StorageBackend(Protocol):
     async def initialize(self) -> None: ...
     async def close(self) -> None: ...
 
     # Task-affine transaction. Implementations may restrict the body to
     # operations that explicitly participate in the outer commit/rollback.
-    def transaction(self) -> AbstractAsyncContextManager[None]: ...
+    # ``wait`` is how long a competing entry may queue for the writer; the
+    # default 0 refuses at once.
+    def transaction(self, *, wait: float = 0.0) -> AbstractAsyncContextManager[None]: ...
 
     # Chunk CRUD
     async def upsert_chunks(self, chunks: Sequence[Chunk]) -> int: ...

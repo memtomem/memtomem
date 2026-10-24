@@ -28,6 +28,7 @@ from uuid import UUID, uuid4
 
 from memtomem.errors import EmbeddingError, EmbeddingPolicyChangedError
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata, ChunkType
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.storage.sqlite_visibility import source_hidden
 from memtomem.tools.entity_sync import sync_entities_for_chunks
@@ -668,7 +669,7 @@ async def import_chunks(
             # without it, a chunk write that committed before the entity or
             # edge write failed would be reported as a failed import while its
             # rows stayed in the store.
-            async with storage.transaction():
+            async with storage.transaction(wait=WRITER_WAIT_S):
                 if to_upsert:
                     await storage.upsert_chunks(to_upsert)
                     # Imported content never passes through the indexing engine,

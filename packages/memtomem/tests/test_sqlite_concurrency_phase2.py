@@ -1,9 +1,13 @@
 """Concurrency hardening tests for SqliteBackend's reader pool.
 
 Covers:
-1. Competing tasks entering ``transaction()`` serialize in FIFO order, and a
-   waiter that times out raises ``TransactionOwnedError`` without corrupting
-   the queue for the tasks behind it.
+1. ``transaction(wait=...)`` (#2860): competing tasks that opt in queue in
+   FIFO order. A waiter that times out or is cancelled, before or after it was
+   granted the slot, does not stall the ones behind it. Newcomers never
+   overtake the queue, including in the moment after the owner exits and
+   before the next waiter resumes. ``close()`` refuses queued waiters. The
+   default ``transaction()`` never queues. Every production call site is
+   classified as opted in or not.
 2. Same-task nested ``transaction()`` fails immediately with ``StorageError``
    (never self-deadlocks in the writer queue).
 3. Unowned ``db.in_transaction`` on the writer connection fails immediately
@@ -24,6 +28,7 @@ Covers:
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import sqlite3
@@ -34,9 +39,11 @@ from uuid import uuid4
 
 import pytest
 
+import memtomem
 from memtomem.config import StorageConfig
 from memtomem.errors import StorageError, TransactionOwnedError
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_backend import SqliteBackend
 
 
@@ -73,80 +80,338 @@ async def storage(tmp_path: Path):
         await backend.close()
 
 
-async def test_competing_transactions_serialize_fifo(storage: SqliteBackend, tmp_path: Path):
-    """Multiple tasks calling transaction() concurrently wait in FIFO order and succeed."""
+async def _until(predicate, timeout: float = 2.0) -> None:
+    """Yield to the loop until ``predicate()`` holds; queue order is never left to a sleep."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            raise AssertionError("condition not reached")
+        await asyncio.sleep(0)
+
+
+async def _queue_writer(storage: SqliteBackend, name: str, order: list[str], tmp_path: Path):
+    """Queue behind the current owner, record entry, and commit one chunk."""
+    async with storage.transaction(wait=5.0):
+        order.append(name)
+        chunk = _make_chunk(f"{name} queued write", source=tmp_path / f"{name}.md")
+        await storage.upsert_chunks([chunk])
+
+
+def _assert_writer_idle(storage: SqliteBackend) -> None:
+    assert storage._transaction_owner is None
+    assert not storage._writer_waiters
+
+
+async def test_queued_writers_enter_in_fifo_order(storage: SqliteBackend, tmp_path: Path):
     order: list[str] = []
-    t1_entered = asyncio.Event()
-    release_t1 = asyncio.Event()
-    t2_queued = asyncio.Event()
-
-    async def writer_one() -> None:
-        async with storage.transaction():
-            order.append("t1_enter")
-            t1_entered.set()
-            await release_t1.wait()
-            chunk = _make_chunk("alpha transaction content", source=tmp_path / "a.md", line=1)
-            await storage.upsert_chunks([chunk])
-            order.append("t1_exit")
-
-    async def writer_two() -> None:
-        await t1_entered.wait()
-        t2_queued.set()
-        async with storage.transaction():
-            order.append("t2_enter")
-            chunk = _make_chunk(
-                "beta transaction content",
-                source=tmp_path / "b.md",
-                line=1,
-                embedding=[0.4, 0.3, 0.2, 0.1],
-            )
-            await storage.upsert_chunks([chunk])
-            order.append("t2_exit")
-
-    task1 = asyncio.create_task(writer_one())
-    task2 = asyncio.create_task(writer_two())
-
-    await t2_queued.wait()
-    # Let task2 reach the writer waiter queue before releasing task1
-    await asyncio.sleep(0.02)
-    release_t1.set()
-
-    await asyncio.gather(task1, task2)
-    assert order == ["t1_enter", "t1_exit", "t2_enter", "t2_exit"]
-    stats = await storage.get_stats()
-    assert stats["total_chunks"] == 2
-
-
-async def test_transaction_waiter_timeout_raises_and_recovers(
-    storage: SqliteBackend, tmp_path: Path
-):
-    """A task timing out on the writer queue raises TransactionOwnedError and leaves the queue healthy."""
-    storage._writer_wait_timeout = 0.05
-    t1_entered = asyncio.Event()
-    release_t1 = asyncio.Event()
+    entered, release = asyncio.Event(), asyncio.Event()
 
     async def holder() -> None:
         async with storage.transaction():
-            t1_entered.set()
-            await release_t1.wait()
+            entered.set()
+            await release.wait()
 
     holder_task = asyncio.create_task(holder())
-    await t1_entered.wait()
+    await entered.wait()
+    waiters = []
+    for i, name in enumerate(["w1", "w2", "w3"], start=1):
+        waiters.append(asyncio.create_task(_queue_writer(storage, name, order, tmp_path)))
+        await _until(lambda i=i: len(storage._writer_waiters) == i)
 
-    with pytest.raises(TransactionOwnedError):
+    release.set()
+    await asyncio.wait_for(asyncio.gather(holder_task, *waiters), 5)
+    assert order == ["w1", "w2", "w3"]
+    _assert_writer_idle(storage)
+    assert (await storage.get_stats())["total_chunks"] == 3
+
+
+async def test_timed_out_waiter_does_not_stall_the_one_behind_it(
+    storage: SqliteBackend, tmp_path: Path
+):
+    order: list[str] = []
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def holder() -> None:
         async with storage.transaction():
-            pass
+            entered.set()
+            await release.wait()
 
-    release_t1.set()
+    async def impatient() -> None:
+        async with storage.transaction(wait=0.05):
+            order.append("impatient")
+
+    holder_task = asyncio.create_task(holder())
+    await entered.wait()
+    impatient_task = asyncio.create_task(impatient())
+    await _until(lambda: len(storage._writer_waiters) == 1)
+    follower = asyncio.create_task(_queue_writer(storage, "follower", order, tmp_path))
+    await _until(lambda: len(storage._writer_waiters) == 2)
+
+    with pytest.raises(TransactionOwnedError, match="timed out waiting for writer lock"):
+        await impatient_task
+    assert len(storage._writer_waiters) == 1
+
+    release.set()
+    await asyncio.wait_for(asyncio.gather(holder_task, follower), 5)
+    assert order == ["follower"]
+    _assert_writer_idle(storage)
+    assert (await storage.get_stats())["total_chunks"] == 1
+
+
+async def test_cancelled_queued_waiter_leaves_the_queue(storage: SqliteBackend, tmp_path: Path):
+    order: list[str] = []
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def holder() -> None:
+        async with storage.transaction():
+            entered.set()
+            await release.wait()
+
+    holder_task = asyncio.create_task(holder())
+    await entered.wait()
+    first = asyncio.create_task(_queue_writer(storage, "first", order, tmp_path))
+    await _until(lambda: len(storage._writer_waiters) == 1)
+    second = asyncio.create_task(_queue_writer(storage, "second", order, tmp_path))
+    await _until(lambda: len(storage._writer_waiters) == 2)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert len(storage._writer_waiters) == 1
+
+    release.set()
+    await asyncio.wait_for(asyncio.gather(holder_task, second), 5)
+    assert order == ["second"]
+    _assert_writer_idle(storage)
+
+
+async def test_waiter_cancelled_after_its_grant_hands_the_slot_on(
+    storage: SqliteBackend, tmp_path: Path
+):
+    """The owner's exit grants ``first``; ``first`` is cancelled before it resumes."""
+    order: list[str] = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    tasks: dict[str, asyncio.Task[None]] = {}
+    granted_before_cancel: list[bool] = []
+
+    async def holder() -> None:
+        async with storage.transaction():
+            entered.set()
+            await release.wait()
+        # Nothing has awaited since the exit granted the head of the queue.
+        granted_before_cancel.append(storage._writer_waiters[0].done())
+        tasks["first"].cancel()
+
+    holder_task = asyncio.create_task(holder())
+    await entered.wait()
+    tasks["first"] = asyncio.create_task(_queue_writer(storage, "first", order, tmp_path))
+    await _until(lambda: len(storage._writer_waiters) == 1)
+    second = asyncio.create_task(_queue_writer(storage, "second", order, tmp_path))
+    await _until(lambda: len(storage._writer_waiters) == 2)
+
+    release.set()
     await holder_task
+    with pytest.raises(asyncio.CancelledError):
+        await tasks["first"]
+    await asyncio.wait_for(second, 5)
+    assert granted_before_cancel == [True]
+    assert order == ["second"]
+    _assert_writer_idle(storage)
 
-    # Subsequent transactions still succeed after a timed-out waiter
-    async with storage.transaction():
-        chunk = _make_chunk("post-timeout write", source=tmp_path / "c.md", line=1)
-        await storage.upsert_chunks([chunk])
 
-    stats = await storage.get_stats()
-    assert stats["total_chunks"] == 1
+async def test_default_transaction_refuses_at_once_and_never_queues(storage: SqliteBackend):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def holder() -> None:
+        async with storage.transaction():
+            entered.set()
+            await release.wait()
+
+    holder_task = asyncio.create_task(holder())
+    await entered.wait()
+    body_ran = False
+    for wait in (0.0, -1.0, float("nan")):
+        with pytest.raises(TransactionOwnedError, match="retry after it completes"):
+            async with storage.transaction(wait=wait):
+                body_ran = True
+        assert not storage._writer_waiters
+    assert not body_ran
+    release.set()
+    await holder_task
+    _assert_writer_idle(storage)
+
+
+async def test_newcomers_do_not_overtake_a_granted_waiter(storage: SqliteBackend, tmp_path: Path):
+    """In the moment after the owner exits, the head of the queue holds the slot.
+
+    The owner's exit grants ``queued`` without letting it run. Still inside the
+    former owner's task, with no await in between, a ``wait=0`` newcomer must be
+    refused, and a ``wait > 0`` newcomer must enter only after ``queued``.
+    Checking ``_transaction_owner`` alone would admit both.
+    """
+    order: list[str] = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    refusal: list[BaseException] = []
+
+    async def holder() -> None:
+        async with storage.transaction():
+            entered.set()
+            await release.wait()
+        assert storage._transaction_owner is None and storage._writer_waiters[0].done()
+        try:
+            async with storage.transaction():
+                order.append("newcomer-default")
+        except TransactionOwnedError as exc:
+            refusal.append(exc)
+        async with storage.transaction(wait=5.0):
+            order.append("newcomer-waiting")
+
+    holder_task = asyncio.create_task(holder())
+    await entered.wait()
+    queued = asyncio.create_task(_queue_writer(storage, "queued", order, tmp_path))
+    await _until(lambda: len(storage._writer_waiters) == 1)
+
+    release.set()
+    await asyncio.wait_for(asyncio.gather(holder_task, queued), 5)
+    assert len(refusal) == 1
+    assert order == ["queued", "newcomer-waiting"]
+    _assert_writer_idle(storage)
+
+
+async def test_unowned_open_transaction_refuses_before_queueing(
+    storage: SqliteBackend, tmp_path: Path
+):
+    """With the owner gone and a waiter queued, an unowned transaction is refused by both budgets."""
+    order: list[str] = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    refusals: list[tuple[float, BaseException]] = []
+
+    async def holder() -> None:
+        async with storage.transaction():
+            entered.set()
+            await release.wait()
+        assert storage._db is not None
+        storage._db.execute("BEGIN IMMEDIATE")
+        try:
+            for wait in (0.0, 0.5):
+                try:
+                    async with storage.transaction(wait=wait):
+                        order.append(f"entered-{wait}")
+                except StorageError as exc:
+                    refusals.append((wait, exc))
+                assert len(storage._writer_waiters) == 1
+        finally:
+            storage._db.rollback()
+
+    holder_task = asyncio.create_task(holder())
+    await entered.wait()
+    queued = asyncio.create_task(_queue_writer(storage, "queued", order, tmp_path))
+    await _until(lambda: len(storage._writer_waiters) == 1)
+
+    release.set()
+    await asyncio.wait_for(asyncio.gather(holder_task, queued), 5)
+    assert [w for w, _ in refusals] == [0.0, 0.5]
+    for _, exc in refusals:
+        assert type(exc) is StorageError
+        assert "already has an open transaction" in str(exc)
+    assert order == ["queued"]
+    _assert_writer_idle(storage)
+
+
+async def test_delete_by_namespace_is_refused_while_a_grant_is_pending(
+    storage: SqliteBackend, tmp_path: Path
+):
+    """The documented exception: a default caller that main would have let in.
+
+    ``delete_by_namespace``'s own ``_get_db()`` sees no owner, so it reaches
+    ``transaction()``, which refuses it rather than letting it ahead of the
+    waiter the owner's exit has just granted.
+    """
+    order: list[str] = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    refusal: list[BaseException] = []
+
+    async def holder() -> None:
+        async with storage.transaction():
+            entered.set()
+            await release.wait()
+        try:
+            await storage.delete_by_namespace("default")
+        except TransactionOwnedError as exc:
+            refusal.append(exc)
+        assert len(storage._writer_waiters) == 1
+
+    holder_task = asyncio.create_task(holder())
+    await entered.wait()
+    queued = asyncio.create_task(_queue_writer(storage, "queued", order, tmp_path))
+    await _until(lambda: len(storage._writer_waiters) == 1)
+
+    release.set()
+    await asyncio.wait_for(asyncio.gather(holder_task, queued), 5)
+    assert len(refusal) == 1
+    assert order == ["queued"]
+    assert (await storage.get_stats())["total_chunks"] == 1
+
+
+async def test_close_refuses_writers_queued_behind_a_released_owner(
+    storage: SqliteBackend, tmp_path: Path
+):
+    order: list[str] = []
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def holder() -> None:
+        async with storage.transaction():
+            entered.set()
+            await release.wait()
+        # close() before the granted waiter resumes; it has nothing to drain.
+        await storage.close()
+
+    holder_task = asyncio.create_task(holder())
+    await entered.wait()
+    queued = asyncio.create_task(_queue_writer(storage, "queued", order, tmp_path))
+    await _until(lambda: len(storage._writer_waiters) == 1)
+
+    release.set()
+    await asyncio.wait_for(holder_task, 5)
+    with pytest.raises(StorageError, match="Database is closing"):
+        await asyncio.wait_for(queued, 5)
+    assert order == []
+    assert not storage._writer_waiters
+
+
+#: Production ``transaction()`` call sites and whether each opts into waiting
+#: (#2860). A new site must be added here, deciding which it is.
+_TRANSACTION_SITES = {
+    "indexing/engine.py": [True],
+    "search/dedup.py": [True],
+    "server/tools/consolidation.py": [True],
+    "storage/sqlite_backend.py": [False],
+    "tools/consolidation_engine.py": [True],
+    "tools/entity_backfill.py": [False],
+    "tools/export_import.py": [True],
+}
+
+
+def test_every_transaction_call_site_is_classified():
+    src = Path(memtomem.__file__).parent
+    found: dict[str, list[bool]] = {}
+    for path in sorted(src.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "transaction"
+            ):
+                continue
+            waits = [kw for kw in node.keywords if kw.arg == "wait"]
+            if waits:
+                assert isinstance(waits[0].value, ast.Name) and waits[0].value.id == (
+                    "WRITER_WAIT_S"
+                ), f"{path}:{node.lineno} waits on something other than WRITER_WAIT_S"
+            found.setdefault(path.relative_to(src).as_posix(), []).append(bool(waits))
+    assert found == _TRANSACTION_SITES
+    assert WRITER_WAIT_S == 5.0
 
 
 async def test_nested_same_task_transaction_refused_immediately(storage: SqliteBackend):

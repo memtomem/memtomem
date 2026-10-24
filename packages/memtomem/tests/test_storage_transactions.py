@@ -1165,7 +1165,6 @@ async def test_foreign_task_refusal_is_a_typed_error(storage):
 
     owner_ready = asyncio.Event()
     release_owner = asyncio.Event()
-    storage._writer_wait_timeout = 0.05
 
     async def owner() -> None:
         async with storage.transaction():

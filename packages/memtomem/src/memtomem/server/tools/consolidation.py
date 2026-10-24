@@ -12,6 +12,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.storage.base import WRITER_WAIT_S
 
 if TYPE_CHECKING:
     from memtomem.models import IndexingStats
@@ -422,7 +423,7 @@ async def mem_consolidate_apply(
         # and these writes.
         decayed_ids: list[str] = []
         try:
-            async with app.storage.transaction():
+            async with app.storage.transaction(wait=WRITER_WAIT_S):
                 live = await app.storage.get_chunks_batch(chunk_uuids) if chunk_uuids else {}
                 unavailable = await app.storage.is_source_hidden(Path(group["source"]))
                 for chunk in live.values():

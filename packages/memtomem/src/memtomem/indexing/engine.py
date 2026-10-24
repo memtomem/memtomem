@@ -49,6 +49,7 @@ from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.indexing.redaction_exemption import declared_exemption, indexer_text
 from memtomem.indexing.source_receipt import chunker_versions, code_fingerprint, digest
 from memtomem.models import Chunk, IndexingStats, stored_namespace
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
 from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
 from memtomem.storage.sqlite_helpers import norm_path
@@ -2601,8 +2602,9 @@ class IndexEngine:
         embed_ms = (time.monotonic() - embed_started) * 1000
         database_started = time.monotonic()
         # Now safe to mutate DB — embedding succeeded.
-        # Wrap delete+upsert in a single transaction for atomicity.
-        async with self._storage.transaction():
+        # Wrap delete+upsert in a single transaction for atomicity. A busy
+        # writer is waited out briefly rather than throwing away the embedding.
+        async with self._storage.transaction(wait=WRITER_WAIT_S):
             await self._validate_source_commit(file_path)
             carried_sources = await self._summary_coverage_to_carry(
                 file_path, decision_path, existing_state, diff_result

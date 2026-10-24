@@ -53,6 +53,7 @@ class _FakeStorage:
         self.dense_enabled = dense_enabled
         self.held_sources = held_sources or set()
         self.transactions = 0
+        self.transaction_waits: list[float] = []
         self.finalized: list[bool] = []
         self.batch_reads: list[list[UUID]] = []
         self.deletes: list[list[UUID]] = []
@@ -74,8 +75,9 @@ class _FakeStorage:
         return source in self.held_sources
 
     @asynccontextmanager
-    async def transaction(self):
+    async def transaction(self, *, wait: float = 0.0):
         self.transactions += 1
+        self.transaction_waits.append(wait)
         yield
 
     async def get_chunks_batch(self, ids: list[UUID]) -> dict[UUID, Chunk]:

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from memtomem.models import Chunk
+from memtomem.storage.base import WRITER_WAIT_S
 
 if TYPE_CHECKING:
     from memtomem.storage.base import StorageBackend
@@ -142,7 +143,7 @@ class DedupScanner:
         # after the check would still lose its rows to the delete. Reading
         # under the lock also keeps a concurrent tag edit on the keeper from
         # being overwritten by the merged tags.
-        async with self._storage.transaction():
+        async with self._storage.transaction(wait=WRITER_WAIT_S):
             chunks_map = await self._storage.get_chunks_batch([keep_id, *delete_ids])
             keep_chunk = chunks_map.get(keep_id)
             if keep_chunk is None:

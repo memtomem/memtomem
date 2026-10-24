@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from memtomem.errors import StorageError
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.models import (
     CONSOLIDATED_SUFFIX,
     ORIGIN_CONSOLIDATION_POLICY,
@@ -514,7 +515,7 @@ async def apply_consolidation(
     # entities, its ``consolidated_into`` edges, or the originals' decay failed
     # would never be revisited — the hole would be permanent rather than retried
     # (#2155 for entities, #2158 for the rest).
-    async with storage.transaction():
+    async with storage.transaction(wait=WRITER_WAIT_S):
         # A watcher can journal an unavailable source after candidate
         # discovery. Check under SQLite's write lock before publishing a
         # summary derived from chunks that are now hidden.
