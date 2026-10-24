@@ -170,7 +170,14 @@ class SourceHoldOps:
         expected_generation: int | None = None,
         validated: bool = True,
     ) -> bool:
-        """Lift a source's hold; ``validated=False`` for a presence-only release."""
+        """Lift a source's hold; ``validated=False`` for a presence-only release.
+
+        ``validated`` means the caller has just indexed the current content
+        cleanly. A caller that only saw the file exist passes ``False``, and a
+        ``redaction_blocked`` hold then stays: its file is present, and the
+        reason it is held is what the file contains (#2629). The reason is
+        read under the writer lock, in the transaction that clears it.
+        """
         db = self._get_db()
         source = norm_path(source_file)
         changed = False
@@ -215,7 +222,24 @@ class SourceHoldOps:
         return changed
 
     async def release_absence_hold(self, source_key: str) -> bool:
-        """Show a retained source again while it is hidden only for being gone (#2833)."""
+        """Show a retained source again while it is hidden only for being gone (#2833).
+
+        ``source_key`` is the stored spelling (a ``held_sources`` or
+        ``pending_source_checks`` row, or ``norm_path`` of the file for the
+        engine, which writes holds under that key). It is matched as is: a
+        stored key re-resolved after a parent became a symlink would name a
+        different row and leave this one hidden.
+
+        The held row goes only while its reason is in
+        :data:`ABSENCE_HOLD_REASONS`, checked under the writer lock, so a hold
+        that has since become ``scan_unavailable`` or ``redaction_blocked``
+        stays. The pending row (a journaled delete) goes only when no other
+        hold remains, because for a retained source a delete is what the
+        archive is for. ``hold_source`` still overwrites one availability
+        reason with another, so a concurrent absence hold can turn an
+        unavailable hold into a releasable one; that exposes only an archived
+        source the user chose to keep, never a redaction hold.
+        """
         db = self._get_db()
         if db.in_transaction and not self._in_transaction:
             raise TransactionOwnedError("release_absence_hold refused an unowned transaction")
@@ -271,7 +295,11 @@ class SourceHoldOps:
             return {Path(row[0]) for row in rows}
 
     async def is_source_hidden(self, source_file: Path) -> bool:
-        """Include a policy summary's parent in path-level visibility."""
+        """Include a policy summary's parent in path-level visibility.
+
+        ``source_file`` is compared as stored, like :meth:`is_source_held`, and
+        read the same way.
+        """
         async with self._lease_txn_read_db() as db:
             source = str(source_file)
             if (
@@ -297,7 +325,17 @@ class SourceHoldOps:
             )
 
     async def is_source_held(self, source_file: Path) -> bool:
-        """Whether a stored source path is held or pending, compared as stored."""
+        """Whether a stored source path is held or pending, compared as stored.
+
+        Callers pass a path read back from the store. Resolving it again would
+        follow a symlink placed at a held source's path to some other file and
+        miss the hold; a caller holding a filesystem path normalises it first.
+
+        Inside the caller's own ``transaction()`` this reads the writer. A pool
+        connection with another thread's statement still open keeps an older
+        snapshot, so a check meant to run under the write lock could otherwise
+        miss a hold committed before the lock was taken.
+        """
         async with self._lease_txn_read_db() as db:
             source = str(source_file)
             return (
@@ -310,7 +348,10 @@ class SourceHoldOps:
             )
 
     async def is_source_pending(self, source_file: Path) -> bool:
-        """Take a filesystem path and normalise it as ``hold_source`` keys rows."""
+        """Take a filesystem path and normalise it as ``hold_source`` keys rows.
+
+        Unlike :meth:`is_source_held`, whose callers pass stored paths.
+        """
         async with self._lease_read_db() as db:
             return (
                 db.execute(
@@ -337,7 +378,12 @@ class SourceHoldOps:
             return int(row[0]) if row else 0
 
     async def source_hold_snapshot(self, source_file: Path) -> int | None:
-        """Return one source's generation only when it is hidden."""
+        """Return one source's generation only when it is hidden.
+
+        Visibility and generation come from one SQLite statement so a watcher
+        delete cannot slip between separate reads at index start. Takes the
+        filesystem path being indexed, normalised like :meth:`is_source_pending`.
+        """
         async with self._lease_read_db() as db:
             source = norm_path(source_file)
             row = db.execute(
@@ -350,8 +396,24 @@ class SourceHoldOps:
             return int(row[0]) if row else None
 
     def queue_source_check_sync(self, source_file: Path) -> bool:
-        """Journal a watcher delete before its volatile debounce queue accepts it."""
+        """Journal a watcher delete before its volatile debounce queue accepts it.
+
+        Watchdog invokes handlers on its own thread, so use a short-lived WAL
+        writer rather than the task-owned connection. Only indexed paths are
+        recorded. Every delete advances the visibility epoch, including a
+        repeated event for an already pending path, so an older index pass
+        cannot clear the newer event's check.
+        """
+        # The observer's root was resolved when it was scheduled. A deletion
+        # callback must not resolve the path again: a detached network mount
+        # can make that syscall block the watchdog thread indefinitely. A
+        # symlinked subpath may therefore miss the resolved chunks key; the
+        # live queue still receives the event, but restart replay is not
+        # guaranteed for that path.
         source = fold_path_form(os.path.abspath(os.path.expanduser(str(source_file))))
+        # A contended writer must not park watchdog's observer thread for a
+        # full debounce window per event. The event still enters the queue if
+        # this best-effort journal write times out.
         sqlite_path = self._sqlite_path_getter() if self._sqlite_path_getter is not None else ""
         db = sqlite3.connect(str(Path(sqlite_path).expanduser()), timeout=0.05)
         try:

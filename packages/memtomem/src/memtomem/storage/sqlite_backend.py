@@ -302,8 +302,6 @@ class SqliteBackend(
         # the single shared writer connection: another coroutine must never
         # observe, commit, or roll back this task's pending writes.
         self._transaction_owner: asyncio.Task[Any] | None = None
-        self._writer_waiters: deque[asyncio.Future[None]] = deque()
-        self._writer_wait_timeout: float = 10.0
         self._read_pool: list[sqlite3.Connection] = []
         self._read_pool_idx = 0
         self._read_pool_lock = threading.Lock()
@@ -381,34 +379,12 @@ class SqliteBackend(
             # Read-only connection pool for concurrent search operations
             stage = "read_pool"
             for _ in range(3):
-                rconn = sqlite3.connect(str(db_path), timeout=10, check_same_thread=False)
                 try:
-                    rconn.create_function(
-                        "memtomem_source_match", 2, match_source_filter_value, deterministic=True
-                    )
-                    rconn.create_function(
-                        "memtomem_list_admit", 3, source_namespaces_admit_sql, deterministic=True
-                    )
-                    rconn.execute("PRAGMA journal_mode=WAL")
-                    rconn.enable_load_extension(True)
-                    sqlite_vec.load(rconn)
-                    rconn.enable_load_extension(False)
-                    rconn.execute("PRAGMA query_only=ON")
+                    rconn = self._open_read_connection()
                 except Exception as exc:
                     # Never publish a reader that lacks sqlite-vec: round-robin
                     # dense searches would then fail nondeterministically only
                     # when they land on that one connection.
-                    try:
-                        rconn.enable_load_extension(False)
-                    except Exception:
-                        # Re-locking the extension loader is hygiene on a
-                        # connection already being discarded; the close below
-                        # is what actually matters.
-                        logger.debug(
-                            "Could not re-lock extension loading on a discarded reader",
-                            exc_info=True,
-                        )
-                    rconn.close()
                     logger.warning("Discarding unusable read pool connection: %s", exc)
                     continue
                 self._read_pool.append(rconn)
@@ -747,10 +723,10 @@ class SqliteBackend(
         if getattr(self, "_closing", False):
             raise StorageError("Database is closing")
         if "_get_read_db" in self.__dict__ or not self._read_pool:
-            conn = self._get_read_db()
+            direct_conn = self._get_read_db()
             self._increment_active_readers()
             try:
-                yield conn
+                yield direct_conn
             finally:
                 self._decrement_active_readers()
             return
@@ -813,16 +789,47 @@ class SqliteBackend(
         async with self._lease_read_db() as conn:
             yield conn
 
+    def _open_read_connection(self) -> sqlite3.Connection:
+        """Open one query-only reader with the functions and sqlite-vec a pooled reader carries."""
+        db_path = Path(self._config.sqlite_path).expanduser()
+        rconn = sqlite3.connect(str(db_path), timeout=10, check_same_thread=False)
+        try:
+            rconn.create_function(
+                "memtomem_source_match", 2, match_source_filter_value, deterministic=True
+            )
+            rconn.create_function(
+                "memtomem_list_admit", 3, source_namespaces_admit_sql, deterministic=True
+            )
+            rconn.execute("PRAGMA journal_mode=WAL")
+            rconn.enable_load_extension(True)
+            sqlite_vec.load(rconn)
+            rconn.enable_load_extension(False)
+            rconn.execute("PRAGMA query_only=ON")
+        except Exception:
+            try:
+                rconn.enable_load_extension(False)
+            except Exception:
+                # Re-locking the extension loader is hygiene on a
+                # connection already being discarded; the close below
+                # is what actually matters.
+                logger.debug(
+                    "Could not re-lock extension loading on a discarded reader",
+                    exc_info=True,
+                )
+            rconn.close()
+            raise
+        return rconn
+
     @contextmanager
     def _lease_read_db_sync(self) -> Iterator[sqlite3.Connection]:
         """Synchronous read-pool lease for sync callers (e.g. eval fingerprint readers)."""
         if getattr(self, "_closing", False):
             raise StorageError("Database is closing")
         if "_get_read_db" in self.__dict__ or not self._read_pool:
-            conn = self._get_read_db()
+            direct_conn = self._get_read_db()
             self._increment_active_readers()
             try:
-                yield conn
+                yield direct_conn
             finally:
                 self._decrement_active_readers()
             return
@@ -839,9 +846,14 @@ class SqliteBackend(
                     conn = candidate
                     leased_exclusive = True
                     break
-            if conn is None:
-                conn = self._read_pool[self._read_pool_idx % pool_len]
-                self._read_pool_idx += 1
+        private = False
+        if conn is None:
+            # Every pooled reader is leased, possibly to a worker thread
+            # mid-query. A sync caller cannot await one, and handing it a
+            # leased connection would run two threads on one sqlite3
+            # handle, so it reads on a connection of its own.
+            conn = self._open_read_connection()
+            private = True
         self._increment_active_readers()
         try:
             self._check_schema_current(conn)
@@ -850,6 +862,9 @@ class SqliteBackend(
             if leased_exclusive:
                 with self._read_pool_lock:
                     self._in_use_readers.discard(id(conn))
+            if private:
+                self._schema_checked_at.pop(id(conn), None)
+                conn.close()
             self._decrement_active_readers()
             self._notify_reader_waiters()
 
@@ -896,7 +911,6 @@ class SqliteBackend(
         self._require_transaction_idle("close")
         self._closing = True
         self._notify_reader_waiters(all_waiters=True)
-        self._notify_writer_waiters(all_waiters=True)
         if hasattr(self, "_readers_drained"):
             await self._readers_drained.wait()
         for rconn in getattr(self, "_read_pool", []):
@@ -927,54 +941,14 @@ class SqliteBackend(
 
     # ---- transaction ---------------------------------------------------------
 
-    def _notify_writer_waiters(self, *, all_waiters: bool = False) -> None:
-        for waiter in list(self._writer_waiters):
-            if not waiter.done():
-                waiter.set_result(None)
-                if not all_waiters:
-                    break
-
-    async def _wait_for_writer_slot(self, task: asyncio.Task[Any]) -> None:
-        if self._transaction_owner is None and not self._writer_waiters:
-            if getattr(self, "_closing", False):
-                raise StorageError("Database is closing")
-            return
-        loop = asyncio.get_running_loop()
-        while True:
-            if getattr(self, "_closing", False):
-                raise StorageError("Database is closing")
-            waiter: asyncio.Future[None] = loop.create_future()
-            self._writer_waiters.append(waiter)
-            woken_cleanly = False
-            try:
-                await asyncio.wait_for(waiter, timeout=self._writer_wait_timeout)
-                woken_cleanly = True
-            except TimeoutError as exc:
-                raise TransactionOwnedError(
-                    "SQLite transaction is owned by another task; timed out waiting for writer lock"
-                ) from exc
-            finally:
-                try:
-                    self._writer_waiters.remove(waiter)
-                except ValueError:
-                    pass
-                if not woken_cleanly and waiter.done() and not waiter.cancelled():
-                    self._notify_writer_waiters()
-            if getattr(self, "_closing", False):
-                self._notify_writer_waiters()
-                raise StorageError("Database is closing")
-            if self._transaction_owner is None:
-                return
-
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[None]:
         """Async context manager for atomic multi-operation transactions.
 
         The context takes SQLite's write lock before yielding and is owned by
         the task that entered it. Transaction-aware methods called by that
-        task suppress their individual commits/rollbacks. Competing tasks
-        entering ``transaction()`` wait in a FIFO queue up to
-        ``_writer_wait_timeout`` before raising ``TransactionOwnedError``.
+        task suppress their individual commits/rollbacks. Other tasks using
+        the shared writer connection fail closed and may retry after exit.
 
         Composition depends on every participating writer suppressing its own
         commit and rollback, which most storage writers do not yet do (#2162).
@@ -998,21 +972,19 @@ class SqliteBackend(
             raise StorageError("Database is closing")
         if self._transaction_owner is task:
             raise StorageError("Nested transactions are not supported")
-        if self._transaction_owner is not None or self._writer_waiters:
-            await self._wait_for_writer_slot(task)
+        if self._transaction_owner is not None:
+            raise TransactionOwnedError(
+                "SQLite transaction is owned by another task; retry after it completes"
+            )
+        db = self._get_db()
+        if db.in_transaction:
+            raise StorageError(
+                "transaction() refused: the connection already has an open transaction"
+            )
         try:
-            db = self._get_db()
-            if db.in_transaction:
-                raise StorageError(
-                    "transaction() refused: the connection already has an open transaction"
-                )
-            try:
-                db.execute("BEGIN IMMEDIATE")
-            except sqlite3.Error as exc:
-                raise StorageError(f"transaction() could not take the write lock: {exc}") from exc
-        except BaseException:
-            self._notify_writer_waiters()
-            raise
+            db.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error as exc:
+            raise StorageError(f"transaction() could not take the write lock: {exc}") from exc
 
         self._transaction_owner = task
         try:
@@ -1043,7 +1015,6 @@ class SqliteBackend(
             raise
         finally:
             self._transaction_owner = None
-            self._notify_writer_waiters()
 
     # ---- meta delegation -----------------------------------------------------
 

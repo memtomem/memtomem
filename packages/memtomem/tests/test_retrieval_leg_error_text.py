@@ -82,10 +82,10 @@ def test_storage_remediation_errors_carry_public_text_at_every_raise(exc_type):
     import ast
     import inspect
 
-    from memtomem.storage import sqlite_backend, sqlite_schema
+    from memtomem.storage import sqlite_backend, sqlite_schema, sqlite_search_ops
 
     raises = []
-    for module in (sqlite_backend, sqlite_schema):
+    for module in (sqlite_backend, sqlite_schema, sqlite_search_ops):
         for node in ast.walk(ast.parse(inspect.getsource(module))):
             if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
                 call = node.exc

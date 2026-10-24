@@ -5559,7 +5559,7 @@
       "code": "1152             # ``_chunks_table_column_count`` consumer below.\n1153             sql = f\"\"\"SELECT c.*, fts.rank\n1154                    FROM chunks_fts fts\n1155                    JOIN chunks c ON c.rowid = fts.rowid\n1156                    WHERE chunks_fts MATCH ? {ns_clause} {scope_clause}\n1157                    ORDER BY fts.rank, {tie_break}\n1158                    LIMIT ?\"\"\"\n1159 \n",
       "col_offset": 22,
       "end_col_offset": 44,
-      "filename": "packages/memtomem/src/memtomem/storage/sqlite_backend.py",
+      "filename": "packages/memtomem/src/memtomem/storage/sqlite_search_ops.py",
       "issue_confidence": "LOW",
       "issue_cwe": {
         "id": 89,
@@ -5584,7 +5584,7 @@
       "code": "1231         # row.\"\n1232         sql = f\"\"\"SELECT c.*, sub.distance\n1233                FROM (\n1234                    SELECT rowid, distance\n1235                    FROM chunks_vec\n1236                    WHERE embedding MATCH ?\n1237                    ORDER BY distance\n1238                    LIMIT ?\n1239                ) sub\n1240                JOIN chunks c ON c.rowid = sub.rowid {ns_clause} {scope_clause}\n1241                ORDER BY sub.distance, {tie_break}\n1242                LIMIT ?\"\"\"\n1243 \n",
       "col_offset": 18,
       "end_col_offset": 52,
-      "filename": "packages/memtomem/src/memtomem/storage/sqlite_backend.py",
+      "filename": "packages/memtomem/src/memtomem/storage/sqlite_search_ops.py",
       "issue_confidence": "LOW",
       "issue_cwe": {
         "id": 89,
@@ -5686,7 +5686,7 @@
       "code": "1487         rows = db.execute(\n1488             f\"SELECT * FROM chunks WHERE source_file IN ({placeholders(len(norm_paths))}) \"\n1489             \"ORDER BY source_file, start_line\",\n1490             norm_paths,\n",
       "col_offset": 14,
       "end_col_offset": 57,
-      "filename": "packages/memtomem/src/memtomem/storage/sqlite_backend.py",
+      "filename": "packages/memtomem/src/memtomem/storage/sqlite_source_holds_ops.py",
       "issue_confidence": "MEDIUM",
       "issue_cwe": {
         "id": 89,
@@ -5728,7 +5728,7 @@
       "code": "1555         rows = db.execute(\n1556             f\"SELECT * FROM chunks {where} \"\n1557             f\"ORDER BY created_at DESC, {scope_sort_priority_case()} LIMIT ?\",\n1558             params,\n",
       "col_offset": 14,
       "end_col_offset": 35,
-      "filename": "packages/memtomem/src/memtomem/storage/sqlite_backend.py",
+      "filename": "packages/memtomem/src/memtomem/storage/sqlite_search_ops.py",
       "issue_confidence": "MEDIUM",
       "issue_cwe": {
         "id": 89,

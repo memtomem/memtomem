@@ -1,18 +1,14 @@
-"""Phase 2 concurrency hardening tests for SqliteBackend.
+"""Concurrency hardening tests for SqliteBackend's reader pool.
 
 Covers:
-1. Competing tasks entering ``transaction()`` serialize in FIFO order rather
-   than immediately failing with ``TransactionOwnedError``.
-2. Waiter timeout in ``transaction()`` raises ``TransactionOwnedError`` without
-   corrupting the writer queue for subsequent tasks.
-3. Same-task nested ``transaction()`` fails immediately with ``StorageError``
-   (never self-deadlocks in the writer queue).
-4. Unowned ``db.in_transaction`` on the writer connection fails immediately
+1. Same-task nested ``transaction()`` fails immediately with ``StorageError``.
+2. Unowned ``db.in_transaction`` on the writer connection fails immediately
    with ``StorageError``.
-5. Concurrent ``bm25_search`` and ``dense_search`` calls lease distinct pool
+3. Concurrent ``bm25_search`` and ``dense_search`` calls lease distinct pool
    connections, queue when concurrency exceeds pool size, and run in worker
    threads without sharing a single ``sqlite3.Connection`` concurrently.
-6. ``close()`` waits for in-flight leased readers to drain before closing pool
+4. A sync reader never receives a leased pool connection.
+5. ``close()`` waits for in-flight leased readers to drain before closing pool
    connections, and rejects new read/write requests during shutdown with
    ``StorageError("Database is closing")``.
 """
@@ -20,13 +16,15 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from memtomem.config import StorageConfig
-from memtomem.errors import StorageError, TransactionOwnedError
+from memtomem.errors import StorageError
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
 from memtomem.storage.sqlite_backend import SqliteBackend
 
@@ -64,85 +62,8 @@ async def storage(tmp_path: Path):
         await backend.close()
 
 
-async def test_competing_transactions_serialize_fifo(storage: SqliteBackend, tmp_path: Path):
-    """Multiple tasks calling transaction() concurrently wait in FIFO order and succeed."""
-    order: list[str] = []
-    t1_entered = asyncio.Event()
-    release_t1 = asyncio.Event()
-    t2_queued = asyncio.Event()
-
-    async def writer_one() -> None:
-        async with storage.transaction():
-            order.append("t1_enter")
-            t1_entered.set()
-            await release_t1.wait()
-            chunk = _make_chunk("alpha transaction content", source=tmp_path / "a.md", line=1)
-            await storage.upsert_chunks([chunk])
-            order.append("t1_exit")
-
-    async def writer_two() -> None:
-        await t1_entered.wait()
-        t2_queued.set()
-        async with storage.transaction():
-            order.append("t2_enter")
-            chunk = _make_chunk(
-                "beta transaction content",
-                source=tmp_path / "b.md",
-                line=1,
-                embedding=[0.4, 0.3, 0.2, 0.1],
-            )
-            await storage.upsert_chunks([chunk])
-            order.append("t2_exit")
-
-    task1 = asyncio.create_task(writer_one())
-    task2 = asyncio.create_task(writer_two())
-
-    await t2_queued.wait()
-    # Let task2 reach the writer waiter queue before releasing task1
-    await asyncio.sleep(0.02)
-    release_t1.set()
-
-    await asyncio.gather(task1, task2)
-    assert order == ["t1_enter", "t1_exit", "t2_enter", "t2_exit"]
-    stats = await storage.get_stats()
-    assert stats["total_chunks"] == 2
-
-
-async def test_transaction_waiter_timeout_raises_and_recovers(
-    storage: SqliteBackend, tmp_path: Path
-):
-    """A task timing out on the writer queue raises TransactionOwnedError and leaves the queue healthy."""
-    storage._writer_wait_timeout = 0.05
-    t1_entered = asyncio.Event()
-    release_t1 = asyncio.Event()
-
-    async def holder() -> None:
-        async with storage.transaction():
-            t1_entered.set()
-            await release_t1.wait()
-
-    holder_task = asyncio.create_task(holder())
-    await t1_entered.wait()
-
-    with pytest.raises(TransactionOwnedError):
-        async with storage.transaction():
-            pass
-
-    release_t1.set()
-    await holder_task
-
-    # Subsequent transactions still succeed after a timed-out waiter
-    async with storage.transaction():
-        chunk = _make_chunk("post-timeout write", source=tmp_path / "c.md", line=1)
-        await storage.upsert_chunks([chunk])
-
-    stats = await storage.get_stats()
-    assert stats["total_chunks"] == 1
-
-
 async def test_nested_same_task_transaction_refused_immediately(storage: SqliteBackend):
     """Same-task nested transaction() raises StorageError immediately without queuing."""
-    storage._writer_wait_timeout = 5.0
     async with storage.transaction():
         with pytest.raises(StorageError, match="Nested transactions are not supported"):
             async with storage.transaction():
@@ -212,6 +133,28 @@ async def test_concurrent_bm25_and_dense_search_never_share_reader_conn(
     assert not overlap_detected, "Two concurrent searches shared the same reader connection!"
     for res in results:
         assert len(res) >= 1
+    assert storage._active_readers == 0
+    assert not storage._in_use_readers
+
+
+async def test_sync_lease_never_shares_a_leased_reader(storage: SqliteBackend):
+    """With every pooled reader leased, a sync reader gets a connection of its own.
+
+    The async leases may be held by worker threads mid-query; handing the sync
+    caller one of them would run two threads on one ``sqlite3.Connection``.
+    """
+    pool = list(storage._read_pool)
+    assert pool, "fixture must build a read pool"
+    async with contextlib.AsyncExitStack() as stack:
+        leased = [await stack.enter_async_context(storage._lease_read_db()) for _ in pool]
+        assert {id(c) for c in leased} == {id(c) for c in pool}
+        with storage._lease_read_db_sync() as db:
+            assert all(db is not c for c in pool)
+            assert db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+            private = db
+        with pytest.raises(sqlite3.ProgrammingError):
+            private.execute("SELECT 1")
+        assert id(private) not in storage._schema_checked_at
     assert storage._active_readers == 0
     assert not storage._in_use_readers
 
