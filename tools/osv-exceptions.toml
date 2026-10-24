@@ -256,6 +256,45 @@ owner = "memtomem"
 reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
 ignoreUntil = 2026-11-20
 
+# Two more against the same pillow 12.3.0, published 2026-10-23; same reasoning and
+# the same expiry as the batches above.
+
+[[exceptions]]
+id = "GHSA-5x8w-8jj5-q52h"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-654x-cwwv-5j9c"
+owner = "memtomem"
+reason = "pillow flaw reached only by opening, saving or processing an image; fixed only in 13.0.0; fastembed (<=0.9.0) requires pillow<13; memtomem embeds text only and handles no images"
+ignoreUntil = 2026-11-20
+
+# filelock 3.25.2 via huggingface-hub (fastembed), published 2026-10-23. The fix
+# (4.2.1+) hangs huggingface-hub 1.33.0, the last 1.x that fastembed allows, on a
+# filesystem without flock: from 4.2.1 filelock reads the empty lock file the Hub
+# pre-creates (or a leftover one) as a held soft-lock marker. Remove when the locked
+# huggingface-hub works with filelock>=4.2.1 there.
+
+[[exceptions]]
+id = "GHSA-567q-5qvw-pf92"
+owner = "memtomem"
+reason = "filelock flaw reached only through soft locks on Windows, where another local account's oplock delays acquire past its timeout; huggingface-hub takes WindowsFileLock there and never falls back to a soft lock; fixed in 4.2.1, but 4.2.1+ hangs huggingface-hub 1.33.0 (the last 1.x; fastembed requires <2.0) on a filesystem without flock"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-9vhv-jxww-xfm5"
+owner = "memtomem"
+reason = "filelock flaw reached only through ReadWriteLock, which neither memtomem nor huggingface-hub uses; fixed in 4.2.1, but 4.2.1+ hangs huggingface-hub 1.33.0 (the last 1.x; fastembed requires <2.0) on a filesystem without flock"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-v4x8-3wr5-3wq8"
+owner = "memtomem"
+reason = "filelock flaw reached only through ReadWriteLock, which neither memtomem nor huggingface-hub uses; fixed in 4.2.1, but 4.2.1+ hangs huggingface-hub 1.33.0 (the last 1.x; fastembed requires <2.0) on a filesystem without flock"
+ignoreUntil = 2026-11-20
+
 # toml 4.3.0 in packages/opencode-memtomem/package-lock.json (dev), published
 # 2026-10-22. Remove when @opencode-ai/plugin moves to an effect that allows toml>=5.0.1.
 
@@ -275,4 +314,13 @@ ignoreUntil = 2026-11-20
 id = "GHSA-9qmh-m7c6-f92p"
 owner = "memtomem"
 reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect 4.0.0-beta.83, which requires toml ^4.1.1 (plugin 1.19.4 still pins it); the plugin ships no dependencies and its build parses no untrusted TOML"
+ignoreUntil = 2026-11-20
+
+# zod 4.1.8 in packages/opencode-memtomem/package-lock.json (dev), published
+# 2026-10-01 and revised 2026-10-23. Remove when @opencode-ai/plugin allows zod>=4.6.6.
+
+[[exceptions]]
+id = "GHSA-mrhx-c7xc-m3w5"
+owner = "memtomem"
+reason = "zod (npm) flaw reached only by validating untrusted input against an unbounded array schema; dev-only, @opencode-ai/plugin pins zod 4.1.8 exactly (plugin 1.19.4 still does); the plugin imports only types from it, ships no dependencies, and its build validates nothing"
 ignoreUntil = 2026-11-20
