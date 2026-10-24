@@ -9,7 +9,7 @@ from typing import Any, cast, get_args
 import click
 
 from memtomem import privacy
-from memtomem.cli import context_cmd as _ctx
+from memtomem.cli._context_facade import context_cmd as _ctx
 from memtomem.config import TargetScope
 from memtomem.context._names import InvalidNameError
 from memtomem.context.bundle import (

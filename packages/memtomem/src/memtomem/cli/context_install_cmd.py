@@ -7,7 +7,7 @@ from typing import get_args
 
 import click
 
-from memtomem.cli import context_cmd as _ctx
+from memtomem.cli._context_facade import context_cmd as _ctx
 from memtomem.config import TargetScope
 from memtomem.context._dir_swap import SwapRecoveryError, swap_failure_text
 from memtomem.context._names import InvalidNameError

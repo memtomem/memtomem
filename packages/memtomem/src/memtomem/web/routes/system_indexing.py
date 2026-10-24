@@ -49,7 +49,8 @@ from memtomem.web.schemas.memory import (
 
 logger = logging.getLogger("memtomem.web.routes.system")
 
-router = APIRouter(tags=["system"])
+# Mounted only through ``system.router``, which carries the ``system`` tag.
+router = APIRouter()
 
 _ADD_PATH_ERROR = "File path must be a relative path contained by the configured memory directory"
 

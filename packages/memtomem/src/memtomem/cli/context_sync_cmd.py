@@ -6,7 +6,8 @@ from pathlib import Path
 
 import click
 
-from memtomem.cli import context_cmd as _ctx
+from memtomem.cli._context_facade import context_cmd as _ctx
+from memtomem.cli.context_options import _LABEL_OPTION, _SCOPE_OPTION, _SYNC_INCLUDE_OPTION
 from memtomem.context._runtime_targets import KNOWN_RUNTIMES
 from memtomem.context.agents import ON_DROP_LEVELS
 from memtomem.context.parser import CONTEXT_FILENAME
@@ -14,7 +15,7 @@ from memtomem.context.projects import ProjectScope
 
 
 @click.command("sync")
-@_ctx._SYNC_INCLUDE_OPTION
+@_SYNC_INCLUDE_OPTION
 @click.option(
     "--strict",
     is_flag=True,
@@ -44,8 +45,8 @@ from memtomem.context.projects import ProjectScope
         "reported and skipped. One project's failure does not abort the batch."
     ),
 )
-@_ctx._SCOPE_OPTION
-@_ctx._LABEL_OPTION
+@_SCOPE_OPTION
+@_LABEL_OPTION
 @click.option(
     "--force-unsafe",
     "force_unsafe",

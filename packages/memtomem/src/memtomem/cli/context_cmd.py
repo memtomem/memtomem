@@ -188,6 +188,11 @@ from memtomem.context import remediation
 from memtomem.wiki.store import WikiNotFoundError, WikiStore, WikiUnbornHeadError  # noqa: F401
 from typing import Any, Literal, cast, get_args
 
+from memtomem.cli.context_options import (  # noqa: F401
+    _LABEL_OPTION,
+    _SCOPE_OPTION,
+    _SYNC_INCLUDE_OPTION,
+)
 from memtomem.config import (
     ContextGatewayConfig,
     Mem2MemConfig,
@@ -256,21 +261,6 @@ _INCLUDE_OPTION = click.option(
     help=(
         "Additional artifact kinds to process (repeatable or comma-separated). "
         "Supported: skills, agents, commands, settings."
-    ),
-)
-
-# ``sync`` accepts one extra kind (mcp-servers, #1311); its own option carries
-# the accurate help so the other commands' --include help is not widened.
-_SYNC_INCLUDE_OPTION = click.option(
-    "--include",
-    "include",
-    multiple=True,
-    metavar="KIND",
-    help=(
-        "Additional artifact kinds to fan out (repeatable or comma-separated). "
-        "Supported: skills, agents, commands, settings, mcp-servers. "
-        "mcp-servers (opt-in) fans canonical MCP server definitions into the "
-        "project .mcp.json; it is a push-only kind."
     ),
 )
 
@@ -942,32 +932,6 @@ def _confirm_mcp_servers_fanout(root: Path, *, yes: bool) -> bool:
     )
     return click.confirm("  Continue?", default=False)
 
-
-_SCOPE_OPTION = click.option(
-    "--scope",
-    "scope_flag",
-    type=click.Choice(list(get_args(TargetScope))),
-    default=None,
-    help=(
-        "Override hooks.target_scope for this invocation only "
-        "(user / project_shared / project_local). "
-        "Host-write confirmation is computed against the resolved scope, "
-        "so --scope=project_local skips the prompt (writes stay in-project)."
-    ),
-)
-
-# ADR-0022: fan out a labeled version instead of the working canonical. Applies
-# only to the version-eligible kinds (agents / commands); ineligible included
-# kinds run label-less (see ``_warn_label_ineligible_kinds``).
-_LABEL_OPTION = click.option(
-    "--label",
-    default=None,
-    help=(
-        "Push the version at this label (e.g. 'production') or a bare version "
-        "tag ('v2') instead of the working canonical. Applies to agents and "
-        "commands only; 'latest' / omitted means the working file."
-    ),
-)
 
 # Kinds whose fan-out honors --label (ADR-0022 v1 scope: agents + commands).
 _LABEL_ELIGIBLE_KINDS: frozenset[str] = frozenset({"agents", "commands"})

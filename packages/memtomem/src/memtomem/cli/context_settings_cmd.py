@@ -10,7 +10,8 @@ import click
 
 from memtomem import privacy
 from memtomem._runtime_paths import scrub_text
-from memtomem.cli import context_cmd as _ctx
+from memtomem.cli._context_facade import context_cmd as _ctx
+from memtomem.cli.context_options import _SCOPE_OPTION
 from memtomem.config import TargetScope
 from memtomem.context.error_redact import redact_secret_value
 from memtomem.context.privacy_scan import PrivacyScanError
@@ -31,7 +32,7 @@ from memtomem.context.settings_doctor import (
     default=False,
     help="Emit a structured JSON result instead of human-readable output.",
 )
-@_ctx._SCOPE_OPTION
+@_SCOPE_OPTION
 def settings_doctor_cmd(json_out: bool, scope_flag: str | None) -> None:
     """Detect memtomem-managed hooks duplicated across settings tiers.
 

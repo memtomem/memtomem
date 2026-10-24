@@ -178,7 +178,8 @@ async def _validate_reranker_ready(reranker: object | None) -> None:
         await _asyncio.to_thread(load_model)
 
 
-router = APIRouter(tags=["system"])
+# Mounted only through ``system.router``, which carries the ``system`` tag.
+router = APIRouter()
 
 
 def _declared_default(model: type, name: str):
