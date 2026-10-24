@@ -788,7 +788,12 @@ class TestDestinationRefusals:
     @pytest.mark.parametrize("wording", ["sync enrollment is disabled", "has no .memtomem/ store"])
     def test_the_cli_has_one_copy_of_each_refusal(self, wording):
         """A fourth hand-written copy would drift the way the first three did."""
-        assert CLI_SOURCE.read_text(encoding="utf-8").count(wording) == 1
+        # Counted across every module context_cmd was split into: a copy added to
+        # one of them would otherwise pass a count of context_cmd.py alone.
+        sources = sorted(CLI_SOURCE.parent.glob("*context*.py"))
+        assert CLI_SETTINGS_SOURCE in sources and len(sources) >= 6, sources
+        total = sum(src.read_text(encoding="utf-8").count(wording) for src in sources)
+        assert total == 1
 
 
 def test_unprintable_excuses_crlf_line_endings_only():
