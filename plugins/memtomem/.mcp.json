@@ -4,7 +4,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "memtomem[onnx]==0.6.10",
+        "memtomem[onnx]==0.6.11",
         "memtomem-server"
       ],
       "env": {

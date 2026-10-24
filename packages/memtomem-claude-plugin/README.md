@@ -17,7 +17,7 @@ write-time indexing.
 ## What this plugin runs and connects to
 
 - **One local MCP server.** Claude Code starts `memtomem-server` over stdio with
-  `uvx --from 'memtomem[onnx]==0.6.10'`. On first launch uv downloads that exact
+  `uvx --from 'memtomem[onnx]==0.6.11'`. On first launch uv downloads that exact
   version and its dependencies from PyPI (or the package index your own uv
   configuration names) and caches them. If the machine has no Python 3.12 or
   newer, uv also downloads a managed CPython build from Astral's
@@ -76,7 +76,7 @@ Before installing, inspect existing servers with `/mcp` in Claude Code, then
 run the read-only diagnostic from the project you want to inspect:
 
 ```bash
-uvx --from "memtomem[all]==0.6.10" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.6.11" mm doctor --claude-mcp
 ```
 
 The pin is there because installing the plugin does not put `mm` on your PATH —
@@ -91,7 +91,7 @@ existing uv installation; resolve any manual MCP registration shown by the
 check before installing. The check does not intercept `/plugin install`.
 
 Before installation, doctor compares manual registrations with the launch this
-release's plugin bundles (`memtomem[onnx]==0.6.10`). After installation, it reads
+release's plugin bundles (`memtomem[onnx]==0.6.11`). After installation, it reads
 the actual plugin manifest. Use `/mcp` to verify the session, and repeat the
 diagnostic after installation.
 
@@ -112,8 +112,8 @@ Model artifacts are fetched only when the configured workflow needs them.
 On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```bash
-uvx --from 'memtomem[onnx]==0.6.10' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.6.10' mm status
+uvx --from 'memtomem[onnx]==0.6.11' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem[onnx]==0.6.11' mm status
 ```
 
 The plugin intentionally cannot perform this trust-establishing step over MCP.
@@ -124,7 +124,7 @@ gitignored local tier explicitly:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem[onnx]==0.6.10' mm mem init --scope project_local
+uvx --from 'memtomem[onnx]==0.6.11' mm mem init --scope project_local
 ```
 
 After that, `/memtomem:setup /path/to/notes` performs a one-shot index and
