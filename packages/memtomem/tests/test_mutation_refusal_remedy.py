@@ -211,7 +211,7 @@ _MODULE_SURFACE = {
 }
 # Functions that take ``surface`` and hand it on unchanged.
 _FORWARDERS = {
-    ("indexing/engine.py", "mutation_detail"),
+    ("indexing/privacy_gate.py", "mutation_detail"),
     ("tools/memory_mutation.py", "preflight_refusal"),
 }
 # Functions that store a refusal as a formation candidate's reason, which

@@ -3566,7 +3566,7 @@
       "code": "1557     for s in runnable:\n1558         assert s.root is not None  # sync_skip_reason() filtered missing roots\n1559         click.secho(f\"\\n\u2192 {s.label} ({s.root})\", fg=\"cyan\")\n",
       "col_offset": 8,
       "end_col_offset": 33,
-      "filename": "packages/memtomem/src/memtomem/cli/context_cmd.py",
+      "filename": "packages/memtomem/src/memtomem/cli/context_sync_cmd.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -3586,7 +3586,7 @@
       "code": "2069         # refuse / get its .bak).\n2070         assert c.lock_entry is not None\n2071         src = wiki.root / asset_type_plural / name\n",
       "col_offset": 8,
       "end_col_offset": 39,
-      "filename": "packages/memtomem/src/memtomem/cli/context_cmd.py",
+      "filename": "packages/memtomem/src/memtomem/cli/context_install_cmd.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -3606,7 +3606,7 @@
       "code": "2360             continue\n2361         assert s.root is not None  # sync_skip_reason() filtered missing roots\n2362         click.secho(f\"\\n\u2192 {s.label}  ({s.scope_id}, {s.root})\", fg=\"cyan\")\n",
       "col_offset": 8,
       "end_col_offset": 33,
-      "filename": "packages/memtomem/src/memtomem/cli/context_cmd.py",
+      "filename": "packages/memtomem/src/memtomem/cli/context_install_cmd.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -6431,7 +6431,7 @@
       "code": "18 import os\n19 import subprocess\n20 import sys\n",
       "col_offset": 0,
       "end_col_offset": 17,
-      "filename": "packages/memtomem/src/memtomem/web/routes/system.py",
+      "filename": "packages/memtomem/src/memtomem/web/routes/system_config.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -6451,7 +6451,7 @@
       "code": "785         # returns immediately and doesn't expose a return code; trust it.\n786         os.startfile(str(path))  # type: ignore[attr-defined]\n787         return\n",
       "col_offset": 8,
       "end_col_offset": 31,
-      "filename": "packages/memtomem/src/memtomem/web/routes/system.py",
+      "filename": "packages/memtomem/src/memtomem/web/routes/system_config.py",
       "issue_confidence": "MEDIUM",
       "issue_cwe": {
         "id": 78,
@@ -6471,7 +6471,7 @@
       "code": "793     try:\n794         result = subprocess.run(\n795             cmd,\n796             capture_output=True,\n797             text=True,\n798             timeout=5,\n799             check=False,\n800         )\n801     except FileNotFoundError as exc:\n",
       "col_offset": 17,
       "end_col_offset": 9,
-      "filename": "packages/memtomem/src/memtomem/web/routes/system.py",
+      "filename": "packages/memtomem/src/memtomem/web/routes/system_config.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,

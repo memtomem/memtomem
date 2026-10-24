@@ -115,22 +115,22 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "settings_sync.resolve_conflict",
         "sources.delete_source",
         "sources.regenerate_summaries",
-        "system.add_memory",
-        "system.add_memory_dir",
         "system.embed_text",
         "system.health_active",
-        "system.index_stream",
-        "system.open_memory_dir",
-        "system.patch_config",
-        "system.preview_namespace",
         "system.rebuild_fts",
-        "system.reindex_all",
-        "system.remove_memory_dir",
         "system.reset_all",
-        "system.reset_embedding",
-        "system.save_config",
-        "system.trigger_index",
-        "system.upload_files",
+        "system_config.add_memory_dir",
+        "system_config.open_memory_dir",
+        "system_config.patch_config",
+        "system_config.remove_memory_dir",
+        "system_config.reset_embedding",
+        "system_config.save_config",
+        "system_indexing.add_memory",
+        "system_indexing.index_stream",
+        "system_indexing.preview_namespace",
+        "system_indexing.reindex_all",
+        "system_indexing.trigger_index",
+        "system_indexing.upload_files",
         "tags.delete_tag",
         "tags.merge_tags",
         "tags.rename_tag",
@@ -188,17 +188,19 @@ _REDACTION_PROTECTED: frozenset[str] = frozenset(
         # strings + a free-string event key) into the git-tracked shared
         # canonical — Gate A fragment scan in-route (#1247).
         "settings_sync.promote_target_rule",
-        "system.add_memory",
-        "system.upload_files",
+        "system_indexing.add_memory",
+        "system_indexing.upload_files",
     }
 )
 
 _REDACTION_EXEMPT: dict[str, str] = {
     "system.health_active": "active dependency checks only; no user content is persisted",
-    "system.index_stream": (
+    "system_indexing.index_stream": (
         "path/options only; discovered file content is guarded by the indexing engine"
     ),
-    "system.preview_namespace": ("read-only path/options preview; no file content is persisted"),
+    "system_indexing.preview_namespace": (
+        "read-only path/options preview; no file content is persisted"
+    ),
     # Delete-only / no body content.
     "chunks.delete_chunk": "delete-only, no payload",
     "context_agents.delete_agent": "delete-only, no payload",
@@ -352,17 +354,17 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "settings_sync.delete_target_rule": "structured settings hook rule deletion; no free-form prose",
     "settings_sync.resolve_conflict": "structured settings conflict resolution; no free-form prose",
     "system.embed_text": "ephemeral compute; no persistence",
-    "system.add_memory_dir": "path-only payload, no prose",
-    "system.remove_memory_dir": "path-only payload, no prose",
-    "system.open_memory_dir": "path-only; opens local FS, no LTM write",
-    "system.patch_config": "structured config payload, no free-form prose",
-    "system.save_config": "structured config payload, no free-form prose",
-    "system.reset_embedding": "control plane; no content payload",
+    "system_config.add_memory_dir": "path-only payload, no prose",
+    "system_config.remove_memory_dir": "path-only payload, no prose",
+    "system_config.open_memory_dir": "path-only; opens local FS, no LTM write",
+    "system_config.patch_config": "structured config payload, no free-form prose",
+    "system_config.save_config": "structured config payload, no free-form prose",
+    "system_config.reset_embedding": "control plane; no content payload",
     "system.reset_all": "control plane; destructive reset, no payload",
     "system.rebuild_fts": "control plane; no content payload",
-    "system.trigger_index": "control plane; operates on existing files; "
+    "system_indexing.trigger_index": "control plane; operates on existing files; "
     "redaction happens at file-ingest time inside the indexer",
-    "system.reindex_all": "control plane; operates on existing files",
+    "system_indexing.reindex_all": "control plane; operates on existing files",
     # Bundle import is redaction-gated in the shared ``tools/export_import.py::
     # import_chunks`` path, not in this route handler body — so the AST walk
     # (which inspects handler bodies only) correctly leaves it exempt here.

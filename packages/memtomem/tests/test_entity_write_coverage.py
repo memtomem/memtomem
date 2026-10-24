@@ -59,7 +59,7 @@ _METADATA_ONLY: dict[tuple[str, str], str] = {
     ("server/tools/url_index.py", "mem_fetch"): "Tag pass after index_file.",
     ("cli/memory.py", "_add"): "Tag pass after index_file.",
     ("cli/ingest_cmd.py", "_apply_tags"): "Tag merge helper; content untouched.",
-    ("web/routes/system.py", "add_memory"): "Tag pass after index_file.",
+    ("web/routes/system_indexing.py", "add_memory"): "Tag pass after index_file.",
 }
 
 _SYNC_CALLS = frozenset({"sync_entities_for_chunks", "_extract_entities_for"})

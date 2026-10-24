@@ -109,7 +109,7 @@ def test_the_matcher_finds_the_write_gate_modules():
     # shows up here instead of quietly shrinking the guarded set.
     for expected in (
         "server/tools/memory_crud.py",
-        "web/routes/system.py",
+        "web/routes/system_indexing.py",
         "web/routes/scratch.py",
         "cli/memory.py",
         "integrations/langgraph.py",
