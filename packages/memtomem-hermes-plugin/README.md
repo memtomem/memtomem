@@ -18,7 +18,7 @@ from `packages/memtomem-plugin-assets/`; edit the sources there, not the files h
   extra to Hermes's environment to fix it.
 - Git on `PATH`, for the commit lookup under [Install](#install).
 - `uv` on `PATH`. The server is started with
-  `uvx --python 3.12 --from 'memtomem[onnx]==0.6.9' memtomem-server`.
+  `uvx --python 3.12 --from 'memtomem[onnx]==0.6.10' memtomem-server`.
   Without `uv` the plugin still installs and enables, and the server fails at start with
   `missing executable 'uvx'`.
 - Python 3.12. uv uses a 3.12 it can find; if there is none, it downloads one (about 70 MiB)
@@ -93,8 +93,8 @@ directory or where you start Hermes is not. A `MEMTOMEM_*` setting in
 `~/.env` therefore does reach this server. Only the file's `MEMTOMEM_*` keys are applied:
 the other variables in it, API keys for other tools included, never enter the server's
 environment, and the server names the keys it left out in one startup log line. A variable
-already set keeps its value. Before the release that made this change (#2824), the file was
-applied whole, so with an older memtomem every unset variable in it reached the server
+already set keeps its value. Before memtomem 0.6.10 (#2824), the file was applied whole,
+so with an older memtomem every unset variable in it reached the server
 regardless of Hermes's allowlist.
 
 ## Scope
@@ -126,7 +126,7 @@ your own server entry to `config.yaml`:
 mcp_servers:
   memtomem:
     command: uvx
-    args: ["--python", "3.12", "--from", "memtomem[onnx]==0.6.9", "memtomem-server"]
+    args: ["--python", "3.12", "--from", "memtomem[onnx]==0.6.10", "memtomem-server"]
     env:
       MEMTOMEM_TOOL_MODE: core
       # copy any MEMTOMEM_* settings you rely on here

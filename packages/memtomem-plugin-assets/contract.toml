@@ -1,16 +1,16 @@
 [core]
-version = "0.6.9"
+version = "0.6.10"
 tool_mode = "core"
 mcp_extras = ["onnx"]
 
 [plugins]
-claude_version = "0.5.15"
-codex_version = "0.3.12"
-automation_version = "0.3.10"
-opencode_version = "0.3.12"
-kimi_version = "0.2.10"
-hermes_version = "0.1.5"
-hermes_memory_version = "0.1.0"
+claude_version = "0.5.16"
+codex_version = "0.3.13"
+automation_version = "0.3.11"
+opencode_version = "0.3.13"
+kimi_version = "0.2.11"
+hermes_version = "0.1.6"
+hermes_memory_version = "0.1.1"
 
 [opencode]
 package = "opencode-memtomem"
