@@ -8,8 +8,13 @@ Covers:
    connections, queue when concurrency exceeds pool size, and run in worker
    threads without sharing a single ``sqlite3.Connection`` concurrently.
 4. A sync reader never receives a leased pool connection.
-5. ``close()`` waits for in-flight leased readers to drain before closing pool
-   connections, and rejects new read/write requests during shutdown with
+5. Cancelling a caller whose read runs in a worker thread keeps the lease until
+   the worker returns, so neither another lease nor ``close()`` gets the
+   connection while the worker still uses it -- including when every Task is
+   cancelled at once, as ``asyncio.run`` does on shutdown.
+6. ``close()`` waits for in-flight leased readers to drain before closing pool
+   connections, still closes them when it is cancelled mid-drain, and rejects
+   new read/write requests during shutdown with
    ``StorageError("Database is closing")``.
 """
 
@@ -18,6 +23,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -157,6 +164,113 @@ async def test_sync_lease_never_shares_a_leased_reader(storage: SqliteBackend):
         assert id(private) not in storage._schema_checked_at
     assert storage._active_readers == 0
     assert not storage._in_use_readers
+
+
+async def test_cancelled_reader_keeps_its_lease_until_the_worker_returns(storage: SqliteBackend):
+    """A thread cannot be cancelled, so its caller's lease must outlive the cancel."""
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def slow(conn: sqlite3.Connection) -> int:
+        started.set()
+        release.wait(10)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        finally:
+            finished.set()
+
+    async def reader() -> int:
+        async with storage._lease_read_db() as db:
+            return await storage._run_read_in_thread(db, slow)
+
+    task = asyncio.create_task(reader())
+    await asyncio.to_thread(started.wait, 10)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    # Cancelled twice over: still waiting on the worker, lease still held.
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    assert storage._active_readers == 1
+    assert len(storage._in_use_readers) == 1
+
+    close_task = asyncio.create_task(storage.close())
+    await asyncio.sleep(0.05)
+    assert not close_task.done(), "close() must wait for the cancelled reader's worker"
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+    await close_task
+    assert storage._active_readers == 0
+
+
+async def test_reader_lease_outlives_a_cancel_of_every_task(storage: SqliteBackend):
+    """``asyncio.run`` shutdown cancels every Task; the lease must still wait for the thread."""
+    started = threading.Event()
+    finished = threading.Event()
+    worker_error: list[BaseException] = []
+
+    def slow(conn: sqlite3.Connection) -> int:
+        started.set()
+        time.sleep(0.3)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        except BaseException as exc:
+            worker_error.append(exc)
+            raise
+        finally:
+            finished.set()
+
+    async def reader() -> int:
+        async with storage._lease_read_db() as db:
+            return await storage._run_read_in_thread(db, slow)
+
+    task = asyncio.create_task(reader())
+    await asyncio.to_thread(started.wait, 10)
+    me = asyncio.current_task()
+    for other in asyncio.all_tasks():
+        if other is not me:
+            other.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert finished.is_set(), "the reader task ended while its worker was still running"
+    await storage.close()
+    assert not worker_error
+
+
+async def test_cancelled_close_still_closes_every_connection(tmp_path: Path):
+    """Cancelling close() mid-drain must not leave the store open and refusing leases."""
+    backend = SqliteBackend(
+        StorageConfig(sqlite_path=str(tmp_path / "close_cancel.db")), dimension=4
+    )
+    await backend.initialize()
+    pool = list(backend._read_pool)
+    started = threading.Event()
+
+    def slow(conn: sqlite3.Connection) -> int:
+        started.set()
+        time.sleep(0.3)
+        return conn.execute("SELECT 1").fetchone()[0]
+
+    async def reader() -> int:
+        async with backend._lease_read_db() as db:
+            return await backend._run_read_in_thread(db, slow)
+
+    read_task = asyncio.create_task(reader())
+    await asyncio.to_thread(started.wait, 10)
+    close_task = asyncio.create_task(backend.close())
+    await asyncio.sleep(0.05)
+    read_task.cancel()
+    close_task.cancel()
+    results = await asyncio.gather(read_task, close_task, return_exceptions=True)
+
+    assert all(isinstance(r, asyncio.CancelledError) for r in results)
+    assert backend._db is None
+    for conn in pool:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
 
 
 async def test_close_waits_for_active_readers_and_rejects_new_requests(tmp_path: Path):

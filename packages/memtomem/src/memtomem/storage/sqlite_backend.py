@@ -5,6 +5,8 @@ from __future__ import annotations
 from memtomem.config import IndexingConfig
 
 import asyncio
+import functools
+import contextvars
 import errno
 import hashlib
 import json
@@ -879,10 +881,35 @@ class SqliteBackend(
         ``PRAGMA query_only=ON``. If a test cleared ``_read_pool`` or
         substituted a thread-affine connection via ``_get_read_db``, fall back
         to running inline on the current thread.
+
+        Cancellation waits for the worker. A thread cannot be stopped, so
+        letting the cancel unwind the caller's lease at once would hand ``db``
+        to the next lease, or to ``close()``, while the worker still queries
+        it. The caller is cancelled only after the worker has returned.
+
+        The worker is an executor future, not a Task: ``asyncio.run`` cancels
+        every Task when it shuts down, and a cancelled Task wrapping the thread
+        reports done while the thread is still running.
         """
-        if db is not self._db and any(rconn is db for rconn in self._read_pool):
-            return await asyncio.to_thread(fn, db)
-        return fn(db)
+        if not (db is not self._db and any(rconn is db for rconn in self._read_pool)):
+            return fn(db)
+        loop = asyncio.get_running_loop()
+        # ``asyncio.to_thread`` carries the caller's contextvars; keep that.
+        ctx = contextvars.copy_context()
+        worker = loop.run_in_executor(None, functools.partial(ctx.run, fn, db))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            while not worker.done():
+                try:
+                    await asyncio.wait({worker})
+                except asyncio.CancelledError:
+                    continue
+            if not worker.cancelled():
+                # Retrieved so it is not logged as never retrieved; the
+                # caller's cancellation is what propagates.
+                worker.exception()
+            raise
 
     def _cached_vec_row_count(self, db: sqlite3.Connection) -> int:
         """``count(*) FROM chunks_vec``, memoized behind ``PRAGMA data_version``.
@@ -911,8 +938,16 @@ class SqliteBackend(
         self._require_transaction_idle("close")
         self._closing = True
         self._notify_reader_waiters(all_waiters=True)
+        # A cancel while readers drain is held until the cleanup below has run.
+        # Leaving early would strand every connection open with ``_closing``
+        # set, so the store refuses all later leases and nothing closes it.
+        cancelled = False
         if hasattr(self, "_readers_drained"):
-            await self._readers_drained.wait()
+            while not self._readers_drained.is_set():
+                try:
+                    await self._readers_drained.wait()
+                except asyncio.CancelledError:
+                    cancelled = True
         for rconn in getattr(self, "_read_pool", []):
             try:
                 rconn.close()
@@ -938,6 +973,8 @@ class SqliteBackend(
                 logger.debug("WAL checkpoint failed during close", exc_info=True)
             self._db.close()
             self._db = None
+        if cancelled:
+            raise asyncio.CancelledError
 
     # ---- transaction ---------------------------------------------------------
 
