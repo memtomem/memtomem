@@ -287,11 +287,22 @@ def _pick_error(kinds: list[str]) -> str | None:
     return None
 
 
+def _marker_exists(path: Path) -> bool:
+    # On py3.12 ``exists()`` raises (not returns False) for a path behind an
+    # unsearchable directory. Such a marker proves nothing either way, so skip
+    # it and let the remaining markers decide; the config read classifies the
+    # same directory as ``permission``.
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _is_installed(client: str, home: Path) -> bool:
     markers = _INSTALLED_MARKERS.get(client)
     if markers is None:
         return False
-    return any(p.exists() for p in markers(home))
+    return any(_marker_exists(p) for p in markers(home))
 
 
 def probe_runtime(

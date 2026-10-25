@@ -10,6 +10,7 @@ gemini->antigravity client replacement, and the
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -120,6 +121,31 @@ def test_antigravity_cli_legacy_config_is_install_marker_only(tmp_path: Path) ->
     assert status.mms_registered is False
     assert status.memtomem_registered is False
     assert status.registered_locations == ()
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="needs POSIX permissions and a non-root user",
+)
+def test_antigravity_unsearchable_config_dir_does_not_abort_probe(tmp_path: Path) -> None:
+    """A marker behind an unsearchable directory is skipped, not raised.
+
+    On Python 3.12 ``Path.exists()`` raises ``PermissionError`` for such a
+    path, which would abort detection for every client. The remaining
+    markers still decide ``installed`` and the config read reports
+    ``permission``.
+    """
+    (tmp_path / ".gemini" / "antigravity-cli").mkdir(parents=True)
+    locked = tmp_path / ".gemini" / "config"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        status = rr.probe_runtime("antigravity", home=tmp_path)
+    finally:
+        locked.chmod(0o755)
+    assert status.installed is True
+    assert status.memtomem_registered is False
+    assert status.error_kind == "permission"
 
 
 def test_antigravity_ide_vscode_uses_servers_key(tmp_path: Path) -> None:
