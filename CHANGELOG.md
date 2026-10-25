@@ -5,6 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.6.12] — 2026-10-25
+
+### Upgrading
+
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.13 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.6.12;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.6.12`, confirm with `mm --version`, then start a new
+  Claude Code session — the compatibility check is refreshed at session start,
+  and until then those hooks are skipped. See the
+  [CLI reference](docs/guides/reference/data-config-cli.md#cli-reference) for
+  what `mm upgrade` preserves and stops.
+- **Check what is already stored for private keys.** Upgrading does not
+  re-scan stored memories; the Security entry below gives the
+  `mm mem rescan` → reindex → rescan steps.
+
 ### Security
 
 - **The write guard now catches PKCS#8 private keys.** The PEM rule matched

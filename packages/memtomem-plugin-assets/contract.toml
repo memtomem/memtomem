@@ -1,15 +1,15 @@
 [core]
-version = "0.6.11"
+version = "0.6.12"
 tool_mode = "core"
 mcp_extras = ["onnx"]
 
 [plugins]
-claude_version = "0.5.17"
-codex_version = "0.3.14"
-automation_version = "0.3.12"
-opencode_version = "0.3.14"
-kimi_version = "0.2.12"
-hermes_version = "0.1.7"
+claude_version = "0.5.18"
+codex_version = "0.3.15"
+automation_version = "0.3.13"
+opencode_version = "0.3.15"
+kimi_version = "0.2.13"
+hermes_version = "0.1.8"
 hermes_memory_version = "0.1.1"
 
 [opencode]
