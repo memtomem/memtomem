@@ -1213,18 +1213,17 @@ def _emit_mcp_paste_hints() -> None:
     for Cursor/Windsurf/Claude Desktop/Antigravity CLI/Gemini CLI/Kimi Code.
 
     Antigravity CLI (``agy``, Google's successor to Gemini CLI) reads MCP
-    servers from its own ``~/.gemini/antigravity-cli/mcp_config.json`` (key
+    servers from ``~/.gemini/config/mcp_config.json`` (key
     ``mcpServers``) — distinct from the Antigravity IDE's
-    ``~/.gemini/antigravity/mcp_config.json``. Each server entry carries
-    ``"type": "stdio"`` there; the generated ``.mcp.json`` omits it, so the
-    hint reminds users to add it when pasting. Gemini CLI's
+    ``~/.gemini/antigravity/mcp_config.json``. An entry there loads with or
+    without ``"type": "stdio"`` (``agy mcp add`` writes none), so the
+    generated ``.mcp.json`` pastes as-is. Gemini CLI's
     ``~/.gemini/settings.json`` is deprecated upstream on 2026-06-18 for
     free/Pro/Ultra tiers (enterprise Gemini Code Assist keeps it)."""
     click.echo("    Cursor          → paste into ~/.cursor/mcp.json")
     click.echo("    Windsurf        → paste into ~/.codeium/windsurf/mcp_config.json")
     click.echo(f"    Claude Desktop  → paste into {_claude_desktop_config_hint()}")
-    click.echo("    Antigravity CLI → paste into ~/.gemini/antigravity-cli/mcp_config.json")
-    click.echo('                      (add "type": "stdio" to the memtomem entry)')
+    click.echo("    Antigravity CLI → paste into ~/.gemini/config/mcp_config.json")
     click.echo("    Gemini CLI      → paste into ~/.gemini/settings.json (deprecated 2026-06-18)")
     click.echo("    Kimi Code       → paste into ~/.kimi-code/mcp.json")
     click.echo("  (Claude Code picks up ./.mcp.json in this project automatically.)")

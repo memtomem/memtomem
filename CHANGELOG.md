@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **Antigravity CLI setup points at the config file `agy` reads.** The CLI
+  loads MCP servers from `~/.gemini/config/mcp_config.json`; the older
+  `~/.gemini/antigravity-cli/mcp_config.json` that `mm init`'s paste hint, the
+  web context portal's install guide, and the MCP-client, LLM-provider and
+  uninstall guides all named is no longer read, so an entry pasted there loaded
+  no server (measured on `agy` 1.4.7). All of them now name the current file,
+  the MCP-client guide adds `agy mcp add memtomem memtomem-server`, and the
+  runtime registry probes the current file, so a legacy-only entry now shows as
+  installed but not registered instead of a false `registered`. The paste
+  hint also stops asking you to add `"type": "stdio"`: `agy` loads the entry
+  without it. If you registered memtomem in the older file, move the entry or
+  re-add it with `agy mcp add`.
+
 ## [0.6.12] — 2026-10-25
 
 ### Upgrading

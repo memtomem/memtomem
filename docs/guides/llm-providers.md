@@ -111,8 +111,8 @@ Add the following to your editor's MCP config file — e.g.,
 `~/.cursor/mcp.json` (Cursor),
 `~/.codeium/windsurf/mcp_config.json` (Windsurf),
 `~/Library/Application Support/Claude/claude_desktop_config.json`
-(Claude Desktop), `~/.gemini/antigravity-cli/mcp_config.json`
-(Antigravity CLI — its entries also carry `"type": "stdio"`; see
+(Claude Desktop), `~/.gemini/config/mcp_config.json`
+(Antigravity CLI — or run `agy mcp add`; see
 [mcp-clients.md](mcp-clients.md#9-antigravity)), or
 `~/.gemini/settings.json` (Gemini CLI; consumer free/Pro/Ultra service ended
 2026-06-18, while enterprise licenses and paid API keys remain supported). For

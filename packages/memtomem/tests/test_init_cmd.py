@@ -2867,10 +2867,10 @@ class TestMcpPasteHints:
         assert "Windsurf" in out and "~/.codeium/windsurf/mcp_config.json" in out
         assert "Claude Desktop" in out
         assert _claude_desktop_config_hint() in out
-        assert "Antigravity CLI → paste into ~/.gemini/antigravity-cli/mcp_config.json" in out
-        # Antigravity CLI's mcp_config.json carries "type": "stdio" on each entry,
-        # which the generated .mcp.json omits — the hint must flag it.
-        assert '(add "type": "stdio" to the memtomem entry)' in out
+        assert "Antigravity CLI → paste into ~/.gemini/config/mcp_config.json" in out
+        # agy loads an entry without "type": "stdio", so the generated .mcp.json
+        # pastes as-is and the hint must not ask for an edit.
+        assert '"type": "stdio"' not in out
         assert "Gemini CLI" in out and "~/.gemini/settings.json" in out
         assert "Kimi Code" in out and "~/.kimi-code/mcp.json" in out
         assert "Claude Code picks up ./.mcp.json in this project automatically" in out

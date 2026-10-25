@@ -988,7 +988,7 @@
   "settings.ctx.guide_claude_note": "또는 모든 프로젝트에 대해 전역으로 등록하려면 \"-s user\" 옵션과 함께 실행하세요.",
   "settings.ctx.guide_antigravity_desc": "Antigravity CLI(agy) 또는 Antigravity IDE(VS Code)에 memtomem을 등록합니다.",
   "settings.ctx.guide_antigravity_cli": "Antigravity CLI (agy)",
-  "settings.ctx.guide_antigravity_cli_desc": "~/.gemini/antigravity-cli/mcp_config.json 파일에 설정을 추가하세요:",
+  "settings.ctx.guide_antigravity_cli_desc": "~/.gemini/config/mcp_config.json 파일에 설정을 추가하세요:",
   "settings.ctx.guide_codex_desc": "Codex CLI는 ~/.codex/config.toml (TOML 형식)에서 MCP 서버 정보를 읽어옵니다.",
   "settings.ctx.guide_kimi_desc": "CLI 마법사를 사용하여 Kimi CLI에 memtomem을 자동으로 등록할 수 있습니다.",
   "settings.ctx.copy": "복사",
