@@ -33,6 +33,7 @@ uv run mypy packages/memtomem/src
 - `packages/opencode-memtomem/` — OpenCode npm plugin
 - `packages/memtomem-kimi-skills/` — Kimi Code skill bundle (not a plugin)
 - `packages/memtomem-hermes-plugin/` — Hermes Agent portable plugin (user scope: MCP server + six workflow skills)
+- `packages/memtomem-antigravity-plugin/` — Antigravity CLI (`agy`) plugin (user scope: MCP server + six workflow skills)
 - `packages/memtomem-hermes-memory/` — Hermes Agent memory provider `memtomem-memory` (recall-only, through Hermes's own memtomem MCP connection; standard library, Python 3.11+)
 - `packages/memtomem-plugin-assets/` — shared plugin contract (`contract.toml`) and workflow sources rendered into the plugins by `tools/render_plugin_assets.py`
 

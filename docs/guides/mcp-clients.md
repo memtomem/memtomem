@@ -463,6 +463,25 @@ Restart the `agy` session after editing. The CLI also reads your existing
 `agy plugin import`, so memory indexed with `mm ingest gemini-memory` keeps
 working unchanged.
 
+#### Install as a plugin
+
+Instead of registering the server yourself, you can install the memtomem
+plugin, which bundles an exact-pinned server and six workflow skills:
+
+```bash
+agy plugin install https://github.com/memtomem/memtomem/tree/main/packages/memtomem-antigravity-plugin
+```
+
+agy starts a plugin's server in the plugin directory, so the plugin runs
+memtomem at user scope only (no per-project memory, absolute paths for
+indexing). Use one of the two, not both: a hand-registered `memtomem` entry
+and the plugin's server (which agy names `memtomem_memtomem`) both run, and
+with a relative storage path in your memtomem config they open different
+stores — compare the DB path `mem_status` reports before removing either. See
+the
+[plugin README](https://github.com/memtomem/memtomem/blob/main/packages/memtomem-antigravity-plugin/README.md)
+for requirements, updating and scope.
+
 ---
 
 ## 10. Verifying Your Connection

@@ -19,6 +19,7 @@ CODEX_ROOT = ROOT / "plugins" / "memtomem"
 KIMI_ROOT = ROOT / "packages" / "memtomem-kimi-skills"
 OPENCODE_ROOT = ROOT / "packages" / "opencode-memtomem"
 HERMES_ROOT = ROOT / "packages" / "memtomem-hermes-plugin"
+ANTIGRAVITY_ROOT = ROOT / "packages" / "memtomem-antigravity-plugin"
 HERMES_MEMORY_ROOT = ROOT / "packages" / "memtomem-hermes-memory"
 
 # Workflow sources may carry scope variants: a host that starts the server inside the
@@ -246,26 +247,56 @@ def _mcp_config(core: dict) -> str:
     return json.dumps(payload, indent=2) + "\n"
 
 
+def _pinned_python_args(contract: dict) -> list[str]:
+    # Without --python, uv falls back to whatever Python it finds first; on a
+    # Mac with only the Command Line Tools 3.9 the server never starts.
+    return [
+        "--python",
+        contract["hermes"]["python"],
+        "--from",
+        _mcp_requirement(contract["core"]),
+        "memtomem-server",
+    ]
+
+
 def _hermes_mcp_config(contract: dict) -> str:
-    core = contract["core"]
     payload = {
         "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
         "mcpServers": {
             "memtomem": {
                 "type": "stdio",
                 "command": "uvx",
-                # Without --python, uv falls back to whatever Python it finds first; on a
-                # Mac with only the Command Line Tools 3.9 the server never starts.
-                "args": [
-                    "--python",
-                    contract["hermes"]["python"],
-                    "--from",
-                    _mcp_requirement(core),
-                    "memtomem-server",
-                ],
-                "env": _launch_env(core),
+                "args": _pinned_python_args(contract),
+                "env": _launch_env(contract["core"]),
             }
         },
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def _antigravity_mcp_config(contract: dict) -> str:
+    # No "type": agy takes the transport from the fields ("command" = stdio), and
+    # `agy plugin validate --strict` fails on the key as an unknown field.
+    payload = {
+        "mcpServers": {
+            "memtomem": {
+                "command": "uvx",
+                "args": _pinned_python_args(contract),
+                "env": _launch_env(contract["core"]),
+            }
+        },
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def _antigravity_plugin_manifest(contract: dict) -> str:
+    payload = {
+        "name": "memtomem",
+        "version": contract["plugins"]["antigravity_version"],
+        "description": (
+            "Markdown-first long-term memory shared across your coding agents: one local "
+            "memtomem store, searchable from Antigravity, Claude Code, Codex CLI and Kimi Code."
+        ),
     }
     return json.dumps(payload, indent=2) + "\n"
 
@@ -320,6 +351,8 @@ def expected_files() -> dict[Path, str]:
         HERMES_ROOT / "mcp.json": _hermes_mcp_config(contract),
         HERMES_ROOT / "plugin.json": _hermes_plugin_manifest(contract),
         HERMES_MEMORY_ROOT / "plugin.yaml": _hermes_memory_manifest(contract),
+        ANTIGRAVITY_ROOT / "mcp_config.json": _antigravity_mcp_config(contract),
+        ANTIGRAVITY_ROOT / "plugin.json": _antigravity_plugin_manifest(contract),
     }
     for workflow in contract["workflows"]:
         body = _workflow_body(workflow["id"], "project")
@@ -346,14 +379,14 @@ def expected_files() -> dict[Path, str]:
             files[OPENCODE_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _opencode_skill(
                 workflow, body, contract["opencode"]["version_range"]
             )
-        # Hermes starts the server in the plugin directory, so it renders the user-scope
-        # variant and skips workflows that need a project root.
+        # Hermes and Antigravity start the server in the plugin directory, so they
+        # render the user-scope variant and skip workflows that need a project root.
         if "user" in workflow.get("scopes", SCOPES):
-            hermes = dict(workflow)
-            hermes["description"] = workflow.get("user_scope_description", workflow["description"])
-            files[HERMES_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _portable_skill(
-                hermes, _workflow_body(workflow["id"], "user")
-            )
+            user = dict(workflow)
+            user["description"] = workflow.get("user_scope_description", workflow["description"])
+            user_skill = _portable_skill(user, _workflow_body(workflow["id"], "user"))
+            for root in (HERMES_ROOT, ANTIGRAVITY_ROOT):
+                files[root / "skills" / workflow["codex_name"] / "SKILL.md"] = user_skill
     return files
 
 

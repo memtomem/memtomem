@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **An Antigravity CLI plugin.** `packages/memtomem-antigravity-plugin/`
+  bundles the exact-pinned memtomem MCP server and six workflow skills for
+  `agy`; install it with
+  `agy plugin install https://github.com/memtomem/memtomem/tree/main/packages/memtomem-antigravity-plugin`.
+  agy starts a plugin's server in the plugin directory, so it runs at user
+  scope, with the same skills as the Hermes plugin and no handoff workflow.
+  A hand-registered `memtomem` server is not replaced: agy names the plugin's
+  server `memtomem_memtomem` and runs both, so keep one of the two.
+
 ### Fixed
 
 - **Antigravity CLI setup points at the config file `agy` reads.** The CLI
