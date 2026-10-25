@@ -94,7 +94,11 @@ Every indexing entrypoint scans file content for secret-shaped patterns
 enforce) before storing it. A hit skips that file — it is **not** indexed —
 and is reported via the `Blocked (redaction)` line above, plus a listing of
 the blocked paths when the count is nonzero. Other files in the same run are
-unaffected.
+unaffected. If the file was indexed before, its earlier chunks are held:
+hidden from search and from reads by chunk id, kept in the DB, and served
+again after the next clean index pass of that file
+([#2629](https://github.com/memtomem/memtomem/issues/2629),
+[#2777](https://github.com/memtomem/memtomem/issues/2777)).
 
 `mm index --force-unsafe` bypasses the gate for a direct CLI index run
 (audit-logged), and the Web UI offers the same bypass as an explicit
@@ -111,9 +115,9 @@ scope regardless of caller.
 
 The gate's two broad label rules match on the keyword plus `=` or `:`,
 independent of what follows — so a note that *documents* them (writing
-`api_key=` in prose) trips its own guard. Because a blocked file is skipped
-rather than failed, its old chunks stay in the DB and `mem_search` keeps
-answering from pre-trip content indefinitely.
+`api_key=` in prose) trips its own guard. The note then drops out of
+`mem_search`: its earlier chunks are held, as above, until an index pass
+accepts the file again.
 
 A Markdown note can declare an exemption for itself
 ([#2076](https://github.com/memtomem/memtomem/issues/2076)):
