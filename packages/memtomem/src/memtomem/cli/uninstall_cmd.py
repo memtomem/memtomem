@@ -527,7 +527,19 @@ def _collect_inventory(db_path: Path) -> _Inventory:
 # ---- external integrations ----------------------------------------------
 
 
-def _probe_external_integrations() -> list[_External]:
+def _antigravity_vscode_mcp(home: Path) -> Path:
+    # The VS Code-side integrations inside Antigravity keep their servers under
+    # ``servers`` (VS Code's MCP schema), not ``mcpServers``.
+    return home / "Library" / "Application Support" / "Antigravity" / "User" / "mcp.json"
+
+
+def _external_candidates(home: Path) -> list[Path]:
+    """User-level config files that may carry a memtomem MCP entry.
+
+    Covers every location ``context.runtime_registry`` probes (pinned by a
+    parity test) plus files only uninstall reports: other editors and the
+    legacy Kimi and Antigravity CLI files a user may have left behind.
+    """
     from memtomem.context._kimi_home import (
         KIMI_CODE_DIRNAME,
         KIMI_LEGACY_DIRNAME,
@@ -535,7 +547,6 @@ def _probe_external_integrations() -> list[_External]:
         kimi_legacy_home,
     )
 
-    home = Path.home()
     candidates: list[Path] = [
         home / ".claude.json",
         home / ".codex" / "config.toml",
@@ -545,10 +556,23 @@ def _probe_external_integrations() -> list[_External]:
         home / KIMI_CODE_DIRNAME / "mcp.json",
         home / KIMI_LEGACY_DIRNAME / "mcp.json",
         home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
+        # Antigravity: the CLI's current file, the older CLI file agy no longer
+        # reads, the IDE's built-in agent, and its VS Code-side integrations.
+        home / ".gemini" / "config" / "mcp_config.json",
+        home / ".gemini" / "antigravity-cli" / "mcp_config.json",
+        home / ".gemini" / "antigravity" / "mcp_config.json",
+        _antigravity_vscode_mcp(home),
     ]
     for kimi_mcp in (kimi_legacy_home(home) / "mcp.json", kimi_code_home(home) / "mcp.json"):
         if kimi_mcp not in candidates:
             candidates.append(kimi_mcp)
+    return candidates
+
+
+def _probe_external_integrations() -> list[_External]:
+    home = Path.home()
+    candidates = _external_candidates(home)
+    servers_key_files = {_antigravity_vscode_mcp(home)}
 
     # #1949: no ``exists()`` precheck here or in the loop below — on py3.12
     # it raises (not returns False) for a candidate linked through an
@@ -566,7 +590,8 @@ def _probe_external_integrations() -> list[_External]:
             continue
 
         # ── parsed mcpServers.memtomem key check ──────────────────────────
-        # JSON files: check ``mcpServers.memtomem`` via json.loads.
+        # JSON files: check ``mcpServers.memtomem`` via json.loads
+        #   (``servers.memtomem`` for the Antigravity VS Code-side file only).
         # Codex TOML: check ``mcp_servers.memtomem`` via tomllib (TOML uses
         #   snake_case dotted keys resolved to nested dicts by tomllib).
         # Unparseable files are silently skipped — uninstall is a recovery
@@ -575,13 +600,14 @@ def _probe_external_integrations() -> list[_External]:
         matched = False
 
         if suffix == ".json":
+            key = "servers" if path in servers_key_files else "mcpServers"
             try:
                 data = json.loads(text)
             except (json.JSONDecodeError, TypeError):
                 pass
             else:
-                if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict):
-                    if "memtomem" in data["mcpServers"]:
+                if isinstance(data, dict) and isinstance(data.get(key), dict):
+                    if "memtomem" in data[key]:
                         matched = True
         elif suffix == ".toml":
             try:

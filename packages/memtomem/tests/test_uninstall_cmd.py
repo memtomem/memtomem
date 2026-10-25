@@ -481,6 +481,96 @@ class TestProbeExternalParsedMCP:
         assert result.exit_code == 0, result.output
         assert "External integrations" not in result.output
 
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            # agy CLI, the file it reads (#2872)
+            ".gemini/config/mcp_config.json",
+            # agy CLI, the older file it no longer reads but users may have left behind
+            ".gemini/antigravity-cli/mcp_config.json",
+            # Antigravity IDE, built-in agent
+            ".gemini/antigravity/mcp_config.json",
+        ],
+    )
+    def test_antigravity_mcp_servers_memtomem_reported(self, home, rel):
+        """#2871: each Antigravity ``mcpServers`` file is reported."""
+        from memtomem.cli.uninstall_cmd import _format_path
+
+        self._seed_state_dir(home)
+        path = home / rel
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"mcpServers": {"memtomem": {"command": "mm-server"}}}),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "External integrations" in result.output
+        assert _format_path(path) in result.output
+
+    def _antigravity_vscode_mcp(self, home: Path) -> Path:
+        path = home / "Library" / "Application Support" / "Antigravity" / "User" / "mcp.json"
+        path.parent.mkdir(parents=True)
+        return path
+
+    def test_antigravity_vscode_servers_key_reported(self, home):
+        """#2871: the Antigravity VS Code-side file nests servers under ``servers``."""
+        from memtomem.cli.uninstall_cmd import _format_path
+
+        self._seed_state_dir(home)
+        path = self._antigravity_vscode_mcp(home)
+        path.write_text(
+            json.dumps({"servers": {"memtomem": {"command": "mm-server"}}}),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert _format_path(path) in result.output
+
+    def test_antigravity_vscode_mcp_servers_key_not_reported(self, home):
+        """The VS Code-side file is read under ``servers`` only, as the registry does."""
+        self._seed_state_dir(home)
+        self._antigravity_vscode_mcp(home).write_text(
+            json.dumps({"mcpServers": {"memtomem": {"command": "mm-server"}}}),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "External integrations" not in result.output
+
+    def test_servers_key_outside_antigravity_vscode_not_reported(self, home):
+        """``servers`` counts only for the Antigravity VS Code-side file, not every JSON."""
+        self._seed_state_dir(home)
+        path = home / ".cursor" / "mcp.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"servers": {"memtomem": {"command": "mm-server"}}}),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "External integrations" not in result.output
+
+    def test_candidates_cover_every_runtime_registry_location(self, tmp_path):
+        """#2871 drift guard: a location the registry probes is an uninstall candidate.
+
+        The registry returns ``$HOME``-collapsed POSIX strings (absolute for an
+        override outside home); rebuild them against the same explicit home.
+        Project ``.mcp.json`` is excluded by passing no project root.
+        """
+        from memtomem.cli.uninstall_cmd import _external_candidates
+        from memtomem.context.runtime_registry import registry_location_paths
+
+        home = tmp_path / "home"
+        registry = {
+            home / token[2:] if token.startswith("~/") else Path(token)
+            for paths in registry_location_paths(home, None).values()
+            for token in paths
+        }
+        assert registry, "registry_location_paths returned nothing"
+        missing = registry - set(_external_candidates(home))
+        assert not missing, f"registry locations uninstall does not report: {sorted(missing)}"
+
     def test_nonexistent_files_skipped_silently(self, home):
         """Files that don't exist are simply skipped — no error, no output."""
         self._seed_state_dir(home)

@@ -30,6 +30,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   hint also stops asking you to add `"type": "stdio"`: `agy` loads the entry
   without it. If you registered memtomem in the older file, move the entry or
   re-add it with `agy mcp add`.
+- **`mm uninstall` reports Antigravity MCP registrations (#2871).** Its list
+  of external configs left for manual cleanup had no Antigravity file, so a
+  memtomem entry registered for Antigravity was never mentioned. It now checks
+  the agy CLI's `~/.gemini/config/mcp_config.json`, the older
+  `~/.gemini/antigravity-cli/mcp_config.json` an earlier setup may have left
+  behind, the IDE's `~/.gemini/antigravity/mcp_config.json`, and its VS
+  Code-side `~/Library/Application Support/Antigravity/User/mcp.json` (read
+  under `servers`, that file's key). A test now fails if the runtime registry
+  learns a location the uninstall list does not cover.
 
 ## [0.6.12] — 2026-10-25
 

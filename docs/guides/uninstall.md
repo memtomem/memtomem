@@ -48,7 +48,7 @@ config file, then restart the editor.
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` |
 | Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) |
 | Antigravity CLI (`agy`) | `agy mcp remove memtomem` (or delete from `~/.gemini/config/mcp_config.json`; also remove a leftover entry in the older `~/.gemini/antigravity-cli/mcp_config.json` if present) |
-| Antigravity IDE | MCP Servers panel → remove the memtomem entry |
+| Antigravity IDE | MCP Servers panel → remove the memtomem entry (built-in agent: `~/.gemini/antigravity/mcp_config.json`; VS Code-side integrations: `~/Library/Application Support/Antigravity/User/mcp.json`, where the entry sits under `servers`, not `mcpServers`) |
 | Gemini CLI (consumer free/Pro/Ultra service ended 2026-06-18; enterprise licenses and paid API keys remain supported) | `~/.gemini/settings.json` |
 | Codex CLI | `~/.codex/config.toml` (remove the `[mcp_servers.memtomem]` section) |
 | Kimi Code | `~/.kimi-code/mcp.json` (or `$KIMI_CODE_HOME/mcp.json`; also remove a legacy `~/.kimi/mcp.json` or `$KIMI_SHARE_DIR/mcp.json` entry if present) |
