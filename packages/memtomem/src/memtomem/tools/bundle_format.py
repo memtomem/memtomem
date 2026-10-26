@@ -79,7 +79,7 @@ def load_json(text: str) -> dict:
         raise invalid("header", "chunks")
     if not isinstance(data.get("relations", []), list):
         raise invalid("header", "relations")
-    for key in ("total_chunks", "omitted_held_sources"):
+    for key in ("total_chunks", "omitted_held_sources", "omitted_self_relations"):
         if key in data and (type(data[key]) is not int or data[key] < 0):
             raise invalid("header", key)
     if "total_chunks" in data and data["total_chunks"] != len(data["chunks"]):
@@ -120,8 +120,10 @@ def timestamp(value: object, where: str, field: str) -> datetime:
     _string(value, where, field)
     try:
         parsed = datetime.fromisoformat(str(value))
-        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
-    except ValueError as exc:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError) as exc:
         raise invalid(where, field) from exc
 
 
@@ -242,23 +244,37 @@ def map_chunk(
     where = f"record {record_index}"
     meta = chunk.metadata
     source = str(meta.source_file)
-    # Pattern-only classification is deliberately independent of local registration.
-    pattern_scope, _ = classify_scope(source, None)
-    if version != "4" and pattern_scope != "user":
-        raise invalid(where, "legacy project source (re-export as v4)")
     if meta.scope == "user":
         if os.name != "nt" and PureWindowsPath(source).drive:
-            raise invalid(where, "foreign user source path")
+            raise invalid(
+                where,
+                "foreign user source path (on POSIX, manually convert source_file "
+                "to a local absolute path; project_root_map only maps project records)",
+            )
         resolved = Path(norm_path(meta.source_file))
         project_dirs = config.project_memory_dirs if config is not None else []
+        registered_scope, _ = classify_scope(resolved, project_dirs)
+        if version != "4":
+            # The canonical user directory has the same spelling as a project
+            # tree. Honor that known tier and configured user roots, but never
+            # let a broad user root swallow an explicitly registered project.
+            user_dirs = [Path.home() / ".memtomem/memories"]
+            if config is not None:
+                user_dirs.extend(config.memory_dirs)
+            known_user = any(
+                resolved.is_relative_to(Path(norm_path(Path(d).expanduser()))) for d in user_dirs
+            )
+            project_pattern = (
+                classify_scope(source, None)[0] != "user"
+                or classify_scope(resolved, None)[0] != "user"
+            )
+            if registered_scope != "user" or (project_pattern and not known_user):
+                raise invalid(where, "legacy project source (re-export as v4)")
         # v4 declares its boundary explicitly. Match the indexer's registration
         # rule: an unregistered .memtomem directory is an ordinary user source.
-        # Legacy records have no such declaration and remain pattern-rejected.
+        # Legacy records have already passed the stricter known-user check.
         unchanged_local_user = self_export and version == "4" and source == str(resolved)
-        if (
-            classify_scope(resolved, project_dirs if version == "4" else None)[0] != "user"
-            and not unchanged_local_user
-        ):
+        if registered_scope != "user" and not unchanged_local_user:
             raise invalid(
                 where, "resolved source_file/scope (run mm reindex --force and re-export)"
             )

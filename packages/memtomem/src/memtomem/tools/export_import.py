@@ -82,6 +82,7 @@ class ExportBundle:
     # See ``memtomem.provenance``.
     provenance: dict | None = None
     format: str | None = BUNDLE_FORMAT
+    omitted_self_relations: int = 0
     # Transient output for the immediate Web response, never a wire field.
     _export_json: str | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -108,6 +109,7 @@ class ExportBundle:
             chunks=data["chunks"],
             relations=data.get("relations", []),
             provenance=data.get("provenance"),
+            omitted_self_relations=data.get("omitted_self_relations", 0),
         )
 
 
@@ -210,7 +212,9 @@ async def export_chunks(
     relations = [
         {"source_id": str(sid), "target_id": str(tid), "relation_type": rel}
         for sid, tid, rel in edges
+        if sid != tid
     ]
+    omitted_self_relations = len(edges) - len(relations)
     # Do not publish a backup whose stored scalar metadata is already invalid.
     try:
         validate_records(records, relations, BUNDLE_VERSION)
@@ -238,8 +242,11 @@ async def export_chunks(
         chunks=records,
         relations=relations,
         provenance=marker,
+        omitted_self_relations=omitted_self_relations,
     )
 
+    if omitted_self_relations:
+        logger.warning("Export omitted %d self-relation(s)", omitted_self_relations)
     if omitted_held_sources:
         logger.warning(
             "Export omitted %d held or pending source(s); restore them and export again "
@@ -916,17 +923,13 @@ def _dict_to_chunk(
         overlap_after=record.get("overlap_after", 0),
         origin=origin,
     )
+    # Normalize here too: UTC conversion must succeed before embedding, even
+    # when this decoder is used directly rather than through bundle validation.
     created_at = (
-        datetime.fromisoformat(record["created_at"])
+        timestamp(record["created_at"], "record", "created_at")
         if "created_at" in record
         else datetime.now(timezone.utc)
     )
-    # Chunk timestamps are always timezone-aware (see ``_row_to_chunk``); a
-    # naive bundle value is read as UTC, matching the storage layer. An
-    # offset-aware value stays as-is — it is correct in Python, and the
-    # storage boundary renders it in UTC.
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
     # content_hash recomputed by Chunk.__post_init__ if blank — trusting the
     # bundle here would skip NFC normalisation and let a tampered bundle
     # smuggle a hash/content mismatch past dedup. Always recompute.

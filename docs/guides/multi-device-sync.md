@@ -182,6 +182,13 @@ leaves out sources held because their file is missing or unreadable, and
 reports how many; restore and re-index them first if the bundle should be
 complete.
 
+For Windows-to-POSIX transfers of user memories, convert the bundle's
+`source_file` values manually to local absolute paths before importing. This
+restriction applies to all memory-bundle versions: `project_root_map` only maps
+project records, and a v4 re-export does not convert user paths. Editing a
+signed bundle invalidates its local provenance and enables the full privacy
+scan. Restore the corresponding source files separately.
+
 That caveat is about *memory* bundles. A single **context artifact** — one
 skill, command, or agent — does have a cross-device format: `mm context export`
 writes a file with no absolute paths and no hostnames, and `mm context import`

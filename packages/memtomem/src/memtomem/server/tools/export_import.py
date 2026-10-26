@@ -83,6 +83,8 @@ async def mem_export(
             f"\n- Warning: {bundle.omitted_held_sources} held or pending source(s) omitted. "
             "Restore them and export again for a complete backup."
         )
+    if bundle.omitted_self_relations:
+        result += f"\n- Warning: {bundle.omitted_self_relations} self-relation(s) omitted."
     return result
 
 

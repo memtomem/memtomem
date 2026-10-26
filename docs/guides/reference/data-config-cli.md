@@ -69,15 +69,19 @@ User/private self-exports retain the local-provenance exemption; changed
 namespace/path metadata is scanned separately. Paths and declared scope must
 agree. Imported rows never receive a source-write hash from the bundle.
 
-Versions 1–3 remain readable for user memories. Legacy project-shaped source
-paths require a v4 re-export, including paths not registered on this computer.
+Versions 1–3 remain readable for user memories, including the canonical
+`~/.memtomem/memories` directory and configured `indexing.memory_dirs`.
+Registered project directories take precedence over these user roots. Other
+legacy project-shaped source paths require a v4 re-export, including paths not
+registered on this computer. A symlink escaping a known user root does not
+inherit its user classification.
 Legacy imports report `legacy_metadata_missing`; metadata not present in a
 legacy update is retained from the destination row.
 
 For v4, explicitly declared user records use the indexer's registration rule:
 an unregistered `.memtomem` directory remains user scope. Registered project
-paths cannot be restored as user records. Legacy project-shaped paths still
-require re-export as v4, independently of local registration.
+paths cannot be restored as user records. Outside known user roots, legacy
+project-shaped paths require re-export as v4 independently of registration.
 
 An unchanged, locally signed v4 user record restores the scope stored in its
 backup, including older virtual policy summaries or notes indexed before
@@ -100,6 +104,13 @@ same scope and project:
 rows; a verified self-export may restore links among existing matching rows.
 Its provenance key sidecar is needed to recognize it as local.
 
+On POSIX, a Windows drive or UNC path in a **user** record is refused rather
+than stored as a misleading relative filename. Before importing such a bundle,
+manually convert each `source_file` to its local absolute path and restore the
+source files there. This applies to v1–v4; re-exporting as v4 alone does not
+convert paths. Editing a signed bundle invalidates local provenance and causes
+the full privacy scan. `project_root_map` maps project records only.
+
 **This is an index backup, not a source-file backup or continuous sync.** Restore
 Markdown/source files separately. `missing_source_files` and
 `unavailable_source_files` count unique source paths; warnings are also returned
@@ -108,6 +119,9 @@ next reindex uses the source files as authoritative. Project-local files are
 usually gitignored and will not appear in a fresh clone automatically.
 
 Core file export atomically replaces a regular file with owner-private output.
+Self-relations are omitted from exports so older stores containing them remain
+backuppable. The bundle's `omitted_self_relations` count, export log, and MCP
+summary report the omission; other relations and all selected chunks are kept.
 The final destination component must not be a symlink; parent-directory aliases
 such as macOS `/tmp` remain supported. Browser search-result CSV, Markdown and
 JSON downloads are **reports**, not restore bundles. CSV quotes all cells,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from bisect import bisect_left
 
 import yaml
 
@@ -12,12 +13,19 @@ _KEY_LINE = re.compile(r"([A-Za-z_][\w-]*)\s*:")
 logger = logging.getLogger(__name__)
 
 
-def _warn_comment(text: str, node: yaml.ScalarNode) -> None:
+def _warn_comment(text: str, node: yaml.ScalarNode, token_starts: list[int]) -> None:
     if node.style is not None:
         return
-    start = text.rfind("\n", 0, node.start_mark.index) + 1
-    end = text.find("\n", node.end_mark.index)
-    if re.search(r"(^|\s)#", text[start : end if end >= 0 else len(text)]):
+    # YAML tokens exclude comments. Inspect only the gap following this value;
+    # a quoted sibling's literal hash is part of its token, never this gap.
+    start = node.end_mark.index
+    next_token = bisect_left(token_starts, start)
+    end = token_starts[next_token] if next_token < len(token_starts) else len(text)
+    # A standalone comment on a later YAML line did not truncate this value.
+    line_break = re.search(r"[\r\n\x85\u2028\u2029]", text[start:end])
+    if line_break is not None:
+        end = start + line_break.start()
+    if re.search(r"(^|\s)#", text[start:end]):
         logger.warning(
             "Unquoted frontmatter contains a YAML comment; quote literal hash characters"
         )
@@ -36,6 +44,7 @@ def flat_yaml(text: str) -> dict | None:
         return None
     if not isinstance(root, yaml.MappingNode):
         return {}
+    token_starts = [token.start_mark.index for token in yaml.scan(text, Loader=yaml.SafeLoader)]
     result = {}
     for key, value in root.value:
         if (
@@ -49,14 +58,14 @@ def flat_yaml(text: str) -> dict | None:
         if lexical_key is None or lexical_key.group(1) != key.value:
             continue
         if isinstance(value, yaml.ScalarNode):
-            _warn_comment(text, value)
+            _warn_comment(text, value, token_starts)
             result[key.value] = (
                 None if value.tag == "tag:yaml.org,2002:null" and not value.value else value.value
             )
         elif isinstance(value, yaml.SequenceNode):
             for item in value.value:
                 if isinstance(item, yaml.ScalarNode):
-                    _warn_comment(text, item)
+                    _warn_comment(text, item, token_starts)
             if all(isinstance(item, yaml.ScalarNode) for item in value.value):
                 result[key.value] = [item.value for item in value.value]
             else:

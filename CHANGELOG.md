@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore v1–v3 user-memory backups from the canonical or configured user
+  directories while retaining registered project boundaries and rejecting
+  symlink escapes into project trees.
+- Reject timestamps that overflow during UTC conversion before embedding.
+- Export older stores containing self-relations by omitting those edges and
+  reporting `omitted_self_relations`, instead of refusing the whole backup.
+- Avoid false YAML-comment warnings for quoted list values with plain siblings.
+- Document Windows user-path conversion required for imports on POSIX.
+
 ## [0.6.12] — 2026-10-25
 
 ### Upgrading
