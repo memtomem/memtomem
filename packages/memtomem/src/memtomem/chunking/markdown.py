@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from memtomem._frontmatter import flat_yaml
+
 import json
 import re
 from dataclasses import dataclass
@@ -431,6 +433,23 @@ class MarkdownChunker:
 
         Returns ``[]`` when nothing parses.
         """
+        # This blockquote-value grammar is separate from document frontmatter.
+        list_lines = []
+        if not value.strip():
+            for line in trailing_lines:
+                stripped = line.strip()
+                if stripped.startswith("- "):
+                    list_lines.append("  " + stripped)
+                elif stripped and not stripped.startswith("#"):
+                    break
+        parsed = flat_yaml("tags: " + value + "\n" + "\n".join(list_lines))
+        if parsed is not None:
+            decoded_tags = parsed.get("tags")
+            if isinstance(decoded_tags, list):
+                return [t.strip() for t in decoded_tags if t.strip()]
+            if isinstance(decoded_tags, str):
+                return [decoded_tags.strip()] if decoded_tags.strip() else []
+            return []
         value = value.strip()
         if value.startswith("[") and value.endswith("]"):
             # Prefer strict JSON: this decodes ``\uXXXX`` escapes (the shape
@@ -463,10 +482,16 @@ class MarkdownChunker:
         match = _FRONT_MATTER_RE.match(content)
         if not match:
             return []
+        parsed = flat_yaml(match.group(1))
+        if parsed is not None:
+            tags = parsed.get("tags")
+            if isinstance(tags, list):
+                return [t.strip() for t in tags if t.strip()]
+            return [tags.strip()] if isinstance(tags, str) and tags.strip() else []
         fm_lines = match.group(1).splitlines()
         for idx, line in enumerate(fm_lines):
             stripped = line.strip()
-            if stripped.startswith("tags:"):
+            if line.startswith("tags:"):
                 return cls._parse_tags_value(stripped[5:], fm_lines[idx + 1 :])
         return []
 
@@ -486,13 +511,20 @@ class MarkdownChunker:
         match = _FRONT_MATTER_RE.match(content)
         if not match:
             return None, None
+        parsed = flat_yaml(match.group(1))
+        if parsed is not None:
+            low, high = parsed.get("valid_from"), parsed.get("valid_to")
+            return (
+                _parse_validity_bound(low, upper=False) if isinstance(low, str) else None,
+                _parse_validity_bound(high, upper=True) if isinstance(high, str) else None,
+            )
         from_value: str | None = None
         to_value: str | None = None
         for line in match.group(1).splitlines():
             stripped = line.strip()
-            if stripped.startswith("valid_from:"):
+            if line.startswith("valid_from:"):
                 from_value = stripped[len("valid_from:") :].strip().strip("'\"")
-            elif stripped.startswith("valid_to:"):
+            elif line.startswith("valid_to:"):
                 to_value = stripped[len("valid_to:") :].strip().strip("'\"")
         vfrom = _parse_validity_bound(from_value, upper=False) if from_value else None
         vto = _parse_validity_bound(to_value, upper=True) if to_value else None

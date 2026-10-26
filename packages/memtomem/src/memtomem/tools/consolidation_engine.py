@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -521,6 +522,16 @@ async def apply_consolidation(
         # summary derived from chunks that are now hidden.
         if await storage.is_source_held(Path(group["source"])):
             raise StorageError("consolidation source became unavailable")
+        if source_ids:
+            originals = await storage.get_chunks_batch([UUID(cid) for cid in source_ids])
+            boundaries = {(c.metadata.scope, c.metadata.project_root) for c in originals.values()}
+            if len(boundaries) > 1:
+                raise StorageError("consolidation originals span multiple scope boundaries")
+            if boundaries:
+                scope, project_root = next(iter(boundaries))
+                summary_chunk.metadata = replace(
+                    summary_chunk.metadata, scope=scope, project_root=project_root
+                )
         # Ownership before coverage, in the order the caller's pre-check uses:
         # a path the policy does not own fails the group whatever else holds.
         existing = await _owned_policy_summaries(storage, virtual_path)

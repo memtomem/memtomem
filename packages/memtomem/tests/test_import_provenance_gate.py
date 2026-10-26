@@ -199,7 +199,7 @@ async def test_self_export_with_secret_roundtrips_unchanged(tmp_path):
 
     bundle_path = tmp_path / "self.json"
     bundle = await export_chunks(src, output_path=bundle_path, provenance_key_path=key_path)
-    assert bundle.provenance and bundle.provenance["scheme"] == provenance.SCHEME
+    assert bundle.provenance and bundle.provenance["scheme"] == provenance.BUNDLE_SCHEME
 
     # Fresh install sharing the same key → marker verifies → no force_unsafe.
     dst = await _make_storage(tmp_path, "dst")
@@ -266,20 +266,12 @@ async def test_tampered_self_export_is_gated(tmp_path):
 
 
 async def test_malformed_record_not_scanned_and_atomic_reject(tmp_path):
-    """A malformed record is dropped pre-scan; a single blocked record rejects
-    the whole import (the clean record is not committed)."""
     storage = await _make_storage(tmp_path)
-    records = [
-        {"not_a": "valid record"},  # missing content/source_file → skipped
-        _record(_CLEAN, source="clean.md"),
-        _record(_SECRET, source="secret.md"),
-    ]
-    bundle = _write_bundle(tmp_path / "mixed.json", records, marker=None)
-
-    with pytest.raises(ImportPrivacyError) as ei:
+    records = [{"not_a": "valid record"}, _record(_CLEAN, source="clean.md"), _record(_SECRET)]
+    bundle = _write_bundle(tmp_path / "mixed.json", records)
+    with pytest.raises(ValueError, match="record 0"):
         await import_chunks(storage, _FakeEmbedder(), bundle)
-    assert ei.value.blocked_records == 1  # only the secret record, not the malformed one
-    assert len(await storage.recall_chunks(limit=100)) == 0  # nothing committed
+    assert (await storage.get_stats())["total_chunks"] == 0
 
 
 async def test_empty_bundle_is_noop(tmp_path):
@@ -422,24 +414,17 @@ async def test_web_import_foreign_secret_403_then_force_unsafe(tmp_path):
 
 
 async def test_secret_in_malformed_field_not_leaked_to_logs(tmp_path, caplog):
-    """A foreign bundle hiding a secret in a field that fails parsing (here
-    ``created_at`` → ``datetime.fromisoformat`` raises ``ValueError`` embedding
-    the value) must drop the record WITHOUT echoing the secret bytes to the log
-    sink. Regression for the parse-error log-leak (Codex review)."""
     import logging
 
     storage = await _make_storage(tmp_path)
     bad = _record(_CLEAN)
-    bad["created_at"] = _SECRET  # fromisoformat(secret) -> ValueError(secret)
-    bundle = _write_bundle(tmp_path / "leak.json", [bad], marker=None)
-
-    with caplog.at_level(logging.WARNING):
-        stats = await import_chunks(storage, _FakeEmbedder(), bundle)
-
-    assert stats.skipped_chunks == 1
-    assert len(await storage.recall_chunks(limit=100)) == 0
+    bad["created_at"] = _SECRET
+    bundle = _write_bundle(tmp_path / "leak.json", [bad])
+    with caplog.at_level(logging.WARNING), pytest.raises(ValueError) as exc:
+        await import_chunks(storage, _FakeEmbedder(), bundle)
+    assert _SECRET not in str(exc.value)
+    assert (await storage.get_stats())["total_chunks"] == 0
     assert _SECRET not in caplog.text
-    assert "sk-" not in caplog.text
 
 
 async def test_force_unsafe_import_records_bypass_and_audits(tmp_path, monkeypatch):

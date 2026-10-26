@@ -36,6 +36,8 @@ from __future__ import annotations
 import logging
 import json
 import re
+
+from memtomem._frontmatter import flat_yaml, yaml_scalar, yaml_list
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -139,6 +141,9 @@ def _parse_flat_yaml(text: str) -> dict[str, Any]:
     features are **not** supported — unsupported lines are silently skipped.
     That is intentional for Phase 2 so we don't take a pyyaml dependency.
     """
+    parsed = flat_yaml(text)
+    if parsed is not None:
+        return parsed
     result: dict[str, Any] = {}
     lines = text.splitlines()
     i = 0
@@ -322,7 +327,7 @@ def list_canonical_agents(
 
 
 def _yaml_inline_list(items: list[str]) -> str:
-    return "[" + ", ".join(items) + "]"
+    return yaml_list(items)
 
 
 def _render_markdown_agent(
@@ -331,20 +336,20 @@ def _render_markdown_agent(
 ) -> str:
     """Render an agent as Markdown + YAML frontmatter, emitting only the
     frontmatter keys listed in ``include_fields`` (in order)."""
-    lines: list[str] = [f"name: {agent.name}", f"description: {agent.description}"]
+    lines: list[str] = [f"name: {agent.name}", f"description: {yaml_scalar(agent.description)}"]
     for key in include_fields:
         if key in ("name", "description"):
             continue
         if key == "tools" and agent.tools:
             lines.append(f"tools: {_yaml_inline_list(agent.tools)}")
         elif key == "model" and agent.model:
-            lines.append(f"model: {agent.model}")
+            lines.append(f"model: {yaml_scalar(agent.model)}")
         elif key == "skills" and agent.skills:
             lines.append(f"skills: {_yaml_inline_list(agent.skills)}")
         elif key == "isolation" and agent.isolation:
-            lines.append(f"isolation: {agent.isolation}")
+            lines.append(f"isolation: {yaml_scalar(agent.isolation)}")
         elif key == "kind" and agent.kind:
-            lines.append(f"kind: {agent.kind}")
+            lines.append(f"kind: {yaml_scalar(agent.kind)}")
         elif key == "temperature" and agent.temperature is not None:
             lines.append(f"temperature: {agent.temperature}")
     frontmatter = "\n".join(lines)

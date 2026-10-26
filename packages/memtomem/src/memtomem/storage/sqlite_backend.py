@@ -2905,19 +2905,26 @@ class SqliteBackend(
         unique = list(set(content_hashes))
         # Batched: an import bundle hands over every hash it carries.
         rows: list[tuple] = []
-        async with self._lease_read_db() as db:
+        async with self._lease_txn_read_db() as db:
             for batch in _param_batches(unique):
                 rows += db.execute(
-                    f"SELECT content_hash, id, namespace, source_file, start_line, rowid "
+                    f"SELECT content_hash, id, namespace, source_file, start_line, rowid, scope, project_root "
                     f"FROM chunks WHERE content_hash IN ({placeholders(len(batch))})",
                     batch,
                 ).fetchall()
         found: dict[str, list[ChunkKeyRow]] = {}
-        for content_hash, chunk_id, namespace, source_file, start_line, _ in sorted(
-            rows, key=lambda row: row[5]
-        ):
+        for (
+            content_hash,
+            chunk_id,
+            namespace,
+            source_file,
+            start_line,
+            _,
+            scope,
+            project_root,
+        ) in sorted(rows, key=lambda row: row[5]):
             found.setdefault(content_hash, []).append(
-                ChunkKeyRow(UUID(chunk_id), namespace, source_file, start_line)
+                ChunkKeyRow(UUID(chunk_id), namespace, source_file, start_line, scope, project_root)
             )
         return found
 

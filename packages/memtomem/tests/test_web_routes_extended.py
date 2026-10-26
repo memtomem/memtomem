@@ -857,22 +857,14 @@ class TestExport:
             assert data["total_chunks"] == 1
 
     async def test_export_stats(self, client: AsyncClient):
-        with patch("memtomem.tools.export_import.export_chunks") as mock_export:
-            from memtomem.tools.export_import import ExportBundle
-
-            bundle = ExportBundle(
-                exported_at="2026-01-01T00:00:00Z",
-                total_chunks=42,
-                omitted_held_sources=2,
-                chunks=[],
-            )
-            mock_export.return_value = bundle
-
+        with patch("memtomem.storage.sqlite_export.read_export", new_callable=AsyncMock) as count:
+            count.return_value = (42, 2)
             resp = await client.get("/api/export/stats")
             assert resp.status_code == 200
             data = resp.json()
             assert data["total_chunks"] == 42
             assert data["omitted_held_sources"] == 2
+            assert count.call_args.kwargs["count_only"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -2545,6 +2537,9 @@ class TestImport:
                 restored_relations=3,
                 skipped_relations=2,
                 failed_relations=1,
+                warnings=["missing_source_files"],
+                missing_source_files=2,
+                unavailable_source_files=0,
             )
             resp = await client.post(
                 "/api/export/import",

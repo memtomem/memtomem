@@ -123,7 +123,7 @@ class TestClaudeCommandRendering:
         generate_all_commands(tmp_path, runtimes=["claude_commands"])
         out = (tmp_path / ".claude/commands/review.md").read_text(encoding="utf-8")
         assert "description: Review a file for issues" in out
-        assert "argument-hint: [file-path]" in out
+        assert "argument-hint: '[file-path]'" in out
         assert "allowed-tools: [Read, Grep]" in out
         assert "model: sonnet" in out
         assert "$ARGUMENTS" in out  # placeholder preserved

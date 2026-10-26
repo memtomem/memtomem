@@ -242,7 +242,7 @@ class PinnedContextStore:
                 audit_context={"block_id": block_id},
             )
         guard = privacy.enforce_write_guard(
-            content,
+            content + "\n" + description,
             surface="pinned_context_set",
             scope=scope,
             force_unsafe=force_unsafe,

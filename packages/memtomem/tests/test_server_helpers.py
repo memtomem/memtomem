@@ -297,6 +297,10 @@ class TestFormatStructuredResults:
             "namespace",
             "chunk_id",
             "content",
+            "source_file",
+            "heading_hierarchy",
+            "start_line",
+            "end_line",
         }
         assert set(item.keys()) == expected_keys
 
@@ -322,6 +326,10 @@ class TestFormatStructuredResults:
             "content",
             "created_at",
             "tags",
+            "source_file",
+            "heading_hierarchy",
+            "start_line",
+            "end_line",
         }
 
         chunk.metadata = replace(chunk.metadata, retrieval_context="Section A", redaction_count=1)

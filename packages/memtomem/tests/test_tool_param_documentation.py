@@ -120,14 +120,8 @@ _SAFETY_MARKERS = (
     (("bypassed", "audit-log", "audit line"), "that the bypass is recorded, not silent"),
 )
 
-#: Tools whose write path cannot reach ``project_shared``, so the "never
-#: bypassable for project_shared" clause would be a false statement in their
-#: docs. ``mem_import`` calls ``enforce_write_guard(..., scope="user")``
-#: unconditionally (``memtomem/tools/export_import.py``), so the scope-aware
-#: refusal never fires for it. Everything else must carry the clause.
-_NO_PROJECT_SHARED_PATH = {
-    "mem_import": "guard is invoked with scope='user' in tools/export_import.py",
-}
+#: Every force_unsafe ingress can now reach project_shared, including v4 import.
+_NO_PROJECT_SHARED_PATH: dict[str, str] = {}
 
 
 def _force_unsafe_tools() -> list[tuple[str, ast.AsyncFunctionDef | ast.FunctionDef]]:
@@ -194,28 +188,13 @@ def test_force_unsafe_documentation_states_the_project_shared_refusal() -> None:
 
 
 def test_project_shared_exemptions_are_still_exempt() -> None:
-    """The exemption list must not outlive its justification.
-
-    If ``mem_import`` ever starts passing a real scope, the clause becomes
-    required and this test says so instead of silently keeping the tool out
-    of the check.
-    """
+    """Import must remain scope-aware and may not regain the user-only exemption."""
+    assert "mem_import" not in _NO_PROJECT_SHARED_PATH
     path = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "tools" / "export_import.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    # Substring-matching the file would also match the ``scope="user"`` that
-    # appears inside its own docstring, so deleting the real keyword would
-    # leave this green on prose alone — the exact drift it exists to catch.
-    pinned = [
-        call
-        for call in ast.walk(tree)
-        if isinstance(call, ast.Call)
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    assert any(
+        isinstance(call, ast.Call)
         and ast.unparse(call.func).endswith("enforce_write_guard")
-        and any(
-            kw.arg == "scope" and getattr(kw.value, "value", None) == "user" for kw in call.keywords
-        )
-    ]
-    assert pinned, (
-        "tools/export_import.py no longer calls enforce_write_guard with a literal "
-        "scope='user' — mem_import can now reach a scope-aware refusal, so drop it "
-        "from _NO_PROJECT_SHARED_PATH and document the project_shared clause on it"
+        and any(kw.arg == "scope" and isinstance(kw.value, ast.Name) for kw in call.keywords)
+        for call in ast.walk(tree)
     )

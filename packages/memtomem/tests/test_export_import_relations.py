@@ -236,11 +236,10 @@ class TestRestore:
         assert _edges(dst) == _edges(src)
 
     async def test_duplicate_mode_with_an_ignored_row_does_not_abort(self, tmp_path):
-        """``duplicate`` mints ids for rows the chunk insert may then ignore.
+        """Exact occupied keys land on real rows rather than phantom duplicate ids.
 
-        Those ids never exist, so an edge with one as an end is not written —
-        here every edge, since each touches a row the store still had. The
-        import itself must not fail on them: foreign keys are on.
+        The self-export can restore the missing row and its edge to an existing
+        summary without violating foreign keys or rewriting the occupied rows.
         """
         key_path = tmp_path / "k.provenance_key"
         src = await _consolidated_store(tmp_path)
@@ -254,7 +253,7 @@ class TestRestore:
         )
 
         assert stats.failed_chunks == 0 and stats.failed_relations == 0
-        assert (stats.restored_relations, stats.skipped_relations) == (0, 4)
+        assert (stats.restored_relations, stats.skipped_relations) == (1, 3)
         assert "original note 2" in _ids(src)
 
 
@@ -363,21 +362,26 @@ class TestMalformed:
     async def test_malformed_relations_are_skipped_and_counted(self, tmp_path):
         key_path = tmp_path / "k.provenance_key"
         a, b = _record("note a"), _record("note b")
-        relations = [
+        for broken in [
             "not a dict",
-            {"source_id": a["chunk_id"], "target_id": b["chunk_id"]},
+            {"source_id": a["chunk_id"]},
             {"source_id": a["chunk_id"], "target_id": b["chunk_id"], "relation_type": 7},
-            {"source_id": a["chunk_id"], "target_id": "no-such-id", "relation_type": "related"},
+            {"source_id": a["chunk_id"], "target_id": str(uuid4()), "relation_type": "related"},
             {"source_id": a["chunk_id"], "target_id": a["chunk_id"], "relation_type": "related"},
-            _rel(a, b),
-        ]
-        bundle_path = _signed_bundle(tmp_path / "b.json", key_path, [a, b], relations)
-        dst = await _make_storage(tmp_path, "dst")
-
-        stats = await import_chunks(dst, _FakeEmbedder(), bundle_path, provenance_key_path=key_path)
-
-        assert (stats.restored_relations, stats.skipped_relations) == (1, 5)
-        assert _edges(dst) == {("note a", "note b", "related")}
+        ]:
+            bundle_path = _signed_bundle(
+                tmp_path / "b.json", key_path, [a, b], [_rel(a, b), broken]
+            )
+            dst = await _make_storage(tmp_path, str(uuid4()))
+            try:
+                with pytest.raises(ValueError, match="relation"):
+                    await import_chunks(
+                        dst, _FakeEmbedder(), bundle_path, provenance_key_path=key_path
+                    )
+                assert (await dst.get_stats())["total_chunks"] == 0
+                assert _edges(dst) == set()
+            finally:
+                await dst.close()
 
     async def test_two_records_landing_on_one_row_drop_their_edge(self, tmp_path):
         key_path = tmp_path / "k.provenance_key"
@@ -403,10 +407,9 @@ class TestMalformed:
     async def test_a_bundle_without_chunks_counts_its_relations_skipped(self, tmp_path):
         bundle_path = _foreign_bundle(tmp_path / "f.json", [], [{"x": 1}, {"y": 2}])
         dst = await _make_storage(tmp_path, "dst")
-
-        stats = await import_chunks(dst, _FakeEmbedder(), bundle_path)
-
-        assert stats.skipped_relations == 2
+        with pytest.raises(ValueError, match="relation"):
+            await import_chunks(dst, _FakeEmbedder(), bundle_path)
+        assert (await dst.get_stats())["total_chunks"] == 0
 
 
 class TestPrivacy:
@@ -454,9 +457,9 @@ class TestPrivacy:
         relations = [{"source_id": "nowhere", "target_id": "nothing", "relation_type": _SECRET}]
         bundle_path = _foreign_bundle(tmp_path / "f.json", [a], relations)
         dst = await _make_storage(tmp_path, "dst")
-
-        with pytest.raises(ImportPrivacyError):
+        with pytest.raises(ValueError, match="relation"):
             await import_chunks(dst, _FakeEmbedder(), bundle_path)
+        assert (await dst.get_stats())["total_chunks"] == 0
 
     async def test_force_unsafe_audits_each_relation_without_its_bytes(self, tmp_path, counters):
         recorded, audits = counters
@@ -763,7 +766,7 @@ class TestSameTextOriginals:
         storage, a, b, _ = await self._store(tmp_path)
         record = _record("same text")
         record["chunk_id"] = str(b)
-        record["start_line"] = 50
+        record["start_line"] = record["end_line"] = 50
         bundle_path = _foreign_bundle(tmp_path / "f.json", [record], [])
 
         stats = await import_chunks(
@@ -853,49 +856,33 @@ class TestSameTextOriginals:
     async def test_a_namespace_that_is_not_a_string_is_a_malformed_record(
         self, tmp_path, namespace, stored
     ):
-        """SQLite stores such a value in a text form the match does not reproduce.
-
-        Admitted, the record would miss the row at its key, update the other
-        row onto that key, and roll the import back.
-        """
         key_path = tmp_path / "k.provenance_key"
         storage = await _make_storage(tmp_path, "src")
         a, b = _at("same text", 2), _at("same text", 1, ns=stored)
         await storage.upsert_chunks([a, b])
         record = _record("same text")
         record["namespace"] = namespace
-        record["tags"] = ["edited"]
         bundle_path = _foreign_bundle(tmp_path / "i.json", [record], [])
-
-        stats = await import_chunks(
-            storage,
-            _FakeEmbedder(),
-            bundle_path,
-            on_conflict="update",
-            provenance_key_path=key_path,
-        )
-
-        assert (stats.skipped_chunks, stats.updated_chunks, stats.failed_chunks) == (1, 0, 0)
-        rows = _rows(storage)
-        assert rows[a.id] == ("default", 2, [])
-        assert rows[b.id] == (stored, 1, [])
+        with pytest.raises(ValueError, match="namespace"):
+            await import_chunks(
+                storage,
+                _FakeEmbedder(),
+                bundle_path,
+                on_conflict="update",
+                provenance_key_path=key_path,
+            )
+        assert _rows(storage) == {a.id: ("default", 2, []), b.id: (stored, 1, [])}
 
     async def test_a_path_that_cannot_resolve_is_one_malformed_record(self, tmp_path):
-        """A NUL in ``source_file`` fails ``norm_path``; the rest still imports."""
-        key_path = tmp_path / "k.provenance_key"
         storage = await _make_storage(tmp_path, "src")
         row = _at("same text", 1)
         await storage.upsert_chunks([row])
         broken = _record("same text", source="no\x00tes.md")
         fresh = _record("a new note")
         bundle_path = _foreign_bundle(tmp_path / "z.json", [broken, fresh], [])
-
-        stats = await import_chunks(
-            storage, _FakeEmbedder(), bundle_path, provenance_key_path=key_path
-        )
-
-        assert (stats.skipped_chunks, stats.imported_chunks, stats.failed_chunks) == (1, 1, 0)
-        assert set(_ids(storage)) == {"same text", "a new note"}
+        with pytest.raises(ValueError, match="source_file"):
+            await import_chunks(storage, _FakeEmbedder(), bundle_path)
+        assert set(_ids(storage)) == {"same text"}
 
     @pytest.mark.requires_symlinks
     async def test_a_path_spelled_through_a_symlink_matches_its_row(self, tmp_path):
@@ -908,7 +895,7 @@ class TestSameTextOriginals:
         b = _at("same text", 10, source=str(real / "notes.md"))
         await storage.upsert_chunks([a, b])
         record = _record("same text", source=str(tmp_path / "link" / "notes.md"))
-        record["start_line"] = 10
+        record["start_line"] = record["end_line"] = 10
         record["tags"] = ["edited"]
         bundle_path = _foreign_bundle(tmp_path / "l.json", [record], [])
 

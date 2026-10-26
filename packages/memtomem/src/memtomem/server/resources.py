@@ -166,7 +166,8 @@ async def chunk_resource(chunk_id: str, ctx: CtxType = None) -> str:
             "namespace": meta.namespace,
             "start_line": meta.start_line,
             "end_line": meta.end_line,
-            "created_at": str(meta.created_at),
+            "created_at": chunk.created_at.isoformat(),
+            "updated_at": chunk.updated_at.isoformat(),
         },
         indent=2,
     )

@@ -210,7 +210,7 @@ def load_or_create_key_for_export(key_path: Path) -> bytes:
     return key
 
 
-def _canonical_chunks(chunks: list[dict]) -> bytes:
+def _canonical_chunks(chunks: list[dict] | dict) -> bytes:
     # Deterministic for the current chunk schema (no floats); ``sort_keys``
     # makes it insensitive to dict key order, and signing the parsed objects
     # (not the pretty-printed bundle text) makes it insensitive to indentation.
@@ -260,4 +260,42 @@ def verify_marker(
     except TypeError:
         # ``hmac.compare_digest`` raises on a non-ASCII ``str`` — our digest is
         # always lowercase hex, so any non-ASCII signature is foreign, not ours.
+        return False
+
+
+BUNDLE_SCHEME = "memtomem-bundle-provenance-v2"
+
+
+def make_bundle_marker(
+    chunks: list[dict], key: bytes, relations: list, *, format: str, version: str
+) -> dict[str, str]:
+    """Sign v4 semantics as well as the exact untransformed records."""
+    envelope = {"format": format, "version": version, "chunks": chunks, "relations": relations}
+    payload = BUNDLE_SCHEME.encode("ascii") + b"\n" + _canonical_chunks(envelope)
+    signature = hmac.new(key, payload, hashlib.sha256).hexdigest()
+    return {"scheme": BUNDLE_SCHEME, "algo": ALGO, "signature": signature}
+
+
+def verify_bundle_marker(
+    chunks: list[dict],
+    marker: object,
+    key: bytes | None,
+    relations: list,
+    *,
+    format: str | None,
+    version: str,
+) -> bool:
+    if version != "4":
+        return verify_marker(chunks, marker, key, relations)
+    if key is None or not isinstance(marker, dict) or not isinstance(format, str):
+        return False
+    expected = make_bundle_marker(chunks, key, relations, format=format, version=version)
+    try:
+        return (
+            marker.get("scheme") == BUNDLE_SCHEME
+            and marker.get("algo") == ALGO
+            and isinstance(marker.get("signature"), str)
+            and hmac.compare_digest(marker["signature"], expected["signature"])
+        )
+    except (TypeError, ValueError):
         return False

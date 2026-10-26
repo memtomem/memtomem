@@ -24,16 +24,20 @@ async def export_memories(
 ) -> Response:
     """Export indexed chunks as a downloadable JSON bundle."""
     from memtomem.tools.export_import import export_chunks
+    from memtomem.tools.bundle_format import BundleSizeError
 
-    bundle = await export_chunks(
-        storage,
-        source_filter=source,
-        tag_filter=tag,
-        since=since,
-        namespace_filter=namespace,
-    )
+    try:
+        bundle = await export_chunks(
+            storage,
+            source_filter=source,
+            tag_filter=tag,
+            since=since,
+            namespace_filter=namespace,
+        )
+    except BundleSizeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     return Response(
-        content=bundle.to_json(),
+        content=bundle._export_json if bundle._export_json is not None else bundle.to_json(),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=memtomem_export.json"},
     )
@@ -48,22 +52,17 @@ async def export_stats(
     storage=Depends(get_storage),
 ) -> ExportStatsResponse:
     """Return chunk count that would be exported (without downloading)."""
-    from memtomem.tools.export_import import export_chunks
+    from memtomem.storage.sqlite_export import read_export
 
-    # Count-only preview: skip provenance signing so this read endpoint neither
-    # creates the per-install key file nor fails on a key-file problem.
-    bundle = await export_chunks(
+    total, omitted = await read_export(
         storage,
         source_filter=source,
         tag_filter=tag,
         since=since,
         namespace_filter=namespace,
-        stamp_provenance=False,
+        count_only=True,
     )
-    return ExportStatsResponse(
-        total_chunks=bundle.total_chunks,
-        omitted_held_sources=bundle.omitted_held_sources,
-    )
+    return ExportStatsResponse(total_chunks=total, omitted_held_sources=omitted)
 
 
 @router.post("/import", response_model=ImportResponse)
@@ -72,6 +71,8 @@ async def import_memories(
     on_conflict: str = Form("skip"),
     preserve_ids: bool = Form(False),
     force_unsafe: bool = Form(False),
+    project_root_map: str | None = Form(None),
+    confirm_project_shared: bool = Form(False),
     storage=Depends(get_storage),
     embedder=Depends(get_embedder),
     config=Depends(get_config),
@@ -99,11 +100,29 @@ async def import_memories(
             detail=f"on_conflict must be one of {sorted(_VALID_ON_CONFLICT)}",
         )
 
-    # Limit upload size to 100 MB
-    max_size = 100 * 1024 * 1024
+    from memtomem.tools.bundle_format import MAX_BUNDLE_BYTES, validate_root_map
+    import json
+
+    mapping = None
+    if project_root_map is not None:
+        try:
+            # Reuse duplicate-key rejection, but this input is options, not a bundle.
+            def unique(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("duplicate mapping")
+                    result[key] = value
+                return result
+
+            mapping = json.loads(project_root_map, object_pairs_hook=unique)
+            validate_root_map(mapping)
+        except (ValueError, TypeError, OSError):
+            raise HTTPException(status_code=422, detail="Invalid project_root_map") from None
+    max_size = MAX_BUNDLE_BYTES
     content = await file.read(max_size + 1)
     if len(content) > max_size:
-        raise HTTPException(status_code=413, detail="File too large (max 100 MB).")
+        raise HTTPException(status_code=413, detail="File too large (max 100 MiB).")
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         tmp.write(content)
         tmp_path = Path(tmp.name)
@@ -119,6 +138,8 @@ async def import_memories(
             surface="web_api_import",
             extract_entities=config.indexing.extract_entities,
             indexing_config=config.indexing,
+            project_root_map=mapping,
+            confirm_project_shared=confirm_project_shared,
         )
     except ImportPrivacyError as exc:
         # Mirrors the web_api_add 403 shape (system.py); ``blocked_records`` is a
@@ -127,7 +148,9 @@ async def import_memories(
         raise HTTPException(
             status_code=403,
             detail={
-                "detail": "redaction_blocked",
+                "detail": "redaction_blocked_project_shared"
+                if exc.shared_blocked
+                else "redaction_blocked",
                 "blocked_records": exc.blocked_records,
                 "surface": "web_api_import",
             },
@@ -152,4 +175,7 @@ async def import_memories(
         restored_relations=stats.restored_relations,
         skipped_relations=stats.skipped_relations,
         failed_relations=stats.failed_relations,
+        warnings=stats.warnings,
+        missing_source_files=stats.missing_source_files,
+        unavailable_source_files=stats.unavailable_source_files,
     )

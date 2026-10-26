@@ -3,7 +3,7 @@
 Export serialises chunks (without embeddings) to a JSON bundle.
 Import reads a bundle, re-embeds each chunk, and upserts to storage.
 
-Bundle schema v3 (current):
+Bundle schema v4 (current):
   * Records carry ``chunk_id`` and ``content_hash`` for cross-instance
     roundtrip fidelity and hash-based dedup.
   * ``relations`` lists the ``chunk_relations`` edges whose both ends are
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, get_args
@@ -30,7 +30,20 @@ from memtomem.errors import EmbeddingError, EmbeddingPolicyChangedError
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata, ChunkType
 from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_helpers import norm_path
-from memtomem.storage.sqlite_visibility import source_hidden
+from memtomem.storage.sqlite_export import read_export
+from memtomem.tools.bundle_format import (
+    BUNDLE_FORMAT,
+    BUNDLE_VERSION,
+    BundleValidationError,
+    MAX_BUNDLE_BYTES,
+    enforce_size,
+    invalid,
+    load_json,
+    map_chunk,
+    timestamp,
+    validate_records,
+    validate_root_map,
+)
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 
 if TYPE_CHECKING:
@@ -45,7 +58,7 @@ logger = logging.getLogger(__name__)
 # Data types
 # ---------------------------------------------------------------------------
 
-_BUNDLE_VERSION = "3"
+_BUNDLE_VERSION = BUNDLE_VERSION
 
 OnConflict = Literal["skip", "update", "duplicate"]
 # Derived from the Literal so the type and the runtime validator cannot drift.
@@ -68,21 +81,31 @@ class ExportBundle:
     # ``None`` on hand-crafted / pre-F.3 bundles, which then import as foreign.
     # See ``memtomem.provenance``.
     provenance: dict | None = None
+    format: str | None = BUNDLE_FORMAT
+    # Transient output for the immediate Web response, never a wire field.
+    _export_json: str | None = field(default=None, init=False, repr=False, compare=False)
 
     def to_json(self, *, indent: int = 2) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False, indent=indent)
+        payload = {f.name: getattr(self, f.name) for f in fields(self) if f.init}
+        if self.format is None:
+            payload.pop("format")
+        text = json.dumps(payload, ensure_ascii=False, indent=indent, allow_nan=False)
+        enforce_size(text)
+        self._export_json = text
+        return text
 
     @classmethod
     def from_json(cls, text: str) -> ExportBundle:
-        data = json.loads(text)
+        data = load_json(text)
+        version = data.get("version", "1")
+        validate_records(data["chunks"], data.get("relations", []), version)
         return cls(
-            version=data.get("version", _BUNDLE_VERSION),
+            version=version,
+            format=data.get("format"),
             exported_at=data.get("exported_at", ""),
-            total_chunks=data.get("total_chunks", 0),
+            total_chunks=len(data["chunks"]),
             omitted_held_sources=data.get("omitted_held_sources", 0),
-            chunks=data.get("chunks", []),
-            # Kept as found: ``import_chunks`` rejects a non-list before any
-            # write, and verifies the signature over exactly these items.
+            chunks=data["chunks"],
             relations=data.get("relations", []),
             provenance=data.get("provenance"),
         )
@@ -103,24 +126,37 @@ class ImportStats:
     restored_relations: int = 0
     skipped_relations: int = 0
     failed_relations: int = 0
+    warnings: list[str] = field(default_factory=list)
+    missing_source_files: int = 0
+    unavailable_source_files: int = 0
+
+
+class ImportChangedError(ValueError):
+    """The prepared import no longer matches the writer transaction snapshot."""
 
 
 class ImportPrivacyError(Exception):
-    """Raised when a foreign bundle's records hit the redaction guard.
+    """Raised when imported records hit the redaction guard.
 
     ADR-0006 Axis F.3: bundles without a valid local-provenance marker are
     scanned per-record on import and the whole import is rejected (atomically,
     mirroring ``mem_batch_add``) if any record contains a secret-shaped value,
-    unless ``force_unsafe=True``. ``blocked_records`` is a count of bundle
+    unless a private restore uses ``force_unsafe=True``. Shared restores are
+    always scanned and cannot bypass the guard. ``blocked_records`` is a count of bundle
     items — chunk records and relations — not of regex spans, so each ingress
     can render its native error without echoing the matched bytes.
     """
 
-    def __init__(self, blocked_records: int) -> None:
+    def __init__(self, blocked_records: int, *, shared_blocked: bool = False) -> None:
         self.blocked_records = blocked_records
+        self.shared_blocked = shared_blocked
+        hint = (
+            "Privacy bypass is unavailable for project_shared."
+            if shared_blocked
+            else "Retry with force_unsafe=True to bypass (audit-logged)."
+        )
         super().__init__(
-            f"{blocked_records} bundle record(s) match privacy pattern(s); import "
-            "rejected. Retry with force_unsafe=True to bypass (audit-logged)."
+            f"{blocked_records} bundle record(s) match privacy pattern(s); import rejected. {hint}"
         )
 
 
@@ -162,55 +198,37 @@ async def export_chunks(
         when ``stamp_provenance`` is set.
     """
     from memtomem import provenance
-    from memtomem.search.pipeline import match_source_filter_substring
 
-    source_files = await storage.get_all_source_files()
-
-    # Substring-only contract with negation — see
-    # ``match_source_filter_substring`` for the separator-fold rule (#720).
-    records: list[dict] = []
-    omitted_held_sources = 0
-    for source in sorted(source_files):
-        if source_filter and not match_source_filter_substring(source_filter, str(source)):
-            continue
-
-        def matches(chunk) -> bool:
-            return (
-                (not tag_filter or tag_filter in chunk.metadata.tags)
-                and (not since or chunk.created_at >= since)
-                and (not namespace_filter or chunk.metadata.namespace == namespace_filter)
-            )
-
-        # Bundles carry chunks but no source visibility state. Exporting held
-        # rows would make deleted or renamed-away content searchable on import,
-        # so the read itself leaves a hidden source out: a hold that lands
-        # after any check here still keeps its rows out of the bundle.
-        chunks = await storage.list_chunks_by_source(
-            source, limit=100_000, exclude_hidden=True, as_stored=True
-        )
-        if not chunks:
-            # Count only hidden sources with rows matching these export
-            # filters. This read decides that count and nothing else; its
-            # rows never reach ``records``.
-            if await source_hidden(storage, source):
-                held = await storage.list_chunks_by_source(source, limit=100_000, as_stored=True)
-                omitted_held_sources += any(matches(chunk) for chunk in held)
-            continue
-        records.extend(_chunk_to_dict(chunk) for chunk in chunks if matches(chunk))
-
-    # Only edges between exported records: an edge to a chunk the filters or a
-    # hold left out would have nothing to land on at import.
-    edges = await storage.get_relations_among([UUID(r["chunk_id"]) for r in records])
+    chunks, edges, omitted_held_sources = await read_export(
+        storage,
+        source_filter=source_filter,
+        tag_filter=tag_filter,
+        since=since,
+        namespace_filter=namespace_filter,
+    )
+    records = [_chunk_to_dict(chunk) for chunk in chunks]
     relations = [
         {"source_id": str(sid), "target_id": str(tid), "relation_type": rel}
         for sid, tid, rel in edges
     ]
+    # Do not publish a backup whose stored scalar metadata is already invalid.
+    try:
+        validate_records(records, relations, BUNDLE_VERSION)
+    except BundleValidationError as exc:
+        label = exc.where
+        if label.startswith("record "):
+            label = f"chunk {records[int(label.split()[1])]['chunk_id']}"
+        raise ValueError(f"Invalid stored {label} field {exc.field}. No bundle exported.") from exc
 
     marker: dict | None = None
     if stamp_provenance:
         key_path = provenance_key_path or provenance.key_path_for_db(storage.db_path)
-        marker = provenance.make_marker(
-            records, provenance.load_or_create_key_for_export(key_path), relations
+        marker = provenance.make_bundle_marker(
+            records,
+            provenance.load_or_create_key_for_export(key_path),
+            relations,
+            format=BUNDLE_FORMAT,
+            version=BUNDLE_VERSION,
         )
 
     bundle = ExportBundle(
@@ -228,9 +246,28 @@ async def export_chunks(
             "before treating this bundle as a complete backup",
             omitted_held_sources,
         )
+    text = bundle.to_json()  # The same byte ceiling applies to downloads and file exports.
     if output_path is not None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(bundle.to_json(), encoding="utf-8")
+        import stat
+
+        # Resolve parents only: resolving the leaf would silently follow a symlink.
+        output_path = output_path.expanduser()
+        output_path = output_path.parent.resolve() / output_path.name
+
+        def check_target():
+            try:
+                mode = output_path.lstat().st_mode
+            except FileNotFoundError:
+                return
+            if not stat.S_ISREG(mode):
+                raise ValueError("Export destination must be a regular file, not a symlink.")
+
+        check_target()
+        from memtomem.context._atomic import atomic_write_bytes
+
+        atomic_write_bytes(
+            output_path, text.encode("utf-8"), mode=0o600, before_replace=check_target
+        )
         logger.info("Exported %d chunks -> %s", len(records), output_path)
 
     return bundle
@@ -262,6 +299,13 @@ def _chunk_to_dict(chunk: Chunk) -> dict:
         "tags": list(meta.tags),
         "namespace": meta.namespace,
         "created_at": chunk.created_at.isoformat(),
+        "updated_at": chunk.updated_at.isoformat(),
+        "scope": meta.scope,
+        "project_root": str(meta.project_root) if meta.project_root is not None else None,
+        "valid_from_unix": meta.valid_from_unix,
+        "valid_to_unix": meta.valid_to_unix,
+        "overlap_before": meta.overlap_before,
+        "overlap_after": meta.overlap_after,
     }
 
 
@@ -279,9 +323,8 @@ def _import_scan_text(chunk: Chunk) -> str:
     retrievable. So the foreign-bundle redaction scan covers the full
     retrievable surface here (content + context + heading + ``source_file`` + ``tags``),
     not just ``content`` as on the locally-derived-metadata write surfaces
-    (``mem_add`` / ``mem_batch_add``). Self-exports skip this scan entirely, so
-    the wider coverage never affects round-trip fidelity — it only closes the
-    metadata-smuggling vector on genuinely foreign bundles.
+    (``mem_add`` / ``mem_batch_add``). Private self-exports skip unchanged fields;
+    transformed metadata and all shared records are scanned too.
     """
     return "\n".join(
         [
@@ -290,6 +333,9 @@ def _import_scan_text(chunk: Chunk) -> str:
             *chunk.metadata.heading_hierarchy,
             str(chunk.metadata.source_file),
             *chunk.metadata.tags,
+            chunk.metadata.namespace,
+            chunk.metadata.language,
+            str(chunk.metadata.project_root) if chunk.metadata.project_root is not None else "",
         ]
     )
 
@@ -300,56 +346,49 @@ def _enforce_import_redaction(
     *,
     force_unsafe: bool,
     surface: str,
+    trusted: bool = False,
+    changed_metadata: list[tuple[str, str]] | None = None,
 ) -> None:
-    """Per-record redaction gate for a foreign bundle (ADR-0006 Axis F.2).
-
-    Scans the full retrievable surface of each record (see
-    :func:`_import_scan_text`), and each well-formed relation's
-    ``relation_type``, which is stored and printed by ``mem_related``. The edge
-    ends are not scanned: they are only looked up among the bundle's own
-    ``chunk_id`` values and never stored. Relations are scanned as found, before
-    any is dropped for an end that does not land, so the decision covers what
-    the bundle carries. Mirrors ``mem_batch_add``'s transactional shape:
-    collect each record's decision with ``record_outcome=False``, reject the
-    whole import on any block (recording ``blocked`` per blocked record and
-    raising :class:`ImportPrivacyError`), and only commit per-record ``pass`` /
-    ``bypassed`` counters once the import is known to proceed. ``scope="user"``
-    because import upserts user-tier storage rows, never a git-tracked
-    ``project_shared`` tier — so ``blocked_project_shared`` cannot arise here.
-    """
+    """Only explicit allow decisions pass; shared restores never inherit an exemption."""
     from memtomem import privacy
 
-    # One decision set over records and relations, so a blocked relation stops
-    # the import before any record's ``pass`` is counted.
-    texts = [(_import_scan_text(chunk), len(chunk.content)) for chunk, _ in parsed]
-    texts += [(relation_type, len(relation_type)) for _, _, relation_type in relations]
-    decisions: list[tuple[str, int, int]] = []  # (decision, hit_count, content_chars)
-    for text, content_chars in texts:
+    texts = [
+        (_import_scan_text(c), c.metadata.scope)
+        for c, _ in parsed
+        if not trusted or c.metadata.scope == "project_shared"
+    ]
+    scopes = {bid: c.metadata.scope for c, bid in parsed}
+    for sid, tid, rel in relations:
+        scope = (
+            "project_shared" if "project_shared" in (scopes.get(sid), scopes.get(tid)) else "user"
+        )
+        if not trusted or scope == "project_shared":
+            texts.append((rel, scope))
+    texts += changed_metadata or []
+    decisions = []
+    for text, scope in texts:
         guard = privacy.enforce_write_guard(
             text,
             surface=surface,
             force_unsafe=force_unsafe,
-            scope="user",
+            scope=scope,
             record_outcome=False,
         )
-        decisions.append((guard.decision, len(guard.hits), content_chars))
-
-    blocked = [d for d in decisions if d[0] == "blocked"]
+        allowed = guard.decision == "pass" or (
+            guard.decision == "bypassed" and scope != "project_shared"
+        )
+        decisions.append((guard, len(text), allowed, scope))
+    blocked = [item for item in decisions if not item[2]]
     if blocked:
-        for _ in blocked:
-            privacy.record("blocked", surface)
-        raise ImportPrivacyError(blocked_records=len(blocked))
-
-    for decision, hit_count, content_chars in decisions:
-        if decision == "bypassed":
-            privacy.record("bypassed", surface)
-            privacy.emit_bypass_audit(
-                surface=surface,
-                content_chars=content_chars,
-                hits=hit_count,
-            )
-        else:
-            privacy.record("pass", surface)
+        for guard, _, _, _ in blocked:
+            privacy.record(guard.decision, surface)
+        raise ImportPrivacyError(
+            len(blocked), shared_blocked=any(d[3] == "project_shared" for d in blocked)
+        )
+    for guard, chars, _, _ in decisions:
+        privacy.record(guard.decision, surface)
+        if guard.decision == "bypassed":
+            privacy.emit_bypass_audit(surface=surface, content_chars=chars, hits=len(guard.hits))
 
 
 async def import_chunks(
@@ -364,163 +403,160 @@ async def import_chunks(
     surface: str = "import",
     extract_entities: bool = True,
     indexing_config: IndexingConfig | None = None,
+    project_root_map: dict[str, str] | None = None,
+    confirm_project_shared: bool = False,
 ) -> ImportStats:
-    """Import chunks from a JSON bundle file.
+    """Restore a validated bundle atomically, retaining project and temporal boundaries.
 
-    Trust boundary (ADR-0006 Axis F.3): a bundle this install exported carries a
-    valid local-provenance marker and round-trips unchanged. A bundle with an
-    absent or invalid marker is *foreign* — every well-formed record's full
-    retrievable surface (content + heading + ``source_file`` + ``tags``; see
-    :func:`_import_scan_text`) is scanned with ``privacy.enforce_write_guard``
-    and the whole import is rejected with :class:`ImportPrivacyError` if any
-    record matches a secret pattern, unless ``force_unsafe=True`` (bypass is
-    audit-logged). The scan runs before any embed/upsert, so rejection is atomic
-    — no partial import.
-
-    Each chunk is re-embedded and upserted. Conflict resolution against the
-    target DB's existing ``content_hash`` set is controlled by ``on_conflict``:
-
-      * ``"skip"`` (default, idempotent): records whose content already
-        exists in the DB are dropped. Re-importing the same bundle is a
-        no-op; merging bundles with overlap adds only the unique side.
-      * ``"update"``: records matching an existing hash overwrite that
-        existing row's metadata (tags, namespace, heading hierarchy,
-        source_file, created_at). The existing UUID is preserved. Each row
-        is written once; a further record matched to it counts as
-        ``conflict_skipped``.
-
-    When several rows hold a record's content, the record matches the one at
-    the key it writes, else (verified self-export only) the one its
-    ``chunk_id`` names, else one no other record took — see
-    :func:`_match_conflicts`.
-      * ``"duplicate"``: no hash check at the import layer — every record
-        is sent to ``upsert_chunks`` with a fresh UUID. This was the
-        pre-v2 behaviour, but since #691 the storage layer now enforces
-        ``UNIQUE(namespace, source_file, content_hash, start_line)`` via
-        ``INSERT OR IGNORE``: rows that would have produced duplicates
-        are silently dropped at insert time. The mode is kept for
-        back-compat with existing callers but no longer materialises
-        duplicate rows on disk.
-
-    For non-conflicting records, UUID assignment is controlled by
-    ``preserve_ids``: when True *and* the bundle is v2 (carries
-    ``chunk_id``) *and* that UUID is not already claimed by a different
-    chunk in the DB, the bundle's UUID is preserved. Otherwise a fresh
-    UUID is assigned. In ``duplicate`` mode the flag is ignored — fresh
-    UUIDs always.
-
-    Relations (v3 bundles) are restored after the ids are settled: each end is
-    mapped from its bundle ``chunk_id`` to the row that record landed on — a
-    new row, or the existing row a hash conflict matched. An edge is written
-    only when both ends exist, inside the same transaction as the chunks, and
-    an edge the store already holds for that pair is kept. A foreign bundle
-    restores only edges between rows this import newly added: it may describe
-    its own chunks, never link rows the store already had.
-
-    Args:
-        storage: StorageBackend instance.
-        embedder: EmbeddingProvider instance.
-        input_path: Path to a JSON bundle produced by export_chunks().
-        namespace: Override the namespace for all imported chunks.
-        on_conflict: Strategy for hash collisions. See above.
-        preserve_ids: Opt-in UUID preservation for new inserts (v2 bundles).
-        force_unsafe: Bypass the redaction gate for a foreign bundle whose
-            records match secret patterns (audit-logged).
-        provenance_key_path: Override the per-install key file location (the
-            sidecar next to the DB by default). Intended for tests.
-        surface: Audit/counter label for the redaction guard ("mem_import",
-            "web_api_import", …).
-        extract_entities: Write ``chunk_entities`` for the imported chunks.
-            Carries ``indexing.extract_entities`` from callers that hold the
-            config; the default keeps direct callers (and tests) on the same
-            behaviour as the indexer.
-    Returns:
-        ImportStats with total / imported / skipped / failed / conflict_skipped
-        / updated counts, and restored / skipped / failed relation counts.
-    Raises:
-        ImportPrivacyError: a foreign bundle has secret-bearing record(s) and
-            ``force_unsafe`` is not set.
-        ValueError: the bundle's ``relations`` is not a list.
+    v1-v3 user bundles remain readable; missing update fields retain local values.
+    Project records require v4 and registered destination roots. Mapping keys name
+    exact source project roots, never arbitrary source prefixes. Shared restores
+    require explicit consent and a full privacy scan even for a signed self-export.
+    Malformed records reject the whole import before embedding or writing.
     """
-    if on_conflict not in _VALID_ON_CONFLICT:
-        raise ValueError(
-            f"on_conflict must be one of {sorted(_VALID_ON_CONFLICT)}, got {on_conflict!r}"
-        )
-
-    _MAX_IMPORT_BYTES = 100 * 1024 * 1024  # 100 MB
-    file_size = input_path.stat().st_size
-    if file_size > _MAX_IMPORT_BYTES:
-        raise ValueError(
-            f"Import file too large ({file_size:,} bytes). "
-            f"Maximum allowed is {_MAX_IMPORT_BYTES:,} bytes (100 MB)."
-        )
-
-    text = input_path.read_text(encoding="utf-8")
-    bundle = ExportBundle.from_json(text)
-
-    if not isinstance(bundle.relations, list):
-        raise ValueError("Bundle 'relations' must be a list. No records were imported.")
+    if not isinstance(on_conflict, str) or on_conflict not in _VALID_ON_CONFLICT:
+        raise ValueError("Invalid on_conflict. Use skip, update, or duplicate.")
+    for label, value in (
+        ("preserve_ids", preserve_ids),
+        ("force_unsafe", force_unsafe),
+        ("confirm_project_shared", confirm_project_shared),
+    ):
+        if type(value) is not bool:
+            raise invalid("options", label)
+    if namespace is not None and not isinstance(namespace, str):
+        raise invalid("options", "namespace")
+    if namespace is not None:
+        try:
+            namespace.encode("utf-8")
+            if "\x00" in namespace:
+                raise ValueError()
+        except (ValueError, UnicodeError) as exc:
+            raise invalid("options", "namespace") from exc
+    root_map = validate_root_map(project_root_map)
+    with input_path.open("rb") as stream:
+        raw = stream.read(MAX_BUNDLE_BYTES + 1)
+    if len(raw) > MAX_BUNDLE_BYTES:
+        raise ValueError("Import file too large (maximum 100 MiB).")
+    try:
+        bundle = ExportBundle.from_json(raw.decode("utf-8"))
+    except UnicodeError as exc:
+        raise invalid("JSON", "UTF-8") from exc
     relations = _parse_relations(bundle.relations)
-
-    if not bundle.chunks:
-        return ImportStats(0, 0, 0, 0, skipped_relations=len(bundle.relations))
-
-    # ADR-0006 Axis F.3: a valid local-provenance marker (verified over the raw
-    # bundle records, before any parse/mutation) means this is a self-export, so
-    # the redaction re-scan is skipped to preserve a deterministic round-trip.
-    # Any absent/invalid marker → foreign → run the per-record gate below.
     from memtomem import provenance
 
     key_path = provenance_key_path or provenance.key_path_for_db(storage.db_path)
-    is_self_export = provenance.verify_marker(
+    is_self_export = provenance.verify_bundle_marker(
         bundle.chunks,
         bundle.provenance,
         provenance.load_key_for_verify(key_path),
         bundle.relations,
+        format=bundle.format,
+        version=bundle.version,
     )
-
-    skipped = 0
-    parsed: list[tuple[Chunk, str | None]] = []  # (chunk, bundle_chunk_id_or_None)
-    keys: list[tuple[str, str, str, int]] = []  # each parsed record's destination key
-
-    for idx, record in enumerate(bundle.chunks):
+    parsed: list[tuple[Chunk, str | None]] = []
+    changed_metadata: list[tuple[str, str]] = []
+    for index, record in enumerate(bundle.chunks):
         try:
-            chunk, bundle_chunk_id = _dict_to_chunk(
+            chunk, bid = _dict_to_chunk(
                 record, namespace_override=namespace, allow_origin=is_self_export
             )
-            # Inside the boundary: ``norm_path`` raises on a path it cannot
-            # resolve (an embedded NUL), and that is one malformed record.
-            key = _destination_key(chunk)
-            parsed.append((chunk, bundle_chunk_id))
-            keys.append(key)
+            map_chunk(
+                chunk,
+                bundle.version,
+                root_map,
+                indexing_config,
+                record_index=index,
+                self_export=is_self_export,
+            )
+            _destination_key(chunk)
+        except BundleValidationError:
+            raise
         except Exception as exc:
-            # Never interpolate ``exc`` into the log: parse errors raised by
-            # ``datetime.fromisoformat`` / ``int()`` / ``ChunkType(...)`` embed
-            # the offending field value, which in a *foreign* bundle could be a
-            # secret-shaped string. Log the record index and exception class
-            # only — matched bytes must not reach the log sink.
-            logger.warning("Skipping malformed bundle record %d (%s)", idx, type(exc).__name__)
-            skipped += 1
+            raise invalid(f"record {index}", "metadata or source path") from exc
+        parsed.append((chunk, bid))
+        if is_self_export and chunk.metadata.scope != "project_shared":
+            changed = []
+            for field_name in ("source_file", "project_root", "namespace"):
+                value = getattr(chunk.metadata, field_name)
+                old = record.get(field_name)
+                if (str(value) if value is not None else None) != old:
+                    changed.append(str(value) if value is not None else "")
+            if changed:
+                changed_metadata.append(("\n".join(changed), chunk.metadata.scope))
+    shared = any(c.metadata.scope == "project_shared" for c, _ in parsed)
+    if shared and not confirm_project_shared:
+        raise ValueError("project_shared restore requires confirm_project_shared=True.")
+    hashes = [c.content_hash for c, _ in parsed]
+    initial_rows = await storage.get_chunk_rows_by_hashes(hashes)
+    initial_ids = [r.id for rows in initial_rows.values() for r in rows]
+    initial_chunks = await storage.get_chunks_batch(initial_ids)
+    matches = _scoped_matches(
+        parsed, initial_rows, trust_ids=is_self_export, duplicate=on_conflict == "duplicate"
+    )
+    to_upsert, newly_imported = [], []
+    landed: dict[str, UUID] = {}
+    updated = conflict_skipped = 0
+    written_ids: set[UUID] = set()
+    pending: dict[tuple[str, str, str, int], UUID] = {}
+    for (chunk, bid), record, match in zip(parsed, bundle.chunks, matches):
+        key = _destination_key(chunk)
+        if key in pending:
+            if bid is not None:
+                landed[bid] = pending[key]
+            conflict_skipped += 1
+            continue
+        if match is not None:
+            existing_id, writes = match
+            if bid is not None:
+                landed[bid] = existing_id
+            if on_conflict != "update" or not writes:
+                conflict_skipped += 1
+                continue
+            prior = initial_chunks.get(existing_id)
+            if prior is None:
+                raise ValueError("Import target is unavailable; retry after restoring its source.")
+            chunk.id = existing_id
+            _carry_local_metadata(
+                chunk,
+                prior,
+                record if namespace is None else {**record, "namespace": namespace},
+                legacy=bundle.version != "4",
+            )
+            updated += 1
+        else:
+            if preserve_ids and bid and on_conflict != "duplicate":
+                candidate = UUID(bid)
+                if candidate not in written_ids and not await storage.get_chunks_batch([candidate]):
+                    chunk.id = candidate
+            newly_imported.append(chunk)
+        if chunk.id in written_ids:
+            raise invalid("records", "duplicate destination identity")
+        written_ids.add(chunk.id)
+        pending[_destination_key(chunk)] = chunk.id
+        if bid is not None:
+            landed[bid] = chunk.id
+        to_upsert.append(chunk)
 
-    if not parsed:
-        return ImportStats(
-            total_chunks=len(bundle.chunks),
-            imported_chunks=0,
-            skipped_chunks=skipped,
-            failed_chunks=0,
-            skipped_relations=len(bundle.relations),
-        )
-
-    # Foreign bundles run the F.2 redaction gate on every well-formed record
-    # and relation (malformed ones were already dropped and are never scanned).
-    if not is_self_export:
-        _enforce_import_redaction(parsed, relations, force_unsafe=force_unsafe, surface=surface)
-
+    # Validate the final post-carryover metadata too, before embeddings.
+    for index, (chunk, _) in enumerate(parsed):
+        try:
+            validate_records([_chunk_to_dict(chunk)], [], BUNDLE_VERSION)
+        except BundleValidationError as exc:
+            raise invalid(f"record {index}", exc.field) from exc
+    _scoped_matches(parsed, initial_rows, trust_ids=is_self_export)
+    _enforce_import_redaction(
+        parsed,
+        relations,
+        force_unsafe=force_unsafe,
+        surface=surface,
+        trusted=is_self_export,
+        changed_metadata=changed_metadata,
+    )
     if indexing_config is not None and indexing_config.hard_max_chunk_tokens:
         from memtomem.chunking.bounded import TokenBudget
 
         budget = TokenBudget(indexing_config)
-        for chunk, _ in parsed:
+        for chunk in to_upsert:
             prefix = chunk.metadata.retrieval_context or " > ".join(
                 chunk.metadata.heading_hierarchy
             )
@@ -530,179 +566,142 @@ async def import_chunks(
                 or budget.count(chunk.retrieval_content, special=True) > budget.model
             ):
                 raise ValueError(
-                    "Import exceeds configured chunk token budgets; reindex the original source "
-                    "with bounded chunking before exporting. No records were imported."
+                    "Import exceeds configured chunk token budgets. No records imported."
                 )
 
-    conflict_skipped = 0
-    updated = 0
-
-    # Chunks this import genuinely adds, as opposed to hash-matched rows that
-    # already existed. Only the new ones get entities written below: a
-    # hash-matched row holds content the store already had, and its entities may
-    # have come from an LLM scan, which is strictly richer than the regex pass.
-    # Overwriting those would quietly downgrade them (backfilling rows that have
-    # none is the separate question ``mem_entity_scan`` answers).
-    newly_imported: list[Chunk] = []
-    # Rows an update-conflict is about to overwrite in place. ``upsert_chunks``
-    # writes ``origin`` like any other column, so an incoming record — which
-    # carries None for everything except a verified self-export — would strip
-    # the provenance the stored row already had, and the one-shot backfill that
-    # could have re-adopted it has long recorded itself done (#2161). The
-    # stored value always wins: an import may replace a chunk's content, never
-    # its writer.
-    origin_carryover: list[Chunk] = []
-    # Bundle ``chunk_id`` -> the row that record lands on, for the relation
-    # ends. A skipped conflict lands on the existing row as much as an update.
-    landed: dict[str, UUID] = {}
-
-    if on_conflict == "duplicate":
-        # Back-compat path: every record gets a fresh UUID, no hash check
-        # at this layer. Since #691 the storage UNIQUE index +
-        # ``INSERT OR IGNORE`` collapses any rows that would have shared
-        # ``(namespace, source_file, content_hash, start_line)``, so this
-        # mode no longer materialises duplicate rows even though the
-        # caller surface still accepts it.
-        to_upsert = [c for c, _ in parsed]
-        newly_imported = list(to_upsert)
-        landed = {bid: c.id for c, bid in parsed if bid is not None}
-    else:
-        all_hashes = [c.content_hash for c, _ in parsed]
-        matches = _match_conflicts(
-            parsed,
-            keys,
-            await storage.get_chunk_rows_by_hashes(all_hashes),
-            trust_ids=is_self_export,
-        )
-
-        to_upsert = []
-        for (chunk, bundle_chunk_id), match in zip(parsed, matches):
-            if match is not None:
-                existing_id, writes = match
-                if bundle_chunk_id is not None:
-                    landed[bundle_chunk_id] = existing_id
-                # One write per row: ``upsert_chunks`` replaces a row's vector
-                # once and then inserts one per occurrence, so the same id twice
-                # in a batch fails and rolls the whole import back.
-                if on_conflict == "skip" or not writes:
-                    conflict_skipped += 1
-                    continue
-                # on_conflict == "update": reuse the existing row's UUID so
-                # upsert_chunks hits the UPDATE branch, preserving identity.
-                chunk.id = existing_id
-                updated += 1
-                to_upsert.append(chunk)
-                origin_carryover.append(chunk)
-            else:
-                if preserve_ids and bundle_chunk_id:
-                    try:
-                        candidate = UUID(bundle_chunk_id)
-                    except ValueError:
-                        candidate = uuid4()
-                    # Avoid stomping an unrelated existing row that happens
-                    # to share this UUID (different content).
-                    clash = await storage.get_chunks_batch([candidate])
-                    if candidate in clash:
-                        candidate = uuid4()
-                    chunk.id = candidate
-                if bundle_chunk_id is not None:
-                    landed[bundle_chunk_id] = chunk.id
-                to_upsert.append(chunk)
-                newly_imported.append(chunk)
-
-    if origin_carryover:
-        stored = await storage.get_chunks_batch([c.id for c in origin_carryover])
-        for chunk in origin_carryover:
-            prior = stored.get(chunk.id)
-            if prior is not None:
-                chunk.metadata = replace(chunk.metadata, origin=prior.metadata.origin)
-
-    edges = _land_relations(
-        relations,
-        landed,
-        new_ids=None if is_self_export else {c.id for c in newly_imported},
-    )
-
-    imported = failed = 0
-    restored_relations = failed_relations = 0
-    if to_upsert:
-        # Embed ``retrieval_content`` (heading-hierarchy prefix + body), matching
-        # what the index engine embeds at ingest time (``IndexEngine`` uses
-        # ``c.retrieval_content``). Embedding plain ``c.content`` here would store
-        # a *different* vector for a chunk than the one it would get if indexed
-        # natively, so the same content_hash would retrieve differently after an
-        # export -> import roundtrip.
-        contents = [c.retrieval_content for c in to_upsert]
+    stats = ImportStats(len(parsed), 0, 0, 0, conflict_skipped_chunks=conflict_skipped)
+    if bundle.version != "4":
+        stats.warnings.append("legacy_metadata_missing")
+    missing, unavailable, checked = set(), set(), set()
+    for chunk, _ in parsed:
+        if (
+            chunk.metadata.origin == ORIGIN_CONSOLIDATION_POLICY
+            or chunk.metadata.source_file in checked
+        ):
+            continue
+        checked.add(chunk.metadata.source_file)
         try:
-            embeddings = await embedder.embed_texts(contents)
-            if len(embeddings) != len(contents):
-                # Same truncation class as the index engine (issue #1563): a
-                # short array would ``zip``-drop the trailing chunks' vectors
-                # while ``upsert_chunks`` still commits their content_hash,
-                # leaving hash-poisoned BM25-only rows that never re-embed.
-                # Fail loud so the ``except`` below returns the zero-import
-                # failure path before any upsert.
-                raise EmbeddingError(
-                    f"Embedder returned {len(embeddings)} vectors for "
-                    f"{len(contents)} chunks during import; refusing to store "
-                    "a truncated result."
-                )
-            for chunk, emb in zip(to_upsert, embeddings):
-                chunk.embedding = emb
-        except Exception as exc:
-            logger.error("Embedding failed during import: %s", exc)
-            return ImportStats(
-                total_chunks=len(bundle.chunks),
-                imported_chunks=0,
-                skipped_chunks=skipped,
-                failed_chunks=len(to_upsert),
-                conflict_skipped_chunks=conflict_skipped,
-                updated_chunks=0,
-                skipped_relations=len(bundle.relations),
-            )
-
-    # Also with nothing to upsert: re-importing a bundle into a store that kept
-    # its chunks but lost their edges is a write of edges alone.
+            if not chunk.metadata.source_file.is_file():
+                missing.add(str(chunk.metadata.source_file))
+        except OSError:
+            unavailable.add(str(chunk.metadata.source_file))
+    stats.missing_source_files, stats.unavailable_source_files = len(missing), len(unavailable)
+    if missing:
+        stats.warnings.append("missing_source_files")
+    if unavailable:
+        stats.warnings.append("unavailable_source_files")
+    if to_upsert:
+        try:
+            embeddings = await embedder.embed_texts([c.retrieval_content for c in to_upsert])
+            if len(embeddings) != len(to_upsert):
+                raise EmbeddingError("Embedder returned the wrong number of vectors.")
+            for chunk, embedding in zip(to_upsert, embeddings):
+                chunk.embedding = embedding
+        except Exception:
+            logger.error("Embedding failed during import")
+            stats.failed_chunks = len(to_upsert)
+            stats.skipped_relations = len(relations)
+            return stats
+    edges = _land_relations(
+        relations, landed, new_ids=None if is_self_export else {c.id for c in newly_imported}
+    )
     if to_upsert or edges:
         try:
-            # One transaction so a failure in any part leaves nothing behind:
-            # without it, a chunk write that committed before the entity or
-            # edge write failed would be reported as a failed import while its
-            # rows stayed in the store.
             async with storage.transaction(wait=WRITER_WAIT_S):
+                current_rows = await storage.get_chunk_rows_by_hashes(hashes)
+                current_chunks = await storage.get_chunks_batch(initial_ids)
+                if current_rows != initial_rows or current_chunks != initial_chunks:
+                    raise ImportChangedError(
+                        "Import target changed during preparation. No records imported; retry."
+                    )
+                new_ids = [c.id for c in newly_imported]
+                if await storage.get_chunks_batch(new_ids):
+                    raise ImportChangedError(
+                        "Import identity changed during preparation. No records imported; retry."
+                    )
+                if shared:
+                    from memtomem import privacy
+
+                    privacy.emit_project_shared_confirmation(surface=surface, mechanism="param")
                 if to_upsert:
                     await storage.upsert_chunks(to_upsert)
-                    # Imported content never passes through the indexing engine,
-                    # so this is the only place its entities can be written (#2155).
                     await sync_entities_for_chunks(
                         storage, newly_imported, enabled=extract_entities
                     )
-                written = await storage.insert_relations(edges) if edges else 0
-            # "imported" counts only genuinely new rows; updates are tracked
-            # separately so callers can distinguish merge from overwrite.
-            imported = len(to_upsert) - updated
-            restored_relations = written
-        except EmbeddingPolicyChangedError:
-            # Not a per-import failure: the store left this process's policy,
-            # and the caller has to see the recovery the error names.
+                stats.restored_relations = await storage.insert_relations(edges) if edges else 0
+        except (ImportChangedError, EmbeddingPolicyChangedError):
             raise
-        except Exception as exc:
-            logger.error("Upsert failed during import: %s", exc)
-            failed = len(to_upsert)
-            imported = 0
-            updated = 0
-            failed_relations = len(edges)
+        except Exception:
+            logger.error("Storage write failed during import; transaction rolled back")
+            stats.failed_chunks = len(to_upsert)
+            stats.failed_relations = len(edges)
+            stats.skipped_relations = len(relations) - len(edges)
+            return stats
+        stats.imported_chunks = len(newly_imported)
+        stats.updated_chunks = updated
+    stats.skipped_relations = len(relations) - stats.restored_relations
+    return stats
 
-    return ImportStats(
-        total_chunks=len(bundle.chunks),
-        imported_chunks=imported,
-        skipped_chunks=skipped,
-        failed_chunks=failed,
-        conflict_skipped_chunks=conflict_skipped,
-        updated_chunks=updated,
-        restored_relations=restored_relations,
-        skipped_relations=len(bundle.relations) - restored_relations - failed_relations,
-        failed_relations=failed_relations,
+
+def _boundary(meta) -> tuple[str, str | None]:
+    return meta.scope, str(meta.project_root) if meta.project_root is not None else None
+
+
+def _scoped_matches(parsed, rows_by_hash, *, trust_ids, duplicate=False):
+    groups = {}
+    for index, item in enumerate(parsed):
+        groups.setdefault(_boundary(item[0].metadata), []).append((index, item))
+    result = [None] * len(parsed)
+    for boundary, items in groups.items():
+        scoped = {}
+        for content_hash, rows in rows_by_hash.items():
+            scoped[content_hash] = [r for r in rows if (r.scope, r.project_root) == boundary]
+        parts = [item for _, item in items]
+        keys = [_destination_key(c) for c, _ in parts]
+        for key in keys:
+            for row in rows_by_hash.get(key[0], []):
+                if (
+                    key[1:] == (row.namespace, row.source_file, row.start_line)
+                    and (row.scope, row.project_root) != boundary
+                ):
+                    raise ValueError("Import destination conflicts with another scope or project.")
+        if duplicate:
+            matches = []
+            occupied = {
+                (h, r.namespace, r.source_file, r.start_line): r.id
+                for h, rows in scoped.items()
+                for r in rows
+            }
+            for key in keys:
+                matches.append((occupied[key], False) if key in occupied else None)
+        else:
+            matches = _match_conflicts(parts, keys, scoped, trust_ids=trust_ids)
+        for (index, _), match in zip(items, matches):
+            result[index] = match
+    return result
+
+
+def _carry_local_metadata(chunk: Chunk, prior: Chunk, record: dict, *, legacy: bool) -> None:
+    if legacy:
+        carry = {
+            f.name: getattr(prior.metadata, f.name)
+            for f in fields(ChunkMetadata)
+            if f.name not in record and f.name not in {"source_span_hash", "origin"}
+        }
+        chunk.metadata = replace(chunk.metadata, **carry)
+        for key in ("created_at", "updated_at"):
+            if key not in record:
+                setattr(chunk, key, getattr(prior, key))
+    stable = (
+        _destination_key(chunk) == _destination_key(prior)
+        and chunk.metadata.end_line == prior.metadata.end_line
+        and chunk.content == prior.content
+        and chunk.metadata.source_read_only == prior.metadata.source_read_only
+    )
+    chunk.metadata = replace(
+        chunk.metadata,
+        origin=prior.metadata.origin,
+        source_span_hash=prior.metadata.source_span_hash if stable else None,
     )
 
 
@@ -726,7 +725,7 @@ def _parse_relations(items: list) -> list[tuple[str, str, str]]:
             and isinstance(target_id, str)
             and isinstance(relation_type, str)
         ):
-            parsed.append((source_id, target_id, relation_type))
+            parsed.append((str(UUID(source_id)), str(UUID(target_id)), relation_type))
     return parsed
 
 
@@ -881,7 +880,9 @@ def _dict_to_chunk(
     policy-owned. Foreign bundles therefore import ``origin=None``, and even a
     self-export is held to the known constant.
     """
-    ns = namespace_override or record.get("namespace", "default")
+    ns = (
+        namespace_override if namespace_override is not None else record.get("namespace", "default")
+    )
     # A number or boolean would be stored in SQLite's text form of it, which
     # no Python conversion reproduces, so the conflict match could miss the
     # row already at that key. Every export writes a string.
@@ -905,6 +906,14 @@ def _dict_to_chunk(
         language=record.get("language", "en"),
         tags=tuple(record.get("tags", [])),
         namespace=ns,
+        scope=record.get("scope", "user"),
+        project_root=Path(record["project_root"])
+        if record.get("project_root") is not None
+        else None,
+        valid_from_unix=record.get("valid_from_unix"),
+        valid_to_unix=record.get("valid_to_unix"),
+        overlap_before=record.get("overlap_before", 0),
+        overlap_after=record.get("overlap_after", 0),
         origin=origin,
     )
     created_at = (
@@ -926,6 +935,9 @@ def _dict_to_chunk(
         metadata=meta,
         id=uuid4(),
         created_at=created_at,
+        updated_at=timestamp(record["updated_at"], "record", "updated_at")
+        if "updated_at" in record
+        else created_at,
     )
     bundle_chunk_id = record.get("chunk_id")
-    return chunk, bundle_chunk_id if isinstance(bundle_chunk_id, str) else None
+    return chunk, str(UUID(bundle_chunk_id)) if isinstance(bundle_chunk_id, str) else None

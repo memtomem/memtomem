@@ -34,45 +34,85 @@ files, re-index them, and export again. Purging them with
 `mm gc orphan-sources --apply` deletes their chunks instead; see
 [Orphan cleanup](organization-maintenance.md#orphan-cleanup).
 
+YAML frontmatter now follows YAML quoting and comment rules. Quote a literal
+hash suffix (for example, `description: "Triage issue #123"` or
+`tags: ["#python"]`). Unquoted scalar comments produce a warning rather than
+silently discarding a suffix that older flat readers treated as text.
+
 ### Restore
 
 ```
 mem_import(input_file="~/backup.json")                                # skip duplicates (default)
 mem_import(input_file="~/backup.json", namespace="imported")
 mem_import(input_file="~/backup.json", on_conflict="update")          # overwrite metadata
-mem_import(input_file="~/backup.json", on_conflict="duplicate")       # pre-v2 behaviour
+mem_import(input_file="~/backup.json", on_conflict="duplicate")       # add distinct keys; skip occupied keys
 mem_import(input_file="~/backup.json", preserve_ids=True)             # keep bundle UUIDs
 ```
 
-Import re-embeds all chunks, so it works across different embedding models or machines.
+Import re-embeds chunks using the current model. New exports use memory bundle
+v4, preserving scope, project root, validity windows, timestamps, overlap,
+and relations. Export and import both have a **100 MiB UTF-8 byte limit**;
+use source/tag/namespace/date filters to split a larger backup.
 
-Import also restores the bundle's links, on whichever rows the chunks land:
-a new row, or the existing row a content match picked. A link the store
-already has between the same two chunks is kept. A bundle this install did
-not export restores only links between chunks it newly adds. The result
-reports how many links were restored, not restored, and failed.
+Malformed JSON, records, or relations reject the **whole bundle before any
+embedding or storage write**. Error messages identify a record and field without
+printing its value. The successful MCP summary retains `Malformed: 0` for
+compatibility. Existing result counters remain available.
 
-**Conflict resolution** (`on_conflict`, default `"skip"`):
+**Project restore.** Project rows retain their scope. Register destination
+memory directories first, then supply `project_root_map` as an object mapping
+an exact original project-root path to the registered destination root. Source
+paths below that root move with it; overlapping roots are not prefix rules.
+`project_shared` rows require `confirm_project_shared=True` and a privacy scan,
+even for a verified self-export. `force_unsafe` cannot bypass that scan.
+User/private self-exports retain the local-provenance exemption; changed
+namespace/path metadata is scanned separately. Paths and declared scope must
+agree. Imported rows never receive a source-write hash from the bundle.
 
-- `"skip"` — drops records whose content already exists in the DB. Re-importing
-  the same bundle adds no chunks, only links the store has lost, and merging
-  bundles with overlapping content adds only the unique side. Recommended for
-  cross-PC sync.
-- `"update"` — records matching an existing content hash overwrite that row's
-  metadata (tags, namespace, heading hierarchy, source_file). The existing
-  UUID is preserved.
-- `"duplicate"` — no hash check; every record is inserted with a fresh UUID.
-  Pre-v2 behaviour, produces row-level duplicates when re-importing.
+Versions 1–3 remain readable for user memories. Legacy project-shaped source
+paths require a v4 re-export, including paths not registered on this computer.
+Legacy imports report `legacy_metadata_missing`; metadata not present in a
+legacy update is retained from the destination row.
 
-`preserve_ids=True` reuses the bundle's original chunk UUIDs for new inserts
-(v2 and later bundles; UUID-identity across instances). Ignored in `"duplicate"`
-mode. For a full restore of this install's own export into an empty store,
-prefer it: an `auto_consolidate` summary records its originals' UUIDs, so with
-fresh UUIDs the next policy run regenerates it once (in place, not as a second
-summary). This assumes the bundle verifies as this install's export, which
-needs the provenance key file next to the database. Imported as foreign, the
-summary comes back without policy ownership, and the policy reports its path
-as a collision instead of regenerating it.
+For v4, explicitly declared user records use the indexer's registration rule:
+an unregistered `.memtomem` directory remains user scope. Registered project
+paths cannot be restored as user records. Legacy project-shaped paths still
+require re-export as v4, independently of local registration.
+
+An unchanged, locally signed v4 user record restores the scope stored in its
+backup, including older virtual policy summaries or notes indexed before
+project registration. This exception requires the same canonical source path;
+foreign bundles and changed paths do not inherit it. For stale project scope,
+register the destination or run `mm reindex --force` on the source installation
+and re-export. Shared restores always require registered roots and consent.
+
+**Conflict resolution** (`on_conflict`, default `"skip"`) is limited to the
+same scope and project:
+
+- `"skip"` keeps matching rows; verified self-imports can repair missing links.
+- `"update"` updates metadata on the matched row, preserving its UUID and local
+  writer ownership. A conflicting row in another scope/project is refused.
+- `"duplicate"` uses fresh IDs for new keys. SQLite's uniqueness constraint
+  prevents a second row at an existing content/source/line/namespace key.
+
+`preserve_ids=True` preserves unclaimed bundle UUIDs on new inserts (except in
+`duplicate` mode). A foreign bundle restores only relations between newly added
+rows; a verified self-export may restore links among existing matching rows.
+Its provenance key sidecar is needed to recognize it as local.
+
+**This is an index backup, not a source-file backup or continuous sync.** Restore
+Markdown/source files separately. `missing_source_files` and
+`unavailable_source_files` count unique source paths; warnings are also returned
+in the Web/API result. Automatic source checks may hide missing files, and the
+next reindex uses the source files as authoritative. Project-local files are
+usually gitignored and will not appear in a fresh clone automatically.
+
+Core file export atomically replaces a regular file with owner-private output.
+The final destination component must not be a symlink; parent-directory aliases
+such as macOS `/tmp` remain supported. Browser search-result CSV, Markdown and
+JSON downloads are **reports**, not restore bundles. CSV quotes all cells,
+preserves newlines, and prefixes formula-shaped text with a single quote; use
+JSON when exact text without that spreadsheet protection is required.
 
 ### Importing from Obsidian
 

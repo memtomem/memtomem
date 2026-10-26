@@ -308,6 +308,10 @@ class TestArchiveHint:
             "content",
             "created_at",
             "tags",
+            "source_file",
+            "heading_hierarchy",
+            "start_line",
+            "end_line",
         }
         assert parsed["hints"] == [
             "2 memories hidden in system namespaces: 2 in archive:* "

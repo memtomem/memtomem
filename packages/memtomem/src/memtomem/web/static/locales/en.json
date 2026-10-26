@@ -1292,7 +1292,7 @@
   "settings.export.held_omitted": "{count} held or pending source(s) are omitted. Restore them and export again for a complete backup.",
   "settings.export.preview_required": "Preview the current filters before downloading.",
   "settings.import.title": "Import",
-  "settings.import.hint": "Upload a memtomem_export.json bundle to re-index its chunks.",
+  "settings.import.hint": "Upload a restore bundle (maximum 100 MiB). Search-result downloads are reports, not restore bundles.",
   "settings.import.file_label": "Bundle File (.json)",
   "settings.import.choose_btn": "Choose File",
   "settings.import.no_file": "No file chosen",
@@ -1896,5 +1896,18 @@
   "settings.config.guide.embedding.item.onnx_variant.label": "ONNX precision variant",
   "settings.config.guide.embedding.item.onnx_variant.text": "FP32 is the initial CPU profile. Quantized variants require a verified artifact and explicit index migration; restart required.",
   "settings.config.guide.embedding.item.onnx_artifact_path.label": "Quantized model directory",
-  "settings.config.guide.embedding.item.onnx_artifact_path.text": "Local directory containing model files and a checksummed manifest.json. Used only for explicit quantized variants."
+  "settings.config.guide.embedding.item.onnx_artifact_path.text": "Local directory containing model files and a checksummed manifest.json. Used only for explicit quantized variants.",
+  "settings.import.projects": "Restore project memories",
+  "settings.import.map_hint": "Map original project folders to registered folders on this computer.",
+  "settings.import.map_add": "Add project mapping",
+  "settings.import.map_from": "Original project folder",
+  "settings.import.map_to": "Registered destination project folder",
+  "settings.import.map_remove": "Remove mapping",
+  "settings.import.confirm_shared": "I approve restoring project-shared memories.",
+  "settings.import.source_authority": "Restore source files separately. Missing sources may be hidden, and reindexing uses the files on disk.",
+  "settings.import.map_invalid": "Complete both folders and remove duplicate mappings.",
+  "settings.import.refused": "Import refused. Check the bundle and project permissions.",
+  "settings.import.legacy_warning": "This older bundle does not preserve all metadata. Export it again with the current version when possible.",
+  "settings.import.missing_warning": "Source files missing: {count}. These memories may be hidden by source checks.",
+  "settings.import.unavailable_warning": "Source files unavailable: {count}. Check access before reindexing."
 }

@@ -36,12 +36,13 @@ async def mem_export(
         since: ISO 8601 datetime lower bound on created_at (e.g. "2026-01-01T00:00:00Z").
         namespace: Only export chunks in this namespace.
 
-    Path policy (ADR-0006 Axis G): ``output_file`` is an unrestricted resolved
+    Path policy (ADR-0006 Axis G): ``output_file`` is an unrestricted local
     path by design — local-tool authority, not a traversal bug. This is
     intentionally asymmetric with the root-bounded read surfaces
     (``mem_add(file=)`` / ``mem_index``): backups are written *outside* the
     indexed tree on purpose, so ``memory_dirs`` is the wrong allowlist for an
-    export target. Do not constrain it to memory/export roots without
+    export target. The final component cannot be a symlink; parent aliases
+    are allowed. Do not constrain it to memory/export roots without
     revisiting that ADR — it would break the documented ``~/backup.json``
     workflow.
     """
@@ -62,7 +63,8 @@ async def mem_export(
 
     # Resolved, intentionally unrestricted (ADR-0006 Axis G): local-tool
     # authority, not a traversal bug — asymmetric with root-bounded mem_index.
-    target = Path(output_file).expanduser().resolve()
+    # Keep the final component unresolved so the helper can refuse a symlink.
+    target = Path(output_file).expanduser()
     bundle = await export_chunks(
         app.storage,
         output_path=target,
@@ -93,6 +95,8 @@ async def mem_import(
     on_conflict: str = "skip",
     preserve_ids: bool = False,
     force_unsafe: bool = False,
+    project_root_map: dict[str, str] | None = None,
+    confirm_project_shared: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Import memory chunks from a JSON bundle file (produced by mem_export).
@@ -101,21 +105,23 @@ async def mem_import(
 
     Args:
         input_file: Path to the JSON bundle file to import.
+        project_root_map: Exact original project-root to registered destination-root mapping.
+        confirm_project_shared: Explicit consent to restore project_shared records.
         namespace: Override the namespace for all imported chunks.
         on_conflict: How to resolve content-hash collisions against the
             existing DB. ``"skip"`` (default) drops records whose content
             already exists (idempotent re-import). ``"update"`` overwrites
             the existing row's metadata while preserving its UUID.
-            ``"duplicate"`` is the pre-v2 behaviour: every record gets a
-            fresh UUID, so re-imports and overlapping merges produce
-            duplicate rows.
+            ``"duplicate"`` uses fresh UUIDs for new keys; SQLite uniqueness
+            still prevents a second row at an existing key.
         preserve_ids: For non-conflicting records in a v2 bundle, reuse the
             bundle's original chunk UUID (skipped if already claimed by
             unrelated content). Ignored when ``on_conflict="duplicate"``.
         force_unsafe: Bypass the redaction gate when importing a *foreign*
             bundle (one not exported by this install) whose records contain
             secret-shaped values. Self-exports round-trip without this. The
-            bypass is audit-logged (ADR-0006 Axis F.3).
+            bypass is audit-logged (ADR-0006 Axis F.3). Never bypassable for
+            project_shared; even signed shared restores are scanned.
 
     Path policy (ADR-0006 Axis F/G): ``input_file`` is an unrestricted resolved
     read by design. The import trust boundary is the provenance-aware redaction
@@ -169,8 +175,12 @@ async def mem_import(
                 surface="mem_import",
                 extract_entities=app.config.indexing.extract_entities,
                 indexing_config=app.config.indexing,
+                project_root_map=project_root_map,
+                confirm_project_shared=confirm_project_shared,
             )
     except ImportPrivacyError as exc:
+        if exc.shared_blocked:
+            return f"Error: {exc}"
         return (
             f"Error: {exc.blocked_records} bundle record(s) match privacy "
             "pattern(s); import rejected. Retry with force_unsafe=True to "
@@ -192,5 +202,8 @@ async def mem_import(
         f"- Malformed:        {stats.skipped_chunks}\n"
         f"- Failed:           {stats.failed_chunks}\n"
         f"- Relations restored: {stats.restored_relations} "
-        f"(not restored: {stats.skipped_relations}, failed: {stats.failed_relations})"
+        f"(not restored: {stats.skipped_relations}, failed: {stats.failed_relations})\n"
+        f"- Missing source files: {stats.missing_source_files}\n"
+        f"- Unavailable source files: {stats.unavailable_source_files}\n"
+        f"- Warnings: {', '.join(stats.warnings) or 'none'}"
     )

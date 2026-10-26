@@ -116,6 +116,22 @@ def _format_verbose_result(r) -> str:
     )
 
 
+def _source_fields(meta) -> dict:
+    out = {
+        "source_file": _display_path(meta.source_file),
+        "heading_hierarchy": list(meta.heading_hierarchy),
+        "start_line": meta.start_line,
+        "end_line": meta.end_line,
+    }
+    if meta.scope != "user":
+        out["scope"] = meta.scope
+    for key in ("valid_from_unix", "valid_to_unix"):
+        value = getattr(meta, key)
+        if value is not None:
+            out[key] = value
+    return out
+
+
 def _format_structured_results(
     results: list,
     hints: list[str] | None = None,
@@ -167,12 +183,13 @@ def _format_structured_results(
             "namespace": meta.namespace,
             "chunk_id": str(r.chunk.id),
             "content": r.chunk.content,
+            **_source_fields(meta),
         }
         # Same rule as the provenance key below, and for the same reason: a
         # bounded-chunking description and an index-masking count are both
         # absent on the common path, so emitting them unconditionally would put
         # an empty string and a zero on every result of every ordinary search
-        # and change the payload shape for every existing consumer. Present
+        # in addition to the always-present source coordinates. Present
         # means "this chunk has one".
         if meta.retrieval_context:
             entry["retrieval_context"] = meta.retrieval_context
@@ -182,7 +199,8 @@ def _format_structured_results(
             entry["source_read_only"] = True
         # RFC P1 Phase C: surface session-summary rescue provenance only
         # when set, so the common case (organic hit) keeps a stable
-        # narrow shape and consumers can branch on key presence.
+        # shape beyond the always-present full source path, heading list and
+        # line coordinates, and consumers can branch on this optional key.
         if getattr(r, "via_session_summary", False):
             entry["via_session_summary"] = True
         out.append(entry)
@@ -229,6 +247,7 @@ def _format_recall_structured(chunks: list, hints: list[str] | None = None) -> s
             "content": c.content,
             "created_at": c.created_at.isoformat(),
             "tags": list(meta.tags),
+            **_source_fields(meta),
         }
         # Optional, present-means-set — see ``_format_structured_results``.
         if meta.retrieval_context:

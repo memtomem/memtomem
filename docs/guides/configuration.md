@@ -804,7 +804,11 @@ sidecars next to its source files too. The code chunkers are always
 registered: without the `memtomem[code]` extra a code file is still indexed,
 and gets its sidecar, but is split differently. Naming a single file directly
 (`mm index <file>`) locks it before that check, so it leaves a sidecar even for
-an extension no chunker handles. Sidecars are never indexed themselves:
+an extension no chunker handles. The chunkers also support `.markdown`, `.rst`, and `.mjs`. These are opt-in:
+add the desired extensions to `indexing.supported_extensions` before scanning
+a directory. The defaults above remain unchanged.
+
+Sidecars are never indexed themselves:
 `.lock` is not a supported extension.
 
 **Keep them out of version control.** Add the pattern to the repository's

@@ -442,9 +442,30 @@ qs('imp-file').addEventListener('change', () => {
 });
 qs('imp-btn').addEventListener('click', runImport);
 
+qs('imp-map-add')?.addEventListener('click', () => {
+  const row = document.createElement('div');
+  row.className = 'imp-map-row';
+  for (const [cls, key] of [['imp-map-from', 'settings.import.map_from'], ['imp-map-to', 'settings.import.map_to']]) {
+    const label = document.createElement('label');
+    label.className = 'field-label';
+    label.textContent = t(key);
+    const input = document.createElement('input');
+    input.type = 'text'; input.className = cls;
+    label.appendChild(input); row.appendChild(label);
+  }
+  const remove = document.createElement('button');
+  remove.type = 'button'; remove.className = 'btn-ghost btn-xs';
+  remove.textContent = t('settings.import.map_remove');
+  remove.addEventListener('click', () => row.remove());
+  row.appendChild(remove); qs('imp-map-rows').appendChild(row);
+});
+
+let _memoryImportRunning = false;
 async function runImport() {
+  if (_memoryImportRunning) return;
   const file = qs('imp-file').files[0];
   if (!file) return;
+  _memoryImportRunning = true;
 
   hide(qs('imp-result'));
   qs('imp-btn').disabled = true;
@@ -453,13 +474,29 @@ async function runImport() {
   form.append('file', file);
 
   try {
+    const mapping = Object.create(null);
+    for (const row of qs('imp-map-rows').querySelectorAll('.imp-map-row')) {
+      const from = row.querySelector('.imp-map-from').value.trim();
+      const to = row.querySelector('.imp-map-to').value.trim();
+      if (!from && !to) continue;
+      if (!from || !to || Object.hasOwn(mapping, from)) throw new Error(t('settings.import.map_invalid'));
+      mapping[from] = to;
+    }
+    if (Object.keys(mapping).length) form.append('project_root_map', JSON.stringify(mapping));
+    form.append('confirm_project_shared', String(qs('imp-confirm-shared').checked));
     const headers = {};
     const res = await csrfFetch('/api/export/import', { method: 'POST', body: form, headers });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail || res.statusText);
+      throw new Error(typeof err.detail === 'string' ? err.detail : (err.detail?.message || t('settings.import.refused')));
     }
     const data = await res.json();
+    const warnings = [];
+    if ((data.warnings || []).includes('legacy_metadata_missing')) warnings.push(t('settings.import.legacy_warning'));
+    if (data.missing_source_files) warnings.push(t('settings.import.missing_warning', { count: data.missing_source_files }));
+    if (data.unavailable_source_files) warnings.push(t('settings.import.unavailable_warning', { count: data.unavailable_source_files }));
+    qs('imp-warnings').textContent = warnings.join(' ');
+    if (warnings.length) show(qs('imp-warnings')); else hide(qs('imp-warnings'));
     qs('imp-total').textContent    = data.total_chunks;
     qs('imp-imported').textContent = data.imported_chunks;
     qs('imp-skipped').textContent  = data.skipped_chunks;
@@ -472,6 +509,7 @@ async function runImport() {
   } catch (err) {
     showToast(t('toast.import_failed', { error: err.message }), 'error');
   } finally {
+    _memoryImportRunning = false;
     qs('imp-btn').disabled = false;
   }
 }

@@ -1639,16 +1639,7 @@ function _showReindexWarning(applied) {
   }
 }
 
-qs('exp-preview-btn').addEventListener('click', () => runExportPreview());
-qs('exp-download-btn').addEventListener('click', () => runExportDownload());
-qs('imp-file-trigger')?.addEventListener('click', () => qs('imp-file')?.click());
-qs('imp-file').addEventListener('change', () => {
-  const files = qs('imp-file').files;
-  qs('imp-btn').disabled = !files?.length;
-  const nameEl = qs('imp-file-name');
-  if (nameEl) nameEl.textContent = files?.length ? files[0].name : 'No file chosen';
-});
-qs('imp-btn').addEventListener('click', () => runImport());
+// Export/import event handlers are owned by settings-maintenance.js.
 
 // ── Index tab: preview-namespace wiring ──
 //

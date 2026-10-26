@@ -636,9 +636,11 @@ async def test_import_rejects_oversized_bundle_before_embedding(storage, bounded
     good = Chunk(content="small", metadata=ChunkMetadata(source_file=Path("good.md")))
     bad = Chunk(content="x" * 1000, metadata=ChunkMetadata(source_file=Path("large.md")))
     bundle = tmp_path / "bundle.json"
-    bundle.write_text(ExportBundle(chunks=[_chunk_to_dict(good), _chunk_to_dict(bad)]).to_json())
+    bundle.write_text(
+        ExportBundle(total_chunks=2, chunks=[_chunk_to_dict(good), _chunk_to_dict(bad)]).to_json()
+    )
     embedder = AsyncMock()
-    with pytest.raises(ValueError, match="No records were imported"):
+    with pytest.raises(ValueError, match="No records imported"):
         await import_chunks(storage, embedder, bundle, indexing_config=bounded_config)
     embedder.embed_texts.assert_not_called()
     assert await storage.get_chunk(good.id) is None

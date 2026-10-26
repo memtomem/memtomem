@@ -15,7 +15,7 @@ import pytest
 from helpers import make_chunk
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.tools.auto_tag import AutoTagStats, auto_tag_storage, extract_tags_keyword
-from memtomem.tools.export_import import ExportBundle, export_chunks
+from memtomem.tools.export_import import ExportBundle, _chunk_to_dict, export_chunks
 
 
 # ---------------------------------------------------------------------------
@@ -598,18 +598,25 @@ class TestExportImport:
         assert bundle.chunks[0]["content"] == "work stuff"
 
     async def test_bundle_roundtrip_serialization(self):
+        first, second = _chunk("test", source="/tmp/t.md"), _chunk("target", source="/tmp/u.md")
         bundle = ExportBundle(
             exported_at="2024-01-01T00:00:00+00:00",
-            total_chunks=1,
-            chunks=[{"content": "test", "source_file": "/tmp/t.md", "tags": []}],
-            relations=[{"source_id": "a", "target_id": "b", "relation_type": "related"}],
+            total_chunks=2,
+            chunks=[_chunk_to_dict(first), _chunk_to_dict(second)],
+            relations=[
+                {
+                    "source_id": str(first.id),
+                    "target_id": str(second.id),
+                    "relation_type": "related",
+                }
+            ],
         )
         json_str = bundle.to_json()
         restored = ExportBundle.from_json(json_str)
-        assert restored.total_chunks == 1
+        assert restored.total_chunks == 2
         assert restored.chunks[0]["content"] == "test"
         assert restored.relations == bundle.relations
-        assert restored.version == "3"
+        assert restored.version == "4"
 
     async def test_export_preserves_metadata(self, storage):
         chunk = _chunk(

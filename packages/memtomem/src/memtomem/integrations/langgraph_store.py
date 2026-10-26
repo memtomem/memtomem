@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import math
+import logging
 import re
 import threading
 from collections import OrderedDict
@@ -38,6 +39,13 @@ from memtomem.context._atomic import atomic_write_text
 from memtomem.embedding.base import EmbeddingProvider
 from memtomem.embedding.factory import create_embedder
 from memtomem.memory_scope import require_user_base, resolve_memory_scope_dir
+
+logger = logging.getLogger(__name__)
+
+
+class StoreRecordError(ValueError):
+    """A present canonical JSON record cannot be read safely."""
+
 
 _TOKEN_RE = re.compile(r"[\w.-]+", re.UNICODE)
 
@@ -254,18 +262,76 @@ class MemtomemBaseStore(BaseStore):
 
     def _read_record(self, path: Path) -> dict[str, Any] | None:
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
             return None
-        if not isinstance(payload, dict) or not isinstance(payload.get("value"), dict):
-            return None
-        return payload
+        except UnicodeError as exc:
+            raise StoreRecordError("Stored LangGraph record is not UTF-8") from exc
+        try:
+
+            def reject(value):
+                raise ValueError("non-finite number")
+
+            def finite_float(value):
+                number = float(value)
+                if not math.isfinite(number):
+                    raise ValueError("non-finite number")
+                return number
+
+            def unique(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("duplicate key")
+                    result[key] = value
+                return result
+
+            payload = json.loads(
+                text, parse_constant=reject, parse_float=finite_float, object_pairs_hook=unique
+            )
+            if (
+                not isinstance(payload, dict)
+                or type(payload.get("schema_version")) is not int
+                or payload["schema_version"] != 1
+                or not isinstance(payload.get("value"), dict)
+            ):
+                raise ValueError("schema")
+            ns, key = payload["namespace"], payload["key"]
+            if (
+                not isinstance(ns, list)
+                or not all(isinstance(x, str) for x in ns)
+                or not isinstance(key, str)
+                or self._path(tuple(ns), key) != path
+            ):
+                raise ValueError("identity")
+            for field in ("created_at", "updated_at"):
+                if (
+                    not isinstance(payload[field], str)
+                    or _parse_datetime(payload[field]).tzinfo is None
+                ):
+                    raise ValueError("timestamp")
+            index = payload["index"]
+            if (
+                index is not None
+                and type(index) is not bool
+                and not (isinstance(index, list) and all(isinstance(x, str) for x in index))
+            ):
+                raise ValueError("index")
+            if not isinstance(payload["projection"], str):
+                raise ValueError("projection")
+            return payload
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError) as exc:
+            raise StoreRecordError("Stored LangGraph record is malformed or unsupported") from exc
 
     def _records(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         with self._lock:
             for path in sorted(self.root.rglob("*.json")):
-                record = self._read_record(path)
+                try:
+                    record = self._read_record(path)
+                except (StoreRecordError, UnicodeError, OSError):
+                    logger.warning("Skipping malformed or unreadable LangGraph record")
+                    continue
                 if record is not None:
                     records.append(record)
         return records
@@ -281,7 +347,10 @@ class MemtomemBaseStore(BaseStore):
         )
 
     def _put(self, op: PutOp) -> None:
-        path = self._path(op.namespace, op.key)
+        namespace, key = tuple(op.namespace), op.key
+        if not isinstance(key, str):
+            raise ValueError("key must be a string")
+        path = self._path(namespace, key)
         with self._lock:
             if op.value is None:
                 path.unlink(missing_ok=True)
@@ -293,9 +362,22 @@ class MemtomemBaseStore(BaseStore):
                         break
                     current = current.parent
                 return
-            serialized = json.dumps(op.value, ensure_ascii=False, sort_keys=True)
+            if not isinstance(op.value, dict):
+                raise ValueError("Store value must be a JSON object")
+            serialized = json.dumps(op.value, ensure_ascii=False, sort_keys=True, allow_nan=False)
+            value = json.loads(serialized)
+            index = list(op.index) if isinstance(op.index, list) else op.index
+            if (
+                index is not None
+                and type(index) is not bool
+                and not (isinstance(index, list) and all(isinstance(x, str) for x in index))
+            ):
+                raise ValueError("index must be a boolean, None, or string selectors")
+            scan_text = "\n".join(
+                [serialized, *namespace, key, *(index if isinstance(index, list) else [])]
+            )
             guard = privacy.enforce_write_guard(
-                serialized,
+                scan_text,
                 surface="langgraph_basestore_put",
                 scope=self.scope,
                 force_unsafe=self.force_unsafe,
@@ -310,15 +392,17 @@ class MemtomemBaseStore(BaseStore):
             now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
             record = {
                 "schema_version": 1,
-                "namespace": list(op.namespace),
-                "key": op.key,
-                "value": op.value,
-                "index": op.index,
-                "projection": _projection(op.value, op.index),
+                "namespace": list(namespace),
+                "key": key,
+                "value": value,
+                "index": index,
+                "projection": _projection(value, index),
                 "created_at": existing["created_at"] if existing else now,
                 "updated_at": now,
             }
-            atomic_write_text(path, json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+            atomic_write_text(
+                path, json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+            )
 
     def _get(self, op: GetOp) -> Item | None:
         with self._lock:

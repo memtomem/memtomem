@@ -173,7 +173,11 @@ applies.
 
 For *single-machine backup*, use `mem_export` / `mem_import`
 ([Reference](reference/data-config-cli.md#6-data--mem_export-mem_import)). The bundle format
-embeds absolute paths and is not designed for cross-device restore. It also
+preserves source paths and project scope. A v4 project restore on another
+computer requires registered destination directories and an explicit
+`project_root_map`; shared scope also requires confirmation. It is an index
+backup, so source files must be restored separately (especially gitignored
+project-local files). It does not provide continuous cross-device sync. It also
 leaves out sources held because their file is missing or unreadable, and
 reports how many; restore and re-index them first if the bundle should be
 complete.

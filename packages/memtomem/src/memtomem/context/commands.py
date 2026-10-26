@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import logging
 import re
+
+from memtomem._frontmatter import yaml_scalar, yaml_list
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -255,20 +257,20 @@ def _gemini_to_claude_body(body: str) -> str:
 
 
 def _yaml_inline_list(items: list[str]) -> str:
-    return "[" + ", ".join(items) + "]"
+    return yaml_list(items)
 
 
 def _subcommand_to_claude_md(cmd: SlashCommand) -> tuple[str, list[str]]:
     """Render for ``.claude/commands/<name>.md`` — pass-through."""
     lines: list[str] = []
     if cmd.description:
-        lines.append(f"description: {cmd.description}")
+        lines.append(f"description: {yaml_scalar(cmd.description)}")
     if cmd.argument_hint:
-        lines.append(f"argument-hint: {cmd.argument_hint}")
+        lines.append(f"argument-hint: {yaml_scalar(cmd.argument_hint)}")
     if cmd.allowed_tools:
         lines.append(f"allowed-tools: {_yaml_inline_list(cmd.allowed_tools)}")
     if cmd.model:
-        lines.append(f"model: {cmd.model}")
+        lines.append(f"model: {yaml_scalar(cmd.model)}")
 
     body = cmd.body if cmd.body.endswith("\n") else cmd.body + "\n"
     if lines:

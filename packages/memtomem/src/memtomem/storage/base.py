@@ -78,6 +78,8 @@ class ChunkKeyRow:
     namespace: str
     source_file: str
     start_line: int
+    scope: str = "user"
+    project_root: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

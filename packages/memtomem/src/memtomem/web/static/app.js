@@ -9068,16 +9068,21 @@ qs('source-chunks-close-btn').addEventListener('click', () => hide(qs('source-ch
 function downloadResults(items, format) {
   let content, mime, ext;
   if (format === 'csv') {
-    const header = 'id,source,type,score,content\n';
+    const cell = (value, numeric = false) => {
+      let text = String(value ?? '');
+      if (!numeric && (/^[\s\u0000-\u001f]*[=+@-]/u.test(text) || /^[\t\r\n]/u.test(text))) {
+        text = "'" + text;
+      }
+      return '"' + text.replace(/"/g, '""') + '"';
+    };
+    const header = 'id,source,type,score,content\r\n';
     const rows = items.map(r => {
       const c = r.chunk || r;
       const score = r.score != null ? r.score.toFixed(4) : '';
-      return [
-        c.id, c.source_file, c.chunk_type, score,
-        '"' + (c.content || '').replace(/"/g, '""').replace(/\n/g, '\\n') + '"',
-      ].join(',');
-    }).join('\n');
-    content = header + rows; mime = 'text/csv'; ext = 'csv';
+      return [cell(c.id), cell(c.source_file), cell(c.chunk_type),
+        cell(score, true), cell(c.content)].join(',');
+    }).join('\r\n');
+    content = header + rows; mime = 'text/csv;charset=utf-8'; ext = 'csv';
   } else if (format === 'markdown') {
     content = items.map(r => {
       const c = r.chunk || r;

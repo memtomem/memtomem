@@ -124,6 +124,9 @@ class ImportResponse(BaseModel):
     restored_relations: int = 0
     skipped_relations: int = 0
     failed_relations: int = 0
+    warnings: list[str] = []
+    missing_source_files: int = 0
+    unavailable_source_files: int = 0
 
 
 class IndexRequest(BaseModel):

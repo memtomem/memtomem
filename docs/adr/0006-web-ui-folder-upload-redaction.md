@@ -861,3 +861,14 @@ These were considered when drafting and folded into the leaning above:
   auth; opt-in trusted-LAN / authenticated-proxy) that bounds Axis G's network
   reachability and is named in the reopen trigger.
 - Issue #1486 — the security-audit decision this amendment records.
+
+
+### Memory bundle v4 export/restore clarification (2026-10-26)
+
+Core export retains unrestricted local-tool path authority and replacement of
+regular files. The final component is now checked before resolution and refused
+if it is a symlink; parent aliases remain allowed. Publication is atomic and
+owner-private. v4 signatures bind format/version as well as records/relations.
+Shared-scope imports always scan the complete record, including verified
+self-exports, and cannot bypass a privacy refusal. Private self-export provenance
+still exempts unchanged signed fields; transformed metadata is scanned.

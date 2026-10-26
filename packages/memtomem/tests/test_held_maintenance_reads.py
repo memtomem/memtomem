@@ -135,13 +135,30 @@ class TestDiscovery:
 
 class TestExport:
     async def test_a_hold_during_the_read_keeps_rows_out(self, bm25_only_components, monkeypatch):
+        from contextlib import asynccontextmanager
+
         from memtomem.tools.export_import import export_chunks
 
         comp, mem_dir = bm25_only_components
         held = mem_dir / "held.md"
         await _index(comp, held, "# X\n\nheldexportword.\n")
         await _index(comp, mem_dir / "visible.md", "# X\n\nvisibleexportword.\n")
-        _hold_during_read(monkeypatch, comp, held, REDACTION_BLOCKED_HOLD)
+        # Export now reads all sources in one leased snapshot. Commit the hold
+        # just before that read, and release it only after the snapshot closes.
+        real = comp.storage._lease_txn_read_db
+
+        @asynccontextmanager
+        async def held_snapshot():
+            await comp.storage.hold_source(held, REDACTION_BLOCKED_HOLD)
+            try:
+                async with real() as db:
+                    yield db
+            finally:
+                writer = comp.storage._get_db()
+                writer.execute("DELETE FROM held_sources WHERE source_file=?", (norm_path(held),))
+                writer.commit()
+
+        monkeypatch.setattr(comp.storage, "_lease_txn_read_db", held_snapshot)
 
         bundle = await export_chunks(comp.storage, stamp_provenance=False)
 

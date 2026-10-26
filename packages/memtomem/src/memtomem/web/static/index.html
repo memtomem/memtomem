@@ -1402,6 +1402,15 @@
                 <button type="button" class="btn-ghost btn-xs" id="imp-file-trigger" data-i18n="settings.import.choose_btn">Choose File</button>
                 <span id="imp-file-name" class="custom-file-name" data-i18n="settings.import.no_file">No file chosen</span>
               </div>
+              <details class="mt-12" id="imp-project-options">
+                <summary data-i18n="settings.import.projects">Restore project memories</summary>
+                <p class="export-hint" data-i18n="settings.import.map_hint">Map original project folders to registered folders on this computer.</p>
+                <div id="imp-map-rows"></div>
+                <button type="button" class="btn-ghost btn-xs" id="imp-map-add" data-i18n="settings.import.map_add">Add project mapping</button>
+                <label class="field-label mt-12"><input type="checkbox" id="imp-confirm-shared" /> <span data-i18n="settings.import.confirm_shared">I approve restoring project-shared memories.</span></label>
+              </details>
+              <p class="export-hint" data-i18n="settings.import.source_authority">Restore source files separately. Missing sources may be hidden, and reindexing uses the files on disk.</p>
+              <div id="imp-warnings" class="status-msg" hidden></div>
               <button id="imp-btn" class="btn-primary mt-12" disabled data-i18n="settings.import.import_btn">Import</button>
               <div id="imp-msg" class="status-msg" hidden></div>
               <div id="imp-result" class="import-result" hidden>
@@ -1933,11 +1942,11 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=7"></script>
-  <script src="/app.js?v=182"></script>
+  <script src="/app.js?v=183"></script>
   <script src="/chunk-progress.js?v=1"></script>
-  <script src="/settings-config.js?v=29"></script>
+  <script src="/settings-config.js?v=30"></script>
   <script src="/sources-memory-dirs.js?v=23"></script>
-  <script src="/settings-maintenance.js?v=7"></script>
+  <script src="/settings-maintenance.js?v=8"></script>
   <script src="/settings-namespaces.js?v=14"></script>
   <script src="/settings-harness.js?v=14"></script>
   <script src="/settings-hooks-watchdog.js?v=27"></script>

@@ -1292,7 +1292,7 @@
   "settings.export.held_omitted": "보류 중인 소스 {count}개가 제외됩니다. 완전한 백업을 만들려면 소스를 복구한 뒤 다시 내보내세요.",
   "settings.export.preview_required": "다운로드 전에 현재 필터를 미리보기하세요.",
   "settings.import.title": "가져오기",
-  "settings.import.hint": "memtomem_export.json 번들을 업로드하여 청크를 다시 인덱싱합니다.",
+  "settings.import.hint": "복원용 번들을 업로드하세요(최대 100MiB). 검색 결과 다운로드는 보고서이며 복원용 번들이 아닙니다.",
   "settings.import.file_label": "번들 파일 (.json)",
   "settings.import.choose_btn": "파일 선택",
   "settings.import.no_file": "선택된 파일 없음",
@@ -1896,5 +1896,18 @@
   "settings.config.guide.embedding.item.onnx_variant.label": "ONNX 정밀도 옵션",
   "settings.config.guide.embedding.item.onnx_variant.text": "CPU 기본값은 FP32입니다. 양자화 옵션은 검증된 모델 파일과 명시적 인덱스 전환이 필요하며 재시작 후 적용됩니다.",
   "settings.config.guide.embedding.item.onnx_artifact_path.label": "양자화 모델 경로",
-  "settings.config.guide.embedding.item.onnx_artifact_path.text": "모델 파일과 체크섬을 기록한 manifest.json이 있는 로컬 경로입니다. 양자화 옵션을 명시한 경우에만 사용합니다."
+  "settings.config.guide.embedding.item.onnx_artifact_path.text": "모델 파일과 체크섬을 기록한 manifest.json이 있는 로컬 경로입니다. 양자화 옵션을 명시한 경우에만 사용합니다.",
+  "settings.import.projects": "프로젝트 기억 복원",
+  "settings.import.map_hint": "원래 프로젝트 폴더를 이 컴퓨터에 등록된 프로젝트 폴더에 연결하세요.",
+  "settings.import.map_add": "프로젝트 매핑 추가",
+  "settings.import.map_from": "원래 프로젝트 폴더",
+  "settings.import.map_to": "등록된 목적지 프로젝트 폴더",
+  "settings.import.map_remove": "매핑 삭제",
+  "settings.import.confirm_shared": "프로젝트 공유 범위 기억 복원에 동의합니다.",
+  "settings.import.source_authority": "원문 파일은 별도로 복원하세요. 원문이 없으면 기억이 숨겨질 수 있으며, 재색인 시 디스크의 파일이 기준이 됩니다.",
+  "settings.import.map_invalid": "양쪽 폴더를 입력하고 중복 매핑을 삭제하세요.",
+  "settings.import.refused": "가져오기가 거부되었습니다. 번들과 프로젝트 권한을 확인하세요.",
+  "settings.import.legacy_warning": "구형 번들은 일부 메타데이터를 보존하지 않습니다. 가능하면 현재 버전에서 다시 내보내세요.",
+  "settings.import.missing_warning": "원문 파일 {count}개가 없습니다. 원문 검사 후 해당 기억이 숨겨질 수 있습니다.",
+  "settings.import.unavailable_warning": "원문 파일 {count}개에 접근할 수 없습니다. 재색인 전에 접근 권한을 확인하세요."
 }
