@@ -359,7 +359,7 @@ class TestForeignBundle:
 
 
 class TestMalformed:
-    async def test_malformed_relations_are_skipped_and_counted(self, tmp_path):
+    async def test_malformed_relations_reject_the_whole_bundle(self, tmp_path):
         key_path = tmp_path / "k.provenance_key"
         a, b = _record("note a"), _record("note b")
         for broken in [
@@ -367,7 +367,6 @@ class TestMalformed:
             {"source_id": a["chunk_id"]},
             {"source_id": a["chunk_id"], "target_id": b["chunk_id"], "relation_type": 7},
             {"source_id": a["chunk_id"], "target_id": str(uuid4()), "relation_type": "related"},
-            {"source_id": a["chunk_id"], "target_id": a["chunk_id"], "relation_type": "related"},
         ]:
             bundle_path = _signed_bundle(
                 tmp_path / "b.json", key_path, [a, b], [_rel(a, b), broken]

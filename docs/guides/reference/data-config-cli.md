@@ -54,6 +54,11 @@ v4, preserving scope, project root, validity windows, timestamps, overlap,
 and relations. Export and import both have a **100 MiB UTF-8 byte limit**;
 use source/tag/namespace/date filters to split a larger backup.
 
+If an older store has negative overlap counts or counts exceeding the chunk's
+content length, export bounds those counts to the valid range in the backup
+copy and logs the number of corrected chunks. Stored rows and content remain
+unchanged.
+
 Malformed JSON, records, or relations reject the **whole bundle before any
 embedding or storage write**. Error messages identify a record and field without
 printing its value. The successful MCP summary retains `Malformed: 0` for
@@ -77,6 +82,10 @@ registered on this computer. A symlink escaping a known user root does not
 inherit its user classification.
 Legacy imports report `legacy_metadata_missing`; metadata not present in a
 legacy update is retained from the destination row.
+Self-relations emitted by older exporters are skipped and counted in
+`skipped_relations` for v1–v3 imports. Signature verification uses the original
+relation list. New exports omit self-relations and report
+`omitted_self_relations`; v4 imports reject them as malformed.
 
 For v4, explicitly declared user records use the indexer's registration rule:
 an unregistered `.memtomem` directory remains user scope. Registered project

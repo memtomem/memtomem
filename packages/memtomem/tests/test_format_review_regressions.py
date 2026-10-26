@@ -14,6 +14,7 @@ import pytest
 from helpers import set_home
 from memtomem import provenance
 from memtomem._frontmatter import flat_yaml, yaml_list
+from memtomem.chunking.markdown import MarkdownChunker
 from memtomem.config import IndexingConfig
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.tools.export_import import (
@@ -295,3 +296,174 @@ def test_trailing_linebreaks_survive_yaml_and_agent_roundtrip(linebreak):
     rendered, _ = _subagent_to_claude_md(agent)
     restored = _parse_canonical_agent_text(rendered, source=Path("demo.md"))
     assert restored.description == value
+
+
+@pytest.mark.parametrize("version", ["1", "2", "3"])
+@pytest.mark.parametrize("signed", [False, True])
+@pytest.mark.asyncio
+async def test_legacy_self_edges_skip_without_losing_signature_or_valid_edge(
+    storage, tmp_path, version, signed
+):
+    # A signed secret proves the raw self-edge remains in the verified HMAC.
+    body = "api_key = sk-" + "x" * 40 if signed else "ordinary"
+    records = [
+        _record(body, source=str(tmp_path / "a.md")),
+        _record("second", source=str(tmp_path / "b.md")),
+    ]
+    relations = [
+        {
+            "source_id": records[0]["chunk_id"],
+            "target_id": r["chunk_id"],
+            "relation_type": "related",
+        }
+        for r in records
+    ]
+    payload = {"version": version, "chunks": records, "relations": relations}
+    if signed:
+        key = provenance.load_or_create_key_for_export(tmp_path / "key")
+        payload["provenance"] = provenance.make_marker(records, key, relations)
+    path = tmp_path / "legacy-relations.json"
+    path.write_text(json.dumps(payload))
+    assert ExportBundle.from_json(path.read_text()).relations == relations
+    stats = await import_chunks(
+        storage, _FakeEmbedder(), path, preserve_ids=True, provenance_key_path=tmp_path / "key"
+    )
+    assert (stats.imported_chunks, stats.restored_relations, stats.skipped_relations) == (2, 1, 1)
+    rows = await storage.recall_chunks()
+    first = next(c for c in rows if c.content == body)
+    second = next(c for c in rows if c.content == "second")
+    assert await storage.get_related(first.id) == [(second.id, "related")]
+
+
+@pytest.mark.asyncio
+async def test_v4_self_edge_still_rejects_before_embedding(storage, tmp_path):
+    record = _chunk_to_dict(Chunk("ordinary", ChunkMetadata(source_file=tmp_path / "n.md")))
+    path = tmp_path / "v4-self.json"
+    payload = json.loads(ExportBundle(total_chunks=1, chunks=[record]).to_json())
+    payload["relations"] = [
+        {
+            "source_id": record["chunk_id"],
+            "target_id": record["chunk_id"],
+            "relation_type": "related",
+        }
+    ]
+    path.write_text(json.dumps(payload))
+    embedder = _FakeEmbedder()
+    embedder.embed_texts = AsyncMock()
+    with pytest.raises(ValueError, match="self relation"):
+        await import_chunks(storage, embedder, path)
+    embedder.embed_texts.assert_not_called()
+    assert (await storage.get_stats())["total_chunks"] == 0
+
+
+def overlap_config():
+    return IndexingConfig(
+        max_chunk_tokens=128,
+        target_chunk_tokens=64,
+        min_chunk_tokens=8,
+        chunk_overlap_tokens=50,
+        paragraph_split_threshold=10,
+    )
+
+
+@pytest.mark.asyncio
+async def test_raw_chunker_store_export_restore_uses_actual_overlap(storage, tmp_path):
+    text = "## Title\n\n" + "s" * 161 + "\n\n" + ("long paragraph words " * 50)
+    text += "\n\n" + ("another paragraph words " * 50)
+    chunks = MarkdownChunker(overlap_config()).chunk_file(tmp_path / "n.md", text)
+    assert len(chunks) > 1
+    assert chunks[0].metadata.overlap_before == 0
+    assert chunks[1].metadata.overlap_before == 161
+    for chunk in chunks:
+        assert 0 <= chunk.metadata.overlap_before <= len(chunk.content)
+        assert chunk.metadata.overlap_after == 0
+    await storage.upsert_chunks(chunks)
+    path = tmp_path / "raw.json"
+    bundle = await export_chunks(storage, output_path=path)
+    assert sorted(r["content"] for r in bundle.chunks) == sorted(c.content for c in chunks)
+    await storage.delete_chunks([c.id for c in chunks])
+    stats = await import_chunks(storage, _FakeEmbedder(), path, preserve_ids=True)
+    assert stats.imported_chunks == len(chunks)
+    restored = await storage.get_chunks_batch([c.id for c in chunks])
+    for chunk in chunks:
+        assert restored[chunk.id].content == chunk.content
+        assert restored[chunk.id].metadata.overlap_before == chunk.metadata.overlap_before
+
+
+def test_raw_overlap_excludes_stripped_borrowed_whitespace(tmp_path):
+    text = "## Title\n\n" + "A" * 400 + " " * 199 + "Z\n\n" + "B" * 600
+    chunks = MarkdownChunker(overlap_config()).chunk_file(tmp_path / "n.md", text)
+    assert len(chunks) == 2
+    assert chunks[1].content == "Z\n\n" + "B" * 600
+    assert chunks[1].metadata.overlap_before == 1
+    assert chunks[1].line_map[0] < 0
+
+
+@pytest.mark.parametrize("single_merged", [False, True])
+@pytest.mark.asyncio
+async def test_normal_indexer_overlap_exports_without_repair(
+    storage, tmp_path, caplog, single_merged
+):
+    from memtomem.indexing.engine import IndexEngine
+
+    source = tmp_path / "indexed.md"
+    first = "s" * (16 if single_merged else 161)
+    text = "## Title\n\n" + first + "\n\n" + "B" * 600
+    if not single_merged:
+        text += "\n\n" + "C" * 600
+    source.write_text(text)
+    config = overlap_config()
+    config.memory_dirs = [tmp_path]
+    engine = IndexEngine(storage, _FakeEmbedder(), config)
+    stats = await engine.index_file(source)
+    assert not stats.errors
+    chunks = await storage.list_chunks_by_source(source)
+    assert len(chunks) == 1 if single_merged else len(chunks) > 1
+    for chunk in chunks:
+        assert 0 <= chunk.metadata.overlap_before <= len(chunk.content)
+        assert 0 <= chunk.metadata.overlap_after <= len(chunk.content)
+    bundle = await export_chunks(storage)
+    assert bundle.total_chunks == len(chunks)
+    assert "bounded stale overlap" not in caplog.text
+
+
+@pytest.mark.parametrize("before,after", [(999, 999), (-5, 999), (999, -5)])
+@pytest.mark.asyncio
+async def test_stale_overlap_repaired_only_in_export_copy(storage, tmp_path, caplog, before, after):
+    chunk = Chunk(
+        "ordinary",
+        ChunkMetadata(source_file=tmp_path / "n.md", overlap_before=before, overlap_after=after),
+    )
+    await storage.upsert_chunks([chunk])
+    path = tmp_path / "bounded.json"
+    bundle = await export_chunks(storage, output_path=path)
+    record = ExportBundle.from_json(path.read_text()).chunks[0]
+    assert record["overlap_before"] == min(max(before, 0), len(chunk.content))
+    assert record["overlap_after"] == min(max(after, 0), len(chunk.content))
+    assert record["content"] == chunk.content
+    assert "bounded stale overlap metadata for 1 chunk(s)" in caplog.text
+    stored = await storage.get_chunk(chunk.id)
+    assert stored.metadata.overlap_before == before
+    assert stored.metadata.overlap_after == after
+    assert chunk.metadata.overlap_before == before
+    assert chunk.metadata.overlap_after == after
+    await storage.delete_chunks([chunk.id])
+    stats = await import_chunks(storage, _FakeEmbedder(), path, preserve_ids=True)
+    assert stats.imported_chunks == bundle.total_chunks == 1
+    restored = await storage.get_chunk(chunk.id)
+    assert restored.content == chunk.content
+    assert restored.metadata.overlap_before == record["overlap_before"]
+    assert restored.metadata.overlap_after == record["overlap_after"]
+
+
+@pytest.mark.asyncio
+async def test_export_repair_does_not_weaken_import_carry_validation(storage, tmp_path):
+    chunk = Chunk("same", ChunkMetadata(source_file=tmp_path / "n.md", overlap_before=999))
+    await storage.upsert_chunks([chunk])
+    path = legacy_file(tmp_path, _record("same", source=str(chunk.metadata.source_file)))
+    embedder = _FakeEmbedder()
+    embedder.embed_texts = AsyncMock()
+    with pytest.raises(ValueError, match="overlap_before"):
+        await import_chunks(storage, embedder, path, on_conflict="update")
+    embedder.embed_texts.assert_not_called()
+    assert (await storage.get_chunk(chunk.id)).metadata.overlap_before == 999

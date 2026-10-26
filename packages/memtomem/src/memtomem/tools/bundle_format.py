@@ -207,7 +207,9 @@ def validate_records(records: list, relations: list, version: str) -> None:
             _uuid(edge.get(key), where, key)
             if str(UUID(edge[key])) not in identities:
                 raise invalid(where, key)
-        if UUID(edge["source_id"]) == UUID(edge["target_id"]):
+        # Older native exporters emitted self-edges. Keep their signed payload
+        # intact and let relation landing skip them; v4 exports omit them.
+        if version == "4" and UUID(edge["source_id"]) == UUID(edge["target_id"]):
             raise invalid(where, "self relation")
         _string(edge.get("relation_type"), where, "relation_type", allow_nul=True)
 

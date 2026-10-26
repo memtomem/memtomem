@@ -129,7 +129,7 @@ def _strip_quotes(value: str) -> str:
 
 
 def _parse_flat_yaml(text: str) -> dict[str, Any]:
-    """Parse a minimal flat YAML subset.
+    """Parse top-level scalar/string-list fields using the shared PyYAML AST reader.
 
     Supported forms:
 
@@ -137,9 +137,9 @@ def _parse_flat_yaml(text: str) -> dict[str, Any]:
     * ``key: [a, b, c]`` (inline list)
     * ``key:`` followed by indented ``  - item`` lines (block list)
 
-    Nested dicts, anchors, multi-doc separators, and other advanced YAML
-    features are **not** supported — unsupported lines are silently skipped.
-    That is intentional for Phase 2 so we don't take a pyyaml dependency.
+    The AST reader inspects values without constructing objects or expanding
+    merges. Unsupported nested values are ignored. Only a YAML syntax error
+    falls back to the historical line-oriented grammar below.
     """
     parsed = flat_yaml(text)
     if parsed is not None:

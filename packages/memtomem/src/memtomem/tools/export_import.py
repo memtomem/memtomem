@@ -208,7 +208,14 @@ async def export_chunks(
         since=since,
         namespace_filter=namespace_filter,
     )
-    records = [_chunk_to_dict(chunk) for chunk in chunks]
+    records = [_export_chunk_record(chunk) for chunk in chunks]
+    repaired_overlap = sum(
+        chunk.metadata.overlap_before != record["overlap_before"]
+        or chunk.metadata.overlap_after != record["overlap_after"]
+        for chunk, record in zip(chunks, records)
+    )
+    if repaired_overlap:
+        logger.warning("Export bounded stale overlap metadata for %d chunk(s)", repaired_overlap)
     relations = [
         {"source_id": str(sid), "target_id": str(tid), "relation_type": rel}
         for sid, tid, rel in edges
@@ -278,6 +285,20 @@ async def export_chunks(
         logger.info("Exported %d chunks -> %s", len(records), output_path)
 
     return bundle
+
+
+def _export_chunk_record(chunk: Chunk) -> dict:
+    """Bound historical impossible counts in an export copy, never in storage.
+
+    Keep this separate from _chunk_to_dict: import's post-carry validation must
+    still reject an invalid merged row instead of validating a repaired copy.
+    """
+    record = _chunk_to_dict(chunk)
+    for key in ("overlap_before", "overlap_after"):
+        value = record[key]
+        if type(value) is int:
+            record[key] = min(max(value, 0), len(chunk.content))
+    return record
 
 
 def _chunk_to_dict(chunk: Chunk) -> dict:

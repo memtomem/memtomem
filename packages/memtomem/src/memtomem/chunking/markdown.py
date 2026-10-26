@@ -681,6 +681,7 @@ class MarkdownChunker:
         current = ""
         current_start = 0
         current_end = 0
+        current_overlap_before = 0
 
         def line_of(pos: int) -> int:
             return base_line + body_offset + text.count("\n", 0, pos)
@@ -690,7 +691,11 @@ class MarkdownChunker:
             return tuple(range(first, first + part_text.count("\n") + 1))
 
         def chunk_record(
-            chunk_text: str, chunk_map: tuple[int, ...], span_start: int, span_end: int
+            chunk_text: str,
+            chunk_map: tuple[int, ...],
+            span_start: int,
+            span_end: int,
+            borrowed_chars: int,
         ) -> dict:
             source_segment = text[span_start:span_end]
             leading_chars = len(source_segment) - len(source_segment.lstrip())
@@ -700,13 +705,17 @@ class MarkdownChunker:
             source_start_line = line_of(trimmed_start)
             source_end_line = line_of(last_char)
             stripped = chunk_text.strip()
-            skip = chunk_text.count("\n", 0, len(chunk_text) - len(chunk_text.lstrip()))
+            left_trim = len(chunk_text) - len(chunk_text.lstrip())
+            skip = chunk_text.count("\n", 0, left_trim)
             return {
                 "text": stripped,
                 # Keep the first sub-chunk anchored to its heading for mem_edit.
                 "start_line": base_line if not result else source_start_line,
                 "end_line": source_end_line,
                 "line_map": chunk_map[skip : skip + stripped.count("\n") + 1],
+                "overlap_before": max(0, min(borrowed_chars, len(chunk_text.rstrip())) - left_trim),
+                # Only a prefix is borrowed here; no next-chunk text is appended.
+                "overlap_after": 0,
             }
 
         # ``current_map`` follows ``current`` line for line (see ``Chunk.line_map``).
@@ -714,15 +723,21 @@ class MarkdownChunker:
         for part in text_parts:
             separator = text[current_end : part.start] if current else ""
             if current and len(current) + len(separator) + len(part.text) > max_chars:
-                result.append(chunk_record(current, current_map, current_start, current_end))
+                result.append(
+                    chunk_record(
+                        current, current_map, current_start, current_end, current_overlap_before
+                    )
+                )
                 # Apply overlap
                 if overlap_chars > 0:
                     overlap_text = current[-overlap_chars:]
+                    current_overlap_before = len(overlap_text)
                     first = current.count("\n", 0, len(current) - len(overlap_text))
                     borrowed = tuple(-abs(n) for n in current_map[first:])
                     current = overlap_text + "\n\n" + part.text
                     current_map = borrowed + (0,) + own_lines(part.start, part.text)
                 else:
+                    current_overlap_before = 0
                     current = part.text
                     current_map = own_lines(part.start, part.text)
                 current_start = part.start
@@ -741,12 +756,11 @@ class MarkdownChunker:
                     current_end = part.end
 
         if current.strip():
-            result.append(chunk_record(current, current_map, current_start, current_end))
-
-        # Mark overlap
-        for i, r in enumerate(result):
-            r["overlap_before"] = overlap_chars if i > 0 and overlap_chars > 0 else 0
-            r["overlap_after"] = overlap_chars if i < len(result) - 1 and overlap_chars > 0 else 0
+            result.append(
+                chunk_record(
+                    current, current_map, current_start, current_end, current_overlap_before
+                )
+            )
 
         return (
             result

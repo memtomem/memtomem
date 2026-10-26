@@ -26,6 +26,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Reject timestamps that overflow during UTC conversion before embedding.
 - Export older stores containing self-relations by omitting those edges and
   reporting `omitted_self_relations`, instead of refusing the whole backup.
+- Restore v1–v3 backups containing self-relations by skipping those edges after
+  verifying the original signed payload; v4 imports still reject self-relations.
+- Record actual borrowed overlap lengths in raw Markdown chunks. Export bounds
+  impossible historical overlap counts in the backup copy and logs corrections,
+  preserving stored rows and content.
 - Avoid false YAML-comment warnings for quoted list values with plain siblings.
 - Document Windows user-path conversion required for imports on POSIX.
 
