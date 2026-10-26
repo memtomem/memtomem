@@ -76,8 +76,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mm purge --matching-excluded` skips and lists a stored path that now
   resolves elsewhere (also in `--json` as `moved` and `moved_sample`) instead
   of judging the file it reaches, which had let it delete a non-excluded
-  file's chunks. `mem_delete(source_file=)` refuses such a path and points to
-  the web Sources tab.
+  file's chunks. `mem_delete(source_file=)` deletes a stored path by that
+  path, and refuses one that now resolves elsewhere, pointing to the web
+  Sources tab.
 
 ## [0.6.12] — 2026-10-25
 

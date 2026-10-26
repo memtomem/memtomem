@@ -20,13 +20,14 @@ from pathlib import Path
 import pytest
 
 from helpers import StubCtx
+from memtomem.config import IndexingConfig
 from memtomem.indexing.watcher import FileWatcher
 from memtomem.server.context import AppContext
 from memtomem.server.tools import memory_crud
 from memtomem.storage import orphan_detect, sqlite_helpers
-from memtomem.storage.orphan_detect import hold_orphans, scan_orphans
+from memtomem.storage.orphan_detect import RetainRule, group_orphans, hold_orphans, scan_orphans
 from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
-from memtomem.storage.sqlite_helpers import norm_path, stored_key_moved
+from memtomem.storage.sqlite_helpers import norm_path, stored_key_for, stored_key_moved
 
 BODY = "## Note\n\nstoredkeyword lives here\n"
 
@@ -186,6 +187,65 @@ class TestStoredKeyMoved:
         assert not stored_key_moved(key)
 
 
+class TestStoredKeyFor:
+    @pytest.mark.requires_symlinks
+    def test_a_directory_alias_finds_the_key_but_a_relinked_file_is_not_followed(self, tmp_path):
+        real = Path(norm_path(tmp_path)) / "real"
+        real.mkdir()
+        a, b = real / "a.md", real / "b.md"
+        b.write_text("x", encoding="utf-8")
+        a.symlink_to(b)
+        alias = tmp_path / "alias"
+        alias.symlink_to(real, target_is_directory=True)
+
+        assert stored_key_for(alias / "a.md", [a, b]) == a
+        assert stored_key_for(a, [b]) is None
+
+    def test_a_folded_spelling_finds_the_stored_one(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", True)
+        key = Path(norm_path(tmp_path)) / unicodedata.normalize("NFC", "café.md")
+        nfd = Path(unicodedata.normalize("NFD", str(key)))
+
+        assert stored_key_for(nfd, [key]) == key
+
+
+class TestLegacyUnicodeKeys:
+    """A key stored before keys were folded (#235) names the same file as its folded form.
+
+    The stored-key judgments compare strings against folded prefixes, so they fold
+    the key too. Folding is forced on so every platform runs these.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fold(self, monkeypatch):
+        monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", True)
+
+    @staticmethod
+    def _cafe(tmp_path: Path) -> tuple[Path, Path]:
+        root = Path(norm_path(tmp_path)) / "root"
+        cafe = root / unicodedata.normalize("NFC", "café")
+        cafe.mkdir(parents=True)
+        key = Path(unicodedata.normalize("NFD", str(cafe / "a.md")))
+        assert str(key) != str(cafe / "a.md")
+        return cafe, key
+
+    def test_retain_keeps_an_nfd_key_under_an_nfc_retain_dir(self, tmp_path):
+        cafe, key = self._cafe(tmp_path)
+        rule = RetainRule.prepare(
+            IndexingConfig(memory_dirs=[cafe.parent], retain_missing_dirs=[cafe])
+        )
+
+        assert rule.split([key]) == ([key], [])
+
+    def test_orphan_groups_and_under_take_an_nfd_key_with_its_root(self, tmp_path):
+        cafe, key = self._cafe(tmp_path)
+
+        groups, excluded = group_orphans([key], [cafe], under=[cafe])
+
+        assert excluded == 0
+        assert [(g.root, g.sources) for g in groups] == [(cafe, [key])]
+
+
 @pytest.mark.requires_symlinks
 class TestCallers:
     async def test_orphan_scan_holds_a_relinked_source_under_its_own_key(self, env):
@@ -326,3 +386,61 @@ class TestCallers:
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+    async def test_mem_delete_refuses_an_outside_root_key_that_links_into_a_root(self, env):
+        """``work/a.md`` left the configured roots and now links to ``plans/b.md``
+        inside one. ``_validate_path`` would accept the resolved path and delete b."""
+        comp, root = env
+        a, b = await _relinked(comp, root, target_present=True)
+        comp.config.indexing.memory_dirs = [root / "plans"]
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        out = await memory_crud.mem_delete(source_file=str(a), ctx=ctx)
+
+        assert "resolves to another file" in out, out
+        assert await _rows(comp, a) == 1 and await _rows(comp, b) == 1
+
+    async def test_mem_delete_removes_a_legacy_nfd_key_by_that_key(self, env, monkeypatch):
+        """A key stored before keys were folded (#235) is deleted by its own spelling,
+        not by the folded one, which holds no rows."""
+        comp, root = env
+        monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", False)
+        nfd = await _indexed(comp, root / unicodedata.normalize("NFD", "café.md"))
+        assert await _rows(comp, nfd) == 1
+        monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", True)
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        out = await memory_crud.mem_delete(source_file=str(nfd), ctx=ctx)
+
+        assert "Removed 1 chunks" in out, out
+        assert await _rows(comp, nfd) == 0
+
+    async def test_mem_delete_refuses_a_relative_name_for_a_relinked_key(self, env):
+        """A relative ``source_file`` is the entry under the first memory dir, not the
+        file it now links to."""
+        comp, root = env
+        a, b = await _relinked(comp, root, target_present=True)
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        out = await memory_crud.mem_delete(source_file="work/a.md", ctx=ctx)
+
+        assert "resolves to another file" in out, out
+        assert await _rows(comp, a) == 1 and await _rows(comp, b) == 1
+
+    async def test_mem_delete_refuses_another_unicode_spelling_of_a_relinked_key(
+        self, env, monkeypatch
+    ):
+        comp, root = env
+        monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", True)
+        cafe = await _indexed(comp, root / "work" / unicodedata.normalize("NFC", "café.md"))
+        b = await _indexed(comp, root / "plans" / "b.md")
+        cafe.unlink()
+        cafe.symlink_to(b)
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        out = await memory_crud.mem_delete(
+            source_file=unicodedata.normalize("NFD", str(cafe)), ctx=ctx
+        )
+
+        assert "resolves to another file" in out, out
+        assert await _rows(comp, cafe) == 1 and await _rows(comp, b) == 1

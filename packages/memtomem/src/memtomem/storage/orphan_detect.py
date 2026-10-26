@@ -15,7 +15,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from memtomem.storage.sqlite_helpers import norm_dir_prefix, norm_path
+from memtomem.storage.sqlite_helpers import fold_path_form, norm_dir_prefix, norm_path
 
 if TYPE_CHECKING:
     from memtomem.config import IndexingConfig
@@ -172,7 +172,9 @@ class RetainRule:
     edited in place by hot reload is seen on the next pass. :meth:`prepare`
     and :meth:`retains` resolve paths, so async callers run them in a thread.
     :meth:`retains_key` takes a stored key, which ``norm_path`` already
-    resolved on write, and only compares strings.
+    resolved on write, and only compares strings. It folds the key's Unicode
+    form first, as the prefixes are folded: a key stored before keys were
+    folded (#235) names the same file and must stay retained.
     """
 
     retain: tuple[str, ...] = ()
@@ -191,6 +193,7 @@ class RetainRule:
         return bool(self.retain) and self.retains_key(norm_path(source))
 
     def retains_key(self, key: str) -> bool:
+        key = fold_path_form(key)
         return (
             bool(self.retain)
             and key.startswith(self.retain)
@@ -263,6 +266,8 @@ def group_orphans(
     both rules judge each by that key, the rows the purge deletes with
     ``as_stored``. A stored path that has since become a symlink is judged
     where the link sits, where it was indexed, not where it points (#2835).
+    The key is compared in its folded Unicode form, as the prefixes are, so a
+    key stored before keys were folded (#235) groups with its root.
     The roots and ``under`` are resolved, so a symlink alias for a directory
     matches only while the link still exists, and async callers run this in a
     thread.
@@ -276,13 +281,13 @@ def group_orphans(
     kept: list[Path] = []
     excluded = 0
     for source in orphans:
-        if prefixes and not _under_any(str(source), prefixes):
+        if prefixes and not _under_any(fold_path_form(str(source)), prefixes):
             excluded += 1
         else:
             kept.append(source)
     by_root: dict[Path | None, list[Path]] = {}
     for source in kept:
-        owner = _longest_owning_prefix(str(source), root_by_prefix)
+        owner = _longest_owning_prefix(fold_path_form(str(source)), root_by_prefix)
         by_root.setdefault(root_by_prefix[owner] if owner is not None else None, []).append(source)
     groups = [
         OrphanGroup(root, sorted(sources))

@@ -8124,6 +8124,30 @@ class TestDeleteSourceParity:
         probe.assert_awaited_once_with(a, as_stored=True)
         app.state.storage.delete_by_source.assert_awaited_once_with(a, as_stored=True)
 
+    @pytest.mark.requires_symlinks
+    async def test_another_unicode_spelling_of_a_relinked_key_is_not_followed(
+        self, app, client: AsyncClient, tmp_path, monkeypatch
+    ):
+        """An NFD request for an NFC ``café.md`` that now links to ``b.md`` names
+        café's rows; resolving the request would follow the link to b (#2835)."""
+        from memtomem.storage import sqlite_helpers
+
+        monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", True)
+        root = tmp_path.resolve()
+        cafe = root / unicodedata.normalize("NFC", "café.md")
+        b = root / "b.md"
+        b.write_text("x", encoding="utf-8")
+        cafe.symlink_to(b)
+        app.state.storage.get_all_source_files.return_value = [cafe, b]
+        app.state.storage.list_scopes_by_source = AsyncMock(return_value={"user"})
+
+        resp = await client.delete(
+            "/api/sources", params={"path": unicodedata.normalize("NFD", str(cafe))}
+        )
+
+        assert resp.status_code == 200, resp.text
+        app.state.storage.delete_by_source.assert_awaited_once_with(cafe, as_stored=True)
+
 
 class TestIndexRoutesInvalidateSearchCache:
     """#2141: every long-lived index surface must drop the search result TTL

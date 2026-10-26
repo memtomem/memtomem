@@ -105,6 +105,27 @@ def stored_key_moved(key: str) -> bool:
     return norm_path(Path(key)) != fold_path_form(key)
 
 
+def stored_key_for(entry: Path, stored: Iterable[Path]) -> Path | None:
+    """The stored source key ``entry`` names, found without following ``entry`` itself.
+
+    ``entry`` is an absolute, expanded path as the caller spelled it. It matches
+    a key as is, then by folded Unicode form, then the same two ways with its
+    directory resolved and its last component kept. A ``/tmp`` alias of the
+    directory still finds the key, but a file that has become a symlink is not
+    followed to its target, whose rows a delete by the resolved path would
+    take (#2835). Resolves, so async callers run it in a thread.
+    """
+    keys = {str(p) for p in stored}
+    by_form = {fold_path_form(key): key for key in sorted(keys)}
+    for spelling in (str(entry), str(Path(norm_path(entry.parent)) / entry.name)):
+        if spelling in keys:
+            return Path(spelling)
+        hit = by_form.get(fold_path_form(spelling))
+        if hit is not None:
+            return Path(hit)
+    return None
+
+
 def norm_dir_prefix(d: str | Path) -> str:
     """Return the directory path normalized for ``str.startswith`` matching.
 

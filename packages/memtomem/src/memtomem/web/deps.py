@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Iterable
 
 from fastapi import HTTPException, Request
 
-from memtomem.storage.sqlite_helpers import fold_path_form, norm_path
+from memtomem.storage.sqlite_helpers import norm_path, stored_key_for
 
 # Mirror of the CLI bootstrap gate at
 # ``packages/memtomem/src/memtomem/cli/_bootstrap.py`` (`_CONFIG_PATH`
@@ -132,21 +132,14 @@ def require_indexed_source(user_path: str, indexed_sources: Iterable[Path]) -> P
 def require_stored_source(user_path: str, indexed_sources: Iterable[Path]) -> Path:
     """Return the stored key ``user_path`` names, for a caller that writes by it.
 
-    :func:`require_indexed_source` normalizes the stored keys too, so a stored
-    path that has since become a symlink matches as its target, and a delete by
-    the returned key removes the target's rows (#2835). Here the stored keys
-    are compared as stored: the request string itself, then its
-    :func:`norm_path` form, then a key whose Unicode form alone differs (one
-    written before keys were folded, #235). The result is a stored key, so the
-    caller passes ``as_stored`` to storage. Raises 403 like its sibling.
+    :func:`require_indexed_source` resolves the request, so a stored path that
+    has since become a symlink matches as its target, and a delete by the
+    returned key removes the target's rows (#2835). This matches the stored
+    keys without following the requested file (:func:`stored_key_for`), and
+    returns a stored key, so the caller passes ``as_stored`` to storage.
+    Raises 403 like its sibling.
     """
-    stored = {str(p) for p in indexed_sources}
-    if user_path in stored:
-        return Path(user_path)
-    request_norm = norm_path(Path(user_path))
-    if request_norm in stored:
-        return Path(request_norm)
-    by_form = {fold_path_form(key): key for key in sorted(stored)}
-    if request_norm in by_form:
-        return Path(by_form[request_norm])
-    raise HTTPException(status_code=403, detail="Path is not an indexed source file.")
+    key = stored_key_for(Path(user_path).expanduser(), indexed_sources)
+    if key is None:
+        raise HTTPException(status_code=403, detail="Path is not an indexed source file.")
+    return key

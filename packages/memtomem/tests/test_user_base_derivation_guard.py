@@ -107,6 +107,15 @@ ALLOWED: frozenset[tuple[str, str, int, str]] = frozenset(
             "this line purely to capture the refusal, and PinnedContextStore."
             "set raises it (#2322).",
         ),
+        (
+            "server/tools/memory_crud.py",
+            "mem_delete",
+            1,
+            "Reads, does not write: finds the stored key a relative source_file "
+            "names, against the same first memory dir _validate_path joins it "
+            "to, so a file that became a symlink is not followed to another "
+            "source's rows (#2835). The delete removes index rows only.",
+        ),
     }
 )
 
