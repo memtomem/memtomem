@@ -219,5 +219,5 @@ class TestCompactionOrphanGuards:
         assert result["sources_checked"] == 5
         assert "skipped_reason" not in result
         app.storage.delete_by_source.assert_not_awaited()
-        app.storage.hold_source.assert_awaited_once_with(gone, "scan_missing")
+        app.storage.hold_source.assert_awaited_once_with(gone, "scan_missing", as_stored=True)
         app.search_pipeline.invalidate_cache.assert_called_once()

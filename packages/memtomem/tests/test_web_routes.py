@@ -8102,6 +8102,28 @@ class TestDeleteSourceParity:
 
         probe.assert_awaited_once()
 
+    @pytest.mark.requires_symlinks
+    async def test_a_relinked_stored_key_is_probed_and_deleted_as_stored(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """``work/a.md`` became a link to ``plans/b.md``: the request names a's
+        rows, so the probe and the delete take a's key, not b's (#2835)."""
+        root = tmp_path.resolve()
+        a, b = root / "work" / "a.md", root / "plans" / "b.md"
+        a.parent.mkdir()
+        b.parent.mkdir()
+        b.write_text("x", encoding="utf-8")
+        a.symlink_to(b)
+        app.state.storage.get_all_source_files.return_value = [a, b]
+        probe = AsyncMock(return_value={"user"})
+        app.state.storage.list_scopes_by_source = probe
+
+        resp = await client.delete("/api/sources", params={"path": str(a)})
+
+        assert resp.status_code == 200, resp.text
+        probe.assert_awaited_once_with(a, as_stored=True)
+        app.state.storage.delete_by_source.assert_awaited_once_with(a, as_stored=True)
+
 
 class TestIndexRoutesInvalidateSearchCache:
     """#2141: every long-lived index surface must drop the search result TTL

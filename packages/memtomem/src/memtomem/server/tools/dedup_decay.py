@@ -251,7 +251,7 @@ async def mem_cleanup_orphans(
     # A mass ratio cannot prove deletion or availability (#2498).
     result = await scan_orphans(app.storage)
     rule = await asyncio.to_thread(RetainRule.prepare, app.config.indexing)
-    archived, candidates = await asyncio.to_thread(rule.split_for_purge, result.confirmed_orphans)
+    archived, candidates = rule.split(result.confirmed_orphans)
     groups, excluded = await asyncio.to_thread(
         group_orphans,
         candidates,
@@ -305,7 +305,7 @@ async def mem_cleanup_orphans(
         if await asyncio.to_thread(source_state, sf) != "missing":
             skipped += 1
             continue
-        deleted = await app.storage.delete_by_source(sf)
+        deleted = await app.storage.delete_by_source(sf, as_stored=True)
         total_deleted += deleted
 
     if total_deleted > 0:

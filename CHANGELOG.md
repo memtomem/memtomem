@@ -62,6 +62,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Code-side `~/Library/Application Support/Antigravity/User/mcp.json` (read
   under `servers`, that file's key). A test now fails if the runtime registry
   learns a location the uninstall list does not cover.
+- **Deleting or holding a source by its stored path no longer reaches the
+  file that path now links to (#2835).** Storage resolved a stored source
+  path again before acting on it, so once a file had been replaced by a
+  symlink, its purge removed the link target's chunks and left its own. With
+  the target also missing, `mm gc orphan-sources --apply` reported success
+  and the source came back on every scan. The orphan purge
+  (`mm gc orphan-sources`, `mem_cleanup_orphans`), the automatic orphan and
+  watcher holds, and `DELETE /api/sources` now act on the stored path itself.
+  **Behavior change:** `--under DIR` and `under` match a source by the path it
+  was indexed under, not by where it now points, so `--under work` now purges
+  a missing `work/a.md` that links elsewhere instead of leaving it.
+  `mm purge --matching-excluded` skips and lists a stored path that now
+  resolves elsewhere (also in `--json` as `moved` and `moved_sample`) instead
+  of judging the file it reaches, which had let it delete a non-excluded
+  file's chunks. `mem_delete(source_file=)` refuses such a path and points to
+  the web Sources tab.
 
 ## [0.6.12] — 2026-10-25
 

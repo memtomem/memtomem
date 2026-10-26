@@ -465,7 +465,9 @@ class FileWatcher:
                                     # Its existing rows may become visible again
                                     # once the source is positively present —
                                     # unless its content was what held it.
-                                    if await storage.release_source_hold(path, validated=False):
+                                    if await storage.release_source_hold(
+                                        path, validated=False, as_stored=True
+                                    ):
                                         if self._search_pipeline is not None:
                                             self._search_pipeline.invalidate_cache()
                                         self._recheck_wakeup.set()
@@ -485,14 +487,18 @@ class FileWatcher:
                                         self._search_pipeline.invalidate_cache()
                                     self._recheck_wakeup.set()
                                 elif path in pending_checks:
-                                    await storage.hold_source(path, "watch_reindex_unresolved")
+                                    await storage.hold_source(
+                                        path, "watch_reindex_unresolved", as_stored=True
+                                    )
                             except Exception:
                                 logger.exception("Could not show retained source %s", path)
                         elif path in pending_checks:
                             # A failed event settle may have left only a pending
                             # journal row. Turn it into a durable hold now.
                             try:
-                                await storage.hold_source(path, "watch_reindex_unresolved")
+                                await storage.hold_source(
+                                    path, "watch_reindex_unresolved", as_stored=True
+                                )
                             except Exception:
                                 logger.exception("Could not settle pending source %s", path)
                         # Missing/unavailable held paths remain held as they are.

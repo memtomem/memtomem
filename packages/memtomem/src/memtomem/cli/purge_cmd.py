@@ -13,7 +13,7 @@ import click
 
 logger = logging.getLogger(__name__)
 
-#: Cap on sample paths printed for sources that could not be classified.
+#: Cap on sample paths printed for sources that could not be classified, or moved.
 UNCLASSIFIED_SAMPLE = 5
 
 
@@ -24,10 +24,16 @@ class PurgeClassification:
     ``unclassified`` holds the sources the exclusion predicate raised on. A scan
     with any of them is incomplete: callers must not report it as a clean result
     or delete on it.
+
+    ``moved`` holds stored keys that no longer resolve to themselves
+    (:func:`~memtomem.storage.sqlite_helpers.stored_key_moved`). The predicate
+    would judge the file the key now reaches, not the one indexed under it, so
+    they are neither matched nor deleted; callers report them (#2835).
     """
 
     matched: list[Path] = field(default_factory=list)
     unclassified: list[Path] = field(default_factory=list)
+    moved: list[Path] = field(default_factory=list)
 
 
 class UnclassifiableSourcesError(RuntimeError):
@@ -52,6 +58,7 @@ def classify_sources_for_purge(
     let the indexer read a denylisted file.
     """
     from memtomem.indexing.engine import WorktreeMemo, _build_exclude_spec, _path_is_excluded
+    from memtomem.storage.sqlite_helpers import stored_key_moved
 
     user_spec = _build_exclude_spec(user_patterns)
     roots = list(memory_dirs)
@@ -59,12 +66,15 @@ def classify_sources_for_purge(
     result = PurgeClassification()
     for sf in sources:
         try:
-            if _path_is_excluded(sf, roots, user_spec, worktree_cache=memo):
+            if stored_key_moved(str(sf)):
+                result.moved.append(sf)
+            elif _path_is_excluded(sf, roots, user_spec, worktree_cache=memo):
                 result.matched.append(sf)
         except (OSError, ValueError, RuntimeError):
             result.unclassified.append(sf)
             logger.warning("purge: could not classify %r", str(sf), exc_info=True)
     result.unclassified.sort(key=str)
+    result.moved.sort(key=str)
     return result
 
 
@@ -91,7 +101,8 @@ def find_sources_matching_excluded(
 
     Raises :class:`UnclassifiableSourcesError` when any source could not be
     classified, rather than returning a list that silently omits it. Callers
-    that must report an incomplete scan use :func:`classify_sources_for_purge`.
+    that must report an incomplete scan, or the moved keys left out of the
+    result, use :func:`classify_sources_for_purge`.
     """
     result = classify_sources_for_purge(sources, user_patterns, memory_dirs)
     if result.unclassified:
@@ -154,6 +165,32 @@ def purge(matching_excluded: bool, apply_: bool, sample_size: int, as_json: bool
         raise_cli_error(e)
 
 
+def _moved_fields(scan: PurgeClassification) -> dict:
+    """JSON fields for moved keys; empty when there are none, so other payloads keep their shape."""
+    if not scan.moved:
+        return {}
+    return {
+        "moved": len(scan.moved),
+        "moved_sample": [str(sf) for sf in scan.moved[:UNCLASSIFIED_SAMPLE]],
+    }
+
+
+def _echo_moved(scan: PurgeClassification) -> None:
+    if not scan.moved:
+        return
+    click.secho(
+        f"Skipped {len(scan.moved)} stored source(s) whose path now resolves elsewhere "
+        "(a symlink since indexing, or a path stored before it was resolved); they are "
+        "not judged or deleted.",
+        fg="yellow",
+        err=True,
+    )
+    for sf in scan.moved[:UNCLASSIFIED_SAMPLE]:
+        click.echo(f"  {sf}", err=True)
+    if len(scan.moved) > UNCLASSIFIED_SAMPLE:
+        click.echo(f"  ... and {len(scan.moved) - UNCLASSIFIED_SAMPLE} more", err=True)
+
+
 async def _report_incomplete_scan(
     comp, scan: PurgeClassification, apply_: bool, sample_size: int, as_json: bool
 ) -> None:
@@ -166,7 +203,7 @@ async def _report_incomplete_scan(
     what a clean run would remove.
     """
     matched = scan.matched
-    counts = await comp.storage.count_chunks_by_sources(matched) if matched else {}
+    counts = await comp.storage.count_chunks_by_sources(matched, as_stored=True) if matched else {}
     matched_chunks = sum(counts.values())
     matched_sample = [str(sf) for sf in sorted(matched)[:sample_size]]
     unclassified_sample = [str(sf) for sf in scan.unclassified[:UNCLASSIFIED_SAMPLE]]
@@ -183,10 +220,12 @@ async def _report_incomplete_scan(
                     "deleted_chunks": 0,
                     "unclassified": len(scan.unclassified),
                     "unclassified_sample": unclassified_sample,
+                    **_moved_fields(scan),
                 }
             )
         )
         return
+    _echo_moved(scan)
     outcome = "nothing was deleted" if apply_ else "the scan is incomplete"
     click.secho(
         f"Could not classify {len(scan.unclassified)} stored source(s); {outcome}.",
@@ -231,8 +270,10 @@ async def _run_matching_excluded(*, apply_: bool, sample_size: int, as_json: boo
                 payload: dict = {"ok": True, "apply": apply_, "files": 0, "chunks": 0}
                 if not apply_:
                     payload["sample"] = []
+                payload.update(_moved_fields(scan))
                 click.echo(json.dumps(payload))
             else:
+                _echo_moved(scan)
                 click.secho("No stored chunks match the current exclude set.", fg="green")
             return
 
@@ -242,7 +283,7 @@ async def _run_matching_excluded(*, apply_: bool, sample_size: int, as_json: boo
             # no such cap, so a big file was announced as smaller than it was
             # about to be deleted (#2261). Only the preview needs this — the
             # apply path reports what ``delete_by_source`` actually removed.
-            counts = await comp.storage.count_chunks_by_sources(matched)
+            counts = await comp.storage.count_chunks_by_sources(matched, as_stored=True)
             total_chunks = sum(counts.values())
             sample = [str(sf) for sf in sorted(matched)[:sample_size]]
             if as_json:
@@ -254,10 +295,12 @@ async def _run_matching_excluded(*, apply_: bool, sample_size: int, as_json: boo
                             "files": len(matched),
                             "chunks": total_chunks,
                             "sample": sample,
+                            **_moved_fields(scan),
                         }
                     )
                 )
                 return
+            _echo_moved(scan)
             click.echo(f"Would delete {total_chunks} chunks across {len(matched)} files. Sample:")
             for path_text in sample:
                 click.echo(f"  {path_text}")
@@ -267,15 +310,24 @@ async def _run_matching_excluded(*, apply_: bool, sample_size: int, as_json: boo
             return
 
         deleted_total = 0
+        # Matched keys came from the store and were judged as stored (moved
+        # ones were split off above), so they are deleted as stored (#2835).
         for sf in matched:
-            deleted_total += await comp.storage.delete_by_source(sf)
+            deleted_total += await comp.storage.delete_by_source(sf, as_stored=True)
         if as_json:
             click.echo(
                 json.dumps(
-                    {"ok": True, "apply": True, "files": len(matched), "chunks": deleted_total}
+                    {
+                        "ok": True,
+                        "apply": True,
+                        "files": len(matched),
+                        "chunks": deleted_total,
+                        **_moved_fields(scan),
+                    }
                 )
             )
             return
+        _echo_moved(scan)
         click.secho(
             f"Deleted {deleted_total} chunks across {len(matched)} files.",
             fg="green",

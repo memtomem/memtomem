@@ -351,8 +351,8 @@ async def test_status_reports_an_archive_instead_of_an_orphan(env):
 
 
 @pytest.mark.requires_symlinks
-async def test_purge_keeps_an_archive_a_relinked_source_would_reach(env, monkeypatch):
-    """``delete_by_source`` re-resolves (#2835): judge the deletion identity too."""
+async def test_purge_of_a_relinked_source_keeps_the_archive_it_points_at(env, monkeypatch):
+    """The purge deletes the relinked source's own rows, not its target's (#2835)."""
     from contextlib import asynccontextmanager
 
     from memtomem.cli import _bootstrap, gc_cmd
@@ -365,6 +365,8 @@ async def test_purge_keeps_an_archive_a_relinked_source_would_reach(env, monkeyp
     archive.unlink()
     old.unlink()
     old.symlink_to(archive)  # dangling: both sources stat as missing
+    stored_old = Path(norm_path(old.parent)) / old.name
+    assert len(await comp.storage.list_chunks_by_source(stored_old, as_stored=True)) == 1
     app = AppContext.from_components(comp)
 
     async def fake_app(_ctx):
@@ -383,8 +385,9 @@ async def test_purge_keeps_an_archive_a_relinked_source_would_reach(env, monkeyp
     out = await dedup_decay.mem_cleanup_orphans(dry_run=False, confirm_purge=True, ctx=None)
     await gc_cmd._run_orphan_sources(apply_=True, assume_yes=True)
 
-    assert "2 archived source(s) under retain_missing_dirs are kept." in out
+    assert "1 archived source(s) under retain_missing_dirs are kept." in out
     assert len(await comp.storage.list_chunks_by_source(archive)) == 1
+    assert await comp.storage.list_chunks_by_source(stored_old, as_stored=True) == []
 
 
 async def test_a_confirmed_purge_also_reports_what_it_kept(env, tmp_path, monkeypatch):

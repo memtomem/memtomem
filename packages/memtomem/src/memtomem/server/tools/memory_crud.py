@@ -1590,6 +1590,18 @@ async def mem_delete(
             )
 
     if source_file:
+        # A stored key that now resolves to another file is refused before it
+        # is resolved: ``_validate_path`` and the locks below would act on the
+        # target, deleting its rows and creating a sidecar beside it (#2835).
+        from memtomem.storage.sqlite_helpers import stored_key_moved
+
+        stored = bool(await app.storage.list_scopes_by_source(Path(source_file), as_stored=True))
+        if stored and await asyncio.to_thread(stored_key_moved, source_file):
+            return (
+                f"Error: {source_file} now resolves to another file (it became a symlink "
+                "after it was indexed), so its rows cannot be deleted by path here. "
+                "Delete it from the Sources tab of the web UI (mm web)."
+            )
         sf_path, sf_err = _validate_path(
             source_file,
             app.config.indexing.memory_dirs,

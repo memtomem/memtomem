@@ -136,9 +136,7 @@ async def _run_orphan_sources(
         result = await scan_orphans(comp.storage)
         unavailable = sorted(result.unavailable_sources)
         rule = await asyncio.to_thread(RetainRule.prepare, comp.config.indexing)
-        archived, candidates = await asyncio.to_thread(
-            rule.split_for_purge, result.confirmed_orphans
-        )
+        archived, candidates = rule.split(result.confirmed_orphans)
         groups, excluded = await asyncio.to_thread(
             group_orphans,
             candidates,
@@ -223,7 +221,7 @@ async def _run_orphan_sources(
                     if await asyncio.to_thread(source_state, source) != "missing":
                         skipped += 1
                         continue
-                    deleted += await comp.storage.delete_by_source(source)
+                    deleted += await comp.storage.delete_by_source(source, as_stored=True)
                     purged += 1
         except click.Abort:
             # The groups confirmed before the interrupted prompt are already gone.

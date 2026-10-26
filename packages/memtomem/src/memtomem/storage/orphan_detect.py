@@ -155,8 +155,8 @@ def _resolvable_prefixes(dirs: Iterable[str | Path]) -> tuple[str, ...]:
     return tuple(prefixes)
 
 
-def _under_any(source: Path, prefixes: tuple[str, ...]) -> bool:
-    return bool(prefixes) and norm_path(source).startswith(prefixes)
+def _under_any(key: str, prefixes: tuple[str, ...]) -> bool:
+    return bool(prefixes) and key.startswith(prefixes)
 
 
 @dataclass(frozen=True)
@@ -164,7 +164,7 @@ class RetainRule:
     """Which missing sources ``indexing.retain_missing_dirs`` keeps (#2833).
 
     A source is retained when it lies under a retain dir **and** under an index
-    root, judged by its resolved path like :func:`group_orphans`. Without the
+    root, judged by its stored key like :func:`group_orphans`. Without the
     root clause a dir dropped from the config would keep its sources visible
     with nothing left to manage them.
 
@@ -206,23 +206,6 @@ class RetainRule:
             (retained if self.retains_key(str(key)) else others).append(key)
         return retained, others
 
-    def split_for_purge(self, keys: Iterable[Path]) -> tuple[list[Path], list[Path]]:
-        """Like :meth:`split`, also keeping a key whose purge would land in a retain dir.
-
-        ``delete_by_source`` re-resolves the key it is given (#2835), so a
-        stored path that has since become a symlink into a retain dir would
-        delete the archive's chunks. Both identities must be outside every
-        retain dir. Resolves paths; run it in a thread.
-        """
-        if not self.retain:
-            return [], list(keys)
-        retained: list[Path] = []
-        others: list[Path] = []
-        for key in keys:
-            keep = self.retains_key(str(key)) or self.retains(key)
-            (retained if keep else others).append(key)
-        return retained, others
-
 
 @dataclass(frozen=True)
 class OrphanHoldOutcome:
@@ -253,9 +236,9 @@ async def hold_orphans(
     for sf in retained:
         changed |= await storage.release_absence_hold(str(sf))
     for sf in missing:
-        changed |= await storage.hold_source(sf, "scan_missing")
+        changed |= await storage.hold_source(sf, "scan_missing", as_stored=True)
     for sf in result.unavailable_sources:
-        changed |= await storage.hold_source(sf, "scan_unavailable")
+        changed |= await storage.hold_source(sf, "scan_unavailable", as_stored=True)
     return OrphanHoldOutcome(
         changed=changed,
         missing_held=len(missing),
@@ -276,28 +259,31 @@ def group_orphans(
     how many orphans ``under`` left out. An empty ``under`` keeps everything.
 
     Ownership is the longest-prefix rule doctor and the Sources tree use, so
-    each source lands in exactly one group. Both rules judge a source by its
-    resolved path, the identity ``delete_by_source`` deletes by. A stored path
-    that has since become a symlink is therefore judged where it points, not
-    where the link sits; judging it by the link would let ``under`` select a
-    source whose purge deletes another source's chunks. A symlink alias for a
-    directory matches only while the link still exists. Both rules stat the
-    filesystem, so async callers run this in a thread.
+    each source lands in exactly one group. ``orphans`` are stored keys, and
+    both rules judge each by that key, the rows the purge deletes with
+    ``as_stored``. A stored path that has since become a symlink is judged
+    where the link sits, where it was indexed, not where it points (#2835).
+    The roots and ``under`` are resolved, so a symlink alias for a directory
+    matches only while the link still exists, and async callers run this in a
+    thread.
     """
-    from memtomem.indexing.engine import resolve_owning_memory_dir
+    from memtomem.indexing.dir_stats import _longest_owning_prefix
 
-    roots = list(roots)
-    prefixes = [norm_dir_prefix(Path(d).expanduser()) for d in under]
+    root_by_prefix: dict[str, Path] = {}
+    for d in roots:
+        root_by_prefix.setdefault(norm_dir_prefix(d), Path(d).expanduser())
+    prefixes = tuple(norm_dir_prefix(Path(d).expanduser()) for d in under)
     kept: list[Path] = []
     excluded = 0
     for source in orphans:
-        if prefixes and not _under_any(source, tuple(prefixes)):
+        if prefixes and not _under_any(str(source), prefixes):
             excluded += 1
         else:
             kept.append(source)
     by_root: dict[Path | None, list[Path]] = {}
     for source in kept:
-        by_root.setdefault(resolve_owning_memory_dir(source, roots), []).append(source)
+        owner = _longest_owning_prefix(str(source), root_by_prefix)
+        by_root.setdefault(root_by_prefix[owner] if owner is not None else None, []).append(source)
     groups = [
         OrphanGroup(root, sorted(sources))
         for root, sources in sorted(by_root.items(), key=lambda kv: (kv[0] is None, str(kv[0])))

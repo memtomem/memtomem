@@ -15,6 +15,17 @@ from memtomem.cli import cli
 from memtomem.cli.purge_cmd import find_sources_matching_excluded
 
 
+@pytest.fixture(autouse=True)
+def _synthetic_keys_are_stored_keys(monkeypatch):
+    """These tests feed made-up ``/home/u/...`` keys, which resolve elsewhere on macOS
+    (``/home`` is a firmlink there), so the moved-key split would take every one of
+    them. Real stored keys and that split are covered in ``test_stored_source_keys.py``.
+    """
+    from memtomem.storage import sqlite_helpers
+
+    monkeypatch.setattr(sqlite_helpers, "stored_key_moved", lambda key: False)
+
+
 def _mock_components(matched_sources, indexing_exclude_patterns=(), memory_dirs=()):
     """Build a fake Components-like object where storage returns the given sources."""
     storage = SimpleNamespace(
@@ -222,7 +233,7 @@ class TestIncompleteScan:
         # Count only what was asked for: the shared mock answers for every source,
         # which would hide a count taken over the unclassified rows too.
         comp.storage.count_chunks_by_sources = AsyncMock(
-            side_effect=lambda asked: {sf: 2 for sf in asked}
+            side_effect=lambda asked, **_: {sf: 2 for sf in asked}
         )
         return comp
 

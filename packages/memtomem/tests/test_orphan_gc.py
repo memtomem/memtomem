@@ -651,7 +651,7 @@ class TestOrphanSourcesCli:
         result = CliRunner().invoke(cli, ["gc", "orphan-sources", "--apply", "--yes"])
 
         assert result.exit_code == 0, result.output
-        comp.storage.delete_by_source.assert_awaited_once_with(missing)
+        comp.storage.delete_by_source.assert_awaited_once_with(missing, as_stored=True)
         invalidate.assert_called_once_with()
         assert "4 chunks deleted" in result.output
 
@@ -772,15 +772,14 @@ class TestOrphanProjectsKeepRetained:
 
 class TestOrphanSourcesUnderRealStorage:
     @pytest.mark.requires_symlinks
-    async def test_under_judges_a_relinked_source_where_its_purge_lands(
+    async def test_under_judges_a_relinked_source_by_its_stored_key(
         self, backend, monkeypatch, tmp_path
     ):
-        """A stored path that became a dangling symlink is judged by its target.
+        """A stored path that became a dangling symlink is judged where it was indexed.
 
-        ``delete_by_source`` deletes by the resolved path, so a purge of
-        ``work/a.md`` here would delete ``plans/b.md``'s chunks. ``--under
-        work`` must therefore not select it, or the purge reaches a directory
-        the user left out (#2833).
+        The purge deletes by the stored key (#2835), so ``--under work`` selects
+        ``work/a.md`` and deletes its row, and ``plans/b.md``, in the directory
+        the user left out, keeps its own.
         """
         from memtomem.cli import gc_cmd
         from memtomem.storage import orphan_detect
@@ -808,4 +807,4 @@ class TestOrphanSourcesUnderRealStorage:
         await gc_cmd._run_orphan_sources(apply_=True, assume_yes=True, under=(work,))
 
         rows = backend._get_db().execute("SELECT id FROM chunks ORDER BY id").fetchall()
-        assert [r[0] for r in rows] == ["a", "b"]
+        assert [r[0] for r in rows] == ["b"]

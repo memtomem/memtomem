@@ -91,6 +91,20 @@ def norm_path(p: Path) -> str:
     return fold_path_form(resolved)
 
 
+def stored_key_moved(key: str) -> bool:
+    """True when the stored source key ``key`` no longer resolves to itself.
+
+    Keys are :func:`norm_path` forms when written, so this means a component
+    became a symlink since, or the key predates a normalization change (a
+    ``/tmp`` alias). Either way the file at the key is not the one indexed
+    under it, and anything that would act on the filesystem through the key
+    reaches another path (#2835). Unicode form alone is not a move: the
+    comparison folds ``key`` the way :func:`norm_path` folds its result.
+    Resolves, so async callers run it in a thread.
+    """
+    return norm_path(Path(key)) != fold_path_form(key)
+
+
 def norm_dir_prefix(d: str | Path) -> str:
     """Return the directory path normalized for ``str.startswith`` matching.
 

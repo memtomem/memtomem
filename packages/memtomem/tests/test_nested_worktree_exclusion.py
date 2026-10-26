@@ -742,16 +742,21 @@ def _symlink_or_skip(link: Path, target: Path) -> None:
 def test_a_symlinked_ancestor_gives_the_same_answer_everywhere(
     repo: Path, tmp_path: Path, spec
 ) -> None:
-    from memtomem.cli.purge_cmd import find_sources_matching_excluded
+    from memtomem.cli.purge_cmd import classify_sources_for_purge
+    from memtomem.storage.sqlite_helpers import norm_path
 
     run("worktree", "add", "-q", str(repo / ".worktrees/wt"), "-b", "wt", cwd=repo)
     link = tmp_path / "link"
     _symlink_or_skip(link, repo)
     via_link = link / ".worktrees/wt/a.md"
+    # The store keeps the resolved path, which is what purge is handed. The
+    # link spelling is not a stored key; purge lists it as moved (#2835).
+    stored = Path(norm_path(via_link))
 
     assert _under_nested_worktree(via_link, [], None) is True
     assert _under_nested_worktree(via_link, [], None, walk_root=link) is True
-    assert find_sources_matching_excluded([via_link], [], []) == [via_link]
+    scan = classify_sources_for_purge([stored, via_link], [], [])
+    assert (scan.matched, scan.moved) == ([stored], [via_link])
 
 
 def test_a_link_into_a_worktree_from_outside_any_checkout_is_resolved_first(
@@ -763,6 +768,7 @@ def test_a_link_into_a_worktree_from_outside_any_checkout_is_resolved_first(
     handed the resolved path the store keeps, claimed it.
     """
     from memtomem.cli.purge_cmd import find_sources_matching_excluded
+    from memtomem.storage.sqlite_helpers import norm_path
 
     run("worktree", "add", "-q", str(repo / ".worktrees/wt"), "-b", "wt", cwd=repo)
     plain = tmp_path / "plain"
@@ -771,7 +777,8 @@ def test_a_link_into_a_worktree_from_outside_any_checkout_is_resolved_first(
     via_link = plain / "link/a.md"
 
     assert _under_nested_worktree(via_link, [], None) is True
-    assert find_sources_matching_excluded([via_link], [], []) == [via_link]
+    stored = Path(norm_path(via_link))
+    assert find_sources_matching_excluded([stored], [], []) == [stored]
 
 
 def test_a_symlinked_git_directory_still_marks_a_checkout(tmp_path: Path) -> None:

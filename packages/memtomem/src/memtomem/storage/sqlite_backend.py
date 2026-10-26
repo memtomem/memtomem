@@ -218,10 +218,11 @@ def _classify_startup_error(exc: BaseException, stage: str) -> StorageStartupErr
     )
 
 
-def _ai_summary_key(source_file: Path, *, as_stored: bool = False) -> str:
+def _ai_summary_key(source_file: Path | str, *, as_stored: bool = False) -> str:
     # ``as_stored``: the caller already holds the stored key (taken before a
     # slow step), and resolving it again could name a different file.
-    return f"{_AI_SUMMARY_KEY_PREFIX}{str(source_file) if as_stored else norm_path(source_file)}"
+    key = str(source_file) if as_stored else norm_path(Path(source_file))
+    return f"{_AI_SUMMARY_KEY_PREFIX}{key}"
 
 
 def _rebuild_fts_retrieval(content: str, hierarchy_json: str) -> str:
@@ -2397,9 +2398,17 @@ class SqliteBackend(
             self._clear_source_visibility(db, summary_source)
         return len(rows)
 
-    async def delete_by_source(self, source_file: Path) -> int:
+    async def delete_by_source(self, source_file: Path, *, as_stored: bool = False) -> int:
+        """Delete every chunk of one source, with its summary, receipt and holds.
+
+        ``as_stored`` takes ``source_file`` as a key read back from the chunks
+        table and deletes the rows stored under that exact string. Without it
+        the path is normalized first, which resolves symlinks: a stored path
+        that has since become a link would delete its target's rows and leave
+        its own (#2835). The key is computed once and used for every table.
+        """
         db = self._get_db()
-        source = norm_path(source_file)
+        source = str(source_file) if as_stored else norm_path(source_file)
         summary_source = source + CONSOLIDATED_SUFFIX
         rows = db.execute(
             "SELECT id, rowid FROM chunks WHERE source_file=? OR (source_file=? AND origin=?)",
@@ -2415,15 +2424,15 @@ class SqliteBackend(
                 db.execute(
                     "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
                     (
-                        _ai_summary_key(source_file),
-                        "chunk_descriptions:" + _ai_summary_key(source_file),
+                        _ai_summary_key(source, as_stored=True),
+                        "chunk_descriptions:" + _ai_summary_key(source, as_stored=True),
                     ),
                 )
                 db.execute(
                     "DELETE FROM source_index_receipts WHERE source_file=?",
-                    (norm_path(source_file),),
+                    (source,),
                 )
-                self._clear_source_visibility(db, source_file)
+                self._clear_source_visibility(db, source)
                 if (
                     db.execute(
                         "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (summary_source,)
@@ -2456,8 +2465,8 @@ class SqliteBackend(
             db.execute(
                 "DELETE FROM _memtomem_meta WHERE key IN (?, ?)",
                 (
-                    _ai_summary_key(source_file),
-                    "chunk_descriptions:" + _ai_summary_key(source_file),
+                    _ai_summary_key(source, as_stored=True),
+                    "chunk_descriptions:" + _ai_summary_key(source, as_stored=True),
                 ),
             )
             # The completed-source receipt describes chunks that no longer
@@ -2467,9 +2476,9 @@ class SqliteBackend(
             # this database ever indexed and deleted.
             db.execute(
                 "DELETE FROM source_index_receipts WHERE source_file=?",
-                (norm_path(source_file),),
+                (source,),
             )
-            self._clear_source_visibility(db, source_file)
+            self._clear_source_visibility(db, source)
             if (
                 db.execute(
                     "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (summary_source,)
@@ -2494,9 +2503,9 @@ class SqliteBackend(
     def _clear_source_visibility(self, db: sqlite3.Connection, source_file: Path | str) -> bool:
         return SourceHoldOps._clear_source_visibility(db, source_file)
 
-    async def hold_source(self, source_file: Path, reason: str) -> bool:
+    async def hold_source(self, source_file: Path, reason: str, *, as_stored: bool = False) -> bool:
         assert self._holds is not None
-        return await self._holds.hold_source(source_file, reason)
+        return await self._holds.hold_source(source_file, reason, as_stored=as_stored)
 
     async def release_source_hold(
         self,
@@ -2504,12 +2513,14 @@ class SqliteBackend(
         *,
         expected_generation: int | None = None,
         validated: bool = True,
+        as_stored: bool = False,
     ) -> bool:
         assert self._holds is not None
         return await self._holds.release_source_hold(
             source_file,
             expected_generation=expected_generation,
             validated=validated,
+            as_stored=as_stored,
         )
 
     async def release_absence_hold(self, source_key: str) -> bool:
@@ -2588,12 +2599,19 @@ class SqliteBackend(
             keep=keep,
         )
 
-    async def list_scopes_by_source(self, source_file: Path) -> set[str]:
-        """Return the distinct persisted scopes for chunks from ``source_file``."""
+    async def list_scopes_by_source(
+        self, source_file: Path, *, as_stored: bool = False
+    ) -> set[str]:
+        """Return the distinct persisted scopes for chunks from ``source_file``.
+
+        ``as_stored`` as in :meth:`delete_by_source`, so a consent probe reads the
+        rows that the delete it guards removes.
+        """
+        key = str(source_file) if as_stored else norm_path(source_file)
         async with self._lease_read_db() as db:
             rows = db.execute(
                 "SELECT DISTINCT COALESCE(scope, 'user') FROM chunks WHERE source_file=?",
-                (norm_path(source_file),),
+                (key,),
             ).fetchall()
         return {str(row[0] or "user") for row in rows}
 
@@ -3268,7 +3286,9 @@ class SqliteBackend(
             ).fetchone()
         return int(row[0]) if row else 0
 
-    async def count_chunks_by_sources(self, source_files: Sequence[Path]) -> dict[Path, int]:
+    async def count_chunks_by_sources(
+        self, source_files: Sequence[Path], *, as_stored: bool = False
+    ) -> dict[Path, int]:
         """How many chunks each of ``source_files`` holds, in one pass per batch.
 
         The batch sibling of :meth:`count_chunks_by_source`, for callers holding
@@ -3285,13 +3305,15 @@ class SqliteBackend(
           missing key as zero. Callers that want a total just ``sum(...)``.
         - **Aliases collapse.** Two inputs that normalise to the same stored
           path (symlink; NFC/NFD spelling on macOS) yield one entry, keyed by whichever
-          the caller passed last. Paths that came out of the store — the purge
-          case — are already canonical and distinct, so this cannot bite there.
+          the caller passed last. Paths that came out of the store can collapse
+          too, once one of them has become a symlink to another, so a caller
+          holding stored keys passes ``as_stored`` and each key counts its own
+          rows (#2835).
         """
         if not source_files:
             return {}
 
-        norm_to_path = {norm_path(sf): sf for sf in source_files}
+        norm_to_path = {(str(sf) if as_stored else norm_path(sf)): sf for sf in source_files}
         norm_paths = list(norm_to_path)
 
         result: dict[Path, int] = {}

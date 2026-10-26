@@ -17,6 +17,7 @@ from memtomem.web.deps import (
     get_search_pipeline,
     get_storage,
     require_indexed_source,
+    require_stored_source,
 )
 from memtomem.web.source_visibility import load_source_visibility
 from memtomem.web.routes._confirm import needs_confirmation_envelope
@@ -345,13 +346,14 @@ async def delete_source(
     chunks this call just deleted until the entry ages out.
     """
     indexed_sources = await storage.get_all_source_files()
-    request_path = require_indexed_source(path, indexed_sources)
+    # The stored key, used as stored by the probe and the delete alike (#2835).
+    request_path = require_stored_source(path, indexed_sources)
 
     # Gate-B: a bulk source delete that would take project_shared chunks with
     # it needs consent first. The probe is re-read below rather than trusted
     # from a caller-supplied hint — the flag says the user consented, it does
     # not say what they consented to.
-    scopes = await storage.list_scopes_by_source(request_path)
+    scopes = await storage.list_scopes_by_source(request_path, as_stored=True)
     if "project_shared" in scopes and not confirm_project_shared:
         logger.info(
             "delete_source rejected project_shared source without confirmation",
@@ -379,7 +381,7 @@ async def delete_source(
             audit_context={"scopes": len(scopes)},
         )
 
-    deleted = await storage.delete_by_source(request_path)
+    deleted = await storage.delete_by_source(request_path, as_stored=True)
     search_pipeline.invalidate_cache()
     return DeleteResponse(deleted=deleted).model_dump()
 

@@ -99,7 +99,7 @@ class SourceHoldOps:
             cls._bump_source_visibility(db, source)
         return changed
 
-    async def hold_source(self, source_file: Path, reason: str) -> bool:
+    async def hold_source(self, source_file: Path, reason: str, *, as_stored: bool = False) -> bool:
         """Hide existing source chunks without destroying them (#2498).
 
         A ``redaction_blocked`` hold keeps its reason when an availability
@@ -108,10 +108,16 @@ class SourceHoldOps:
         the out-of-root recheck lifts availability holds on presence alone.
         Moving a hold *to* that reason advances the source's visibility
         generation, so a release prepared before the block cannot lift it.
+
+        ``as_stored`` holds the key exactly as given, for a caller that read it
+        from the store: resolving it again would hold a symlink's target (#2835).
         """
-        # A stale network mount can block Path.resolve(); keep that syscall off
-        # the event loop for scanner and scheduler callers that reach here.
-        source = await asyncio.to_thread(norm_path, source_file)
+        if as_stored:
+            source = str(source_file)
+        else:
+            # A stale network mount can block Path.resolve(); keep that syscall
+            # off the event loop for scanner and scheduler callers that reach here.
+            source = await asyncio.to_thread(norm_path, source_file)
         db = self._get_db()
         if db.in_transaction and not self._in_transaction:
             raise TransactionOwnedError("hold_source refused an unowned transaction")
@@ -169,6 +175,7 @@ class SourceHoldOps:
         *,
         expected_generation: int | None = None,
         validated: bool = True,
+        as_stored: bool = False,
     ) -> bool:
         """Lift a source's hold; ``validated=False`` for a presence-only release.
 
@@ -177,9 +184,12 @@ class SourceHoldOps:
         ``redaction_blocked`` hold then stays: its file is present, and the
         reason it is held is what the file contains (#2629). The reason is
         read under the writer lock, in the transaction that clears it.
+
+        ``as_stored`` as in :meth:`hold_source`. The key is computed once and
+        used for every row this touches.
         """
         db = self._get_db()
-        source = norm_path(source_file)
+        source = str(source_file) if as_stored else norm_path(source_file)
         changed = False
         # Refuse before the rollback guard: this implicit transaction belongs
         # to neither this method nor a tracked owner, so rolling it back here
@@ -217,7 +227,7 @@ class SourceHoldOps:
                 ).fetchone()
                 is not None
             ):
-                changed = self._clear_source_visibility(db, source_file)
+                changed = self._clear_source_visibility(db, source)
             self._commit(db)
         return changed
 
