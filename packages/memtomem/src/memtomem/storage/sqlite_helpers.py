@@ -115,7 +115,7 @@ def stored_key_spellings(spelling: str) -> list[str]:
     """
     lexical = str(Path(spelling))
     spellings = [lexical]
-    if sys.platform == "darwin" and lexical.startswith("/tmp/"):
+    if sys.platform == "darwin" and lexical.startswith("/tmp/"):  # nosec B108
         spellings.append("/private" + lexical)
     return spellings
 
