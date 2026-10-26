@@ -275,9 +275,7 @@ def map_chunk(
         # Legacy records have already passed the stricter known-user check.
         unchanged_local_user = self_export and version == "4" and source == str(resolved)
         if registered_scope != "user" and not unchanged_local_user:
-            raise invalid(
-                where, "resolved source_file/scope (run mm reindex --force and re-export)"
-            )
+            raise invalid(where, "resolved source_file/scope (run mm index --force and re-export)")
         chunk.metadata = replace(meta, source_file=resolved)
         return
     if meta.project_root is None or config is None:
@@ -307,7 +305,7 @@ def map_chunk(
         raise invalid(
             where,
             "registered source_file/scope/project_root "
-            "(register the destination or run mm reindex --force and re-export)",
+            "(register the destination or run mm index --force and re-export)",
         )
     chunk.metadata = replace(meta, source_file=mapped, project_root=root)
 

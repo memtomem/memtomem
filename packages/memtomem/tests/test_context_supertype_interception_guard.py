@@ -1584,6 +1584,11 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "no_recovery_callee",
         "runtime config probe (toml/json load); " + _RO,
     ),
+    ("context/runtime_registry.py", "_marker_exists", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "runtime install-marker stat (Path.exists); " + _RO,
+    ),
     # ── context/settings*.py (read/resolve) ─────────────────────────────
     ("context/settings.py", "_is_under_project_root", ("OSError",), 0): (
         _U,

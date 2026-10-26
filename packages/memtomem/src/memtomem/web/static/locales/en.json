@@ -988,7 +988,7 @@
   "settings.ctx.guide_claude_note": "Or run with \"-s user\" to register globally for all projects.",
   "settings.ctx.guide_antigravity_desc": "Register memtomem in Antigravity CLI (agy) or Antigravity IDE (VS Code).",
   "settings.ctx.guide_antigravity_cli": "Antigravity CLI (agy)",
-  "settings.ctx.guide_antigravity_cli_desc": "Add the configuration to ~/.gemini/antigravity-cli/mcp_config.json:",
+  "settings.ctx.guide_antigravity_cli_desc": "Add the configuration to ~/.gemini/config/mcp_config.json:",
   "settings.ctx.guide_codex_desc": "Codex CLI reads MCP servers from ~/.codex/config.toml (TOML format).",
   "settings.ctx.guide_kimi_desc": "You can automatically register memtomem for Kimi CLI using the CLI wizard.",
   "settings.ctx.copy": "Copy",

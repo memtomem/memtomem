@@ -10,6 +10,7 @@ gemini->antigravity client replacement, and the
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -95,13 +96,56 @@ def test_claude_project_mcp_json(tmp_path: Path) -> None:
 
 def test_antigravity_cli(tmp_path: Path) -> None:
     _write_json(
-        tmp_path / ".gemini" / "antigravity-cli" / "mcp_config.json",
+        tmp_path / ".gemini" / "config" / "mcp_config.json",
         {"mcpServers": {"memtomem": {}}},
     )
     status = rr.probe_runtime("antigravity", home=tmp_path)
     assert status.installed is True
     assert status.memtomem_registered is True
     assert status.registered_locations == ("cli",)
+    assert status.config_paths == ("~/.gemini/config/mcp_config.json",)
+
+
+def test_antigravity_cli_legacy_config_is_install_marker_only(tmp_path: Path) -> None:
+    """A legacy-only ``antigravity-cli/mcp_config.json`` is installed, NOT registered.
+
+    agy loads no servers from that file, so counting it would hide an
+    unconfigured CLI behind a false ``registered`` status.
+    """
+    _write_json(
+        tmp_path / ".gemini" / "antigravity-cli" / "mcp_config.json",
+        {"mcpServers": {"mms": {}, "memtomem": {}}},
+    )
+    status = rr.probe_runtime("antigravity", home=tmp_path)
+    assert status.installed is True
+    assert status.mms_registered is False
+    assert status.memtomem_registered is False
+    assert status.registered_locations == ()
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="needs POSIX permissions and a non-root user",
+)
+def test_antigravity_unsearchable_config_dir_does_not_abort_probe(tmp_path: Path) -> None:
+    """A marker behind an unsearchable directory is skipped, not raised.
+
+    On Python 3.12 ``Path.exists()`` raises ``PermissionError`` for such a
+    path, which would abort detection for every client. The remaining
+    markers still decide ``installed`` and the config read reports
+    ``permission``.
+    """
+    (tmp_path / ".gemini" / "antigravity-cli").mkdir(parents=True)
+    locked = tmp_path / ".gemini" / "config"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        status = rr.probe_runtime("antigravity", home=tmp_path)
+    finally:
+        locked.chmod(0o755)
+    assert status.installed is True
+    assert status.memtomem_registered is False
+    assert status.error_kind == "permission"
 
 
 def test_antigravity_ide_vscode_uses_servers_key(tmp_path: Path) -> None:
@@ -261,8 +305,12 @@ _OUT_OF_SCOPE_TITLES = ("Cursor", "Windsurf", "Claude Desktop", "Gemini CLI")
 # Documented in-scope tokens the registry intentionally does not probe.
 # The legacy Kimi layout is documented as an upgrade/install marker only —
 # modern Kimi Code executes from ``~/.kimi-code``, so a legacy-only config
-# must never count as an active registration (see _LOCATIONS["kimi"]).
-_DOC_TOKENS_NOT_PROBED: frozenset[str] = frozenset({"~/.kimi/mcp.json"})
+# must never count as an active registration (see _LOCATIONS["kimi"]). The
+# same holds for the older Antigravity CLI file, which agy no longer reads
+# (see _LOCATIONS["antigravity"]); the docs name it only as a move-from source.
+_DOC_TOKENS_NOT_PROBED: frozenset[str] = frozenset(
+    {"~/.kimi/mcp.json", "~/.gemini/antigravity-cli/mcp_config.json"}
+)
 
 
 def _inscope_doc_config_paths(doc: str) -> set[str]:
@@ -306,7 +354,7 @@ def test_registry_covers_documented_locations() -> None:
     assert "~/.claude.json" in documented, rename_hint
     assert "~/.codex/config.toml" in documented, rename_hint
     assert "~/.kimi-code/mcp.json" in documented, rename_hint
-    assert any("antigravity-cli/mcp_config.json" in t for t in documented), rename_hint
+    assert "~/.gemini/config/mcp_config.json" in documented, rename_hint
     assert any("Antigravity/User/mcp.json" in t for t in documented), rename_hint
 
     home = Path("/home/u")

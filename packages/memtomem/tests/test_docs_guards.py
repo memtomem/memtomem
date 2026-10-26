@@ -1502,6 +1502,7 @@ class TestRegistryAndInstallDocs:
             _REPO_ROOT / "plugins" / "memtomem" / "README.md",
             _REPO_ROOT / "packages" / "memtomem-claude-automation-plugin" / "README.md",
             _REPO_ROOT / "packages" / "opencode-memtomem" / "README.md",
+            _REPO_ROOT / "packages" / "memtomem-antigravity-plugin" / "README.md",
         ]
         offenders: list[str] = []
         for doc in docs:

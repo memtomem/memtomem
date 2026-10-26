@@ -391,8 +391,9 @@ files — register memtomem in whichever you actually use:
 - **Antigravity IDE** (the desktop app / VS Code fork) — configured through
   the Agent panel UI below.
 - **Antigravity CLI** (`agy`, Google's terminal-native successor to Gemini
-  CLI) — configured by editing `~/.gemini/antigravity-cli/mcp_config.json`
-  directly; see [Antigravity CLI (`agy`)](#antigravity-cli-agy) below.
+  CLI) — configured with `agy mcp add` or by editing
+  `~/.gemini/config/mcp_config.json`; see
+  [Antigravity CLI (`agy`)](#antigravity-cli-agy) below.
 
 ### Antigravity IDE
 
@@ -430,9 +431,15 @@ files — register memtomem in whichever you actually use:
 ### Antigravity CLI (`agy`)
 
 The Antigravity CLI is a **separate** surface from the IDE above: it reads
-MCP servers from `~/.gemini/antigravity-cli/mcp_config.json` (key
-`mcpServers`), **not** the IDE's `~/.gemini/antigravity/mcp_config.json`.
-Create or edit that file:
+MCP servers from `~/.gemini/config/mcp_config.json` (key `mcpServers`),
+**not** the IDE's `~/.gemini/antigravity/mcp_config.json`. The quickest way
+to register memtomem is to let `agy` write the entry:
+
+```bash
+agy mcp add memtomem memtomem-server
+```
+
+Or create or edit that file yourself:
 
 ```json
 {
@@ -446,10 +453,34 @@ Create or edit that file:
 }
 ```
 
+An entry in the older `~/.gemini/antigravity-cli/mcp_config.json` is no
+longer read — `agy` 1.4.7 loads no servers from that file — so move a
+memtomem entry from there into `~/.gemini/config/mcp_config.json` (or
+re-add it with `agy mcp add`). Run `agy mcp list` to confirm the CLI sees it.
+
 Restart the `agy` session after editing. The CLI also reads your existing
 `~/.gemini/GEMINI.md` context and can pull in Gemini/Claude plugins via
 `agy plugin import`, so memory indexed with `mm ingest gemini-memory` keeps
 working unchanged.
+
+#### Install as a plugin
+
+Instead of registering the server yourself, you can install the memtomem
+plugin, which bundles an exact-pinned server and six workflow skills:
+
+```bash
+agy plugin install https://github.com/memtomem/memtomem/tree/main/packages/memtomem-antigravity-plugin
+```
+
+agy starts a plugin's server in the plugin directory, so the plugin runs
+memtomem at user scope only (no per-project memory, absolute paths for
+indexing). Use one of the two, not both: a hand-registered `memtomem` entry
+and the plugin's server (which agy names `memtomem_memtomem`) both run, and
+with a relative storage path in your memtomem config they open different
+stores — compare the DB path `mem_status` reports before removing either. See
+the
+[plugin README](https://github.com/memtomem/memtomem/blob/main/packages/memtomem-antigravity-plugin/README.md)
+for requirements, updating and scope.
 
 ---
 

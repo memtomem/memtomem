@@ -811,7 +811,7 @@ async def test_self_export_keeps_unchanged_stored_user_scope(storage, tmp_path, 
     data = json.loads(path.read_text())
     data["chunks"][0]["content"] += " changed"
     path.write_text(json.dumps(data))
-    with pytest.raises(ValueError, match="reindex --force"):
+    with pytest.raises(ValueError, match="index --force"):
         await import_chunks(storage, _FakeEmbedder(), path, indexing_config=config)
 
 

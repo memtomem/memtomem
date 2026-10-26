@@ -30,7 +30,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _register_antigravity(home: Path) -> None:
     """Write a memtomem registration into the Antigravity CLI config under home."""
-    cfg = home / ".gemini" / "antigravity-cli" / "mcp_config.json"
+    cfg = home / ".gemini" / "config" / "mcp_config.json"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text(json.dumps({"mcpServers": {"memtomem": {}}}), encoding="utf-8")
 

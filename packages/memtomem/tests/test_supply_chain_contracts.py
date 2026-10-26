@@ -290,6 +290,44 @@ def test_hermes_plugin_matches_contract() -> None:
     _assert_hermes_install_commands(readme, "packages/memtomem-hermes-plugin")
 
 
+def test_antigravity_plugin_matches_contract() -> None:
+    contract = _contract()
+    core = contract["core"]
+    root = _ROOT / "packages/memtomem-antigravity-plugin"
+    requirement = f"memtomem[{','.join(core['mcp_extras'])}]=={core['version']}"
+
+    # agy's manifest schema is closed: an unknown key fails `agy plugin validate --strict`.
+    manifest = _json("packages/memtomem-antigravity-plugin/plugin.json")
+    assert set(manifest) == {"name", "version", "description"}, manifest
+    assert manifest["name"] == "memtomem"
+    assert manifest["version"] == contract["plugins"]["antigravity_version"]
+    # No "type": agy derives the transport from "command" and strict validation
+    # rejects the key.
+    assert _json("packages/memtomem-antigravity-plugin/mcp_config.json") == {
+        "mcpServers": {
+            "memtomem": {
+                "command": "uvx",
+                "args": ["--python", "3.12", "--from", requirement, "memtomem-server"],
+                "env": {
+                    "MEMTOMEM_TOOL_MODE": core["tool_mode"],
+                    "ORT_DISABLE_TELEMETRY": "1",
+                },
+            }
+        },
+    }
+
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    launches = [line for line in readme.splitlines() if "memtomem[" in line]
+    assert len(launches) == 1, launches
+    assert re.findall(r"memtomem\[[^\]]*\]==[^\s'\"\],]*", launches[0]) == [requirement]
+    assert re.findall(r"--python\s+(\S+)", launches[0]) == ["3.12"], launches[0]
+    # Every install command names this directory, from GitHub or from a clone.
+    installs = re.findall(r"^agy plugin install (\S+)$", readme, re.M)
+    assert installs and all(
+        target.endswith("/packages/memtomem-antigravity-plugin") for target in installs
+    ), installs
+
+
 def test_hermes_memory_plugin_matches_contract() -> None:
     contract = _contract()
     root = _ROOT / "packages/memtomem-hermes-memory"

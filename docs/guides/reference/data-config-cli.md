@@ -87,7 +87,7 @@ An unchanged, locally signed v4 user record restores the scope stored in its
 backup, including older virtual policy summaries or notes indexed before
 project registration. This exception requires the same canonical source path;
 foreign bundles and changed paths do not inherit it. For stale project scope,
-register the destination or run `mm reindex --force` on the source installation
+register the destination or run `mm index --force` on the source installation
 and re-export. Shared restores always require registered roots and consent.
 
 **Conflict resolution** (`on_conflict`, default `"skip"`) is limited to the

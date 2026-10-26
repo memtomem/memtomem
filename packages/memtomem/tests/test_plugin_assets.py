@@ -20,6 +20,7 @@ _CONTRACT = _ROOT / "packages/memtomem-plugin-assets/contract.toml"
 _DISPATCHER = _ROOT / "packages/memtomem-claude-automation-plugin/bin/hook_dispatch.py"
 _RENDERER = _ROOT / "tools/render_plugin_assets.py"
 _HERMES_SKILLS = _ROOT / "packages/memtomem-hermes-plugin/skills"
+_ANTIGRAVITY_SKILLS = _ROOT / "packages/memtomem-antigravity-plugin/skills"
 
 
 def _contract() -> dict:
@@ -104,6 +105,20 @@ def test_workflow_contract_is_safe_and_matches_runtime_assets() -> None:
         row["codex_name"] for row in _user_scope_workflows(workflows)
     }
     assert "memtomem-handoff" not in {path.parent.name for path in hermes}
+
+
+def test_antigravity_skills_are_the_hermes_user_scope_render() -> None:
+    """agy also starts the server in the plugin directory, so it gets the same skills.
+
+    Byte-identical to Hermes rather than separately asserted: every user-scope rule
+    and leak check pinned for the Hermes skills then holds here too.
+    """
+    hermes = {path.parent.name: path.read_bytes() for path in _skill_files(_HERMES_SKILLS)}
+    antigravity = {
+        path.parent.name: path.read_bytes() for path in _skill_files(_ANTIGRAVITY_SKILLS)
+    }
+    assert antigravity == hermes
+    assert "memtomem-handoff" not in antigravity
 
 
 def test_generated_assets_have_no_cross_runtime_or_legacy_leaks() -> None:
@@ -311,11 +326,13 @@ def test_every_input_taking_surface_carries_the_non_interactive_fallback() -> No
 
     # Every non-status workflow renders to four SKILL.md surfaces except the
     # OpenCode skills, which carry only the implicit read workflows, and the Hermes
-    # skills, which carry only the user-scope ones.
+    # and Antigravity skills, which carry only the user-scope ones.
     non_status = [row for row in contract["workflows"] if row["id"] != "status"]
     opencode_skills = [row for row in non_status if row["implicit"] and row["effect"] == "read"]
-    hermes_skills = _user_scope_workflows(non_status)
-    assert len(surfaces) == len(non_status) * 4 + len(opencode_skills) + len(hermes_skills)
+    user_scope_skills = _user_scope_workflows(non_status)
+    assert len(surfaces) == (
+        len(non_status) * 4 + len(opencode_skills) + 2 * len(user_scope_skills)
+    )
 
     for label, input_kind, content in surfaces:
         flat = " ".join(content.split())

@@ -140,11 +140,16 @@ _LOCATIONS: dict[str, tuple[_Location, ...]] = {
         _Location("local", "json", lambda h, r: h / ".claude.json", _claude_local),
         _Location("project", "json", lambda h, r: (r / ".mcp.json") if r else None, _mcp_servers),
     ),
+    # The CLI reads ``~/.gemini/config/mcp_config.json``; the older
+    # ``~/.gemini/antigravity-cli/mcp_config.json`` is no longer read (a
+    # legacy-only config loads no servers on agy 1.4.7), so it is not an
+    # active registration. ``~/.gemini/antigravity-cli`` stays an install
+    # marker below — agy still keeps its settings and logs there.
     "antigravity": (
         _Location(
             "cli",
             "json",
-            lambda h, r: h / ".gemini" / "antigravity-cli" / "mcp_config.json",
+            lambda h, r: h / ".gemini" / "config" / "mcp_config.json",
             _mcp_servers,
         ),
         _Location(
@@ -180,7 +185,10 @@ _LOCATIONS: dict[str, tuple[_Location, ...]] = {
 # Existence of any marker => the client is considered installed.
 _INSTALLED_MARKERS: dict[str, Callable[[Path], tuple[Path, ...]]] = {
     "claude": lambda h: (h / ".claude.json", h / ".claude"),
+    # ``agy mcp add`` on a fresh HOME creates only the config file, not the
+    # ``antigravity-cli`` directory, so the file itself is a marker too.
     "antigravity": lambda h: (
+        h / ".gemini" / "config" / "mcp_config.json",
         h / ".gemini" / "antigravity-cli",
         h / ".gemini" / "antigravity",
         h / "Library" / "Application Support" / "Antigravity",
@@ -279,11 +287,22 @@ def _pick_error(kinds: list[str]) -> str | None:
     return None
 
 
+def _marker_exists(path: Path) -> bool:
+    # On py3.12 ``exists()`` raises (not returns False) for a path behind an
+    # unsearchable directory. Such a marker proves nothing either way, so skip
+    # it and let the remaining markers decide; the config read classifies the
+    # same directory as ``permission``.
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _is_installed(client: str, home: Path) -> bool:
     markers = _INSTALLED_MARKERS.get(client)
     if markers is None:
         return False
-    return any(p.exists() for p in markers(home))
+    return any(_marker_exists(p) for p in markers(home))
 
 
 def probe_runtime(
