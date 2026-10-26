@@ -105,25 +105,40 @@ def stored_key_moved(key: str) -> bool:
     return norm_path(Path(key)) != fold_path_form(key)
 
 
-def stored_key_for(entry: Path, stored: Iterable[Path]) -> Path | None:
-    """The stored source key ``entry`` names, found without following ``entry`` itself.
+def stored_key_spellings(spelling: str) -> list[str]:
+    """The stored-key spellings a caller's path string may stand for, in order.
 
-    ``entry`` is an absolute, expanded path as the caller spelled it. It matches
-    a key as is, then by folded Unicode form, then the same two ways with its
-    directory resolved and its last component kept. A ``/tmp`` alias of the
-    directory still finds the key, but a file that has become a symlink is not
-    followed to its target, whose rows a delete by the resolved path would
-    take (#2835). Resolves, so async callers run it in a thread.
+    No filesystem access: ``spelling`` normalized by ``Path`` alone (native
+    separators, ``.`` and repeated separators), and on macOS also with the
+    ``/private`` prefix that ``server.formatters._display_path`` strips from a
+    ``/tmp`` path, so a path copied from ``mem_list`` finds its key.
+    """
+    lexical = str(Path(spelling))
+    spellings = [lexical]
+    if sys.platform == "darwin" and lexical.startswith("/tmp/"):
+        spellings.append("/private" + lexical)
+    return spellings
+
+
+def stored_key_for(spelling: str, stored: Iterable[Path | str]) -> Path | None:
+    """The stored source key ``spelling`` names, matched as a string only (#2835).
+
+    A key equal to one of :func:`stored_key_spellings` matches; failing that,
+    the one key whose folded Unicode form equals theirs, a key written before
+    keys were folded (#235). Two keys folding alike match neither. Nothing is
+    resolved: a delete by the path a caller typed must not follow a file that
+    has become a symlink to another source's rows, and every way of matching
+    other spellings (case, a directory alias, a link) found another path that
+    did. A caller gets ``None`` for those and refuses.
     """
     keys = {str(p) for p in stored}
-    by_form = {fold_path_form(key): key for key in sorted(keys)}
-    for spelling in (str(entry), str(Path(norm_path(entry.parent)) / entry.name)):
-        if spelling in keys:
-            return Path(spelling)
-        hit = by_form.get(fold_path_form(spelling))
-        if hit is not None:
-            return Path(hit)
-    return None
+    candidates = stored_key_spellings(spelling)
+    for candidate in candidates:
+        if candidate in keys:
+            return Path(candidate)
+    forms = {fold_path_form(candidate) for candidate in candidates}
+    hits = {key for key in keys if fold_path_form(key) in forms}
+    return Path(hits.pop()) if len(hits) == 1 else None
 
 
 def norm_dir_prefix(d: str | Path) -> str:

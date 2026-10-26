@@ -607,6 +607,14 @@ chunk in the set requires the confirmation for the whole call. The
 `chunk_id=` form rewrites the file, so it is refused for the same reasons
 as `mem_edit`.
 
+`source_file=` names an indexed file by the path `mem_list` shows, or by a
+path relative to the first memory dir. It is matched to the stored path as
+text, not resolved, so another spelling of the same file (a different letter
+case, a path through a symlinked directory, a link to the file) is refused
+rather than deleting whatever it resolves to. A stored path whose file has
+since been replaced by a symlink is refused too; delete it from the web
+Sources tab.
+
 > **Note**: to keep a file out of the index for good, exclude it and then
 > reclaim the rows it already has — add a matching glob to
 > `indexing.exclude_patterns` and run `mm purge --matching-excluded` (dry-run

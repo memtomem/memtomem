@@ -76,9 +76,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mm purge --matching-excluded` skips and lists a stored path that now
   resolves elsewhere (also in `--json` as `moved` and `moved_sample`) instead
   of judging the file it reaches, which had let it delete a non-excluded
-  file's chunks. `mem_delete(source_file=)` deletes a stored path by that
-  path, and refuses one that now resolves elsewhere, pointing to the web
-  Sources tab.
+  file's chunks. **Behavior change:** `DELETE /api/sources` and
+  `mem_delete(source_file=)` match the path you pass to a stored path as a
+  string (a relative `source_file` joined to the first memory dir, and the
+  `/tmp/...` form `mem_list` prints on macOS, count) instead of resolving it.
+  Another spelling of an indexed file, such as a different letter case, a
+  symlinked directory or a link to the file, is refused (403 on the web, an
+  error from `mem_delete`) instead of deleting whatever it resolves to, and
+  `mem_delete` on a path with no indexed rows is an error rather than
+  "Removed 0 chunks". `mem_delete` also refuses a stored path that now
+  resolves elsewhere, pointing to the web Sources tab.
 
 ## [0.6.12] — 2026-10-25
 

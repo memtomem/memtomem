@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Iterable
 
 from fastapi import HTTPException, Request
 
-from memtomem.storage.sqlite_helpers import norm_path, stored_key_for
+from memtomem.storage.sqlite_helpers import norm_path
 
 # Mirror of the CLI bootstrap gate at
 # ``packages/memtomem/src/memtomem/cli/_bootstrap.py`` (`_CONFIG_PATH`
@@ -127,19 +127,3 @@ def require_indexed_source(user_path: str, indexed_sources: Iterable[Path]) -> P
     if request_norm not in indexed_norms:
         raise HTTPException(status_code=403, detail="Path is not an indexed source file.")
     return Path(request_norm)
-
-
-def require_stored_source(user_path: str, indexed_sources: Iterable[Path]) -> Path:
-    """Return the stored key ``user_path`` names, for a caller that writes by it.
-
-    :func:`require_indexed_source` resolves the request, so a stored path that
-    has since become a symlink matches as its target, and a delete by the
-    returned key removes the target's rows (#2835). This matches the stored
-    keys without following the requested file (:func:`stored_key_for`), and
-    returns a stored key, so the caller passes ``as_stored`` to storage.
-    Raises 403 like its sibling.
-    """
-    key = stored_key_for(Path(user_path).expanduser(), indexed_sources)
-    if key is None:
-        raise HTTPException(status_code=403, detail="Path is not an indexed source file.")
-    return key

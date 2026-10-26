@@ -1592,27 +1592,31 @@ async def mem_delete(
     if source_file:
         # ``source_file`` usually names a stored key, as ``mem_list`` prints it
         # or relative to the first memory dir as ``_validate_path`` reads it.
-        # That key is found without following the file and is probed and
-        # deleted as stored, so resolving it cannot name another key: a legacy
-        # NFD key would fold to an NFC one with no rows (#2835). One that now
-        # resolves to another file is refused before it is resolved:
-        # ``_validate_path`` and the locks below would act on the target,
-        # deleting its rows and creating a sidecar beside it.
-        from memtomem.storage.sqlite_helpers import stored_key_for, stored_key_moved
+        # The key is matched as a string, never by resolving the request, and
+        # is probed and deleted as stored (#2835): resolving would follow a
+        # source that has become a symlink to another source's rows, and fold
+        # a legacy NFD key to an NFC one with no rows. One that now resolves
+        # to another file is refused before it is resolved: ``_validate_path``
+        # and the locks below would act on the target, deleting its rows and
+        # creating a sidecar beside it.
+        from memtomem.storage.sqlite_helpers import norm_path, stored_key_moved
 
         raw = Path(source_file).expanduser()
         user_dirs = app.config.indexing.memory_dirs
-        entry = (
-            raw
-            if raw.is_absolute()
-            else Path(user_dirs[0]).expanduser() / raw
-            if user_dirs
-            else None
-        )
-        stored_key = None
-        if entry is not None:
-            indexed = await app.storage.get_all_source_files()
-            stored_key = await asyncio.to_thread(stored_key_for, entry, indexed)
+        stored_key: Path | None = None
+        if raw.is_absolute():
+            stored_key = await app.storage.find_source_key(str(raw))
+        elif user_dirs:
+            # Joined to the dir as configured first. A key there that has
+            # moved is refused below; resolving the dir instead would follow a
+            # root that became a symlink to another root's key. Only when
+            # nothing is stored under the configured spelling is the resolved
+            # dir tried, for a root configured through a symlink.
+            configured = Path(user_dirs[0]).expanduser()
+            stored_key = await app.storage.find_source_key(str(configured / raw))
+            if stored_key is None:
+                base = await asyncio.to_thread(norm_path, configured)
+                stored_key = await app.storage.find_source_key(str(Path(base) / raw))
         if stored_key is not None and await asyncio.to_thread(stored_key_moved, str(stored_key)):
             return (
                 f"Error: {source_file} now resolves to another file (it became a symlink "
@@ -1620,15 +1624,18 @@ async def mem_delete(
                 "Delete it from the Sources tab of the web UI (mm web)."
             )
         sf_path, sf_err = _validate_path(
-            source_file,
+            str(stored_key) if stored_key is not None else source_file,
             app.config.indexing.memory_dirs,
             app.config.indexing.project_memory_dirs,
         )
         if sf_err:
             return sf_err
         assert sf_path is not None
-        stored = stored_key is not None
-        delete_key = stored_key if stored_key is not None else sf_path
+        if stored_key is None:
+            return (
+                f"Error: {source_file} is not an indexed source file. Pass the path "
+                "mem_list shows; other spellings of it are not resolved."
+            )
         # Same per-file lock as the chunk branch (issue #1570) plus the
         # cross-process sidecar (#1587): without both locks, a concurrent
         # incremental ``index_file`` — in this process or another — can land
@@ -1659,7 +1666,7 @@ async def mem_delete(
                 # not the rows). If the directory returned after the degrade,
                 # the worst case is rows removed for a file that is back, which
                 # the next index of that file restores.
-                scopes = await app.storage.list_scopes_by_source(delete_key, as_stored=stored)
+                scopes = await app.storage.list_scopes_by_source(stored_key, as_stored=True)
                 if "project_shared" in scopes and not confirm_project_shared:
                     logger.info(
                         "mem_delete rejected bulk project_shared source without confirmation",
@@ -1679,7 +1686,7 @@ async def mem_delete(
                         action="delete",
                         audit_context={"source_file": sf_path.name, "scopes": len(scopes)},
                     )
-                deleted = await app.storage.delete_by_source(delete_key, as_stored=stored)
+                deleted = await app.storage.delete_by_source(stored_key, as_stored=True)
         except TimeoutError:
             return (
                 f"Error: {source_file} is locked by another process (migration in flight?); retry."

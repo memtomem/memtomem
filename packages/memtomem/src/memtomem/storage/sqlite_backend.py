@@ -2599,6 +2599,27 @@ class SqliteBackend(
             keep=keep,
         )
 
+    async def find_source_key(self, spelling: str) -> Path | None:
+        """The stored source key a caller's path string names, or ``None``.
+
+        :func:`~memtomem.storage.sqlite_helpers.stored_key_for` against the
+        store: each candidate spelling is looked up by the ``source_file``
+        index, and only a miss where keys fold Unicode forms reads every key.
+        """
+        from memtomem.storage import sqlite_helpers
+
+        candidates = sqlite_helpers.stored_key_spellings(spelling)
+        async with self._lease_read_db() as db:
+            for candidate in candidates:
+                if db.execute(
+                    "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (candidate,)
+                ).fetchone():
+                    return Path(candidate)
+            if not sqlite_helpers.FOLDS_UNICODE_FORMS:
+                return None
+            keys = [row[0] for row in db.execute("SELECT DISTINCT source_file FROM chunks")]
+        return sqlite_helpers.stored_key_for(spelling, keys)
+
     async def list_scopes_by_source(
         self, source_file: Path, *, as_stored: bool = False
     ) -> set[str]:

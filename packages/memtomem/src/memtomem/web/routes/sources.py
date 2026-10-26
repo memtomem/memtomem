@@ -17,7 +17,6 @@ from memtomem.web.deps import (
     get_search_pipeline,
     get_storage,
     require_indexed_source,
-    require_stored_source,
 )
 from memtomem.web.source_visibility import load_source_visibility
 from memtomem.web.routes._confirm import needs_confirmation_envelope
@@ -345,9 +344,12 @@ async def delete_source(
     latter, a search served from the pipeline's cache keeps returning the
     chunks this call just deleted until the entry ages out.
     """
-    indexed_sources = await storage.get_all_source_files()
-    # The stored key, used as stored by the probe and the delete alike (#2835).
-    request_path = require_stored_source(path, indexed_sources)
+    # The stored key the request names, matched as a string and used as stored
+    # by the probe and the delete alike. Resolving the request would follow a
+    # source that has become a symlink to another source's rows (#2835).
+    request_path = await storage.find_source_key(path)
+    if request_path is None:
+        raise HTTPException(status_code=403, detail="Path is not an indexed source file.")
 
     # Gate-B: a bulk source delete that would take project_shared chunks with
     # it needs consent first. The probe is re-read below rather than trusted

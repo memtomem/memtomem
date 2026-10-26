@@ -199,6 +199,14 @@ def app(_isolated_config_paths: Path):
     storage.get_chunk = AsyncMock(return_value=_make_test_chunk())
     storage.recall_chunks = AsyncMock(return_value=[_make_test_chunk()])
     storage.get_all_source_files = AsyncMock(return_value=[Path("/tmp/test.md")])
+    # The real string matcher over whatever a test sets as the indexed sources.
+    from memtomem.storage.sqlite_helpers import stored_key_for
+
+    storage.find_source_key = AsyncMock(
+        side_effect=lambda spelling: stored_key_for(
+            spelling, storage.get_all_source_files.return_value
+        )
+    )
     storage.get_held_sources = AsyncMock(return_value=[])
     storage.get_pending_source_checks = AsyncMock(return_value=[])
     storage.is_source_held = AsyncMock(return_value=False)

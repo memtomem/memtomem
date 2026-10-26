@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import sys
 import unicodedata
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -188,8 +190,10 @@ class TestStoredKeyMoved:
 
 
 class TestStoredKeyFor:
+    """Matching is by string only: nothing about the request is resolved."""
+
     @pytest.mark.requires_symlinks
-    def test_a_directory_alias_finds_the_key_but_a_relinked_file_is_not_followed(self, tmp_path):
+    def test_a_relinked_key_matches_itself_and_an_alias_matches_nothing(self, tmp_path):
         real = Path(norm_path(tmp_path)) / "real"
         real.mkdir()
         a, b = real / "a.md", real / "b.md"
@@ -198,15 +202,49 @@ class TestStoredKeyFor:
         alias = tmp_path / "alias"
         alias.symlink_to(real, target_is_directory=True)
 
-        assert stored_key_for(alias / "a.md", [a, b]) == a
-        assert stored_key_for(a, [b]) is None
+        assert stored_key_for(str(a), [a, b]) == a
+        assert stored_key_for(str(a), [b]) is None
+        assert stored_key_for(str(alias / "b.md"), [a, b]) is None
 
-    def test_a_folded_spelling_finds_the_stored_one(self, tmp_path, monkeypatch):
+    def test_a_folded_spelling_finds_the_one_stored_key(self, tmp_path, monkeypatch):
         monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", True)
         key = Path(norm_path(tmp_path)) / unicodedata.normalize("NFC", "café.md")
-        nfd = Path(unicodedata.normalize("NFD", str(key)))
+        nfd = unicodedata.normalize("NFD", str(key))
 
         assert stored_key_for(nfd, [key]) == key
+
+    def test_two_keys_folding_alike_match_only_their_own_spelling(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", True)
+        base = str(Path(norm_path(tmp_path)))
+        nfc = Path(base) / unicodedata.normalize("NFC", "Å.md")
+        nfd = Path(unicodedata.normalize("NFD", str(nfc)))
+        third = str(Path(base) / "\u212b.md")  # ANGSTROM SIGN, NFC-folds to Å
+
+        assert stored_key_for(str(nfc), [nfc, nfd]) == nfc
+        assert stored_key_for(str(nfd), [nfc, nfd]) == nfd
+        assert stored_key_for(third, [nfc, nfd]) is None
+
+    def test_a_case_variant_matches_nothing(self, tmp_path):
+        key = Path(norm_path(tmp_path)) / "A.md"
+
+        assert stored_key_for(str(key.with_name("a.md")), [key]) is None
+
+    def test_the_tmp_spelling_mem_list_prints_finds_a_private_tmp_key(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        key = Path("/private/tmp/notes/a.md")
+
+        assert stored_key_for("/tmp/notes/a.md", [key]) == key
+
+    async def test_the_store_lookup_matches_as_the_helper_does(self, env, monkeypatch):
+        comp, root = env
+        a, b = await _relinked(comp, root, target_present=True)
+        storage = comp.storage
+
+        assert await storage.find_source_key(str(a)) == a
+        assert await storage.find_source_key(str(root / "work" / "." / "a.md")) == a
+        assert await storage.find_source_key(str(root / "work" / "missing.md")) is None
+        monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", False)
+        assert await storage.find_source_key(str(a).upper()) is None
 
 
 class TestLegacyUnicodeKeys:
@@ -444,3 +482,48 @@ class TestCallers:
 
         assert "resolves to another file" in out, out
         assert await _rows(comp, cafe) == 1 and await _rows(comp, b) == 1
+
+    async def test_mem_delete_refuses_a_case_variant_of_a_relinked_key(self, env):
+        """On a case-insensitive volume ``a.md`` opens ``A.md``, which now links to
+        ``b.md``; resolving the request deleted b's rows."""
+        comp, root = env
+        upper = await _indexed(comp, root / "work" / "A.md")
+        b = await _indexed(comp, root / "plans" / "b.md")
+        upper.unlink()
+        upper.symlink_to(b)
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        out = await memory_crud.mem_delete(source_file=str(root / "work" / "a.md"), ctx=ctx)
+
+        assert "is not an indexed source file" in out, out
+        assert await _rows(comp, upper) == 1 and await _rows(comp, b) == 1
+
+    async def test_mem_delete_of_an_unindexed_path_is_an_error(self, env):
+        comp, root = env
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        out = await memory_crud.mem_delete(source_file=str(root / "never.md"), ctx=ctx)
+
+        assert out.startswith("Error:") and "is not an indexed source file" in out, out
+
+    async def test_mem_delete_refuses_a_relative_name_under_a_root_that_became_a_link(
+        self, env, tmp_path
+    ):
+        """Memory dirs ``[A, B]`` each hold ``n.md``; then ``A`` becomes a link to
+        ``B``. ``n.md`` names A's key, which has moved; resolving A first matched
+        B's key and deleted it."""
+        comp, root = env
+        a_dir, b_dir = root / "A", root / "B"
+        a_dir.mkdir()
+        b_dir.mkdir()
+        comp.config.indexing.memory_dirs = [a_dir, b_dir]
+        a_note = await _indexed(comp, a_dir / "n.md")
+        b_note = await _indexed(comp, b_dir / "n.md")
+        shutil.rmtree(a_dir)
+        a_dir.symlink_to(b_dir, target_is_directory=True)
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        out = await memory_crud.mem_delete(source_file="n.md", ctx=ctx)
+
+        assert "resolves to another file" in out, out
+        assert await _rows(comp, a_note) == 1 and await _rows(comp, b_note) == 1
