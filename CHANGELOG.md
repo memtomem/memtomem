@@ -18,6 +18,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- Preserve trailing Unicode NEL and other line breaks in YAML values by using
+  escaped double-quoted scalars, including inside flow lists.
 - Restore v1–v3 user-memory backups from the canonical or configured user
   directories while retaining registered project boundaries and rejecting
   symlink escapes into project trees.

@@ -272,3 +272,26 @@ async def test_raw_project_spelling_cannot_normalize_into_ordinary_user_path(
     with pytest.raises(ValueError, match="legacy project source"):
         await import_chunks(storage, embedder, path, indexing_config=IndexingConfig())
     embedder.embed_texts.assert_not_called()
+
+
+@pytest.mark.parametrize("linebreak", ["\n", "\r\n", "\r", "\x85", "\u2028", "\u2029"])
+def test_trailing_linebreaks_survive_yaml_and_agent_roundtrip(linebreak):
+    import yaml
+
+    from memtomem._frontmatter import yaml_scalar
+    from memtomem.context.agents import _parse_canonical_agent_text, _subagent_to_claude_md
+
+    value = "hello" + linebreak
+    field = "description: " + yaml_scalar(value) + "\n"
+    sequence = "tags: " + yaml_list([value, "ordinary"]) + "\n"
+    assert yaml.safe_load(field) == {"description": value}
+    assert flat_yaml(field) == {"description": value}
+    assert yaml.safe_load(sequence) == {"tags": [value, "ordinary"]}
+    assert flat_yaml(sequence) == {"tags": [value, "ordinary"]}
+
+    source = "---\nname: demo\n" + field + "---\n\nBody\n"
+    agent = _parse_canonical_agent_text(source, source=Path("demo.md"))
+    assert agent.description == value
+    rendered, _ = _subagent_to_claude_md(agent)
+    restored = _parse_canonical_agent_text(rendered, source=Path("demo.md"))
+    assert restored.description == value

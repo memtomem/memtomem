@@ -75,7 +75,7 @@ def flat_yaml(text: str) -> dict | None:
 
 def yaml_scalar(value: str, *, flow: bool = False) -> str:
     """Keep ordinary bytes; quote strings that YAML could misread."""
-    if len(value.splitlines()) != 1 or (
+    if value.splitlines() != [value] or (
         flow and (any(c in value for c in ",[]{}") or value.startswith(("?", ":")))
     ):
         return yaml.safe_dump(
