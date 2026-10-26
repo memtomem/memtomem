@@ -33,15 +33,14 @@ scope for Phase 2 — the canonical frontmatter is intentionally flat.
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import re
-
-from memtomem._frontmatter import flat_yaml, yaml_scalar, yaml_list
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from memtomem._frontmatter import flat_yaml, yaml_list, yaml_scalar
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.config import TargetScope
 from memtomem.context._atomic_reverse import (

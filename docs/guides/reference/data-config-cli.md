@@ -36,8 +36,8 @@ files, re-index them, and export again. Purging them with
 
 YAML frontmatter now follows YAML quoting and comment rules. Quote a literal
 hash suffix (for example, `description: "Triage issue #123"` or
-`tags: ["#python"]`). Unquoted scalar comments produce a warning rather than
-silently discarding a suffix that older flat readers treated as text.
+`tags: ["#python"]`). Unquoted scalar comment suffixes are discarded with a
+warning; older flat readers treated those suffixes as text.
 
 ### Restore
 
@@ -53,6 +53,11 @@ Import re-embeds chunks using the current model. New exports use memory bundle
 v4, preserving scope, project root, validity windows, timestamps, overlap,
 and relations. Export and import both have a **100 MiB UTF-8 byte limit**;
 use source/tag/namespace/date filters to split a larger backup.
+
+Validity bounds are preserved exactly, including an inverted interval from
+frontmatter (`valid_from` later than `valid_to`). Such an interval remains
+empty for temporal search; it does not prevent backup or restore. Bounds must
+still be integers within SQLite's signed 64-bit range, or null.
 
 If an older store has negative overlap counts or counts exceeding the chunk's
 content length, export bounds those counts to the valid range in the backup
@@ -113,12 +118,14 @@ same scope and project:
 rows; a verified self-export may restore links among existing matching rows.
 Its provenance key sidecar is needed to recognize it as local.
 
-On POSIX, a Windows drive or UNC path in a **user** record is refused rather
-than stored as a misleading relative filename. Before importing such a bundle,
+On POSIX, a Windows drive or UNC path in a **user** record is refused. On
+Windows, a POSIX absolute user path is refused instead of implicitly assigning
+it to the current drive. Before importing such a bundle,
 manually convert each `source_file` to its local absolute path and restore the
 source files there. This applies to v1–v4; re-exporting as v4 alone does not
 convert paths. Editing a signed bundle invalidates local provenance and causes
-the full privacy scan. `project_root_map` maps project records only.
+the full privacy scan. `project_root_map` maps project records only and is
+required for foreign-platform project roots in either direction.
 
 **This is an index backup, not a source-file backup or continuous sync.** Restore
 Markdown/source files separately. `missing_source_files` and

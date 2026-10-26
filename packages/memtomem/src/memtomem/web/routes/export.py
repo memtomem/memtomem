@@ -24,7 +24,7 @@ async def export_memories(
 ) -> Response:
     """Export indexed chunks as a downloadable JSON bundle."""
     from memtomem.tools.export_import import export_chunks
-    from memtomem.tools.bundle_format import BundleSizeError
+    from memtomem.tools.bundle_format import BundleSizeError, StoredBundleValidationError
 
     try:
         bundle = await export_chunks(
@@ -36,6 +36,8 @@ async def export_memories(
         )
     except BundleSizeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except StoredBundleValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return Response(
         content=bundle._export_json if bundle._export_json is not None else bundle.to_json(),
         media_type="application/json",

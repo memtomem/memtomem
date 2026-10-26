@@ -790,7 +790,7 @@ class TestOriginProvenance:
                 "chunks": [
                     {
                         "content": "A record claiming to be a policy summary.",
-                        "source_file": "/tmp/forged.md.consolidated.md",
+                        "source_file": str(tmp_path / "forged.md.consolidated.md"),
                         "heading_hierarchy": ["Consolidated: forged.md"],
                         "chunk_type": "markdown_section",
                         "tags": ["consolidated", "summary", "heuristic"],

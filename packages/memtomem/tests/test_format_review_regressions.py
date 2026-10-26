@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import httpx
 
 from helpers import set_home
 from memtomem import provenance
@@ -24,7 +26,7 @@ from memtomem.tools.export_import import (
     export_chunks,
     import_chunks,
 )
-from test_import_provenance_gate import _FakeEmbedder, _make_storage, _record
+from test_import_provenance_gate import _FakeEmbedder, _make_storage, _record, _web_app
 
 
 @pytest.fixture
@@ -467,3 +469,189 @@ async def test_export_repair_does_not_weaken_import_carry_validation(storage, tm
         await import_chunks(storage, embedder, path, on_conflict="update")
     embedder.embed_texts.assert_not_called()
     assert (await storage.get_chunk(chunk.id)).metadata.overlap_before == 999
+
+
+@pytest.mark.asyncio
+async def test_indexed_empty_validity_interval_roundtrips_without_blocking_other_notes(
+    storage, tmp_path
+):
+    from memtomem.indexing.engine import IndexEngine
+    from memtomem.models import SearchResult
+    from memtomem.search.pipeline import _apply_validity_filter
+
+    engine = IndexEngine(storage, _FakeEmbedder(), IndexingConfig(memory_dirs=[tmp_path]))
+    for name, text in [
+        ("empty.md", "---\nvalid_from: 2027-01-01\nvalid_to: 2026-01-01\n---\n# T\n\nbody"),
+        ("ordinary.md", "# Other\n\nordinary note"),
+    ]:
+        source = tmp_path / name
+        source.write_text(text)
+        assert not (await engine.index_file(source)).errors
+    chunks = await storage.recall_chunks()
+    assert len(chunks) == 2
+    empty = next(c for c in chunks if c.metadata.valid_from_unix is not None)
+    low, high = empty.metadata.valid_from_unix, empty.metadata.valid_to_unix
+    assert low > high
+    path = tmp_path / "empty-window.json"
+    bundle = await export_chunks(storage, output_path=path)
+    assert bundle.total_chunks == 2
+    await storage.delete_chunks([c.id for c in chunks])
+    stats = await import_chunks(storage, _FakeEmbedder(), path, preserve_ids=True)
+    assert stats.imported_chunks == 2
+    restored = await storage.get_chunk(empty.id)
+    assert (restored.metadata.valid_from_unix, restored.metadata.valid_to_unix) == (low, high)
+    result = SearchResult(chunk=restored, score=1.0, rank=1, source="fused")
+    for as_of in (high - 1, high, low, low + 1):
+        assert _apply_validity_filter([result], as_of) == []
+
+
+@pytest.mark.parametrize("simulate_windows_decode", [False, True])
+@pytest.mark.asyncio
+async def test_posix_project_mapping_uses_original_wire_paths(
+    storage, tmp_path, monkeypatch, simulate_windows_decode
+):
+    from memtomem.tools import export_import
+
+    destination = tmp_path / "destination"
+    memory_dir = destination / ".memtomem/memories.local"
+    memory_dir.mkdir(parents=True)
+    record = _chunk_to_dict(Chunk("mapped body", ChunkMetadata(source_file=tmp_path / "n.md")))
+    record.update(
+        scope="project_local",
+        project_root="/home/u/project",
+        source_file="/home/u/project/.memtomem/memories.local/n.md",
+    )
+    path = tmp_path / "posix-project.json"
+    path.write_text(ExportBundle(chunks=[record], total_chunks=1).to_json())
+    if simulate_windows_decode:
+        decode = export_import._dict_to_chunk
+
+        def windows_decode(*args, **kwargs):
+            chunk, bid = decode(*args, **kwargs)
+            chunk.metadata = replace(
+                chunk.metadata,
+                source_file=PureWindowsPath(record["source_file"]),
+                project_root=PureWindowsPath(record["project_root"]),
+            )
+            return chunk, bid
+
+        monkeypatch.setattr(export_import, "_dict_to_chunk", windows_decode)
+    stats = await import_chunks(
+        storage,
+        _FakeEmbedder(),
+        path,
+        indexing_config=IndexingConfig(project_memory_dirs=[memory_dir]),
+        project_root_map={record["project_root"]: str(destination)},
+    )
+    assert stats.imported_chunks == 1
+    row = (await storage.recall_chunks(project_context_root=destination))[0]
+    assert row.metadata.source_file == memory_dir / "n.md"
+    assert row.metadata.project_root == destination
+    assert row.metadata.scope == "project_local"
+    assert row.metadata.source_span_hash is None
+
+
+@pytest.mark.parametrize("version", ["1", "2", "3", "4"])
+@pytest.mark.asyncio
+async def test_windows_rejects_foreign_posix_user_path_before_embedding(
+    storage, tmp_path, monkeypatch, version
+):
+    from memtomem.tools import bundle_format
+
+    source = "/home/u/notes.md"
+    if version == "4":
+        record = _chunk_to_dict(Chunk("ordinary", ChunkMetadata(source_file=tmp_path / "n.md")))
+        record["source_file"] = source
+        path = tmp_path / "foreign-posix.json"
+        path.write_text(ExportBundle(chunks=[record], total_chunks=1).to_json())
+    else:
+        path = legacy_file(tmp_path, _record("ordinary", source=source), version)
+    # Patch this module's platform view without replacing global os.name/Path.
+    monkeypatch.setattr(bundle_format, "os", SimpleNamespace(name="nt"))
+    embedder = _FakeEmbedder()
+    embedder.embed_texts = AsyncMock()
+    with pytest.raises(ValueError, match="on Windows, manually convert source_file"):
+        await import_chunks(storage, embedder, path)
+    embedder.embed_texts.assert_not_called()
+    assert (await storage.get_stats())["total_chunks"] == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="simulate Windows with an existing POSIX root")
+@pytest.mark.asyncio
+async def test_windows_needs_explicit_map_even_if_foreign_project_path_exists(
+    storage, tmp_path, monkeypatch
+):
+    from memtomem.tools import bundle_format
+
+    memory_dir = tmp_path / ".memtomem/memories.local"
+    memory_dir.mkdir(parents=True)
+    record = _chunk_to_dict(
+        Chunk(
+            "ordinary",
+            ChunkMetadata(
+                source_file=memory_dir / "n.md", project_root=tmp_path, scope="project_local"
+            ),
+        )
+    )
+    path = tmp_path / "foreign-existing.json"
+    path.write_text(ExportBundle(chunks=[record], total_chunks=1).to_json())
+    monkeypatch.setattr(bundle_format, "os", SimpleNamespace(name="nt"))
+    embedder = _FakeEmbedder()
+    embedder.embed_texts = AsyncMock()
+    with pytest.raises(ValueError, match="project_root_map required"):
+        await import_chunks(
+            storage,
+            embedder,
+            path,
+            indexing_config=IndexingConfig(project_memory_dirs=[memory_dir]),
+        )
+    embedder.embed_texts.assert_not_called()
+
+
+@pytest.mark.parametrize("linebreak", ["\x85", "\u2028", "\u2029"])
+def test_writer_json_tags_keep_unicode_separators(tmp_path, linebreak):
+    from memtomem.tools.memory_writer import format_entry_block
+
+    tags = ["a" + linebreak + "b", "한글", "x,y", 'a"b']
+    value = json.dumps(tags, ensure_ascii=False)
+    assert MarkdownChunker._parse_tags_value(value, []) == tags
+    text = format_entry_block("ordinary body", title="Title", tags=tags)
+    chunks = MarkdownChunker().chunk_file(tmp_path / "note.md", text)
+    assert len(chunks) == 1
+    assert set(chunks[0].metadata.tags) == set(tags)
+    assert chunks[0].content == "ordinary body"
+
+
+@pytest.mark.asyncio
+async def test_web_export_validation_error_is_actionable_without_content(storage, tmp_path):
+    chunk = Chunk(
+        "private body must stay out of errors",
+        ChunkMetadata(source_file=tmp_path / "n.md", start_line=2, end_line=1),
+    )
+    await storage.upsert_chunks([chunk])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_web_app(storage, _FakeEmbedder())),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/export")
+    assert response.status_code == 422
+    assert str(chunk.id) in response.json()["detail"]
+    assert "line range" in response.json()["detail"]
+    assert chunk.content not in response.text
+
+
+@pytest.mark.asyncio
+async def test_web_export_does_not_expose_unclassified_value_errors(storage, monkeypatch):
+    from memtomem.tools import export_import
+
+    message = "unexpected internal detail must stay private"
+    monkeypatch.setattr(export_import, "export_chunks", AsyncMock(side_effect=ValueError(message)))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=_web_app(storage, _FakeEmbedder()), raise_app_exceptions=False
+        ),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/export")
+    assert response.status_code == 500
+    assert message not in response.text

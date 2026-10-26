@@ -33,13 +33,12 @@ from __future__ import annotations
 
 import logging
 import re
-
-from memtomem._frontmatter import yaml_scalar, yaml_list
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol, cast
 
+from memtomem._frontmatter import yaml_list, yaml_scalar
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context._atomic_reverse import (
     canonical_artifact_name,

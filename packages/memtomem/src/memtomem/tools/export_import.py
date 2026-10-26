@@ -36,6 +36,7 @@ from memtomem.tools.bundle_format import (
     BUNDLE_VERSION,
     BundleValidationError,
     MAX_BUNDLE_BYTES,
+    StoredBundleValidationError,
     enforce_size,
     invalid,
     load_json,
@@ -229,7 +230,9 @@ async def export_chunks(
         label = exc.where
         if label.startswith("record "):
             label = f"chunk {records[int(label.split()[1])]['chunk_id']}"
-        raise ValueError(f"Invalid stored {label} field {exc.field}. No bundle exported.") from exc
+        raise StoredBundleValidationError(
+            f"Invalid stored {label} field {exc.field}. No bundle exported."
+        ) from exc
 
     marker: dict | None = None
     if stamp_provenance:
@@ -494,6 +497,8 @@ async def import_chunks(
                 root_map,
                 indexing_config,
                 record_index=index,
+                source_file=record["source_file"],
+                project_root=record.get("project_root"),
                 self_export=is_self_export,
             )
             _destination_key(chunk)

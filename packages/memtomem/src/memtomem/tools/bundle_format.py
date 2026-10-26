@@ -37,6 +37,10 @@ class BundleSizeError(ValueError):
     """The serialized bundle exceeds the common transport ceiling."""
 
 
+class StoredBundleValidationError(ValueError):
+    """A value-free stored-record export error safe for transport adapters."""
+
+
 def invalid(where: str, field: str) -> BundleValidationError:
     # Neither a secret-bearing value nor a decoder exception belongs in a response.
     return BundleValidationError(where, field)
@@ -183,9 +187,8 @@ def validate_records(records: list, relations: list, version: str) -> None:
                 type(record[key]) is not int or not INT64_MIN <= record[key] <= INT64_MAX
             ):
                 raise invalid(where, key)
-        low, high = record.get("valid_from_unix"), record.get("valid_to_unix")
-        if low is not None and high is not None and low > high:
-            raise invalid(where, "validity window")
+        # Inverted bounds are a stored empty interval, including native indexed
+        # frontmatter typos. Preserve both bounds without changing search meaning.
         scope, root = record.get("scope", "user"), record.get("project_root")
         if not isinstance(scope, str) or scope not in SCOPES:
             raise invalid(where, "scope")
@@ -241,11 +244,16 @@ def map_chunk(
     config: IndexingConfig | None,
     *,
     record_index: int,
+    source_file: str,
+    project_root: str | None,
     self_export: bool = False,
 ) -> None:
     where = f"record {record_index}"
     meta = chunk.metadata
-    source = str(meta.source_file)
+    # Use wire strings: a local Windows Path has already replaced POSIX slashes
+    # and cannot recover the original path flavour for cross-platform mapping.
+    source = source_file
+    original = _pure(source)
     if meta.scope == "user":
         if os.name != "nt" and PureWindowsPath(source).drive:
             raise invalid(
@@ -253,7 +261,13 @@ def map_chunk(
                 "foreign user source path (on POSIX, manually convert source_file "
                 "to a local absolute path; project_root_map only maps project records)",
             )
-        resolved = Path(norm_path(meta.source_file))
+        if os.name == "nt" and isinstance(original, PurePosixPath) and original.is_absolute():
+            raise invalid(
+                where,
+                "foreign user source path (on Windows, manually convert source_file "
+                "to a local absolute path; project_root_map only maps project records)",
+            )
+        resolved = Path(norm_path(Path(source)))
         project_dirs = config.project_memory_dirs if config is not None else []
         registered_scope, _ = classify_scope(resolved, project_dirs)
         if version != "4":
@@ -280,10 +294,9 @@ def map_chunk(
             raise invalid(where, "resolved source_file/scope (run mm index --force and re-export)")
         chunk.metadata = replace(meta, source_file=resolved)
         return
-    if meta.project_root is None or config is None:
+    if project_root is None or config is None:
         raise invalid(where, "registered project configuration required")
-    old = _pure(str(meta.project_root))
-    original = _pure(source)
+    old = _pure(project_root)
     if not old.is_absolute() or ".." in old.parts or ".." in original.parts:
         raise invalid(where, "project_root")
     try:
@@ -292,7 +305,10 @@ def map_chunk(
         raise invalid(where, "source_file/project_root") from exc
     target_root = root_map.get(old)
     if target_root is None:
-        if (os.name != "nt" and isinstance(old, PureWindowsPath)) or not Path(str(old)).is_dir():
+        foreign_root = (os.name == "nt" and isinstance(old, PurePosixPath)) or (
+            os.name != "nt" and isinstance(old, PureWindowsPath)
+        )
+        if foreign_root or not Path(str(old)).is_dir():
             raise invalid(where, "project_root_map required")
         target_root = Path(str(old)).expanduser().resolve()
     mapped = (target_root.joinpath(*relative.parts)).resolve()

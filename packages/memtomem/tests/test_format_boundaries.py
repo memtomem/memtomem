@@ -140,7 +140,9 @@ async def test_v4_project_mapping_preserves_metadata_and_visibility(storage, tmp
 @pytest.mark.parametrize("version", ["1", "2", "3"])
 @pytest.mark.asyncio
 async def test_unregistered_legacy_project_never_becomes_user(storage, tmp_path, version):
-    path = bundle_file(tmp_path, [_record("legacy", source="/foreign/.memtomem/memories/a.md")])
+    path = bundle_file(
+        tmp_path, [_record("legacy", source=str(tmp_path / "foreign/.memtomem/memories/a.md"))]
+    )
     data = json.loads(path.read_text())
     data["version"] = version
     path.write_text(json.dumps(data))
@@ -583,16 +585,14 @@ async def test_legacy_namespace_override_survives_missing_field(storage, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_legacy_carryover_cannot_make_invalid_validity(storage, tmp_path):
+async def test_legacy_carryover_preserves_empty_validity_interval(storage, tmp_path):
     c = Chunk("same", ChunkMetadata(source_file=tmp_path / "n.md", valid_to_unix=1))
     await storage.upsert_chunks([c])
     r = _record("same", source=str(c.metadata.source_file))
     r["valid_from_unix"] = 2
-    with pytest.raises(ValueError, match="validity"):
-        await import_chunks(
-            storage, _FakeEmbedder(), bundle_file(tmp_path, [r]), on_conflict="update"
-        )
-    assert (await storage.get_chunks_batch([c.id]))[c.id].metadata.valid_from_unix is None
+    await import_chunks(storage, _FakeEmbedder(), bundle_file(tmp_path, [r]), on_conflict="update")
+    meta = (await storage.get_chunks_batch([c.id]))[c.id].metadata
+    assert (meta.valid_from_unix, meta.valid_to_unix) == (2, 1)
 
 
 @pytest.mark.asyncio
@@ -895,8 +895,8 @@ def test_sequence_comment_and_mapping_items_warn_without_values(caplog):
 @pytest.mark.asyncio
 async def test_export_validation_identifies_stored_chunk(storage, tmp_path):
     c = Chunk(
-        "bad validity",
-        ChunkMetadata(source_file=tmp_path / "n.md", valid_from_unix=2, valid_to_unix=1),
+        "bad line range",
+        ChunkMetadata(source_file=tmp_path / "n.md", start_line=2, end_line=1),
     )
     await storage.upsert_chunks([c])
     with pytest.raises(ValueError, match=str(c.id)) as exc:

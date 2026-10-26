@@ -18,6 +18,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- Back up and restore inverted validity intervals produced by ordinary
+  frontmatter indexing without changing their empty-window search meaning.
+- Map foreign project backups using original wire paths, including POSIX to
+  Windows. Refuse foreign absolute user paths requiring manual conversion in
+  either direction rather than assigning them to a local drive.
+- Return a value-free, actionable 422 for stored-record Web export validation
+  errors, and preserve literal Unicode NEL inside writer-generated JSON tags.
 - Preserve trailing Unicode NEL and other line breaks in YAML values by using
   escaped double-quoted scalars, including inside flow lists.
 - Restore v1–v3 user-memory backups from the canonical or configured user

@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from memtomem._frontmatter import flat_yaml
-
 import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from memtomem._frontmatter import flat_yaml
 from memtomem.chunking.base import split_source_lines
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
 
@@ -433,6 +432,14 @@ class MarkdownChunker:
 
         Returns ``[]`` when nothing parses.
         """
+        # memory_writer emits JSON arrays with literal Unicode. Decode those
+        # first: YAML folds a literal NEL inside a quoted scalar into a space.
+        try:
+            json_tags = json.loads(value)
+        except (ValueError, TypeError):
+            json_tags = None
+        if isinstance(json_tags, list) and all(isinstance(t, str) for t in json_tags):
+            return [t.strip() for t in json_tags if t.strip()]
         # This blockquote-value grammar is separate from document frontmatter.
         list_lines = []
         if not value.strip():
@@ -452,17 +459,10 @@ class MarkdownChunker:
             return []
         value = value.strip()
         if value.startswith("[") and value.endswith("]"):
-            # Prefer strict JSON: this decodes ``\uXXXX`` escapes (the shape
-            # ``json.dumps(..., ensure_ascii=True)`` produced for older files)
-            # back to their characters and keeps quoted commas intact. Fall
-            # back to the lenient hand-split for non-JSON shapes that we also
-            # accept (single quotes ``['a']``, bare ``[a, b]``).
-            try:
-                parsed = json.loads(value)
-            except (ValueError, TypeError):
-                parsed = None
-            if isinstance(parsed, list):
-                return [str(t).strip() for t in parsed if str(t).strip()]
+            # Keep the historical syntax-error fallback, reusing the JSON
+            # decode above before hand-splitting non-JSON list shapes.
+            if isinstance(json_tags, list):
+                return [str(t).strip() for t in json_tags if str(t).strip()]
             return [t.strip().strip("'\"") for t in value[1:-1].split(",") if t.strip()]
         if value:
             return [value.strip("'\"")]
