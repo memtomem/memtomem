@@ -37,8 +37,8 @@ tool` after the terminal round trip succeeds.
 ## What is memtomem?
 
 memtomem gives AI coding agents long-term memory backed by files you control.
-It indexes Markdown, JSON, YAML, Python, and JavaScript/TypeScript content and
-can search by keywords, meaning, or both.
+It indexes Markdown, JSON, YAML, TOML, Python, and JavaScript/TypeScript
+content and can search by keywords, meaning, or both.
 
 Key terms:
 

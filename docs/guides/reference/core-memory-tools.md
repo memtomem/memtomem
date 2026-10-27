@@ -283,6 +283,12 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 
 > **Trust-UX hints**: when you don't pin a namespace, results are followed by a parenthesized hint if chunks were hidden in system namespaces (e.g. `archive:*`) or if the configured embedding dimension disagrees with what's in the database. A third hint — independent of namespace selection — appears when you pass `rerank=true` but the server has reranking disabled (`rerank.enabled=false`), since the parameter cannot force-enable it. A fourth, `semantic search failed for this query — results may be incomplete`, appears when the primary dense leg raised (embedder unreachable, for example) and the search still returned results; the cause stays in the server log and the `output_format="verbose"` pipeline line. In `output_format="structured"` those hints are emitted as a `hints` array instead.
 
+> **Structured result fields**: each result in `output_format="structured"`
+> (from `mem_search` and `mem_recall`) carries where it came from:
+> `source_file`, `heading_hierarchy`, `start_line` and `end_line`. `scope` is
+> added when the chunk is not in the `user` tier, and `valid_from_unix` /
+> `valid_to_unix` when the chunk has that validity bound.
+
 > **Score scale**: `score` values are only comparable within one scale, and the
 > scale follows server config. Structured output names the base scale in a
 > top-level `score_scale` key: `"rerank"` (cross-encoder output — range depends
@@ -334,6 +340,10 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > pruned by the existing 90-day history policy. `mm search --format json` does
 > not carry the run ID; use MCP structured output or the Web API when it is
 > needed. (The per-result `chunk_id` *is* in the CLI JSON payload — see below.)
+
+> **CLI JSON**: `mm search --json` and `mm recall --json` are shorthands for
+> `--format json`. Each item's `content` holds the whole chunk;
+> `content_preview` keeps its first 200 characters.
 
 > **Capturing a `chunk_id` from the CLI**: every item of `mm search --format
 > json` carries `chunk_id`, the same key and canonical UUID string the MCP
@@ -479,6 +489,26 @@ header is written above that heading, and its chunks are not tagged. See
 [ADR-0002](../../adr/0002-mem-add-blockquote-tags.md) for the on-disk format
 and reader/writer contract.
 
+#### Frontmatter and `> tags:` syntax
+
+A file's leading frontmatter (`tags`, `valid_from`, `valid_to` and the other
+keys memtomem reads) is read as YAML:
+
+- A `#` after whitespace starts a comment, which is dropped with a warning:
+  `tags: a # c` gives `a`. Quote a literal hash (`tags: ["#python"]`).
+- A key needs a space after its colon. When such a line is the only one, the
+  frontmatter is a single YAML string and nothing is read, without a warning
+  (`tags:[a, b]` alone gives no tags); beside other keys it is still read.
+- Double-quoted values decode escapes (`"C:\temp"` holds a tab; use single
+  quotes for a literal backslash), and a quoted comma stays inside one item
+  (`['a,b', 'c']` is two tags).
+- Keys nested under another key are ignored.
+
+An entry's `> tags:` line keeps its own line grammar (no space is needed after
+its colon), but its value follows the same quoting and comment rules:
+`> tags: #python` gives no tag. After fixing a file, re-index it so the
+stored tags and validity follow.
+
 #### Structured Templates
 
 Use `template` to create formatted entries:
@@ -574,9 +604,15 @@ them with HTTP 409:
   (`mm index <path>` or `mem_index(path="<path>")`), take the chunk ID from
   a fresh search, and retry.
 
-A chunk whose file has gone missing is held outside search but can still be
-reached by ID with `mem_read`, `mem_edit`, `mem_delete` and `mem_related`.
-See [Orphan cleanup](organization-maintenance.md#orphan-cleanup).
+A chunk whose file has gone missing is held outside search (unless the file
+is under `indexing.retain_missing_dirs`, which keeps it searchable as an
+archive) but can still be reached by ID with `mem_read` and `mem_related`.
+`mem_edit` and `mem_delete(chunk_id=)` rewrite the file, so they refuse such a
+chunk and write nothing: `source_missing` when the file is gone, or a
+"source directory has been removed" error when its whole directory is.
+`mem_delete(source_file=)` still removes the index rows, and so does the
+Web UI's chunk delete. See
+[Orphan cleanup](organization-maintenance.md#orphan-cleanup).
 
 > **Note**: After editing, the chunk gets a new UUID (the old one is replaced during re-indexing). If you need to reference it again, search for the updated content.
 
@@ -614,6 +650,10 @@ case, a path through a symlinked directory, a link to the file) is refused
 rather than deleting whatever it resolves to. A stored path whose file has
 since been replaced by a symlink is refused too; delete it from the web
 Sources tab.
+
+`mem_list` returns one page of files at a time: `limit` sets the page size
+(1–500, default 50), and passing the `cursor` from a page's `More:` line
+returns the next page.
 
 > **Note**: to keep a file out of the index for good, exclude it and then
 > reclaim the rows it already has — add a matching glob to

@@ -3,7 +3,9 @@
 Pinned Context is for small facts or instructions that must be included before
 ordinary search results. Blocks remain Markdown files and use the same user,
 project-shared, project-local, privacy, and confirmation rules as other
-memtomem writes.
+memtomem writes. The privacy scan covers `--description` as well as the
+body, so a description that looks like a credential is refused like one in
+the content.
 
 ```bash
 mm pinned set response-style \
@@ -131,6 +133,12 @@ item = store.get(("users", "alice"), "preferences")
 Canonical records are inspectable JSON files under the configured memory root;
 semantic projections are derived. TTL is deliberately unsupported and raises
 an explicit error.
+
+Stored records are validated when they are read. A record that is malformed or
+holds `NaN` or `Infinity` raises `StoreRecordError` (a `ValueError`) on a
+`get` or on a `put` to its key, and is skipped with a warning when a search
+or listing scans the store. On a write, `index` must be `True`, `False`,
+`None`, or a list of strings.
 
 A `root=` you pass is classified rather than trusted: a root inside a
 registered project's Git-tracked (`project_shared`) tier needs

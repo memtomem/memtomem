@@ -649,6 +649,11 @@ the `env` block. This is an advanced, explicit override: these values win over
 `config.d/` and `config.json`. For ordinary setup, omit the block and manage
 settings with `mm init`, `mm config`, or the Web UI.
 
+The `env` block is also where unprefixed variables such as
+`FASTEMBED_CACHE_PATH` or `HF_HUB_OFFLINE` belong: the server applies only
+the `MEMTOMEM_*` keys of a `.env` file
+([details](configuration.md#configuration-reference)).
+
 > **List-typed settings must be JSON-encoded.** `MEMTOMEM_INDEXING__MEMORY_DIRS`
 > is a list, so pass it as a JSON array literal string: `"[\"~/memories\"]"`
 > — not a bare path. Passing a plain string will crash the MCP server on

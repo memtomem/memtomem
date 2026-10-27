@@ -351,7 +351,10 @@ The Context Gateway tab has two views, toggled by the **Simple view** switch:
 
 The **Projects** portal lists the project roots memtomem knows about: the folder
 the server is running in (marked *current folder*), any roots you registered, and
-— if you opt in — roots discovered under `~/.claude/projects/`. Each runtime
+roots discovered under `~/.claude/projects/` whose folder carries a runtime
+marker (`.claude`, `.codex`, `.gemini`, `.agents`, `.kimi` or `.memtomem`). If
+you opt in to the [experimental](../../README.md#stability) unfiltered scan,
+the rest of those roots are listed too. Each runtime
 shows a detection badge (*Not installed* / *Installed* / *Registered*).
 
 Shortly after the list paints, a background fleet check marks any project whose

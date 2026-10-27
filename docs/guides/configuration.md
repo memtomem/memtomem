@@ -13,6 +13,18 @@ fastembed's `FASTEMBED_CACHE_PATH` and Hugging Face's `HF_HUB_OFFLINE` for
 local models, and `CLAUDE_CONFIG_DIR`, `KIMI_CODE_HOME` and `KIMI_SHARE_DIR`
 to find those clients' configuration.
 
+The MCP server (`memtomem-server` or `mm serve`) also reads a `.env` file at
+startup; other `mm` commands, including `mm web`, do not. It
+searches upward from the directory memtomem is installed in, not from the
+working directory, so for an install under your home directory the file it
+finds is usually `~/.env`. Only the file's `MEMTOMEM_*` keys are applied (the
+prefix is matched case-insensitively), and a variable already set in the
+environment wins over the file. Every other key is left out and its name
+logged once at INFO, so the unprefixed variables above have no effect in
+`.env`: set them in the real environment or in your MCP client's `env` block
+([MCP client setup](mcp-clients.md#11-environment-variable-overrides)).
+`PYTHON_DOTENV_DISABLED=1` turns the file off.
+
 ```bash
 # Example: switch from Ollama to OpenAI
 export MEMTOMEM_EMBEDDING__PROVIDER=openai
@@ -694,7 +706,7 @@ is no in-place retarget.
 | `MEMTOMEM_INDEXING__READ_ONLY_MEMORY_DIRS` | `[]` | Index roots memtomem indexes and searches but never rewrites (see above); must be disjoint from the writable roots |
 | `MEMTOMEM_INDEXING__RETAIN_MISSING_DIRS` | `[]` | Directories whose files, once missing on disk, stay searchable instead of being held; see below |
 | `MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS` | `[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]` | File types accepted by the indexer and file watcher |
-| `MEMTOMEM_INDEXING__WATCHER_BACKEND` | `auto` | Watch backend: `auto` uses polling on macOS and native events elsewhere; set `native` or `polling` to override |
+| `MEMTOMEM_INDEXING__WATCHER_BACKEND` | `auto` | Watch backend: `auto` uses polling on macOS and native events elsewhere; set `native` or `polling` to override. A running MCP server applies a change on its next tool call |
 | `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Approximate packing preference; use the hard limit for an exact ceiling |
 | `MEMTOMEM_INDEXING__HARD_MAX_CHUNK_TOKENS` | `0` | Exact body ceiling (`0` disables); requires a matching local tokenizer |
 | `MEMTOMEM_INDEXING__CHUNK_TOKENIZER_PATH` | empty | Local embedding-model `tokenizer.json`; no model download |
@@ -956,6 +968,12 @@ memory dir cannot be resolved, for example a symlink loop, which makes every
 source fail — it deletes nothing, even with `--apply`. It lists what could not
 be classified on stderr (`"ok": false, "reason": "unclassifiable_sources"` with
 `--json`), still reports the matches it did classify, and exits 1.
+
+A stored source whose path now resolves somewhere else (the file became a
+symlink after it was indexed, or the path was stored before it was resolved)
+is neither judged nor deleted: purge skips it and lists it on stderr, or,
+with `--json`, reports it in `moved` and `moved_sample` (present only when
+there are any).
 
 **Writes to an excluded file are refused before anything is written.** Chunk
 edits and deletes, adds (`mem_add`, `mm add`, the web add, …) and URL fetches

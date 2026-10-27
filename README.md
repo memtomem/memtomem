@@ -164,7 +164,7 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor
 - **Context Gateway** — keep canonical Skills, Commands, and Subagents in a project or user Store, optionally install reusable assets from a separate Wiki, then push them to supported AI runtimes. See [Context Gateway](docs/guides/context-gateway.md).
 - **MCP tools** — `mem_do` meta-tool routes all non-core actions in `core` mode for minimal context usage
 - **Predictable core** — memory operations run on explicit CLI/MCP calls (`mm add`, `mem_add`, `mem_index`, etc.). Optional client hooks are installed and removed separately rather than being a hidden runtime default.
-- **Scriptable CLI** — JSON output for scripts: `--json` on `mm status`, the write commands (`mm add` / `mm reset` / `mm purge`), `mm session start` / `end` / `list` / `events`, `mm schedule list`, `mm watchdog status` / `run` and `mm doctor`, and `--format json` on `mm search` and `mm recall`; `mm warmup` pre-loads local models so the first query skips the cold-start cost
+- **Scriptable CLI** — JSON output for scripts: `--json` on `mm status`, the write commands (`mm add` / `mm reset` / `mm purge`), `mm session start` / `end` / `list` / `events`, `mm schedule list`, `mm watchdog status` / `run` and `mm doctor`, and `--json` (or `--format json`) on `mm search` and `mm recall`; `mm warmup` pre-loads local models so the first query skips the cold-start cost
 - **Scheduled jobs** — `mm schedule add/list/run-now/delete` (or `mem_do(action="schedule_*")`) for cron-driven compaction, importance decay, dead-link cleanup, and dedup scans
 - **Pinned Context** — keep small user/project/agent Markdown blocks ahead of retrieved results with `mm pinned compose`
 - **LangGraph Store** — optional `MemtomemBaseStore` implements LangGraph's tuple-namespace long-term-memory contract
@@ -215,6 +215,9 @@ still open or an LLM writes what they produce:
 | [**Codex plugin**](plugins/memtomem/) | Exact-pinned MCP server and seven workflows for Codex CLI |
 | [**opencode-memtomem**](packages/opencode-memtomem/) | OpenCode — exact-pinned MCP, commands, read skills, safe permissions |
 | [**Kimi Code skills**](packages/memtomem-kimi-skills/) | Skill bundle for Kimi Code (not a plugin) |
+| [**Hermes Agent plugin**](packages/memtomem-hermes-plugin/) | Exact-pinned MCP server and six workflow skills for Hermes Agent |
+| [**Hermes memory provider**](packages/memtomem-hermes-memory/) | Recall-only Hermes memory provider that adds relevant notes to each turn |
+| [**Antigravity CLI plugin**](packages/memtomem-antigravity-plugin/) | Exact-pinned MCP server and six workflow skills for `agy` — [experimental](#stability) |
 | [**memtomem-stm**](https://github.com/memtomem/memtomem-stm) | STM proxy — proactive memory surfacing via tool interception |
 
 ---

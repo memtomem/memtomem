@@ -175,7 +175,9 @@ For *single-machine backup*, use `mem_export` / `mem_import`
 ([Reference](reference/data-config-cli.md#6-data--mem_export-mem_import)). The bundle format
 preserves source paths and project scope. A v4 project restore on another
 computer requires registered destination directories and an explicit
-`project_root_map`; shared scope also requires confirmation. It is an index
+`project_root_map`; shared scope also requires confirmation. Restore it with
+memtomem 0.7.0 or later — an earlier import silently ignores the v4 scope,
+project and validity fields. It is an index
 backup, so source files must be restored separately (especially gitignored
 project-local files). It does not provide continuous cross-device sync. It also
 leaves out sources held because their file is missing or unreadable, and

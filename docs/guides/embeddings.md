@@ -56,7 +56,7 @@ export MEMTOMEM_EMBEDDING__DIMENSION=384
 
 Or run `mm init` and pick the English or Korean-optimized preset, or select "Local ONNX" in the Advanced wizard.
 
-The model is downloaded automatically on first use (~490 MB for multilingual-e5-small) and cached in `~/.memtomem/cache/fastembed/` (override with `MEMTOMEM_FASTEMBED_CACHE` or `FASTEMBED_CACHE_PATH`).
+The model is downloaded automatically on first use (~490 MB for multilingual-e5-small) and cached in `~/.memtomem/cache/fastembed/` (override with `MEMTOMEM_FASTEMBED_CACHE` or `FASTEMBED_CACHE_PATH`; a `.env` file applies only the first, so set `FASTEMBED_CACHE_PATH` in the environment).
 
 The download goes through `huggingface_hub`. memtomem runs it with Hub telemetry off: the pinned
 E5 calls, the `fastembed` constructors for other ONNX embedding models and the `fastembed`

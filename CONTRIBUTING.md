@@ -266,8 +266,8 @@ Examples in the current CLI:
   alternative output); `mm config show` and `mm status` (aliases of
   `--format json`).
 - `--format` — `mm search` (has `context`, `smart`), `mm recall` (has
-  `plain`), `mm config show` and `mm status` (keep the original option
-  alongside `--json`).
+  `plain`), `mm config show` and `mm status` (all four keep the original
+  option alongside `--json`, which is shorthand for `--format json`).
 - `--json` write acks — `mm reset`, `mm purge`, `mm add` emit the
   write-command `{"ok": ...}` shape below.
 

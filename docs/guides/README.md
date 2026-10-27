@@ -11,7 +11,8 @@ guides are organized by outcome rather than by feature name.
    - **Korean plugin-first path:** [한국어 바이브코딩 빠른 시작](vibe-coding-getting-started-ko.md)
      — Claude Code 또는 Codex CLI에서 10~15분 안에 기억을 저장·검색합니다.
 2. **[MCP Client Setup](mcp-clients.md)** — connect Claude Code, Cursor,
-   Codex CLI, Antigravity, Windsurf, Claude Desktop, Gemini CLI, or Kimi Code.
+   Codex CLI, Antigravity, Windsurf, Claude Desktop, Gemini CLI, Kimi Code, or
+   OpenCode.
    Client-specific deep dives:
    - [Claude Code](integrations/claude-code.md)
    - [Codex](integrations/codex.md)
@@ -19,6 +20,7 @@ guides are organized by outcome rather than by feature name.
    - [Cursor](integrations/cursor.md)
    - [Claude Desktop](integrations/claude-desktop.md)
    - [OpenCode](integrations/opencode.md)
+   - [Antigravity](mcp-clients.md#9-antigravity)
    - [Cross-runtime handoff](integrations/cross-runtime-handoff.md)
    - [사용자 주도 멀티 코딩 에이전트 Handoff 운영 가이드](integrations/user-controlled-handoff-ko.md)
 3. **[Use cases](use-cases.md)** — nine runnable scenarios for multi-tool

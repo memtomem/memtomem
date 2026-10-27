@@ -39,10 +39,9 @@ files, re-index them, and export again. Purging them with
 `mm gc orphan-sources --apply` deletes their chunks instead; see
 [Orphan cleanup](organization-maintenance.md#orphan-cleanup).
 
-YAML frontmatter now follows YAML quoting and comment rules. Quote a literal
-hash suffix (for example, `description: "Triage issue #123"` or
-`tags: ["#python"]`). Unquoted scalar comment suffixes are discarded with a
-warning; older flat readers treated those suffixes as text.
+Frontmatter in the source files is read as YAML, so an unquoted ` #` suffix
+is a comment and not part of the value; see
+[Frontmatter and `> tags:` syntax](core-memory-tools.md#frontmatter-and--tags-syntax).
 
 ### Restore
 
@@ -56,8 +55,12 @@ mem_import(input_file="~/backup.json", preserve_ids=True)             # keep bun
 
 Import re-embeds chunks using the current model. New exports use memory bundle
 v4, preserving scope, project root, validity windows, timestamps, overlap,
-and relations. Export and import both have a **100 MiB UTF-8 byte limit**;
-use source/tag/namespace/date filters to split a larger backup.
+and relations. Restore a v4 bundle with 0.7.0 or later: an earlier import
+does not check the bundle version, ignores the scope, project and validity
+fields, and cannot verify the provenance marker, so upgrade the receiving
+install first. Export and import both have a **100 MiB UTF-8 byte limit**
+(the Web export answers HTTP 413 above it); use source/tag/namespace/date
+filters to split a larger backup.
 
 Validity bounds are preserved exactly, including an inverted interval from
 frontmatter (`valid_from` later than `valid_to`). Such an interval remains
@@ -479,7 +482,7 @@ mm quality experiment --baseline base-profile.json --profile cand-a.json --profi
 mm agent register planner --description "research agent"  # register an agent id (optional --color)
 mm agent list                          # list registered agents (--json for scripting)
 mm agent search "deploy" -a planner    # search that agent's scope + shared (--no-include-shared, --shared-namespace shared:<project>, --top-k, --format); without -a the active session supplies the agent, and --no-include-shared then needs one of the two
-mm search "deployment" --format json   # every item carries chunk_id (canonical UUID) — the capture path for the command below
+mm search "deployment" --json          # same as --format json; every item carries chunk_id (canonical UUID) — the capture path for the command below
 mm agent share <chunk_id> --target shared    # copy a chunk into the shared scope (default target: shared)
 mm agent migrate                       # migrate legacy agent records into the registry (--dry-run to preview)
 

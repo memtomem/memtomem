@@ -98,6 +98,10 @@ mem_policy_add(name="consolidate-sources", policy_type="auto_consolidate",
 - `keep_originals`: if `false`, soft-decays originals (importance *= 0.5, floor 0.3) instead of deleting. An original that is itself a summary (the target of a `consolidated_into` edge) keeps its importance.
 - `summary_namespace`: target namespace for summaries (default `"archive:summary"`) — excluded from default search.
 
+A summary takes the scope and project root of the chunks it summarises, so a
+project's notes are not summarised into a user-wide chunk; a group whose
+originals span more than one scope boundary is refused.
+
 **auto_tag** — tag untagged chunks:
 
 ```

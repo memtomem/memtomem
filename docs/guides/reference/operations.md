@@ -155,6 +155,14 @@ git-tracked content, rotate exposed credentials, and then use the ordinary
 edit/delete/re-index workflow appropriate to that source. The audit commands
 intentionally have no automatic `--fix` mode.
 
+An upgrade that adds a pattern (0.6.12 added PKCS#8 private keys) does not
+re-scan what is already stored. Run `mm mem rescan --scope <tier> --json`,
+take the secret out of each reported file, run `mm index <dir>`, and rescan:
+it should report nothing. A source it still reports was not reindexed — a
+file you deleted, an excluded path, a file over 10 MB, or a file whose
+`mm index` run reported an error — so remove those chunks with the delete
+workflow instead.
+
 ---
 
 ## Troubleshooting
