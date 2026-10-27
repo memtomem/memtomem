@@ -1486,7 +1486,7 @@ class TestRegistryAndInstallDocs:
         assert pins == {version}
 
     def test_every_memtomem_version_pin_matches_pyproject(self) -> None:
-        """Every ``memtomem==`` / ``memtomem[extra]==`` pin equals pyproject.
+        """Every pin of the core release in the docs and skills equals pyproject.
 
         The ``[all]`` check above misses the bare ``memtomem==X.Y.Z`` spelling
         the plugin READMEs use, and those READMEs sit outside
@@ -1503,17 +1503,30 @@ class TestRegistryAndInstallDocs:
             _REPO_ROOT / "packages" / "memtomem-claude-automation-plugin" / "README.md",
             _REPO_ROOT / "packages" / "opencode-memtomem" / "README.md",
             _REPO_ROOT / "packages" / "memtomem-antigravity-plugin" / "README.md",
+            _REPO_ROOT / "examples" / "onboarding" / "retry-policy" / "README.md",
+            # Workflow sources and every rendered skill: the renderer copies a
+            # stale pin verbatim, so its own check passes on a missed bump.
+            *(_REPO_ROOT / "packages" / "memtomem-plugin-assets" / "workflows").glob("*.md"),
+            *(_REPO_ROOT / "packages").glob("*/skills/*/SKILL.md"),
+            *(_REPO_ROOT / "plugins" / "memtomem" / "skills").glob("*/SKILL.md"),
         ]
-        offenders: list[str] = []
-        for doc in docs:
+        spellings = (
             # ``(?<![\w-])`` keeps ``opencode-memtomem==…`` (the npm plugin's
             # own version) from being compared against the Python package.
-            for pinned in re.findall(
-                r"(?<![\w-])memtomem(?:\[[a-z,]+\])?==([0-9]+\.[0-9]+\.[0-9]+)", _read(doc)
-            ):
-                if pinned != version:
-                    rel = doc.relative_to(_REPO_ROOT)
-                    offenders.append(f"{rel}: =={pinned} (pyproject is {version})")
+            r"(?<![\w-])memtomem(?:\[[a-z,]+\])?==([0-9]+\.[0-9]+\.[0-9]+)",
+            r"\bupgrade --version[ =]([0-9]+\.[0-9]+\.[0-9]+)",
+            # Prose naming the core release ("Use memtomem `X`", "bundling core
+            # `X`"); a floor such as "memtomem `0.4.0` and later" is history.
+            r"\b(?:memtomem|core) `([0-9]+\.[0-9]+\.[0-9]+)`(?! (?:and|or) later)",
+        )
+        offenders: list[str] = []
+        for doc in docs:
+            text = _read(doc)
+            for spelling in spellings:
+                for match in re.finditer(spelling, text):
+                    if match.group(1) != version:
+                        rel = doc.relative_to(_REPO_ROOT)
+                        offenders.append(f"{rel}: {match.group(0)} (pyproject is {version})")
         assert not offenders, (
             "Stale memtomem version pins (bump missed an occurrence):\n  "
             + "\n  ".join(sorted(set(offenders)))
