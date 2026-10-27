@@ -229,6 +229,9 @@ class TestStoredKeyFor:
 
         assert stored_key_for(str(key.with_name("a.md")), [key]) is None
 
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="POSIX path spelling; Path writes it with backslashes"
+    )
     def test_the_tmp_spelling_mem_list_prints_finds_a_private_tmp_key(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "darwin")
         key = Path("/private/tmp/notes/a.md")
