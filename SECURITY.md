@@ -10,8 +10,8 @@ memtomem is beta (`0.x`); only the latest published minor receives security fixe
 
 | Version | Supported |
 |---------|-----------|
-| 0.6.x   | Yes       |
-| < 0.6   | No        |
+| 0.7.x   | Yes       |
+| < 0.7   | No        |
 
 ## Security Measures
 

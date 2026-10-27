@@ -17,7 +17,7 @@ there, not the files here.
 
 - Antigravity CLI (`agy`) 1.4.7 or later, the version this plugin was verified against.
 - `uv` on `PATH`. The server is started with
-  `uvx --python 3.12 --from 'memtomem[onnx]==0.6.12' memtomem-server`.
+  `uvx --python 3.12 --from 'memtomem[onnx]==0.7.0' memtomem-server`.
 - Python 3.12. uv uses a 3.12 it can find; if there is none, it downloads one (about
   70 MiB) on first start. If that is not possible — offline, or uv's Python downloads
   turned off — the server does not start; run `uv python install 3.12` once to fix it.
