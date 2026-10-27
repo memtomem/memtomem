@@ -209,6 +209,21 @@ def test_apply_identical_noop(proj: Path) -> None:
     assert "already identical" in res.output
 
 
+def test_apply_identical_noop_needs_no_consent(proj: Path) -> None:
+    """Without ``--yes`` the no-op returns before Gate B, as on the tool and the
+    route (ADR-0030 §11's #2318 stage-2 rider): a reached prompt would read the
+    ``n`` and abort."""
+    body = _agent("a", "same")
+    d = canonical_artifact_dir("agents", "project_shared", proj) / "a"
+    d.mkdir(parents=True)
+    (d / "agent.md").write_text(body, encoding="utf-8")
+    seed_multi_runtime(proj, "agents", "a", {"claude": body})
+    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared"], input="n\n")
+    assert res.exit_code == 0, res.output
+    assert "already identical" in res.output
+    assert "Continue?" not in res.output
+
+
 def test_skills_overwrite_succeeds(proj: Path) -> None:
     """ADR-0030 §10 / PR-G4b: a skills overwrite-Pull now snapshots the pre-image
     into ``versions/v1/`` and swaps the runtime copy in (was a hard refusal)."""
