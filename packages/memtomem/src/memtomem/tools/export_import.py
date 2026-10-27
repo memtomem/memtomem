@@ -39,6 +39,7 @@ from memtomem.tools.bundle_format import (
     StoredBundleValidationError,
     enforce_size,
     invalid,
+    line_range_valid,
     load_json,
     map_chunk,
     timestamp,
@@ -217,6 +218,13 @@ async def export_chunks(
     )
     if repaired_overlap:
         logger.warning("Export bounded stale overlap metadata for %d chunk(s)", repaired_overlap)
+    cleared_ranges = sum(
+        chunk.metadata.start_line != record["start_line"]
+        or chunk.metadata.end_line != record["end_line"]
+        for chunk, record in zip(chunks, records)
+    )
+    if cleared_ranges:
+        logger.warning("Export cleared impossible line ranges for %d chunk(s)", cleared_ranges)
     relations = [
         {"source_id": str(sid), "target_id": str(tid), "relation_type": rel}
         for sid, tid, rel in edges
@@ -293,6 +301,9 @@ async def export_chunks(
 def _export_chunk_record(chunk: Chunk) -> dict:
     """Bound historical impossible counts in an export copy, never in storage.
 
+    An impossible line range becomes the unmapped ``(0, 0)`` rather than a
+    guessed span: line ranges are ``mem_edit`` targets.
+
     Keep this separate from _chunk_to_dict: import's post-carry validation must
     still reject an invalid merged row instead of validating a repaired copy.
     """
@@ -301,6 +312,8 @@ def _export_chunk_record(chunk: Chunk) -> dict:
         value = record[key]
         if type(value) is int:
             record[key] = min(max(value, 0), len(chunk.content))
+    if not line_range_valid(record["start_line"], record["end_line"]):
+        record["start_line"] = record["end_line"] = 0
     return record
 
 
@@ -486,11 +499,17 @@ async def import_chunks(
     )
     parsed: list[tuple[Chunk, str | None]] = []
     changed_metadata: list[tuple[str, str]] = []
+    cleared_ranges = 0
     for index, record in enumerate(bundle.chunks):
         try:
             chunk, bid = _dict_to_chunk(
                 record, namespace_override=namespace, allow_origin=is_self_export
             )
+            # Only v1-v3 records reach here with an impossible range (see
+            # validate_records). The signed record itself stays untouched.
+            if not line_range_valid(chunk.metadata.start_line, chunk.metadata.end_line):
+                chunk.metadata = replace(chunk.metadata, start_line=0, end_line=0)
+                cleared_ranges += 1
             map_chunk(
                 chunk,
                 bundle.version,
@@ -605,6 +624,9 @@ async def import_chunks(
     stats = ImportStats(len(parsed), 0, 0, 0, conflict_skipped_chunks=conflict_skipped)
     if bundle.version != "4":
         stats.warnings.append("legacy_metadata_missing")
+    if cleared_ranges:
+        stats.warnings.append("legacy_line_ranges_cleared")
+        logger.warning("Import cleared impossible line ranges for %d record(s)", cleared_ranges)
     missing, unavailable, checked = set(), set(), set()
     for chunk, _ in parsed:
         if (

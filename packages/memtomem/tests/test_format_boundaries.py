@@ -74,7 +74,7 @@ async def test_bad_envelope_rejects_without_embedding(storage, tmp_path, body):
         ("source_read_only", "false"),
         ("start_line", True),
         ("start_line", -1),
-        ("end_line", 0),
+        ("end_line", "1"),
         ("scope", "unexpected"),
         ("overlap_before", 999),
         ("valid_from_unix", True),
@@ -895,8 +895,8 @@ def test_sequence_comment_and_mapping_items_warn_without_values(caplog):
 @pytest.mark.asyncio
 async def test_export_validation_identifies_stored_chunk(storage, tmp_path):
     c = Chunk(
-        "bad line range",
-        ChunkMetadata(source_file=tmp_path / "n.md", start_line=2, end_line=1),
+        "bad redaction count",
+        ChunkMetadata(source_file=tmp_path / "n.md", redaction_count=-1),
     )
     await storage.upsert_chunks([c])
     with pytest.raises(ValueError, match=str(c.id)) as exc:

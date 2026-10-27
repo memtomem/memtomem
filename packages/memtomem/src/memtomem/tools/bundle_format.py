@@ -131,6 +131,11 @@ def timestamp(value: object, where: str, field: str) -> datetime:
         raise invalid(where, field) from exc
 
 
+def line_range_valid(start: int, end: int) -> bool:
+    """Whether ``start``/``end`` is a mapped range or the unmapped ``(0, 0)``."""
+    return end >= start and (start == 0) == (end == 0)
+
+
 def validate_records(records: list, relations: list, version: str) -> None:
     identities: set[str] = set()
     for index, record in enumerate(records):
@@ -171,8 +176,11 @@ def validate_records(records: list, relations: list, version: str) -> None:
                 type(record[key]) is not int or not 0 <= record[key] <= INT64_MAX
             ):
                 raise invalid(where, key)
+        # Older pipelines stored impossible ranges such as a merged unmapped
+        # chunk's (0, N). Import clears them on v1-v3 records; v4 exports never
+        # carry them, so a v4 record holding one is malformed.
         start, end = record.get("start_line", 0), record.get("end_line", 0)
-        if end < start or (start == 0) != (end == 0):
+        if version == "4" and not line_range_valid(start, end):
             raise invalid(where, "line range")
         for key in ("overlap_before", "overlap_after"):
             if record.get(key, 0) > len(record["content"]):
