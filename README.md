@@ -10,7 +10,7 @@
 [![CLA](https://img.shields.io/badge/CLA-required-green)](CLA.md)
 [![Safety](https://img.shields.io/badge/safety-no%20vulnerabilities-brightgreen)](https://data.safetycli.com/packages/pypi/memtomem)
 
-> 🧪 **Beta** — the nine core MCP tools, the `mm` CLI and the on-disk formats change only with an `Upgrading` note in the [CHANGELOG](CHANGELOG.md), and behind a deprecation window where one is possible. Features marked **experimental** can change or go away without either — see [Stability](#stability). Feedback and issue reports are especially welcome: [Issues](https://github.com/memtomem/memtomem/issues) · [Discussions](https://github.com/memtomem/memtomem/discussions).
+> 🧪 **Beta** — the nine core MCP tools, the `mm` CLI, and the format of your memory files and config files change only with an `Upgrading` note in the [CHANGELOG](CHANGELOG.md), and behind a deprecation window where one is possible. Features marked **experimental** can change or go away without either — see [Stability](#stability). Feedback and issue reports are especially welcome: [Issues](https://github.com/memtomem/memtomem/issues) · [Discussions](https://github.com/memtomem/memtomem/discussions).
 
 <p align="center">
   <img src="docs/assets/README-hero.gif" alt="memtomem Web UI dashboard — namespaces, file types, chunk-size buckets, activity timeline" width="640">
@@ -174,12 +174,9 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor
 
 ## Stability
 
-memtomem is beta (`0.x`). Everything not listed below is supported: a change
-that breaks it gets an `Upgrading` note in the [CHANGELOG](CHANGELOG.md), and a
-deprecation window where one is possible. That includes every on-disk format
-memtomem writes — memory files and their frontmatter, `~/.memtomem/config.json`
-and its `config.d/` fragments, the SQLite store, the LangGraph stores' files —
-except memory export bundles, which are experimental (below).
+memtomem is beta (`0.x`). Every feature not listed below is supported: a
+change that breaks it gets an `Upgrading` note in the [CHANGELOG](CHANGELOG.md),
+and a deprecation window where one is possible.
 
 These are **experimental** — their behaviour, output or format can still
 change or go away without a window, because a decision that shapes them is
