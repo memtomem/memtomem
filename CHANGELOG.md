@@ -59,8 +59,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   and cannot verify the new provenance marker. Imports are stricter too.
   A bundle is validated as a whole before anything is written, so one
   malformed record or relation refuses the import instead of being skipped;
-  a project memory needs a registered project destination, project memories
-  from another machine need an explicit `project_root_map`, and restoring
+  a project memory needs a registered project destination, a project memory
+  whose original project root is from the other platform or is not a
+  directory here needs an explicit `project_root_map`, and restoring
   into `project_shared` needs confirmation. A user memory whose absolute
   path comes from the other platform (Windows or POSIX) is refused even with
   a map; convert its `source_file` to a local path first. A bundle is capped at 100 MiB (the Web
