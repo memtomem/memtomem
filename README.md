@@ -10,7 +10,7 @@
 [![CLA](https://img.shields.io/badge/CLA-required-green)](CLA.md)
 [![Safety](https://img.shields.io/badge/safety-no%20vulnerabilities-brightgreen)](https://data.safetycli.com/packages/pypi/memtomem)
 
-> 🚧 **Alpha** — APIs, defaults, and on-disk config surfaces may still change between `0.x` releases. Feedback and issue reports are especially welcome: [Issues](https://github.com/memtomem/memtomem/issues) · [Discussions](https://github.com/memtomem/memtomem/discussions).
+> 🧪 **Beta** — the nine core MCP tools, the `mm` CLI and the on-disk formats change only with an `Upgrading` note in the [CHANGELOG](CHANGELOG.md), and behind a deprecation window where one is possible. Features marked **experimental** can change or go away without either — see [Stability](#stability). Feedback and issue reports are especially welcome: [Issues](https://github.com/memtomem/memtomem/issues) · [Discussions](https://github.com/memtomem/memtomem/discussions).
 
 <p align="center">
   <img src="docs/assets/README-hero.gif" alt="memtomem Web UI dashboard — namespaces, file types, chunk-size buckets, activity timeline" width="640">
@@ -169,6 +169,37 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor
 - **Pinned Context** — keep small user/project/agent Markdown blocks ahead of retrieved results with `mm pinned compose`
 - **LangGraph Store** — optional `MemtomemBaseStore` implements LangGraph's tuple-namespace long-term-memory contract
 - **[Hybrid LangGraph Store](docs/guides/langgraph-hybrid-store.md)** — `MemtomemHybridStore` adds dedicated SQLite persistence, BM25/dense/RRF retrieval, TTL, and diagnostics
+
+---
+
+## Stability
+
+memtomem is beta (`0.x`). Everything not listed below is supported: a change
+that breaks it gets an `Upgrading` note in the [CHANGELOG](CHANGELOG.md), and a
+deprecation window where one is possible.
+
+These are **experimental** — their behaviour, output or format can still
+change or go away without a window, because a decision that shapes them is
+still open or an LLM writes what they produce:
+
+- **Multi-agent memory** — `mem_agent_register`, `mem_agent_search`,
+  `mem_agent_share` and per-agent session scopes (`mem_session_start` with
+  `agent_id`). Open decisions: [#1477](https://github.com/memtomem/memtomem/issues/1477),
+  [#1478](https://github.com/memtomem/memtomem/issues/1478).
+- **Memory export and import bundles** — `mem_export` / `mem_import` and the
+  Web export/import. How a backup made before 0.7.0 (bundle v1–v3) that holds
+  project memories should be restored is still open.
+- **LLM-written output** — anything produced with `MEMTOMEM_LLM__ENABLED=true`
+  that would otherwise come from a rule: LLM auto-tagging and entity
+  extraction, `strategy="llm"` query expansion, LLM consolidation and policy
+  summaries, session auto-summaries, source summaries
+  (`indexing.auto_summarize`) and contextual chunk enrichment
+  (`indexing.enrich_chunk_context`). The rule-based modes beside them —
+  keyword auto-tagging, regex entity extraction, `tags`/`headings` expansion,
+  heuristic consolidation summaries — are supported.
+- **Claude projects scan** in the Context Gateway
+  (`MEMTOMEM_CONTEXT_GATEWAY__EXPERIMENTAL_CLAUDE_PROJECTS_SCAN`).
+- **Antigravity CLI plugin** ([`packages/memtomem-antigravity-plugin/`](packages/memtomem-antigravity-plugin/)).
 
 ---
 

@@ -2,7 +2,7 @@
 
 # memtomem
 
-> 🚧 **Alpha** — APIs, defaults, and on-disk config surfaces may still change between `0.x` releases. Feedback and issue reports are especially welcome at [github.com/memtomem/memtomem/issues](https://github.com/memtomem/memtomem/issues).
+> 🧪 **Beta** — the nine core MCP tools, the `mm` CLI and the on-disk formats change only with an `Upgrading` note in the [CHANGELOG](https://github.com/memtomem/memtomem/blob/main/CHANGELOG.md), and behind a deprecation window where one is possible. Features marked **experimental** can change or go away without either — see [Stability](https://github.com/memtomem/memtomem#stability). Feedback and issue reports are especially welcome at [github.com/memtomem/memtomem/issues](https://github.com/memtomem/memtomem/issues).
 
 Markdown-first long-term memory infrastructure for AI agents. Core usage is hook-free by default: your files remain the source of truth, and memory changes happen only when you or your agent explicitly call memtomem. Optional client hooks are separate, visible integrations.
 

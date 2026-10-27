@@ -17,6 +17,11 @@ Back up, restore, and ingest memories; inspect and change settings; and the full
 
 ### Backup
 
+> **Experimental** — the bundle format and the restore rules can still change
+> without a deprecation window; how a backup made before 0.7.0 (bundle v1–v3)
+> that holds project memories should be restored is still open. See
+> [Stability](../../../README.md#stability).
+
 ```
 mem_export(output_file="~/backup.json")
 mem_export(output_file="~/work-backup.json", namespace="work")

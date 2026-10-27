@@ -1499,6 +1499,10 @@ The `openai` provider works with any OpenAI-compatible endpoint (LM Studio, vLLM
 
 ## Session Summary
 
+> **Experimental** — the auto-summary is LLM-written, so its content and
+> format can change without a deprecation window. An explicit `summary=` is
+> supported. See [Stability](../../README.md#stability).
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_SESSION_SUMMARY__AUTO` | `true` | When `mem_session_end` is called without `summary=`, run an LLM auto-summary over chunks the session recorded as written |
@@ -1604,7 +1608,7 @@ registry and stores local absolute paths.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_CONTEXT_GATEWAY__KNOWN_PROJECTS_PATH` | `~/.memtomem/known_projects.json` | Where the Web UI persists "Add Project" registrations. The Sources, Skills, Custom Commands, and Subagents tabs render one collapsible group per registered project root. |
-| `MEMTOMEM_CONTEXT_GATEWAY__EXPERIMENTAL_CLAUDE_PROJECTS_SCAN` | `false` | When `true`, the gateway also reverse-decodes `~/.claude/projects/<encoded>` directory names into project roots and surfaces them as discovered roots. Off by default — the encoding is fragile around dash-containing paths, so this stays gated behind explicit consent. |
+| `MEMTOMEM_CONTEXT_GATEWAY__EXPERIMENTAL_CLAUDE_PROJECTS_SCAN` | `false` | [Experimental](../../README.md#stability). When `true`, the gateway also reverse-decodes `~/.claude/projects/<encoded>` directory names into project roots and surfaces them as discovered roots. Off by default — the encoding is fragile around dash-containing paths, so this stays gated behind explicit consent. |
 | `MEMTOMEM_CONTEXT_GATEWAY__AUTO_DISPLAY_CONFIGURED_PROJECTS` | `true` | Auto-surface `~/.claude/projects/` scan candidates that already carry a runtime marker, without an explicit Add Project step |
 
 ## Hooks

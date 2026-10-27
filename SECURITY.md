@@ -6,7 +6,7 @@ Please report security issues via [GitHub private advisory](https://github.com/m
 
 ## Supported Versions
 
-memtomem is alpha (`0.x`); only the latest published minor receives security fixes.
+memtomem is beta (`0.x`); only the latest published minor receives security fixes.
 
 | Version | Supported |
 |---------|-----------|

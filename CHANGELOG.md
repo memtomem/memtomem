@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **memtomem is beta.** The Alpha banner and the `3 - Alpha` classifier give
+  way to Beta and `4 - Beta`, with a commitment in their place: the nine core
+  MCP tools, the `mm` CLI and the on-disk formats change only with an
+  `Upgrading` note here, and behind a deprecation window where one is
+  possible. A new Stability section in the README lists what is still
+  **experimental** and can change without either: multi-agent memory, memory
+  export and import bundles, LLM-written output (its rule-based modes are
+  supported), the Context Gateway's Claude projects scan, and the Antigravity
+  CLI plugin. The guides for those features carry the same marker.
+
 ### Added
 
 - **An Antigravity CLI plugin.** `packages/memtomem-antigravity-plugin/`

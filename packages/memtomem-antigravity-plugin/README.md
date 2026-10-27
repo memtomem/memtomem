@@ -1,5 +1,9 @@
 # memtomem for Antigravity CLI
 
+> **Experimental** — this plugin is new in memtomem 0.7.0, so its layout and
+> skills can change without a deprecation window. See
+> [Stability](https://github.com/memtomem/memtomem#stability).
+
 Markdown-first long-term memory shared across your coding agents. This plugin starts a
 local memtomem MCP server in the Antigravity CLI (`agy`) and adds six memory workflow
 skills. Notes saved here are searchable from Claude Code, Codex CLI, Kimi Code and any

@@ -576,7 +576,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Sessions** | `mem_session_start` (with optional `title`), `mem_session_end`, `mem_session_list` |
 | **Working Memory** | `mem_scratch_set`, `mem_scratch_get`, `mem_scratch_promote` |
 | **Procedures** | `mem_procedure_save`, `mem_procedure_list` |
-| **Multi-Agent** | `mem_agent_register`, `mem_agent_search`, `mem_agent_share` |
+| **Multi-Agent** ([experimental](../../README.md#stability)) | `mem_agent_register`, `mem_agent_search`, `mem_agent_share` |
 | **Consolidation** | `mem_consolidate`, `mem_consolidate_apply` |
 | **Reflection** | `mem_reflect`, `mem_reflect_save` |
 | **History** | `mem_search_history`, `mem_search_feedback`, `mem_search_suggest` |

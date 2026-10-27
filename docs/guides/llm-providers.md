@@ -14,6 +14,10 @@ export MEMTOMEM_LLM__PROVIDER=ollama
 
 ## What LLM Powers
 
+> **Experimental** — everything an LLM writes in the two tables below can
+> change without a deprecation window. The heuristic modes beside it are
+> supported. See [Stability](../../README.md#stability).
+
 Enabling an LLM upgrades four features. Each degrades gracefully — if a call fails, the heuristic fallback (the "disabled" column) runs automatically:
 
 | Feature | LLM enabled | LLM disabled (default) |
