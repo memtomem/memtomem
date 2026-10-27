@@ -344,8 +344,8 @@ handling honors ADR-0011's explicit-choice rule for the git-tracked
 tier: the **preview** may run with an inferred scope, but an `--apply`
 whose destination is `project_shared` requires the **explicit**
 `--scope project_shared` (plus Gate B confirmation — originally via `--yes`
-or the prompt; `--confirm-project-shared` is the spelling from 0.6.0 and the
-only one from 0.7.0, #2318 below) — a new command does not inherit `init`'s
+or the prompt; `--confirm-project-shared` from 0.6.0, and the only flag from
+0.7.0, which refuses a bare `--yes`, #2318 below) — a new command does not inherit `init`'s
 legacy implicit default into a git-tracked write. `mm context sync` gains an additive `--runtime` filter (default: all
 detected runtimes, unchanged).
 
@@ -372,6 +372,14 @@ detected runtimes, unchanged).
 > use, so an operator can see which scripts still need migrating before the
 > flip. See ADR-0011 §5's `2026-09 (#2318)` rider for why this one gets a
 > window and #2317's `mem_edit` change did not.
+
+> **2026-10 (#2318, stage 2):** The flip landed for 0.7.0: a bare `--yes`
+> on a `project_shared` pull is refused, so the CLI, the `mem_context_pull`
+> tool and the web route all require explicit `project_shared` consent for a
+> write. They differ in order only for a `--yes` run, which the tool and the
+> route have no spelling for: the CLI refuses it before preparing the pull,
+> so a byte-identical no-op is refused there too. Without `--yes`, every
+> surface returns that no-op without asking for consent.
 
 ### 12. Source-runtime vocabulary is a first-class table
 

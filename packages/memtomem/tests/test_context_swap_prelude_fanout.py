@@ -1933,10 +1933,20 @@ class TestCliPull:
         before = _wedge_state(p)
 
         result = CliRunner().invoke(
-            context, ["pull", "skills", "skill", "--apply", "--scope", "project_shared", "--yes"]
+            context,
+            [
+                "pull",
+                "skills",
+                "skill",
+                "--apply",
+                "--scope",
+                "project_shared",
+                "--confirm-project-shared",
+            ],
         )
 
         assert result.exit_code == 1, result.output
+        assert "the Store already has skills/skill" in result.output, result.output
         assert "swap" not in result.output.lower(), result.output
         assert _wedge_state(p) == before
 
@@ -1989,7 +1999,7 @@ class TestCliPull:
                 "--overwrite",
                 "--scope",
                 "project_shared",
-                "--yes",
+                "--confirm-project-shared",
             ],
         )
 

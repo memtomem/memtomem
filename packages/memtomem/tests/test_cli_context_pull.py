@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
-from importlib import metadata
 from pathlib import Path
 
 import pytest
@@ -211,6 +209,21 @@ def test_apply_identical_noop(proj: Path) -> None:
     assert "already identical" in res.output
 
 
+def test_apply_identical_noop_needs_no_consent(proj: Path) -> None:
+    """Without ``--yes`` the no-op returns before Gate B, as on the tool and the
+    route (ADR-0030 §11's #2318 stage-2 rider): a reached prompt would read the
+    ``n`` and abort."""
+    body = _agent("a", "same")
+    d = canonical_artifact_dir("agents", "project_shared", proj) / "a"
+    d.mkdir(parents=True)
+    (d / "agent.md").write_text(body, encoding="utf-8")
+    seed_multi_runtime(proj, "agents", "a", {"claude": body})
+    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared"], input="n\n")
+    assert res.exit_code == 0, res.output
+    assert "already identical" in res.output
+    assert "Continue?" not in res.output
+
+
 def test_skills_overwrite_succeeds(proj: Path) -> None:
     """ADR-0030 §10 / PR-G4b: a skills overwrite-Pull now snapshots the pre-image
     into ``versions/v1/`` and swaps the runtime copy in (was a hard refusal)."""
@@ -263,11 +276,10 @@ def test_project_shared_prompt_accept_writes(proj: Path) -> None:
 #
 # #2318 gave this command the ``--confirm-project-shared`` every other CLI
 # surface takes, so the AST guard in
-# ``test_project_shared_confirmation_audit_guard.py`` can finally see it. What
-# that guard buys is narrow — it only checks that the emit outlives the
-# conditional. Whether ``--yes`` is still accepted, which flag the line names,
-# and how many lines are emitted are all invisible to it, so the tests below
-# remain the only thing holding those.
+# ``test_project_shared_confirmation_audit_guard.py`` can see it. What that
+# guard buys is narrow — it only checks that the emit outlives the
+# conditional. Whether ``--yes`` is refused and how many lines are emitted are
+# invisible to it, so the tests below remain the only thing holding those.
 
 
 def test_prompt_accepted_records_the_consent(proj: Path, caplog) -> None:
@@ -282,30 +294,27 @@ def test_prompt_accepted_records_the_consent(proj: Path, caplog) -> None:
     assert "action=pull" in lines[0]
 
 
-def test_yes_flag_records_the_consent_and_names_the_flag(proj: Path, caplog) -> None:
-    """``--yes`` still carries Gate B during the #2318 window, so it is
-    recorded — and the line names which flag carried it, since ``--yes`` is
-    not the ``--confirm-project-shared`` the other surfaces require."""
+def test_yes_alone_is_refused_and_records_no_consent(proj: Path, caplog) -> None:
+    """``--yes`` is not Gate B consent (#2318), so a bare ``--yes`` run
+    authorises nothing and the audit log records nothing."""
     seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")})
     with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
         res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
-    assert res.exit_code == 0, res.output
-    lines = consent_lines(caplog)
-    assert len(lines) == 1
-    assert "mechanism=flag" in lines[0]
-    assert "flag='--yes'" in lines[0]
+    assert res.exit_code == 1, res.output
+    assert _YES_REFUSAL in res.output
+    assert consent_lines(caplog) == []
 
 
-# ── ADR-0011 §5 parity: --confirm-project-shared and the --yes window (#2318) ──
+# ── ADR-0011 §5 parity: --confirm-project-shared, and --yes refused (#2318) ──
 #
 # ``mm context pull`` was the one CLI surface where a generic ``--yes``
 # satisfied Gate B, diverging from its own ``mem_context_pull`` tool and web
-# route. It now takes the standard flag; ``--yes`` keeps working through 0.6.x
-# behind a notice and stops satisfying Gate B in 0.7.0. Each test below pins
-# exactly one cell of that contract, because the flip in 0.7.0 has to be able
-# to change one row without silently rewriting the others.
+# route. It took the standard flag in 0.6.0 with ``--yes`` still accepted
+# behind a notice, and refuses a bare ``--yes`` from 0.7.0. Each test below
+# pins one cell of that contract, so the refusal can be checked not to fire
+# on a path it must leave alone.
 
-_FLIP_NOTICE = "--yes alone will stop satisfying Gate B"
+_YES_REFUSAL = "--yes alone is not sufficient"
 
 
 def _seed_one(proj: Path, scope: str = "project_shared") -> None:
@@ -343,32 +352,31 @@ def test_confirm_flag_carries_gate_b_without_a_prompt(proj: Path, caplog) -> Non
     assert "flag='--yes'" not in lines[0]
 
 
-def test_confirm_flag_emits_no_deprecation_notice(proj: Path) -> None:
+def test_confirm_flag_is_not_refused(proj: Path) -> None:
     _seed_one(proj)
     res = _invoke(
         ["pull", "agents", "a", "--apply", "--scope", "project_shared", "--confirm-project-shared"]
     )
     assert res.exit_code == 0, res.output
-    assert _FLIP_NOTICE not in res.output
+    assert _YES_REFUSAL not in res.output
 
 
-def test_yes_alone_warns_on_stderr_and_still_applies(proj: Path) -> None:
-    """The window's whole point: an existing ``--yes`` script keeps working,
-    and is told once, on stderr, that it will not in 0.7.0."""
+def test_yes_alone_is_refused_before_any_write(proj: Path) -> None:
+    """An existing ``--yes`` script now fails, naming the flag to use instead,
+    and lands nothing in the git-tracked tier."""
     _seed_one(proj)
     res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
-    assert res.exit_code == 0, res.output
-    assert "c" in _canonical_agent_text(proj, "a")
-    assert res.stderr.count(_FLIP_NOTICE) == 1
+    assert res.exit_code == 1, res.output
+    assert res.stderr.count(_YES_REFUSAL) == 1
     assert "--confirm-project-shared" in res.stderr
-    assert "0.7.0" in res.stderr
-    assert _FLIP_NOTICE not in res.stdout
+    assert "0.7.0" not in res.output
+    assert not (canonical_artifact_dir("agents", "project_shared", proj) / "a").exists()
 
 
 def test_both_flags_the_explicit_one_wins(proj: Path, caplog) -> None:
-    """Precedence, and the reason it is computed once: with both flags the
-    consent belongs to ``--confirm-project-shared``, so the line must not
-    name ``--yes`` and the migration notice must not fire."""
+    """Precedence: with both flags the consent belongs to
+    ``--confirm-project-shared``, so the run lands, the line does not name
+    ``--yes``, and the refusal does not fire."""
     _seed_one(proj)
     with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
         res = _invoke(
@@ -388,22 +396,23 @@ def test_both_flags_the_explicit_one_wins(proj: Path, caplog) -> None:
     assert len(lines) == 1
     assert "mechanism=flag" in lines[0]
     assert "flag='--yes'" not in lines[0]
-    assert _FLIP_NOTICE not in res.output
+    assert _YES_REFUSAL not in res.output
 
 
-def test_prompt_path_emits_no_notice(proj: Path) -> None:
+def test_prompt_path_is_not_refused(proj: Path) -> None:
     _seed_one(proj)
     res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared"], input="y\n")
     assert res.exit_code == 0, res.output
-    assert _FLIP_NOTICE not in res.output
+    assert _YES_REFUSAL not in res.output
 
 
-def test_yes_without_apply_still_fails_before_the_notice(proj: Path) -> None:
-    """The flag-combination guard runs first, so a preview never warns."""
+def test_yes_without_apply_still_fails_as_a_usage_error(proj: Path) -> None:
+    """The flag-combination guard runs first, so a preview gets the usage
+    error, not the Gate B refusal."""
     _seed_one(proj)
     res = _invoke(["pull", "agents", "a", "--yes"])
     assert res.exit_code == 2
-    assert _FLIP_NOTICE not in res.output
+    assert _YES_REFUSAL not in res.output
 
 
 def test_preview_with_the_confirm_flag_neither_warns_nor_consents(proj: Path, caplog) -> None:
@@ -414,19 +423,19 @@ def test_preview_with_the_confirm_flag_neither_warns_nor_consents(proj: Path, ca
         )
     assert res.exit_code == 0, res.output
     assert consent_lines(caplog) == []
-    assert _FLIP_NOTICE not in res.output
+    assert _YES_REFUSAL not in res.output
     assert not (canonical_artifact_dir("agents", "project_shared", proj) / "a").exists()
 
 
 def test_user_tier_yes_keeps_its_ordinary_meaning(proj: Path, caplog) -> None:
     """``--yes`` was never Gate B on the user tier, so nothing changes there:
-    it still skips the prompt, warns about nothing, and records no consent."""
+    it still skips the prompt, is not refused, and records no consent."""
     _seed_one(proj, scope="user")
     with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
         res = _invoke(["pull", "agents", "a", "--apply", "--scope", "user", "--yes"])
     assert res.exit_code == 0, res.output
     assert consent_lines(caplog) == []
-    assert _FLIP_NOTICE not in res.output
+    assert _YES_REFUSAL not in res.output
 
 
 def test_user_tier_confirm_flag_does_not_skip_the_prompt(proj: Path, caplog) -> None:
@@ -450,61 +459,33 @@ def test_user_tier_confirm_flag_does_not_skip_the_prompt(proj: Path, caplog) -> 
     assert not (canonical_artifact_dir("agents", "user", None) / "a").exists()
 
 
-def test_gate_a_block_warns_but_records_no_consent(proj: Path, caplog) -> None:
-    """Notice is not consent. ``prepare_pull`` refuses before Gate B is ever
-    reached, so the migration signal still fires — an automation owner needs
-    it on a refused run too — while the audit line, which records an
-    authorised write, must not."""
+def test_yes_refusal_precedes_gate_a(proj: Path, caplog) -> None:
+    """The refusal is pre-flight, like every sibling's: content Gate A would
+    block still gets the Gate B refusal, not the Gate A one."""
     seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", _SECRET)})
     with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
         res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
-    assert res.exit_code != 0
-    assert "Gate A" in res.output
-    assert res.stderr.count(_FLIP_NOTICE) == 1
+    assert res.exit_code == 1, res.output
+    assert _YES_REFUSAL in res.output
+    assert "Gate A" not in res.output
     assert consent_lines(caplog) == []
     assert not (canonical_artifact_dir("agents", "project_shared", proj) / "a").exists()
 
 
-def test_the_yes_deprecation_window_expires_at_0_7_0() -> None:
-    """The window is a promise with a date on it; this is the alarm clock.
+def test_yes_refusal_never_reaches_prepare_pull(proj: Path, monkeypatch) -> None:
+    """Output alone cannot place the refusal: ``prepare_pull`` returns its own
+    refusals as values, so a check made just after the call, before its
+    result is handled, would print the same thing. Only the call itself
+    shows the refusal ran first."""
+    import memtomem.cli.context_cmd as context_cmd
 
-    Nothing else in the suite notices when that date passes. The AST guard is
-    green whether or not ``--yes`` is accepted — it only checks that a gate
-    which mentions the flag also emits — and every test above is *written for*
-    the window, so they all keep passing too. A 0.7.0 release with the
-    compatibility block still in place would therefore ship green, and the
-    deprecation would quietly become permanent, which is the outcome ADR-0011
-    §5 objects to in the first place.
-
-    So the version bump itself has to be what goes red. When it does, the flip
-    is: turn the ``deprecated_yes`` block in ``pull_cmd`` into the siblings'
-    refusal, rewrite (do not delete) the three window tests above —
-    ``test_yes_flag_records_the_consent_and_names_the_flag``,
-    ``test_yes_alone_warns_on_stderr_and_still_applies`` and
-    ``test_gate_a_block_warns_but_records_no_consent``, the last of which
-    should then pin that the Gate B refusal precedes Gate A — and delete this
-    test.
-
-    The threshold was 0.6.0 until 2026-09-10. Stage 1 landed after 0.5.0 had
-    shipped and no 0.5.x release followed it, so the "through 0.5.x" window it
-    promised was never installable: released 0.5.0 has no
-    ``--confirm-project-shared`` on ``pull`` at all. Stage 1 therefore ships in
-    0.6.0 — the release the window actually spends — and this alarm moved with
-    it. A window is counted in published releases, not in merges to ``main``.
-
-    That argument is spent once 0.6.0 ships: from then on users have had a
-    release that warned them, and this threshold is a deadline rather than a
-    dial. Moving it again is a maintainer decision that needs its own reason
-    recorded here — not a routine edit to keep the suite green.
-    """
-    raw = metadata.version("memtomem")
-    match = re.match(r"^(\d+)\.(\d+)", raw)
-    assert match is not None, f"unparseable version {raw!r}"
-    assert (int(match.group(1)), int(match.group(2))) < (0, 7), (
-        f"memtomem {raw} still accepts a bare --yes as Gate B on "
-        "`mm context pull`. The #2318 deprecation window ended at 0.7.0 — see "
-        "this test's docstring for the flip."
-    )
+    _seed_one(proj)
+    calls: list[object] = []
+    monkeypatch.setattr(context_cmd, "prepare_pull", lambda *a, **k: calls.append(a))
+    res = _invoke(["pull", "agents", "a", "--apply", "--scope", "project_shared", "--yes"])
+    assert res.exit_code == 1, res.output
+    assert _YES_REFUSAL in res.output
+    assert calls == []
 
 
 def test_declined_prompt_records_no_consent(proj: Path, caplog) -> None:

@@ -1495,10 +1495,8 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     "yes",
     is_flag=True,
     help=(
-        "Skip the confirmation prompt. Requires --apply. Deprecated as Gate B "
-        "consent for a project_shared landing: it still carries the consent "
-        "through 0.6.x with a notice, and stops satisfying Gate B in 0.7.0 "
-        "(#2318) — pass --confirm-project-shared instead."
+        "Skip the confirmation prompt. Requires --apply. Not consent for a "
+        "project_shared landing: pass --confirm-project-shared for that (#2318)."
     ),
 )
 @click.option(
@@ -1507,8 +1505,7 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     is_flag=True,
     help=(
         "Consent for a project_shared landing, as on every other mm write "
-        "surface. From 0.7.0 it is the only flag that carries it — --yes "
-        "stops substituting, leaving this or the prompt (#2318); adopt it now."
+        "surface; --yes alone is not sufficient."
     ),
 )
 @click.option(
@@ -1603,35 +1600,19 @@ def pull_cmd(
             "--scope project_shared (ADR-0030 §11)."
         )
     gate_b_applies = scope == "project_shared"
-    # Was the consent carried by the deprecated spelling? One definition, read
-    # by both the notice below and the audit line's ``flag=`` key, so the two
-    # cannot come to different conclusions about which flag authorised the
-    # write. (The gate itself keeps naming ``confirm_project_shared``
-    # literally: ``test_project_shared_confirmation_audit_guard.py`` finds Gate
-    # B sites by that identifier, and a gate phrased through a derived variable
-    # would drop back out of its view.)
-    deprecated_yes = gate_b_applies and yes and not confirm_project_shared
-    if deprecated_yes:
-        # Deprecation window (#2318), and **this block is the 0.7.0 flip
-        # point**: replace the notice with the siblings' refusal
-        # ("--yes alone is not sufficient") and the window is over.
-        #
-        # It lives here, before ``prepare_pull``, for two reasons. The notice
-        # has to reach runs that never get as far as Gate B — ``prepare_pull``
-        # returns early on a divergent-source refusal, a canonical-exists
-        # refusal, the byte-identical no-op and a Gate A block, and those are
-        # exactly the scheduled jobs whose owner still needs telling. And when
-        # this becomes a refusal it must be pre-flight like every sibling's,
-        # or a --yes-only run would be answered with whatever ``prepare_pull``
-        # objected to instead of the refusal every other surface gives.
-        #
-        # A notice is not a consent: the audit line below still records only a
-        # run that reached a writable plan.
-        click.secho(
-            "Note: --yes alone will stop satisfying Gate B for a project_shared "
-            "pull in 0.7.0; pass --confirm-project-shared instead (#2318).",
-            fg="yellow",
-            err=True,
+    # ADR-0011 §5: --yes is not Gate B consent (#2318). Refused pre-flight like
+    # every sibling's, before ``prepare_pull``: that function returns its own
+    # refusals (divergent source, canonical exists, Gate A) and the
+    # byte-identical no-op as values, so a later check would answer a --yes run
+    # with whichever of those came first instead of the refusal every other
+    # surface gives. Gates here name ``confirm_project_shared`` literally:
+    # ``test_project_shared_confirmation_audit_guard.py`` finds Gate B sites by
+    # that identifier.
+    if gate_b_applies and yes and not confirm_project_shared:
+        raise click.ClickException(
+            "--scope project_shared requires --confirm-project-shared. "
+            "--yes alone is not sufficient: project_shared writes go "
+            "to the git-tracked tier and require explicit opt-in."
         )
     outcome = prepare_pull(
         artifact_kind,
@@ -1651,19 +1632,15 @@ def pull_cmd(
 
     plan = outcome
     _render_pull_plan(plan)
-    # ADR-0011 §5 Gate B, now spelled the way every other CLI surface spells it
-    # (#2318). The ordinary "skip the prompt" meaning of ``--yes`` on the other
-    # tiers is untouched — there it was never Gate B. The 0.7.0 flip is made in
-    # the compatibility block above, not here.
+    # ADR-0011 §5 Gate B, spelled the way every other CLI surface spells it. A
+    # bare --yes never reaches here on project_shared (refused above); on the
+    # other tiers it keeps its ordinary "skip the prompt" meaning, which was
+    # never Gate B.
     #
-    # ``consent_mechanism`` is the audit line's only input. Both flag paths —
-    # the standard one and the deprecated ``--yes`` — record ``flag``, so the
-    # seed covers them and only the prompt arm has to say otherwise. The gate
-    # keeps ``not confirm_project_shared`` literally for the AST guard, and
-    # reuses ``deprecated_yes`` rather than re-testing ``yes``: one definition
-    # decides the notice, this branch, and the ``flag=`` key together.
+    # ``consent_mechanism`` is the audit line's only input: the flag path
+    # records ``flag``, so only the prompt arm has to say otherwise.
     consent_mechanism = "flag"
-    if gate_b_applies and not confirm_project_shared and not deprecated_yes:
+    if gate_b_applies and not confirm_project_shared:
         if not click.confirm(
             f"\n--scope=project_shared writes to git-tracked {root}/.memtomem/. "
             f"Pull {kind}/{name} from {plan.selected_runtime}. Continue?",
@@ -1679,8 +1656,6 @@ def pull_cmd(
     # ADR-0011 §5 Gate B consent (#2306). A *later sibling* of the gate and
     # never inside its body: that body runs only when the consent flag is
     # absent, so an emit there would miss every --confirm-project-shared run.
-    # ``audit_context`` names the flag only when the deprecated ``--yes``
-    # carried the consent, which is what ADR-0011 §5 asks for.
     if gate_b_applies:
         privacy.emit_project_shared_confirmation(
             surface="cli_context_pull",
@@ -1690,7 +1665,6 @@ def pull_cmd(
                 "kind": kind,
                 "name": name,
                 "runtime": plan.selected_runtime,
-                **({"flag": "--yes"} if deprecated_yes else {}),
             },
         )
     result = commit_pull(plan)

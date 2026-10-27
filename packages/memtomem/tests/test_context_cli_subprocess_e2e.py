@@ -566,7 +566,7 @@ class TestContextInitGenerateSubprocess:
             "gemini",
             "--scope",
             "project_shared",
-            "--yes",
+            "--confirm-project-shared",
         )
         assert r.returncode == 0, f"apply failed:\nstdout={r.stdout}\nstderr={r.stderr}"
         canonical = project / ".memtomem" / "agents" / "foo" / "agent.md"
