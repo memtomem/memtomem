@@ -5,8 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-27
+
 ### Upgrading
 
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.14 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.0;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.0`, confirm with `mm --version`, then start a new
+  Claude Code session — the compatibility check is refreshed at session start,
+  and until then those hooks are skipped. See the
+  [CLI reference](docs/guides/reference/data-config-cli.md#cli-reference) for
+  what `mm upgrade` preserves and stops.
 - **`mm context pull … --scope project_shared --yes` is now refused (#2318).**
   A bare `--yes` no longer counts as consent for a write into the git-tracked
   `project_shared` tier: the command exits 1 with "`--yes` alone is not
@@ -15,6 +26,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   has been accepted since 0.6.0, and 0.6.x printed a notice on every `--yes`
   run that would be refused now. `--yes` keeps its usual meaning, skipping
   the prompt, for a pull into any other tier.
+- **Frontmatter is read as YAML (#2877).** Memory files' frontmatter now
+  follows YAML's quoting, comment and structure rules instead of a flat
+  line reader, so some tags and validity bounds read differently after a
+  re-index:
+  - an unquoted `#` suffix is a comment and is dropped with a warning
+    (`tags: a # c` gives `a`); quote a literal hash;
+  - a key needs a space after its colon: `tags:[a, b]` and
+    `valid_to:2024-12-31` are no longer read at all, without a warning
+    (#2885);
+  - double-quoted values decode escapes (`"C:\temp"` holds a tab; use single
+    quotes for a literal backslash), and quoted commas stay inside one item
+    (`['a,b', 'c']` is two tags);
+  - `true`, `false` and `null` in a list keep YAML's spelling instead of
+    becoming `True`, `False` and `None`;
+  - continuation lines and `|` or `>` blocks are read as one value, an
+    `&anchor` is syntax rather than text, a repeated key takes its last
+    value, and `tags` or validity keys nested under another key are ignored.
+
+  Tag filters that matched the old spellings stop matching until the file is
+  fixed and re-indexed.
+- **Back up again after upgrading, and restore a 0.7.0 backup with 0.7.0
+  (#2877).** Export now writes bundle v4. A 0.6.x import does not check the
+  bundle version: it ignores the scope, project and validity fields v4 adds
+  and cannot verify the new provenance marker. Imports are stricter too.
+  A bundle is validated as a whole before anything is written, so one
+  malformed record or relation refuses the import instead of being skipped;
+  a project memory needs a registered project destination, a backup from
+  another machine needs an explicit `project_root_map`, and restoring into
+  `project_shared` needs confirmation. A bundle is capped at 100 MiB (the Web
+  export answers 413; split with export filters). An export file is replaced
+  atomically with mode `0600`, and a symlinked destination is refused. Export
+  and import bundles are experimental (see the README's Stability section).
+- **`mm pinned set` scans the description too (#2877).** A description that
+  looks like a credential is now refused like one in the body.
+- **Deleting or holding a source matches its stored path (#2835).** See the
+  Fixed entry below: `--under`, `mm purge --matching-excluded`,
+  `DELETE /api/sources` and `mem_delete(source_file=)` changed which paths
+  they match.
+- **Antigravity users who registered memtomem in
+  `~/.gemini/antigravity-cli/mcp_config.json`:** the agy CLI no longer reads
+  that file. Move the entry to `~/.gemini/config/mcp_config.json` or run
+  `agy mcp add memtomem memtomem-server` (see Fixed below).
 
 ### Changed
 
@@ -35,6 +88,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   required `confirm_project_shared` and are unchanged. The consent audit line
   no longer carries `flag='--yes'`.
 
+- **Policy summaries keep their originals' project boundary (#2877).** A
+  summary written by consolidation now carries the scope and project root of
+  the chunks it summarises instead of landing user-wide, and a group whose
+  originals span more than one boundary is refused.
+- **The LangGraph store validates what it reads and writes (#2877).** A
+  stored record holding `NaN` or `Infinity`, or one that is malformed, now
+  raises on an exact read or update and is skipped with a warning in a scan,
+  instead of being read or treated as missing. Writes privacy-scan the
+  namespace, key and index selectors, and an `index=` selector must be a
+  list of strings.
+- **Web CSV export quotes every cell (#2877).** Rows end in CRLF, embedded
+  newlines are kept inside the quoted cell instead of becoming `\n`, and a
+  text cell that starts like a formula (`=`, `+`, `-` or `@`, after any
+  leading whitespace) or with a tab or line break is prefixed with `'`.
+  Use JSON export when exact text matters.
+- **Search and recall results carry source fields (#2877).** Structured
+  `mem_search` and `mem_recall` results add `source_file`,
+  `heading_hierarchy`, `start_line` and `end_line`, plus `scope` and the
+  validity bounds when they are set.
+
 ### Added
 
 - **An Antigravity CLI plugin.** `packages/memtomem-antigravity-plugin/`
@@ -45,6 +118,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   scope, with the same skills as the Hermes plugin and no handoff workflow.
   A hand-registered `memtomem` server is not replaced: agy names the plugin's
   server `memtomem_memtomem` and runs both, so keep one of the two.
+- **Memory bundle v4 (#2877).** Backups keep each chunk's scope, project
+  root, validity window, timestamps, overlap and relations, come from one
+  database snapshot, and report held sources and self-relations they leave
+  out. An export is no longer cut at 100,000 chunks per source.
 
 ### Fixed
 
@@ -58,29 +135,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   shows. A v4 bundle holding one is still rejected, and other impossible
   ranges are still refused, because repairing them would move a row's start
   line, which is part of its identity.
-- Back up and restore inverted validity intervals produced by ordinary
-  frontmatter indexing without changing their empty-window search meaning.
-- Map foreign project backups using original wire paths, including POSIX to
-  Windows. Refuse foreign absolute user paths requiring manual conversion in
-  either direction rather than assigning them to a local drive.
-- Return a value-free, actionable 422 for stored-record Web export validation
-  errors, and preserve literal Unicode NEL inside writer-generated JSON tags.
-- Preserve trailing Unicode NEL and other line breaks in YAML values by using
-  escaped double-quoted scalars, including inside flow lists.
-- Restore v1–v3 user-memory backups from the canonical or configured user
-  directories while retaining registered project boundaries and rejecting
-  symlink escapes into project trees.
-- Reject timestamps that overflow during UTC conversion before embedding.
-- Export older stores containing self-relations by omitting those edges and
-  reporting `omitted_self_relations`, instead of refusing the whole backup.
-- Restore v1–v3 backups containing self-relations by skipping those edges after
-  verifying the original signed payload; v4 imports still reject self-relations.
-- Record actual borrowed overlap lengths in raw Markdown chunks. Export bounds
-  impossible historical overlap counts in the backup copy and logs corrections,
-  preserving stored rows and content.
-- Avoid false YAML-comment warnings for quoted list values with plain siblings.
-- Document Windows user-path conversion required for imports on POSIX.
-
+- **Backup and restore edge cases (#2877).** Inverted validity intervals from
+  ordinary frontmatter back up and restore with their empty-window search
+  meaning. Foreign project backups map by their original wire paths,
+  including POSIX to Windows, and foreign absolute user paths that need
+  manual conversion are refused rather than assigned to a local drive. v1–v3
+  user-memory backups restore from the canonical or configured user
+  directories, keeping registered project boundaries and refusing symlink
+  escapes into project trees. Older stores with self-relations export and
+  restore with those edges omitted and counted (`omitted_self_relations`);
+  v4 imports still reject them. Raw Markdown chunks record the overlap they
+  actually borrowed, and export bounds impossible historical counts in the
+  backup copy. Timestamps that overflow during UTC conversion are refused
+  before embedding. Stored-record Web export validation errors return a
+  value-free, actionable 422.
+- **YAML writing keeps line breaks (#2877).** Trailing Unicode NEL and other
+  line breaks in written YAML values use escaped double-quoted scalars,
+  including inside flow lists, and writer-generated JSON tags keep a literal
+  NEL. Quoted list values beside plain ones no longer raise a false comment
+  warning.
+- **The chunk resource returns timestamps (#2877).** The MCP chunk resource
+  read a field that does not exist; it now returns the chunk's `created_at`
+  and `updated_at`.
 - **Antigravity CLI setup points at the config file `agy` reads.** The CLI
   loads MCP servers from `~/.gemini/config/mcp_config.json`; the older
   `~/.gemini/antigravity-cli/mcp_config.json` that `mm init`'s paste hint, the
