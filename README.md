@@ -176,7 +176,9 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor
 
 memtomem is beta (`0.x`). Everything not listed below is supported: a change
 that breaks it gets an `Upgrading` note in the [CHANGELOG](CHANGELOG.md), and a
-deprecation window where one is possible.
+deprecation window where one is possible. The on-disk formats this covers are
+your memory files and their frontmatter, `~/.memtomem/config.json`, and the
+SQLite store; memory export bundles are experimental (below).
 
 These are **experimental** — their behaviour, output or format can still
 change or go away without a window, because a decision that shapes them is
@@ -189,8 +191,8 @@ still open or an LLM writes what they produce:
 - **Memory export and import bundles** — `mem_export` / `mem_import` and the
   Web export/import. How a backup made before 0.7.0 (bundle v1–v3) that holds
   project memories should be restored is still open.
-- **LLM-written output** — anything produced with `MEMTOMEM_LLM__ENABLED=true`
-  that would otherwise come from a rule: LLM auto-tagging and entity
+- **LLM-written output** — anything memtomem's configured LLM
+  (`MEMTOMEM_LLM__ENABLED=true`) writes: LLM auto-tagging and entity
   extraction, `strategy="llm"` query expansion, LLM consolidation and policy
   summaries, session auto-summaries, source summaries
   (`indexing.auto_summarize`) and contextual chunk enrichment
