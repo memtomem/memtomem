@@ -91,9 +91,10 @@ Self-relations emitted by older exporters are skipped and counted in
 `skipped_relations` for v1–v3 imports. Signature verification uses the original
 relation list. New exports omit self-relations and report
 `omitted_self_relations`; v4 imports reject them as malformed.
-An impossible line range in a v1–v3 record (lines `0`–`N`, `N`–`0`, or an end
-before its start) is restored as unmapped (`0`–`0`) and reported as
-`legacy_line_ranges_cleared`; v4 imports reject it as malformed.
+A v1–v3 record whose line range is `0`–`N`, the shape an older
+structured-file merge stored, is restored as unmapped (`0`–`0`) and reported as
+`legacy_line_ranges_cleared`. Other impossible ranges, and any in a v4 bundle,
+are rejected as malformed.
 
 For v4, explicitly declared user records use the indexer's registration rule:
 an unregistered `.memtomem` directory remains user scope. Registered project
@@ -141,8 +142,9 @@ Core file export atomically replaces a regular file with owner-private output.
 Self-relations are omitted from exports so older stores containing them remain
 backuppable. The bundle's `omitted_self_relations` count, export log, and MCP
 summary report the omission; other relations and all selected chunks are kept.
-A stored impossible line range is written as unmapped (`0`–`0`) in the backup
-copy and counted in the export log; the stored row is unchanged.
+A stored `0`–`N` line range is written as unmapped (`0`–`0`) in the backup copy
+and counted in the export log; the stored row is unchanged. Any other impossible
+stored range refuses the export and names the chunk.
 The final destination component must not be a symlink; parent-directory aliases
 such as macOS `/tmp` remain supported. Browser search-result CSV, Markdown and
 JSON downloads are **reports**, not restore bundles. CSV quotes all cells,

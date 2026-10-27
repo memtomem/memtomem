@@ -131,9 +131,23 @@ def timestamp(value: object, where: str, field: str) -> datetime:
         raise invalid(where, field) from exc
 
 
-def line_range_valid(start: int, end: int) -> bool:
-    """Whether ``start``/``end`` is a mapped range or the unmapped ``(0, 0)``."""
-    return end >= start and (start == 0) == (end == 0)
+def stale_unmapped_end(start: object, end: object) -> bool:
+    """Whether a range is the ``(0, N)`` an older merge stored for an unmapped chunk.
+
+    Clearing ``end`` repairs it without moving ``start_line``, which is part of
+    the row's unique key, so no two rows can collapse into one.
+    """
+    return type(start) is int and type(end) is int and start == 0 and end > 0
+
+
+def legacy_unmapped_range(record: dict, version: str) -> bool:
+    """Whether a v1-v3 record carries a ``(0, N)`` range that import clears."""
+    return (
+        version != "4"
+        and "start_line" in record
+        and "end_line" in record
+        and stale_unmapped_end(record["start_line"], record["end_line"])
+    )
 
 
 def validate_records(records: list, relations: list, version: str) -> None:
@@ -176,11 +190,12 @@ def validate_records(records: list, relations: list, version: str) -> None:
                 type(record[key]) is not int or not 0 <= record[key] <= INT64_MAX
             ):
                 raise invalid(where, key)
-        # Older pipelines stored impossible ranges such as a merged unmapped
-        # chunk's (0, N). Import clears them on v1-v3 records; v4 exports never
-        # carry them, so a v4 record holding one is malformed.
+        # An older structured-file merge stored an unmapped chunk as (0, N).
+        # Import clears it on a v1-v3 record; v4 exports never carry it.
         start, end = record.get("start_line", 0), record.get("end_line", 0)
-        if version == "4" and not line_range_valid(start, end):
+        if not legacy_unmapped_range(record, version) and (
+            end < start or (start == 0) != (end == 0)
+        ):
             raise invalid(where, "line range")
         for key in ("overlap_before", "overlap_after"):
             if record.get(key, 0) > len(record["content"]):

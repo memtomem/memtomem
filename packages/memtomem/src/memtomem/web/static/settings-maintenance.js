@@ -493,6 +493,7 @@ async function runImport() {
     const data = await res.json();
     const warnings = [];
     if ((data.warnings || []).includes('legacy_metadata_missing')) warnings.push(t('settings.import.legacy_warning'));
+    if ((data.warnings || []).includes('legacy_line_ranges_cleared')) warnings.push(t('settings.import.line_ranges_warning'));
     if (data.missing_source_files) warnings.push(t('settings.import.missing_warning', { count: data.missing_source_files }));
     if (data.unavailable_source_files) warnings.push(t('settings.import.unavailable_warning', { count: data.unavailable_source_files }));
     qs('imp-warnings').textContent = warnings.join(' ');

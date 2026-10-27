@@ -77,4 +77,26 @@ describe('restore mapping form', () => {
     expect(doc.getElementById('imp-btn').disabled).toBe(false);
     w.close();
   });
+
+  it('names cleared legacy line positions among the import warnings', async () => {
+    const { window: w } = await bootApp({ scripts: ['i18n.js', 'app.js', 'settings-maintenance.js'] });
+    await w.I18N.init();
+    const doc = w.document;
+    Object.defineProperty(doc.getElementById('imp-file'), 'files', {
+      value: [new w.File(['{}'], 'restore.json')],
+    });
+    w.csrfFetch = async () => ({ ok: true, json: async () => ({
+      total_chunks: 1, imported_chunks: 1, skipped_chunks: 0, failed_chunks: 0,
+      warnings: ['legacy_metadata_missing', 'legacy_line_ranges_cleared'],
+    }) });
+    w.showToast = () => {};
+    w.loadSourceFilter = () => {};
+    w.loadStats = () => {};
+    await w.runImport();
+    const text = doc.getElementById('imp-warnings').textContent;
+    expect(text).toContain(w.I18N.t('settings.import.legacy_warning'));
+    expect(text).toContain(w.I18N.t('settings.import.line_ranges_warning'));
+    expect(text).not.toContain('settings.import.');
+    w.close();
+  });
 });

@@ -1908,6 +1908,7 @@
   "settings.import.map_invalid": "양쪽 폴더를 입력하고 중복 매핑을 삭제하세요.",
   "settings.import.refused": "가져오기가 거부되었습니다. 번들과 프로젝트 권한을 확인하세요.",
   "settings.import.legacy_warning": "구형 번들은 일부 메타데이터를 보존하지 않습니다. 가능하면 현재 버전에서 다시 내보내세요.",
+  "settings.import.line_ranges_warning": "일부 구형 레코드는 줄 위치가 잘못되어 줄 위치 없이 복원했습니다.",
   "settings.import.missing_warning": "원문 파일 {count}개가 없습니다. 원문 검사 후 해당 기억이 숨겨질 수 있습니다.",
   "settings.import.unavailable_warning": "원문 파일 {count}개에 접근할 수 없습니다. 재색인 전에 접근 권한을 확인하세요."
 }

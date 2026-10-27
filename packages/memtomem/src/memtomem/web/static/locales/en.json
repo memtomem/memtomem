@@ -1908,6 +1908,7 @@
   "settings.import.map_invalid": "Complete both folders and remove duplicate mappings.",
   "settings.import.refused": "Import refused. Check the bundle and project permissions.",
   "settings.import.legacy_warning": "This older bundle does not preserve all metadata. Export it again with the current version when possible.",
+  "settings.import.line_ranges_warning": "Some older records had an impossible line position and were restored without one.",
   "settings.import.missing_warning": "Source files missing: {count}. These memories may be hidden by source checks.",
   "settings.import.unavailable_warning": "Source files unavailable: {count}. Check access before reindexing."
 }
