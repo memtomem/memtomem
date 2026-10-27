@@ -26,15 +26,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   has been accepted since 0.6.0, and 0.6.x printed a notice on every `--yes`
   run that would be refused now. `--yes` keeps its usual meaning, skipping
   the prompt, for a pull into any other tier.
-- **Frontmatter is read as YAML (#2877).** Memory files' frontmatter now
-  follows YAML's quoting, comment and structure rules instead of a flat
-  line reader, so some tags and validity bounds read differently after a
-  re-index:
+- **Frontmatter is read as YAML (#2877).** The frontmatter of memory files
+  and of Context Gateway agent and command files now follows YAML's quoting,
+  comment and structure rules instead of a flat line reader, so some values
+  read differently after a re-index:
   - an unquoted `#` suffix is a comment and is dropped with a warning
-    (`tags: a # c` gives `a`); quote a literal hash;
-  - a key needs a space after its colon: `tags:[a, b]` and
-    `valid_to:2024-12-31` are no longer read at all, without a warning
-    (#2885);
+    (`tags: a # c` gives `a`; an agent's
+    `description: Triage issue #123 and label it` becomes `Triage issue`);
+    quote a literal hash;
+  - a key needs a space after its colon. When such a line is the only one,
+    the frontmatter is a single YAML string, so `tags:[a, b]` or
+    `valid_to:2024-12-31` alone is not read, without a warning (#2885);
+    beside other keys it is still read, because YAML rejects the block and
+    the line reader takes over;
   - double-quoted values decode escapes (`"C:\temp"` holds a tab; use single
     quotes for a literal backslash), and quoted commas stay inside one item
     (`['a,b', 'c']` is two tags);
@@ -44,20 +48,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
     `&anchor` is syntax rather than text, a repeated key takes its last
     value, and `tags` or validity keys nested under another key are ignored.
 
-  Tag filters that matched the old spellings stop matching until the file is
-  fixed and re-indexed.
+  A `> tags:` blockquote line in a note keeps its own line grammar (no space
+  is needed after its colon), but its value now follows the same quoting and
+  comment rules: `> tags: #python` gives no tag, and double-quoted escapes
+  decode. Tag filters that matched the old spellings stop matching until the
+  file is fixed and re-indexed.
 - **Back up again after upgrading, and restore a 0.7.0 backup with 0.7.0
   (#2877).** Export now writes bundle v4. A 0.6.x import does not check the
   bundle version: it ignores the scope, project and validity fields v4 adds
   and cannot verify the new provenance marker. Imports are stricter too.
   A bundle is validated as a whole before anything is written, so one
   malformed record or relation refuses the import instead of being skipped;
-  a project memory needs a registered project destination, a backup from
-  another machine needs an explicit `project_root_map`, and restoring into
-  `project_shared` needs confirmation. A bundle is capped at 100 MiB (the Web
+  a project memory needs a registered project destination, project memories
+  from another machine need an explicit `project_root_map`, and restoring
+  into `project_shared` needs confirmation. A user memory whose absolute
+  path comes from the other platform (Windows or POSIX) is refused even with
+  a map; convert its `source_file` to a local path first. A bundle is capped at 100 MiB (the Web
   export answers 413; split with export filters). An export file is replaced
   atomically with mode `0600`, and a symlinked destination is refused. Export
   and import bundles are experimental (see the README's Stability section).
+- **Structured `mem_search` and `mem_recall` results carry source fields
+  (#2877).** Each result adds `source_file`, `heading_hierarchy`,
+  `start_line` and `end_line`, plus `scope` and the validity bounds when they
+  are set. The change is additive: no existing key is removed or renamed.
 - **`mm pinned set` scans the description too (#2877).** A description that
   looks like a credential is now refused like one in the body.
 - **Deleting or holding a source matches its stored path (#2835).** See the
@@ -98,15 +111,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   instead of being read or treated as missing. Writes privacy-scan the
   namespace, key and index selectors, and an `index=` selector must be a
   list of strings.
-- **Web CSV export quotes every cell (#2877).** Rows end in CRLF, embedded
-  newlines are kept inside the quoted cell instead of becoming `\n`, and a
-  text cell that starts like a formula (`=`, `+`, `-` or `@`, after any
-  leading whitespace) or with a tab or line break is prefixed with `'`.
-  Use JSON export when exact text matters.
-- **Search and recall results carry source fields (#2877).** Structured
-  `mem_search` and `mem_recall` results add `source_file`,
-  `heading_hierarchy`, `start_line` and `end_line`, plus `scope` and the
-  validity bounds when they are set.
+- **Web CSV export quotes every data cell (#2877).** Rows are separated by
+  CRLF, embedded newlines are kept inside the quoted cell instead of
+  becoming `\n`, and a text cell that starts like a formula (`=`, `+`, `-` or
+  `@`, after any leading whitespace) or with a tab or line break is prefixed
+  with `'`. Use JSON export when exact text matters.
 
 ### Added
 
@@ -142,9 +151,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   manual conversion are refused rather than assigned to a local drive. v1–v3
   user-memory backups restore from the canonical or configured user
   directories, keeping registered project boundaries and refusing symlink
-  escapes into project trees. Older stores with self-relations export and
-  restore with those edges omitted and counted (`omitted_self_relations`);
-  v4 imports still reject them. Raw Markdown chunks record the overlap they
+  escapes into project trees. Older stores with self-relations export with
+  those edges omitted (reported as `omitted_self_relations`), and a v1–v3
+  restore skips them after verifying the signed payload (counted in
+  `skipped_relations`); v4 imports still reject them. Raw Markdown chunks record the overlap they
   actually borrowed, and export bounds impossible historical counts in the
   backup copy. Timestamps that overflow during UTC conversion are refused
   before embedding. Stored-record Web export validation errors return a
