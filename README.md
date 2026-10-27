@@ -174,9 +174,11 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor
 
 ## Stability
 
-memtomem is beta (`0.x`). Every feature not listed below is supported: a
-change that breaks it gets an `Upgrading` note in the [CHANGELOG](CHANGELOG.md),
-and a deprecation window where one is possible.
+memtomem is beta (`0.x`). The nine core MCP tools, the `mm` CLI, and the
+format of your memory files and config files change only with an `Upgrading`
+note in the [CHANGELOG](CHANGELOG.md), and behind a deprecation window where
+one is possible. Other features not listed below are supported — maintained,
+with their changes recorded in the CHANGELOG — without that guarantee.
 
 These are **experimental** — their behaviour, output or format can still
 change or go away without a window, because a decision that shapes them is
