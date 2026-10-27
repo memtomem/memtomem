@@ -176,9 +176,10 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor
 
 memtomem is beta (`0.x`). Everything not listed below is supported: a change
 that breaks it gets an `Upgrading` note in the [CHANGELOG](CHANGELOG.md), and a
-deprecation window where one is possible. The on-disk formats this covers are
-your memory files and their frontmatter, `~/.memtomem/config.json`, and the
-SQLite store; memory export bundles are experimental (below).
+deprecation window where one is possible. That includes every on-disk format
+memtomem writes — memory files and their frontmatter, `~/.memtomem/config.json`
+and its `config.d/` fragments, the SQLite store, the LangGraph stores' files —
+except memory export bundles, which are experimental (below).
 
 These are **experimental** — their behaviour, output or format can still
 change or go away without a window, because a decision that shapes them is
