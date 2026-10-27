@@ -375,7 +375,10 @@ detected runtimes, unchanged).
 
 > **2026-10 (#2318, stage 2):** The flip landed for 0.7.0: a bare `--yes`
 > on a `project_shared` pull is refused, so the CLI, the `mem_context_pull`
-> tool and the web route now refuse the same things.
+> tool and the web route all require explicit `project_shared` consent for a
+> write. They still differ in order: the CLI refuses before preparing the
+> pull, so even a byte-identical no-op needs the flag there, while the tool
+> and the route can return that no-op without one.
 
 ### 12. Source-runtime vocabulary is a first-class table
 
