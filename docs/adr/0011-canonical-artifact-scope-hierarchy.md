@@ -315,11 +315,9 @@ Continue? [y/N]:
 requests, neither of which has a terminal to prompt at. On every surface
 that takes `--confirm-project-shared`, `--yes` alone does **not** satisfy
 Gate B — it is a generic "skip prompts" flag users alias for unrelated
-reasons. One surface is mid-migration rather than compliant: `mm context
-pull` now *takes* `--confirm-project-shared` like the rest, but through 0.6.x
-it also still accepts `--yes`, behind a deprecation notice, and only refuses
-it from 0.7.0 (#2318, below). Until that release the rule above describes
-every CLI write surface's vocabulary and every one but `pull`'s behaviour.
+reasons. `mm context pull` was the last surface to comply: it took
+`--confirm-project-shared` in 0.6.0, accepted `--yes` behind a deprecation
+notice through 0.6.x, and refuses it from 0.7.0 (#2318, below).
 Every one of those consents produces a
 `project_shared.confirmed_via=<surface>` audit line.
 
@@ -523,6 +521,11 @@ instead.
 > 0.6.0, which is the release the window spends, and stage 2 refuses from
 > 0.7.0. The rule this records: a deprecation window is counted in
 > *published releases*, not in merges to `main`.
+>
+> **2026-10 (#2318, stage 2):** The window is closed. From 0.7.0 a bare
+> `--yes` on a `project_shared` pull gets the standard refusal, pre-flight
+> like every sibling's, so it precedes `prepare_pull`'s own refusals and
+> Gate A. No surface now passes `flag='--yes'` in a consent line.
 
 > **2026-09 (#2322):** the derived-destination half above is closed —
 > which corrects the last sentence of the #2318 note, written while it was

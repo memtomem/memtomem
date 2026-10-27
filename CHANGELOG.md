@@ -5,6 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Upgrading
+
+- **`mm context pull … --scope project_shared --yes` is now refused (#2318).**
+  A bare `--yes` no longer counts as consent for a write into the git-tracked
+  `project_shared` tier: the command exits 1 with "`--yes` alone is not
+  sufficient" and writes nothing. Pass
+  `--confirm-project-shared` instead, as on every other `mm` write surface; it
+  has been accepted since 0.6.0, and 0.6.x printed a notice on every `--yes`
+  run that would be refused now. `--yes` keeps its usual meaning, skipping
+  the prompt, for a pull into any other tier.
+
+### Changed
+
+- **`mm context pull` refuses a bare `--yes` as Gate B (#2318).** This ends
+  the deprecation window 0.6.0 opened: the refusal runs before the pull is
+  prepared, as on the sibling commands, so it comes before a Gate A block or
+  any other refusal. The MCP `mem_context_pull` tool and the web route already
+  required `confirm_project_shared` and are unchanged. The consent audit line
+  no longer carries `flag='--yes'`.
+
 ### Added
 
 - **An Antigravity CLI plugin.** `packages/memtomem-antigravity-plugin/`
