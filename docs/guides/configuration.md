@@ -19,7 +19,9 @@ searches upward from the directory memtomem is installed in, not from the
 working directory, so for an install under your home directory the file it
 finds is usually `~/.env`. Only the file's `MEMTOMEM_*` keys are applied (the
 prefix is matched case-insensitively), and a variable already set in the
-environment wins over the file. Every other key is left out and its name
+environment wins over the file when both use the same spelling. Write the
+keys in upper case: on macOS and Linux a lower-case `.env` key is a separate
+variable, and it can override an exported upper-case one. Every other key is left out and its name
 logged once at INFO, so the unprefixed variables above have no effect in
 `.env`: set them in the real environment or in your MCP client's `env` block
 ([MCP client setup](mcp-clients.md#11-environment-variable-overrides)).
