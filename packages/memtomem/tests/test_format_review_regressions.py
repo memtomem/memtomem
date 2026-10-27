@@ -558,6 +558,26 @@ async def test_legacy_stale_unmapped_end_survives_update_carryover(storage, tmp_
     assert (row.metadata.start_line, row.metadata.end_line) == (0, 0)
 
 
+@pytest.mark.parametrize("present", [{"end_line": 50}, {"start_line": 5}])
+@pytest.mark.asyncio
+async def test_legacy_range_with_one_coordinate_is_not_repaired(storage, tmp_path, present):
+    # Carryover would fill the missing coordinate from the row, so a repair here
+    # would land a range the record never held.
+    source = tmp_path / "w.yml"
+    prior = Chunk("historical", ChunkMetadata(source_file=source))
+    await storage.upsert_chunks([prior])
+    record = _record("historical", source=str(source))
+    del record["start_line"], record["end_line"]
+    record.update(present)
+    embedder = _FakeEmbedder()
+    embedder.embed_texts = AsyncMock()
+    with pytest.raises(ValueError, match="line range"):
+        await import_chunks(storage, embedder, legacy_file(tmp_path, record), on_conflict="update")
+    embedder.embed_texts.assert_not_called()
+    row = await storage.get_chunk(prior.id)
+    assert (row.metadata.start_line, row.metadata.end_line) == (0, 0)
+
+
 @pytest.mark.parametrize("start,end", UNREPAIRED_RANGES)
 @pytest.mark.asyncio
 async def test_legacy_impossible_range_with_a_start_still_rejects(storage, tmp_path, start, end):
