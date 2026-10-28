@@ -3297,13 +3297,15 @@ class SqliteBackend(
         return sorted(str(row[0]) for row in rows)
 
     async def count_chunks_by_source(
-        self, source_file: Path, *, exclude_hidden: bool = False
+        self, source_file: Path, *, exclude_hidden: bool = False, as_stored: bool = False
     ) -> int:
+        # ``as_stored`` as on :meth:`list_chunks_by_source`: a key read back
+        # from the store counts its own rows, not those of a symlink's target.
         hidden_clause = f" AND {VISIBLE_SOURCE_PATH}" if exclude_hidden else ""
         async with self._lease_read_db() as db:
             row = db.execute(
                 f"SELECT COUNT(*) FROM chunks WHERE source_file=?{hidden_clause}",  # nosec B608
-                (norm_path(source_file),),
+                (str(source_file) if as_stored else norm_path(source_file),),
             ).fetchone()
         return int(row[0]) if row else 0
 

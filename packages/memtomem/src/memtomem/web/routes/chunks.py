@@ -40,7 +40,6 @@ from memtomem.web.deps import (
     get_index_engine,
     get_search_pipeline,
     get_storage,
-    require_indexed_source,
 )
 from memtomem.web.routes._confirm import needs_confirmation_envelope
 from memtomem.web.routes._errors import (
@@ -104,15 +103,21 @@ async def list_chunks(
     limit: int = Query(50, ge=1, le=500),
     storage=Depends(get_storage),
 ) -> ChunksListResponse:
-    indexed_sources = await storage.get_all_source_files()
-    request_path = require_indexed_source(source, indexed_sources)
+    # The stored key the request names, matched as a string and read as stored,
+    # as the source delete does. Resolving the request would follow a source
+    # that has become a symlink and list another source's rows (#2896).
+    request_path = await storage.find_source_key(source)
+    if request_path is None:
+        raise HTTPException(status_code=403, detail="Path is not an indexed source file.")
     if await source_hidden(storage, request_path):
         raise HTTPException(status_code=404, detail="Source not found")
     # The checks around the reads answer 404; the reads judge the hold
     # themselves, so rows read while the source was hidden never get here.
-    chunks = await storage.list_chunks_by_source(request_path, limit=limit, exclude_hidden=True)
+    chunks = await storage.list_chunks_by_source(
+        request_path, limit=limit, exclude_hidden=True, as_stored=True
+    )
     out = [chunk_to_out(c) for c in chunks]
-    total = await storage.count_chunks_by_source(request_path, exclude_hidden=True)
+    total = await storage.count_chunks_by_source(request_path, exclude_hidden=True, as_stored=True)
     if await source_hidden(storage, request_path):
         raise HTTPException(status_code=404, detail="Source not found")
     return ChunksListResponse(chunks=out, total=total)

@@ -28,6 +28,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   spelling of a root, such as `/tmp/…` for `/private/tmp/…`, a spelling
   the indexer does not write today, is now listed outside every root and
   left by the remove, as `mm gc orphan-sources` already treats it.
+- **The Web UI chunk browser shows a source's own chunks after it became a
+  symlink (#2896).** For an indexed file later replaced by a link to another
+  indexed file, opening it listed and counted the link target's chunks,
+  while deleting it from the same panel deleted its own. `GET /api/chunks`
+  now takes the stored path the way the source delete does and reads it as
+  stored. A path that reaches an indexed file only through a symlinked
+  directory, a relative path or one with `..` is now refused with 403 as the delete
+  already refuses it; the Web UI sends stored paths.
 
 ## [0.7.0] — 2026-10-27
 

@@ -327,7 +327,7 @@ class StorageBackend(Protocol):
         exclude_consolidated: bool = False,
     ) -> list[Chunk]: ...
     async def count_chunks_by_source(
-        self, source_file: Path, *, exclude_hidden: bool = False
+        self, source_file: Path, *, exclude_hidden: bool = False, as_stored: bool = False
     ) -> int: ...
     # Batch sibling of the above (#2261). Two contract points:
     #   * **Sparse** — a file with no chunks is absent, not zero — and keys are
