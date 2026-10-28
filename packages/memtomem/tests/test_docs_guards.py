@@ -1488,17 +1488,6 @@ def _release_mention(version: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![\d.]){re.escape(version)}(?!\d|\.\d)")
 
 
-def _previous_release(changelog: str, current: str) -> str | None:
-    """The highest ``## [X.Y.Z]`` CHANGELOG heading below *current*."""
-
-    def key(version: str) -> tuple[int, ...]:
-        return tuple(int(part) for part in version.split("."))
-
-    released = re.findall(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.MULTILINE)
-    older = [version for version in released if key(version) < key(current)]
-    return max(older, key=key) if older else None
-
-
 def _unexempt_mentions(line: str, mention: re.Pattern[str], fragments: list[str]) -> list[str]:
     """Matches of *mention* in *line* that no fragment occurrence contains.
 
@@ -1636,11 +1625,14 @@ class TestRegistryAndInstallDocs:
         The spelling list above cannot converge — ``# memtomem 0.7.0 use cases``
         and ``The complete v0.7.0 top-level command catalog`` both passed it —
         so this checks the other direction: after a bump, the old version is
-        searched for in any spelling (#2888).
+        searched for in any spelling (#2888). The previous release comes from
+        the CHANGELOG headings; the release preflight refuses a tag whose
+        headings disagree with the previous production tag (#2891).
         """
         with (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").open("rb") as handle:
             version = tomllib.load(handle)["project"]["version"]
-        previous = _previous_release(_read(_REPO_ROOT / "CHANGELOG.md"), version)
+        changelog = _read(_REPO_ROOT / "CHANGELOG.md")
+        previous = _load_release_preflight().previous_changelog_release(changelog, version)
         assert previous is not None, f"CHANGELOG.md has no release heading below {version}"
 
         whole_files = {path for path, fragment, _ in _PRIOR_RELEASE_MENTIONS if fragment is None}

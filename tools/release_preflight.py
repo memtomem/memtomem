@@ -587,6 +587,57 @@ def _version_tuple(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.split("."))
 
 
+def _previous_production_tag(tag: str, repo_root: Path) -> str:
+    """The highest ``vX.Y.Z`` tag below *tag*'s version; test tags never count."""
+    expected = _version_tuple(version_from_tag(tag))
+    candidates = []
+    for line in _git_ok(repo_root, "tag", "--list").splitlines():
+        match = _PROD_TAG_RE.fullmatch(line.strip())
+        if match and _version_tuple(match.group("version")) < expected:
+            candidates.append((_version_tuple(match.group("version")), match.group(0)))
+    if not candidates:
+        raise ReleaseCheckError(
+            f"no production tag older than {tag} "
+            "(a shallow clone or a checkout without tags has none)"
+        )
+    return max(candidates)[1]
+
+
+def previous_changelog_release(changelog: str, current: str) -> str | None:
+    """The highest ``## [X.Y.Z]`` CHANGELOG heading below *current*.
+
+    The docs guard reads this as the release a bump leaves behind, so it and
+    ``validate_changelog_baseline`` share this one parse.
+    """
+    released = re.findall(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.MULTILINE)
+    older = [version for version in released if _version_tuple(version) < _version_tuple(current)]
+    return max(older, key=_version_tuple) if older else None
+
+
+def validate_changelog_baseline(tag: str, repo_root: Path) -> str:
+    """Refuse a CHANGELOG whose previous release is not the previous production tag.
+
+    ``test_no_doc_still_names_the_previous_release`` takes the previous release
+    from the CHANGELOG headings. An unreleased heading below this tag moves that
+    baseline up, and a released heading rewritten out of the parse moves it down;
+    either way the docs guard checks for the wrong old version and passes. The
+    tags are the release record, so the headings are held to them here.
+
+    Returns the previous production tag.
+    """
+    baseline = _previous_production_tag(tag, repo_root)
+    changelog = (repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
+    found = previous_changelog_release(changelog, version_from_tag(tag))
+    if found != version_from_tag(baseline):
+        heading = f"'## [{found}]'" if found else "missing"
+        raise ReleaseCheckError(
+            f"the highest CHANGELOG.md release heading below {tag} is {heading}, but the previous "
+            f"production tag is {baseline}; an unreleased heading, or a released one not "
+            "written as '## [X.Y.Z]', would make the docs guard check the wrong old version"
+        )
+    return baseline
+
+
 def validate_hermes_version_bump(tag: str, repo_root: Path) -> str | None:
     """Refuse a Hermes package that changed since the last release under the same version.
 
@@ -599,7 +650,6 @@ def validate_hermes_version_bump(tag: str, repo_root: Path) -> str | None:
 
     Returns the baseline tag, or None when the baseline predates every package.
     """
-    expected = _version_tuple(version_from_tag(tag))
     # The verdict speaks for HEAD, so a package directory that differs from HEAD
     # would make it describe something other than what is on disk.
     for package in _HERMES_PACKAGES:
@@ -611,17 +661,7 @@ def validate_hermes_version_bump(tag: str, repo_root: Path) -> str | None:
                 f"{package.path} has uncommitted changes; commit them before the release check"
             )
 
-    candidates = []
-    for line in _git_ok(repo_root, "tag", "--list").splitlines():
-        match = _PROD_TAG_RE.fullmatch(line.strip())
-        if match and _version_tuple(match.group("version")) < expected:
-            candidates.append((_version_tuple(match.group("version")), match.group(0)))
-    if not candidates:
-        raise ReleaseCheckError(
-            f"no production tag older than {tag} to compare the Hermes packages against "
-            "(a shallow clone or a checkout without tags has none)"
-        )
-    baseline = max(candidates)[1]
+    baseline = _previous_production_tag(tag, repo_root)
     base_commit = _git_ok(repo_root, "rev-parse", "--verify", f"refs/tags/{baseline}^{{commit}}")
     base_commit = base_commit.strip()
 
@@ -945,6 +985,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "release tag without a version bump. Needs full tag history."
         ),
     )
+    contract.add_argument(
+        "--require-changelog-baseline",
+        action="store_true",
+        help=(
+            "Also require the highest CHANGELOG release heading below the tag to be "
+            "the previous release tag. Needs full tag history."
+        ),
+    )
 
     artifacts = subparsers.add_parser("artifacts")
     artifacts.add_argument("--dist", type=Path, required=True)
@@ -983,6 +1031,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             if args.require_hermes_version_bump:
                 validate_hermes_version_bump(args.tag, args.repo_root.resolve())
+            if args.require_changelog_baseline:
+                validate_changelog_baseline(args.tag, args.repo_root.resolve())
             _write_github_output(args.github_output, "version", version)
             print(version)
         elif args.command == "artifacts":

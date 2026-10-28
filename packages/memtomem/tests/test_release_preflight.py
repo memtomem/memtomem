@@ -485,10 +485,16 @@ def test_sbom_workflow_does_not_require_the_registry_manifest() -> None:
     assert scanned, "release-sbom.yml no longer runs release_preflight.py at all"
 
 
-def test_release_workflow_opts_into_the_hermes_version_bump_check() -> None:
+# The contract checks that compare against the previous production tag.
+_PREVIOUS_RELEASE_FLAGS = ("--require-hermes-version-bump", "--require-changelog-baseline")
+
+
+@pytest.mark.parametrize("flag", _PREVIOUS_RELEASE_FLAGS)
+def test_release_workflow_opts_into_each_previous_release_check(flag: str) -> None:
     """Only the preflight job: it is the one checkout carrying the full tag history."""
     document = _workflow("release.yml")
-    assert _parsed_contract_args(document, "preflight", "contract").require_hermes_version_bump
+    args = _parsed_contract_args(document, "preflight", "contract")
+    assert getattr(args, flag.removeprefix("--").replace("-", "_")) is True
     checkout = next(
         step
         for step in document["jobs"]["preflight"]["steps"]
@@ -497,7 +503,8 @@ def test_release_workflow_opts_into_the_hermes_version_bump_check() -> None:
     assert checkout["with"]["fetch-depth"] == 0
 
 
-def test_sbom_workflow_does_not_require_the_hermes_version_bump() -> None:
+@pytest.mark.parametrize("flag", _PREVIOUS_RELEASE_FLAGS)
+def test_sbom_workflow_does_not_compare_against_the_previous_release(flag: str) -> None:
     """Backfills validate one historical tag; its predecessor is not this gate's business."""
     runs = [
         step["run"]
@@ -506,7 +513,7 @@ def test_sbom_workflow_does_not_require_the_hermes_version_bump() -> None:
         if isinstance(step.get("run"), str) and "release_preflight.py" in step["run"]
     ]
     assert runs, "release-sbom.yml no longer runs release_preflight.py at all"
-    assert all("--require-hermes-version-bump" not in run for run in runs)
+    assert all(flag not in run for run in runs)
 
 
 class _Pkg(NamedTuple):
@@ -815,6 +822,130 @@ def test_the_flag_is_what_makes_the_contract_check_refuse_an_unbumped_hermes_cha
     assert rp.main(argv) == 0
     # Text mode: the success line ends in CRLF on Windows.
     assert output.read_text(encoding="utf-8").splitlines() == ["before", "version=0.6.7"]
+
+
+def _baseline_repo(tmp_path: Path, version: str, headings: list[str], tags: list[str]) -> Path:
+    repo = _repo(tmp_path, version=version)
+    sections = "".join(f"{heading}\n\n- entry\n\n" for heading in headings)
+    (repo / "CHANGELOG.md").write_text(f"## [Unreleased]\n\n{sections}", encoding="utf-8")
+    _git(repo, "init", "-q", "-b", "main")
+    _commit(repo, "release")
+    for tag in tags:
+        _git(repo, "tag", tag)
+    return repo
+
+
+def test_changelog_baseline_matching_the_previous_tag_passes(tmp_path: Path) -> None:
+    repo = _baseline_repo(
+        tmp_path,
+        "0.7.1",
+        ["## [0.7.1] — 2026-10-29", "## [0.7.0] — 2026-10-27", "## [0.6.12] — 2026-10-25"],
+        ["v0.6.12", "v0.7.0"],
+    )
+    assert rp.validate_changelog_baseline("v0.7.1", repo) == "v0.7.0"
+
+
+def test_an_unreleased_heading_below_the_tag_is_refused(tmp_path: Path) -> None:
+    """0.7.1 was merged but never tagged; the docs guard would look for 0.7.1, not 0.7.0."""
+    repo = _baseline_repo(
+        tmp_path,
+        "0.7.2",
+        ["## [0.7.2] — 2026-11-02", "## [0.7.1] — 2026-10-30", "## [0.7.0] — 2026-10-27"],
+        ["v0.7.0"],
+    )
+    with pytest.raises(
+        rp.ReleaseCheckError,
+        match=r"below v0\.7\.2 is '## \[0\.7\.1\]', but the previous production tag is v0\.7\.0;",
+    ):
+        rp.validate_changelog_baseline("v0.7.2", repo)
+
+
+@pytest.mark.parametrize(
+    "rewritten",
+    ["## 0.7.0 — 2026-10-27", "## [v0.7.0] — 2026-10-27", "##\t[0.7.0] — 2026-10-27", None],
+    ids=["unbracketed", "v-prefixed", "tab", "deleted"],
+)
+def test_a_released_heading_the_parse_no_longer_reads_is_refused(
+    tmp_path: Path, rewritten: str | None
+) -> None:
+    """The baseline falls back to 0.6.12, and the docs guard would look for that."""
+    headings = ["## [0.7.1] — 2026-10-29", rewritten, "## [0.6.12] — 2026-10-25"]
+    repo = _baseline_repo(
+        tmp_path, "0.7.1", [h for h in headings if h is not None], ["v0.6.12", "v0.7.0"]
+    )
+    with pytest.raises(
+        rp.ReleaseCheckError,
+        match=r"is '## \[0\.6\.12\]', but the previous production tag is v0\.7\.0;",
+    ):
+        rp.validate_changelog_baseline("v0.7.1", repo)
+
+
+def test_a_changelog_with_no_heading_below_the_tag_is_refused(tmp_path: Path) -> None:
+    repo = _baseline_repo(
+        tmp_path, "0.7.1", ["## [0.7.1] — 2026-10-29", "## 0.7.0 — 2026-10-27"], ["v0.7.0"]
+    )
+    with pytest.raises(rp.ReleaseCheckError, match=r"below v0\.7\.1 is missing, but .* v0\.7\.0;"):
+        rp.validate_changelog_baseline("v0.7.1", repo)
+
+
+def test_changelog_baseline_ignores_higher_tags_and_reruns(tmp_path: Path) -> None:
+    repo = _baseline_repo(
+        tmp_path,
+        "0.7.1",
+        ["## [0.7.1] — 2026-10-29", "## [0.7.0] — 2026-10-27"],
+        ["v0.7.0", "v0.7.1", "v0.8.0", "test-v0.7.1a1"],
+    )
+    assert rp.validate_changelog_baseline("test-v0.7.1a2", repo) == "v0.7.0"
+    assert rp.validate_changelog_baseline("v0.7.1", repo) == "v0.7.0"
+
+
+def test_a_test_tag_is_never_the_previous_release(tmp_path: Path) -> None:
+    """0.7.0 reached TestPyPI only; its heading is as unreleased as an untagged one."""
+    repo = _baseline_repo(
+        tmp_path,
+        "0.7.1",
+        ["## [0.7.1] — 2026-10-29", "## [0.7.0] — 2026-10-27", "## [0.6.12] — 2026-10-25"],
+        ["v0.6.12", "test-v0.7.0a1"],
+    )
+    with pytest.raises(rp.ReleaseCheckError, match=r"previous production tag is v0\.6\.12;"):
+        rp.validate_changelog_baseline("test-v0.7.1a1", repo)
+
+
+def test_changelog_baseline_orders_versions_numerically(tmp_path: Path) -> None:
+    """Lexically 0.6.9 is above 0.6.11 on both sides, so only the exact baseline tells."""
+    repo = _baseline_repo(
+        tmp_path,
+        "0.6.12",
+        ["## [0.6.12] — 2026-10-25", "## [0.6.11] — 2026-10-24", "## [0.6.9] — 2026-10-20"],
+        ["v0.6.9", "v0.6.11"],
+    )
+    assert rp.validate_changelog_baseline("v0.6.12", repo) == "v0.6.11"
+
+
+def test_changelog_baseline_without_an_older_production_tag_is_refused(tmp_path: Path) -> None:
+    repo = _baseline_repo(tmp_path, "0.7.0", ["## [0.7.0] — 2026-10-27"], ["test-v0.7.0a1"])
+    with pytest.raises(rp.ReleaseCheckError, match=r"^no production tag older than v0\.7\.0 "):
+        rp.validate_changelog_baseline("v0.7.0", repo)
+
+
+def test_the_flag_is_what_makes_the_contract_check_refuse_an_unreleased_heading(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _baseline_repo(
+        tmp_path,
+        "0.7.2",
+        ["## [0.7.2] — 2026-11-02", "## [0.7.1] — 2026-10-30", "## [0.7.0] — 2026-10-27"],
+        ["v0.7.0"],
+    )
+    output = tmp_path / "github-output"
+    output.write_bytes(b"before\n")
+    argv = ["contract", "--tag", "v0.7.2", "--repo-root", str(repo), "--github-output", str(output)]
+
+    assert rp.main([*argv, "--require-changelog-baseline"]) == 1
+    assert output.read_bytes() == b"before\n"
+    assert capsys.readouterr().out == ""
+    assert rp.main(argv) == 0
+    assert output.read_text(encoding="utf-8").splitlines() == ["before", "version=0.7.2"]
 
 
 # Every counterexample three review rounds and one design debate produced.

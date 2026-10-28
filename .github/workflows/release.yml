@@ -107,6 +107,7 @@ jobs:
           --repo-root .
           --require-registry-manifest
           --require-hermes-version-bump
+          --require-changelog-baseline
           --github-output "$GITHUB_OUTPUT"
       - name: Require the tag commit to be on main
         run: |
