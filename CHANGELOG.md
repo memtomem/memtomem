@@ -17,6 +17,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   grammar still reads it, as before. An indented one under an unquoted value
   such as `title: x` becomes part of that value under YAML and is not
   warned about.
+- **Removing a memory dir in the Web UI deletes the rows it counted, even
+  after a file became a symlink (#2878).** When an indexed file was later
+  replaced by a link to another indexed file, the Sources tree and the
+  status counts grouped it under the link target's root. Removing that root
+  with chunk deletion then deleted the target's rows and left the link's, so
+  it deleted fewer chunks than the confirm dialog showed. All three now group
+  a source by the key it was indexed under, and the sweep deletes that key,
+  as `mm gc orphan-sources` has since #2835. A source stored under an alias
+  spelling of a root, such as `/tmp/…` for `/private/tmp/…`, a spelling
+  the indexer does not write today, is now listed outside every root and
+  left by the remove, as `mm gc orphan-sources` already treats it.
 
 ## [0.7.0] — 2026-10-27
 

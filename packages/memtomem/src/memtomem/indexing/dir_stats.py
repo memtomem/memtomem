@@ -347,9 +347,10 @@ def _dir_creation_time_iso(p: Path) -> str | None:
 def _longest_owning_prefix(target: str, prefixes: Iterable[str]) -> str | None:
     """Return the longest of ``prefixes`` that ``target`` starts with.
 
-    ``target`` is a :func:`norm_path` string and ``prefixes`` are
-    :func:`norm_dir_prefix` strings, both computed by the caller so a loop over
-    many sources normalises each path once. This is the longest-prefix rule of
+    ``target`` is a :func:`norm_path` string, or a stored key in its
+    :func:`fold_path_form` for the callers that judge indexed sources (#2878).
+    ``prefixes`` are :func:`norm_dir_prefix` strings. Both are computed by the
+    caller so a loop over many sources normalises each path once. This is the longest-prefix rule of
     :func:`resolve_owning_memory_dir`, which the Sources tree uses, applied to
     strings that are already normalised. The status counts and the web remove
     sweep use it so that each source belongs to exactly one root. (#2524)
@@ -368,8 +369,9 @@ def swept_on_remove(target: str, removed_prefix: str, surviving_prefixes: Iterab
     that survives the removal still contains it. A surviving root that
     contains the source (a nested root, an ancestor, or the same path listed
     in another tier) would index it again on its next walk or watcher event,
-    so deleting it would only make it disappear for a while (#2534). Strings
-    are :func:`norm_path` / :func:`norm_dir_prefix` forms, as in
+    so deleting it would only make it disappear for a while (#2534). ``target``
+    is a stored key in its :func:`fold_path_form`, which the sweep deletes as
+    stored (#2878); the prefixes are :func:`norm_dir_prefix` forms, as in
     :func:`_longest_owning_prefix`.
     """
     return (
@@ -536,7 +538,7 @@ async def memory_dir_stats(
 
     Without ``hidden_reasons`` all three are 0.
     """
-    from memtomem.storage.sqlite_helpers import norm_path
+    from memtomem.storage.sqlite_helpers import fold_path_form
 
     rows = await storage.get_source_files_with_counts()
     dir_list = list(memory_dirs)
@@ -571,7 +573,9 @@ async def memory_dir_stats(
     for row in rows:
         # row = (Path, chunk_count, last_updated, namespaces, ...)
         source_path, count, last_updated = row[0], row[1], row[2]
-        owner = _longest_owning_prefix(norm_path(source_path), prefixes)
+        # The stored key, not where it resolves now: the remove sweep deletes
+        # by the same key, so the dialog's count matches it (#2878).
+        owner = _longest_owning_prefix(fold_path_form(str(source_path)), prefixes)
         if owner is None:
             continue
         bucket = buckets[owner]

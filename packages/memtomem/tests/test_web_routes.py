@@ -1568,10 +1568,12 @@ class TestSources:
         """Sources whose owning dir is registered carry a concrete
         ``kind``. Use a path under the existing ``/tmp/memories`` dir
         (which classifies as ``memory`` thanks to the ``memories``
-        segment) so the kind/memory_dir wiring is end-to-end exercised."""
+        segment) so the kind/memory_dir wiring is end-to-end exercised.
+        The row is the resolved spelling storage writes: a stored key is
+        grouped as stored, not re-resolved (#2878)."""
         app.state.storage.get_source_files_with_counts.return_value = [
             (
-                Path("/tmp/memories/note.md"),
+                Path("/tmp/memories").resolve() / "note.md",
                 3,
                 "2026-04-29T10:00:00",
                 "default",
@@ -6150,11 +6152,14 @@ class TestRemoveMemoryDirChunkCleanup:
         app.state.storage.get_source_files_with_counts.return_value = [
             (path, n, "2026-04-29T00:00:00", "default", 100, 50, 200) for path, n in rows
         ]
-        app.state.storage.delete_by_source = AsyncMock(side_effect=lambda p: chunks[p])
+        app.state.storage.delete_by_source = AsyncMock(side_effect=lambda p, **_: chunks[p])
 
     @staticmethod
     def _deleted(app) -> list[Path]:
-        return [call.args[0] for call in app.state.storage.delete_by_source.call_args_list]
+        calls = app.state.storage.delete_by_source.call_args_list
+        # The sweep deletes the stored key it judged, never a re-resolution (#2878).
+        assert all(call.kwargs == {"as_stored": True} for call in calls), calls
+        return [call.args[0] for call in calls]
 
     async def test_nested_user_dir_that_stays_keeps_its_chunks(
         self, app, client: AsyncClient, tmp_path: Path
@@ -6521,6 +6526,60 @@ class TestRemoveMemoryDirChunkCleanup:
         assert resp.status_code == 404, resp.text
         assert app.state.config.indexing.memory_dirs == [nfd, z]
         save.assert_not_called()
+        assert self._deleted(app) == []
+
+    @pytest.mark.usefixtures("folds_unicode_forms")
+    async def test_an_nfd_stored_key_is_swept_with_its_nfc_root(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2878: the stored key is not resolved, but its Unicode form is still
+        folded the way the root prefixes are, so a key stored before keys were
+        folded (#235) counts and sweeps with its root."""
+        nfc, z = tmp_path / CAFE_NFC, tmp_path / "z"
+        nfc.mkdir()
+        z.mkdir()
+        app.state.config.indexing.memory_dirs = [nfc, z]
+        key = Path(str(nfc.resolve()).replace(CAFE_NFC, CAFE_NFD) + "/a.md")
+        assert str(key) != str(nfc.resolve() / "a.md")
+        self._serve_rows(app, [(key, 3)])
+
+        shown = await self._shown(client, nfc)
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(nfc), "delete_chunks": True}
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted_chunks"] == shown == 3
+        assert self._deleted(app) == [key]
+
+    @pytest.mark.requires_symlinks
+    async def test_a_key_stored_under_an_alias_spelling_is_outside_the_root(
+        self, app, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        """#2878, declared trade-off: a key in an alias spelling of a root (one
+        written before keys were resolved, like ``/tmp`` for ``/private/tmp``)
+        is not re-resolved into that root. It is shown outside every root and
+        the remove leaves it, as ``mm gc orphan-sources`` does (#2835)."""
+        real = tmp_path / "real"
+        real.mkdir()
+        z = tmp_path / "z"
+        z.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        app.state.config.indexing.memory_dirs = [real, z]
+        self._serve_rows(app, [(link / "a.md", 4)])
+
+        shown = await self._shown(client, real)
+        sources = (await client.get("/api/sources")).json()["sources"]
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/remove", json={"path": str(real), "delete_chunks": True}
+            )
+
+        assert [(s["path"], s["memory_dir"]) for s in sources] == [(str(link / "a.md"), None)]
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted_chunks"] == shown == 0
         assert self._deleted(app) == []
 
     @pytest.mark.requires_symlinks

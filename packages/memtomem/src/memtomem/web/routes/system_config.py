@@ -1094,8 +1094,14 @@ async def remove_memory_dir(
                     try:
                         for row in rows:
                             source_path = row[0]
-                            if swept_on_remove(norm_path(source_path), prefix, surviving):
-                                deleted_chunks += await storage.delete_by_source(source_path)
+                            # Judged and deleted by the stored key: resolving it
+                            # would follow a path that has since become a link
+                            # to another source's rows (#2835, #2878).
+                            key = fold_path_form(str(source_path))
+                            if swept_on_remove(key, prefix, surviving):
+                                deleted_chunks += await storage.delete_by_source(
+                                    source_path, as_stored=True
+                                )
                     finally:
                         # Same cache-staleness class as #2141: these rows are
                         # gone from the store but a warmed query would still

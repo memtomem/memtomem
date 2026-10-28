@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from memtomem.config import MemoryDirKind, TargetScope, memory_dir_kind
 from memtomem.indexing.engine import norm_dir_prefix
 from memtomem.indexing.summarizer import regenerate_for_paths
-from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_helpers import fold_path_form, norm_path
 from memtomem.web.deps import (
     get_config,
     get_search_pipeline,
@@ -145,7 +145,9 @@ async def list_sources(
 
     all_sources: list[SourceOut] = []
     for p, cnt, last_indexed_iso, ns_csv, avg_tok, min_tok, max_tok in sorted(rows):
-        target = norm_path(p)
+        # Grouped by the stored key, the rule the remove sweep and the status
+        # counts use, not by where a since-relinked path points (#2878).
+        target = fold_path_form(str(p))
         match = next(
             (
                 (dir_path, dir_kind)
