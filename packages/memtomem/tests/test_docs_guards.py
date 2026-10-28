@@ -115,12 +115,8 @@ _NON_DOC_MARKDOWN = (
 )
 
 
-def _tracked_markdown() -> list[Path]:
-    """Tracked Markdown documentation — guides, ADRs, plugin and package docs.
-
-    Broader than :func:`_public_markdown` (which is the *contractual* surface)
-    so a link rotting in an ADR or a plugin SKILL.md is caught too, but the
-    non-documentation Markdown in ``_NON_DOC_MARKDOWN`` is excluded.
+def _tracked_files(*pathspecs: str, root: Path = _REPO_ROOT) -> list[Path] | None:
+    """Tracked files matching *pathspecs*, or None when *root* is not a repository.
 
     ``core.quotePath=false`` plus NUL separation keeps non-ASCII filenames
     usable: the default output would octal-escape and quote them, and the
@@ -129,30 +125,43 @@ def _tracked_markdown() -> list[Path]:
     """
     try:
         result = subprocess.run(
-            [
-                "git",
-                "-c",
-                "core.quotePath=false",
-                "ls-files",
-                "-z",
-                "--",
-                "*.md",
-                *_NON_DOC_MARKDOWN,
-            ],
-            cwd=_REPO_ROOT,
+            ["git", "-c", "core.quotePath=false", "ls-files", "-z", "--", *pathspecs],
+            cwd=root,
             check=True,
             capture_output=True,
             text=True,
             timeout=30,
         )
     except FileNotFoundError:  # pragma: no cover - git is present in CI
-        pytest.skip("git is unavailable; cannot enumerate tracked Markdown")
+        pytest.skip("git is unavailable; cannot enumerate tracked files")
     except subprocess.CalledProcessError:  # pragma: no cover - CI is a checkout
         # git exists but there is no repository metadata (source archive,
-        # exported tree). Fall back to the contractual surface, which is
-        # enumerated from the filesystem and needs no git.
-        return _public_markdown()
-    return sorted(_REPO_ROOT / path for path in result.stdout.split("\0") if path)
+        # exported tree).
+        return None
+    return sorted(root / path for path in result.stdout.split("\0") if path)
+
+
+def _tracked_markdown() -> list[Path]:
+    """Tracked Markdown documentation — guides, ADRs, plugin and package docs.
+
+    Broader than :func:`_public_markdown` (which is the *contractual* surface)
+    so a link rotting in an ADR or a plugin SKILL.md is caught too, but the
+    non-documentation Markdown in ``_NON_DOC_MARKDOWN`` is excluded. Without
+    repository metadata it falls back to the contractual surface, which is
+    enumerated from the filesystem and needs no git.
+    """
+    tracked = _tracked_files("*.md", *_NON_DOC_MARKDOWN)
+    return _public_markdown() if tracked is None else tracked
+
+
+def _tracked_example_python(root: Path = _REPO_ROOT) -> list[Path]:
+    """Tracked ``examples/**/*.py``, at any depth including ``examples/`` itself.
+
+    Tracked only: an example run from a local ``.venv`` under ``examples/``
+    would otherwise put site-packages into the scan. For the same reason there
+    is no filesystem fallback — without repository metadata this is empty.
+    """
+    return _tracked_files(":(glob)examples/**/*.py", root=root) or []
 
 
 def _read(path: Path) -> str:
@@ -1628,6 +1637,10 @@ class TestRegistryAndInstallDocs:
         searched for in any spelling (#2888). The previous release comes from
         the CHANGELOG headings; the release preflight refuses a tag whose
         headings disagree with the previous production tag (#2891).
+
+        Scanned: tracked Markdown, notebook cell sources, and tracked example
+        Python, whose docstrings and error messages tell a reader which
+        release to install (#2892).
         """
         with (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").open("rb") as handle:
             version = tomllib.load(handle)["project"]["version"]
@@ -1645,6 +1658,7 @@ class TestRegistryAndInstallDocs:
         docs = [
             *_tracked_markdown(),
             *sorted((_REPO_ROOT / "examples" / "notebooks").glob("*.ipynb")),
+            *_tracked_example_python(),
         ]
         offenders: list[str] = []
         for doc in docs:
@@ -1718,6 +1732,22 @@ class TestRegistryAndInstallDocs:
             (f"{rel}#cell1:2", "# pinned to 0.7.0"),
             (f"{rel}#cell1:3", "x = 1"),
         ]
+
+    def test_previous_release_scan_reads_tracked_example_python_only(self, tmp_path: Path) -> None:
+        """Every tracked depth under ``examples/``; nothing untracked, nothing outside it."""
+        for rel in ("examples/top.py", "examples/a/b/deep.py", "examples/a/notes.txt", "x.py"):
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_text("print('0.7.0')\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+        venv = tmp_path / "examples" / "a" / ".venv" / "lib" / "site.py"
+        venv.parent.mkdir(parents=True)
+        venv.write_text("print('0.7.0')\n", encoding="utf-8")
+
+        found = [
+            path.relative_to(tmp_path).as_posix() for path in _tracked_example_python(tmp_path)
+        ]
+        assert found == ["examples/a/b/deep.py", "examples/top.py"]
 
     def test_plugin_readme_fresh_env_blocks_have_no_bare_mm(self) -> None:
         """Fresh-machine command blocks in the plugin READMEs pin every call.
