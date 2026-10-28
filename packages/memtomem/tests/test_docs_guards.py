@@ -1436,6 +1436,102 @@ class TestVibeCodingQuickstart:
             assert advanced_or_private not in guide
 
 
+# Mentions of a past core release that are history, not a pin a bump must move.
+# (repo-relative path, fragment, reason): a match of the previous release is
+# exempt only when it lies inside an occurrence of the fragment on the same
+# line; ``None`` exempts the whole file. A spelling is never exempt by shape —
+# a new historical reference is added here on purpose (#2888).
+_PRIOR_RELEASE_MENTIONS: tuple[tuple[str, str | None, str], ...] = (
+    ("CHANGELOG.md", None, "the release log"),
+    ("examples/onboarding/VALIDATION.md", None, "dated validation record"),
+    ("examples/onboarding/slateharbor/VALIDATION.md", None, "dated validation record"),
+    ("examples/workflows/VALIDATION.md", None, "dated validation record"),
+    (
+        "docs/adr/0011-canonical-artifact-scope-hierarchy.md",
+        None,
+        "decision record dating the bare --yes deprecation window",
+    ),
+    (
+        "docs/adr/0030-explicit-preview-pull.md",
+        None,
+        "decision record dating the bare --yes deprecation window",
+    ),
+    ("README.md", "a backup made before 0.7.0", "bundle v1-v3 predate the v4 format"),
+    (
+        "docs/guides/reference/data-config-cli.md",
+        "a backup made before 0.7.0",
+        "bundle v1-v3 predate the v4 format",
+    ),
+    (
+        "docs/guides/reference/data-config-cli.md",
+        "with 0.7.0 or later",
+        "floor for restoring a v4 bundle",
+    ),
+    ("docs/guides/multi-device-sync.md", "memtomem 0.7.0 or later", "floor for a v4 bundle"),
+    ("docs/guides/context-gateway.md", "since 0.7.0", "release that refused a bare --yes"),
+    (
+        "docs/guides/reference/operations.md",
+        "0.6.12 added PKCS#8",
+        "release that added the redaction pattern",
+    ),
+    (
+        "packages/memtomem-antigravity-plugin/README.md",
+        "new in memtomem 0.7.0",
+        "release the plugin first shipped in",
+    ),
+)
+_VERSION_IN_FRAGMENT = re.compile(r"\d+\.\d+\.\d+")
+
+
+def _release_mention(version: str) -> re.Pattern[str]:
+    # The boundaries keep 0.7.0 from matching inside 10.7.0, 0.7.01 or 0.7.0.1.
+    return re.compile(rf"(?<![\d.]){re.escape(version)}(?!\d|\.\d)")
+
+
+def _previous_release(changelog: str, current: str) -> str | None:
+    """The highest ``## [X.Y.Z]`` CHANGELOG heading below *current*."""
+
+    def key(version: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in version.split("."))
+
+    released = re.findall(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.MULTILINE)
+    older = [version for version in released if key(version) < key(current)]
+    return max(older, key=key) if older else None
+
+
+def _unexempt_mentions(line: str, mention: re.Pattern[str], fragments: list[str]) -> list[str]:
+    """Matches of *mention* in *line* that no fragment occurrence contains.
+
+    Spans are computed on the original line; deleting a fragment first could
+    join its neighbours into a new match or split a real one.
+    """
+    spans = [
+        (found.start(), found.end())
+        for fragment in fragments
+        for found in re.finditer(re.escape(fragment), line)
+    ]
+    return [
+        match.group(0)
+        for match in mention.finditer(line)
+        if not any(start <= match.start() and match.end() <= end for start, end in spans)
+    ]
+
+
+def _doc_lines(path: Path, root: Path = _REPO_ROOT) -> list[tuple[str, str]]:
+    """(location, line) pairs; a notebook contributes its cell sources, not outputs."""
+    rel = path.relative_to(root).as_posix()
+    if path.suffix != ".ipynb":
+        return [(f"{rel}:{n}", line) for n, line in enumerate(_read(path).splitlines(), 1)]
+    lines: list[tuple[str, str]] = []
+    for index, cell in enumerate(json.loads(_read(path))["cells"]):
+        source = cell["source"]
+        text = source if isinstance(source, str) else "".join(source)
+        lines.extend(
+            (f"{rel}#cell{index}:{n}", line) for n, line in enumerate(text.splitlines(), 1)
+        )
+    return lines
+
+
 class TestRegistryAndInstallDocs:
     def test_cli_reference_names_every_top_level_command(self) -> None:
         text = _read(_GUIDES / "reference" / "data-config-cli.md")
@@ -1493,7 +1589,9 @@ class TestRegistryAndInstallDocs:
         ``_public_markdown()`` — so a release bump that missed one occurrence
         shipped green (#1923 review nit). Count-independent by design: the
         release bump may add or remove occurrences freely as long as none is
-        stale.
+        stale. The spelling-independent check is the one below, which searches
+        for the previous release; this one still catches a pin that is wrong in
+        some other way (two releases stale, a typo).
         """
         with (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").open("rb") as handle:
             version = tomllib.load(handle)["project"]["version"]
@@ -1531,6 +1629,103 @@ class TestRegistryAndInstallDocs:
             "Stale memtomem version pins (bump missed an occurrence):\n  "
             + "\n  ".join(sorted(set(offenders)))
         )
+
+    def test_no_doc_still_names_the_previous_release(self) -> None:
+        """No doc names the previous core release outside ``_PRIOR_RELEASE_MENTIONS``.
+
+        The spelling list above cannot converge — ``# memtomem 0.7.0 use cases``
+        and ``The complete v0.7.0 top-level command catalog`` both passed it —
+        so this checks the other direction: after a bump, the old version is
+        searched for in any spelling (#2888).
+        """
+        with (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").open("rb") as handle:
+            version = tomllib.load(handle)["project"]["version"]
+        previous = _previous_release(_read(_REPO_ROOT / "CHANGELOG.md"), version)
+        assert previous is not None, f"CHANGELOG.md has no release heading below {version}"
+
+        whole_files = {path for path, fragment, _ in _PRIOR_RELEASE_MENTIONS if fragment is None}
+        fragments: dict[str, list[str]] = {}
+        for path, fragment, _ in _PRIOR_RELEASE_MENTIONS:
+            if fragment is not None:
+                fragments.setdefault(path, []).append(fragment)
+
+        mention = _release_mention(previous)
+        docs = [
+            *_tracked_markdown(),
+            *sorted((_REPO_ROOT / "examples" / "notebooks").glob("*.ipynb")),
+        ]
+        offenders: list[str] = []
+        for doc in docs:
+            rel = doc.relative_to(_REPO_ROOT).as_posix()
+            if rel in whole_files:
+                continue
+            for location, line in _doc_lines(doc):
+                if _unexempt_mentions(line, mention, fragments.get(rel, [])):
+                    offenders.append(f"{location}: {line.strip()}")
+        assert not offenders, (
+            f"Docs still name the previous release {previous} (pyproject is {version}). "
+            "Bump each one, or list it in _PRIOR_RELEASE_MENTIONS with a reason if it is "
+            "history:\n  " + "\n  ".join(offenders)
+        )
+
+    def test_prior_release_mentions_are_still_in_their_files(self) -> None:
+        """Every allowlist entry still names text that exists.
+
+        A reworded line would otherwise leave an entry exempting nothing in
+        particular, and a fragment without a version could exempt a mention
+        of any release.
+        """
+        stale: list[str] = []
+        for path, fragment, _ in _PRIOR_RELEASE_MENTIONS:
+            doc = _REPO_ROOT / path
+            if not doc.is_file():
+                stale.append(f"{path}: file is gone")
+            elif fragment is not None:
+                if not _VERSION_IN_FRAGMENT.search(fragment):
+                    stale.append(f"{path}: {fragment!r} names no version")
+                elif fragment not in _read(doc):
+                    stale.append(f"{path}: {fragment!r} is no longer in the file")
+        assert not stale, "Stale _PRIOR_RELEASE_MENTIONS entries:\n  " + "\n  ".join(stale)
+
+    def test_previous_release_scan_ignores_spelling_and_neighbours(self) -> None:
+        mention = _release_mention("0.7.0")
+        # The two spellings that passed the enumerated-spelling guard (#2888).
+        assert _unexempt_mentions("# memtomem 0.7.0 use cases", mention, []) == ["0.7.0"]
+        assert _unexempt_mentions("The complete v0.7.0 top-level command catalog", mention, []) == [
+            "0.7.0"
+        ]
+        for neighbour in ("10.7.0", "0.7.01", "0.7.0.1", "1.0.7.0"):
+            assert _unexempt_mentions(f"see {neighbour} here", mention, []) == []
+
+        floor = "with 0.7.0 or later"
+        assert _unexempt_mentions(f"Restore a v4 bundle {floor}.", mention, [floor]) == []
+        # A listed floor exempts its own occurrence, not the rest of the line.
+        both = f"Restore {floor}; see the complete v0.7.0 catalog"
+        assert _unexempt_mentions(both, mention, [floor]) == ["0.7.0"]
+        # Exemption must neither hide a real match nor create a missing one.
+        assert _unexempt_mentions(f"0.7.0{floor}1", mention, [floor]) == ["0.7.0"]
+        assert _unexempt_mentions(f"0.7.{floor}0", mention, [floor]) == []
+
+    def test_previous_release_scan_reads_notebook_sources_only(self, tmp_path: Path) -> None:
+        notebook = {
+            "cells": [
+                {"cell_type": "markdown", "source": "Install memtomem 0.7.0 first."},
+                {
+                    "cell_type": "code",
+                    "source": ["import memtomem\n", "# pinned to 0.7", ".0\n", "x = 1"],
+                    "outputs": [{"output_type": "stream", "text": ["0.7.0\n"]}],
+                },
+            ]
+        }
+        path = tmp_path / "witness.ipynb"
+        path.write_text(json.dumps(notebook), encoding="utf-8")
+        rel = "witness.ipynb"
+        assert _doc_lines(path, tmp_path) == [
+            (f"{rel}#cell0:1", "Install memtomem 0.7.0 first."),
+            (f"{rel}#cell1:1", "import memtomem"),
+            (f"{rel}#cell1:2", "# pinned to 0.7.0"),
+            (f"{rel}#cell1:3", "x = 1"),
+        ]
 
     def test_plugin_readme_fresh_env_blocks_have_no_bare_mm(self) -> None:
         """Fresh-machine command blocks in the plugin READMEs pin every call.
