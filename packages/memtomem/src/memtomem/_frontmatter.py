@@ -10,7 +10,28 @@ import yaml
 
 _KEY = re.compile(r"[A-Za-z_][\w-]*\Z")
 _KEY_LINE = re.compile(r"([A-Za-z_][\w-]*)\s*:")
+# YAML separates a key from its value only with a space or tab.
+_UNSPACED_KEY = re.compile(r"([A-Za-z_][\w-]*):(?=[^ \t])")
+_LINE_BREAK = re.compile(r"\r\n|[\r\n\x85\u2028\u2029]")
 logger = logging.getLogger(__name__)
+
+
+def _warn_unspaced_keys(text: str, root: yaml.ScalarNode) -> None:
+    if root.style is not None:
+        return
+    # 0.6.x read `key:value` lines as keys; YAML folds them into one root scalar.
+    keys: dict[str, None] = {}
+    for line in _LINE_BREAK.split(text[root.start_mark.index : root.end_mark.index]):
+        match = _UNSPACED_KEY.match(line.lstrip(" \t"))
+        if match is not None:
+            keys.setdefault(match.group(1))
+    for key in keys:
+        logger.warning(
+            "Frontmatter is not a YAML mapping, so %r is not read as a key; "
+            "if it is one, add a space after '%s:'",
+            key,
+            key,
+        )
 
 
 def _warn_comment(text: str, node: yaml.ScalarNode, token_starts: list[int]) -> None:
@@ -43,6 +64,8 @@ def flat_yaml(text: str) -> dict | None:
     except yaml.YAMLError:
         return None
     if not isinstance(root, yaml.MappingNode):
+        if isinstance(root, yaml.ScalarNode):
+            _warn_unspaced_keys(text, root)
         return {}
     token_starts = [token.start_mark.index for token in yaml.scan(text, Loader=yaml.SafeLoader)]
     result = {}

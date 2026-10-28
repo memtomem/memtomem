@@ -259,6 +259,72 @@ def test_own_line_yaml_comments_do_not_warn(newline, text, caplog):
     assert not caplog.records
 
 
+def _unspaced_key_warnings(caplog) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "memtomem._frontmatter" and record.levelname == "WARNING"
+    ]
+
+
+def _unspaced_key_message(key: str) -> str:
+    return (
+        f"Frontmatter is not a YAML mapping, so {key!r} is not read as a key; "
+        f"if it is one, add a space after '{key}:'"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "keys"),
+    [
+        ("tags:[a, b]\n", ["tags"]),
+        ("valid_to:2024-12-31\n", ["valid_to"]),
+        ("# note\ntags:[a, b]\n", ["tags"]),
+        ("tags:[a, b] # note\n", ["tags"]),
+        ("tags:[a]\n  tags:[b]\nvalid_to:2024-12-31\n", ["tags", "valid_to"]),
+        ("tags:[a]\n# valid_to:2024-12-31\n", ["tags"]),
+        ("tags:\u00a0[a,b]\n", ["tags"]),
+        ("valid_to:\u20032024-12-31\n", ["valid_to"]),
+    ],
+)
+def test_unspaced_frontmatter_key_warns_by_name(text, keys, caplog):
+    assert flat_yaml(text) == {}
+    assert _unspaced_key_warnings(caplog) == [_unspaced_key_message(key) for key in keys]
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r", "\x85", "\u2028", "\u2029"])
+def test_unspaced_frontmatter_keys_warn_across_yaml_line_breaks(newline, caplog):
+    flat_yaml("tags:[a, b]" + newline + "valid_to:2024-12-31" + newline)
+    assert _unspaced_key_warnings(caplog) == [
+        _unspaced_key_message("tags"),
+        _unspaced_key_message("valid_to"),
+    ]
+
+
+def test_unspaced_frontmatter_key_warns_through_the_chunker(caplog):
+    from memtomem.chunking.markdown import MarkdownChunker
+
+    assert MarkdownChunker._extract_frontmatter_tags("---\ntags:[a, b]\n---\n\nBody\n") == []
+    assert _unspaced_key_warnings(caplog) == [_unspaced_key_message("tags")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['"tags:[a]"\n', "url: http://x\n", "time: 12:30\n", "just text\n", "tags: [a, b]\n"],
+)
+def test_spaced_or_quoted_frontmatter_does_not_warn_about_keys(text, caplog):
+    flat_yaml(text)
+    assert not caplog.records
+
+
+def test_unspaced_key_beside_a_spaced_key_is_still_read(caplog):
+    from memtomem.chunking.markdown import MarkdownChunker
+
+    document = "---\ntitle: x\ntags:[a, b]\n---\n\nBody\n"
+    assert MarkdownChunker._extract_frontmatter_tags(document) == ["a", "b"]
+    assert not caplog.records
+
+
 @pytest.mark.parametrize("version", ["1", "2", "3"])
 @pytest.mark.asyncio
 async def test_raw_project_spelling_cannot_normalize_into_ordinary_user_path(

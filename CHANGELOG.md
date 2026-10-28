@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **A frontmatter key with no space after its colon now logs a warning
+  (#2885).** Since 0.7.0 reads frontmatter as YAML, a block
+  made only of no-space lines such as `tags:[a, b]` or `valid_to:2024-12-31`
+  is not a mapping, so its values were ignored without a message. They are
+  still ignored, but a warning now names each such key and says to add a
+  space after its colon. An unindented no-space line next to an ordinary
+  `key: value` line makes the block invalid YAML, so the previous line
+  grammar still reads it, as before. An indented one under an unquoted value
+  such as `title: x` becomes part of that value under YAML and is not
+  warned about.
+
 ## [0.7.0] — 2026-10-27
 
 ### Upgrading
