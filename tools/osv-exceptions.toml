@@ -295,6 +295,50 @@ owner = "memtomem"
 reason = "filelock flaw reached only through ReadWriteLock, which neither memtomem nor huggingface-hub uses; fixed in 4.2.1, but 4.2.1+ hangs huggingface-hub 1.33.0 (the last 1.x; fastembed requires <2.0) on a filesystem without flock"
 ignoreUntil = 2026-11-20
 
+# filelock 3.25.2, six more published 2026-10-28; same blocker as the batch above.
+# Unlike that batch, four of these ARE reachable through huggingface-hub's locks in
+# the fastembed cache: on a filesystem without flock (3.25.2 then falls back to a soft
+# lock at the same path) and by another local account that can traverse or write
+# that cache. They are recorded because their fix (4.2.1+) hangs the Hub, not
+# because they are unreachable; the sixth (GHSA-j8f7, fixed in 4.0.9) is unreached
+# and its reason says why that fix is not taken. Remove with the batch above.
+
+[[exceptions]]
+id = "GHSA-69hj-f68j-2879"
+owner = "memtomem"
+reason = "filelock flaw reachable: huggingface-hub takes FileLock with an explicit mode in the fastembed cache, so another local account that can rename or hard-link a file onto a lock path there gets it truncated and chmodded; fixed in 4.2.1, but 4.2.1+ hangs huggingface-hub 1.33.0 (the last 1.x; fastembed requires <2.0) on a filesystem without flock"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-8mx5-7m5m-r77g"
+owner = "memtomem"
+reason = "filelock flaw reachable on Windows: lock files huggingface-hub creates in the fastembed cache take the directory's inherited ACL, so they are open to any account that ACL admits; fixed in 4.2.1, but 4.2.1+ hangs huggingface-hub 1.33.0 (the last 1.x; fastembed requires <2.0) on a filesystem without flock"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-cwqr-hh33-gh44"
+owner = "memtomem"
+reason = "filelock flaw reached only through ReadWriteLock, which neither memtomem nor huggingface-hub uses; fixed in 4.2.1, but 4.2.1+ hangs huggingface-hub 1.33.0 (the last 1.x; fastembed requires <2.0) on a filesystem without flock"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-j8f7-rjxc-mr56"
+owner = "memtomem"
+reason = "filelock flaw reached only through ReadWriteLock, which neither memtomem nor huggingface-hub uses; fixed in 4.0.9, not taken to avoid a 3.x to 4.x upgrade for an unreached flaw while the 4.2.1 fixes above stay unusable"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-fq56-3cx3-fjxp"
+owner = "memtomem"
+reason = "filelock flaw reachable on a filesystem without flock, where huggingface-hub's locks become soft locks: two processes of the same user can both hold one, and overlapping shared-blob publication can corrupt the cache; fixed in 4.2.1, but 4.2.1+ hangs huggingface-hub 1.33.0 (the last 1.x; fastembed requires <2.0) on exactly such a filesystem"
+ignoreUntil = 2026-11-20
+
+[[exceptions]]
+id = "GHSA-rfpc-qcw5-3pc4"
+owner = "memtomem"
+reason = "filelock flaw reachable on a filesystem without flock: there the shared-blob lock falls back to a soft-lock marker at the same path, and a later huggingface-hub contender chmods that existing marker to 0o666, so another local account that can traverse the fastembed cache can forge the holder and break a live lock; fixed in 4.2.1, but 4.2.1+ hangs huggingface-hub 1.33.0 (the last 1.x; fastembed requires <2.0) on exactly such a filesystem"
+ignoreUntil = 2026-11-20
+
 # toml 4.3.0 in packages/opencode-memtomem/package-lock.json (dev), published
 # 2026-10-22. GHSA-h895-cgqg-jf52 named the package `tome` until OSV matched it to
 # toml on 2026-10-26. Remove when @opencode-ai/plugin moves to an effect that allows
