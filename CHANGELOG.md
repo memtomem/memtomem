@@ -34,8 +34,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   while deleting it from the same panel deleted its own. `GET /api/chunks`
   now takes the stored path the way the source delete does and reads it as
   stored. A path that reaches an indexed file only through a symlinked
-  directory, a relative path or one with `..` is now refused with 403 as the delete
-  already refuses it; the Web UI sends stored paths.
+  directory, a relative path or one with `..` is now refused with 403, as
+  the delete already refuses it; the `/tmp/...` form `mem_list` prints on
+  macOS still matches, as it does for the delete. The Web UI sends stored
+  paths.
 
 ### Security
 
