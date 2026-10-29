@@ -12,9 +12,24 @@ from typing import AsyncContextManager, AsyncIterator, Callable, ContextManager
 
 from memtomem.errors import TransactionOwnedError
 from memtomem.models import CONSOLIDATED_SUFFIX, ORIGIN_CONSOLIDATION_POLICY
-from memtomem.storage.source_holds import ABSENCE_HOLD_REASONS, REDACTION_BLOCKED_HOLD
+from memtomem.storage.source_holds import (
+    ABSENCE_HOLD_REASONS,
+    PRESENCE_KEPT_HOLD_REASONS,
+    REDACTION_BLOCKED_HOLD,
+    RELINKED_HOLD,
+)
 from memtomem.storage.sqlite_helpers import fold_path_form, norm_path, utc_stamp
 from memtomem.storage.sqlite_meta import _standalone_commit, _standalone_write_guard
+
+
+# A hold keeps its reason against a lower-ranked one: redaction is about the
+# file's content and a relink about which file the path names, and neither is
+# answered by the availability observations every other reason records.
+_HOLD_RANKS = {REDACTION_BLOCKED_HOLD: 2, RELINKED_HOLD: 1}
+
+
+def _hold_rank(reason: str) -> int:
+    return _HOLD_RANKS.get(reason, 0)
 
 
 class SourceHoldOps:
@@ -102,12 +117,13 @@ class SourceHoldOps:
     async def hold_source(self, source_file: Path, reason: str, *, as_stored: bool = False) -> bool:
         """Hide existing source chunks without destroying them (#2498).
 
-        A ``redaction_blocked`` hold keeps its reason when an availability
-        reason arrives later (#2629): the file being missing or outside the
-        roots says nothing about whether its content may be served again, and
-        the out-of-root recheck lifts availability holds on presence alone.
-        Moving a hold *to* that reason advances the source's visibility
-        generation, so a release prepared before the block cannot lift it.
+        A ``redaction_blocked`` hold keeps its reason when any other reason
+        arrives later (#2629), and a ``source_relinked`` hold keeps its reason
+        against everything but redaction (#2878): the file being missing or
+        outside the roots says nothing about whether the path may be served
+        again, and the out-of-root recheck lifts availability holds on
+        presence alone. Moving a hold *to* either reason advances the source's
+        visibility generation, so a release prepared before it cannot lift it.
 
         ``as_stored`` holds the key exactly as given, for a caller that read it
         from the store: resolving it again would hold a symlink's target (#2835).
@@ -126,7 +142,7 @@ class SourceHoldOps:
             "SELECT reason FROM held_sources WHERE source_file=?", (source,)
         ).fetchone()
         if existing is not None and (
-            existing[0] == reason or existing[0] == REDACTION_BLOCKED_HOLD
+            existing[0] == reason or _hold_rank(existing[0]) > _hold_rank(reason)
         ):
             pending = db.execute(
                 "SELECT 1 FROM pending_source_checks WHERE source_file=?", (source,)
@@ -145,7 +161,7 @@ class SourceHoldOps:
                     "(source_file, first_seen_at, last_checked_at, reason) VALUES (?, ?, ?, ?)",
                     (source, now, now, reason),
                 ).rowcount
-                blocked_now = False
+                raised_now = False
                 if not inserted:
                     current = db.execute(
                         "SELECT reason FROM held_sources WHERE source_file=?", (source,)
@@ -153,17 +169,17 @@ class SourceHoldOps:
                     if (
                         current is not None
                         and current[0] != reason
-                        and current[0] != REDACTION_BLOCKED_HOLD
+                        and _hold_rank(current[0]) <= _hold_rank(reason)
                     ):
                         db.execute(
                             "UPDATE held_sources SET last_checked_at=?, reason=? WHERE source_file=?",
                             (now, reason, source),
                         )
-                        blocked_now = reason == REDACTION_BLOCKED_HOLD
+                        raised_now = reason in PRESENCE_KEPT_HOLD_REASONS
                 pending = db.execute(
                     "DELETE FROM pending_source_checks WHERE source_file=?", (source,)
                 ).rowcount
-                changed = bool(inserted or pending or blocked_now)
+                changed = bool(inserted or pending or raised_now)
                 if changed:
                     self._bump_source_visibility(db, source)
             self._commit(db)
@@ -182,8 +198,10 @@ class SourceHoldOps:
         ``validated`` means the caller has just indexed the current content
         cleanly. A caller that only saw the file exist passes ``False``, and a
         ``redaction_blocked`` hold then stays: its file is present, and the
-        reason it is held is what the file contains (#2629). The reason is
-        read under the writer lock, in the transaction that clears it.
+        reason it is held is what the file contains (#2629). So does a
+        ``source_relinked`` hold, whose path is present but names another file
+        (#2878). The reason is read under the writer lock, in the transaction
+        that clears it.
 
         ``as_stored`` as in :meth:`hold_source`. The key is computed once and
         used for every row this touches.
@@ -214,7 +232,7 @@ class SourceHoldOps:
                 reason = db.execute(
                     "SELECT reason FROM held_sources WHERE source_file=?", (source,)
                 ).fetchone()
-                content_blocked = reason is not None and reason[0] == REDACTION_BLOCKED_HOLD
+                content_blocked = reason is not None and reason[0] in PRESENCE_KEPT_HOLD_REASONS
             # An ordinary receipt hit has no visibility row. Skip DELETE so
             # the common path stays read-only.
             if (

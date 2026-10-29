@@ -16,7 +16,14 @@ from watchdog.observers.polling import PollingObserver
 
 from memtomem.config import IndexingConfig
 from memtomem.errors import NamespaceResolutionError, RetryableError
-from memtomem.storage.sqlite_helpers import is_under_any_root, norm_path
+from memtomem.storage.source_holds import RELINKED_HOLD
+from memtomem.storage.sqlite_helpers import (
+    fold_path_form,
+    is_under_any_root,
+    norm_path,
+    resolve_path,
+    stored_key_moved,
+)
 
 if TYPE_CHECKING:
     from watchdog.observers.api import BaseObserver, ObservedWatch
@@ -453,6 +460,17 @@ class FileWatcher:
 
                             try:
                                 if is_under_any_root(path, self._config.all_index_roots()):
+                                    # ``index_file`` resolves the key and indexes
+                                    # the file it now names, so a key that moved
+                                    # is held as stored first. Before the index,
+                                    # so a target that fails cannot leave the key
+                                    # pending (#2878).
+                                    if await asyncio.to_thread(stored_key_moved, str(path)):
+                                        if await storage.hold_source(
+                                            path, RELINKED_HOLD, as_stored=True
+                                        ):
+                                            if self._search_pipeline is not None:
+                                                self._search_pipeline.invalidate_cache()
                                     stats = await self._engine.index_file(
                                         path, path_scope="explicit"
                                     )
@@ -1094,11 +1112,51 @@ class FileWatcher:
                 raise result
         return retry
 
+    async def _hold_relinked_leaf(self, file_path: Path) -> bool:
+        """Hold the rows stored under ``file_path`` once that file is a symlink (#2878).
+
+        ``index_file`` resolves the link and indexes its target, so the rows
+        stored under the leaf's own key would stay searchable while the path
+        presents another file. The key is the one the store wrote for the leaf
+        when it was a regular file: its resolved parent plus its name. Only the
+        leaf counts. A parent that became a link resolves to its new location
+        here, which names no stored key, so a moved folder is left alone.
+
+        Returns ``False`` only when the hold was attempted and failed: with no
+        journaled delete, nothing else would hide those rows, so the caller
+        retries the path.
+        """
+        storage = getattr(self._engine, "_storage", None)
+        if storage is None or not hasattr(type(storage), "hold_source"):
+            return True
+
+        def leaf_key() -> str | None:
+            try:
+                if not file_path.is_symlink():
+                    return None
+                return fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
+            except OSError:
+                return None
+
+        key = await asyncio.to_thread(leaf_key)
+        if key is None:
+            return True
+        try:
+            if await storage.hold_source(Path(key), RELINKED_HOLD, as_stored=True):
+                logger.info("Held a source that is now a symlink: %s", file_path.name)
+                if self._search_pipeline is not None:
+                    self._search_pipeline.invalidate_cache()
+        except Exception:
+            logger.exception("Could not hold relinked source %s", file_path)
+            return False
+        return True
+
     async def _reindex(self, file_path: Path) -> Path | None:
         """Reindex one changed file. Returns ``file_path`` when the reindex
         timed out acquiring the file's cross-process sidecar, or was refused by
-        the redaction guard without its older chunks being held (so the caller
-        can retry it next window), else ``None``.
+        the redaction guard without its older chunks being held, or is now a
+        symlink whose own chunks could not be held (so the caller can retry it
+        next window), else ``None``.
 
         A path no longer contained in any configured root is dropped. Events are
         collected before a flush and ``reconfigure`` leaves them alone, so a file
@@ -1128,6 +1186,7 @@ class FileWatcher:
                     logger.exception("Could not settle watcher check outside roots: %s", file_path)
             return None
 
+        relink_settled = await self._hold_relinked_leaf(file_path)
         try:
             stats = await self._engine.index_file(file_path)
             self._invalidate_if_mutated(stats)
@@ -1195,7 +1254,7 @@ class FileWatcher:
                             self._recheck_wakeup.set()
                 except Exception:
                     logger.exception("Could not settle watcher check after reindex: %s", file_path)
-        return None
+        return None if relink_settled else file_path
 
 
 class WatcherResumer:
