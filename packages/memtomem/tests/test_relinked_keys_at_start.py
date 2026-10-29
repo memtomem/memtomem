@@ -1,9 +1,10 @@
-"""At start, the watcher holds stored keys whose file became a symlink (#2904).
+"""At start, the watcher journals stored keys whose file became a symlink (#2904).
 
 A relink made while no server or ``mm web`` was running produces no event, so
 ``FileWatcher`` checks every stored key once per start: a key whose leaf is a
-symlink is held with ``source_relinked``. A parent directory that was moved and
-linked back is not a relinked leaf.
+symlink is journaled as a pending source check, which hides it at once, and the
+held recheck settles it (#2905). A parent directory that was moved and linked
+back is not a relinked leaf.
 
 Real ``SqliteBackend``, real symlinks, ``FileWatcher`` driven directly.
 """
@@ -11,7 +12,6 @@ Real ``SqliteBackend``, real symlinks, ``FileWatcher`` driven directly.
 from __future__ import annotations
 
 import asyncio
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -58,27 +58,60 @@ def _reasons(comp) -> dict[str, str]:
     return {row[0]: row[1] for row in rows.fetchall()}
 
 
+def _pending(comp) -> set[str]:
+    rows = comp.storage._get_db().execute("SELECT source_file FROM pending_source_checks")
+    return {row[0] for row in rows.fetchall()}
+
+
+async def _found(comp, word: str) -> bool:
+    return bool((await comp.search_pipeline.search(word))[0])
+
+
 def _watcher(comp) -> FileWatcher:
     return FileWatcher(
         comp.index_engine, comp.config.indexing, search_pipeline=comp.search_pipeline
     )
 
 
-def _spy_holds(monkeypatch, comp) -> list[Path]:
-    calls: list[Path] = []
-    real = comp.storage.hold_source
-
-    async def spy(source_file, reason, **kwargs):
-        if reason == RELINKED_HOLD:
-            calls.append(Path(source_file))
-        return await real(source_file, reason, **kwargs)
-
-    monkeypatch.setattr(comp.storage, "hold_source", spy)
-    return calls
+async def _check(watcher: FileWatcher) -> None:
+    """Run the start check and wait for its thread to finish."""
+    await watcher._journal_relinked_keys()
+    if watcher._relink_scan_thread is not None:
+        await asyncio.to_thread(watcher._relink_scan_thread.join, 10)
+        assert not watcher._relink_scan_thread.is_alive()
+    await asyncio.sleep(0)
 
 
-@pytest.mark.parametrize("shape", ["indexed", "new", "dangling", "loop"])
-async def test_a_file_relinked_while_no_watcher_ran_is_held(env, monkeypatch, shape):
+async def _until(predicate, timeout: float = 5.0) -> None:
+    for _ in range(int(timeout / 0.01)):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition never held")
+
+
+async def _settle(watcher: FileWatcher, predicate) -> None:
+    """Run the held recheck until ``predicate()`` holds."""
+    task = asyncio.create_task(watcher._recheck_held_loop())
+    try:
+        await _until(predicate)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    ("shape", "settled_reason"),
+    [
+        ("indexed", RELINKED_HOLD),
+        ("new", RELINKED_HOLD),
+        ("dangling", "watch_reindex_unresolved"),
+        ("loop", "watch_reindex_unresolved"),
+    ],
+)
+async def test_a_file_relinked_while_no_watcher_ran_is_hidden_and_settled(
+    env, shape, settled_reason
+):
     comp, root = env
     a = await _indexed(comp, root / "work" / "a.md")
     b = await _indexed(comp, root / "plans" / "b.md", TARGET)
@@ -86,33 +119,34 @@ async def test_a_file_relinked_while_no_watcher_ran_is_held(env, monkeypatch, sh
     c.write_text(TARGET, encoding="utf-8")
     targets = {"indexed": b, "new": c, "dangling": root / "nowhere.md", "loop": a / "x"}
     _relink(a, targets[shape])
-    invalidations: list[bool] = []
-    monkeypatch.setattr(
-        comp.search_pipeline, "invalidate_cache", lambda *a, **k: invalidations.append(True)
-    )
+    assert await _found(comp, "storedkeyword")
+    watcher = _watcher(comp)
 
-    await _watcher(comp)._hold_relinked_keys()
+    await _check(watcher)
 
-    assert _reasons(comp) == {str(a): RELINKED_HOLD}
-    assert invalidations
+    assert _pending(comp) == {str(a)}
+    assert not await _found(comp, "storedkeyword")
+    assert watcher._recheck_wakeup.is_set()
+    await _settle(watcher, lambda: str(a) not in _pending(comp))
+    assert _reasons(comp).get(str(a)) == settled_reason
+    assert str(b) not in _reasons(comp)
+    assert not await _found(comp, "storedkeyword")
 
 
-async def test_a_parent_moved_and_linked_back_is_not_held(env, monkeypatch):
+async def test_a_parent_moved_and_linked_back_is_not_journaled(env):
     comp, root = env
     a = await _indexed(comp, root / "notes" / "a.md")
     (root / "notes").rename(root / "moved")
     (root / "notes").symlink_to(root / "moved")
-    # The rule a scan over every moved key would have used says otherwise.
+    # The rule a check over every moved key would have used says otherwise.
     assert stored_key_moved(str(a))
-    holds = _spy_holds(monkeypatch, comp)
 
-    await _watcher(comp)._hold_relinked_keys()
+    await _check(_watcher(comp))
 
-    assert holds == []
-    assert _reasons(comp) == {}
+    assert _pending(comp) == set()
 
 
-async def test_a_file_indexed_through_a_link_is_not_held(env, monkeypatch):
+async def test_a_file_indexed_through_a_link_is_not_journaled(env):
     comp, root = env
     target = root / "plans" / "c.md"
     target.parent.mkdir(parents=True)
@@ -121,11 +155,10 @@ async def test_a_file_indexed_through_a_link_is_not_held(env, monkeypatch):
     link.parent.mkdir(parents=True)
     link.symlink_to(target)
     assert (await comp.index_engine.index_file(link)).indexed_chunks == 1
-    holds = _spy_holds(monkeypatch, comp)
 
-    await _watcher(comp)._hold_relinked_keys()
+    await _check(_watcher(comp))
 
-    assert holds == []
+    assert _pending(comp) == set()
 
 
 async def test_a_legacy_unfolded_key_is_left_alone(env, monkeypatch):
@@ -140,89 +173,91 @@ async def test_a_legacy_unfolded_key_is_left_alone(env, monkeypatch):
     nfd.symlink_to(b)
     monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", True)
     assert sqlite_helpers.fold_path_form(str(nfd)) != str(nfd)
-    holds = _spy_holds(monkeypatch, comp)
+    journaled: list[Path] = []
+    monkeypatch.setattr(
+        type(comp.storage),
+        "queue_source_check_sync",
+        lambda self, key: journaled.append(Path(key)) or True,
+    )
 
-    await _watcher(comp)._hold_relinked_keys()
+    await _check(_watcher(comp))
 
-    # Indexing would release a hold under the folded key, never this one.
-    assert holds == []
+    # Indexing would release a hold under the folded key, never this one (#2907).
+    assert journaled == []
 
 
-async def test_a_failed_hold_does_not_stop_the_others(env, monkeypatch, caplog):
+async def test_a_file_restored_before_the_recheck_is_shown_again(env, monkeypatch):
+    """The thread saw a link; the file was back before the recheck looked."""
+    comp, root = env
+    a = await _indexed(comp, root / "work" / "a.md")
+    b = await _indexed(comp, root / "plans" / "b.md", TARGET)
+    _relink(a, b)
+    real = orphan_detect.iter_relinked_leaf_keys
+
+    def restored_after_the_probe(keys):
+        for key in real(keys):
+            key.unlink()
+            key.write_text(BODY, encoding="utf-8")
+            yield key
+
+    monkeypatch.setattr(orphan_detect, "iter_relinked_leaf_keys", restored_after_the_probe)
+    watcher = _watcher(comp)
+
+    await _check(watcher)
+
+    assert _pending(comp) == {str(a)}
+    await _settle(watcher, lambda: not _pending(comp))
+    assert _reasons(comp) == {}
+    assert await _found(comp, "storedkeyword")
+
+
+async def test_a_journal_write_that_meets_a_busy_database_is_retried(env, monkeypatch):
+    comp, root = env
+    a = await _indexed(comp, root / "work" / "a.md")
+    b = await _indexed(comp, root / "plans" / "b.md", TARGET)
+    _relink(a, b)
+    monkeypatch.setattr(watcher_mod, "_RELINK_JOURNAL_RETRY_DELAYS_S", (0.01, 0.01))
+    real = type(comp.storage).queue_source_check_sync
+    failures = [sqlite3.OperationalError("database is locked")]
+
+    def flaky(self, key):
+        if failures:
+            raise failures.pop()
+        return real(self, key)
+
+    monkeypatch.setattr(type(comp.storage), "queue_source_check_sync", flaky)
+
+    await _check(_watcher(comp))
+
+    assert failures == []
+    assert _pending(comp) == {str(a)}
+
+
+async def test_a_journal_write_that_keeps_failing_is_logged(env, monkeypatch, caplog):
     comp, root = env
     first = await _indexed(comp, root / "work" / "a.md")
     second = await _indexed(comp, root / "work" / "c.md")
     b = await _indexed(comp, root / "plans" / "b.md", TARGET)
     _relink(first, b)
     _relink(second, b)
-    real = comp.storage.hold_source
+    monkeypatch.setattr(watcher_mod, "_RELINK_JOURNAL_RETRY_DELAYS_S", (0.01, 0.01))
+    real = type(comp.storage).queue_source_check_sync
 
-    async def flaky(source_file, reason, **kwargs):
-        if Path(source_file) == first:
-            raise OSError("disk I/O error")
-        return await real(source_file, reason, **kwargs)
+    def flaky(self, key):
+        if Path(key) == first:
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, key)
 
-    monkeypatch.setattr(comp.storage, "hold_source", flaky)
-    monkeypatch.setattr(watcher_mod, "_RELINK_HOLD_RETRY_DELAYS_S", (0.01, 0.01))
+    monkeypatch.setattr(type(comp.storage), "queue_source_check_sync", flaky)
 
-    await _watcher(comp)._hold_relinked_keys()
+    await _check(_watcher(comp))
 
-    assert _reasons(comp) == {str(second): RELINKED_HOLD}
-    assert f"Gave up holding relinked source {first}" in caplog.text
-
-
-async def test_start_runs_the_check_and_stop_cancels_it(env, monkeypatch):
-    comp, root = env
-    a = await _indexed(comp, root / "work" / "a.md")
-    b = await _indexed(comp, root / "plans" / "b.md", TARGET)
-    _relink(a, b)
-    reached = asyncio.Event()
-    real = comp.storage.hold_source
-
-    async def parked(source_file, reason, **kwargs):
-        if reason == RELINKED_HOLD:
-            reached.set()
-            await asyncio.Event().wait()
-        return await real(source_file, reason, **kwargs)
-
-    monkeypatch.setattr(comp.storage, "hold_source", parked)
-    watcher = _watcher(comp)
-    await watcher.start()
-    try:
-        await asyncio.wait_for(reached.wait(), timeout=5)
-        task = watcher._relink_scan_task
-        assert task is not None and not task.done()
-    finally:
-        await asyncio.wait_for(watcher.stop(), timeout=10)
-    assert task.cancelled()
-    assert watcher._relink_scan_task is None
-
-
-async def test_a_held_relinked_key_is_released_once_the_file_is_back(env):
-    comp, root = env
-    a = await _indexed(comp, root / "work" / "a.md")
-    b = await _indexed(comp, root / "plans" / "b.md", TARGET)
-    _relink(a, b)
-    await _watcher(comp)._hold_relinked_keys()
-    assert _reasons(comp) == {str(a): RELINKED_HOLD}
-
-    a.unlink()
-    shutil.copyfile(b, a)
-    await comp.index_engine.index_file(a)
-
-    assert _reasons(comp) == {}
-
-
-async def _until(predicate, timeout: float = 5.0) -> None:
-    for _ in range(int(timeout / 0.01)):
-        if predicate():
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError("condition never held")
+    assert _pending(comp) == {str(second)}
+    assert f"Could not journal relinked source {first}" in caplog.text
 
 
 def _stall_after_first(monkeypatch, release: threading.Event) -> list[int]:
-    """Make the first scan block in its thread after handing over its first key."""
+    """Make the first scan block in its thread after its first relinked key."""
     scans: list[int] = []
     real = orphan_detect.iter_relinked_leaf_keys
 
@@ -238,16 +273,71 @@ def _stall_after_first(monkeypatch, release: threading.Event) -> list[int]:
     return scans
 
 
+async def test_a_restart_waits_for_a_stalled_check_then_checks_afresh(env, monkeypatch):
+    comp, root = env
+    a = await _indexed(comp, root / "work" / "a.md")
+    c = await _indexed(comp, root / "work" / "c.md")
+    b = await _indexed(comp, root / "plans" / "b.md", TARGET)
+    _relink(a, b)
+    _relink(c, b)
+    monkeypatch.setattr(watcher_mod, "_RELINK_WAIT_POLL_S", 0.02)
+    release = threading.Event()
+    scans = _stall_after_first(monkeypatch, release)
+    watcher = _watcher(comp)
+    try:
+        await watcher.start()
+        # The first key is journaled, and so hidden, while the thread is stalled.
+        await _until(lambda: str(a) in _pending(comp) or str(a) in _reasons(comp))
+        await asyncio.wait_for(watcher.stop(), timeout=5)
+        await watcher.start()
+        await asyncio.sleep(0.1)
+        assert not watcher._relink_scan_task.done()
+        assert len(scans) == 1
+        release.set()
+        await asyncio.wait_for(watcher._relink_scan_task, timeout=5)
+        await asyncio.to_thread(watcher._relink_scan_thread.join, 5)
+    finally:
+        release.set()
+        await watcher.stop()
+
+    assert len(scans) == 2
+    hidden = _pending(comp) | set(_reasons(comp))
+    assert {str(a), str(c)} <= hidden
+
+
+async def test_start_runs_the_check_and_stop_cancels_it(env, monkeypatch):
+    comp, root = env
+    reached = asyncio.Event()
+
+    async def parked(_storage):
+        reached.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(orphan_detect, "orphan_candidate_sources", parked)
+    watcher = _watcher(comp)
+    await watcher.start()
+    try:
+        await asyncio.wait_for(reached.wait(), timeout=5)
+        task = watcher._relink_scan_task
+        assert task is not None and not task.done()
+    finally:
+        await asyncio.wait_for(watcher.stop(), timeout=10)
+    assert task.cancelled()
+    assert watcher._relink_scan_task is None
+
+
 class _Store:
-    """The two storage calls the start check makes, for a check run without real storage."""
+    """The two storage calls the start check makes, without real storage."""
 
     def __init__(self, keys: set[Path]) -> None:
         self.keys = keys
+        self.journaled: list[Path] = []
 
     async def get_orphan_candidate_source_files(self) -> set[Path]:
         return self.keys
 
-    async def hold_source(self, source_file, reason, **kwargs) -> bool:
+    def queue_source_check_sync(self, key: Path) -> bool:
+        self.journaled.append(key)
         return True
 
 
@@ -261,24 +351,30 @@ def _bare_watcher(tmp_path: Path, keys: set[Path]) -> FileWatcher:
 
 
 def test_a_check_outliving_its_event_loop_finishes_quietly(tmp_path, monkeypatch):
-    """The thread hands keys to a loop that has closed; that is dropped, not raised."""
+    """The thread wakes a loop that has closed; that is dropped, not raised."""
     key = tmp_path / "a.md"
     key.symlink_to(tmp_path / "nowhere.md")
     release = threading.Event()
-    _stall_after_first(monkeypatch, release)
+    real = orphan_detect.iter_relinked_leaf_keys
+
+    def late(keys):
+        release.wait(10)
+        yield from real(keys)
+
+    monkeypatch.setattr(orphan_detect, "iter_relinked_leaf_keys", late)
     raised: list[BaseException] = []
     monkeypatch.setattr(threading, "excepthook", lambda args: raised.append(args.exc_value))
     watcher = _bare_watcher(tmp_path, {key})
     loop = asyncio.new_event_loop()
     try:
-        with pytest.raises(TimeoutError):
-            loop.run_until_complete(asyncio.wait_for(watcher._hold_relinked_keys(), 0.2))
+        loop.run_until_complete(watcher._journal_relinked_keys())
     finally:
         loop.close()
         release.set()
     watcher._relink_scan_thread.join(5)
 
     assert not watcher._relink_scan_thread.is_alive()
+    assert watcher._engine._storage.journaled == [key]
     assert raised == []
 
 
@@ -292,7 +388,7 @@ async def test_a_check_that_fails_in_its_thread_is_logged(tmp_path, monkeypatch,
     monkeypatch.setattr(threading, "excepthook", lambda args: raised.append(args.exc_value))
     watcher = _bare_watcher(tmp_path, {tmp_path / "a.md"})
 
-    await asyncio.wait_for(watcher._hold_relinked_keys(), timeout=5)
+    await _check(watcher)
 
     assert raised == []
     assert "Relink check failed: mount went away" in caplog.text
@@ -308,7 +404,7 @@ async def test_a_thread_that_cannot_start_skips_the_check(tmp_path, monkeypatch,
     monkeypatch.setattr(watcher_mod, "threading", SimpleNamespace(Thread=Unstartable))
     watcher = _bare_watcher(tmp_path, {tmp_path / "a.md"})
 
-    await asyncio.wait_for(watcher._hold_relinked_keys(), timeout=5)
+    await watcher._journal_relinked_keys()
 
     assert watcher._relink_scan_thread is None
     assert "Could not start the relink check" in caplog.text
@@ -330,7 +426,7 @@ def test_a_stalled_check_does_not_hold_up_process_exit(tmp_path):
             async def get_orphan_candidate_source_files(self):
                 return {Path(KEY)}
 
-            async def hold_source(self, *args, **kwargs):
+            def queue_source_check_sync(self, key):
                 return True
 
         def never(keys):
@@ -342,10 +438,8 @@ def test_a_stalled_check_does_not_hold_up_process_exit(tmp_path):
         async def main():
             engine = SimpleNamespace(_storage=Store())
             watcher = FileWatcher(engine, IndexingConfig(memory_dirs=[Path(KEY).parent]))
-            task = asyncio.create_task(watcher._hold_relinked_keys())
+            await watcher._journal_relinked_keys()
             await asyncio.sleep(0.2)
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
 
         asyncio.run(main())
         print("exited")
@@ -360,104 +454,49 @@ def test_a_stalled_check_does_not_hold_up_process_exit(tmp_path):
     assert proc.stdout.strip() == "exited"
 
 
-class _Abort(BaseException):
-    pass
-
-
-async def test_a_scan_killed_by_a_base_exception_still_ends_the_check(tmp_path, monkeypatch):
-    def aborting(keys):
-        raise _Abort
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(orphan_detect, "iter_relinked_leaf_keys", aborting)
-    raised: list[BaseException] = []
-    monkeypatch.setattr(threading, "excepthook", lambda args: raised.append(args.exc_value))
-    watcher = _bare_watcher(tmp_path, {tmp_path / "a.md"})
-
-    await asyncio.wait_for(watcher._hold_relinked_keys(), timeout=5)
-
-    await asyncio.to_thread(watcher._relink_scan_thread.join, 5)
-    assert [type(exc) for exc in raised] == [_Abort]
-
-
-async def test_a_restart_waits_for_a_stalled_check_then_checks_afresh(env, monkeypatch):
-    """What the first thread finds after its task was stopped is not lost."""
+async def test_a_relinked_key_outside_every_root_is_shown_as_before(env):
+    """The recheck shows a present source outside the roots, as since #2835."""
     comp, root = env
-    a = await _indexed(comp, root / "work" / "a.md")
-    c = await _indexed(comp, root / "work" / "c.md")
-    b = await _indexed(comp, root / "plans" / "b.md", TARGET)
+    a = await _indexed(comp, root / "old" / "a.md")
+    b = await _indexed(comp, root / "elsewhere" / "b.md", TARGET)
     _relink(a, b)
-    _relink(c, b)
-    monkeypatch.setattr(watcher_mod, "_RELINK_WAIT_POLL_S", 0.02)
-    release = threading.Event()
-    scans = _stall_after_first(monkeypatch, release)
-    watcher = _watcher(comp)
-    try:
-        await watcher.start()
-        await _until(lambda: _reasons(comp) == {str(a): RELINKED_HOLD})
-        await asyncio.wait_for(watcher.stop(), timeout=5)
-        await watcher.start()
-        await asyncio.sleep(0.1)
-        # Still waiting on the first thread; no second scan yet.
-        assert not watcher._relink_scan_task.done()
-        assert len(scans) == 1
-        release.set()
-        await asyncio.wait_for(watcher._relink_scan_task, timeout=5)
-    finally:
-        release.set()
-        await watcher.stop()
-
-    assert len(scans) == 2
-    assert _reasons(comp) == {str(a): RELINKED_HOLD, str(c): RELINKED_HOLD}
-
-
-async def test_a_hold_that_fails_once_is_retried(env, monkeypatch):
-    comp, root = env
-    a = await _indexed(comp, root / "work" / "a.md")
-    b = await _indexed(comp, root / "plans" / "b.md", TARGET)
-    _relink(a, b)
-    monkeypatch.setattr(watcher_mod, "_RELINK_HOLD_RETRY_DELAYS_S", (0.01, 0.01, 0.01))
-    real = comp.storage.hold_source
-    failures = [sqlite3.OperationalError("database is locked")]
-
-    async def flaky(source_file, reason, **kwargs):
-        if reason == RELINKED_HOLD and failures:
-            raise failures.pop()
-        return await real(source_file, reason, **kwargs)
-
-    monkeypatch.setattr(comp.storage, "hold_source", flaky)
-
-    await _watcher(comp)._hold_relinked_keys()
-
-    assert failures == []
-    assert _reasons(comp) == {str(a): RELINKED_HOLD}
-
-
-async def test_a_hold_wakes_the_recheck_so_a_restored_file_is_released(env, monkeypatch):
-    """The thread saw a link; the file was back and indexed before the hold landed."""
-    comp, root = env
-    a = await _indexed(comp, root / "work" / "a.md")
-    b = await _indexed(comp, root / "plans" / "b.md", TARGET)
-    _relink(a, b)
-    real = orphan_detect.iter_relinked_leaf_keys
-
-    def restored_before_hand_over(keys):
-        for key in real(keys):
-            key.unlink()
-            key.write_text(BODY, encoding="utf-8")
-            yield key
-
-    monkeypatch.setattr(orphan_detect, "iter_relinked_leaf_keys", restored_before_hand_over)
+    (root / "plans").mkdir()
+    comp.config.indexing.memory_dirs = [root / "plans"]
     watcher = _watcher(comp)
 
-    await watcher._hold_relinked_keys()
+    await _check(watcher)
 
-    assert _reasons(comp) == {str(a): RELINKED_HOLD}
-    assert watcher._recheck_wakeup.is_set()
-    recheck = asyncio.create_task(watcher._recheck_held_loop())
-    try:
-        await _until(lambda: _reasons(comp) == {})
-    finally:
-        recheck.cancel()
-        await asyncio.gather(recheck, return_exceptions=True)
-    assert (await comp.search_pipeline.search("storedkeyword"))[0]
+    assert str(a) in _pending(comp)
+    await _settle(watcher, lambda: str(a) not in _pending(comp))
+    assert _reasons(comp) == {}
+
+
+async def test_a_dangling_link_under_a_retain_dir_stays_hidden(env):
+    """A retain dir shows the archive of a file that is gone, not of one replaced by a link."""
+    comp, root = env
+    a = await _indexed(comp, root / "work" / "a.md")
+    _relink(a, root / "nowhere.md")
+    comp.config.indexing.retain_missing_dirs = [root]
+    watcher = _watcher(comp)
+
+    await _check(watcher)
+
+    assert _pending(comp) == {str(a)}
+    await _settle(watcher, lambda: str(a) not in _pending(comp))
+    assert _reasons(comp) == {str(a): "watch_reindex_unresolved"}
+    assert not await _found(comp, "storedkeyword")
+
+
+async def test_a_file_gone_from_a_retain_dir_is_still_shown_as_its_archive(env):
+    """The control: nothing at the path, so the retain dir keeps showing it (#2833)."""
+    comp, root = env
+    a = await _indexed(comp, root / "work" / "a.md")
+    a.unlink()
+    comp.config.indexing.retain_missing_dirs = [root]
+    assert comp.storage.queue_source_check_sync(a)
+    watcher = _watcher(comp)
+
+    await _settle(watcher, lambda: str(a) not in _pending(comp))
+
+    assert _reasons(comp) == {}
+    assert await _found(comp, "storedkeyword")

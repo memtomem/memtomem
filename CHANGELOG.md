@@ -42,19 +42,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   start (#2904).** Such a relink produces no event, so its old chunks stayed
   searchable, and indexing the path indexed the link's target. Each time
   the watcher starts, in the MCP server or `mm web`, it now checks every
-  indexed file once and holds the chunks of any that is now a symlink, the
-  same hold the live watcher places. A directory that was moved and replaced
-  by a link to its new place is not affected: the files under it are
-  regular files. A key in a Unicode form from before keys were folded is
-  skipped, since indexing could never lift a hold placed under it. When
-  the watcher does not start, as in a degraded start after an embedding
-  mismatch, the check runs once it is resumed. The check runs in a
-  background thread, so a mount that stops responding holds up neither
-  startup nor shutdown; what it found before the stall is still held, and
-  a later start waits for that thread to return before checking afresh, so
-  restarts never pile up threads behind one mount.
-  At 50,000 indexed files it takes about a third of a second, of which about
-  a quarter of a second blocks the event loop, once per start.
+  indexed file once and queues any that is now a symlink for the same
+  recheck a delete event gets. Its chunks are hidden at once; the recheck
+  then holds them while the path still points elsewhere, or shows them again
+  if the file is back. A dangling link stays hidden even under
+  `retain_missing_dirs`, which keeps showing files that are gone, not files
+  replaced by a link. A source outside every configured root is shown
+  again, as such sources already are once present. A directory that was
+  moved and replaced by a link to its new place is not affected: the files
+  under it are regular files. A key in a Unicode form from before keys were
+  folded is skipped, since indexing could never lift a hold placed under it.
+  When the watcher does not start, as in a degraded start after an embedding
+  mismatch, the check runs once it is resumed. The check runs in a background
+  thread, so a mount that stops responding holds up neither startup nor
+  shutdown; what it found before the stall stays queued, and a later start
+  waits for that thread to return before checking afresh, so restarts never
+  pile up threads behind one mount. At 50,000 indexed files it took 0.4 to
+  0.5 seconds in three runs, of which 0.27 to 0.36 seconds blocked the event
+  loop, once per start.
 - **The Web UI chunk browser shows a source's own chunks after it became a
   symlink (#2896).** For an indexed file later replaced by a link to another
   indexed file, opening it listed and counted the link target's chunks,
