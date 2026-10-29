@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import random
 import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -66,6 +68,10 @@ _BACKFILL_RETRY_BASE_S = 5.0
 _HELD_RECHECK_INTERVAL_S = 300.0
 _HELD_RECHECK_BATCH = 100
 _HELD_PROBE_TIMEOUT_S = 2.0
+# The start-time relink check (#2904): how often a start polls for an earlier
+# check's stalled thread to finish, and the waits before retrying a failed hold.
+_RELINK_WAIT_POLL_S = 1.0
+_RELINK_HOLD_RETRY_DELAYS_S = (0.5, 1.0, 2.0)
 
 
 def effective_watcher_backend(config: IndexingConfig) -> str:
@@ -205,6 +211,11 @@ class FileWatcher:
         self._backfill_task: asyncio.Task[None] | None = None
         self._pending_replay_task: asyncio.Task[None] | None = None
         self._held_recheck_task: asyncio.Task[None] | None = None
+        self._relink_scan_task: asyncio.Task[None] | None = None
+        # The start-time relink check's thread. Kept across stop/start: one
+        # stalled on a mount outlives the task, and even the event loop, that
+        # started it, and a new start must not add another behind it.
+        self._relink_scan_thread: threading.Thread | None = None
         self._stalled_probes: set[asyncio.Task[str]] = set()
         self._held_cursor = 0
         self._recheck_wakeup = asyncio.Event()
@@ -363,6 +374,7 @@ class FileWatcher:
             self._task = asyncio.create_task(self._process_events())
             self._pending_replay_task = asyncio.create_task(self._replay_pending_checks())
             self._held_recheck_task = asyncio.create_task(self._recheck_held_loop())
+            self._relink_scan_task = asyncio.create_task(self._hold_relinked_keys())
             if watched and self._config.startup_backfill:
                 self._backfill_task = asyncio.create_task(self._backfill_existing(watched))
 
@@ -384,6 +396,109 @@ class FileWatcher:
             raise
         except Exception:
             logger.exception("Could not replay pending watcher source checks")
+
+    async def _hold_relinked_keys(self) -> None:
+        """Hold each stored key whose file became a symlink while no watcher ran (#2904).
+
+        A relink this watcher sees is held by ``_hold_relinked_leaf``. One made
+        while no server or ``mm web`` was running produces no event, so every
+        stored key is checked once per start, by the leaf rule of
+        :func:`~memtomem.storage.orphan_detect.iter_relinked_leaf_keys`.
+
+        The ``lstat``s run in one daemon thread that hands each relinked key to
+        this task as it finds it. A mount that stalls blocks only that thread:
+        startup goes on and process exit does not wait for it. Keys found
+        before the stall are held. A later start that finds that thread still
+        alive waits for it to finish rather than queue another behind it, then
+        checks afresh, since what the old thread finds after a stop goes
+        nowhere. A hold that fails is retried a few times before the key is
+        given up until the next start. After any hold the held recheck is
+        woken, so a file restored in the moment between the probe and the hold
+        is indexed and released right away rather than at its next pass. A key
+        in a
+        Unicode form from before keys were folded is skipped: indexing releases
+        holds under the folded key, so a hold under the unfolded one would never
+        lift.
+        """
+        from memtomem.storage.orphan_detect import iter_relinked_leaf_keys, orphan_candidate_sources
+
+        storage = getattr(self._engine, "_storage", None)
+        if storage is None or not hasattr(type(storage), "hold_source"):
+            return
+        previous = self._relink_scan_thread
+        if previous is not None and previous.is_alive():
+            logger.warning("A previous relink check is still stalled; waiting for it to finish")
+            while previous.is_alive():
+                await asyncio.sleep(_RELINK_WAIT_POLL_S)
+        try:
+            candidates = await orphan_candidate_sources(storage)
+        except Exception:
+            logger.exception("Could not read stored sources for the relink check")
+            return
+
+        loop = asyncio.get_running_loop()
+        found: asyncio.Queue[Path | None] = asyncio.Queue()
+
+        def hand_over(key: Path | None) -> None:
+            try:
+                loop.call_soon_threadsafe(found.put_nowait, key)
+            except RuntimeError:
+                pass  # The loop that started this check has closed.
+
+        def scan() -> None:
+            try:
+                keys = sorted(
+                    (key for key in candidates if fold_path_form(str(key)) == str(key)), key=str
+                )
+                for key in iter_relinked_leaf_keys(keys):
+                    hand_over(key)
+            except Exception as exc:
+                logger.warning("Relink check failed: %s", exc)
+            finally:
+                hand_over(None)
+
+        thread = threading.Thread(
+            target=contextvars.copy_context().run,
+            args=(scan,),
+            name="memtomem-relink-check",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError as exc:
+            logger.warning("Could not start the relink check: %s", exc)
+            return
+        self._relink_scan_thread = thread
+        changed = False
+
+        async def hold(key: Path) -> bool:
+            nonlocal changed
+            try:
+                if await storage.hold_source(key, RELINKED_HOLD, as_stored=True):
+                    changed = True
+                    logger.info("Held a source that became a symlink: %s", key.name)
+                return True
+            except Exception as exc:
+                logger.warning("Could not hold relinked source %s: %s", key, exc)
+                return False
+
+        failed: list[Path] = []
+        try:
+            while (key := await found.get()) is not None:
+                if not await hold(key):
+                    failed.append(key)
+            for delay in _RELINK_HOLD_RETRY_DELAYS_S:
+                if not failed:
+                    break
+                await asyncio.sleep(delay)
+                failed = [key for key in failed if not await hold(key)]
+            for key in failed:
+                logger.error("Gave up holding relinked source %s until the next start", key)
+        finally:
+            if changed:
+                if self._search_pipeline is not None:
+                    self._search_pipeline.invalidate_cache()
+                self._recheck_wakeup.set()
 
     async def _recheck_held_loop(self) -> None:
         from memtomem.storage.orphan_detect import RetainRule, source_state
@@ -670,7 +785,11 @@ class FileWatcher:
     async def stop(self) -> None:
         """Stop the observer and the processor task, clearing their handles."""
         async with self._lifecycle_lock:
-            background = [self._pending_replay_task, self._held_recheck_task]
+            background = [
+                self._pending_replay_task,
+                self._held_recheck_task,
+                self._relink_scan_task,
+            ]
             for task in background:
                 if task is not None:
                     task.cancel()
@@ -680,6 +799,7 @@ class FileWatcher:
                 )
             self._pending_replay_task = None
             self._held_recheck_task = None
+            self._relink_scan_task = None
             if self._backfill_task is not None and not self._backfill_task.done():
                 # Cancel — the backfill walk can take a while on large trees and
                 # we don't want shutdown to block on it.

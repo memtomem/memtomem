@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,6 +37,24 @@ def source_state(source: Path) -> str:
     except OSError:
         return "unavailable"
     return "present"
+
+
+def iter_relinked_leaf_keys(keys: Iterable[Path]) -> Iterator[Path]:
+    """Yield the stored keys whose file is now a symlink, as each is found (#2904).
+
+    A key is the path the store wrote for a regular file, so a symlink at that
+    exact path means the file itself was replaced by a link. ``lstat`` follows
+    every component but the last, so a key under a parent directory that was
+    moved and linked back is not one, and neither is a file indexed through a
+    link from the start, whose key is its target's. Blocking: it runs in a
+    thread.
+    """
+    for key in keys:
+        try:
+            if key.is_symlink():
+                yield key
+        except (OSError, ValueError):
+            continue
 
 
 # Legacy mass-delete diagnostic thresholds. Absence alone no longer authorizes
