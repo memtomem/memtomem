@@ -99,6 +99,40 @@ async def test_source_content_refuses_a_masked_projection(bm25_only_components):
     assert "raw value" not in resp.text
 
 
+@pytest.mark.requires_symlinks
+async def test_source_content_judges_the_mask_of_the_file_it_reads(
+    bm25_only_components, monkeypatch
+):
+    """The gate matches a clean key; its parent is then retargeted to a directory
+    holding a masked file of the same name. The read reaches the masked file, so
+    the mask check has to judge that file, not the key's own rows (#2898)."""
+    from memtomem.storage import sqlite_visibility
+
+    comp, mem_dir = bm25_only_components
+    clean_dir, masked_dir = mem_dir / "clean", mem_dir / "masked"
+    assert await _index(comp, clean_dir / "f.md", "## Clean\n\nnothing masked\n") == 1
+    assert await _index(comp, masked_dir / "f.md", "## Masked\n\nthe raw value\n") == 1
+    db = comp.storage._get_db()
+    db.execute(
+        "UPDATE chunks SET redaction_count = 1 WHERE source_file = ?",
+        (str((masked_dir / "f.md").resolve()),),
+    )
+    db.commit()
+    real = sqlite_visibility.source_hidden
+
+    async def retarget_then_check(storage, source):
+        clean_dir.rename(mem_dir / "clean-moved")
+        clean_dir.symlink_to(masked_dir, target_is_directory=True)
+        return await real(storage, source)
+
+    monkeypatch.setattr(sqlite_visibility, "source_hidden", retarget_then_check)
+
+    resp = await _source_content(comp, (clean_dir / "f.md").resolve())
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == "masked_projection_read_only"
+    assert "raw value" not in resp.text
+
+
 async def test_scratch_promote_flushes_the_search_cache(bm25_only_components, monkeypatch):
     comp, mem_dir = bm25_only_components
     await comp.storage.scratch_set("note", "promoted scratch entry")

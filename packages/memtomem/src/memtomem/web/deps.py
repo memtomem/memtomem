@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request
-
-from memtomem.storage.sqlite_helpers import norm_path
 
 # Mirror of the CLI bootstrap gate at
 # ``packages/memtomem/src/memtomem/cli/_bootstrap.py`` (`_CONFIG_PATH`
@@ -112,18 +110,3 @@ def require_configured() -> None:
             status_code=409,
             detail="memtomem is not configured. Run 'mm init' to set up.",
         )
-
-
-def require_indexed_source(user_path: str, indexed_sources: Iterable[Path]) -> Path:
-    """Return the :func:`norm_path` key of ``user_path`` if it matches any indexed source.
-
-    Raises 403 when the path is not indexed. Normalizes both sides with
-    ``norm_path`` (resolve + the macOS-only Unicode-form fold) so an NFC
-    user-typed path can still match an NFD on-disk path on macOS/APFS
-    (issue #235). Elsewhere the two forms are two paths (#2544).
-    """
-    request_norm = norm_path(Path(user_path))
-    indexed_norms = {norm_path(p) for p in indexed_sources}
-    if request_norm not in indexed_norms:
-        raise HTTPException(status_code=403, detail="Path is not an indexed source file.")
-    return Path(request_norm)

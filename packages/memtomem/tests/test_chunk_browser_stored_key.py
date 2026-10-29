@@ -1,10 +1,12 @@
-"""The web chunk browser reads a source by its stored key (#2896).
+"""The web per-source reads take a source by its stored key (#2896, #2898).
 
 Stored ``chunks.source_file`` keys are :func:`norm_path` forms when written. If a
 stored path has since become a symlink to another source, resolving the request
-names that other source, and the browser would list its rows under this path.
-``GET /api/chunks`` takes the stored key the way ``DELETE /api/sources`` does
-(#2835) and reads and counts it as stored.
+names that other source, and the route would read its rows under this path.
+``GET /api/chunks`` and ``GET /api/sources/chunk-sizes`` take the stored key the
+way ``DELETE /api/sources`` does (#2835) and read it as stored.
+``GET /api/sources/content`` takes the key the same way and still reads the
+file on disk.
 
 ``a`` and ``b`` hold different chunk counts, so a count that resolves the key
 reads the wrong total. These run against a real ``SqliteBackend``.
@@ -124,3 +126,100 @@ async def test_count_chunks_by_source_counts_a_stored_key_as_stored(relinked):
     assert await comp.storage.count_chunks_by_source(a, as_stored=True) == 3
     assert await comp.storage.count_chunks_by_source(a) == 2  # resolves to b
     assert await comp.storage.count_chunks_by_source(b, as_stored=True) == 2
+
+
+async def _get(comp, url: str, **params) -> tuple[int, object]:
+    app = _web_app(comp)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        resp = await client.get(url, params=params)
+    return resp.status_code, resp.json()
+
+
+_EMPTY_BUCKETS = [
+    {"bucket": b, "count": 0}
+    for b in ("32-64", "64-128", "128-256", "256-512", "512-1024", "1024+")
+]
+
+
+def _histogram(dist) -> dict[str, int]:
+    return {bucket["bucket"]: bucket["count"] for bucket in dist if bucket["count"]}
+
+
+@pytest.mark.requires_symlinks
+async def test_chunk_sizes_of_a_relinked_key_are_its_own(relinked):
+    comp, a, b = relinked
+
+    status_a, dist_a = await _get(comp, "/api/sources/chunk-sizes", path=str(a))
+    status_b, dist_b = await _get(comp, "/api/sources/chunk-sizes", path=str(b))
+
+    assert status_a == status_b == 200
+    # Each chunk is a heading and one short line, well under 32 tokens.
+    assert dist_a == [{"bucket": "0-32", "count": 3}] + _EMPTY_BUCKETS
+    assert dist_b == [{"bucket": "0-32", "count": 2}] + _EMPTY_BUCKETS
+
+
+@pytest.mark.requires_symlinks
+async def test_chunk_sizes_refuse_an_unindexed_path_and_a_directory_alias(relinked, tmp_path):
+    comp, _, b = relinked
+    alias = Path(norm_path(tmp_path)) / "plans-alias"
+    alias.symlink_to(b.parent, target_is_directory=True)
+
+    for spelling in (Path(norm_path(tmp_path)) / "nope.md", alias / b.name):
+        status, body = await _get(comp, "/api/sources/chunk-sizes", path=str(spelling))
+        assert (status, body["detail"]) == (403, "Path is not an indexed source file.")
+
+
+@pytest.mark.requires_symlinks
+async def test_chunk_sizes_of_a_held_relinked_key_are_hidden_without_hiding_its_target(
+    relinked,
+):
+    comp, a, b = relinked
+    assert await comp.storage.hold_source(a, "scan_missing", as_stored=True)
+
+    status_a, _ = await _get(comp, "/api/sources/chunk-sizes", path=str(a))
+    status_b, dist_b = await _get(comp, "/api/sources/chunk-sizes", path=str(b))
+
+    assert status_a == 404
+    assert (status_b, sum(_histogram(dist_b).values())) == (200, 2)
+
+
+@pytest.mark.requires_symlinks
+async def test_get_chunk_size_distribution_reads_a_stored_key_as_stored(relinked):
+    comp, a, b = relinked
+
+    def total(dist) -> int:
+        return sum(bucket["count"] for bucket in dist)
+
+    assert total(await comp.storage.get_chunk_size_distribution(a, as_stored=True)) == 3
+    assert total(await comp.storage.get_chunk_size_distribution(a)) == 2  # resolves to b
+    assert await comp.storage.hold_source(a, "scan_missing", as_stored=True)
+    assert (
+        total(
+            await comp.storage.get_chunk_size_distribution(a, as_stored=True, exclude_hidden=True)
+        )
+        == 0
+    )
+    assert total(await comp.storage.get_chunk_size_distribution(b, exclude_hidden=True)) == 2
+
+
+@pytest.mark.requires_symlinks
+async def test_content_refuses_a_directory_alias_and_serves_the_stored_key(relinked, tmp_path):
+    comp, _, b = relinked
+    alias = Path(norm_path(tmp_path)) / "plans-alias"
+    alias.symlink_to(b.parent, target_is_directory=True)
+
+    status_alias, body_alias = await _get(comp, "/api/sources/content", path=str(alias / b.name))
+    status_b, body_b = await _get(comp, "/api/sources/content", path=str(b))
+
+    assert (status_alias, body_alias["detail"]) == (403, "Path is not an indexed source file.")
+    assert status_b == 200
+    assert (body_b["path"], body_b["content"]) == (str(b), b.read_text(encoding="utf-8"))
+
+
+@pytest.mark.requires_symlinks
+async def test_content_still_refuses_a_relinked_key(relinked):
+    comp, a, _ = relinked
+
+    status, body = await _get(comp, "/api/sources/content", path=str(a))
+
+    assert (status, body["detail"]) == (403, "Symlinked files are not served.")
