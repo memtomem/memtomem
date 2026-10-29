@@ -39,6 +39,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   macOS still matches, as it does for the delete. The Web UI sends stored
   paths.
 
+### Security
+
+- An advisory published on 2026-10-28 against `langgraph` 1.2.11 and
+  `langgraph-sdk` 0.4.5
+  ([GHSA-3fx2-cqw9-xr3c](https://osv.dev/vulnerability/GHSA-3fx2-cqw9-xr3c)):
+  the SDK's v3 streaming client puts caller-supplied thread and assistant ids
+  into request paths unencoded, which can redirect an authenticated GET.
+  memtomem's `langgraph` extra uses neither `RemoteGraph` nor the SDK client.
+  The lockfile moves to `langgraph` 1.2.14 and `langgraph-sdk` 0.4.6, the
+  fixed releases. The published `langgraph>=1.0,<2` constraint is unchanged,
+  so an existing environment keeps the `langgraph` it has until you upgrade
+  it.
+- Six more filelock advisories, published on 2026-10-28 against the locked
+  3.25.2, are fixed in 4.2.1 (one also in 4.0.9), and the lockfile stays on
+  3.25.2 for the reason the 0.7.0 entry gives: 4.2.1 and later hang
+  huggingface-hub 1.33.0, the last release fastembed allows, on a filesystem
+  without `flock`. Two are reached only through `ReadWriteLock`, which nothing
+  here uses. **The other four are reachable** through the locks
+  huggingface-hub takes in the fastembed cache (`~/.memtomem/cache/fastembed`
+  by default):
+  - on a filesystem without `flock`, such as some network mounts, where
+    filelock falls back to a soft lock: two processes of the same user can
+    both hold one, and two overlapping downloads of the same model file can
+    corrupt that cache entry
+    ([GHSA-fq56-3cx3-fjxp](https://osv.dev/vulnerability/GHSA-fq56-3cx3-fjxp)),
+    and another local account that can reach the cache can break a live lock
+    ([GHSA-rfpc-qcw5-3pc4](https://osv.dev/vulnerability/GHSA-rfpc-qcw5-3pc4));
+  - for another local account that can rename or hard-link one of your files
+    onto a lock path in the cache, which has that file truncated and made
+    writable by others
+    ([GHSA-69hj-f68j-2879](https://osv.dev/vulnerability/GHSA-69hj-f68j-2879)),
+    or, on Windows, that the cache directory's inherited ACL admits
+    ([GHSA-8mx5-7m5m-r77g](https://osv.dev/vulnerability/GHSA-8mx5-7m5m-r77g)).
+
+  All six are recorded as exceptions with the batch's 2026-11-20 expiry. If
+  other accounts share your machine, or the cache sits on a network mount,
+  point `MEMTOMEM_FASTEMBED_CACHE` at a private local directory.
+
 ## [0.7.0] — 2026-10-27
 
 ### Upgrading
