@@ -28,6 +28,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   spelling of a root, such as `/tmp/…` for `/private/tmp/…`, a spelling
   the indexer does not write today, is now listed outside every root and
   left by the remove, as `mm gc orphan-sources` already treats it.
+- **The file watcher hides an indexed file's chunks once the file is
+  replaced by a symlink (#2878).** Indexing a link indexes the file it
+  points to, so the chunks stored for the file that used to be at that path
+  stayed searchable. The watcher now holds them when it sees the file
+  become a link, and its periodic recheck does the same for a held or
+  pending path that now resolves elsewhere, which also clears a pending
+  check that was replayed on every pass. Presence alone does not lift this
+  hold; indexing the path once it is a regular file again does. A change
+  event for a file under a directory that became a link holds nothing.
+  `mm index`, `mem_index` and the Web UI reindex without a running watcher
+  still leave those chunks searchable.
 - **The Web UI chunk browser shows a source's own chunks after it became a
   symlink (#2896).** For an indexed file later replaced by a link to another
   indexed file, opening it listed and counted the link target's chunks,
