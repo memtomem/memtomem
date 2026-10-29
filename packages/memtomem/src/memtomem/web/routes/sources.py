@@ -16,7 +16,6 @@ from memtomem.web.deps import (
     get_config,
     get_search_pipeline,
     get_storage,
-    require_indexed_source,
 )
 from memtomem.web.source_visibility import load_source_visibility
 from memtomem.web.routes._confirm import needs_confirmation_envelope
@@ -396,8 +395,13 @@ async def source_content(
     storage=Depends(get_storage),
 ):
     """Return the raw text content of an indexed source file (max 1 MB)."""
-    indexed_sources = await storage.get_all_source_files()
-    request_path = require_indexed_source(path, indexed_sources)
+    # The stored key the request names, matched as a string as the other
+    # per-source routes do (#2898). The checks below and the read go through
+    # the file that key resolves to on disk.
+    key = await storage.find_source_key(path)
+    if key is None:
+        raise HTTPException(status_code=403, detail="Path is not an indexed source file.")
+    request_path = Path(norm_path(key))
 
     # Checked on the caller's spelling as well as the resolved one, and only
     # after the indexed-source gate so this route cannot probe arbitrary paths.
@@ -406,10 +410,11 @@ async def source_content(
 
     from memtomem.storage.sqlite_visibility import source_hidden
 
-    # The holds are keyed on the stored path, compared as stored. This route
-    # reads the file through ``request_path`` next, so resolve it again here:
-    # if a parent directory was retargeted since the gate, the hold that
-    # matters is the one on the file the read will reach.
+    # The holds are keyed on the stored path, compared as stored. Judged on the
+    # file the read will reach, not on ``key``, when a parent directory was
+    # retargeted since indexing. Normalized again: ``norm_path`` folds the
+    # Unicode form after resolving, so ``request_path`` can itself pass
+    # through another link where the volume keeps the two forms apart.
     if await source_hidden(storage, Path(norm_path(request_path))):
         raise HTTPException(status_code=404, detail="Source file not found on disk.")
 
@@ -424,6 +429,8 @@ async def source_content(
     # still holds the values the mask removed. Refuse rather than re-derive the
     # mask here — the engine's projection depends on scope and the reviewed
     # masking manifest, and a second copy of that decision would drift from it.
+    # Not read as stored: like the hold check, this judges the file the read
+    # reaches, since its bytes are what is served.
     chunks = await storage.list_chunks_by_source(request_path, limit=None)
     if any(c.metadata.redaction_count for c in chunks):
         raise HTTPException(status_code=409, detail="masked_projection_read_only")
@@ -446,7 +453,21 @@ async def source_chunk_sizes(
     storage=Depends(get_storage),
 ) -> list[ChunkSizeBucket]:
     """Return chunk size distribution for a single source file."""
-    dist = await storage.get_chunk_size_distribution(source_file=Path(path))
+    from memtomem.storage.sqlite_visibility import source_hidden
+
+    # Taken and read as ``GET /api/chunks`` does: the stored key, matched as a
+    # string and read as stored, so a source that has become a symlink is not
+    # measured by its target's rows (#2898).
+    key = await storage.find_source_key(path)
+    if key is None:
+        raise HTTPException(status_code=403, detail="Path is not an indexed source file.")
+    if await source_hidden(storage, key):
+        raise HTTPException(status_code=404, detail="Source not found")
+    dist = await storage.get_chunk_size_distribution(
+        source_file=key, exclude_hidden=True, as_stored=True
+    )
+    if await source_hidden(storage, key):
+        raise HTTPException(status_code=404, detail="Source not found")
     return [ChunkSizeBucket(**d) for d in dist]
 
 

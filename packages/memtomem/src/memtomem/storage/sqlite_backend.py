@@ -3212,17 +3212,24 @@ class SqliteBackend(
     async def get_chunk_size_distribution(
         self,
         source_file: Path | None = None,
+        *,
+        exclude_hidden: bool = False,
+        as_stored: bool = False,
     ) -> list[dict]:
         """Return chunk count per token-size bucket.
 
         Token estimate: LENGTH(content) / 3.
-        If source_file is given, filter to that source only.
+        If source_file is given, filter to that source only. ``exclude_hidden``
+        and ``as_stored`` apply to that filter, as on
+        :meth:`count_chunks_by_source`.
         """
         where = ""
         params: list = []
         if source_file is not None:
             where = "WHERE source_file = ?"
-            params.append(norm_path(source_file))
+            params.append(str(source_file) if as_stored else norm_path(source_file))
+            if exclude_hidden:
+                where += f" AND {VISIBLE_SOURCE_PATH}"
 
         async with self._lease_txn_read_db() as db:
             rows = db.execute(

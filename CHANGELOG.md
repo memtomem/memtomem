@@ -38,6 +38,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the delete already refuses it; the `/tmp/...` form `mem_list` prints on
   macOS still matches, as it does for the delete. The Web UI sends stored
   paths.
+- **The source chunk-size API reports a source's own chunks and honours
+  holds (#2898).** `GET /api/sources/chunk-sizes` resolved the request, so
+  for an indexed file later replaced by a link to another indexed file it
+  returned the target's histogram. It also returned a histogram for a held
+  source, and an all-zero one for any path at all. It now takes the stored
+  path the way `GET /api/chunks` does: an unindexed path gets 403, and a
+  held source 404. `GET /api/sources/content`, the Web UI's file preview,
+  now refuses a path through a symlinked directory with 403, as the other
+  per-source routes do. For the stored paths the Web UI sends, what it
+  reads from disk and its refusal of symlinked files are unchanged.
 
 ### Security
 

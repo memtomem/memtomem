@@ -372,6 +372,79 @@ class TestWebChunkListing:
         assert "lateword" not in resp.text
 
 
+class TestWebChunkSizes:
+    """``GET /api/sources/chunk-sizes`` judges the hold as the chunk browser does (#2898)."""
+
+    @staticmethod
+    def _total(resp) -> int:
+        return sum(bucket["count"] for bucket in resp.json())
+
+    async def test_rows_read_while_held_are_not_counted(self, bm25_only_components, monkeypatch):
+        """Hold after the first check, release before the second: only the read can tell."""
+        from memtomem.storage import sqlite_visibility
+
+        comp, mem_dir = bm25_only_components
+        path = mem_dir / "raced.md"
+        await _index(comp, path, "# R\n\nracedword fact.\n")
+        real = sqlite_visibility.source_hidden
+        calls = 0
+
+        async def racing(storage, source):
+            nonlocal calls
+            calls += 1
+            answer = await real(storage, source)
+            if calls == 1:
+                await comp.storage.hold_source(path, REDACTION_BLOCKED_HOLD)
+            else:
+                _release(comp, path)
+                answer = await real(storage, source)
+            return answer
+
+        monkeypatch.setattr(sqlite_visibility, "source_hidden", racing)
+
+        resp = await _get(_web_app(comp), "/api/sources/chunk-sizes", path=str(path.resolve()))
+
+        assert resp.status_code == 200, resp.text
+        assert self._total(resp) == 0
+
+    async def test_a_hold_during_the_read_answers_404(self, bm25_only_components, monkeypatch):
+        comp, mem_dir = bm25_only_components
+        path = mem_dir / "late.md"
+        await _index(comp, path, "# L\n\nlateword fact.\n")
+        real = comp.storage.get_chunk_size_distribution
+
+        async def hold_then_read(*args, **kwargs):
+            await comp.storage.hold_source(path, "scan_missing")
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(comp.storage, "get_chunk_size_distribution", hold_then_read)
+
+        resp = await _get(_web_app(comp), "/api/sources/chunk-sizes", path=str(path.resolve()))
+
+        assert resp.status_code == 404
+
+    async def test_a_held_source_is_refused_before_the_read(
+        self, bm25_only_components, monkeypatch
+    ):
+        comp, mem_dir = bm25_only_components
+        path = mem_dir / "held.md"
+        await _index(comp, path, "# H\n\nheldword fact.\n")
+        await comp.storage.hold_source(path, "scan_missing")
+        reads: list[object] = []
+        real = comp.storage.get_chunk_size_distribution
+
+        async def spy(*args, **kwargs):
+            reads.append(args or kwargs)
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(comp.storage, "get_chunk_size_distribution", spy)
+
+        resp = await _get(_web_app(comp), "/api/sources/chunk-sizes", path=str(path.resolve()))
+
+        assert resp.status_code == 404
+        assert reads == []
+
+
 class TestWebSourceSummaries:
     async def test_storage_reads_drop_hidden_sources(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
@@ -445,8 +518,6 @@ class TestStoredPathHoldChecks:
     async def test_raw_read_rechecks_the_file_a_retargeted_parent_reaches(
         self, bm25_only_components, monkeypatch
     ):
-        from memtomem.web.routes import sources as sources_route
-
         comp, mem_dir = bm25_only_components
         clean_dir, held_dir = mem_dir / "clean", mem_dir / "held"
         clean_dir.mkdir()
@@ -454,19 +525,51 @@ class TestStoredPathHoldChecks:
         await _index(comp, clean_dir / "f.md", "# C\n\ncleanword.\n")
         await _index(comp, held_dir / "f.md", "# H\n\nheldrawword.\n")
         await comp.storage.hold_source(held_dir / "f.md", REDACTION_BLOCKED_HOLD)
-        real_gate = sources_route.require_indexed_source
+        real_gate = comp.storage.find_source_key
 
-        def gate_then_retarget(user_path, indexed):
-            key = real_gate(user_path, indexed)
+        async def gate_then_retarget(spelling):
+            key = await real_gate(spelling)
             clean_dir.rename(mem_dir / "clean-moved")
             _symlink_or_skip(clean_dir, held_dir)
             return key
 
-        monkeypatch.setattr(sources_route, "require_indexed_source", gate_then_retarget)
+        monkeypatch.setattr(comp.storage, "find_source_key", gate_then_retarget)
 
         resp = await _get(
             _web_app(comp), "/api/sources/content", path=str((clean_dir / "f.md").resolve())
         )
+
+        assert resp.status_code == 404
+        assert "heldrawword" not in resp.text
+
+    @pytest.mark.usefixtures("folds_unicode_forms")
+    @pytest.mark.skipif(sys.platform == "win32", reason="directory symlinks need privilege")
+    async def test_raw_read_rechecks_a_link_the_unicode_fold_lands_on(self, bm25_only_components):
+        """``norm_path`` resolves, then folds to NFC. On a volume that keeps the
+        forms apart, the folded path can be a different entry, here a link to a
+        held file, so the hold check normalizes ``request_path`` again (#2898)."""
+        import unicodedata
+
+        comp, mem_dir = bm25_only_components
+        clean_dir, held_dir = mem_dir / "p", mem_dir / "held"
+        clean_dir.mkdir()
+        held_dir.mkdir()
+        await _index(comp, clean_dir / "f.md", "# P\n\npword.\n")
+        await _index(comp, held_dir / "f.md", "# H\n\nheldrawword.\n")
+        await comp.storage.hold_source(held_dir / "f.md", REDACTION_BLOCKED_HOLD)
+        nfd_dir = mem_dir / unicodedata.normalize("NFD", "café")
+        nfc_dir = mem_dir / unicodedata.normalize("NFC", "café")
+        nfd_dir.mkdir()
+        (nfd_dir / "f.md").write_text("nfdword\n", encoding="utf-8")
+        try:
+            os.symlink(held_dir, nfc_dir, target_is_directory=True)
+        except FileExistsError:
+            pytest.skip("this volume does not keep NFC and NFD names apart")
+        key = norm_path(clean_dir / "f.md")
+        clean_dir.rename(mem_dir / "p-moved")
+        _symlink_or_skip(clean_dir, nfd_dir)
+
+        resp = await _get(_web_app(comp), "/api/sources/content", path=key)
 
         assert resp.status_code == 404
         assert "heldrawword" not in resp.text
