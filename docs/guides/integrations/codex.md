@@ -1,6 +1,6 @@
 # Codex x memtomem Integration Guide
 
-The native Codex plugin bundles an exact-pinned memtomem MCP server and seven
+The native Codex plugin bundles an exact-pinned memtomem MCP server and nine
 skills. BM25 is enabled by default; an embedding provider is optional.
 
 Prefer a short Korean first-success path? Follow the [Claude Code·Codex CLI
@@ -48,6 +48,8 @@ skills, and MCP server are reloaded.
 | `memtomem-index` | Index a selected path | Explicit only |
 | `memtomem-setup` | Status → explicit path → index → search | Explicit only |
 | `memtomem-handoff` | Save or resume a compact project-local handoff | Explicit only |
+| `memtomem-brief` | Assemble a read-only project memory briefing | Explicit only |
+| `memtomem-update` | Review recent commits and session context to save project-local lessons | Explicit only |
 
 The plugin exposes memtomem's nine core MCP tools. The shipped skills do not
 use the broad `mem_do` gateway.

@@ -1,19 +1,19 @@
 # opencode-memtomem
 
 Safe, configuration-only memtomem integration for OpenCode 1.17.18 through the
-current v1 line. It adds an exact-pinned local MCP server, seven slash commands,
+current v1 line. It adds an exact-pinned local MCP server, nine slash commands,
 and three read-only skills. It does not add event hooks or automatic indexing.
 
 ## Install
 
-The npm release for this core version is `opencode-memtomem@0.3.16`, bundling
+The npm release for this core version is `opencode-memtomem@0.3.17`, bundling
 core `0.7.0`.
 
 Do not use an `opencode plugin add` command; OpenCode loads npm plugins from
 the singular `plugin` array in `opencode.json`:
 
 ```json
-{"plugin": ["opencode-memtomem@0.3.16"]}
+{"plugin": ["opencode-memtomem@0.3.17"]}
 ```
 
 Upgrade if your pin is still `0.1.3` or older: those bundle pre-`0.3.14`
