@@ -25,11 +25,12 @@ SIGNED_MARKER = "All contributors have signed the CLA."
 # current instead of a new one posted per state. The two markers above still
 # identify comments written before it existed.
 STATUS_MARKER = "<!-- cla-status -->"
-# A signing comment runs against the default branch, so it cannot re-colour the
-# pull request's own CLA check; that run has to be re-run by hand.
-MAINTAINER_RERUN_NOTE = (
-    "If the CLA check on this pull request is still red, a maintainer will re-run it."
-)
+# The CLA result is a commit status on the pull request's head commit, so a
+# signing comment (whose own run belongs to the default branch) can turn it green.
+# The pull request number keeps two pull requests that share a head commit from
+# overwriting each other's result; both still show on that commit.
+STATUS_CONTEXT = "CLA / PR #{number}"
+STATUS_DESCRIPTION_LIMIT = 140  # code points; GitHub rejects longer descriptions
 
 
 class GitHubApiError(RuntimeError):
@@ -243,7 +244,28 @@ def comment_command(event: dict[str, Any], signature_text: str) -> str | None:
     return "ignore"
 
 
+def compare_commits(repo: str, base_sha: str, head_sha: str, token: str) -> list[dict[str, Any]]:
+    commits: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        response = gh_api(
+            f"repos/{repo}/compare/{base_sha}...{head_sha}?per_page=100&page={page}",
+            token=token,
+        )
+        batch = response.get("commits") or []
+        commits.extend(batch)
+        if not batch or len(commits) >= int(response.get("total_commits", 0)):
+            return commits
+        page += 1
+
+
 def pr_contributors(repo: str, pr: dict[str, Any], allowlist: set[str], token: str) -> set[str]:
+    """The PR author plus the authors of the commits between its base and head.
+
+    Both ends are commit SHAs taken from one snapshot of the pull request, so the
+    result describes exactly the head commit the status is written to, even if the
+    branch moves while this runs.
+    """
     contributors: set[str] = set()
 
     def add_user(user: dict[str, Any] | None) -> None:
@@ -255,7 +277,7 @@ def pr_contributors(repo: str, pr: dict[str, Any], allowlist: set[str], token: s
 
     add_user(pr.get("user"))
 
-    commits = gh_paginated(f"repos/{repo}/pulls/{pr['number']}/commits", token=token)
+    commits = compare_commits(repo, pr["base"]["sha"], pr["head"]["sha"], token)
     for commit in commits:
         add_user(commit.get("author"))
 
@@ -322,15 +344,60 @@ def missing_comment_body(names: str, document_url: str, signature_text: str) -> 
     )
 
 
-def signed_comment_body(*, after_comment: bool) -> str:
-    lines = [SIGNED_MARKER]
-    if after_comment:
-        lines.append(MAINTAINER_RERUN_NOTE)
-    lines.append(STATUS_MARKER)
-    return "\n\n".join(lines)
+def signed_comment_body() -> str:
+    return f"{SIGNED_MARKER}\n\n{STATUS_MARKER}"
 
 
-def warn_comment_failure(action: str, exc: GitHubApiError) -> None:
+def status_description(missing: list[str]) -> str:
+    if not missing:
+        return "All contributors have signed the CLA"
+    text = "Missing: " + ", ".join(missing)
+    if len(text) <= STATUS_DESCRIPTION_LIMIT:
+        return text
+    return text[: STATUS_DESCRIPTION_LIMIT - 1] + "\u2026"
+
+
+def post_status(
+    repo: str, pr_number: int, sha: str, state: str, description: str, url: str, token: str
+) -> None:
+    gh_api(
+        f"repos/{repo}/statuses/{sha}",
+        method="POST",
+        token=token,
+        payload={
+            "state": state,
+            "target_url": url,
+            "description": description,
+            "context": STATUS_CONTEXT.format(number=pr_number),
+        },
+    )
+
+
+def write_commit_status(
+    repo: str, pr_number: int, sha: str, missing: list[str], document_url: str, token: str
+) -> None:
+    state = "failure" if missing else "success"
+    post_status(repo, pr_number, sha, state, status_description(missing), document_url, token)
+
+
+def mark_evaluation_failed(repo: str, pr_number: int, sha: str, token: str) -> None:
+    """Replace a possibly stale result with ``error`` before the run fails.
+
+    Without this, a run that cannot finish evaluating (say, after a retarget
+    exposed an unsigned contributor) would leave the previous ``success`` standing.
+    """
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    url = f"{server}/{repo}/actions/runs/{run_id}" if run_id else f"{server}/{repo}/actions"
+    try:
+        post_status(
+            repo, pr_number, sha, "error", "The CLA check failed; see the workflow run", url, token
+        )
+    except GitHubApiError as exc:
+        warn_api_failure("write the CLA commit status", exc)
+
+
+def warn_api_failure(action: str, exc: GitHubApiError) -> None:
     print(
         f"Warning: unable to {action}: {' '.join(exc.command)}",
         file=sys.stderr,
@@ -364,48 +431,63 @@ def main() -> int:
         print("Ignoring event without a pull request.")
         return 0
 
-    pr = gh_api(f"repos/{repo}/pulls/{pr_number}", token=github_token)
+    # A pull_request_target payload is the snapshot this run was triggered for; a
+    # comment has none, so take the pull request as it is now.
+    pr = event.get("pull_request") or gh_api(f"repos/{repo}/pulls/{pr_number}", token=github_token)
     repo_id = int(event["repository"]["id"])
-    signatures, _sha = load_signatures(repo, signatures_branch, signatures_path, github_token)
+    head_sha = pr["head"]["sha"]
+    # Anything that stops the evaluation must not leave an earlier result standing,
+    # so every step up to the verdict is guarded as one.
+    try:
+        signatures, _sha = load_signatures(repo, signatures_branch, signatures_path, github_token)
 
-    if command == "sign":
-        comment = event["comment"]
-        user = comment["user"]
-        signatures, changed = record_signature_with_retry(
-            repo=repo,
-            branch=signatures_branch,
-            path=signatures_path,
-            token=github_token,
-            login=user["login"],
-            user_id=int(user["id"]),
-            comment_id=int(comment["id"]),
-            created_at=comment["created_at"],
-            repo_id=repo_id,
-            pull_request_no=pr_number,
-        )
-        if changed:
-            print(f"Recorded CLA signature for {user['login']}.")
-        else:
-            print(f"CLA signature for {user['login']} is already recorded.")
+        if command == "sign":
+            comment = event["comment"]
+            user = comment["user"]
+            signatures, changed = record_signature_with_retry(
+                repo=repo,
+                branch=signatures_branch,
+                path=signatures_path,
+                token=github_token,
+                login=user["login"],
+                user_id=int(user["id"]),
+                comment_id=int(comment["id"]),
+                created_at=comment["created_at"],
+                repo_id=repo_id,
+                pull_request_no=pr_number,
+            )
+            if changed:
+                print(f"Recorded CLA signature for {user['login']}.")
+            else:
+                print(f"CLA signature for {user['login']} is already recorded.")
 
-    contributors = pr_contributors(repo, pr, allowlist, github_token)
-    signed = signed_logins(signatures)
-    missing = sorted(login for login in contributors if login.lower() not in signed)
+        contributors = pr_contributors(repo, pr, allowlist, github_token)
+        signed = signed_logins(signatures)
+        missing = sorted(login for login in contributors if login.lower() not in signed)
+    except Exception:
+        mark_evaluation_failed(repo, pr_number, head_sha, github_token)
+        raise
 
     if missing:
         names = ", ".join(f"`{name}`" for name in missing)
         body = missing_comment_body(names, document_url, signature_text)
-        exit_code = 1
         print(f"Missing CLA signature(s): {', '.join(missing)}")
     else:
-        body = signed_comment_body(after_comment=command is not None)
-        exit_code = 0
+        body = signed_comment_body()
         print(SIGNED_MARKER)
 
+    # The status is the CLA result, so failing to write it fails the run; the
+    # comment only explains the result, so failing to update it does not.
+    exit_code = 0
+    try:
+        write_commit_status(repo, pr_number, head_sha, missing, document_url, github_token)
+    except GitHubApiError as exc:
+        warn_api_failure("write the CLA commit status", exc)
+        exit_code = 1
     try:
         upsert_status_comment(repo, pr_number, github_token, body)
     except GitHubApiError as exc:
-        warn_comment_failure("update the CLA status comment", exc)
+        warn_api_failure("update the CLA status comment", exc)
     return exit_code
 
 
