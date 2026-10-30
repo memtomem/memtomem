@@ -4,11 +4,11 @@ tool_mode = "core"
 mcp_extras = ["onnx"]
 
 [plugins]
-claude_version = "0.5.19"
-codex_version = "0.3.16"
+claude_version = "0.5.20"
+codex_version = "0.3.17"
 automation_version = "0.3.14"
-opencode_version = "0.3.16"
-kimi_version = "0.2.14"
+opencode_version = "0.3.17"
+kimi_version = "0.2.15"
 hermes_version = "0.1.9"
 hermes_memory_version = "0.1.1"
 antigravity_version = "0.1.0"
@@ -127,3 +127,43 @@ input_kind = "handoff operation (save or resume)"
 ui_name = "memtomem Handoff"
 ui_description = "Save or resume a project handoff"
 default_prompt = "Use $memtomem-handoff to save this work for the next coding agent."
+
+[[workflows]]
+id = "brief"
+codex_name = "memtomem-brief"
+title = "Brief project context"
+description = "Compile a read-only task briefing from project memories, recent updates, and user preferences, list recent handoff IDs, and verify cited paths against the live Git worktree."
+tools = ["mem_status", "mem_search", "mem_recall"]
+claude_host_tools = ["Bash(git rev-parse:*)", "Bash(git status:*)"]
+# Needs a project root, which a user-scope host does not have.
+scopes = ["project"]
+effect = "read"
+implicit = false
+argument_hint = "[task or topic]"
+input_kind = "task or topic to brief"
+ui_name = "memtomem Brief"
+ui_description = "Read-only task briefing from project memories"
+default_prompt = "Use $memtomem-brief to brief past decisions and active context for this task."
+
+[[workflows]]
+id = "update"
+codex_name = "memtomem-update"
+title = "Update project memories"
+description = "Review session outcomes and recent Git commits, check existing memories for duplicates, and explicitly save durable project decisions, fixes, or preferences."
+tools = ["mem_status", "mem_search", "mem_recall", "mem_add"]
+claude_host_tools = [
+  "Bash(git rev-parse:*)",
+  "Bash(git status:*)",
+  "Bash(git merge-base:*)",
+  "Bash(git log --no-ext-diff --oneline --end-of-options:*)",
+  "Bash(git log --no-ext-diff -n 15 --oneline --)",
+]
+# Needs a project root, which a user-scope host does not have.
+scopes = ["project"]
+effect = "write"
+implicit = false
+argument_hint = "[full|topic|f|t] [focus]"
+input_kind = "update mode (full or topic)"
+ui_name = "memtomem Update"
+ui_description = "Save durable session and commit learnings"
+default_prompt = "Use $memtomem-update to review this session and recent commits for durable memories."

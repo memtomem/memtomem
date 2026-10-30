@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-runtime `brief` and `update` project memory workflows (`claude` 0.5.20,
+  `codex` 0.3.17, `opencode` 0.3.17, `kimi` 0.2.15).** The project-scoped
+  plugin and skill bundles now include `brief` (`/memtomem:brief`,
+  `memtomem-brief`) for read-only pre-task project briefings across
+  `project_local` (`shared:<project-slug>`) and user-scope memories, and
+  `update` (`/memtomem:update`, `memtomem-update`) for reviewing recent git
+  commits and session context to save durable architecture, bugfix, and
+  feedback lessons with idempotent item writes and a SHA-validated checkpoint
+  memory. User-scoped Hermes and Antigravity skill bundles remain unchanged at
+  six skills.
+
 ### Fixed
 
 - **A frontmatter key with no space after its colon now logs a warning

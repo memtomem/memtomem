@@ -120,7 +120,7 @@ These commands reuse the persistent environment that provides `mm`. If you
 intentionally do not install memtomem, replace `memtomem-server` with `uvx
 --isolated --from "memtomem[all]==0.7.0" memtomem-server`.
 
-For the safe plugin experience (bundled MCP server plus seven focused skills),
+For the safe plugin experience (bundled MCP server plus nine focused skills),
 install `/plugin install memtomem@memtomem`. Prompt retrieval and write-time
 indexing are a separate opt-in `/plugin install memtomem-automation@memtomem`.
 Note that both manual commands above differ from the plugin's pinned launch
@@ -300,7 +300,7 @@ and the [cross-runtime handoff guide](integrations/cross-runtime-handoff.md).
 
 ### Option A: Install the memtomem plugin
 
-The repository marketplace bundles the exact-pinned MCP server and seven Codex
+The repository marketplace bundles the exact-pinned MCP server and nine Codex
 skills:
 
 ```bash
@@ -352,10 +352,10 @@ Call mem_status to check the memtomem connection status
 
 ## 8. OpenCode
 
-The npm plugin for this core version is `opencode-memtomem@0.3.16` (bundling
+The npm plugin for this core version is `opencode-memtomem@0.3.17` (bundling
 core `0.7.0`). Add it through OpenCode's plugin form —
-`{"plugin": ["opencode-memtomem@0.3.16"]}` in `opencode.json`. The plugin
-supplies an exact-pinned MCP server, seven commands, three read-only skills,
+`{"plugin": ["opencode-memtomem@0.3.17"]}` in `opencode.json`. The plugin
+supplies an exact-pinned MCP server, nine commands, three read-only skills,
 and conservative permissions. Upgrade any pin still on `0.1.3` or older:
 those bundle pre-`0.3.14` cores, whose `mcp` dependency has no `<2` upper
 bound, so they fail at import against `mcp` 2.x (#1978).

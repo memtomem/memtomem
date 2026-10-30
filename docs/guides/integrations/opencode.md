@@ -1,7 +1,7 @@
 # OpenCode x memtomem Integration Guide
 
 `opencode-memtomem` is a configuration-only OpenCode plugin. It installs the
-exact-pinned memtomem MCP server, seven slash commands, and three read-only
+exact-pinned memtomem MCP server, nine slash commands, and three read-only
 skills without adding event hooks or automatic indexing.
 
 ## Compatibility
@@ -14,12 +14,12 @@ Native Windows has not yet been verified.
 
 ## Install
 
-The npm release for this core version is `opencode-memtomem@0.3.16`, bundling
+The npm release for this core version is `opencode-memtomem@0.3.17`, bundling
 core `0.7.0`. Add it through OpenCode's singular `plugin` configuration key
 (there is no `opencode plugin add` command):
 
 ```json
-{"plugin": ["opencode-memtomem@0.3.16"]}
+{"plugin": ["opencode-memtomem@0.3.17"]}
 ```
 
 Upgrade if your `plugin` array still pins `0.1.3` or older: those releases
@@ -70,7 +70,7 @@ Restart OpenCode and call `memtomem_mem_status` to verify this path.
 | Surface | Included behavior |
 |---|---|
 | MCP | Exact-pinned `memtomem[onnx]==0.7.0`, core tool mode (plugin); `[all]` no-install runtime (manual MCP) |
-| Commands | `memtomem-search`, `recall`, `status`, `remember`, `index`, `setup`, `handoff` |
+| Commands | `memtomem-search`, `recall`, `status`, `remember`, `index`, `setup`, `handoff`, `brief`, `update` |
 | Skills | Read-only `search`, `recall`, and `status` |
 
 OpenCode prefixes MCP tools with the server name, so prompts use names such as

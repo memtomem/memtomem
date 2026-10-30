@@ -1,7 +1,7 @@
 # memtomem for Kimi Code
 
 This is a portable Kimi Code skill bundle, not a plugin. It contains the
-same seven workflow contracts shipped for Claude Code and Codex CLI; Kimi
+same nine workflow contracts shipped for Claude Code and Codex CLI; Kimi
 loads them from its Agent Skills directory while MCP registration remains a
 separate, explicit step.
 

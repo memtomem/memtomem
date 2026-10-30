@@ -47,7 +47,7 @@ The most powerful automation pipeline is achieved when combined with Claude Code
 
 ### Option A: Install the safe base plugin
 
-The memtomem plugin bundles the exact-pinned MCP server and seven focused slash
+The memtomem plugin bundles the exact-pinned MCP server and nine focused slash
 commands. Read workflows can be selected automatically; write and setup
 workflows require direct invocation.
 
