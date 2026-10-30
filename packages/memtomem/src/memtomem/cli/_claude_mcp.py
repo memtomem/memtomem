@@ -59,11 +59,20 @@ class Report:
         self.add("incomplete", message)
 
 
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict:
+    result: dict = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON keys require manual review.")
+        result[key] = value
+    return result
+
+
 def _object(path: Path, report: Report, label: str, *, required: bool = False) -> dict:
     try:
         raw = path.read_bytes()
         report.snapshots[path] = raw
-        value = json.loads(raw.decode("utf-8"))
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
         if not isinstance(value, dict):
             raise ValueError
         return value
@@ -132,6 +141,11 @@ def _candidate(name: str, entry: dict) -> bool:
         )
         for token in tokens
     )
+
+
+def _has_tool_policy(entry: dict) -> bool:
+    # Presence requires host-specific interpretation, even for an empty list.
+    return any(key in entry for key in ("enabled_tools", "disabled_tools"))
 
 
 def _launch(entry: dict) -> tuple[str, tuple[str, ...]] | None:
@@ -357,6 +371,9 @@ def _inspect_claude_mcp() -> Report:
         if state == "configured" and _launch(entry) is None:
             report.unknown("Manual memtomem launch cannot be classified without executing it.")
             state = "unclassified"
+        if state == "configured" and _has_tool_policy(entry):
+            report.unknown("Manual memtomem tool policy needs effective-configuration review.")
+            state = "unclassified"
         report.add(
             "manual_registration",
             "Manual memtomem registration found.",
@@ -420,6 +437,9 @@ def _inspect_claude_mcp() -> Report:
         entry = servers.get("memtomem")
         if len(servers) != 1 or not isinstance(entry, dict) or _launch(entry) is None:
             report.unknown("memtomem plugin launch configuration is unsupported.")
+            continue
+        if _has_tool_policy(entry):
+            report.unknown("Plugin MCP tool policy needs effective-configuration review.")
             continue
         report.plugin_paths.append(plugin_path)
         # /mcp can disable the bundled server without disabling its plugin.
@@ -520,11 +540,22 @@ def emit_report(report: Report, *, as_json: bool = False, client: str = "claude"
                 f"    To keep the plugin, remove only this manual registration: {finding['remediation']}"
             )
     if report.current_risk:
-        click.echo(
-            "  To retain manual MCP and plugin skills: "
-            f"mm doctor --mcp-client {client} --reconcile keep-manual "
-            "(preview; add --apply to write)."
+        configured_manuals = sum(
+            f["code"] == "manual_registration" and f.get("state") == "configured"
+            for f in report.findings
         )
+        if (
+            report.complete
+            and not report.shadowed_manual
+            and configured_manuals == 1
+            and len(report.manual_sources) == 1
+            and len(report.plugin_paths) == 1
+        ):
+            click.echo(
+                "  To retain manual MCP and plugin skills: "
+                f"mm doctor --mcp-client {client} --reconcile keep-manual "
+                "(preview; add --apply to write)."
+            )
         for finding in report.findings:
             if "uninstall_command" in finding:
                 click.echo(f"  To keep the manual setup instead: {finding['uninstall_command']}")

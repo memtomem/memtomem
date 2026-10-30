@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tomllib
 from types import SimpleNamespace
@@ -156,6 +157,7 @@ def test_inventory_failure_refuses_write(host, error):
     result = invoke(host, "--reconcile", "keep-manual", "--apply")
     assert result.exit_code == 2
     assert host.bundled.read_bytes() == before
+    assert "Reconciliation skipped: inspection is incomplete" in result.output
 
 
 @pytest.mark.parametrize(
@@ -185,6 +187,7 @@ def test_changed_config_refuses_write(host):
     assert report.exit_code == 2
     assert host.config.read_text() == "changed by client"
     assert host.bundled.read_bytes() == original
+    assert any(f.get("path") == str(host.config) for f in report.findings)
 
 
 @pytest.mark.requires_symlinks
@@ -297,6 +300,10 @@ def test_replace_failure_keeps_original_and_backup(host, monkeypatch):
     assert host.config.read_bytes() == before
     backup = next(host.config.parent.glob(host.config.name + ".mm-backup-*"))
     assert backup.read_bytes() == before
+    assert any(
+        f["code"] == "reconcile_backup_retained" and f.get("backup") == str(backup)
+        for f in json.loads(result.output)["findings"]
+    )
     assert not list(host.config.parent.glob(host.config.name + ".mm-[!b]*"))
 
 
@@ -306,7 +313,10 @@ def test_remove_quoted_toml_table_preserves_unrelated_comments():
     assert result == b'# top\n[mcp_servers.other] # keep\ncommand="other"\n'
 
 
-@pytest.mark.parametrize("raw", ['{"mcpServers":', "[]", '{"mcpServers": []}'])
+@pytest.mark.parametrize(
+    "raw",
+    ['{"mcpServers":', "[]", '{"mcpServers": []}', '{"mcpServers": {}, "mcpServers": {}}'],
+)
 @pytest.mark.parametrize("has_manual", [False, True])
 def test_review_invalid_plugin_is_not_omitted(host, raw, has_manual):
     host.bundled.write_text(raw)
@@ -317,6 +327,95 @@ def test_review_invalid_plugin_is_not_omitted(host, raw, has_manual):
     assert "skills_only" not in {f["code"] for f in report.findings}
     assert not any("Plugin MCP is omitted" in f["message"] for f in report.findings)
     assert not report.plugin_paths
+
+
+@pytest.mark.parametrize("choice", ["keep-manual", "keep-plugin"])
+def test_agy_source_plugin_refuses_edits(host, choice):
+    if host.client != "agy":
+        return
+    source = Path.cwd() / "shared-plugin"
+    shutil.copytree(host.plugin, source)
+    host.rows[0]["path"] = str(source)
+    before = {p: p.read_bytes() for p in [host.config, source / "mcp_config.json"]}
+    result = invoke(host, "--reconcile", choice, "--apply")
+    assert result.exit_code == 2, result.output
+    assert "outside the user install directory" in result.output
+    assert all(p.read_bytes() == raw for p, raw in before.items())
+    assert not list(source.glob("*.mm-*"))
+
+
+@pytest.mark.requires_symlinks
+def test_agy_plugin_symlink_cannot_escape_install_directory(host):
+    if host.client != "agy":
+        return
+    source = Path.cwd() / "shared-plugin"
+    host.plugin.rename(source)
+    host.plugin.symlink_to(source, target_is_directory=True)
+    result = invoke(host, "--reconcile", "keep-manual", "--apply")
+    assert result.exit_code == 2, result.output
+    assert "outside the user install directory" in result.output
+    assert "memtomem" in json.loads((source / "mcp_config.json").read_text())["mcpServers"]
+
+
+@pytest.mark.parametrize("host", ["codex"], indirect=True)
+@pytest.mark.parametrize("manual_name", ["memtomem", "mm-dev"])
+@pytest.mark.parametrize("identity", ["memtomem", "memtomem@memtomem", "memtomem@team"])
+@pytest.mark.parametrize(
+    "policy",
+    [
+        "mcp_servers.memtomem.enabled = false",
+        "mcp_servers.memtomem.enabled_tools = []",
+        "unknown = true",
+        'enabled = "yes"',
+    ],
+)
+@pytest.mark.parametrize("choice", ["keep-manual", "keep-plugin"])
+def test_codex_plugin_policy_refuses_state_claims_and_edits(
+    host, manual_name, identity, policy, choice
+):
+    content = host.config.read_text().replace("mcp_servers.memtomem", f"mcp_servers.{manual_name}")
+    host.config.write_text(content + f'\n[plugins."{identity}"]\n{policy}\n')
+    before = {p: p.read_bytes() for p in [host.config, host.bundled]}
+    result = invoke(host, "--reconcile", choice, "--apply")
+    assert result.exit_code == 2, result.output
+    findings = json.loads(result.output)["findings"]
+    assert not {"native_dedup", "plugin_enabled"} & {f["code"] for f in findings}
+    assert "plugin policy overrides" in result.output
+    assert all(p.read_bytes() == raw for p, raw in before.items())
+
+
+def test_codex_supported_and_unrelated_plugin_policy(host):
+    if host.client != "codex":
+        return
+    host.config.write_text(
+        host.config.read_text()
+        + '\n[plugins."memtomem@memtomem"]\nenabled = true\n'
+        + "[plugins.other.mcp_servers.docs]\nenabled = false\n"
+    )
+    assert invoke(host).exit_code == 0
+
+
+@pytest.mark.parametrize("git_root", [False, True])
+def test_custom_codex_home_ignores_default_home_and_above_repo_layers(host, monkeypatch, git_root):
+    if host.client != "codex":
+        return
+    home = host.root.parent
+    custom = home / "custom-codex"
+    host.root.rename(custom)
+    monkeypatch.setenv("CODEX_HOME", str(custom))
+    host.root.mkdir()
+    (host.root / "config.toml").write_text('model = "unused-default"\n')
+    project = home / "parent" / "repo"
+    project.mkdir(parents=True)
+    if git_root:
+        (project / ".git").mkdir()
+        above = project.parent / ".codex"
+        above.mkdir()
+        (above / "config.toml").write_text('model = "above-repo"\n')
+    monkeypatch.chdir(project)
+    result = invoke(host)
+    assert result.exit_code == 0, result.output
+    assert "native_dedup" in result.output
 
 
 @pytest.mark.parametrize("invalid", ["enablement", "launcher"])
@@ -375,3 +474,97 @@ def test_invalid_manifest_does_not_supply_skills_only_plugin(host, monkeypatch, 
     assert not ({"skills_only", "plugin_enabled"} & {f["code"] for f in report.findings})
     assert not any("Plugin MCP is omitted" in f["message"] for f in report.findings)
     assert not report.plugin_paths
+
+
+@pytest.mark.parametrize("host", ["agy"], indirect=True)
+@pytest.mark.parametrize("location", ["plugin", "parent"])
+@pytest.mark.parametrize("marker", ["directory", "file"])
+def test_agy_installed_plugin_in_git_worktree_is_not_edited(host, location, marker):
+    directory = host.plugin if location == "plugin" else host.root
+    git = directory / ".git"
+    if marker == "directory":
+        git.mkdir()
+    else:
+        git.write_text("gitdir: /shared/repository/worktrees/plugin\n")
+    before = host.bundled.read_bytes()
+    result = invoke(host, "--reconcile", "keep-manual", "--apply")
+    assert result.exit_code == 2, result.output
+    assert "Git worktree" in result.output
+    assert host.bundled.read_bytes() == before
+    assert not list(host.plugin.glob("*.mm-*"))
+
+
+def test_omitted_manifest_name_uses_agy_directory_only(host):
+    manifest = host.plugin / (
+        ".codex-plugin/plugin.json" if host.client == "codex" else "plugin.json"
+    )
+    write(manifest, {})
+    result = invoke(host, "--reconcile", "keep-manual", "--apply")
+    assert result.exit_code == (2 if host.client == "codex" else 0), result.output
+    if host.client == "agy":
+        assert json.loads(host.bundled.read_bytes())["mcpServers"] == {}
+
+
+@pytest.mark.parametrize("policy", ["enabled_tools", "disabled_tools"])
+@pytest.mark.parametrize("bundled", [False, True])
+@pytest.mark.parametrize("choice", ["keep-manual", "keep-plugin"])
+def test_tool_filter_requires_review_before_reconciliation(host, policy, bundled, choice):
+    target = host.bundled if bundled else host.config
+    if not bundled and host.client == "codex":
+        content = target.read_text().replace(
+            'command = "memtomem-server"', f'command = "memtomem-server"\n{policy} = []'
+        )
+        target.write_text(content)
+    else:
+        data = json.loads(target.read_bytes())
+        data["mcpServers"]["memtomem"][policy] = []
+        write(target, data)
+    before = {p: p.read_bytes() for p in [host.config, host.bundled]}
+    result = invoke(host, "--reconcile", choice, "--apply")
+    assert result.exit_code == 2, result.output
+    assert "tool policy" in result.output
+    assert "native_dedup" not in result.output
+    assert all(p.read_bytes() == raw for p, raw in before.items())
+
+
+def test_manual_tool_filter_cannot_justify_skills_only(host):
+    host.bundled.unlink()
+    if host.client == "codex":
+        host.config.write_text(
+            host.config.read_text().replace(
+                'command = "memtomem-server"', 'command = "memtomem-server"\nenabled_tools = []'
+            )
+        )
+    else:
+        data = json.loads(host.config.read_bytes())
+        data["mcpServers"]["memtomem"]["enabled_tools"] = []
+        write(host.config, data)
+    result = invoke(host, "--reconcile", "keep-manual", "--apply")
+    assert result.exit_code == 2, result.output
+    assert "skills_only" not in result.output and "reconcile_noop" not in result.output
+    assert not json.loads(result.output)["reusable_registration"]
+
+
+@pytest.mark.parametrize("host", ["codex"], indirect=True)
+def test_apply_preserves_comments_before_next_toml_table(host):
+    host.config.write_text(
+        host.config.read_text().replace(
+            "[mcp_servers.other]", "# docs for other\n\n[mcp_servers.other]"
+        )
+    )
+    result = invoke(host, "--reconcile", "keep-plugin", "--apply")
+    assert result.exit_code == 0, result.output
+    assert host.config.read_text() == (
+        'model = "test"\n# docs for other\n\n[mcp_servers.other]\ncommand = "other"\n'
+    )
+
+
+def test_toml_removal_does_not_move_removed_subtable_comments():
+    raw = (
+        b'[mcp_servers.memtomem]\ncommand="memtomem-server"\n'
+        b'# docs for removed env\n[mcp_servers.memtomem.env]\nTOKEN="private-value"\n'
+        b'# docs for other\n[mcp_servers.other]\ncommand="other"\n'
+    )
+    assert checks._remove_toml(raw, ("mcp_servers", "memtomem")) == (
+        b'# docs for other\n[mcp_servers.other]\ncommand="other"\n'
+    )

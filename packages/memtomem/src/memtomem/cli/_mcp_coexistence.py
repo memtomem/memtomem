@@ -17,7 +17,15 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-from memtomem.cli._claude_mcp import Report, _candidate, _launch, _mapping, _object, _plugin_servers
+from memtomem.cli._claude_mcp import (
+    Report,
+    _candidate,
+    _has_tool_policy,
+    _launch,
+    _mapping,
+    _object,
+    _plugin_servers,
+)
 
 
 def _inventory(client: str, report: Report) -> list[dict]:
@@ -67,7 +75,19 @@ def _plugin_path(client: str, row: dict, root: Path, report: Report) -> Path | N
     if client == "agy":
         value = row.get("path")
         if isinstance(value, str) and Path(value).is_absolute():
-            return Path(value)
+            installed = Path(value)
+            install_root = (root / "plugins").resolve()
+            resolved = installed.resolve()
+            if resolved != install_root and resolved.is_relative_to(install_root):
+                if any((parent / ".git").exists() for parent in [resolved, *resolved.parents]):
+                    report.unknown("Antigravity plugin is in a Git worktree; edit it manually.")
+                    return None
+                return installed
+            report.unknown(
+                "Antigravity plugin is outside the user install directory; "
+                "project and shared plugin files require manual review."
+            )
+            return None
     else:
         # plugin list exposes source paths, not installed cache paths. Do not
         # edit/read a marketplace checkout as if it were the installed bundle.
@@ -79,6 +99,28 @@ def _plugin_path(client: str, row: dict, root: Path, report: Report) -> Path | N
             return root.joinpath("plugins/cache", *(str(p) for p in parts))
     report.unknown("memtomem plugin installation path cannot be resolved.")
     return None
+
+
+def _codex_policy_unknown(data: dict, report: Report) -> bool:
+    """Do not infer bundled-server state from unsupported host policy overrides."""
+    settings = data.get("plugins", {})
+    if not isinstance(settings, dict):
+        report.unknown("Codex plugins configuration must be an object.")
+        return True
+    unknown = False
+    for identity, policy in settings.items():
+        if identity != "memtomem" and not identity.startswith("memtomem@"):
+            continue
+        if (
+            not isinstance(policy, dict)
+            or set(policy) - {"enabled"}
+            or not isinstance(policy.get("enabled", True), bool)
+        ):
+            report.unknown(
+                "Codex memtomem plugin policy overrides need effective-configuration review."
+            )
+            unknown = True
+    return unknown
 
 
 def inspect_host(client: str) -> Report:
@@ -101,13 +143,16 @@ def _inspect_host(client: str, report: Report) -> None:
     path = root / ("config.toml" if codex else "mcp_config.json")
     data = _toml(path, report) if codex else _object(path, report, "Antigravity MCP")
     key = "mcp_servers" if codex else "mcpServers"
+    policy_unknown = _codex_policy_unknown(data, report) if codex else False
     if codex:
         # A plain config.toml inspection cannot reconstruct session overrides,
         # managed requirements or trusted project/profile layers.
         for parent in [Path.cwd(), *Path.cwd().parents]:
             extra = parent / ".codex/config.toml"
-            if extra != path and extra.exists():
+            if extra not in {path, Path.home() / ".codex/config.toml"} and extra.exists():
                 report.unknown("Codex project configuration exists; review effective layers first.")
+                break
+            if (parent / ".git").exists():
                 break
         if data.get("profiles") or data.get("profile") or (root / "requirements.toml").exists():
             report.unknown("Codex profile or requirements need effective-configuration review.")
@@ -131,6 +176,9 @@ def _inspect_host(client: str, report: Report) -> None:
         elif _launch(entry) is None:
             report.unknown("Manual memtomem launch cannot be classified without executing it.")
             state = "unclassified"
+        elif _has_tool_policy(entry):
+            report.unknown("Manual memtomem tool policy needs effective-configuration review.")
+            state = "unclassified"
         else:
             state = "configured"
         report.add(
@@ -147,6 +195,8 @@ def _inspect_host(client: str, report: Report) -> None:
             continue
         if row.get("name") != "memtomem":
             continue
+        if policy_unknown:
+            continue
         if not isinstance(row.get("enabled"), bool):
             report.unknown("Plugin enablement could not be resolved.")
             continue
@@ -157,8 +207,15 @@ def _inspect_host(client: str, report: Report) -> None:
         if installed is None:
             continue
         manifest_path = installed / (".codex-plugin/plugin.json" if codex else "plugin.json")
-        manifest = _object(manifest_path, report, "Plugin manifest", required=True)
-        if manifest.get("name") != "memtomem":
+        manifest_report = Report()
+        manifest = _object(manifest_path, manifest_report, "Plugin manifest", required=True)
+        report.findings.extend(manifest_report.findings)
+        report.snapshots.update(manifest_report.snapshots)
+        report.complete &= manifest_report.complete
+        if not manifest_report.complete:
+            continue
+        manifest_name = manifest.get("name", installed.name if not codex else None)
+        if manifest_name != "memtomem":
             report.unknown("Plugin manifest identity is unsupported.")
             continue
         filename = ".mcp.json" if codex else "mcp_config.json"
@@ -185,6 +242,9 @@ def _inspect_host(client: str, report: Report) -> None:
             continue
         else:
             entry = servers["memtomem"]
+            if _has_tool_policy(entry):
+                report.unknown("Plugin MCP tool policy needs effective-configuration review.")
+                continue
             if entry.get("enabled", True) is not True or entry.get("disabled", False) is not False:
                 report.unknown(
                     "Plugin MCP has an enablement override; review it before reconciliation."
@@ -229,6 +289,7 @@ def _remove_toml(raw: bytes, keys: tuple[str, ...]) -> bytes:
     expected = copy.deepcopy(original)
     del expected[keys[0]][keys[1]]
     output = []
+    trailing_trivia: list[str] = []
     dropping = False
     for line in raw.decode("utf-8").splitlines(keepends=True):
         if line.lstrip().startswith("["):
@@ -238,8 +299,16 @@ def _remove_toml(raw: bytes, keys: tuple[str, ...]) -> bytes:
                 dropping = isinstance(section, dict) and keys[1] in section
             except ValueError:
                 dropping = False
+            if not dropping:
+                output.extend(trailing_trivia)
+            trailing_trivia.clear()
         if not dropping:
             output.append(line)
+        elif not line.strip() or line.lstrip().startswith("#"):
+            trailing_trivia.append(line)
+        else:
+            trailing_trivia.clear()
+    output.extend(trailing_trivia)
     candidate = "".join(output).encode("utf-8")
     # tomllib omits an implicit empty parent table when its last child is removed.
     parsed = tomllib.loads(candidate.decode("utf-8"))
@@ -264,6 +333,7 @@ def reconcile(report: Report, client: str, choice: str, *, apply: bool) -> None:
 
 def _reconcile(report: Report, client: str, choice: str, *, apply: bool) -> None:
     if not report.complete:
+        report.add("reconcile_refused", "Reconciliation skipped: inspection is incomplete.")
         return
     active = [
         f
@@ -306,6 +376,15 @@ def _reconcile(report: Report, client: str, choice: str, *, apply: bool) -> None
             return
         path, keys = report.manual_sources[0]
         summary = "Remove only the manual MCP entry; keep the plugin's bundled server and skills."
+    if client == "claude":
+        summary += " Close all Claude sessions before --apply to prevent stale settings restoring the entry."
+        if choice == "keep-plugin" and path == Path.cwd().resolve() / ".mcp.json":
+            report.add(
+                "shared_project_config",
+                "This edits the project's .mcp.json, which may be tracked and shared with teammates. "
+                "Use /mcp for a local-only change instead.",
+                path=str(path),
+            )
     raw = report.snapshots[path]
     if raw is None:
         raise ValueError
@@ -336,6 +415,11 @@ def _reconcile(report: Report, client: str, choice: str, *, apply: bool) -> None
 def _replace(report: Report, path: Path, raw: bytes, replacement: bytes) -> Path:
     # Refuse symlinks in every component; do not rewrite a linked source bundle.
     if any(p.is_symlink() for p in [path, *path.parents]):
+        report.add(
+            "reconcile_refused",
+            "Symlinked targets or ancestors require manual review.",
+            path=str(path),
+        )
         raise ValueError
     mode = path.stat().st_mode
     if not stat.S_ISREG(mode) or path.stat().st_nlink != 1:
@@ -346,20 +430,41 @@ def _replace(report: Report, path: Path, raw: bytes, replacement: bytes) -> Path
         except FileNotFoundError:
             actual = None
         if actual != expected:
+            report.add(
+                "reconcile_refused",
+                "Configuration changed since inspection; inspect again.",
+                path=str(source),
+            )
             raise ValueError
     backup_fd, backup_name = tempfile.mkstemp(prefix=path.name + ".mm-backup-", dir=path.parent)
-    with os.fdopen(backup_fd, "wb") as stream:
-        stream.write(raw)
-    fd, temporary = tempfile.mkstemp(prefix=path.name + ".mm-", dir=path.parent)
+    temporary: str | None = None
     try:
+        with os.fdopen(backup_fd, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        fd, temporary = tempfile.mkstemp(prefix=path.name + ".mm-", dir=path.parent)
         with os.fdopen(fd, "wb") as stream:
             stream.write(replacement)
             stream.flush()
             os.fsync(stream.fileno())
         os.chmod(temporary, stat.S_IMODE(mode))
         if path.is_symlink() or path.read_bytes() != raw:
+            report.add(
+                "reconcile_refused",
+                "Target changed before replacement; inspect again.",
+                path=str(path),
+            )
             raise ValueError
         os.replace(temporary, path)
+    except (OSError, ValueError):
+        report.add(
+            "reconcile_backup_retained",
+            "Backup file retained after refused edit.",
+            backup=backup_name,
+        )
+        raise
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
     return Path(backup_name)

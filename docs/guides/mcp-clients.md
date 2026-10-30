@@ -1012,6 +1012,11 @@ uv run --project /path/to/memtomem --package memtomem mm doctor --mcp-client agy
 
 Replace `agy` with `claude` or `codex` as needed.
 
+For Claude, close all Claude sessions before applying an edit: a running session
+can restore stale settings. A `keep-plugin` preview targeting the project's
+`.mcp.json` warns that the file may be tracked and shared with teammates. Use
+Claude's `/mcp` controls for a local-only change instead.
+
 | Client | `keep-manual` | `keep-plugin` |
 | --- | --- | --- |
 | Claude Code | Removes only `mcpServers.memtomem` from the enabled plugin cache's `.mcp.json`. An already omitted/empty config or project-disabled plugin server is a no-op. | Removes the single manual entry at its detected user, project, or local scope. |
@@ -1021,7 +1026,8 @@ Replace `agy` with `claude` or `codex` as needed.
 An apply operation backs up the exact original bytes beside the changed file as
 `<filename>.mm-backup-*` with private permissions, replaces one file atomically, and
 runs the diagnostic again. Other server entries, settings, plugin skills and memory
-data are retained. The output identifies the backup for manual restoration. Backups
+data are retained. The output identifies the backup for manual restoration, including
+a backup retained when replacement fails. Backups
 can contain credentials; retain their private permissions.
 
 Plugin-cache edits affect every session using that installation. **Updating or
@@ -1033,9 +1039,24 @@ bundled server must also be re-enabled before removing the manual connection.
 Missing, disabled, pending-approval or unclassifiable manual connections cannot
 justify skills-only mode. Malformed configs, multiple/shadowed manual registrations,
 multiple plugins, managed policies and unsupported config layouts need manual review;
-no automatic edit is made. Codex project/profile layers are reported as incomplete.
+no automatic edit is made. Inventory warnings also make inspection incomplete because
+they can indicate a partial plugin catalog. Duplicate JSON keys are refused rather
+than silently discarded when rewriting a file.
+
+Antigravity plugins must resolve beneath `~/.gemini/config/plugins/`; project and
+shared source directories, including Git worktrees inside that install directory,
+require manual review. A valid Antigravity manifest may omit `name` when its directory
+is named `memtomem`. Codex project/profile layers and
+memtomem plugin policy beyond boolean `enabled` are reported as incomplete. This
+includes [plugin-scoped MCP server policies](https://developers.openai.com/plugins/build/plugins#configure-installed-server-policy)
+that can override bundled server enablement. With custom `CODEX_HOME`, the default
+home config is not treated as a project layer; ancestor inspection stops at the Git root.
+Server entries with `enabled_tools` or `disabled_tools` also require manual review;
+the diagnostic cannot infer a usable connection from the launch command alone.
 Use `codex mcp remove memtomem` for a TOML layout the reconciler cannot safely preserve.
-Symlinked edit targets are refused; changed files must be inspected again before apply.
+Symlinked edit targets or parent directories are refused (including paths through
+`/tmp` on macOS; use the physical `/private/tmp` path). Changed files are identified
+by path and must be inspected again before apply.
 
 For Claude, a valid manual registration with an omitted/empty plugin MCP config now
 passes `mm doctor --claude-mcp`, and `mm init --mcp claude` / `--mcp json` reuses it.
