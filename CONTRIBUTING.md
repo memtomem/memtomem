@@ -329,8 +329,8 @@ with:
 
 > I have read the CLA Document and I hereby sign the CLA
 
-The workflow records your signature and updates its comment. If the CLA check on
-your PR is still red after that, a maintainer will re-run it.
+The workflow records your signature and updates its comment, and the
+`CLA / PR #<number>` status on your PR turns green once every contributor has signed.
 
 You only need to sign once per GitHub account per repository. Because
 memtomem and [memtomem-stm](https://github.com/memtomem/memtomem-stm) are
