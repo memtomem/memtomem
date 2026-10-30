@@ -632,3 +632,89 @@ def test_disabled_server_marker_does_not_hide_other_plugin_servers(sandbox):
     with pytest.raises(click.exceptions.Exit) as exc:
         checks.preflight()
     assert exc.value.exit_code == 2
+
+
+@pytest.mark.parametrize("omitted", ["absent", "empty", "no-key"])
+def test_skills_only_manual_is_clean_and_reused(sandbox, omitted):
+    root = plugin(sandbox)
+    manual(sandbox)
+    if omitted == "absent":
+        (root / ".mcp.json").unlink()
+    else:
+        write(root / ".mcp.json", {"mcpServers": {}} if omitted == "empty" else {})
+    report = checks.inspect_claude_mcp()
+    assert report.exit_code == 0 and report.reusable
+    assert "skills_only" in codes(report)
+    assert checks.preflight() is False
+
+
+@pytest.mark.parametrize("state", ["absent", "disabled", "pending", "unknown"])
+def test_omitted_plugin_requires_usable_manual(sandbox, state):
+    root = plugin(sandbox)
+    (root / ".mcp.json").unlink()
+    if state == "disabled":
+        manual(sandbox, local_extra={"disabledMcpServers": ["memtomem"]})
+    elif state == "pending":
+        manual(sandbox, scope="project", local_extra={"enabledMcpjsonServers": []})
+    elif state == "unknown":
+        manual(sandbox, entry={"command": "custom-wrapper"})
+    assert checks.inspect_claude_mcp().exit_code == 2
+    with pytest.raises(click.exceptions.Exit):
+        checks.preflight()
+
+
+@pytest.mark.parametrize("choice", ["keep-manual", "keep-plugin"])
+@pytest.mark.parametrize("scope", ["user", "project", "local"])
+def test_reconcile_preview_apply_and_preservation(sandbox, choice, scope):
+    root = plugin(sandbox)
+    manual(sandbox, scope=scope)
+    skill = root / "skills/example/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("unchanged skill")
+    before = {p: p.read_bytes() for p in sandbox.home.rglob("*.json")}
+    before.update({p: p.read_bytes() for p in sandbox.project.rglob("*.json")})
+    args = ["doctor", "--claude-mcp", "--reconcile", choice, "--json"]
+    preview = CliRunner().invoke(cli, args)
+    assert preview.exit_code == 1, preview.output
+    assert any(f["code"] == "reconcile_plan" for f in json.loads(preview.output)["findings"])
+    assert all(p.read_bytes() == raw for p, raw in before.items())
+    result = CliRunner().invoke(cli, [*args, "--apply"])
+    assert result.exit_code == 0, result.output
+    assert skill.read_text() == "unchanged skill"
+    changed = [p for p, raw in before.items() if p.read_bytes() != raw]
+    assert len(changed) == 1
+    backups = list(changed[0].parent.glob(changed[0].name + ".mm-backup-*"))
+    assert len(backups) == 1 and backups[0].read_bytes() == before[changed[0]]
+    again = CliRunner().invoke(cli, [*args, "--apply"])
+    assert again.exit_code == 0, again.output
+    assert len(list(changed[0].parent.glob(changed[0].name + ".mm-backup-*"))) == 1
+
+
+def test_reconcile_shadowed_manual_scopes_refused(sandbox):
+    plugin(sandbox)
+    manual(sandbox)
+    write(sandbox.project / ".mcp.json", {"mcpServers": {"memtomem": pinned()}})
+    before = (sandbox.home / ".claude.json").read_bytes()
+    result = CliRunner().invoke(
+        cli, ["doctor", "--claude-mcp", "--reconcile", "keep-plugin", "--apply"]
+    )
+    assert result.exit_code == 2
+    assert (sandbox.home / ".claude.json").read_bytes() == before
+
+
+def test_disabled_plugin_with_manual_is_clean(sandbox):
+    plugin(sandbox)
+    manual(sandbox, local_extra={"disabledMcpServers": ["plugin:memtomem:memtomem"]})
+    assert checks.inspect_claude_mcp().exit_code == 0
+
+
+@pytest.mark.parametrize("mode", ["claude", "json"])
+def test_init_with_skills_only_plugin(sandbox, mode):
+    root = plugin(sandbox)
+    manual(sandbox)
+    write(root / ".mcp.json", {"mcpServers": {}})
+    result = CliRunner().invoke(
+        cli, ["init", "--preset", "minimal", "--non-interactive", "--mcp", mode]
+    )
+    assert result.exit_code == 0, result.output
+    assert "additional MCP registration skipped" in result.output

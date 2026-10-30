@@ -146,8 +146,12 @@ registration never creates a fallback `.mcp.json`.
 
 To switch to the plugin, remove only the manual entry using the diagnostic's
 name and scope, for example `claude mcp remove memtomem -s user`. To keep the
-manual setup, use `/plugin uninstall memtomem@memtomem`. Neither action removes
-your uv installation or memories. Custom launch wrappers, managed policies,
+manual setup and the plugin's workflow skills, use the source-checkout
+[skills-only reconciliation](../../docs/guides/mcp-clients.md#keep-manual-mcp-and-plugin-skills).
+An omitted or empty plugin MCP config with a usable manual registration passes the
+updated diagnostic and initialization preflight. Uninstalling the plugin with
+`/plugin uninstall memtomem@memtomem` is still an option if you do not need its skills.
+Neither choice removes your uv installation or memories. Custom launch wrappers, managed policies,
 and unresolved project approval require manual review; session-only flags
 must be checked in `/mcp`. The diagnostic does not execute configured servers.
 

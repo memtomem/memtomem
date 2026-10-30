@@ -31,6 +31,10 @@ class Report:
     current_risk: bool = False
     install_risk: bool = False
     reusable: bool = False
+    # Internal edit locations; never serialize launch commands or credentials.
+    manual_sources: list[tuple[Path, tuple[str, ...]]] = field(default_factory=list)
+    plugin_paths: list[Path] = field(default_factory=list)
+    snapshots: dict[Path, bytes | None] = field(default_factory=dict)
 
     @property
     def exit_code(self) -> int:
@@ -56,11 +60,14 @@ class Report:
 
 def _object(path: Path, report: Report, label: str, *, required: bool = False) -> dict:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_bytes()
+        report.snapshots[path] = raw
+        value = json.loads(raw.decode("utf-8"))
         if not isinstance(value, dict):
             raise ValueError
         return value
     except FileNotFoundError:
+        report.snapshots[path] = None
         if required or path.is_symlink():
             report.unknown(f"{label}: configuration is missing.")
     except (OSError, ValueError, UnicodeError):
@@ -293,6 +300,14 @@ def _inspect_claude_mcp() -> Report:
             if not isinstance(entry, dict):
                 report.unknown(f"{scope} MCP entry must be an object.")
                 continue
+            if _candidate(name, entry):
+                path = cwd / ".mcp.json" if scope == "project" else global_path
+                keys = (
+                    ("projects", str(cwd), "mcpServers", name)
+                    if scope == "local"
+                    else ("mcpServers", name)
+                )
+                report.manual_sources.append((path, keys))
             effective[name] = (scope, entry)
 
     manual: list[tuple[str, dict]] = []
@@ -333,6 +348,7 @@ def _inspect_claude_mcp() -> Report:
         manual.append((name, entry))
 
     plugins: list[dict] = []
+    skills_only = False
     for row in _effective_plugins(cwd, report):
         if row.get("enabled") is False:
             report.add("plugin_disabled", "memtomem plugin is disabled.")
@@ -351,20 +367,34 @@ def _inspect_claude_mcp() -> Report:
             "memtomem plugin manifest",
             required=True,
         )
+        if manifest.get("name") != "memtomem":
+            report.unknown("memtomem plugin manifest identity is unsupported.")
+            continue
         if manifest.get("mcpServers", "./.mcp.json") != "./.mcp.json":
             report.unknown("Custom memtomem plugin MCP manifest needs manual review.")
             continue
-        config = _object(
-            Path(install_path) / ".mcp.json", report, "memtomem plugin MCP", required=True
-        )
+        plugin_path = Path(install_path) / ".mcp.json"
+        config = _object(plugin_path, report, "memtomem plugin MCP")
         servers = _mapping(config, "mcpServers", report, "memtomem plugin")
+        if not servers and report.complete:
+            report.plugin_paths.append(plugin_path)
+            if len(manual) == 1 and _launch(manual[0][1]) is not None:
+                skills_only = True
+                report.add(
+                    "skills_only", "Plugin MCP omitted; the manual registration supplies tools."
+                )
+            else:
+                report.unknown("Plugin MCP is omitted without one usable manual registration.")
+            continue
         entry = servers.get("memtomem")
         if len(servers) != 1 or not isinstance(entry, dict) or _launch(entry) is None:
             report.unknown("memtomem plugin launch configuration is unsupported.")
             continue
+        report.plugin_paths.append(plugin_path)
         # /mcp can disable the bundled server without disabling its plugin.
         # Plugin inventory enablement alone does not make a connection usable.
         if "plugin:memtomem:memtomem" in disabled:
+            skills_only = bool(manual)
             report.add(
                 "plugin_server_disabled",
                 "memtomem plugin MCP server is disabled for this project; review /mcp to re-enable it.",
@@ -399,6 +429,8 @@ def _inspect_claude_mcp() -> Report:
         }
     )
     for _, entry in manual:
+        if skills_only and not plugins:
+            continue
         if _launch(entry) is None:
             continue
         if _launch(entry) == _launch(target):
@@ -436,11 +468,12 @@ def inspect_claude_mcp() -> Report:
         return report
 
 
-def emit_report(report: Report, *, as_json: bool = False) -> None:
+def emit_report(report: Report, *, as_json: bool = False, client: str = "claude") -> None:
     if as_json:
         click.echo(json.dumps(report.payload(), indent=2))
         return
-    click.echo(f"Claude MCP: {report.payload()['status']}")
+    label = {"claude": "Claude", "agy": "Antigravity", "codex": "Codex"}[client]
+    click.echo(f"{label} MCP: {report.payload()['status']}")
     for finding in report.findings:
         label = (
             f" [{finding['scope']}: {finding['name']}; {finding['state']}]"
@@ -448,11 +481,19 @@ def emit_report(report: Report, *, as_json: bool = False) -> None:
             else ""
         )
         click.echo(f"  {finding['message']}{label}")
+        for detail in ("path", "backup"):
+            if detail in finding:
+                click.echo(f"    {detail}: {finding[detail]}")
         if "remediation" in finding:
             click.echo(
                 f"    To keep the plugin, remove only this manual registration: {finding['remediation']}"
             )
     if report.current_risk:
+        click.echo(
+            "  To retain manual MCP and plugin skills: "
+            f"mm doctor --mcp-client {client} --reconcile keep-manual "
+            "(preview; add --apply to write)."
+        )
         for finding in report.findings:
             if "uninstall_command" in finding:
                 click.echo(f"  To keep the manual setup instead: {finding['uninstall_command']}")

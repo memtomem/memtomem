@@ -50,7 +50,12 @@ again. `agy plugin uninstall memtomem` also removes the plugin; your memories st
 `agy mcp add memtomem memtomem-server`, which writes `~/.gemini/config/mcp_config.json`),
 both servers run side by side: agy names the plugin's server `memtomem_memtomem`, so it
 does not replace your entry. Remove the hand-written one with `agy mcp remove memtomem`
-to keep a single server.
+to keep a single server. To keep your manual registration and retain the plugin's
+six skills instead, use the source-checkout
+[skills-only reconciliation](../../docs/guides/mcp-clients.md#keep-manual-mcp-and-plugin-skills).
+It suppresses only the bundled MCP entry; plugin updates can restore that entry, so
+rerun the diagnostic after reinstalling. The manual server retains its existing
+working-directory behavior.
 
 ## First run
 
