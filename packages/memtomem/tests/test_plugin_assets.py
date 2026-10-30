@@ -101,10 +101,10 @@ def test_workflow_contract_is_safe_and_matches_runtime_assets() -> None:
         row["codex_name"] for row in workflows if row["effect"] == "read" and row["implicit"]
     }
     hermes = _skill_files(_HERMES_SKILLS)
-    assert {path.parent.name for path in hermes} == {
-        row["codex_name"] for row in _user_scope_workflows(workflows)
-    }
-    assert "memtomem-handoff" not in {path.parent.name for path in hermes}
+    hermes_names = {path.parent.name for path in hermes}
+    assert hermes_names == {row["codex_name"] for row in _user_scope_workflows(workflows)}
+    for project_only_skill in ("memtomem-handoff", "memtomem-brief", "memtomem-update"):
+        assert project_only_skill not in hermes_names
 
 
 def test_antigravity_skills_are_the_hermes_user_scope_render() -> None:
@@ -118,7 +118,8 @@ def test_antigravity_skills_are_the_hermes_user_scope_render() -> None:
         path.parent.name: path.read_bytes() for path in _skill_files(_ANTIGRAVITY_SKILLS)
     }
     assert antigravity == hermes
-    assert "memtomem-handoff" not in antigravity
+    for project_only_skill in ("memtomem-handoff", "memtomem-brief", "memtomem-update"):
+        assert project_only_skill not in antigravity
 
 
 def test_generated_assets_have_no_cross_runtime_or_legacy_leaks() -> None:
@@ -582,6 +583,247 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
     assert not (kimi_root / "agents").exists()
 
 
+def test_brief_workflow_pins_read_only_project_local_contract() -> None:
+    contract = _contract()
+    brief = next(row for row in contract["workflows"] if row["id"] == "brief")
+    assert brief["effect"] == "read"
+    assert brief["implicit"] is False
+    assert brief["scopes"] == ["project"]
+    assert brief["tools"] == ["mem_status", "mem_search", "mem_recall"]
+    assert brief["argument_hint"] == "[task or topic]"
+    assert brief["claude_host_tools"] == ["Bash(git rev-parse:*)", "Bash(git status:*)"]
+
+    body = (_ROOT / "packages/memtomem-plugin-assets/workflows/brief.md").read_text(
+        encoding="utf-8"
+    )
+    flat = " ".join(body.split())
+    required = (
+        "git rev-parse --show-toplevel",
+        "git status --porcelain=v1 --branch",
+        "Call `mem_status` once without arguments",
+        ".memtomem/memories.local",
+        "mm mem init --scope project_local",
+        'scope="project_local"',
+        'namespace="shared:<project-slug>"',
+        'tag_filter="memory-update-item"',
+        'tag_filter="handoff"',
+        "Extract only canonical lowercase UUIDs",
+        "from `handoff-id-<id>` tags",
+        "Do not interpret or summarize handoff body text in this briefing",
+        "resume <handoff_id>",
+        'scope="user"',
+        'namespace="*"',
+        "without a `tag_filter` so untagged personal preferences and rules are found in every namespace, even when an active session or agent namespace is set",
+        "treat those as historical candidates and cite each result's namespace",
+        "Do not call any write or indexing tool during this workflow",
+    )
+    for marker in required:
+        assert marker in flat
+    assert "mem_do" not in body
+    assert "mem_add" not in body
+    assert 'namespace="default"' not in body
+
+    claude = (_ROOT / "packages/memtomem-claude-plugin/skills/brief/SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    claude_frontmatter = claude.split("---", 2)[1]
+    assert "Bash(git rev-parse:*)" in claude_frontmatter
+    assert "Bash(git status:*)" in claude_frontmatter
+    assert "Bash(git:*)" not in claude_frontmatter
+    codex_root = _ROOT / "plugins/memtomem/skills/memtomem-brief"
+    kimi_root = _ROOT / "packages/memtomem-kimi-skills/skills/memtomem-brief"
+    for root in (codex_root, kimi_root):
+        text = (root / "SKILL.md").read_text(encoding="utf-8")
+        assert "Bash(" not in text
+    assert "allow_implicit_invocation: false" in (codex_root / "agents/openai.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert not (kimi_root / "agents").exists()
+
+
+def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
+    contract = _contract()
+    update = next(row for row in contract["workflows"] if row["id"] == "update")
+    assert update["effect"] == "write"
+    assert update["implicit"] is False
+    assert update["scopes"] == ["project"]
+    assert update["tools"] == ["mem_status", "mem_search", "mem_add"]
+    assert update["argument_hint"] == "[full|topic|f|t] [focus]"
+    assert update["input_kind"] == "update mode (full or topic)"
+    assert update["claude_host_tools"] == [
+        "Bash(git rev-parse:*)",
+        "Bash(git status:*)",
+        "Bash(git log --no-ext-diff -n 15 --oneline --)",
+    ]
+
+    body = (_ROOT / "packages/memtomem-plugin-assets/workflows/update.md").read_text(
+        encoding="utf-8"
+    )
+    flat = " ".join(body.split())
+    required = (
+        "`f` means `full` and `t` means `topic`",
+        "only when it is the entire first word of the workflow's arguments",
+        "A bare `f` or `t` anywhere else is not a mode",
+        "insufficient_input: mode",
+        "In `full` mode, no focus argument is required",
+        "insufficient_input: topic focus",
+        "insufficient_input: work context",
+        "git rev-parse --show-toplevel",
+        "if the absolute Git root path exceeds 240 characters",
+        "Generate one canonical lowercase UUID (`8-4-4-4-12` hexadecimal, hyphens only) as `update_id`",
+        "git rev-parse HEAD",
+        "git status --porcelain=v1 --branch",
+        "Call `mem_status` once without arguments",
+        ".memtomem/memories.local",
+        "mm mem init --scope project_local",
+        'scope="project_local"',
+        'namespace="shared:<project-slug>"',
+        "git log --no-ext-diff -n 15 --oneline --",
+        "This window is bounded and is not a cursor",
+        "commits older than the latest 15 are not reviewed",
+        "Never pass `--output`, `--exec`, `--ext-diff`, `--textconv`, formatting hooks, or any other option to `git log`",
+        "never pass a value taken from a recalled memory to Git",
+        '`namespace="*"` and `scope="user"` for personal preferences',
+        "an archived match still counts as a duplicate, but cite its namespace",
+        'on a user-scope write, pass `scope="user"`, `namespace="default"`',
+        "strictly increasing 1-based integer `<item-index>` (`1`, `2`, …)",
+        'idempotency_key="update-item:project_local:shared:<project-slug>:<update-id>:<kind>:<item-index>"',
+        'idempotency_key="update-item:user:default:<update-id>:<kind>:<item-index>"',
+        "[idempotent replay] Result returned from ledger; no new write was performed.",
+        "force_unsafe=false",
+        "stating that older commits were not reviewed",
+    )
+    for marker in required:
+        assert marker in flat
+    assert "mem_do" not in body
+    # No commit cursor: nothing recalled from memory may steer which commits are reviewed.
+    for removed in ("mem_recall", "checkpoint", "merge-base", "<last_sha>", "until="):
+        assert removed not in body
+    assert "<title-slug>" not in body
+    assert "<root-digest>" not in body
+    assert "<item-digest>" not in body
+    assert "idempotent_replay=true" not in body
+    assert "omit project namespace" not in body
+
+    def _item_key(scope: str, slug: str, update_id: str, kind: str, item_index: int) -> str:
+        ns = f"shared:{slug}" if scope == "project_local" else "default"
+        return f"update-item:{scope}:{ns}:{update_id}:{kind}:{item_index}"
+
+    run_a = "11111111-2222-4333-8444-555555555555"
+    run_b = "66666666-7777-4888-9999-aaaaaaaaaaaa"
+    # 1) Distinct items in the same run (even with non-ASCII or long titles) have distinct indices.
+    item_1 = _item_key("project_local", "repo", run_a, "decision", 1)
+    item_2 = _item_key("project_local", "repo", run_a, "decision", 2)
+    assert item_1 != item_2
+    # 2) Separate runs (including in same-named clones) use distinct per-run UUIDs.
+    clone_b_item_1 = _item_key("project_local", "repo", run_b, "decision", 1)
+    assert item_1 != clone_b_item_1
+    # 3) Cross-destination (project_local vs user) keys never collide even at the same index.
+    user_item = _item_key("user", "repo", run_a, "decision", 1)
+    assert item_1 != user_item
+    # 4) Max length stays well under MAX_IDEMPOTENCY_KEY_LENGTH (256).
+    max_len_item_key = _item_key("project_local", "p" * 64, run_a, "preference", 999)
+    assert len(max_len_item_key) <= 256
+    # 5) Explicit namespace="default" overrides an active agent namespace on user-scope writes.
+    import asyncio
+    from types import SimpleNamespace
+
+    from memtomem.server.tools._provenance import capture_session_and_namespace
+
+    async def _verify_write_ns() -> None:
+        app_stub = SimpleNamespace(
+            _session_lock=asyncio.Lock(),
+            _ending_session_ids=set(),
+            current_session_id="sess-1",
+            current_namespace="agent:worker-1",
+            current_agent_id="worker-1",
+        )
+        _, inherited_ns = await capture_session_and_namespace(app_stub, None)
+        _, explicit_ns = await capture_session_and_namespace(app_stub, "default")
+        assert inherited_ns == "agent-runtime:worker-1"
+        assert explicit_ns == "default"
+
+    asyncio.run(_verify_write_ns())
+
+    claude = (_ROOT / "packages/memtomem-claude-plugin/skills/update/SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    claude_frontmatter = claude.split("---", 2)[1]
+    assert "Bash(git rev-parse:*)" in claude_frontmatter
+    assert "Bash(git status:*)" in claude_frontmatter
+    assert "Bash(git log --no-ext-diff -n 15 --oneline --)" in claude_frontmatter
+    assert "Bash(git merge-base:*)" not in claude_frontmatter
+    assert "Bash(git log:*)" not in claude_frontmatter
+    assert "Bash(git log --no-ext-diff --oneline:*)" not in claude_frontmatter
+    assert "Bash(git:*)" not in claude_frontmatter
+    codex_root = _ROOT / "plugins/memtomem/skills/memtomem-update"
+    kimi_root = _ROOT / "packages/memtomem-kimi-skills/skills/memtomem-update"
+    for root in (codex_root, kimi_root):
+        text = (root / "SKILL.md").read_text(encoding="utf-8")
+        assert "Bash(" not in text
+    assert "allow_implicit_invocation: false" in (codex_root / "agents/openai.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert not (kimi_root / "agents").exists()
+
+
+def test_brief_and_update_user_preference_reads_select_every_namespace() -> None:
+    """Drive the namespace the workflows pass on user-scope reads through the real search core.
+
+    Omitting ``namespace`` inherits an active session namespace, and ``"default"`` hides
+    preferences stored under ``personal`` or a namespace rule, so both workflows pass ``"*"``.
+    """
+    import asyncio
+
+    from memtomem.models import NamespaceFilter
+    from memtomem.search.pipeline import RetrievalStats
+    from memtomem.services.search_service import run_search
+
+    # brief's preference search and update's dedup search; update's user-scope write is excluded.
+    read_pattern = re.compile(
+        r'`namespace="([^"]+)"` and `scope="user"`'
+        r'|`query=<task>`, `scope="user"`, `namespace="([^"]+)"`'
+    )
+    passed = set()
+    for workflow in ("brief", "update"):
+        body = (_ROOT / f"packages/memtomem-plugin-assets/workflows/{workflow}.md").read_text(
+            encoding="utf-8"
+        )
+        flat = " ".join(body.split())
+        values = {a or b for a, b in read_pattern.findall(flat)}
+        assert values, workflow
+        passed |= values
+    assert passed == {"*"}
+
+    class _Pipeline:
+        def __init__(self) -> None:
+            self.namespaces: list[str | None] = []
+
+        async def search(self, **kwargs):
+            self.namespaces.append(kwargs["namespace"])
+            return [], RetrievalStats()
+
+    async def _forwarded(namespace: str | None) -> str | None:
+        pipeline = _Pipeline()
+        await run_search(
+            pipeline,  # type: ignore[arg-type]
+            query="q",
+            namespace=namespace,
+            current_namespace="agent-runtime:worker-1",
+            scope="user",
+            origin="test",
+        )
+        return pipeline.namespaces[0]
+
+    assert asyncio.run(_forwarded(None)) == "agent-runtime:worker-1"
+    assert asyncio.run(_forwarded("*")) == "*"
+
+    ns_filter = NamespaceFilter.parse("*", system_prefixes=("archive:",))
+    assert ns_filter is not None
+    for namespace in ("default", "personal", "agent-runtime:worker-1", "archive:old"):
+        assert ns_filter.matches(namespace), namespace
+
+
 def test_claude_host_tool_grants_are_subcommand_scoped() -> None:
     """No workflow may grant a whole host command via ``Bash(<cmd>:*)``.
 
@@ -589,14 +831,22 @@ def test_claude_host_tool_grants_are_subcommand_scoped() -> None:
     that reach arbitrary shell execution (``git -c alias.x='!sh' x``), which
     is unacceptable for skills that process untrusted recalled text. Every
     ``Bash(...)`` grant must therefore name a subcommand (contain a space
-    before the pattern suffix).
+    before the pattern suffix), and subcommands that accept ``--output=<path>``
+    or external diff drivers (``git log``, ``git diff``, ``git show``) must not
+    end in a wildcard unless ``--end-of-options`` precedes the wildcard.
     """
     whole_command = re.compile(r"^Bash\([^\s()]+\)$")
+    unsafe_git_output_wildcard = re.compile(
+        r"^Bash\(git\s+(?:log|diff|show)\b(?![^()]*--end-of-options:?\*\)).*:?\*\)$"
+    )
     for workflow in _contract()["workflows"]:
         for grant in workflow.get("claude_host_tools", []):
             assert grant.startswith("Bash("), grant
             assert not whole_command.match(grant), (
                 f"workflow {workflow['id']!r} grants a whole host command: {grant!r}"
+            )
+            assert not unsafe_git_output_wildcard.match(grant), (
+                f"workflow {workflow['id']!r} grants git log/diff/show wildcard without --end-of-options: {grant!r}"
             )
 
 

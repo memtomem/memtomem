@@ -50,9 +50,9 @@ For regular use, copy the individual children of `skills/` into
 `~/.kimi-code/skills/`. Start a new Kimi session after changing MCP or skill
 configuration.
 
-The bundle contains seven workflows. Search, recall, and status are read-only;
-remember, index, setup, and handoff require an explicit request. To verify the
-connection, ask Kimi:
+The bundle contains nine workflows. Search, recall, and status are read-only
+and may be selected implicitly; remember, index, setup, handoff, brief, and
+update require an explicit request. To verify the connection, ask Kimi:
 
 ```text
 Use the memtomem-status skill to inspect the current memory index.

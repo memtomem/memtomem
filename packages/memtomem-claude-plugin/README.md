@@ -8,7 +8,7 @@ One install bundles:
 - **Exact-pinned MCP server** — launched on demand with the reviewed core version
 - **Read workflows** — `/memtomem:search`, `/memtomem:recall`, `/memtomem:status`
 - **Explicit workflows** — `/memtomem:remember`, `/memtomem:index`, `/memtomem:setup`,
-  `/memtomem:handoff`
+  `/memtomem:handoff`, `/memtomem:brief`, `/memtomem:update`
 
 The base plugin does not run background hooks or destructive curation. Install
 `memtomem-automation@memtomem` separately to opt into prompt-time retrieval and

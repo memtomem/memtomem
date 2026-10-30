@@ -1,8 +1,9 @@
 # memtomem for Codex
 
-This plugin bundles the exact-pinned memtomem MCP server and seven focused
+This plugin bundles the exact-pinned memtomem MCP server and nine focused
 skills for search, date-based recall, status, explicit saves, explicit
-indexing, first-time setup, and sequential cross-runtime handoff.
+indexing, first-time setup, sequential cross-runtime handoff, project memory
+briefing, and project memory updates.
 
 ## Install from this repository
 

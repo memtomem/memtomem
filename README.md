@@ -210,9 +210,9 @@ still open or an LLM writes what they produce:
 | Package | Description |
 |---------|-------------|
 | [**memtomem**](https://pypi.org/project/memtomem/) | Core — MCP server, CLI, Web UI, hybrid search, storage |
-| [**Claude Code plugin**](packages/memtomem-claude-plugin/) | Exact-pinned MCP server and seven slash-command workflows |
+| [**Claude Code plugin**](packages/memtomem-claude-plugin/) | Exact-pinned MCP server and nine slash-command workflows |
 | [**Claude Code automation plugin**](packages/memtomem-claude-automation-plugin/) | Optional hooks for prompt-time search and write-time indexing |
-| [**Codex plugin**](plugins/memtomem/) | Exact-pinned MCP server and seven workflows for Codex CLI |
+| [**Codex plugin**](plugins/memtomem/) | Exact-pinned MCP server and nine workflows for Codex CLI |
 | [**opencode-memtomem**](packages/opencode-memtomem/) | OpenCode — exact-pinned MCP, commands, read skills, safe permissions |
 | [**Kimi Code skills**](packages/memtomem-kimi-skills/) | Skill bundle for Kimi Code (not a plugin) |
 | [**Hermes Agent plugin**](packages/memtomem-hermes-plugin/) | Exact-pinned MCP server and six workflow skills for Hermes Agent |
