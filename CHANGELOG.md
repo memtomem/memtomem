@@ -19,6 +19,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   read user-scope preferences across every namespace, including archived ones.
   User-scoped Hermes and Antigravity skill bundles remain unchanged at six
   skills.
+- **`brief` runs a minimal briefing without a topic, and `brief`/`update` read
+  host-native repo memories (`claude` 0.5.21, `codex` 0.3.18, `opencode`
+  0.3.18, `kimi` 0.2.16; #2920).** Invoked with no task or topic, `brief`
+  no longer asks or stops with `insufficient_input`. It reports recent
+  `memory-update-item` entries, active handoff IDs, and open in-flight, hold,
+  WIP, todo, or blocked items. Both workflows now also read the repository's
+  host-native notes, such as Claude Code's per-project memory indexed as
+  `claude:<id>` or `claude-memory:<id>`. `brief` finds them by directory name
+  and cites each namespace, because a same-named repository can match.
+  `update` checks this repository's two exact host namespaces but never skips
+  an item on a match there: the path encoding cannot prove a note belongs to
+  this repository, so it writes the item and cites the match. `brief` marks each cited path or symbol `✅ exists`, `❌ gone`, or
+  `? not checkable` and lists the gone ones for the next `update`. `update`
+  and `handoff` accept the `antigravity-cli` runtime label and keep paths,
+  symbols, commands, and quotes of the user verbatim.
 
 ### Fixed
 

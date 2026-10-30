@@ -8,7 +8,8 @@ words after the skill's invocation name), as in `s to codex-cli` or `r <handoff-
 calling a tool; in a non-interactive context (a subagent or scripted run with nobody to
 ask), do not stall and do not guess — stop and report `insufficient_input: operation`.
 Supported runtime labels are `claude-code`, `codex-cli`, `kimi-code`,
-`opencode`, and `any`. Infer the current runtime when possible; use `any` as the default target.
+`opencode`, `antigravity-cli`, and `any`. Infer the current runtime when possible; use `any` as
+the default target.
 
 ## Common checks
 
@@ -37,7 +38,9 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
 
 1. Read `git rev-parse HEAD` and `git status --porcelain=v1 --branch`. Summarize the work from
    the live repository and the current conversation. Do not include credentials, patch bodies,
-   complete transcripts, or raw command-output dumps.
+   complete transcripts, or raw command-output dumps. Keep file paths, code symbols, command
+   strings, and direct quotes of the user verbatim — never translate or paraphrase them — and
+   write the rest in the language this project's existing memories use.
 2. Generate one canonical lowercase UUID as the `handoff_id` — nothing else is a valid id, and
    resume rejects anything that is not one. Create a single compact record in this exact field
    order and pass it to `mem_add` **inside one fenced ```text block**, fence lines included.

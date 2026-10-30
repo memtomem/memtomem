@@ -11,7 +11,8 @@ focus topic after the mode word is required; if `topic` mode is requested withou
 before calling a tool, or in a non-interactive context stop and report
 `insufficient_input: topic focus`.
 
-Supported runtime labels are `claude-code`, `codex-cli`, `kimi-code`, `opencode`, and `any`.
+Supported runtime labels are `claude-code`, `codex-cli`, `kimi-code`, `opencode`,
+`antigravity-cli`, and `any`.
 Infer the current runtime when possible; use `any` if unknown.
 
 ## Common checks
@@ -26,6 +27,10 @@ Infer the current runtime when possible; use `any` if unknown.
 3. Derive `project-slug` from the Git-root directory name (basename): preserve case, replace each
    run of characters outside `[A-Za-z0-9._-]` with `-`, and trim leading `-` characters. If the
    result is empty, `.`, `..`, or exceeds 64 characters, ask for a valid slug instead of guessing.
+   Also derive `root-id` from the absolute Git root by replacing every character outside
+   `[A-Za-z0-9]` with `-`, one for one. Host-native memory folders, such as Claude Code's
+   per-project memory, are named this way, so a store that indexes them files this repository's
+   notes under `claude:<root-id>` or `claude-memory:<root-id>`.
 4. Generate one canonical lowercase UUID (`8-4-4-4-12` hexadecimal, hyphens only) as `update_id`
    for this run. Reuse the same `update_id` if a `mem_add` call in this run is retried after a
    transient failure; never reuse an `update_id` across separate runs.
@@ -74,15 +79,28 @@ Infer the current runtime when possible; use `any` if unknown.
    here by `mem_search`: if an existing memory already captures the same fact, skip the candidate
    rather than writing a duplicate. If a candidate supersedes an older decision, cite the
    superseded `(source, chunk_id)` in the new note.
-3. Keep each saved item concise (at most 1,200 characters). Number each distinct write in this run
-   with a strictly increasing 1-based integer `<item-index>` (`1`, `2`, …) assigned before calling
-   `mem_add`. Pairing the per-run canonical UUID `<update-id>` with `<item-index>`, target
+3. For each project item that step 2 did not skip, also call `mem_search` with
+   `namespace="claude:<root-id>,claude-memory:<root-id>"`, `scope="user"`, `top_k=5`, and
+   `output_format="structured"` to find the same learning in a host's own memory for this
+   repository. A match there never skips the item: the encoding is lossy (paths that differ only
+   in punctuation, such as `alpha_beta` and `alpha-beta` in one directory, share a `root-id`), so
+   a match cannot show that the note belongs to this repository, and `project_local` is the copy
+   other runtimes read. Write the item and cite each match's namespace and `(source, chunk_id)`
+   in it. A checkout whose root path differs from the one the host recorded, such as a separate
+   worktree, finds no match, and neither does a long root path whose folder name a host may
+   shorten.
+4. Keep each saved item concise (at most 1,200 characters). Keep file paths, code symbols,
+   command strings, and direct quotes of the user verbatim — never translate or paraphrase them —
+   and write the rest in the language this project's existing memories use. Number each distinct
+   write in this run with a strictly increasing 1-based integer `<item-index>` (`1`, `2`, …)
+   assigned before calling `mem_add`. Pairing the per-run canonical UUID `<update-id>` with
+   `<item-index>`, target
    `scope`, and target `namespace` requires no external hashing command, avoids any title or path
    normalization collision (including non-ASCII titles and clones sharing a basename), and ensures
    a transport retry of the same `mem_add` call reuses the exact key while distinct writes in the
    24-hour ledger window never collide. Never reuse the same `<item-index>` for two different
    items or across `project_local` and `user` writes.
-4. For each project learning, call `mem_add` with:
+5. For each project learning, call `mem_add` with:
    - `title`: a short descriptive title
    - `scope="project_local"`
    - `namespace="shared:<project-slug>"`
@@ -103,5 +121,5 @@ Infer the current runtime when possible; use `any` if unknown.
 
 Report the mode (`full` or `topic`), `git_head`, the inspected commit window (the latest 15
 commits, stating that older commits were not reviewed), saved items (with their written files and
-chunk counts), skipped duplicates, any replayed keys, and any safety or similar-memory warnings
-unchanged.
+chunk counts), skipped duplicates, items written despite a host-native match (with each match's
+namespace), any replayed keys, and any safety or similar-memory warnings unchanged.

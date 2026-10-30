@@ -309,21 +309,21 @@ def test_every_input_taking_surface_carries_the_non_interactive_fallback() -> No
     by_name = {row["id"]: row for row in contract["workflows"]}
     by_name.update({row["codex_name"]: row for row in contract["workflows"]})
 
-    surfaces: list[tuple[str, str, str]] = []
+    surfaces: list[tuple[str, dict, str]] = []
     for path, content in rendered.items():
         if path.name != "SKILL.md":
             continue
         workflow = by_name[path.parent.name]
         if workflow["id"] == "status":
             continue
-        surfaces.append((str(path.relative_to(_ROOT)), workflow["input_kind"], content))
+        surfaces.append((str(path.relative_to(_ROOT)), workflow, content))
 
     generated = rendered[_ROOT / "packages/opencode-memtomem/src/generated.ts"]
     for name, command in _opencode_commands(generated).items():
         workflow = by_name[name]
         if workflow["id"] == "status":
             continue
-        surfaces.append((f"OPENCODE_COMMANDS[{name}]", workflow["input_kind"], command["template"]))
+        surfaces.append((f"OPENCODE_COMMANDS[{name}]", workflow, command["template"]))
 
     # Every non-status workflow renders to four SKILL.md surfaces except the
     # OpenCode skills, which carry only the implicit read workflows, and the Hermes
@@ -335,8 +335,26 @@ def test_every_input_taking_surface_carries_the_non_interactive_fallback() -> No
         len(non_status) * 4 + len(opencode_skills) + 2 * len(user_scope_skills)
     )
 
-    for label, input_kind, content in surfaces:
+    optional = [label for label, workflow, _ in surfaces if workflow.get("input_optional")]
+    # brief's Claude, Codex, Kimi, and OpenCode command surfaces; no user-scope host carries it.
+    assert len(optional) == 4, optional
+
+    for label, workflow, content in surfaces:
+        input_kind = workflow["input_kind"]
         flat = " ".join(content.split())
+        if workflow.get("input_optional"):
+            # A workflow with a defined no-input mode must run it: asking or refusing
+            # would keep that mode from ever running.
+            assert (
+                f"If the request does not specify the {input_kind}, do not ask and do not stop"
+                in flat
+            ), label
+            assert "run the minimal mode described below" in flat, label
+            assert "in an interactive or a non-interactive context" in flat, label
+            assert f"A request that does specify the {input_kind} proceeds normally" in flat, label
+            assert "insufficient_input" not in flat, label
+            assert "ask before calling a tool" not in flat, label
+            continue
         assert f"If the request does not clearly specify the {input_kind}" in flat, label
         assert "ask before calling a tool" in flat, label
         assert "do not stall and do not guess" in flat, label
@@ -480,6 +498,9 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "live repository always wins",
         'tag_filter="handoff-to-<current-runtime>,handoff-to-any"',
         'tag_filter="handoff-id-<handoff-id>"',
+        "`opencode`, `antigravity-cli`, and `any`",
+        "Keep file paths, code symbols, command strings, and direct quotes of the user verbatim",
+        "write the rest in the language this project's existing memories use",
         "inside one fenced ```text block",
         "The fence is load-bearing",
         "silently become a second OR term",
@@ -616,12 +637,25 @@ def test_brief_workflow_pins_read_only_project_local_contract() -> None:
         "without a `tag_filter` so untagged personal preferences and rules are found in every namespace, even when an active session or agent namespace is set",
         "treat those as historical candidates and cite each result's namespace",
         "Do not call any write or indexing tool during this workflow",
+        "**Minimal mode** runs when the request names none",
+        "In topic mode, run steps 1, 2, 3, 4, and 6. In minimal mode, run steps 2, 3, 4, and 5",
+        'query="in-flight hold wip todo blocked"',
+        "report these as candidates and check each against the live worktree",
+        "`✅ exists` (found in the current worktree)",
+        "`❌ gone` (checked and not found)",
+        "`? not checkable` (cannot be checked from this worktree",
+        "**Stale claims** — every `❌ gone` item with its `(source, chunk_id)`",
+        "This workflow only lists them",
+        "In minimal mode, use four sections: **Recent updates and active handoff IDs**, **Open items**",
     )
     for marker in required:
         assert marker in flat
     assert "mem_do" not in body
     assert "mem_add" not in body
     assert 'namespace="default"' not in body
+    # The guard against leftover markers in shipped skills is case-sensitive; BM25
+    # (FTS5 unicode61) folds case, so the open-items query stays lowercase.
+    assert "TODO" not in body
 
     claude = (_ROOT / "packages/memtomem-claude-plugin/skills/brief/SKILL.md").read_text(
         encoding="utf-8"
@@ -692,6 +726,13 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
         "[idempotent replay] Result returned from ledger; no new write was performed.",
         "force_unsafe=false",
         "stating that older commits were not reviewed",
+        "`opencode`, `antigravity-cli`, and `any`",
+        "Keep file paths, code symbols, command strings, and direct quotes of the user verbatim",
+        "write the rest in the language this project's existing memories use",
+        "For each project item that step 2 did not skip, also call `mem_search`",
+        "A match there never skips the item",
+        "Write the item and cite each match's namespace and `(source, chunk_id)` in it",
+        "items written despite a host-native match (with each match's namespace)",
     )
     for marker in required:
         assert marker in flat
@@ -790,7 +831,8 @@ def test_brief_and_update_user_preference_reads_select_every_namespace() -> None
             encoding="utf-8"
         )
         flat = " ".join(body.split())
-        values = {a or b for a, b in read_pattern.findall(flat)}
+        # brief's host-native read shares the parameter order; it has its own test below.
+        values = {a or b for a, b in read_pattern.findall(flat)} - {_HOST_NATIVE_GLOB}
         assert values, workflow
         passed |= values
     assert passed == {"*"}
@@ -822,6 +864,91 @@ def test_brief_and_update_user_preference_reads_select_every_namespace() -> None
     assert ns_filter is not None
     for namespace in ("default", "personal", "agent-runtime:worker-1", "archive:old"):
         assert ns_filter.matches(namespace), namespace
+
+
+_HOST_NATIVE_GLOB = "claude*:*-<host-slug>"
+_HOST_NATIVE_PAIR = "claude:<root-id>,claude-memory:<root-id>"
+
+
+def test_host_native_reads_select_this_repository_through_the_real_filter() -> None:
+    """Drive brief's discovery glob and update's exact dedup pair through the namespace SQL.
+
+    A host such as Claude Code names its per-project memory folder after the absolute
+    project path with every non-alphanumeric character turned into ``-``; ``mm init``'s
+    preset indexes it as ``claude:<folder>`` and ``mm ingest claude-memory`` as
+    ``claude-memory:<folder>``. brief may over-match by directory name (it says so);
+    update's duplicate evidence must be exactly this repository's two namespaces.
+    """
+    import sqlite3
+
+    from memtomem.cli.ingest_cmd import _build_namespace
+    from memtomem.cli.init_cmd import _PROVIDER_RULE_TEMPLATES
+    from memtomem.models import NamespaceFilter
+    from memtomem.storage.sqlite_helpers import namespace_sql
+
+    def _flat(workflow: str) -> str:
+        path = _ROOT / f"packages/memtomem-plugin-assets/workflows/{workflow}.md"
+        return " ".join(path.read_text(encoding="utf-8").split())
+
+    brief, update = _flat("brief"), _flat("update")
+    assert re.findall(r'namespace="(claude[^"]*)"', brief) == [_HOST_NATIVE_GLOB]
+    assert re.findall(r'namespace="(claude[^"]*)"', update) == [_HOST_NATIVE_PAIR]
+    encoding_rule = "replacing every character outside `[A-Za-z0-9]` with `-`, one for one"
+    assert encoding_rule in brief
+    assert encoding_rule in update
+    assert "it can also return notes from a same-named repository elsewhere" in brief
+
+    def _encode(text: str) -> str:
+        return re.sub(r"[^A-Za-z0-9]", "-", text)
+
+    root = "/Users/u/Work/agent_harness/my.repo"
+    root_id = _encode(root)
+    host_slug = _encode(root.rsplit("/", 1)[1])
+    assert root_id == "-Users-u-Work-agent-harness-my-repo"
+    # The encoding is lossy, so even an exact-namespace match cannot prove the note is this
+    # repository's: brief never presents one as confirmed, and update never skips on one.
+    assert _encode("/work/alpha_beta") == _encode("/work/alpha-beta")
+    assert "the encoding is lossy" in update
+    assert "A match there never skips the item" in update
+    assert "no host-native result is confirmed as this repository's" in brief
+    for disproved in ("count as this repository's", "evidently about this repository"):
+        assert disproved not in update
+    assert "as this repository's, and any other as possibly another" not in brief
+    # Both indexers keep the folder name as is, so the encoded id is the namespace suffix.
+    assert ("~/.claude/projects/*/memory/**", "claude:{ancestor:1}") in _PROVIDER_RULE_TEMPLATES[
+        "claude-memory"
+    ]
+    assert _build_namespace(root_id) == f"claude-memory:{root_id}"
+
+    rows = {
+        f"claude:{root_id}": "this repository (preset)",
+        f"claude-memory:{root_id}": "this repository (ingest)",
+        "claude:-Users-other-my-repo": "same-named repository elsewhere",
+        "claude:-private-tmp-wt-2920": "a worktree of this repository",
+        f"claude:{root_id}-stm": "a repository whose name extends this one",
+        "claude-plans": "plans, not project memory",
+        "codex:global": "another host",
+        "shared:my.repo": "project tier",
+    }
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE chunks (namespace TEXT)")
+    db.executemany("INSERT INTO chunks VALUES (?)", [(ns,) for ns in rows])
+
+    def _selected(template: str) -> set[str]:
+        value = template.replace("<host-slug>", host_slug).replace("<root-id>", root_id)
+        ns_filter = NamespaceFilter.parse(value, system_prefixes=("archive:",))
+        assert ns_filter is not None
+        clause, params = namespace_sql(ns_filter)
+        found = {ns for (ns,) in db.execute(f"SELECT namespace FROM chunks WHERE {clause}", params)}
+        assert found == {ns for ns in rows if ns_filter.matches(ns)}, template
+        return found
+
+    assert _selected(_HOST_NATIVE_GLOB) == {
+        f"claude:{root_id}",
+        f"claude-memory:{root_id}",
+        "claude:-Users-other-my-repo",
+    }
+    assert _selected(_HOST_NATIVE_PAIR) == {f"claude:{root_id}", f"claude-memory:{root_id}"}
 
 
 def test_claude_host_tool_grants_are_subcommand_scoped() -> None:
