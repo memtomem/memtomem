@@ -228,6 +228,25 @@ class RetainRule:
         return retained, others
 
 
+def _linked_keys(keys: Iterable[Path]) -> list[Path]:
+    """The keys whose path is itself a symlink; one that cannot be read is not.
+
+    A key in a Unicode form from before keys were folded is left out, as the
+    watcher's start check leaves it out: indexing releases under the folded
+    key, so a hold under the unfolded one would never lift (#2907).
+    """
+    linked: list[Path] = []
+    for key in keys:
+        if fold_path_form(str(key)) != str(key):
+            continue
+        try:
+            if key.is_symlink():
+                linked.append(key)
+        except OSError:
+            continue
+    return linked
+
+
 @dataclass(frozen=True)
 class OrphanHoldOutcome:
     """What automatic cleanup did with one :func:`scan_orphans` result."""
@@ -253,6 +272,14 @@ async def hold_orphans(
     if indexing.retain_missing_dirs:
         rule = await asyncio.to_thread(RetainRule.prepare, indexing)
         retained, missing = rule.split(result.confirmed_orphans)
+        # A retained key whose path is now a dangling link is a file replaced by
+        # a link, not a file that is gone: hold it rather than show its old
+        # chunks as the archive (#2904). Only this path, which never deletes,
+        # makes the distinction; a purge still keeps every retained key.
+        linked = set(await asyncio.to_thread(_linked_keys, retained))
+        if linked:
+            missing.extend(key for key in retained if key in linked)
+            retained = [key for key in retained if key not in linked]
     changed = False
     for sf in retained:
         changed |= await storage.release_absence_hold(str(sf))

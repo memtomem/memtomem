@@ -47,7 +47,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   then holds them while the path still points elsewhere, or shows them again
   if the file is back. A dangling link stays hidden even under
   `retain_missing_dirs`, which keeps showing files that are gone, not files
-  replaced by a link. A source outside every configured root is shown
+  replaced by a link. The automatic orphan cleanup holds such a link too, so
+  it cannot show its chunks before the recheck runs. A purge still keeps
+  every retained source. A source outside every configured root is shown
   again, as such sources already are once present. A directory that was
   moved and replaced by a link to its new place is not affected: the files
   under it are regular files. A key in a Unicode form from before keys were

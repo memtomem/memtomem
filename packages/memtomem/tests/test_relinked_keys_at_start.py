@@ -500,3 +500,80 @@ async def test_a_file_gone_from_a_retain_dir_is_still_shown_as_its_archive(env):
 
     assert _reasons(comp) == {}
     assert await _found(comp, "storedkeyword")
+
+
+async def test_orphan_cleanup_before_the_recheck_keeps_a_retained_dangling_link_hidden(env):
+    """The orphan scan may run between the journal write and the recheck."""
+    from memtomem.storage.orphan_detect import hold_orphans, scan_orphans
+
+    comp, root = env
+    a = await _indexed(comp, root / "work" / "a.md")
+    _relink(a, root / "nowhere.md")
+    comp.config.indexing.retain_missing_dirs = [root]
+    await _check(_watcher(comp))
+    assert _pending(comp) == {str(a)}
+
+    result = await scan_orphans(comp.storage, recheck_delay_seconds=0.0)
+    assert a in result.confirmed_orphans
+    await hold_orphans(comp.storage, result, comp.config.indexing)
+
+    assert _reasons(comp) == {str(a): "scan_missing"}
+    assert not await _found(comp, "storedkeyword")
+
+
+def test_a_purge_still_keeps_every_retained_key_including_a_dangling_link(tmp_path):
+    """Only the non-destructive hold path treats a retained dangling link as not gone."""
+    from memtomem.config import IndexingConfig
+    from memtomem.storage.orphan_detect import RetainRule
+
+    root = Path(norm_path(tmp_path))
+    kept = root / "kept"
+    kept.mkdir()
+    gone = kept / "gone.md"
+    dangling = kept / "dangling.md"
+    dangling.symlink_to(kept / "nowhere.md")
+    elsewhere = root / "elsewhere" / "gone.md"
+    rule = RetainRule.prepare(IndexingConfig(memory_dirs=[root], retain_missing_dirs=[kept]))
+
+    assert rule.split([gone, dangling, elsewhere]) == ([gone, dangling], [elsewhere])
+
+
+def test_a_retained_key_that_flickers_present_is_never_a_purge_candidate(tmp_path, monkeypatch):
+    """split trusts the scan's absence; a fresh stat must not move an archive to purge."""
+    from memtomem.config import IndexingConfig
+    from memtomem.storage.orphan_detect import RetainRule
+
+    root = Path(norm_path(tmp_path))
+    kept = root / "kept"
+    kept.mkdir()
+    archived = kept / "gone.md"
+    rule = RetainRule.prepare(IndexingConfig(memory_dirs=[root], retain_missing_dirs=[kept]))
+    for state in ("present", "unavailable"):
+        monkeypatch.setattr(orphan_detect, "source_state", lambda _path, s=state: s)
+
+        assert rule.split([archived]) == ([archived], [])
+
+
+async def test_orphan_cleanup_leaves_a_legacy_unfolded_retained_link_as_an_archive(
+    env, monkeypatch
+):
+    """A hold under an unfolded key could never be lifted, so the cleanup places none."""
+    from memtomem.storage.orphan_detect import hold_orphans, scan_orphans
+
+    comp, root = env
+    indexed = await _indexed(comp, root / "work" / "a.md")
+    nfd = root / "work" / unicodedata.normalize("NFD", "café.md")
+    db = comp.storage._get_db()
+    db.execute("UPDATE chunks SET source_file=? WHERE source_file=?", (str(nfd), str(indexed)))
+    db.commit()
+    indexed.unlink()
+    nfd.symlink_to(root / "nowhere.md")
+    monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", True)
+    assert sqlite_helpers.fold_path_form(str(nfd)) != str(nfd)
+    comp.config.indexing.retain_missing_dirs = [root]
+
+    result = await scan_orphans(comp.storage, recheck_delay_seconds=0.0)
+    assert nfd in result.confirmed_orphans
+    await hold_orphans(comp.storage, result, comp.config.indexing)
+
+    assert str(nfd) not in _reasons(comp)
