@@ -35,7 +35,10 @@ section, that entry takes precedence and the plugin's bundled server is not
 started (name-keyed; measured on codex-cli 0.145.0). Remove the section to use
 the plugin's pinned server, and avoid registering memtomem under any other
 name — a differently named entry is not deduplicated and both servers would
-run.
+run. The source-checkout
+[coexistence diagnostic and reconciliation](../../docs/guides/mcp-clients.md#keep-manual-mcp-and-plugin-skills)
+can check both registrations and preview either choice. `keep-manual` leaves a
+canonical `[mcp_servers.memtomem]` entry and the plugin cache unchanged.
 
 For project-specific memories, keep the terminal in that project and create
 the gitignored local tier explicitly:

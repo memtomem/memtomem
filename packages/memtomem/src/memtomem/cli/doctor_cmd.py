@@ -531,14 +531,33 @@ def _row_json(row: InstanceRow) -> dict[str, object]:
     help="Check Claude MCP registrations and prospective plugin conflicts (0=pass, 1=risk, 2=incomplete).",
 )
 @click.option(
+    "--mcp-client",
+    type=click.Choice(["claude", "agy", "codex"]),
+    help="Inspect manual/plugin MCP coexistence for this client (read-only).",
+)
+@click.option(
+    "--reconcile",
+    type=click.Choice(["keep-manual", "keep-plugin"]),
+    help="Preview a coexistence change for --mcp-client or --claude-mcp.",
+)
+@click.option(
+    "--apply", "apply_change", is_flag=True, help="Apply the reconciliation with a backup."
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
     default=False,
     help="Emit a structured JSON result instead of human-readable output.",
 )
-def doctor(as_json: bool, claude_mcp: bool = False) -> None:
-    """Check the memtomem runtime on this machine (read-only).
+def doctor(
+    as_json: bool,
+    claude_mcp: bool = False,
+    mcp_client: str | None = None,
+    reconcile: str | None = None,
+    apply_change: bool = False,
+) -> None:
+    """Check the memtomem runtime (read-only unless --reconcile --apply).
 
     Reports the server processes running on this host — across *every* store,
     which is what makes accumulation visible — and the health of the runtime
@@ -558,11 +577,29 @@ def doctor(as_json: bool, claude_mcp: bool = False) -> None:
     process; and a live parent does not mean a server is in *use* — an idle
     editor session left open for days holds one just as firmly.
     """
-    if claude_mcp:
+    if claude_mcp and mcp_client:
+        raise click.UsageError("Use either --claude-mcp or --mcp-client.")
+    client = "claude" if claude_mcp else mcp_client
+    if reconcile and not client:
+        raise click.UsageError("--reconcile requires --mcp-client or --claude-mcp.")
+    if apply_change and not reconcile:
+        raise click.UsageError("--apply requires --reconcile.")
+    if client:
         from memtomem.cli._claude_mcp import emit_report, inspect_claude_mcp
+        from memtomem.cli._mcp_coexistence import inspect_host
+        from memtomem.cli._mcp_coexistence import reconcile as reconcile_mcp
 
-        report = inspect_claude_mcp()
-        emit_report(report, as_json=as_json)
+        def inspect():
+            return inspect_claude_mcp() if client == "claude" else inspect_host(client)
+
+        report = inspect()
+        if reconcile:
+            reconcile_mcp(report, client, reconcile, apply=apply_change)
+            if any(f["code"] == "reconcile_applied" for f in report.findings):
+                receipt = [f for f in report.findings if f["code"].startswith("reconcile_")]
+                report = inspect()
+                report.findings.extend(receipt)
+        emit_report(report, as_json=as_json, client=client)
         raise click.exceptions.Exit(report.exit_code)
 
     snapshot = snapshot_all_instances()

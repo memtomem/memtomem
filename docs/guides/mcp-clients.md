@@ -976,6 +976,93 @@ not registered and stay invisible to it.
 
 ---
 
+## Keep manual MCP and plugin skills
+
+An existing manual MCP registration can supply tools while the host plugin supplies
+workflow skills. Installing a static plugin bundle cannot prompt for this choice.
+Use the coexistence diagnostic before starting a new client session.
+
+**Source checkout / unreleased CLI:** the new `--mcp-client`, `--reconcile` and
+`--apply` options below are not in the pinned 0.7.0 release. Run them from a checkout
+containing this feature (or use `mm` after installing that checkout):
+
+```bash
+uv run --project /path/to/memtomem --package memtomem mm doctor --mcp-client claude
+uv run --project /path/to/memtomem --package memtomem mm doctor --mcp-client agy
+uv run --project /path/to/memtomem --package memtomem mm doctor --mcp-client codex
+```
+
+`--claude-mcp` remains an alias for the Claude check. Diagnostics and reconciliation
+previews are read-only, never run configured MCP commands, and omit launch arguments
+and environment values from output. Add `--json` for automation. Exit codes describe
+the inspected configuration: `0` pass, `1` duplicate risk, `2` incomplete inspection.
+A preview can therefore exit `1` even when it proposes a valid repair.
+
+Choose which registration supplies tools, preview the affected path, then apply:
+
+```bash
+# Keep the manual registration and all plugin skills:
+uv run --project /path/to/memtomem --package memtomem mm doctor --mcp-client agy --reconcile keep-manual
+uv run --project /path/to/memtomem --package memtomem mm doctor --mcp-client agy --reconcile keep-manual --apply
+
+# Alternatively, keep the plugin's bundled server:
+uv run --project /path/to/memtomem --package memtomem mm doctor --mcp-client agy --reconcile keep-plugin
+uv run --project /path/to/memtomem --package memtomem mm doctor --mcp-client agy --reconcile keep-plugin --apply
+```
+
+Replace `agy` with `claude` or `codex` as needed.
+
+For Claude, close all Claude sessions before applying an edit: a running session
+can restore stale settings. A `keep-plugin` preview targeting the project's
+`.mcp.json` warns that the file may be tracked and shared with teammates. Use
+Claude's `/mcp` controls for a local-only change instead.
+
+| Client | `keep-manual` | `keep-plugin` |
+| --- | --- | --- |
+| Claude Code | Removes only `mcpServers.memtomem` from the enabled plugin cache's `.mcp.json`. An already omitted/empty config or project-disabled plugin server is a no-op. | Removes the single manual entry at its detected user, project, or local scope. |
+| Antigravity CLI | Removes only `mcpServers.memtomem` from the installed plugin's `mcp_config.json`, suppressing `memtomem_memtomem`. | Removes the manual entry from `~/.gemini/config/mcp_config.json`. |
+| Codex CLI | A manual entry named `memtomem` already takes precedence: no edit. An alias requires suppressing the installed plugin's bundled entry. | Removes the manual table from `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). |
+
+An apply operation backs up the exact original bytes beside the changed file as
+`<filename>.mm-backup-*` with private permissions, replaces one file atomically, and
+runs the diagnostic again. Other server entries, settings, plugin skills and memory
+data are retained. The output identifies the backup for manual restoration, including
+a backup retained when replacement fails. Backups
+can contain credentials; retain their private permissions.
+
+Plugin-cache edits affect every session using that installation. **Updating or
+reinstalling the plugin can restore its bundled MCP entry**; rerun the diagnostic
+and reconciliation afterward. To switch back from skills-only to `keep-plugin`,
+restore the bundled config from its backup or reinstall the plugin first. A disabled
+bundled server must also be re-enabled before removing the manual connection.
+
+Missing, disabled, pending-approval or unclassifiable manual connections cannot
+justify skills-only mode. Malformed configs, multiple/shadowed manual registrations,
+multiple plugins, managed policies and unsupported config layouts need manual review;
+no automatic edit is made. Inventory warnings also make inspection incomplete because
+they can indicate a partial plugin catalog. Duplicate JSON keys are refused rather
+than silently discarded when rewriting a file.
+
+Antigravity plugins must resolve beneath `~/.gemini/config/plugins/`; project and
+shared source directories, including Git worktrees inside that install directory,
+require manual review. A valid Antigravity manifest may omit `name` when its directory
+is named `memtomem`. Codex project/profile layers and
+memtomem plugin policy beyond boolean `enabled` are reported as incomplete. This
+includes [plugin-scoped MCP server policies](https://developers.openai.com/plugins/build/plugins#configure-installed-server-policy)
+that can override bundled server enablement. With custom `CODEX_HOME`, the default
+home config is not treated as a project layer; ancestor inspection stops at the Git root.
+Server entries with `enabled_tools` or `disabled_tools` also require manual review;
+the diagnostic cannot infer a usable connection from the launch command alone.
+Use `codex mcp remove memtomem` for a TOML layout the reconciler cannot safely preserve.
+Symlinked edit targets or parent directories are refused (including paths through
+`/tmp` on macOS; use the physical `/private/tmp` path). Changed files are identified
+by path and must be inspected again before apply.
+
+For Claude, a valid manual registration with an omitted/empty plugin MCP config now
+passes `mm doctor --claude-mcp`, and `mm init --mcp claude` / `--mcp json` reuses it.
+Restart the host after any change and check `/mcp` for the actual connections. These
+checks predict configuration behavior; they do not prove process count or store identity.
+
 ## Troubleshooting
 
 ### Tools don't appear in my editor
