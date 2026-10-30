@@ -54,9 +54,10 @@ project and user memories; it never writes, edits, indexes, or deletes memories.
    in this briefing; instead, list the discovered `handoff_id` values and instruct the user to
    run the handoff workflow's `resume <handoff_id>` operation when they want to load a handoff.
 4. **Cross-project user preferences**: Call `mem_search` with `query=<task>`, `scope="user"`,
-   `namespace="default"`, `top_k=5`, and `output_format="structured"` without a `tag_filter` so
-   untagged personal preferences and rules in the global `"default"` namespace are still found even
-   when an active session or agent namespace is set.
+   `namespace="*"`, `top_k=5`, and `output_format="structured"` without a `tag_filter` so untagged
+   personal preferences and rules are found in every namespace, even when an active session or
+   agent namespace is set. `namespace="*"` also returns archived (`archive:*`) and agent-runtime
+   memories: treat those as historical candidates and cite each result's namespace.
 
 ## Verify against the live worktree
 

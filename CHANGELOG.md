@@ -12,11 +12,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   plugin and skill bundles now include `brief` (`/memtomem:brief`,
   `memtomem-brief`) for read-only pre-task project briefings across
   `project_local` (`shared:<project-slug>`) and user-scope memories, and
-  `update` (`/memtomem:update`, `memtomem-update`) for reviewing recent git
-  commits and session context to save durable architecture, bugfix, and
-  feedback lessons with idempotent item writes and a SHA-validated checkpoint
-  memory. User-scoped Hermes and Antigravity skill bundles remain unchanged at
-  six skills.
+  `update` (`/memtomem:update`, `memtomem-update`) for reviewing session
+  context and the latest 15 git commits to save durable decision, bugfix, and
+  preference lessons with idempotent item writes. `update` keeps no commit
+  cursor, so commits older than that window are not reviewed. Both workflows
+  read user-scope preferences across every namespace, including archived ones.
+  User-scoped Hermes and Antigravity skill bundles remain unchanged at six
+  skills.
 
 ### Fixed
 
