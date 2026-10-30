@@ -381,10 +381,11 @@ def write_commit_status(
 
 
 def mark_evaluation_failed(repo: str, pr_number: int, sha: str, token: str) -> None:
-    """Replace a possibly stale result with ``error`` before the run fails.
+    """Try to replace a possibly stale result with ``error`` before the run fails.
 
     Without this, a run that cannot finish evaluating (say, after a retarget
     exposed an unsigned contributor) would leave the previous ``success`` standing.
+    If this write is rejected too, the previous status stays; the run still fails.
     """
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
     run_id = os.environ.get("GITHUB_RUN_ID")
@@ -436,7 +437,7 @@ def main() -> int:
     pr = event.get("pull_request") or gh_api(f"repos/{repo}/pulls/{pr_number}", token=github_token)
     repo_id = int(event["repository"]["id"])
     head_sha = pr["head"]["sha"]
-    # Anything that stops the evaluation must not leave an earlier result standing,
+    # Anything that stops the evaluation should not leave an earlier result standing,
     # so every step up to the verdict is guarded as one.
     try:
         signatures, _sha = load_signatures(repo, signatures_branch, signatures_path, github_token)

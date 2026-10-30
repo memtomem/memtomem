@@ -13,8 +13,8 @@ on:
 permissions: {}
 
 jobs:
-  # Passes whether or not anyone is missing: the commit status carries the result,
-  # and this check turns red only when that status could not be written.
+  # Passes whether or not anyone is missing: the commit status carries the result.
+  # This check turns red only when the evaluation or the status write fails.
   CLAAssistant:
     if: ${{ github.event_name == 'pull_request_target' }}
     runs-on: ubuntu-latest
