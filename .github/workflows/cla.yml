@@ -6,15 +6,18 @@ on:
   pull_request_target:
     types: [opened, reopened, synchronize]
 
-# Explicit permissions — repository default may be read-only.
-permissions:
-  contents: write
-  issues: write
-  pull-requests: read
+# Each job grants only what its mode needs. Commenting on a pull request with
+# GITHUB_TOKEN takes `pull-requests: write`; `issues: write` alone returns 403.
+permissions: {}
 
 jobs:
+  # The job id is the check name contributors see on their pull request.
   CLAAssistant:
+    if: ${{ github.event_name == 'pull_request_target' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -22,25 +25,41 @@ jobs:
           persist-credentials: false
 
       - name: Check CLA signatures
-        if: >-
-          ${{
-            github.event_name == 'pull_request_target' ||
-            (
-              github.event.issue.pull_request &&
-              (
-                github.event.comment.body == 'recheck' ||
-                github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'
-              )
-            )
-          }}
         run: python3 .github/cla-check.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # PAT used to push the signature JSON. The target branch
-          # `cla-signatures` is unprotected, so no admin / bypass
-          # permission is required — a plain repo-scoped token works.
-          # See #87 for the prior history when signatures lived on `main`.
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          SIGNATURES_PATH: signatures/v1/cla.json
+          SIGNATURES_BRANCH: cla-signatures
+          CLA_DOCUMENT_URL: https://github.com/memtomem/memtomem/blob/main/CLA.md
+          CLA_ALLOWLIST: dependabot[bot],memtomem
+          CLA_SIGNATURE_TEXT: I have read the CLA Document and I hereby sign the CLA
+
+  # Records a signature (or re-evaluates on `recheck`). Its run belongs to the
+  # default branch, so it cannot turn the pull request's check green.
+  CLASign:
+    if: >-
+      ${{
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        (
+          github.event.comment.body == 'recheck' ||
+          github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'
+        )
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Record CLA signature
+        run: python3 .github/cla-check.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SIGNATURES_PATH: signatures/v1/cla.json
           SIGNATURES_BRANCH: cla-signatures
           CLA_DOCUMENT_URL: https://github.com/memtomem/memtomem/blob/main/CLA.md
