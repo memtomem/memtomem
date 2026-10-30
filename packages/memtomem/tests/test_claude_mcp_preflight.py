@@ -718,3 +718,77 @@ def test_init_with_skills_only_plugin(sandbox, mode):
     )
     assert result.exit_code == 0, result.output
     assert "additional MCP registration skipped" in result.output
+
+
+@pytest.mark.parametrize("state", ["pending", "unknown"])
+def test_review_omitted_plugin_has_precise_unusable_manual_diagnostic(sandbox, state):
+    root = plugin(sandbox)
+    (root / ".mcp.json").unlink()
+    if state == "pending":
+        manual(sandbox, scope="project", local_extra={"enabledMcpjsonServers": []})
+    else:
+        manual(sandbox, entry={"command": "custom-wrapper"})
+    report = checks.inspect_claude_mcp()
+    assert report.exit_code == 2
+    assert any("omitted without one usable manual" in f["message"] for f in report.findings)
+    assert not any(
+        "plugin launch configuration is unsupported" in f["message"] for f in report.findings
+    )
+    assert not ({"skills_only", "native_dedup", "plugin_install_risk"} & codes(report))
+
+
+def test_review_unrelated_error_does_not_invalidate_plugin_parsing(sandbox):
+    root = plugin(sandbox)
+    manual(sandbox)
+    write(root / ".mcp.json", {"mcpServers": {}})
+    write(sandbox.home / ".claude/settings.json", {"allowedMcpServers": []})
+    report = checks.inspect_claude_mcp()
+    assert report.exit_code == 2
+    assert "skills_only" in codes(report)
+    assert not any(
+        "plugin launch configuration is unsupported" in f["message"] for f in report.findings
+    )
+
+
+@pytest.mark.parametrize("scope", ["local", "project"])
+@pytest.mark.parametrize("candidate_on_top", [False, True])
+@pytest.mark.parametrize("choice", ["keep-plugin", "keep-manual"])
+def test_review_shadowing_non_candidate_refuses_edits(sandbox, scope, candidate_on_top, choice):
+    plugin(sandbox)
+    candidate, other = {"command": "memtomem-server"}, {"command": "other"}
+    lower, upper = (other, candidate) if candidate_on_top else (candidate, other)
+    account = {"mcpServers": {"alias": lower}, "projects": {str(sandbox.project): {}}}
+    local = account["projects"][str(sandbox.project)]
+    if scope == "local":
+        local["mcpServers"] = {"alias": upper}
+    else:
+        write(sandbox.project / ".mcp.json", {"mcpServers": {"alias": upper}})
+        local["enabledMcpjsonServers"] = ["alias"]
+    write(sandbox.home / ".claude.json", account)
+    before = {
+        p: p.read_bytes()
+        for root in [sandbox.home, sandbox.project]
+        for p in root.rglob("*")
+        if p.is_file()
+    }
+    result = CliRunner().invoke(cli, ["doctor", "--claude-mcp", "--reconcile", choice, "--apply"])
+    assert result.exit_code == 2, result.output
+    # Require the scope guard, not a later refusal for a missing usable manual entry.
+    assert "one unshadowed manual registration" in result.output
+    after = {
+        p: p.read_bytes()
+        for root in [sandbox.home, sandbox.project]
+        for p in root.rglob("*")
+        if p.is_file()
+    }
+    assert after == before
+
+
+def test_review_multiple_skills_only_plugins_are_reported(sandbox):
+    root = plugin(sandbox)
+    sandbox.rows.append({**sandbox.rows[0], "id": "memtomem@second-marketplace"})
+    manual(sandbox)
+    write(root / ".mcp.json", {"mcpServers": {}})
+    report = checks.inspect_claude_mcp()
+    assert report.exit_code == 1
+    assert "multiple_registrations" in codes(report)

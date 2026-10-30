@@ -33,6 +33,7 @@ class Report:
     reusable: bool = False
     # Internal edit locations; never serialize launch commands or credentials.
     manual_sources: list[tuple[Path, tuple[str, ...]]] = field(default_factory=list)
+    shadowed_manual: bool = False
     plugin_paths: list[Path] = field(default_factory=list)
     snapshots: dict[Path, bytes | None] = field(default_factory=dict)
 
@@ -82,6 +83,21 @@ def _mapping(data: dict, key: str, report: Report, label: str) -> dict:
         report.unknown(f"{label}: {key} must be an object.")
         return {}
     return value
+
+
+def _plugin_servers(path: Path, report: Report) -> dict | None:
+    """Distinguish an omitted/empty bundle from a failed local parse.
+
+    Other inspection failures must neither turn a valid empty bundle into an
+    invalid launch nor make a malformed bundle look intentionally omitted.
+    """
+    local = Report()
+    config = _object(path, local, "Plugin MCP")
+    servers = _mapping(config, "mcpServers", local, "Plugin MCP")
+    report.snapshots.update(local.snapshots)
+    report.findings.extend(local.findings)
+    report.complete &= local.complete
+    return servers if local.complete else None
 
 
 def _names(data: dict, key: str, report: Report) -> set[str]:
@@ -295,12 +311,16 @@ def _inspect_claude_mcp() -> Report:
         approve_all |= any(s.get("enableAllProjectMcpServers") is True for s in settings[1:])
     project = _object(cwd / ".mcp.json", report, "Claude project MCP")
     effective: dict[str, tuple[str, dict]] = {}
+    definitions: dict[str, int] = {}
+    candidate_names: set[str] = set()
     for scope, data in [("user", account), ("project", project), ("local", local)]:
         for name, entry in _mapping(data, "mcpServers", report, scope).items():
+            definitions[name] = definitions.get(name, 0) + 1
             if not isinstance(entry, dict):
                 report.unknown(f"{scope} MCP entry must be an object.")
                 continue
             if _candidate(name, entry):
+                candidate_names.add(name)
                 path = cwd / ".mcp.json" if scope == "project" else global_path
                 keys = (
                     ("projects", str(cwd), "mcpServers", name)
@@ -309,6 +329,15 @@ def _inspect_claude_mcp() -> Report:
                 )
                 report.manual_sources.append((path, keys))
             effective[name] = (scope, entry)
+    # Include non-memtomem definitions: removing an effective candidate can
+    # uncover an unrelated lower-scope server, and hidden candidates are not
+    # appropriate edit targets either. Keep read-only scope resolution intact.
+    report.shadowed_manual = any(definitions[name] > 1 for name in candidate_names)
+    if report.shadowed_manual:
+        report.add(
+            "shadowed_registration",
+            "A memtomem registration overlaps another scope; reconciliation needs manual review.",
+        )
 
     manual: list[tuple[str, dict]] = []
     for name, (scope, entry) in effective.items():
@@ -325,6 +354,9 @@ def _inspect_claude_mcp() -> Report:
             state = "disabled"
         elif scope == "project" and not (approve_all or name in approvals):
             state = "pending_approval"
+        if state == "configured" and _launch(entry) is None:
+            report.unknown("Manual memtomem launch cannot be classified without executing it.")
+            state = "unclassified"
         report.add(
             "manual_registration",
             "Manual memtomem registration found.",
@@ -337,14 +369,12 @@ def _inspect_claude_mcp() -> Report:
                 else "Review the invalid server name in Claude settings."
             ),
         )
-        if state == "disabled":
-            continue
         if state == "pending_approval":
             report.unknown(
                 "Project memtomem registration is awaiting approval; review `/mcp` first."
             )
-        if _launch(entry) is None:
-            report.unknown("Manual memtomem launch cannot be classified without executing it.")
+        if state != "configured" or safe_name == "<invalid-name>":
+            continue
         manual.append((name, entry))
 
     plugins: list[dict] = []
@@ -374,11 +404,12 @@ def _inspect_claude_mcp() -> Report:
             report.unknown("Custom memtomem plugin MCP manifest needs manual review.")
             continue
         plugin_path = Path(install_path) / ".mcp.json"
-        config = _object(plugin_path, report, "memtomem plugin MCP")
-        servers = _mapping(config, "mcpServers", report, "memtomem plugin")
-        if not servers and report.complete:
+        servers = _plugin_servers(plugin_path, report)
+        if servers is None:
+            continue
+        if not servers:
             report.plugin_paths.append(plugin_path)
-            if len(manual) == 1 and _launch(manual[0][1]) is not None:
+            if len(manual) == 1:
                 skills_only = True
                 report.add(
                     "skills_only", "Plugin MCP omitted; the manual registration supplies tools."
@@ -413,7 +444,7 @@ def _inspect_claude_mcp() -> Report:
             uninstall_command=f"claude plugin uninstall {row['id']} -s {row['scope']}",
         )
 
-    if len(plugins) > 1 or len(manual) > 1:
+    if len(report.plugin_paths) > 1 or len(manual) > 1:
         report.current_risk = True
         report.add(
             "multiple_registrations",

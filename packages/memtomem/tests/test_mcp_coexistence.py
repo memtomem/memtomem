@@ -304,3 +304,46 @@ def test_remove_quoted_toml_table_preserves_unrelated_comments():
     raw = b'# top\n[mcp_servers."memtomem"]\ncommand = "memtomem-server"\n[mcp_servers."memtomem".env]\nTOKEN="private-value"\n[mcp_servers.other] # keep\ncommand="other"\n'
     result = checks._remove_toml(raw, ("mcp_servers", "memtomem"))
     assert result == b'# top\n[mcp_servers.other] # keep\ncommand="other"\n'
+
+
+@pytest.mark.parametrize("raw", ['{"mcpServers":', "[]", '{"mcpServers": []}'])
+@pytest.mark.parametrize("has_manual", [False, True])
+def test_review_invalid_plugin_is_not_omitted(host, raw, has_manual):
+    host.bundled.write_text(raw)
+    if not has_manual:
+        host.config.unlink()
+    report = checks.inspect_host(host.client)
+    assert report.exit_code == 2
+    assert "skills_only" not in {f["code"] for f in report.findings}
+    assert not any("Plugin MCP is omitted" in f["message"] for f in report.findings)
+    assert not report.plugin_paths
+
+
+@pytest.mark.parametrize("invalid", ["enablement", "launcher"])
+@pytest.mark.parametrize("omitted", [False, True])
+def test_review_unusable_manual_supplies_no_tools(host, invalid, omitted):
+    if host.client == "codex":
+        content = host.config.read_text()
+        replacement = (
+            'command = "memtomem-server"\nenabled = "no"'
+            if invalid == "enablement"
+            else 'command = "custom-wrapper"'
+        )
+        host.config.write_text(content.replace('command = "memtomem-server"', replacement))
+    else:
+        data = json.loads(host.config.read_bytes())
+        entry = data["mcpServers"]["memtomem"]
+        if invalid == "enablement":
+            entry["disabled"] = "no"
+        else:
+            entry["command"] = "custom-wrapper"
+        write(host.config, data)
+    if omitted:
+        host.bundled.unlink()
+    report = checks.inspect_host(host.client)
+    assert report.exit_code == 2
+    assert not ({"skills_only", "native_dedup"} & {f["code"] for f in report.findings})
+    assert not any(
+        f["code"] == "manual_registration" and f.get("state") == "configured"
+        for f in report.findings
+    )

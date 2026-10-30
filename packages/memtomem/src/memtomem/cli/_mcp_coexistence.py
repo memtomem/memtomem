@@ -17,7 +17,7 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-from memtomem.cli._claude_mcp import Report, _candidate, _launch, _mapping, _object
+from memtomem.cli._claude_mcp import Report, _candidate, _launch, _mapping, _object, _plugin_servers
 
 
 def _inventory(client: str, report: Report) -> list[dict]:
@@ -121,20 +121,25 @@ def _inspect_host(client: str, report: Report) -> None:
         if not _candidate(name, entry):
             continue
         report.manual_sources.append((path, (key, name)))
-        enabled = entry.get("enabled", True) if codex else not entry.get("disabled", False)
         flag = entry.get("enabled", True) if codex else entry.get("disabled", False)
+        enabled = flag if codex else not flag
         if not isinstance(flag, bool):
             report.unknown("Manual MCP enablement must be boolean.")
+            state = "unclassified"
+        elif not enabled:
+            state = "disabled"
+        elif _launch(entry) is None:
+            report.unknown("Manual memtomem launch cannot be classified without executing it.")
+            state = "unclassified"
+        else:
+            state = "configured"
         report.add(
             "manual_registration",
             "Manual memtomem registration found.",
-            state="configured" if enabled else "disabled",
+            state=state,
         )
-        if not enabled:
-            continue
-        if _launch(entry) is None:
-            report.unknown("Manual memtomem launch cannot be classified without executing it.")
-        manual.append(name)
+        if state == "configured":
+            manual.append(name)
     plugins = []
     for row in _inventory(client, report):
         if not isinstance(row.get("name"), str):
@@ -160,8 +165,9 @@ def _inspect_host(client: str, report: Report) -> None:
             report.unknown("Custom plugin MCP manifest needs manual review.")
             continue
         plugin_path = installed / filename
-        config = _object(plugin_path, report, "Plugin MCP")
-        servers = _mapping(config, "mcpServers", report, "Plugin MCP")
+        servers = _plugin_servers(plugin_path, report)
+        if servers is None:
+            continue
         if not servers:
             if len(manual) == 1:
                 report.add(
@@ -199,7 +205,15 @@ def _inspect_host(client: str, report: Report) -> None:
             report.add(
                 "duplicate_risk", "Manual and plugin MCP registrations can both start servers."
             )
-    if codex and not manual and report.manual_sources and plugins:
+    if (
+        codex
+        and not manual
+        and plugins
+        and any(
+            f["code"] == "manual_registration" and f.get("state") == "disabled"
+            for f in report.findings
+        )
+    ):
         report.unknown("A disabled manual name may suppress the plugin; review /mcp.")
     report.reusable = report.complete and not report.current_risk and bool(manual or plugins)
 
@@ -255,7 +269,7 @@ def _reconcile(report: Report, client: str, choice: str, *, apply: bool) -> None
         for f in report.findings
         if f["code"] == "manual_registration" and f.get("state") == "configured"
     ]
-    if len(report.plugin_paths) != 1 or len(report.manual_sources) > 1:
+    if report.shadowed_manual or len(report.plugin_paths) != 1 or len(report.manual_sources) > 1:
         report.unknown(
             "Reconciliation needs one enabled plugin and at most one unshadowed manual registration."
         )
