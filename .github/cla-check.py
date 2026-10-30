@@ -21,6 +21,15 @@ SIGNATURES_KEY = "signedContributors"
 CLA_BOT_LOGINS = {"github-actions[bot]", "cla-assistant[bot]"}
 MISSING_MARKER = "Before we can merge, please sign"
 SIGNED_MARKER = "All contributors have signed the CLA."
+# Every status comment carries this, so one comment per pull request is kept
+# current instead of a new one posted per state. The two markers above still
+# identify comments written before it existed.
+STATUS_MARKER = "<!-- cla-status -->"
+# A signing comment runs against the default branch, so it cannot re-colour the
+# pull request's own CLA check; that run has to be re-run by hand.
+MAINTAINER_RERUN_NOTE = (
+    "If the CLA check on this pull request is still red, a maintainer will re-run it."
+)
 
 
 class GitHubApiError(RuntimeError):
@@ -262,26 +271,63 @@ def cla_bot_comments(repo: str, pr_number: int, token: str) -> list[dict[str, An
     ]
 
 
-def post_comment_once(repo: str, pr_number: int, token: str, body: str, marker: str) -> None:
-    if any(marker in (comment.get("body") or "") for comment in cla_bot_comments(repo, pr_number, token)):
+def status_comments(repo: str, pr_number: int, token: str) -> list[dict[str, Any]]:
+    markers = (STATUS_MARKER, MISSING_MARKER, SIGNED_MARKER)
+    return [
+        comment
+        for comment in cla_bot_comments(repo, pr_number, token)
+        if any(marker in (comment.get("body") or "") for marker in markers)
+    ]
+
+
+def upsert_status_comment(repo: str, pr_number: int, token: str, body: str) -> None:
+    existing = sorted(
+        status_comments(repo, pr_number, token),
+        key=lambda comment: (comment.get("created_at") or "", int(comment["id"])),
+    )
+    if not existing:
+        gh_api(
+            f"repos/{repo}/issues/{pr_number}/comments",
+            method="POST",
+            token=token,
+            payload={"body": body},
+        )
         return
-    gh_api(
-        f"repos/{repo}/issues/{pr_number}/comments",
-        method="POST",
-        token=token,
-        payload={"body": body},
+
+    keep, *extras = existing
+    if (keep.get("body") or "").strip() != body.strip():
+        gh_api(
+            f"repos/{repo}/issues/comments/{keep['id']}",
+            method="PATCH",
+            token=token,
+            payload={"body": body},
+        )
+    for comment in extras:
+        gh_api(
+            f"repos/{repo}/issues/comments/{comment['id']}",
+            method="DELETE",
+            token=token,
+        )
+
+
+def missing_comment_body(names: str, document_url: str, signature_text: str) -> str:
+    return (
+        f"Thank you for your contribution! {MISSING_MARKER} "
+        f"the [Contributor License Agreement]({document_url}).\n\n"
+        f"Missing signature(s): {names}\n\n"
+        f"To sign, comment on this pull request with the statement below. "
+        f"You only need to sign once per GitHub account.\n\n"
+        f"> {signature_text}\n\n"
+        f"{STATUS_MARKER}"
     )
 
 
-def delete_stale_missing_comments(repo: str, pr_number: int, token: str) -> None:
-    for comment in cla_bot_comments(repo, pr_number, token):
-        body = comment.get("body") or ""
-        if MISSING_MARKER in body:
-            gh_api(
-                f"repos/{repo}/issues/comments/{comment['id']}",
-                method="DELETE",
-                token=token,
-            )
+def signed_comment_body(*, after_comment: bool) -> str:
+    lines = [SIGNED_MARKER]
+    if after_comment:
+        lines.append(MAINTAINER_RERUN_NOTE)
+    lines.append(STATUS_MARKER)
+    return "\n\n".join(lines)
 
 
 def warn_comment_failure(action: str, exc: GitHubApiError) -> None:
@@ -296,8 +342,6 @@ def main() -> int:
     event = load_event()
     repo = env_required("GITHUB_REPOSITORY")
     github_token = env_required("GITHUB_TOKEN")
-    write_token = os.environ.get("PERSONAL_ACCESS_TOKEN") or github_token
-    comment_token = write_token
     signatures_branch = os.environ.get("SIGNATURES_BRANCH", "cla-signatures")
     signatures_path = os.environ.get("SIGNATURES_PATH", "signatures/v1/cla.json")
     signature_text = os.environ.get(
@@ -322,7 +366,7 @@ def main() -> int:
 
     pr = gh_api(f"repos/{repo}/pulls/{pr_number}", token=github_token)
     repo_id = int(event["repository"]["id"])
-    signatures, _sha = load_signatures(repo, signatures_branch, signatures_path, write_token)
+    signatures, _sha = load_signatures(repo, signatures_branch, signatures_path, github_token)
 
     if command == "sign":
         comment = event["comment"]
@@ -331,7 +375,7 @@ def main() -> int:
             repo=repo,
             branch=signatures_branch,
             path=signatures_path,
-            token=write_token,
+            token=github_token,
             login=user["login"],
             user_id=int(user["id"]),
             comment_id=int(comment["id"]),
@@ -350,39 +394,19 @@ def main() -> int:
 
     if missing:
         names = ", ".join(f"`{name}`" for name in missing)
-        try:
-            post_comment_once(
-                repo,
-                pr_number,
-                comment_token,
-                (
-                    f"Thank you for your contribution! Before we can merge, please sign "
-                    f"the [Contributor License Agreement]({document_url}).\n\n"
-                    f"Missing signature(s): {names}\n\n"
-                    f"To sign, comment on this pull request with the statement below. "
-                    f"You only need to sign once per GitHub account.\n\n"
-                    f"> {signature_text}"
-                ),
-                MISSING_MARKER,
-            )
-        except GitHubApiError as exc:
-            warn_comment_failure("post missing-signature CLA comment", exc)
+        body = missing_comment_body(names, document_url, signature_text)
+        exit_code = 1
         print(f"Missing CLA signature(s): {', '.join(missing)}")
-        return 1
+    else:
+        body = signed_comment_body(after_comment=command is not None)
+        exit_code = 0
+        print(SIGNED_MARKER)
 
     try:
-        delete_stale_missing_comments(repo, pr_number, comment_token)
-        post_comment_once(
-            repo,
-            pr_number,
-            comment_token,
-            SIGNED_MARKER,
-            SIGNED_MARKER,
-        )
+        upsert_status_comment(repo, pr_number, github_token, body)
     except GitHubApiError as exc:
-        warn_comment_failure("update CLA status comments", exc)
-    print(SIGNED_MARKER)
-    return 0
+        warn_comment_failure("update the CLA status comment", exc)
+    return exit_code
 
 
 if __name__ == "__main__":
