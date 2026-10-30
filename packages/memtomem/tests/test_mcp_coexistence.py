@@ -347,3 +347,31 @@ def test_review_unusable_manual_supplies_no_tools(host, invalid, omitted):
         f["code"] == "manual_registration" and f.get("state") == "configured"
         for f in report.findings
     )
+
+
+@pytest.mark.parametrize("invalid", ["missing", "malformed", "wrong-name", "unreadable"])
+def test_invalid_manifest_does_not_supply_skills_only_plugin(host, monkeypatch, invalid):
+    manifest = host.plugin / (
+        ".codex-plugin/plugin.json" if host.client == "codex" else "plugin.json"
+    )
+    host.bundled.unlink()
+    if invalid == "missing":
+        manifest.unlink()
+    elif invalid == "malformed":
+        manifest.write_text("{")
+    elif invalid == "wrong-name":
+        write(manifest, {"name": "other"})
+    else:
+        original = Path.read_bytes
+
+        def read_bytes(path):
+            if path == manifest:
+                raise PermissionError
+            return original(path)
+
+        monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    report = checks.inspect_host(host.client)
+    assert report.exit_code == 2
+    assert not ({"skills_only", "plugin_enabled"} & {f["code"] for f in report.findings})
+    assert not any("Plugin MCP is omitted" in f["message"] for f in report.findings)
+    assert not report.plugin_paths

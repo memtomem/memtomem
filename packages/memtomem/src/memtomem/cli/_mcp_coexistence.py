@@ -160,6 +160,7 @@ def _inspect_host(client: str, report: Report) -> None:
         manifest = _object(manifest_path, report, "Plugin manifest", required=True)
         if manifest.get("name") != "memtomem":
             report.unknown("Plugin manifest identity is unsupported.")
+            continue
         filename = ".mcp.json" if codex else "mcp_config.json"
         if codex and manifest.get("mcpServers", "./.mcp.json") != "./.mcp.json":
             report.unknown("Custom plugin MCP manifest needs manual review.")
