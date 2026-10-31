@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
+from memtomem.constants import NON_SYSTEM_NAMESPACES
+
 #: ``ChunkMetadata.origin`` value stamped on summaries written by the
 #: consolidation policy (``memtomem.tools.consolidation_engine``). It is the
 #: ownership proof ``_clear_policy_summaries`` deletes on: no ingress surface
@@ -191,7 +193,7 @@ class InvalidFilterSyntaxError(ValueError):
 
 
 class InvalidNamespaceFilterError(InvalidFilterSyntaxError):
-    """The ``namespace`` argument mixes a comma list with a glob."""
+    """The ``namespace`` argument mixes a comma list with a glob, or lists ``!system``."""
 
 
 class InvalidScopeFilterError(InvalidFilterSyntaxError):
@@ -213,8 +215,9 @@ class NamespaceFilter:
     Supports exact match (single or union), glob patterns, comma-separated
     lists, and default-search exclusion of system namespace prefixes (e.g.
     ``archive:``). Exclusion is applied *only* when no explicit namespace
-    is given — the idea is that callers who ask for ``archive:summary``
-    directly have already opted in.
+    is given, or when the explicit ``!system`` selector asks for it — the
+    idea is that callers who ask for ``archive:summary`` directly have
+    already opted in.
 
     A comma list and a glob are **mutually exclusive** spellings, not
     composable ones: the SQL layer emits either an ``IN (…)`` list or a
@@ -249,19 +252,39 @@ class NamespaceFilter:
         admit everything, which turns "no namespace given" into "hide
         nothing" — the opposite of the default.
 
+        :data:`~memtomem.constants.NON_SYSTEM_NAMESPACES` (``"!system"``)
+        takes the ``None`` path too. The difference lies with the caller:
+        an explicit value survives ``namespace or current_namespace``, so it
+        selects every non-system namespace even under an active session.
+
         Raises:
             InvalidNamespaceFilterError: the value mixes a comma list with a
                 glob. ``*`` is checked before ``,``, so such a value would
                 otherwise become one pattern containing a literal comma and
                 match nothing — a silent empty result set rather than an
-                answer the caller can act on.
+                answer the caller can act on. Also raised when the
+                ``"!system"`` selector is one item of a comma list or a list,
+                where it would otherwise be read as an exact namespace name.
         """
         prefixes = tuple(system_prefixes) if system_prefixes else ()
 
-        if value is None or (isinstance(value, list) and not value):
+        if (
+            value is None
+            or value == NON_SYSTEM_NAMESPACES
+            or (isinstance(value, list) and not value)
+        ):
             if prefixes:
                 return NamespaceFilter(exclude_prefixes=prefixes)
             return None
+        items = value if isinstance(value, list) else value.split(",") if "," in value else []
+        # ``isinstance``: a raw-params route (``mem_do`` → ``context_compose``)
+        # can hand over a list of non-strings, which this check must not crash on.
+        if any(isinstance(item, str) and item.strip() == NON_SYSTEM_NAMESPACES for item in items):
+            raise InvalidNamespaceFilterError(
+                f"namespace {value!r} puts the {NON_SYSTEM_NAMESPACES!r} selector in a list. "
+                f"Pass {NON_SYSTEM_NAMESPACES!r} on its own to select every non-system "
+                "namespace, or list exact namespace names without it."
+            )
         if isinstance(value, list):
             return NamespaceFilter(namespaces=tuple(value))
         if "*" in value and "," in value:
@@ -582,3 +605,8 @@ class IndexingStats:
     # ``SearchPipeline.invalidate_cache()`` on this flag instead.
     # Appended last for positional construction compatibility.
     mutated: bool = False
+    # The source's project rows were not rewritten: re-indexing would have
+    # stored them under another scope or project root, so the engine held the
+    # source instead (#2923). The reason is also in ``errors``; this lets a
+    # by-id rewrite tell its caller that its change is on disk but held.
+    scope_held: bool = False

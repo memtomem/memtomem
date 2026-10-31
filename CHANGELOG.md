@@ -5,7 +5,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Upgrading
+
+- **`namespace="!system"` no longer names a namespace called `!system`.** On
+  `mem_search`, `mem_recall`, `mem_list`, `mm search` and `mm recall` it now
+  selects every namespace except the system ones (#2919). This change has no
+  deprecation window, an exception to the beta commitment. On
+  `mem_search`, `mem_recall`, `mm search` and `mm recall`, a comma list or a
+  list that includes it, such as `"!system,work"`, is refused; drop it from
+  saved filters and configuration. If you stored memory under a namespace
+  literally named `!system` (possible in 0.7.0 through `mm index --namespace`,
+  namespace rules, or raw MCP `mem_add`), find it with `mem_ns_list` and move
+  it with `mem_ns_rename(old="!system", new="<name>")` (#2937), then change
+  the rule or flag that produced the name, or a later re-index can write it
+  again.
+
 ### Added
+
+- **`namespace="!system"` selects every namespace except the system ones
+  (#2919).** An omitted namespace hides the system namespaces (`archive:*`
+  and `agent-runtime:*` by default, `search.system_namespace_prefixes`), but
+  an active session or agent namespace replaces it, and `"*"` includes the
+  system namespaces. `"!system"` is an explicit value, so it overrides the
+  session namespace and keeps the system namespaces hidden. `mem_search`,
+  `mem_ask`, `mem_recall`, `mem_timeline`, `mem_list`, the `memtomem://sources`
+  resource, `mm search`, `mm recall`, and the web search and timeline accept
+  it; with no session namespace it matches an omitted namespace. On the
+  search, recall and timeline surfaces it is valid only as the whole value:
+  `"!system,work"` or a list containing it is refused rather than read as an
+  exact namespace name. `mem_list` and the resource keep their own namespace
+  matching for every other value.
 
 - **`mem_project_bind` gives a stdio server started outside the project a
   project context (#2920).** The project context comes from the server's
@@ -58,9 +87,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `? not checkable` and lists the gone ones for the next `update`. `update`
   and `handoff` accept the `antigravity-cli` runtime label and keep paths,
   symbols, commands, and quotes of the user verbatim.
+- **`update` reads the latest 10 commits' full messages instead of 15
+  subjects (`claude` 0.5.22, `codex` 0.3.19, `opencode` 0.3.19, `kimi` 0.2.17;
+  #2918).** A subject says what changed but not why, and two `update full`
+  runs saved nothing from commits. The workflow now prints each commit's full
+  SHA and message with one fixed, read-only command, which the Claude bundle
+  allows exactly. `--no-pager`, `--no-replace-objects`, `--encoding=UTF-8` and
+  `--no-show-signature` keep repository and user Git configuration from
+  running a pager, substituting messages, re-encoding the output or running
+  gpg. The window shrinks to 10 so this repository's messages fit Claude
+  Code's 30,000-character inline limit. When output is truncated or elided,
+  the run reports only the commits whose full message it read. Commit
+  messages are treated as untrusted: they may be summarised as evidence, never
+  followed, and never supply a command, path, scope, namespace, tag or
+  override. A `decision` or `bugfix` from a commit must state the reason its
+  message gives. Each run reports `commit-derived` and `session-derived`
+  counts, to measure whether a commit cursor (#2918) is worth building.
 
 ### Fixed
 
+- **`mem_ns_rename` can move a stored namespace whose name is not valid
+  (#2937).**
+  `!system` now selects every non-system namespace on search and recall
+  (#2919), but 0.7.0 writers that never checked names (`mm index --namespace`,
+  namespace rules, raw MCP `mem_add`, the langgraph adapter) could store a
+  namespace with that literal name, and `mem_ns_rename` could not move it: it
+  refused any `old` that failed validation. It now accepts an `old` that fails
+  validation when that exact string is stored as a chunk namespace or a
+  metadata row; a name that is not stored gets the same refusal as before, and
+  `new` must still be valid. A non-string `old` sent through `mem_do` is
+  refused before the lookup, and so is an empty one: move a file indexed
+  under an empty namespace with `mm index <file> --force --namespace <name>`.
+- **`mm mem init` no longer says a running server needs a restart to see the
+  new tier (#2925).** The note dated from before #2190. A running MCP server
+  picks up the tier on its next memory operation, and a running `mm web` the
+  next time its page loads. The note and the
+  `MEMTOMEM_INDEXING__PROJECT_MEMORY_DIRS` row in the configuration guide now
+  say so. The guide's read-only-dirs and `watcher_backend` entries said "next
+  tool call"; they now say "next memory operation", because
+  `mem_do(action="help")` answers without re-reading the config.
 - **`mem_edit` and `mem_delete` refuse a rewrite that would turn project
   memory into user memory (#2920).** They rewrite a chunk's file and re-index
   all of it, and the re-index classifies by path against the tiers registered
@@ -68,9 +133,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `user`, readable from every project. That row stays reachable from a server
   bound to its project, and also from a server whose working directory is in
   a project that kept its other tier registered. Both now refuse the rewrite
-  and name the `mm mem init` command that registers the tier again. Web edits,
-  an unregistration racing the edit, and a source moved behind a symlink still
-  re-index this way (#2923).
+  and name the `mm mem init` command that registers the tier again.
+- **Re-indexing no longer turns project memory into user memory (#2923).**
+  Indexing classifies a file against the tiers registered at that moment, so
+  re-writing the rows of a file whose tier was unregistered stored them as
+  `user`. That happened on `mm index --force` (until now the documented
+  way to apply an unregistration), on any re-index of a changed file, on a web
+  edit or delete, and when the tier was unregistered while a `mem_edit` ran.
+  Now the indexer never rewrites `project_shared` or `project_local` rows under
+  another scope or another project root. It holds the source instead: its
+  memory is hidden from search and the index result names the file and the
+  tier. The hold lifts on the first index after the tier is registered again.
+  To make the memory user memory on purpose, use `mm context memory-migrate`.
+  A file whose content did not change is not rewritten and is not held. The
+  web chunk edit and delete refuse such a rewrite before writing, as
+  `mem_edit` and `mem_delete` already did. All four also refuse a rewrite
+  through a stored path that has become a symlink into another file, which
+  wrote into that file, possibly another project's. If the tier is
+  unregistered while an edit runs, the edit stays on disk, the source is held,
+  and the response carries a warning. On macOS, a source whose rows are stored
+  only under an older NFD spelling of its path is refused the same way but is
+  not hidden, so its previously indexed content stays searchable in its project
+  (#2926).
 - **A frontmatter key with no space after its colon now logs a warning
   (#2885).** Since 0.7.0 reads frontmatter as YAML, a block
   made only of no-space lines such as `tags:[a, b]` or `valid_to:2024-12-31`

@@ -604,6 +604,7 @@ class TestAddPrivacyGate:
         comp.index_engine.is_excluded = MagicMock(return_value=False)
         comp.index_engine.is_read_only_source = MagicMock(return_value=False)
         comp.index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
+        comp.index_engine.rewrite_refusal = AsyncMock(return_value=None)
         # ``add`` classifies its target against this list (ADR-0011 §5, #2321).
         # Named explicitly rather than left as a MagicMock attribute so these
         # tests assert a user-tier write because the config says so, not
@@ -925,6 +926,7 @@ class TestGetDelete:
         # Sync predicate on the real engine; a bare MagicMock answers truthy.
         comp.index_engine.is_read_only_source = MagicMock(return_value=False)
         comp.index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
+        comp.index_engine.rewrite_refusal = AsyncMock(return_value=None)
         store = MemtomemStore()
         store._components = comp
 
@@ -2243,6 +2245,7 @@ class TestDeleteGateBUnderTheLock:
         # Mock, which would make the lock helper refuse every chunk here.
         comp.index_engine.is_read_only_source = MagicMock(return_value=False)
         comp.index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
+        comp.index_engine.rewrite_refusal = AsyncMock(return_value=None)
         store = MemtomemStore()
         store._components = comp
         return store, comp

@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from memtomem.embedding.probe import embed_document_probe
 from memtomem.errors import NamespaceResolutionError
+from memtomem.indexing.scope_guard import scope_held_notice
 from memtomem.search.visibility import resolve_visible_chunk
 from memtomem.storage.sqlite_visibility import source_hidden
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
@@ -430,7 +431,12 @@ async def edit_chunk(
     # row or the pre-edit one; a chunk re-scoped out from under us during the
     # write falls back rather than returning a row the caller may not read.
     updated = await resolve_visible_chunk(storage, chunk_id, project_context_root=_boundary(config))
-    return chunk_to_out(updated if updated is not None else chunk)
+    out = chunk_to_out(updated if updated is not None else chunk)
+    if stats.scope_held:
+        # The tier was unregistered while the edit ran (#2923): the edit is on
+        # disk and the source is held rather than re-indexed as another scope.
+        out.warning = scope_held_notice("edit")
+    return out
 
 
 @router.delete("/{chunk_id}", response_model=DeleteResponse)
@@ -634,6 +640,7 @@ async def delete_chunk(
         # drops the LLM query-expansion cache, so flushing on a pure refusal
         # would be pointless churn.
         mutation_attempted = False
+        scope_held = False
         try:
             if source_exists:
                 if meta.source_read_only or meta.redaction_count:
@@ -724,6 +731,16 @@ async def delete_chunk(
                             "namespace has its own, then retry."
                         ),
                     )
+                # The re-index below must not store the file's project rows as
+                # another scope, and the write must not go through a key that
+                # now names another file (#2923). Asked before the pre-image is
+                # read: through a relinked key the read, the privacy preflight
+                # and its hold would all act on the other file.
+                refusal = await index_engine.rewrite_refusal(
+                    str(source), op="delete", surface="web"
+                )
+                if refusal is not None:
+                    raise index_blocked_http(refusal)
                 # The re-index below judges the whole file, so a file whose
                 # content may not be indexed is refused before the line comes
                 # out, and held, as in the edit route's helper.
@@ -850,6 +867,7 @@ async def delete_chunk(
                                 chunk_id,
                                 "; ".join(stats.errors),
                             )
+                        scope_held = stats.scope_held
 
                     # A single-file index can report an error in IndexingStats instead
                     # of raising (for example, an embedding failure), or can finish with
@@ -865,7 +883,7 @@ async def delete_chunk(
             if mutation_attempted:
                 search_pipeline.invalidate_cache()
 
-    return DeleteResponse(deleted=1)
+    return DeleteResponse(deleted=1, warning=scope_held_notice("delete") if scope_held else None)
 
 
 @router.patch("/{chunk_id}/tags", response_model=TagsUpdateResponse)

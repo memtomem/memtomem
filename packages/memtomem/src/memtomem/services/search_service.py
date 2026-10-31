@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, get_args
 
 from memtomem.chunking.markdown import _parse_validity_bound
 from memtomem.config import TargetScope
+from memtomem.constants import NON_SYSTEM_NAMESPACES
 from memtomem.models import InvalidScopeFilterError, ScopeFilter
 
 if TYPE_CHECKING:
@@ -385,8 +386,8 @@ async def run_search(
     )
 
     # Trust-UX hints shared across formats. The archive notice is emitted
-    # only for callers who did NOT pin a namespace — otherwise the archive
-    # filter never engaged.
+    # only for callers who did NOT pin a namespace or who passed ``!system``
+    # — otherwise the archive filter never engaged.
     hints: list[str] = []
     # stats.rerank_applied is the per-call effective decision, not the live
     # config — accurate even when a hot reload flips rerank.enabled while
@@ -408,7 +409,7 @@ async def run_search(
     # has none to offer. Hidden-namespace discovery stays last.
     elif results and stats.dense_error is not None:
         hints.append(DENSE_LEG_DROPPED_HINT)
-    if effective_ns is None and stats.hidden_system_ns > 0:
+    if effective_ns in (None, NON_SYSTEM_NAMESPACES) and stats.hidden_system_ns > 0:
         hints.append(hidden_namespace_hint(stats.hidden_system_ns, stats.hidden_by_prefix))
 
     return results, stats, hints

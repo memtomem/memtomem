@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from memtomem.constants import INVALID_OUTPUT_FORMAT_PREFIX
+from memtomem.constants import INVALID_OUTPUT_FORMAT_PREFIX, NON_SYSTEM_NAMESPACES
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -126,7 +126,7 @@ async def mem_recall(
     # one-shot embedding mismatch notice. Mirrors mem_search behaviour so
     # archived/auto-consolidated memories are visible to the caller.
     hints: list[str] = []
-    if effective_ns is None:
+    if effective_ns in (None, NON_SYSTEM_NAMESPACES):
         hidden_by_prefix: dict[str, int] = {}
         try:
             hidden_count, hidden_by_prefix = await app.storage.count_chunks_by_ns_prefix_detail(

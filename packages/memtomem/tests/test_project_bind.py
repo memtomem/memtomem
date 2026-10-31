@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from helpers import StubCtx
+from memtomem._runtime_paths import _hint_quote
 from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server import context as server_context
 from memtomem.server.context import AppContext
@@ -493,11 +494,11 @@ async def test_edit_and_delete_refuse_a_row_whose_bound_tier_was_unregistered(
 
     comp.config.indexing.project_memory_dirs = [other_tier]
     edited = await mem_edit(chunk_id=chunk_id, new_content="private zephyr edited", ctx=ctx)
-    assert edited.startswith(f"Error: chunk {chunk_id} is project_local memory"), edited
-    assert "would re-index it as user memory" in edited
-    assert f"cd {mine_root} && mm mem init --scope project_local" in edited
+    assert edited.startswith(f"Error: chunk {chunk_id} rewrite refused: "), edited
+    assert "would store it as user memory; nothing was written" in edited
+    assert f"cd {_hint_quote(mine_root)} && mm mem init --scope project_local" in edited
     deleted = await mem_delete(chunk_id=chunk_id, ctx=ctx)
-    assert deleted.startswith(f"Error: chunk {chunk_id} is project_local memory"), deleted
+    assert deleted.startswith(f"Error: chunk {chunk_id} rewrite refused: "), deleted
     assert {path: path.read_bytes() for path in mine_tier.rglob("*.md")} == before
 
     other_app = AppContext.from_components(comp)
@@ -529,7 +530,7 @@ async def test_edit_refuses_a_cwd_projects_row_whose_tier_was_unregistered(
     comp.config.indexing.project_memory_dirs = [shared_tier]
     assert _resolve_project_context_root(app) == root
     edited = await mem_edit(chunk_id=chunk_id, new_content="local quokka edited", ctx=ctx)
-    assert edited.startswith(f"Error: chunk {chunk_id} is project_local memory"), edited
+    assert edited.startswith(f"Error: chunk {chunk_id} rewrite refused: "), edited
 
 
 # ---------------------------------------------------------------------------

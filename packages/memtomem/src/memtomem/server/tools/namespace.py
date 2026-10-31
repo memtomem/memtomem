@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pydantic import StrictBool
 
-from memtomem.constants import validate_namespace
+from memtomem.constants import InvalidNameError, validate_namespace
 from memtomem.errors import NamespaceConflictError
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
@@ -121,6 +121,13 @@ async def mem_ns_get(
     return f"Current session namespace: '{ns}'"
 
 
+async def _is_stored_namespace(storage, name: str) -> bool:
+    """Whether *name* is stored exactly, as a chunk namespace or a metadata row."""
+    if name in dict(await storage.list_namespaces()):
+        return True
+    return await storage.get_namespace_meta(name) is not None
+
+
 @mcp.tool()
 @tool_handler
 @register("namespace")
@@ -142,9 +149,27 @@ async def mem_ns_rename(
     ``merge=True`` to consolidate on purpose: chunks move into ``new``
     and the *target's* description/color are kept.
 
-    Both ``old`` and ``new`` are run through :func:`validate_namespace`
-    so a hostile-shaped string cannot land verbatim in the chunks /
-    namespace_metadata rows via the rename path. See issue #500.
+    ``new`` is run through :func:`validate_namespace` so a hostile-shaped
+    string cannot land verbatim in the chunks / namespace_metadata rows via
+    the rename path (issue #500). ``old`` is too, with one exception: a
+    string that fails validation but is already stored, exactly, as a chunk
+    namespace or a metadata row may still be renamed to a valid ``new``.
+    Writers that never validated (``mm index --namespace``, namespace rules,
+    raw MCP ``mem_add``) could store such names — a literal ``!system``, for
+    one, which since 0.7.1 is the every-non-system-namespace selector on
+    search and recall — and this is the way to move them out. The empty
+    name is the exception to the exception: it stays refused, and a file
+    indexed under it moves with a forced re-index that names the namespace
+    (``mm index <file> --force --namespace <name>``).
+
+    Re-indexing keeps the new name for a file whose rows all sit in one
+    namespace: it keeps it on ordinary, forced and watcher passes. A file
+    whose rows span several namespaces is resolved by the rules again on an
+    ordinary pass, so its changed chunks can return to the old name. The old name
+    comes back only through an explicit ``--namespace`` naming it,
+    ``--reassign-namespaces`` with the rule that produced it unchanged, or
+    indexing the file again after its rows were removed — so change that
+    rule or flag as well.
 
     Args:
         old: Namespace to rename. A namespace that exists only as
@@ -157,13 +182,24 @@ async def mem_ns_rename(
         mem_ns_rename(old="project:v1", new="project:v2")
         mem_ns_rename(old="project:draft", new="project:v2", merge=True)
 
-    (Legacy ``agent/{id}`` namespaces cannot be named here — the slash fails
-    validation. Use ``mm agent migrate``, which consolidates them.)
+    (For legacy ``agent/{id}`` namespaces prefer ``mm agent migrate``, which
+    consolidates them; the stored-name exception above would rename one at a
+    time.)
     """
-    validate_namespace(old)
     validate_namespace(new)
     merge = strict_bool(merge, "merge")
     app = await _get_app_initialized(ctx)
+    try:
+        validate_namespace(old)
+    except InvalidNameError:
+        # ``mem_do`` forwards params unvalidated, and SQLite would match an
+        # int ``123`` against a stored TEXT ``"123"``: only a plain, non-empty
+        # string may take the stored-name exception. ``type() is str`` keeps a
+        # subclass with its own ``__eq__``/``__hash__`` from matching a stored
+        # name it does not spell; ``""`` reads as "no filter" to the candidate
+        # loader, so it could not move anything anyway.
+        if type(old) is not str or not old or not await _is_stored_namespace(app.storage, old):
+            raise
     try:
         result = await namespace_management.rename_namespace(
             app.storage,

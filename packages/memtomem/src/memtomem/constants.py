@@ -260,6 +260,18 @@ def validate_namespace(value: object) -> str:
     return value
 
 
+# Read-side selector for "every namespace except the system prefixes". It is
+# an explicit value, so ``namespace or current_namespace`` keeps it over an
+# active session or agent namespace, and :meth:`NamespaceFilter.parse` turns
+# it into the same filter an omitted namespace gets. The parser accepts it
+# only as the whole value; ``mem_list`` and ``memtomem://sources`` map it to
+# an omitted namespace before their own matching (``get_source_files_page``).
+# A namespace literally named ``!system`` can still be written (writes
+# do not validate against reader syntax, as with ``,`` and ``*``); reads
+# cannot address it by exact name.
+NON_SYSTEM_NAMESPACES: Final[str] = "!system"
+
+
 # Default ``system_namespace_prefixes`` — namespaces matching any of these
 # prefixes are excluded from default ``mem_search`` (``namespace=None``)
 # but stay reachable when an explicit namespace is passed. ``archive:`` is
