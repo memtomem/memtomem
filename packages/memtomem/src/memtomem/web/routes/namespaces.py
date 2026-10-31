@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from memtomem.constants import InvalidNameError, validate_namespace
 from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError
 from memtomem.services import namespace_management
 from memtomem.web.deps import get_storage
@@ -117,7 +118,23 @@ async def rename_namespace(
     The 409 ``detail`` is written for the settings UI, which posts renames
     without a merge affordance; API clients get the merge option from this
     description. See ``NamespaceOps.rename_namespace``.
+
+    ``new_name`` goes through :func:`validate_namespace`, as ``new`` does on
+    the MCP ``mem_ns_rename``; a name it refuses answers 400 with the same
+    message. The request schema runs first, so an empty name or one over 200
+    characters still answers 422.
+
+    The source name in the path is not validated: storage matches it exactly,
+    so a stored name that fails validation (a literal ``!system``, say) can
+    still be renamed out, and a name that is not stored moves nothing and
+    answers 404. That is the outcome the MCP tool reaches with its
+    stored-name exception, though the MCP tool refuses an invalid name that is
+    not stored instead of answering "not found".
     """
+    try:
+        validate_namespace(body.new_name)
+    except InvalidNameError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         result = await namespace_management.rename_namespace(
             storage,
