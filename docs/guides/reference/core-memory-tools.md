@@ -256,7 +256,7 @@ Combines keyword matching (exact words) with meaning-based search (similar conce
 | `top_k` | Number of results (default 10, max 100) | `20` |
 | `source_filter` | File path substring (recommended) or glob | `"docs/adr"`, `".yaml"` |
 | `tag_filter` | Comma-separated tags, OR logic | `"redis,cache"` |
-| `namespace` | Scope to namespace | `"work"` |
+| `namespace` | Scope to namespace: one value, comma list, or glob. `"!system"` selects every namespace except the system ones, even under an active session namespace | `"work"`, `"!system"` |
 | `as_of` | Temporal validity query — only return chunks valid on this date (default = current time). Date-only `YYYY-MM-DD` or quarter `YYYY-QN`. Chunks without `valid_from`/`valid_to` frontmatter are always-valid and unaffected. | `"2024-Q3"` |
 | `bm25_weight` / `dense_weight` | Override RRF weights (default `1.0`) | `2.0` |
 | `context_window` | Expand each result with ±N adjacent chunks (`0` = disabled). Neighbours inherit the visibility filters — hidden system namespaces, the project-scope boundary, temporal validity — but not the selection filters (`tag_filter`, chunk types, created-date bounds), so a hidden neighbour shrinks the window instead of surfacing | `1` |
@@ -281,7 +281,7 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 
 > **source_filter tip**: Use substrings like `"docs/adr"` or `".py"` for filtering. Glob patterns (`*`, `?`) are matched against the **full absolute path** via `fnmatch`, so `"*.py"` won't work as expected — use `".py"` instead.
 
-> **Trust-UX hints**: when you don't pin a namespace, results are followed by a parenthesized hint if chunks were hidden in system namespaces (e.g. `archive:*`) or if the configured embedding dimension disagrees with what's in the database. A third hint — independent of namespace selection — appears when you pass `rerank=true` but the server has reranking disabled (`rerank.enabled=false`), since the parameter cannot force-enable it. A fourth, `semantic search failed for this query — results may be incomplete`, appears when the primary dense leg raised (embedder unreachable, for example) and the search still returned results; the cause stays in the server log and the `output_format="verbose"` pipeline line. In `output_format="structured"` those hints are emitted as a `hints` array instead.
+> **Trust-UX hints**: when you don't pin a namespace (or pass `"!system"`), results are followed by a parenthesized hint if chunks were hidden in system namespaces (e.g. `archive:*`) or if the configured embedding dimension disagrees with what's in the database. A third hint — independent of namespace selection — appears when you pass `rerank=true` but the server has reranking disabled (`rerank.enabled=false`), since the parameter cannot force-enable it. A fourth, `semantic search failed for this query — results may be incomplete`, appears when the primary dense leg raised (embedder unreachable, for example) and the search still returned results; the cause stays in the server log and the `output_format="verbose"` pipeline line. In `output_format="structured"` those hints are emitted as a `hints` array instead.
 
 > **Structured result fields**: each result in `output_format="structured"`
 > (from `mem_search` and `mem_recall`) carries where it came from:
@@ -441,14 +441,14 @@ mem_recall(namespace="project:*", limit=5)
 | `until` | Exclusive end date | same formats |
 | `source_filter` | File path substring or glob | `"notes"`, `"*.md"` |
 | `tag_filter` | Comma-separated tags, matching ANY | `"handoff,decision"` |
-| `namespace` | Single, comma-separated, or glob | `"work"`, `"project:*"` |
+| `namespace` | Single, comma-separated, or glob; `"!system"` = every non-system namespace | `"work"`, `"project:*"`, `"!system"` |
 | `limit` | Max results (default 20, max 500) | `10` |
 | `output_format` | `"compact"` (default) or `"structured"` (JSON with `hints` field) | `"structured"` |
 | `scope` | Memory tier filter: one value, comma list, or glob | `"project_shared"` |
 
 `tag_filter` is applied in SQL *before* `limit`, so no tagged row can be crowded out. `mem_search` also selects on the tag before its ranking cap, with one caveat: its keyword leg filters in SQL, but its semantic (dense) leg can only apply the tag within the bounded neighbour set it retrieves, so a tagged chunk that is neither a keyword match nor a near-neighbour of the query may still be missed there. Use `mem_recall` when a tagged record must be reachable regardless of the query, and for newest-first ordering; `mem_search` ranks by relevance.
 
-Like `mem_search`, `mem_recall` hides system namespaces (`archive:*` by default) when no namespace is pinned and appends a trust-UX hint if any chunks were filtered or if an embedding dimension mismatch is detected. `output_format="structured"` exposes those as a `hints` array for programmatic consumers.
+Like `mem_search`, `mem_recall` hides system namespaces (`archive:*` by default) when no namespace is pinned (or `"!system"` is passed) and appends a trust-UX hint if any chunks were filtered or if an embedding dimension mismatch is detected. `output_format="structured"` exposes those as a `hints` array for programmatic consumers.
 
 ---
 

@@ -520,7 +520,7 @@ Fusion). The variables below tune each retriever and the fusion.
 | `MEMTOMEM_SEARCH__CACHE_TTL` | `30.0` | Search result cache TTL in seconds |
 | `MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES` | `["archive:", "agent-runtime:"]` | Namespace prefixes excluded from default search (max 10) |
 
-Chunks in system namespaces (e.g. `archive:*` and the per-agent `agent-runtime:*` buckets) are hidden from `namespace=None` searches but remain retrievable with an explicit namespace argument. Set to `[]` to make all namespaces searchable by default.
+Chunks in system namespaces (e.g. `archive:*` and the per-agent `agent-runtime:*` buckets) are hidden from `namespace=None` searches but remain retrievable with an explicit namespace argument. `namespace="!system"` applies the same exclusion explicitly, so it also overrides an active session or agent namespace on `mem_search` and `mem_recall`. Set to `[]` to make all namespaces searchable by default.
 
 ## Query Expansion
 

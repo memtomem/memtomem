@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import AsyncIterator, Sequence
 from uuid import UUID
 
+from memtomem.constants import NON_SYSTEM_NAMESPACES
 from memtomem.errors import (
     ExhaustiveDenseSearchLimitError,
     QueryEmbeddingDimensionError,
@@ -898,7 +899,13 @@ class SearchOpsMixin:
         One statement, so the page and its aggregates come from one snapshot. A
         traversal of a changing store never repeats a file, but misses files
         added before its cursor and reports each page as of its own read.
+
+        ``namespace="!system"`` lists what an omitted namespace lists: this
+        listing has no ambient namespace to override, and both the prefilter
+        and ``memtomem_list_admit`` would otherwise read it as a namespace name.
         """
+        if namespace == NON_SYSTEM_NAMESPACES:
+            namespace = None
         where = ["chunks.source_file > ?"]
         params: list[object] = [after or ""]
         if namespace:

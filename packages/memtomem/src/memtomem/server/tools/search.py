@@ -79,7 +79,8 @@ async def mem_search(
         tag_filter: Comma-separated tags; matches chunks carrying ANY of them
         namespace: Namespace scope — value, comma list (``work,personal``) or
             glob (``proj:*``), not both. Omitted, system namespaces are hidden;
-            naming one includes it.
+            naming one includes it. ``!system`` = every non-system namespace,
+            overriding the session's.
         as_of: Temporal bound for retroactive search — ``YYYY-MM-DD`` or
             ``YYYY-QN``, default now. Chunks whose ``valid_from`` /
             ``valid_to`` frontmatter excludes that point drop out; chunks

@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`namespace="!system"` selects every namespace except the system ones
+  (#2919).** An omitted namespace hides the system namespaces (`archive:*`
+  and `agent-runtime:*` by default, `search.system_namespace_prefixes`), but
+  an active session or agent namespace replaces it, and `"*"` includes the
+  system namespaces. `"!system"` is an explicit value, so it overrides the
+  session namespace and keeps the system namespaces hidden. `mem_search`,
+  `mem_ask`, `mem_recall`, `mem_timeline`, `mem_list`, the `memtomem://sources`
+  resource, `mm search`, `mm recall`, and the web search and timeline accept
+  it; with no session namespace it matches an omitted namespace. It is valid
+  only as the whole value: `"!system,work"` or a list containing it is
+  refused rather than read as an exact namespace name.
+
 - **`mem_project_bind` gives a stdio server started outside the project a
   project context (#2920).** The project context comes from the server's
   working directory. A host can start the server elsewhere: the Antigravity
