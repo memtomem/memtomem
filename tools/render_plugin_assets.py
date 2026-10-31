@@ -94,7 +94,17 @@ def _allowed_tools(workflow: dict) -> str:
     return ", ".join(names)
 
 
-def _input_fallback(kind: str) -> list[str]:
+def _input_fallback(workflow: dict) -> list[str]:
+    kind = workflow["input_kind"]
+    if workflow.get("input_optional"):
+        # The workflow defines what runs without the input, so neither asking nor
+        # refusing is right: both would keep the no-input mode from ever running.
+        return [
+            f"If the request does not specify the {kind}, do not ask and do not stop: run the",
+            "minimal mode described below, in an interactive or a non-interactive context.",
+            f"A request that does specify the {kind} proceeds normally.",
+            "",
+        ]
     # Interactive sessions ask; non-interactive contexts must neither stall on a
     # question nobody will answer nor guess — they stop with a machine-readable
     # refusal instead. Both outcomes hang off the same condition in one sentence:
@@ -125,7 +135,7 @@ def _claude_skill(workflow: dict, body: str) -> str:
     frontmatter.extend(["---", "", f"# {workflow['title']}", ""])
     if workflow["id"] != "status":
         frontmatter.append(f"Use `$ARGUMENTS` as the {workflow['input_kind']}.")
-        frontmatter.extend(_input_fallback(workflow["input_kind"]))
+        frontmatter.extend(_input_fallback(workflow))
     return "\n".join(frontmatter) + body.strip() + "\n"
 
 
@@ -141,7 +151,7 @@ def _portable_skill(workflow: dict, body: str) -> str:
     ]
     if workflow["id"] != "status":
         lines.append(f"Derive the {workflow['input_kind']} from the current user request.")
-        lines.extend(_input_fallback(workflow["input_kind"]))
+        lines.extend(_input_fallback(workflow))
     return "\n".join(lines) + body.strip() + "\n"
 
 
@@ -179,7 +189,7 @@ def _opencode_skill(workflow: dict, body: str, version_range: str) -> str:
     ]
     if workflow["id"] != "status":
         lines.append(f"Derive the {workflow['input_kind']} from the current user request.")
-        lines.extend(_input_fallback(workflow["input_kind"]))
+        lines.extend(_input_fallback(workflow))
     return "\n".join(lines) + _opencode_body(body, workflow["tools"]).strip() + "\n"
 
 
@@ -190,7 +200,7 @@ def _opencode_generated(contract: dict) -> str:
         prompt = _opencode_body(body, workflow["tools"]).strip()
         prefix = f"Use the memtomem {workflow['id']} workflow."
         if workflow["id"] != "status":
-            fallback = "\n".join(_input_fallback(workflow["input_kind"])).rstrip("\n")
+            fallback = "\n".join(_input_fallback(workflow)).rstrip("\n")
             prompt = f"{prefix}\n\nUser input: $ARGUMENTS\n\n{fallback}\n\n{prompt}"
         else:
             prompt = f"{prefix}\n\n{prompt}"
