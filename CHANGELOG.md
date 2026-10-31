@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-10-31
+
 ### Upgrading
 
 - **`namespace="!system"` no longer names a namespace called `!system`.** On
@@ -19,6 +21,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   it with `mem_ns_rename(old="!system", new="<name>")` (#2937), then change
   the rule or flag that produced the name, or a later re-index can write it
   again.
+- **Re-indexing a file whose project tier is unregistered holds it instead of
+  making it user memory (#2923).** Until 0.7.0, `mm index --force` was the
+  documented way to apply an unregistration: it re-stamped the file's
+  `project_local` or `project_shared` rows as `user`. Now `mm index`,
+  `mem_index` and the watcher hold such a source instead of rewriting it: its
+  memory is hidden from search and the index result names the file and the
+  tier, so a forced or changed-file pass can now report errors where it used
+  to succeed. `mem_edit`, `mem_delete` and the web chunk edit and delete
+  refuse such a rewrite before writing.
+  To keep the memory in the project, register the tier again
+  (`mm mem init --scope project_local` or `--scope project_shared`); the next
+  index lifts the hold. To make it user memory on purpose, run
+  `mm context memory-migrate <file> --from <tier> --to user --apply`.
+- **`mm doctor --claude-mcp` and `mm init --mcp claude` accept a manual MCP
+  registration next to a skills-only Claude plugin (#2916).** A valid manual
+  registration with an omitted or empty plugin MCP config now passes the
+  check, and `mm init --mcp claude` / `--mcp json` reuse it instead of adding
+  another. Updating or reinstalling a plugin can restore its bundled MCP
+  entry; run `mm doctor --mcp-client <claude|agy|codex>` again afterwards.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.15 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.1;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.1`, confirm with `mm --version`, then start a new
+  Claude Code session.
 
 ### Added
 
@@ -60,21 +87,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mem_status` warns until then. `mem_status` marks a bound root `(bound)`,
   and `mm status --json` gains `runtime.project_context_source` (`"bound"` or
   `"cwd"`).
-- **Cross-runtime `brief` and `update` project memory workflows (`claude` 0.5.20,
-  `codex` 0.3.17, `opencode` 0.3.17, `kimi` 0.2.15).** The project-scoped
+- **`mm doctor --mcp-client` checks and reconciles a manual MCP registration
+  against the host plugin's bundled server (#2916).** `--mcp-client claude`,
+  `agy` or `codex` reports whether a manual registration and a plugin would
+  start two memtomem servers (`--claude-mcp` stays as an alias for the Claude
+  check). `--reconcile keep-manual` keeps the manual registration and the
+  plugin's skills and suppresses the plugin's bundled server;
+  `--reconcile keep-plugin` removes the manual entry instead. Both preview by
+  default and edit only with `--apply`, which backs up the exact original
+  file beside it as `<filename>.mm-backup-*` with private permissions (it can
+  contain credentials), replaces one file atomically and runs the check again.
+  Exit codes: `0` pass, `1` duplicate risk, `2` incomplete inspection, so a
+  preview can exit `1` while proposing a valid repair. Malformed or shadowed
+  configurations, several manual registrations, managed policies and layouts
+  the reconciler cannot preserve are reported for manual review and not
+  edited. See "Keep manual MCP and plugin skills" in the MCP clients guide.
+- **Cross-runtime `brief` and `update` project memory workflows (first in
+  `claude` 0.5.20, `codex` 0.3.17, `opencode` 0.3.17, `kimi` 0.2.15).** The project-scoped
   plugin and skill bundles now include `brief` (`/memtomem:brief`,
   `memtomem-brief`) for read-only pre-task project briefings across
   `project_local` (`shared:<project-slug>`) and user-scope memories, and
   `update` (`/memtomem:update`, `memtomem-update`) for reviewing session
-  context and the latest 15 git commits to save durable decision, bugfix, and
-  preference lessons with idempotent item writes. `update` keeps no commit
+  context and recent git commits (the latest 10 full messages since #2918,
+  below) to save durable decision, bugfix, and preference lessons with
+  idempotent item writes. `update` keeps no commit
   cursor, so commits older than that window are not reviewed. Both workflows
   read user-scope preferences across every namespace, including archived ones.
   User-scoped Hermes and Antigravity skill bundles remain unchanged at six
   skills.
 - **`brief` runs a minimal briefing without a topic, and `brief`/`update` read
-  host-native repo memories (`claude` 0.5.21, `codex` 0.3.18, `opencode`
-  0.3.18, `kimi` 0.2.16; #2920).** Invoked with no task or topic, `brief`
+  host-native repo memories (first in `claude` 0.5.21, `codex` 0.3.18,
+  `opencode` 0.3.18, `kimi` 0.2.16; #2920).** Invoked with no task or topic, `brief`
   no longer asks or stops with `insufficient_input`. It reports recent
   `memory-update-item` entries, active handoff IDs, and open in-flight, hold,
   WIP, todo, or blocked items. Both workflows now also read the repository's
@@ -88,8 +131,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   and `handoff` accept the `antigravity-cli` runtime label and keep paths,
   symbols, commands, and quotes of the user verbatim.
 - **`update` reads the latest 10 commits' full messages instead of 15
-  subjects (`claude` 0.5.22, `codex` 0.3.19, `opencode` 0.3.19, `kimi` 0.2.17;
-  #2918).** A subject says what changed but not why, and two `update full`
+  subjects (first in `claude` 0.5.22, `codex` 0.3.19, `opencode` 0.3.19,
+  `kimi` 0.2.17; #2918).** A subject says what changed but not why, and two `update full`
   runs saved nothing from commits. The workflow now prints each commit's full
   SHA and message with one fixed, read-only command, which the Claude bundle
   allows exactly. `--no-pager`, `--no-replace-objects`, `--encoding=UTF-8` and
@@ -145,7 +188,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   memory is hidden from search and the index result names the file and the
   tier. The hold lifts on the first index after the tier is registered again.
   To make the memory user memory on purpose, use `mm context memory-migrate`.
-  A file whose content did not change is not rewritten and is not held. The
+  On an ordinary (not forced) pass, a file whose content did not change is not
+  rewritten, so it is not held; a forced pass reaches the scope check and holds
+  it without rewriting its rows, and an existing hold survives unchanged passes
+  until the tier is registered again.
+  The
   web chunk edit and delete refuse such a rewrite before writing, as
   `mem_edit` and `mem_delete` already did. All four also refuse a rewrite
   through a stored path that has become a symlink into another file, which
