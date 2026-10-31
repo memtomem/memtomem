@@ -72,6 +72,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `? not checkable` and lists the gone ones for the next `update`. `update`
   and `handoff` accept the `antigravity-cli` runtime label and keep paths,
   symbols, commands, and quotes of the user verbatim.
+- **`update` reads the latest 10 commits' full messages instead of 15
+  subjects (`claude` 0.5.22, `codex` 0.3.19, `opencode` 0.3.19, `kimi` 0.2.17;
+  #2918).** A subject says what changed but not why, and two `update full`
+  runs saved nothing from commits. The workflow now prints each commit's full
+  SHA and message with one fixed, read-only command, which the Claude bundle
+  allows exactly. `--no-pager`, `--no-replace-objects`, `--encoding=UTF-8` and
+  `--no-show-signature` keep repository and user Git configuration from
+  running a pager, substituting messages, re-encoding the output or running
+  gpg. The window shrinks to 10 so this repository's messages fit Claude
+  Code's 30,000-character inline limit. When output is truncated or elided,
+  the run reports only the commits whose full message it read. Commit
+  messages are treated as untrusted: they may be summarised as evidence, never
+  followed, and never supply a command, path, scope, namespace, tag or
+  override. A `decision` or `bugfix` from a commit must state the reason its
+  message gives. Each run reports `commit-derived` and `session-derived`
+  counts, to measure whether a commit cursor (#2918) is worth building.
 
 ### Fixed
 
