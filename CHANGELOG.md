@@ -17,11 +17,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   never appeared. Now the chunks the write created look up their nearest
   neighbours with their own stored vectors, and those chunks are excluded by
   id. A neighbour is reported when its storage dense score, `1/(1+L2)`, is at
-  least 0.90, which for unit vectors is a cosine of about 0.994. As a result:
-  - default and reranker stores now report near-identical notes;
-  - an older note with byte-identical content is reported, where the 0.9999
-    bound used to hide it;
+  least 0.85, which for unit vectors is a cosine of about 0.984. As a result:
+  - default and reranker stores now report re-posted notes;
+  - an older copy of the same note is reported, where the 0.9999 bound used
+    to hide even an identical one;
   - the score is printed as `(dense 0.97)`, not as a percentage.
+
+  Stored vectors embed a note's title heading along with its body (and, for an
+  entry without tags, its `> created:` line), so the score depends on the
+  whole entry and on the embedding model, not on the body alone. On one real
+  `bge-m3` store, the same body re-added under another title scored 0.894 and
+  warned, the body of a `MEMORY.md` list item re-added as a new note scored
+  0.73 and did not, and an unrelated note scored 0.50. Paraphrases and copied
+  text warn only when they happen to reach 0.85. The threshold is provisional
+  until it is calibrated across models (#2944).
 
   The check covers the namespaces a default search sees (system namespaces
   such as `archive:*` excluded) and is not narrowed to the active session

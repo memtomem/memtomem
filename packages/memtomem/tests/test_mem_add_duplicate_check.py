@@ -38,8 +38,8 @@ _VECTORS = {
     "vecmarkNEAR": _unit(1.0, 0.03),  # L2 ~0.030 -> ~0.971
     "vecmarkMID": _unit(1.0, 0.0, 0.08),  # L2 ~0.080 -> ~0.926
     "vecmarkFAR": _unit(1.0, 0.25),  # L2 ~0.245 -> ~0.803
-    "vecmarkABOVE": _unit(1.0, 0.0, 0.0, 0.1035),  # just above 0.90 (~0.9065)
-    "vecmarkBELOW": _unit(1.0, 0.0, 0.0, 0.1160),  # just below 0.90 (~0.8965)
+    "vecmarkABOVE": _unit(1.0, 0.0, 0.0, 0.1700),  # just above 0.85 (~0.856)
+    "vecmarkBELOW": _unit(1.0, 0.0, 0.0, 0.1840),  # just below 0.85 (~0.846)
 }
 _QUERY_VECTOR = _unit(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
 
@@ -182,8 +182,11 @@ class TestRealNeighboursAreReported:
 
     @pytest.mark.asyncio
     async def test_threshold_is_on_the_dense_score(self, stack):
-        assert 0.90 < _dense_score("vecmarkALPHA", "vecmarkABOVE") < 0.91
-        assert 0.89 < _dense_score("vecmarkALPHA", "vecmarkBELOW") < 0.90
+        from memtomem.server.tools.memory_crud import _DUPLICATE_DENSE_MIN
+
+        assert _DUPLICATE_DENSE_MIN == 0.85
+        assert 0.85 < _dense_score("vecmarkALPHA", "vecmarkABOVE") < 0.86
+        assert 0.84 < _dense_score("vecmarkALPHA", "vecmarkBELOW") < 0.85
         comp, _ = stack
         await _add(comp, _note("vecmarkABOVE", "Above neighbour"), title="Above", file="a.md")
         await _add(comp, _note("vecmarkBELOW", "Below neighbour"), title="Below", file="b.md")
