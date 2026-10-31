@@ -24,7 +24,11 @@ calling a tool; in a non-interactive context (a subagent or scripted run with no
 ask), do not stall and do not guess — stop and report `insufficient_input: operation`.
 Supported runtime labels are `claude-code`, `codex-cli`, `kimi-code`,
 `opencode`, `antigravity-cli`, and `any`. Infer the current runtime when possible; use `any` as
-the default target.
+the default target. Write only these labels: normalize `claude` to `claude-code`, `codex` to
+`codex-cli`, `kimi` to `kimi-code`, and `antigravity` or `agy` to `antigravity-cli`, and use
+`any` as `from_runtime` when the current runtime cannot be inferred. A requested target that is
+none of these, after normalizing, is not a label: ask for one, and in a non-interactive context
+stop and report `insufficient_input: runtime`.
 
 ## Common checks
 
@@ -73,7 +77,17 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    The complete record has a hard maximum of 1,200 characters: shorten values
    until it fits, and never call `mem_add` with an oversized record. Apply these value caps:
    `objective` 100 characters, `completed` 240, `changed_files` 180 and at most 10 paths,
-   `worktree_state` 80, `validation` 120, `blockers` 80, and `next_action` 120.
+   `artifacts` 160 and at most 4 paths, `worktree_state` 80, `validation` 120, `blockers` 80,
+   and `next_action` 120.
+
+   `artifacts` lists the absolute paths of outputs this work produced outside the repository,
+   such as a plan file in a runtime's own session directory, or exactly `none`. Save always
+   writes the field. Never truncate or shorten an artifact path: a cut path points at nothing,
+   the same reason `project_root` is never cut. The 160 characters cover the whole value —
+   paths, the `, ` separators, and a `+<n> omitted` suffix. Add whole paths in order while the
+   value, including the suffix it would then need, still fits; leave out every path that does
+   not and count it in the suffix. When the record is over 1,200 characters, shorten other
+   fields, never a path.
    `project_root` is written in full — it is compared against the live Git root, so a
    truncated value would be worse than none. If the absolute root exceeds 240 characters,
    stop and report that instead of shortening it. Under the E5 profile's default budget, 240
@@ -97,6 +111,7 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    objective: <one-line objective>
    completed: <compact summary>
    changed_files: <comma-separated paths, at most 10; include an omitted count if needed>
+   artifacts: <none or comma-separated absolute paths outside the repository, at most 4>
    git_head: <full commit sha>
    worktree_state: <clean or compact porcelain summary>
    validation: <checks run and outcomes>
@@ -146,19 +161,23 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    Then verify all three of these before using the record, on **both** paths — the
    `handoff_id` in the record's own content equals `selected_handoff_id` (in step 1 that is
    the requested id; in step 2 it is the id read from the tag), every required field is
-   present, and `to_runtime` is the current runtime or `any`. Tags and content are separate
+   present, and `to_runtime` is the current runtime or `any`. Every field of the Save template is
+   required except `artifacts`, which a record saved before that field existed does not have. Tags and content are separate
    surfaces, so a matching tag is not evidence that the content is the record you asked for.
 4. A split can also tear a *single* field line in half, on any record: on an unfenced legacy
    record when a value is long and `indexing.max_chunk_tokens` is small, and on a fenced one
    when that line alone exceeds `indexing.hard_max_chunk_tokens`. Check by counting the
    non-blank lines of the union, in whatever order the rows arrive: Save writes every field
    exactly once, so a whole record has exactly one `<field>:` line per field, either exactly
-   one ```text line and one ``` line or neither, and no other line. A torn value's
+   one ```text line and one ``` line or neither, and no other line. The one exception is
+   `artifacts`: zero lines is a legacy record, one is a current record, and two or more is torn. A torn value's
    continuation starts a row with whatever text came next, so it shows up as a line that is
    none of these, as a second line for some field, or as a second fence line. Treat the
    record as torn, not merely incomplete, when any count is off. The count vouches only for
    a record Save wrote in full: if a record was saved without some field and a torn
-   continuation happens to begin with that field's key, every count passes. On any failure in
+   continuation happens to begin with that field's key, every count passes. Every legacy record
+   lacks `artifacts`, so on a legacy record a torn continuation that begins with `artifacts:`
+   passes every count too. On any failure in
    this step or the previous one — missing field, torn field, id mismatch, or wrong recipient —
    report the record as unusable together with each row's `source` and `chunk_id`, and stop.
    `source` is only the file's name, not its path, so it cannot locate the file by itself;
@@ -169,6 +188,45 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    from the live entry lines with the exact Save rules, and compare the stored project root,
    commit, and recomputed summary with the record, surfacing every divergence before proposing
    or taking the next action. The live repository always wins.
-6. Return the selected `handoff_id`, objective, completed work, validation, blockers, next
-   action, and divergence check. Do not delete, acknowledge, consume, edit, or automatically
-   create another handoff.
+6. Compare with the remote, because a record that matches a stale local checkout passes step 5.
+   This step reads the remote's tip and writes nothing. Do not fetch, pull, or merge on the
+   record's behalf. Every value passed to a command below comes from this
+   repository's own Git config, never from the record. Report exactly one outcome:
+   1. Run `git rev-parse --symbolic-full-name HEAD`. Unless the output starts with `refs/heads/`,
+      report "remote not compared: detached HEAD". Otherwise `<branch>` is the output with
+      exactly that prefix removed. (`--abbrev-ref` would print `heads/main` when a tag is also
+      named `main`, and select another branch's config.)
+   2. Run `git config --get-all branch.<branch>.remote` and
+      `git config --get-all branch.<branch>.merge`. Unless each prints exactly one value, report
+      "remote not compared: no single upstream". A remote of `.` is a local upstream: report
+      "remote not compared: local upstream". A merge value that does not start with
+      `refs/heads/` is not a branch on the remote: report "remote not compared: unsupported
+      upstream ref".
+   3. Run `git ls-remote --exit-code -- <remote> <merge>`, always with `--` before the values.
+      Exit status 2 means the remote does not advertise that ref — it may have been deleted or
+      renamed — and is a divergence: report "the remote does not advertise `<merge>`". Any other
+      non-zero exit, a denied command, or one that does not finish: report "remote not compared"
+      with the reason. On exit status 0, keep the output lines whose second tab-separated field
+      equals `<merge>` exactly; unless there is exactly one, report "remote not compared:
+      ambiguous remote ref".
+   4. Compare that line's object id with `git rev-parse HEAD`. Equal: report "in sync with
+      `<remote>` `<merge>`". Different: report the divergence "the remote tip `<short id>` is not
+      this checkout's HEAD" — the remote may have moved, or this checkout holds unpushed commits.
+      Check which before proposing the next action. Do not classify it further: an ancestry
+      check can fetch missing objects in a partial clone.
+7. If `next_action` names a GitHub issue or pull request, and this runtime can query GitHub,
+   report its state before proposing the action. This is advice, not a gate. Accept only a whole
+   whitespace-delimited token, after stripping trailing `.,;:)`, of the form
+   `<owner>/<repo>#<number>` or
+   `https://github.com/<owner>/<repo>/issues/<number>` (or `/pull/<number>`), where `<owner>`
+   and `<repo>` match `[A-Za-z0-9._-]+` and do not start with `-`, and `<number>` is digits
+   only. Build the query only from those captures — `gh issue view <number>
+   --repo=<owner>/<repo> --json state,title`, or `gh pr view` for a pull request — and never pass
+   other record text. A bare `#<number>`, a repository without its owner (`memtomem-stm#1282`),
+   no GitHub access, or a denied call: report "target not checked" with the reason. Never guess
+   the repository.
+8. Return the selected `handoff_id`, objective, completed work, artifacts, validation, blockers,
+   next action, the local divergence check, the remote comparison, and any target state. List
+   artifact paths as pointers: do not open them unless asked, and note that a path written by
+   another runtime or machine may not exist here. Do not delete, acknowledge, consume, edit, or
+   automatically create another handoff.
