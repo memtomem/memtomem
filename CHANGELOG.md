@@ -5,6 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mem_add`'s "Similar memories found" warning compares stored vectors, not
+  search scores (#2934).**
+  It used to run a search over the new note and keep results scoring between
+  0.90 and 0.9999, treating the top one as the note itself. That only worked on
+  a dense-only store. With a reranker the scores are logits, so the note warned
+  about itself and the nearest real neighbour was dropped as "self". On the
+  default BM25+dense store the scores are RRF sums far below 0.90, so the warning
+  never appeared. Now the chunks the write created look up their nearest
+  neighbours with their own stored vectors, and those chunks are excluded by
+  id. A neighbour is reported when its storage dense score, `1/(1+L2)`, is at
+  least 0.90, which for unit vectors is a cosine of about 0.994. As a result:
+  - default and reranker stores now report near-identical notes;
+  - an older note with byte-identical content is reported, where the 0.9999
+    bound used to hide it;
+  - the score is printed as `(dense 0.97)`, not as a percentage.
+
+  The check covers the namespaces a default search sees (system namespaces
+  such as `archive:*` excluded) and is not narrowed to the active session
+  namespace. Content from the same file that the chunker merged into one of
+  the new chunks counts as the note itself and is not reported. A store
+  without vectors reports nothing.
+
 ## [0.7.1] — 2026-10-31
 
 ### Upgrading

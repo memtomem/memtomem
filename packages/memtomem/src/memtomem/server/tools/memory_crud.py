@@ -58,6 +58,13 @@ logger = logging.getLogger(__name__)
 # instead of spinning.
 _CHUNK_LOCK_MOVE_RETRIES = 3
 
+# ``mem_add``'s duplicate warning. The threshold is on the storage dense score,
+# ``1/(1+L2)``, not a cosine: for unit vectors 0.90 is a cosine of about 0.994,
+# so only near-identical notes are reported. At most this many of the write's
+# own chunks probe for neighbours; all of them are excluded as "self".
+_DUPLICATE_DENSE_MIN = 0.90
+_DUPLICATE_PROBES = 8
+
 
 def _degraded_source_error(chunk_id: str) -> str:
     """The refusal a byte-writing CRUD branch gives on a degraded L2 span.
@@ -1205,26 +1212,36 @@ async def _mem_add_core(
             # chunk lives under. Without this, a project_shared write
             # would only get matched against user-tier candidates and
             # genuine in-project duplicates would slip through.
+            import time
+
+            from memtomem.models import NamespaceFilter
+            from memtomem.search.dedup import nearest_stored_neighbours
             from memtomem.server.tools.search import _resolve_project_context_root
 
-            # record=False: an internal read, so its hits are not accesses and
-            # the note body is not stored as a query (#2683).
-            similar, _ = await app.search_pipeline.search(
-                content,
-                top_k=5,
+            # Not a search: a search's score scale depends on the pipeline
+            # configuration (a rerank logit, an RRF sum, a boosted score), so no
+            # fixed threshold means anything on it (#2934). The chunks this
+            # write upserted probe with their stored vectors, and they are the
+            # "self" that is excluded, by id. Namespaces as a default search
+            # sees them; the active session namespace does not narrow it.
+            own_ids = stats.new_chunk_ids
+            similar = await nearest_stored_neighbours(
+                app.storage,
+                own_ids[:_DUPLICATE_PROBES],
+                exclude_ids=own_ids,
+                per_probe_k=3,
+                namespace_filter=NamespaceFilter.parse(
+                    None, system_prefixes=tuple(app.config.search.system_namespace_prefixes)
+                ),
                 project_context_root=effective_project_root or _resolve_project_context_root(app),
-                record=False,
+                as_of_unix=int(time.time()),
             )
-            dupes = [
-                s
-                for s in similar
-                if s.score >= 0.90 and s.score < 0.9999  # exclude exact self-match
-            ]
+            dupes = [n for n in similar if n.score >= _DUPLICATE_DENSE_MIN]
             if dupes:
                 result += "\n\n⚠ Similar memories found:"
                 for d in dupes[:3]:
                     preview = d.chunk.content[:80].replace("\n", " ")
-                    result += f"\n  - ({d.score:.0%}) {preview}..."
+                    result += f"\n  - (dense {d.score:.2f}) {preview}..."
     except Exception:
         logger.warning("Duplicate check after mem_add failed", exc_info=True)
 
@@ -1297,8 +1314,8 @@ async def mem_add(
         allow_namespace_mix: Append even if ``file`` holds another
                              namespace (refused by default).
 
-    Returns a confirmation message, plus a duplicate warning when a highly
-    similar memory (≥90% match) already exists.
+    Returns a confirmation message, plus a duplicate warning when a
+    near-identical memory already exists.
     """
     from memtomem.indexing.engine import PrivacyRejection
 
