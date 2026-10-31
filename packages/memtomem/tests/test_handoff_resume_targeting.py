@@ -559,12 +559,15 @@ _FIELDS = (
     "objective",
     "completed",
     "changed_files",
+    "artifacts",
     "git_head",
     "worktree_state",
     "validation",
     "blockers",
     "next_action",
 )
+# A record saved before ``artifacts`` existed has every other field (#2930).
+_LEGACY_FIELDS = tuple(key for key in _FIELDS if key != "artifacts")
 _FASTEMBED_CACHE_ENV = ("MEMTOMEM_FASTEMBED_CACHE", "FASTEMBED_CACHE_PATH")
 
 
@@ -663,11 +666,17 @@ def _fenced_record(**values: str) -> str:
 
 
 def _capped_korean_record() -> str:
-    """Every capped field filled to its cap with Korean text."""
+    """Every capped field filled to its cap with Korean text, except ``completed``.
+
+    With ``artifacts`` filled too, the caps add up to more than the record's
+    1,200-character ceiling, so the workflow shortens another field and never a
+    path. ``completed`` gives up the difference here.
+    """
     return _fenced_record(
         objective=_korean(100),
-        completed=_korean(240),
+        completed=_korean(90),
         changed_files=", ".join(f"src/pkg/모듈_{i}.py" for i in range(10)),
+        artifacts=", ".join(f"/Users/x/.gemini/tmp/세션/계획_{i}.md" for i in range(4)),
         worktree_state=_korean(80),
         validation=_korean(120),
         blockers=_korean(80),
@@ -707,6 +716,9 @@ def _record_is_whole(contents: list[str]) -> bool:
     continuation begins a row with whatever text came next: a line that is no
     field line, a second line for some field, or a second fence line. Each of
     those breaks a count, so no row needs to be judged by how it starts.
+
+    ``artifacts`` is the one field a record may lack: zero lines is a legacy
+    record, one a current record, and two or more a torn one.
     """
     lines = [line for content in contents for line in content.splitlines() if line.strip()]
     fences = (lines.count("```text"), lines.count("```"))
@@ -716,7 +728,7 @@ def _record_is_whole(contents: list[str]) -> bool:
             key, colon, _ = line.partition(":")
             # A line with no colon is no field line, even when it is a bare key.
             keys.append(key if colon else line + " (no colon)")
-    return fences in ((1, 1), (0, 0)) and sorted(keys) == sorted(_FIELDS)
+    return fences in ((1, 1), (0, 0)) and sorted(keys) in (sorted(_FIELDS), sorted(_LEGACY_FIELDS))
 
 
 def _parse_fields(contents: list[str]) -> dict[str, str]:
@@ -761,7 +773,7 @@ def test_a_last_row_can_hold_only_the_closing_fence(tmp_path, e5_budget):
     That row is legitimate, so the count must accept it.
     """
     config, budget = e5_budget
-    record = _fenced_record(objective=_korean(100), completed=_korean(240), validation=_korean(103))
+    record = _fenced_record(objective=_korean(100), completed=_korean(240), validation=_korean(95))
 
     rows = _e5_rows(tmp_path, record, config)
 
@@ -881,7 +893,7 @@ def test_the_count_cannot_vouch_for_a_record_saved_without_a_field(tmp_path, e5_
     """
     config, _budget = e5_budget
     expanding = chr(0xFDFA)
-    record = _fenced_record(completed=expanding * 92 + "a" * 69 + "blockers: none")
+    record = _fenced_record(completed=expanding * 92 + "a" * 70 + "blockers: none")
     record = record.replace("blockers: \n", "")
 
     rows = _e5_rows(tmp_path, record, config)
@@ -890,6 +902,83 @@ def test_the_count_cannot_vouch_for_a_record_saved_without_a_field(tmp_path, e5_
     assert any(c.startswith("blockers: none\n") for c in contents[1:]), "re-pick the padding"
     assert _record_is_whole(contents)
     assert _parse_fields(contents[::-1])["blockers"] == "none"
+
+
+def test_a_legacy_record_cannot_be_vouched_for_against_an_artifacts_continuation(
+    tmp_path, e5_budget
+):
+    """The same blind spot, named for ``artifacts`` because every legacy record has it.
+
+    A record saved before ``artifacts`` existed lacks that line, which the count
+    accepts as legacy. A torn ``completed`` that continues with ``artifacts:``
+    therefore passes every count. Resume step 4 states this; the test keeps it honest.
+    """
+    config, _budget = e5_budget
+    expanding = chr(0xFDFA)
+    record = _fenced_record(completed=expanding * 92 + "a" * 70 + "artifacts: none")
+    record = record.replace("artifacts: \n", "")
+
+    rows = _e5_rows(tmp_path, record, config)
+
+    contents = [row.content for row in rows]
+    assert any(c.startswith("artifacts: none\n") for c in contents[1:]), "re-pick the padding"
+    assert _record_is_whole(contents)
+    assert _parse_fields(contents[::-1])["artifacts"] == "none"
+
+
+def test_artifacts_may_be_absent_but_never_repeated() -> None:
+    """Zero ``artifacts`` lines is a legacy record, one is current, two is torn (#2930)."""
+    current = _fenced_record(artifacts="/Users/x/.gemini/tmp/plan.md")
+    legacy = current.replace("artifacts: /Users/x/.gemini/tmp/plan.md\n", "")
+    repeated = current.replace("git_head:", "artifacts: none\ngit_head:")
+
+    assert _record_is_whole([current])
+    assert _record_is_whole([legacy])
+    assert "artifacts" not in _parse_fields([legacy])
+    assert not _record_is_whole([repeated])
+    # Only ``artifacts`` is optional: a legacy record missing another field is not whole.
+    assert not _record_is_whole([legacy.replace("blockers: \n", "")])
+
+
+def _artifacts_value(paths: list[str], cap: int = 160, limit: int = 4) -> str:
+    """Save's ``artifacts`` rule: whole paths in order, then ``+<n> omitted``, within *cap*.
+
+    The cap covers the separators and the suffix, a path is never cut, and a
+    path that does not fit is left out and counted.
+    """
+    kept: list[str] = []
+    for index, path in enumerate(paths):
+        # Paths already left out plus every later one: the most the suffix can need.
+        worst = (index - len(kept)) + (len(paths) - index - 1)
+        candidate = ", ".join([*kept, path])
+        if worst:
+            candidate += f", +{worst} omitted"
+        if len(kept) < limit and len(candidate) <= cap:
+            kept.append(path)
+    omitted = len(paths) - len(kept)
+    parts = [*kept, f"+{omitted} omitted"] if omitted else kept
+    return ", ".join(parts) or "none"
+
+
+def test_the_artifacts_cap_holds_the_suffix_and_never_cuts_a_path() -> None:
+    """A boundary-length path followed by another one: the suffix still fits."""
+    boundary = "/" + "p" * 149  # 150 characters: alone it fits, with ", +1 omitted" it does not
+    second = "/tmp/second.md"
+
+    assert len(boundary) + len(", +1 omitted") > 160
+
+    assert _artifacts_value([boundary, second]) == f"{second}, +1 omitted"
+    assert _artifacts_value([second, boundary]) == f"{second}, +1 omitted"
+    assert _artifacts_value([boundary]) == boundary
+    assert _artifacts_value([]) == "none"
+    assert _artifacts_value(["/" + "q" * 200]) == "+1 omitted"
+    six = [f"/a/{i}" for i in range(6)]
+    assert _artifacts_value(six) == ", ".join(six[:4]) + ", +2 omitted"
+    # Whatever the inputs, the value fits and every listed path is whole.
+    for paths in ([boundary, second], [second, boundary, boundary], six, [boundary] * 3):
+        value = _artifacts_value(paths)
+        assert len(value) <= 160
+        assert all(part in paths or part.endswith(" omitted") for part in value.split(", "))
 
 
 async def test_a_failure_report_needs_the_chunk_id_to_locate_the_file(monkeypatch) -> None:
