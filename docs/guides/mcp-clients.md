@@ -983,7 +983,8 @@ workflow skills. Installing a static plugin bundle cannot prompt for this choice
 Use the coexistence diagnostic before starting a new client session.
 
 The `--mcp-client`, `--reconcile` and `--apply` options below need memtomem
-0.7.1 or later (`mm --version`):
+0.7.1 or later (`mm --version`). Without `mm` on your `PATH`, as in a uvx-only
+setup, run each command as `uvx --from 'memtomem==0.7.1' mm doctor …`:
 
 ```bash
 mm doctor --mcp-client claude

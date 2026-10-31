@@ -25,9 +25,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   making it user memory (#2923).** Until 0.7.0, `mm index --force` was the
   documented way to apply an unregistration: it re-stamped the file's
   `project_local` or `project_shared` rows as `user`. Now `mm index`,
-  `mem_index`, the watcher and web edits hold such a source: its memory is
-  hidden from search and the index result names the file and the tier, so a
-  forced or changed-file pass can now report errors where it used to succeed.
+  `mem_index` and the watcher hold such a source instead of rewriting it: its
+  memory is hidden from search and the index result names the file and the
+  tier, so a forced or changed-file pass can now report errors where it used
+  to succeed. `mem_edit`, `mem_delete` and the web chunk edit and delete
+  refuse such a rewrite before writing.
   To keep the memory in the project, register the tier again
   (`mm mem init --scope project_local` or `--scope project_shared`); the next
   index lifts the hold. To make it user memory on purpose, run
@@ -187,8 +189,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   tier. The hold lifts on the first index after the tier is registered again.
   To make the memory user memory on purpose, use `mm context memory-migrate`.
   On an ordinary (not forced) pass, a file whose content did not change is not
-  rewritten, so it is not held; a forced pass rewrites it and holds it, and an
-  existing hold survives unchanged passes until the tier is registered again.
+  rewritten, so it is not held; a forced pass reaches the scope check and holds
+  it without rewriting its rows, and an existing hold survives unchanged passes
+  until the tier is registered again.
   The
   web chunk edit and delete refuse such a rewrite before writing, as
   `mem_edit` and `mem_delete` already did. All four also refuse a rewrite
