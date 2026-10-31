@@ -70,6 +70,11 @@ this way since it was written, and with `mem_search` / `mem_recall` / the CLI /
 web `/search` / `/timeline`, all of which have never returned a foreign
 project's rows without an explicit `scope=`.
 
+"Inside project `<X>`" includes a stdio server bound to `<X>` with
+`mem_project_bind` (#2920, ADR-0011 §6 amendment). A binding moves the boundary,
+so it changes which ids the ordinary read, edit and delete surfaces accept. It
+does not lift a redaction hold or a read-only root.
+
 ### 2. System-namespace hiding and temporal validity do not
 
 Id-addressed access reaches `archive:*` and `agent-runtime:*` chunks, and

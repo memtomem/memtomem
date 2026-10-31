@@ -939,7 +939,7 @@ class TestStatusJson:
 
         data = json.loads(result.output)
         assert set(data) == {"config", "runtime", "index", "immutable", "warnings"}
-        assert set(data["runtime"]) == {"cwd", "project_context_root"}
+        assert set(data["runtime"]) == {"cwd", "project_context_root", "project_context_source"}
         assert data["runtime"]["cwd"] == str(Path.cwd().resolve())
         assert data["index"]["total_chunks"] == 42
         assert data["index"]["dense_coverage"] == {

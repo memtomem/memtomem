@@ -11,8 +11,17 @@ import pytest
 # Network configuration is passed to ``mcp.run()`` as keyword arguments
 # rather than written onto ``mcp.settings`` — the 2.0 SDK dropped
 # host/port/paths/transport-security from the settings object and takes them
-# per-run. That also means these tests mutate no global state, so there is
-# nothing to snapshot and restore between them.
+# per-run. The one process-wide value ``main()`` writes is the transport it
+# records for ``mem_project_bind``; the fixture below restores it.
+
+
+@pytest.fixture(autouse=True)
+def _restore_server_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memtomem.server import context as server_context
+
+    monkeypatch.setattr(server_context, "_server_transport", None)
+
+
 def _run_kwargs(
     calls: list[tuple[tuple[object, ...], dict[str, object]]],
 ) -> dict[str, object]:
@@ -88,6 +97,7 @@ def test_stdio_pipe_runs_without_terminal_help(
     monkeypatch.setattr(server_mod, "_is_direct_stdio_terminal", lambda: False)
     monkeypatch.setattr(server_mod, "_install_sigterm_handler", lambda *_paths: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    from memtomem.server import context as server_context
 
     try:
         server_mod.main(["--transport", "stdio"])
@@ -96,6 +106,8 @@ def test_stdio_pipe_runs_without_terminal_help(
 
     assert calls == [((), {})]
     assert "MCP stdio server" not in capsys.readouterr().out
+    # mem_project_bind is refused on anything but a recorded stdio transport.
+    assert server_context._get_server_transport() == "stdio"
 
 
 def test_http_transport_alias_runs_streamable_http(
@@ -103,6 +115,7 @@ def test_http_transport_alias_runs_streamable_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from memtomem import server as server_mod
+    from memtomem.server import context as server_context
 
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     callbacks = _isolate_runtime(monkeypatch, tmp_path)
@@ -127,6 +140,8 @@ def test_http_transport_alias_runs_streamable_http(
 
     kwargs = _run_kwargs(calls)
     assert kwargs["transport"] == "streamable-http"
+    # The normalized name, so mem_project_bind refuses the shared-context transport.
+    assert server_context._get_server_transport() == "streamable-http"
     assert kwargs["host"] == "127.0.0.1"
     assert kwargs["port"] == 8765
     assert kwargs["streamable_http_path"] == "/custom-mcp"

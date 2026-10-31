@@ -136,6 +136,7 @@ from memtomem.server.tools.tag_management import (
 from memtomem.server.tools.url_index import mem_fetch
 from memtomem.server.tools.cross_ref import mem_link, mem_unlink, mem_related
 from memtomem.server.tools.session import mem_session_start, mem_session_end, mem_session_list
+from memtomem.server.tools.project_bind import mem_project_bind
 from memtomem.server.tools.scratch import mem_scratch_set, mem_scratch_get, mem_scratch_promote
 from memtomem.server.tools.procedure import mem_procedure_save, mem_procedure_list
 from memtomem.server.tools.pinned import (
@@ -906,6 +907,10 @@ def main(argv: list[str] | None = None) -> None:
         # and the "Press Ctrl+C to stop" line stay consistent with reality.
         assert public_url is not None  # narrowed by the configure branch above
         _print_network_server_info(transport, args, public_url, run_kwargs)
+
+    from memtomem.server.context import _set_server_transport
+
+    _set_server_transport(transport)
 
     # ``run`` forwards these kwargs to the matching async runner, and its
     # overloads key off a literal transport — hence the explicit branches
