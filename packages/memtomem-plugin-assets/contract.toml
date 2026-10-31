@@ -4,11 +4,11 @@ tool_mode = "core"
 mcp_extras = ["onnx"]
 
 [plugins]
-claude_version = "0.5.20"
-codex_version = "0.3.17"
+claude_version = "0.5.21"
+codex_version = "0.3.18"
 automation_version = "0.3.14"
-opencode_version = "0.3.17"
-kimi_version = "0.2.15"
+opencode_version = "0.3.18"
+kimi_version = "0.2.16"
 hermes_version = "0.1.9"
 hermes_memory_version = "0.1.1"
 antigravity_version = "0.1.0"
@@ -141,6 +141,8 @@ effect = "read"
 implicit = false
 argument_hint = "[task or topic]"
 input_kind = "task or topic to brief"
+# Without a topic, brief runs its minimal mode instead of asking or refusing.
+input_optional = true
 ui_name = "memtomem Brief"
 ui_description = "Read-only task briefing from project memories"
 default_prompt = "Use $memtomem-brief to brief past decisions and active context for this task."
