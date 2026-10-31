@@ -193,7 +193,7 @@ class InvalidFilterSyntaxError(ValueError):
 
 
 class InvalidNamespaceFilterError(InvalidFilterSyntaxError):
-    """The ``namespace`` argument mixes a comma list with a glob."""
+    """The ``namespace`` argument mixes a comma list with a glob, or lists ``!system``."""
 
 
 class InvalidScopeFilterError(InvalidFilterSyntaxError):
@@ -215,8 +215,9 @@ class NamespaceFilter:
     Supports exact match (single or union), glob patterns, comma-separated
     lists, and default-search exclusion of system namespace prefixes (e.g.
     ``archive:``). Exclusion is applied *only* when no explicit namespace
-    is given — the idea is that callers who ask for ``archive:summary``
-    directly have already opted in.
+    is given, or when the explicit ``!system`` selector asks for it — the
+    idea is that callers who ask for ``archive:summary`` directly have
+    already opted in.
 
     A comma list and a glob are **mutually exclusive** spellings, not
     composable ones: the SQL layer emits either an ``IN (…)`` list or a
@@ -276,7 +277,9 @@ class NamespaceFilter:
                 return NamespaceFilter(exclude_prefixes=prefixes)
             return None
         items = value if isinstance(value, list) else value.split(",") if "," in value else []
-        if any(item.strip() == NON_SYSTEM_NAMESPACES for item in items):
+        # ``isinstance``: a raw-params route (``mem_do`` → ``context_compose``)
+        # can hand over a list of non-strings, which this check must not crash on.
+        if any(isinstance(item, str) and item.strip() == NON_SYSTEM_NAMESPACES for item in items):
             raise InvalidNamespaceFilterError(
                 f"namespace {value!r} puts the {NON_SYSTEM_NAMESPACES!r} selector in a list. "
                 f"Pass {NON_SYSTEM_NAMESPACES!r} on its own to select every non-system "

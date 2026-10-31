@@ -386,8 +386,8 @@ async def run_search(
     )
 
     # Trust-UX hints shared across formats. The archive notice is emitted
-    # only for callers who did NOT pin a namespace — otherwise the archive
-    # filter never engaged.
+    # only for callers who did NOT pin a namespace or who passed ``!system``
+    # — otherwise the archive filter never engaged.
     hints: list[str] = []
     # stats.rerank_applied is the per-call effective decision, not the live
     # config — accurate even when a hot reload flips rerank.enabled while

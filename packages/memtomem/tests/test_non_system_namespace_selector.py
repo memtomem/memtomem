@@ -34,12 +34,13 @@ SESSION_NS = "agent-runtime:w1"
 ORDINARY = {"default", "personal"}
 SYSTEM = {"archive:old", SESSION_NS}
 _PREFIXES = ("archive:", "agent-runtime:")
+_TAG = "selector-probe"
 
 
 def _chunk(path: Path, namespace: str) -> Chunk:
     return Chunk(
         content=f"zephyrword fact stored in {namespace}",
-        metadata=ChunkMetadata(source_file=path, namespace=namespace),
+        metadata=ChunkMetadata(source_file=path, namespace=namespace, tags=(_TAG,)),
         content_hash=f"hash-{uuid4().hex}",
         embedding=[0.1] * 1024,
     )
@@ -95,6 +96,14 @@ class TestParse:
 
     def test_a_glob_that_starts_with_the_selector_text_stays_a_glob(self):
         assert NamespaceFilter.parse("!sys*", _PREFIXES) == NamespaceFilter(pattern="!sys*")
+
+    def test_a_list_with_a_non_string_item_parses_as_before(self):
+        # ``mem_do(action="context_compose")`` binds raw params to
+        # ``str | list[str]`` without checking the items.
+        value = ["work", 1]
+        assert NamespaceFilter.parse(value, _PREFIXES) == NamespaceFilter(  # type: ignore[arg-type]
+            namespaces=("work", 1)  # type: ignore[arg-type]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -159,12 +168,17 @@ class TestMcpTools:
         out = await mem_timeline(
             topic="zephyrword", namespace=NON_SYSTEM_NAMESPACES, ctx=_ctx(seeded)
         )
-        # One period; its "Sources:" line names every file in it.
-        sources = [line for line in out.splitlines() if line.startswith("Sources: ")]
-        assert len(sources) == 1, out
-        assert set(sources[0].removeprefix("Sources: ").split(", ")) == {
-            _file_for(ns) for ns in ORDINARY
+        # Each period's "Sources:" line names its files; the seeded rows may
+        # straddle a week boundary, so read every line. ``Path(...).name``:
+        # the formatter splits on "/" only, so on Windows the line carries
+        # the full native path.
+        names = {
+            Path(name).name
+            for line in out.splitlines()
+            if line.startswith("Sources: ")
+            for name in line.removeprefix("Sources: ").split(", ")
         }
+        assert names == {_file_for(ns) for ns in ORDINARY}, out
 
     @pytest.mark.asyncio
     async def test_mem_list_lists_what_an_omitted_namespace_lists(self, seeded):
@@ -232,6 +246,13 @@ class TestWeb:
     @pytest.mark.asyncio
     async def test_search_reads_every_non_system_namespace(self, seeded):
         resp = await _get(_web_app(seeded), "/api/search", q="zephyrword", namespace="!system")
+        assert resp.status_code == 200, resp.text
+        assert {r["chunk"]["namespace"] for r in resp.json()["results"]} == ORDINARY
+
+    @pytest.mark.asyncio
+    async def test_filter_only_search_reads_every_non_system_namespace(self, seeded):
+        # No ``q``: the route's filter-only branch, which enumerates by tag.
+        resp = await _get(_web_app(seeded), "/api/search", tag_filter=_TAG, namespace="!system")
         assert resp.status_code == 200, resp.text
         assert {r["chunk"]["namespace"] for r in resp.json()["results"]} == ORDINARY
 
