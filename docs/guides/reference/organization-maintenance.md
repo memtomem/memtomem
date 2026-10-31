@@ -65,6 +65,29 @@ source's duplicate is deleted; the message reports how many.
 `merge` must be a literal `true` — a quoted `"true"` is rejected rather than
 coerced.
 
+Both names must be valid namespaces (`:`-separated segments of
+`[A-Za-z0-9._-]`), with one exception for `old`: a name already stored
+exactly as written can be renamed even when it is not valid. Some writers never
+checked names (`mm index --namespace`, namespace rules, raw MCP `mem_add`), so
+a store can hold one such as a literal `!system`, which search and recall now
+read as "every non-system namespace". Find it with `mem_ns_list`, then move it:
+
+```
+mem_ns_rename(old="!system", new="legacy-system")
+```
+
+An empty namespace is not covered: rename refuses `old=""` even when it is
+stored. Move a file indexed under it with
+`mm index <file> --force --namespace <name>` instead.
+
+Re-indexing keeps the new name when all of a file's rows sit in that one
+namespace. The old one comes back only if you index the file again with
+`--namespace '!system'`, run `--reassign-namespaces` while the rule that
+produced it is unchanged, or index the file after its rows were removed, so
+change that rule or flag too. A file whose rows span several namespaces is
+resolved by the rules again on an ordinary re-index, so its changed chunks can
+take the old name again.
+
 The reported chunk count is only the chunk rows. A namespace that was
 registered (`ns_update`) but never written to has no chunks, so its rename
 reports `0 chunks moved` while the metadata row does move — the message says
