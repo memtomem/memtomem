@@ -7,6 +7,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Handoff resume compares the record with the remote, not only the local
+  checkout (first in `claude` 0.5.24, `codex` 0.3.21, `opencode` 0.3.21,
+  `kimi` 0.2.19; #2930).** A record saved for "fix memtomem-stm#1282" was
+  resumed after #1284 had already fixed it. The resuming checkout's `main`
+  was one commit behind `origin/main`, so the stored `git_head` matched and
+  resume reported no divergence. Resume now reads the upstream's tip with
+  `git ls-remote` and compares it with `HEAD`. It reports "in sync", a
+  divergence (the remote moved, or this checkout holds unpushed commits, or
+  the remote no longer advertises the branch), or "remote not compared" with
+  the reason: detached `HEAD`, no single upstream, a local or non-branch
+  upstream, or a failed or denied call. It does not fetch, and writes no
+  refs, objects or `FETCH_HEAD`, in partial clones too. Every value it passes
+  comes from the repository's own Git config, after `--`.
+
+  When `next_action` names an issue or pull request as `<owner>/<repo>#<n>`
+  or a GitHub URL, resume reports its state if the runtime can query GitHub.
+  It builds the query only from the validated owner, repository and number.
+  A bare `#<n>` or a reference without its owner is reported as not checked.
+
+  Save writes a new `artifacts` field: absolute paths of outputs outside the
+  repository, such as a plan file in a runtime's session directory, or
+  `none`. Paths are never cut; one that does not fit the 160-character
+  field is left out and counted. Records saved before this field still
+  resume. Save also writes only the supported runtime labels: `agy` and
+  `antigravity` become `antigravity-cli`, and an unknown target is asked
+  for, or reported as `insufficient_input: runtime` when nobody can answer.
+  The Claude bundle grants none of the new commands. Whether each one is
+  allowed is left to the host's own permission settings.
+
 - **Writes refuse a namespace a search could not find by name (#2933).**
   `mem_add`, `mem_batch_add`, `mem_fetch`, `mem_index`, `mem_import` and the
   Notion and Obsidian importers stored any string as a chunk's namespace,

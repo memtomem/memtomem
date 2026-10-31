@@ -570,9 +570,74 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "`s` means `save` and `r` means `resume`",
         "only when it is the entire first word of the operation's arguments",
         "A bare `s` or `r` anywhere else is not an operation",
+        # #2930: a record that matched a stale local checkout passed resume. Each
+        # outcome clause is pinned whole: an edit that keeps every command but
+        # flips what an exit status means would pass an argv-only check.
+        "Compare with the remote, because a record that matches a stale local checkout passes",
+        "This step reads the remote's tip and writes nothing",
+        "Do not fetch, pull, or merge on the record's behalf",
+        "never from the record",
+        "Run `git rev-parse --symbolic-full-name HEAD`. Unless the output starts with "
+        '`refs/heads/`, report "remote not compared: detached HEAD"',
+        "`<branch>` is the output with exactly that prefix removed",
+        "Run `git config --get-all branch.<branch>.remote` and "
+        "`git config --get-all branch.<branch>.merge`. Unless each prints exactly one value, "
+        'report "remote not compared: no single upstream"',
+        'A remote of `.` is a local upstream: report "remote not compared: local upstream"',
+        "A merge value that does not start with `refs/heads/` is not a branch on the remote: "
+        'report "remote not compared: unsupported upstream ref"',
+        "Run `git ls-remote --exit-code -- <remote> <merge>`, always with `--` before the values",
+        "Exit status 2 means the remote does not advertise that ref",
+        'and is a divergence: report "the remote does not advertise `<merge>`"',
+        "Any other non-zero exit, a denied command, or one that does not finish: report "
+        '"remote not compared" with the reason',
+        "equals `<merge>` exactly; unless there is exactly one, report "
+        '"remote not compared: ambiguous remote ref"',
+        "Compare that line's object id with `git rev-parse HEAD`. Equal: report \"in sync with",
+        'Different: report the divergence "the remote tip `<short id>` is not this checkout\'s HEAD"',
+        "the remote may have moved, or this checkout holds unpushed commits",
+        "Do not classify it further: an ancestry check can fetch missing objects in a partial clone",
+        # The advisory target check builds its query only from validated captures.
+        "This is advice, not a gate",
+        "Accept only a whole whitespace-delimited token",
+        "`<owner>/<repo>#<number>`",
+        "match `[A-Za-z0-9._-]+` and do not start with `-`, and `<number>` is digits only",
+        "--repo=<owner>/<repo> --json state,title`",
+        "never pass other record text",
+        "A bare `#<number>`, a repository without its owner (`memtomem-stm#1282`)",
+        'report "target not checked" with the reason. Never guess the repository',
+        # Artifacts: always written, never cut, and the cap holds the suffix.
+        "artifacts: <none or comma-separated absolute paths outside the repository, at most 4>",
+        "`artifacts` 160 and at most 4 paths",
+        "Save always writes the field",
+        "Never truncate or shorten an artifact path",
+        "The 160 characters cover the whole value",
+        "When the record is over 1,200 characters, shorten other fields, never a path",
+        "Every field of the Save template is required except `artifacts`",
+        "zero lines is a legacy record, one is a current record, and two or more is torn",
+        "a torn continuation that begins with `artifacts:` passes every count too",
+        "do not open them unless asked",
+        # Runtime labels: only supported labels are written.
+        "normalize `claude` to `claude-code`, `codex` to `codex-cli`, `kimi` to `kimi-code`, "
+        "and `antigravity` or `agy` to `antigravity-cli`",
+        "insufficient_input: runtime",
     )
     for marker in required:
-        assert marker in flat
+        assert marker in flat, marker
+    # The designs #2930's plan review rejected: a fetch's effect depends on refspec,
+    # prune and fetch.all config; ancestry lazily fetches in a partial clone;
+    # ``--get`` returns the last of several merge values; ``--abbrev-ref`` can name
+    # another branch.
+    resume = flat.split("## Resume", 1)[1]
+    for rejected in (
+        "git fetch",
+        "--prune",
+        "merge-base",
+        "config --get branch.",
+        "--abbrev-ref HEAD`.",
+        "Run `git rev-parse --abbrev-ref",
+    ):
+        assert rejected not in resume, rejected
     # The claim #2814 disproved: false on the E5 profile, whose token pass
     # re-splits any record over 384 tokens.
     assert "stays one complete chunk" not in flat
@@ -593,6 +658,11 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
     assert "Bash(git rev-parse:*)" in claude_frontmatter
     assert "Bash(git status:*)" in claude_frontmatter
     assert "Bash(git:*)" not in claude_frontmatter
+    # The bundle grants none of resume's remote-comparison or target-check commands:
+    # they touch the network and credential helpers while reading untrusted text, so
+    # whether they run is left to the host's own permission settings (#2930).
+    for ungranted in ("Bash(git ls-remote", "Bash(git config", "Bash(git fetch", "Bash(gh"):
+        assert ungranted not in claude_frontmatter, ungranted
     codex_root = _ROOT / "plugins/memtomem/skills/memtomem-handoff"
     kimi_root = _ROOT / "packages/memtomem-kimi-skills/skills/memtomem-handoff"
     for root in (codex_root, kimi_root):
