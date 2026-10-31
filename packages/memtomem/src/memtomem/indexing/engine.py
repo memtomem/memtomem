@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 import pathspec
 
 from memtomem.chunking.registry import ChunkerRegistry, build_chunker_registry
+from memtomem.constants import InvalidNameError, validate_writable_namespace
 from memtomem.config import (
     IndexingConfig,
     NamespaceConfig,
@@ -369,6 +370,9 @@ class IndexEngine:
             (_build_exclude_spec([rule.path_glob]), rule) for rule in self._ns_config.rules
         ]
         self._warned_empty_parent_rules: set[int] = set()
+        # (source, value) pairs already logged by ``_addressable``, so a folder
+        # of many files logs its refused name once.
+        self._warned_unaddressable_ns: set[tuple[str, str]] = set()
         # Resolved on first use by ``_chunk_tokenizer_fingerprint``. The *path*
         # is restart-guarded so resolving once is correct; the digest at that
         # path is not, and is re-taken per call.
@@ -1673,7 +1677,8 @@ class IndexEngine:
         """Determine the namespace for a file.
 
         Priority: explicit parameter > policy rules (first valid match) >
-        auto_ns (folder-based) > default_namespace. Returns None only if
+        auto_ns (folder-based) > default_namespace. A derived candidate the
+        write gate refuses is skipped (see :meth:`_addressable`). Returns None only if
         default_namespace is "default" and nothing else matched (preserves
         backward compat — chunks without namespace stay untagged).
         """
@@ -1702,7 +1707,7 @@ class IndexEngine:
                 if not spec.match_file(candidate):
                     continue
                 ns = self._format_namespace(rule.namespace, file_path, rule_index=i)
-                if ns is not None:
+                if ns is not None and self._addressable(ns, f"namespace rule #{i}"):
                     return ns, True
 
         if self._ns_config.enable_auto_ns:
@@ -1716,14 +1721,39 @@ class IndexEngine:
             memory_roots = {Path(d).expanduser().resolve() for d in self._config.all_index_roots()}
             if parent not in memory_roots:
                 name = parent.name
-                if name and name not in (".", ""):
+                if name and name not in (".", "") and self._addressable(name, "enable_auto_ns"):
                     return name, True
 
         default = self._ns_config.default_namespace
-        if default and default != "default":
+        if (
+            default
+            and default != "default"
+            and self._addressable(default, "namespace.default_namespace")
+        ):
             return default, False
 
         return None, False
+
+    def _addressable(self, namespace: str, source: str) -> bool:
+        """True when a derived *namespace* passes the write gate (#2946).
+
+        Rules, ``enable_auto_ns`` and ``default_namespace`` build names from
+        folder names and config text, so they can produce what
+        :func:`validate_writable_namespace` refuses on caller input: a comma,
+        a ``*``, ``!system``, a blank name, a bad ``agent-runtime:`` name.
+        Resolution skips such a candidate and falls through to the next one,
+        as it already does for a placeholder that expands to nothing. The
+        refusal is logged once per (source, name).
+        """
+        try:
+            validate_writable_namespace(namespace)
+        except InvalidNameError as exc:
+            key = (source, namespace)
+            if key not in self._warned_unaddressable_ns:
+                self._warned_unaddressable_ns.add(key)
+                logger.warning("%s skipped: %s", source, exc)
+            return False
+        return True
 
     def _format_namespace(self, template: str, file_path: Path, *, rule_index: int) -> str | None:
         """Substitute ``{parent}`` and ``{ancestor:N}`` in a namespace template.

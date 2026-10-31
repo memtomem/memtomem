@@ -1166,7 +1166,7 @@ async def _mem_add_core(
                         await mark_provenance_incomplete(app, provenance_session_id)
                         raise
                     await _flag_imprecise_write(app, provenance_session_id, stats)
-                    display_ns = effective_ns or app.config.namespace.default_namespace
+                    display_ns = await _written_namespace_label(app, target, effective_ns, stats)
                     result = (
                         f"Memory added to {target}\n"
                         f"- Namespace: {display_ns}\n"
@@ -1259,6 +1259,37 @@ async def _mem_add_core(
         result += f"\n\n{dim_notice}"
 
     return (result, stats)
+
+
+async def _written_namespace_label(
+    app: AppContext, written_file: Path, effective_ns: str | None, stats: IndexingStats
+) -> str:
+    """The namespace to report for a write that just indexed *written_file*.
+
+    The engine's in-lock answer when this write applied exactly one: a rule,
+    ``enable_auto_ns``, or the namespace the file was already stored under
+    (#2061) can each differ from what the caller passed. A write that applied
+    none (every entry skipped, nothing re-indexed) asks the engine where the
+    file's chunks go, the same question ``index_file`` answers, instead of
+    substituting the configured default: the indexer skips a default the
+    write gate refuses (#2946), and a stored file keeps its own namespace.
+    The append is already durable here, so a failed lookup is reported, not
+    raised.
+    """
+    from memtomem.models import stored_namespace
+
+    applied = stats.applied_namespaces
+    if len(applied) == 1:
+        return stored_namespace(applied[0])
+    try:
+        return stored_namespace(
+            await app.index_engine.effective_namespace_for(written_file, effective_ns)
+        )
+    except Exception:
+        logger.warning(
+            "could not resolve the namespace of %s for the reply", written_file, exc_info=True
+        )
+        return "unknown (the chunk store did not answer)"
 
 
 @mcp.tool()
@@ -2248,7 +2279,7 @@ async def mem_batch_add(
                         await mark_provenance_incomplete(app, provenance_session_id)
                         raise
                     await _flag_imprecise_write(app, provenance_session_id, stats)
-                    display_ns = effective_ns or app.config.namespace.default_namespace
+                    display_ns = await _written_namespace_label(app, target, effective_ns, stats)
                     result = (
                         f"Batch add complete ({len(entries)} entries) → {target}\n"
                         f"- Namespace: {display_ns}\n"

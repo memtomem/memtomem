@@ -1251,6 +1251,13 @@ folder trees like `memtomem-memories/team/X.md` → `team`, but produces
 low-signal namespaces (`subagents`, `<UUID>`) when applied blindly under
 opt-in provider roots like `~/.claude/projects/<project>/memory/`.
 
+A derived name that a search could not find by that exact name is skipped
+the same way: one containing `,` or `*`, `!system`, a blank name, or a bare
+`agent-runtime` folder. The indexer logs a warning once per setting and name, and moves on
+to the next candidate — the next rule, then `auto_ns`, then
+`default_namespace`. A `default_namespace` with such a name is skipped too,
+and the chunks are stored untagged (`default`).
+
 > **Recommendation.** Filter noise via `exclude_patterns` *before* enabling
 > `auto_ns`, otherwise opaque parent-folder names (like a Claude Code
 > session UUID) end up as namespaces.
@@ -1301,8 +1308,10 @@ Example `~/.memtomem/config.d/10-namespace-rules.json`:
 - **First match wins.** Order rules from most specific to least within
   a fragment.
 - `{parent}` in the namespace string expands to the immediate parent
-  folder name. If that name would be empty, the rule is skipped and the
-  next rule / `auto_ns` / `default_namespace` is tried.
+  folder name. If that name would be empty, or the expanded namespace is
+  one a search could not find by name (it contains `,` or `*`, or is
+  `!system`), the rule is skipped and the next rule / `auto_ns` /
+  `default_namespace` is tried.
 - Merge strategy is **APPEND**: multiple `config.d/*.json` fragments
   contribute rules without overwriting. **Fragments load in
   alphabetical filename order**, so use numeric prefixes

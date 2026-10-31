@@ -31,8 +31,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   surfaces; `POST /api/index` used to store it as a namespace.
 
   Names already stored are left in place. `mem_ns_rename` can move one to a
-  valid name (0.7.1). Namespace rules, `enable_auto_ns` folder names and a
-  configured `default_namespace` are not checked by this change (#2946).
+  valid name (0.7.1). Namespaces the indexer derives itself are covered by
+  the entry below (#2946).
+
+- **Namespace rules, `enable_auto_ns` and `default_namespace` skip a name a
+  search could not find (#2946).** The indexer built namespaces from folder
+  names and config text without the check above, so `<memory_dir>/a,b/n.md`
+  was stored under `a,b` by a `{parent}` rule or by `enable_auto_ns`, and a
+  `default_namespace` of `x*y` was stored as given. A rule whose expanded
+  namespace (placeholder or literal text) fails the check is now skipped,
+  like a rule whose placeholder expands to nothing, and resolution moves on to
+  the next rule, then `enable_auto_ns`, then `default_namespace`. A folder
+  name `enable_auto_ns` would use is skipped the same way, and a
+  `default_namespace` that fails the check stores the chunks untagged
+  (`default`). Each skipped name is logged once per setting and name. `mem_add` and
+  `mem_batch_add` now report the namespace the write was stored under — the
+  rule's, or the one a file already had — rather than the configured
+  default, and `default` instead of a refused default nothing was stored
+  under.
+
+  A file already stored under such a name keeps it on a plain or `--force`
+  re-index; `mm index --reassign-namespaces` moves it to the namespace the
+  rules now resolve to.
 
 - **The web namespace rename route validates the new name (#2938).**
   `POST /api/namespaces/{namespace}/rename` now runs `new_name` through the
