@@ -24,7 +24,11 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from memtomem.constants import default_system_prefixes
+from memtomem.constants import (
+    InvalidNameError,
+    default_system_prefixes,
+    validate_writable_namespace,
+)
 from memtomem._runtime_paths import scrub_text
 
 
@@ -1363,6 +1367,47 @@ def _validate_exclude_patterns(value: object) -> None:
             raise ValueError(f"exclude_patterns[{idx}]: {exc}") from exc
 
 
+def validate_default_namespace_write(value: object) -> None:
+    """Refuse a new ``default_namespace`` a search could not find by name.
+
+    The stock ``"default"`` passes. Write-only (see ``coerce_and_validate``'s
+    ``for_write``): a value already in a config file still loads, and the
+    indexer skips it at resolution time instead (#2946).
+    """
+    if value == "default":
+        return
+    try:
+        validate_writable_namespace(value)
+    except InvalidNameError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _validate_rules_write(value: object) -> None:
+    """Refuse a rule whose namespace template cannot produce a findable name.
+
+    Each placeholder is replaced by a neutral segment (``x``) and the result
+    goes through :func:`validate_writable_namespace`, so the literal text of
+    the template is what is judged: ``a,b`` or ``{parent},x`` is refused,
+    ``claude:{parent}`` is not. Write-only, like the default's check.
+    """
+    import string as _string
+
+    if not isinstance(value, list):
+        return
+    for idx, rule in enumerate(value):
+        template = getattr(rule, "namespace", None)
+        if not isinstance(template, str):
+            continue
+        sample = "".join(
+            literal + ("x" if field is not None else "")
+            for literal, field, _spec, _conv in _string.Formatter().parse(template)
+        )
+        try:
+            validate_writable_namespace(sample)
+        except InvalidNameError as exc:
+            raise ValueError(f"item[{idx}] namespace {template!r}: {exc}") from exc
+
+
 def _validate_rrf_weights(value: object) -> None:
     """Reject an RRF weight pair fusion cannot honor (#2094).
 
@@ -1485,9 +1530,16 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
         "length": 2,
         "validator": _validate_rrf_weights,
     },
-    "namespace.default_namespace": {"type": str},
+    "namespace.default_namespace": {
+        "type": str,
+        "write_validator": validate_default_namespace_write,
+    },
     "namespace.enable_auto_ns": {"type": bool},
-    "namespace.rules": {"type": list, "item_type": NamespacePolicyRule},
+    "namespace.rules": {
+        "type": list,
+        "item_type": NamespacePolicyRule,
+        "write_validator": _validate_rules_write,
+    },
     "rerank.enabled": {"type": bool},
     "rerank.oversample": {"type": float, "min": 0.1, "max": 10.0},
     "rerank.min_pool": {"type": int, "min": 1, "max": 1000},
@@ -1552,8 +1604,19 @@ def _split_scalar_list_string(value: str) -> list[object]:
     return [s.strip() for s in value.split(",")]
 
 
-def coerce_and_validate(value: object, constraint: dict | None) -> object:
-    """Coerce *value* to the expected type and validate min/max/allowed constraints."""
+def coerce_and_validate(
+    value: object, constraint: dict | None, *, for_write: bool = True
+) -> object:
+    """Coerce *value* to the expected type and validate min/max/allowed constraints.
+
+    ``for_write`` adds the constraint's ``write_validator``: a check applied
+    when a surface writes a new value (``mm config set``, the web PATCH,
+    ``mem_config``) but not when a config file is loaded, so a value saved
+    before the check existed keeps loading. Only the ``config.json`` loader
+    passes ``False``; the fragment loader reads ``validator`` directly and
+    never sees ``write_validator``. The default is ``True`` so a new
+    mutation surface gets the check without opting in.
+    """
     if constraint is None:
         return value
 
@@ -1670,6 +1733,9 @@ def coerce_and_validate(value: object, constraint: dict | None) -> object:
     validator = constraint.get("validator")
     if callable(validator):
         validator(coerced)
+    write_validator = constraint.get("write_validator")
+    if for_write and callable(write_validator):
+        write_validator(coerced)
 
     return coerced
 
@@ -2330,7 +2396,7 @@ def _apply_override_snapshot(
                 constraint = FIELD_CONSTRAINTS.get(full_key)
                 if constraint:
                     try:
-                        value = coerce_and_validate(value, constraint)
+                        value = coerce_and_validate(value, constraint, for_write=False)
                     except ValueError as exc:
                         _warn(
                             "Invalid config value %s=%r in %s: %s (using default)",
