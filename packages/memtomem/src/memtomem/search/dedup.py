@@ -12,6 +12,10 @@ from memtomem.models import Chunk
 from memtomem.storage.base import WRITER_WAIT_S
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Sequence
+    from pathlib import Path
+
+    from memtomem.models import NamespaceFilter
     from memtomem.storage.base import StorageBackend
 
 
@@ -305,3 +309,77 @@ class DedupScanner:
             probed=probed,
             without_vector=without_vector,
         )
+
+
+@dataclass(frozen=True)
+class StoredNeighbour:
+    chunk: Chunk
+    # The storage dense score (``1/(1+L2)`` on SQLite): bounded and comparable
+    # across stores, unlike a search result's score, which may be a rerank logit
+    # or an RRF sum depending on the pipeline configuration (#2934).
+    score: float
+
+
+#: Ceiling on one widened retry of a probe (see ``nearest_stored_neighbours``).
+_STORED_NEIGHBOUR_POOL_CAP = 200
+
+
+async def nearest_stored_neighbours(
+    storage: StorageBackend,
+    probe_ids: Sequence[UUID],
+    *,
+    exclude_ids: Collection[UUID],
+    per_probe_k: int,
+    namespace_filter: NamespaceFilter | None,
+    project_context_root: Path | None,
+    as_of_unix: int,
+) -> list[StoredNeighbour]:
+    """Existing chunks nearest the stored vectors of ``probe_ids``.
+
+    Probes with the vectors the chunks were indexed with, so both sides of the
+    comparison are passage embeddings (a fresh query-side embedding would not
+    be, #2461). ``dense_search`` applies the namespace filter, the scope context
+    and the held/pending-source rule in SQL; validity is checked here, the way
+    the search pipeline's validity stage does.
+
+    ``exclude_ids`` are dropped before the per-probe cut, and each probe asks
+    for that many extra rows, so excluded chunks cannot fill the pool. When
+    invalid rows still leave fewer than ``per_probe_k`` neighbours from a full
+    pool, the probe is retried once with a wider pool.
+
+    Each neighbour appears once, with its best score over all probes, sorted by
+    score descending. A probe with no stored vector is skipped. Returns ``[]``
+    on a store without vectors. Failures propagate.
+    """
+    if not probe_ids or getattr(storage, "dense_enabled", True) is False:
+        return []
+    from memtomem.search.visibility import chunk_valid_at
+
+    excluded = set(exclude_ids)
+    stored = await storage.get_embeddings_for_chunks([str(i) for i in probe_ids])
+    best: dict[UUID, StoredNeighbour] = {}
+    for probe_id in probe_ids:
+        embedding = stored.get(str(probe_id))
+        if embedding is None:
+            continue
+        pool = per_probe_k + len(excluded)
+        widened = min(pool * 4, _STORED_NEIGHBOUR_POOL_CAP)
+        for attempt in (pool, widened) if widened > pool else (pool,):
+            results = await storage.dense_search(
+                embedding,
+                top_k=attempt,
+                namespace_filter=namespace_filter,
+                project_context_root=project_context_root,
+            )
+            eligible = [
+                r
+                for r in results
+                if r.chunk.id not in excluded and chunk_valid_at(r.chunk.metadata, as_of_unix)
+            ]
+            if len(results) < attempt or len(eligible) >= per_probe_k:
+                break
+        for r in eligible[:per_probe_k]:
+            seen = best.get(r.chunk.id)
+            if seen is None or r.score > seen.score:
+                best[r.chunk.id] = StoredNeighbour(chunk=r.chunk, score=r.score)
+    return sorted(best.values(), key=lambda n: n.score, reverse=True)

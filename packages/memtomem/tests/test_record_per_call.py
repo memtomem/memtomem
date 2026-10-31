@@ -186,9 +186,11 @@ class TestEndToEndNoWrites:
 class TestMemAddDuplicateCheckWritesNothing:
     """#2683: ``mem_add``'s duplicate check is an internal read, not a search.
 
-    It searches for the note it just wrote; recorded, that bumped the access
-    counts of every hit (the new note included) and stored the note body as
-    a query.
+    A recorded search for the note just written bumped the access counts of
+    every hit (the new note included) and stored the note body as a query.
+    The check probes stored vectors and runs no search, so the spy below must
+    see none; that the check runs and still writes nothing is pinned on a
+    dense store in ``test_mem_add_duplicate_check.py``.
     """
 
     @pytest.mark.asyncio
@@ -201,8 +203,6 @@ class TestMemAddDuplicateCheckWritesNothing:
         storage, pipeline = comp.storage, comp.search_pipeline
         ctx = StubCtx(AppContext.from_components(comp))
 
-        # The check swallows its own failures, so prove it actually ran: a
-        # check that raised, or was skipped, would write nothing either.
         completed: list[dict] = []
         real_search = pipeline.search
 
@@ -222,7 +222,7 @@ class TestMemAddDuplicateCheckWritesNothing:
         await _drain_bg(pipeline)
 
         assert "Error" not in out, out
-        assert [kw.get("record") for kw in completed] == [False]
+        assert completed == []
         # Sanity: the check's own query hits the seeds and the new note, so a
         # recorded check would have had four chunks to count.
         hits, _ = await real_search(note, top_k=5, record=False)
