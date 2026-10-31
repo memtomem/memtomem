@@ -321,9 +321,13 @@ async def collect_status_report(app: AppContext) -> dict:
         cwd = Path(os.getcwd()).resolve()
     except OSError:
         cwd = None
-    from memtomem.server.tools.search import _resolve_project_context_root
+    from memtomem.server.tools.search import (
+        _resolve_project_context_from_dirs,
+        _resolve_project_context_root,
+    )
 
     project_root = _resolve_project_context_root(app)
+    bound_root = getattr(app, "bound_project_root", None)
 
     stored = getattr(app.storage, "stored_embedding_info", None)
     if stored:
@@ -439,6 +443,19 @@ async def collect_status_report(app: AppContext) -> dict:
     warnings.extend(
         diagnostic.as_status_warning() for diagnostic in getattr(config, "load_diagnostics", ())
     )
+    # A binding is not re-checked per call (see ``mem_project_bind``), so this
+    # report is where an unregistration that has not reached it yet shows.
+    if bound_root is not None and (
+        _resolve_project_context_from_dirs(config.indexing.project_memory_dirs, anchor=bound_root)
+        != bound_root
+    ):
+        warnings.append(
+            {
+                "kind": "bound_project_unregistered",
+                "detail": f"bound project root {bound_root} has no registered project tier",
+                "fix": "restart the server, or re-register with mm mem init in that project",
+            }
+        )
     if config.scheduler.enabled and not config.health_watchdog.enabled:
         warnings.append(
             {
@@ -563,6 +580,7 @@ async def collect_status_report(app: AppContext) -> dict:
         "runtime": {
             "cwd": str(cwd) if cwd is not None else None,
             "project_context_root": str(project_root) if project_root is not None else None,
+            "project_context_source": "bound" if bound_root is not None else "cwd",
         },
         "index": {
             "total_chunks": stats["total_chunks"],
@@ -883,6 +901,7 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
             key="Project root:".ljust(17),
             value=(
                 _shorten_status_path(str(runtime["project_context_root"]))
+                + (" (bound)" if runtime.get("project_context_source") == "bound" else "")
                 if runtime.get("project_context_root")
                 else "(none registered for CWD)"
             ),

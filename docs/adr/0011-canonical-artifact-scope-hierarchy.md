@@ -819,6 +819,23 @@ Same-relevance results tie-break in scope priority order:
 default-search archive prefix exclusion regardless of scope — same as
 today.
 
+**Amended 2026-10-31 (#2920): a bound project replaces the cwd.** "The
+caller's cwd" above is the MCP server's cwd, and a host can start the server
+outside the project: the Antigravity CLI starts plugin servers in the
+plugin's own directory. On a stdio server, `mem_project_bind` names a
+project whose tier is registered, and the context-boundary root is that
+project from then on, for every tool that resolves it. The binding is set
+once per process and is not re-checked. A re-check that found the tier gone
+would have to return no project, and under an explicit scope filter no
+project reads every project's rows. Unregistering the tier leaves the binding
+in place until the server restarts, so reads stay on the bound project; adds
+to the tier are refused at once by the write path's own registration check,
+and `mem_status` warns. Network transports refuse
+the binding, because streamable HTTP shares one context across clients. The
+health watchdog keeps using the cwd, and so do the context gateway's
+`context_*` actions. They resolve their project separately, and moving them
+would change which project's artifact files they write.
+
 ### 7. ADR-0001 §1 supersession
 
 This RFC supersedes the implicit "canonical = project-scope only"

@@ -157,6 +157,10 @@ class AppContext:
     # because session state has a different lifetime / mutation cadence than
     # config — mixing the two locks would entangle their contention paths.
     current_agent_id: str | None = None
+    # The registered project root ``mem_project_bind`` pinned this server to,
+    # used in place of the cwd by ``_resolve_project_context_root`` (#2920).
+    # Set at most once and never cleared, so no operation can see two roots.
+    bound_project_root: Path | None = field(default=None, init=False)
     # Internal state — not part of the public ``__init__`` surface; populated
     # by ``ensure_initialized`` / ``from_components``. The watcher /
     # scheduler / policy_scheduler / health_watchdog handles are populated
@@ -1393,6 +1397,23 @@ async def _get_app_initialized(ctx: CtxType) -> AppContext:
 # streamable-HTTP enter the lifespan once per process and are unaffected
 # either way.
 _ACTIVE_APP: ContextVar[AppContext | None] = ContextVar("memtomem_active_app", default=None)
+
+# The transport ``main()`` started this process with, or ``None`` when the
+# server was not started through ``main()`` (tests, embedders). Process-wide
+# by nature: one process runs one transport. ``mem_project_bind`` refuses
+# anything but ``"stdio"``, where one client owns the process; streamable HTTP
+# shares one ``AppContext`` across its clients, so a binding would cross them.
+_server_transport: str | None = None
+
+
+def _set_server_transport(transport: str) -> None:
+    """Record the normalized transport. ``main()`` only."""
+    global _server_transport
+    _server_transport = transport
+
+
+def _get_server_transport() -> str | None:
+    return _server_transport
 
 
 def _set_active_app(app: AppContext) -> Token[AppContext | None]:

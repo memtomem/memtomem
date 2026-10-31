@@ -29,21 +29,26 @@ import os
 from pathlib import Path
 
 
-def _resolve_project_context_from_dirs(project_memory_dirs) -> Path | None:
+def _resolve_project_context_from_dirs(
+    project_memory_dirs, anchor: Path | None = None
+) -> Path | None:
     """Same as :func:`_resolve_project_context_root` but takes the dirs
-    list directly (no ``app`` / ``comp`` wrapper).
+    list directly (no ``app`` / ``comp`` wrapper), and ignores any binding.
 
     Used by web routes that have ``Mem2MemConfig`` directly via
     ``get_config`` and by any caller that already extracted the
     registered project tier list. The wrapper :func:`_resolve_project_context_root`
     delegates here so MCP tool callers (``app``) and CLI callers
     (``comp``) keep their existing one-arg signature.
+
+    ``anchor`` replaces the cwd as the path a registered root must contain;
+    ``mem_project_bind`` passes the path it was given.
     """
     project_dirs = list(project_memory_dirs)
     if not project_dirs:
         return None
     try:
-        cwd = Path(os.getcwd()).resolve()
+        cwd = (anchor if anchor is not None else Path(os.getcwd())).resolve()
     except OSError:
         return None
     best_root: Path | None = None
@@ -92,5 +97,17 @@ def _resolve_project_context_root(app) -> Path | None:
     Accepts either ``app`` (MCP) or ``comp`` (CLI) — both expose
     ``.config.indexing.project_memory_dirs`` so the duck-typed access
     is symmetric.
+
+    A stdio server whose host launched it outside the project (#2920) has
+    a root bound by ``mem_project_bind``; that exact root is returned
+    instead of the cwd match, and is not re-checked against the registered
+    tiers. Re-searching would turn an unregistered bound root into ``None``
+    — which reads every project's rows under an explicit scope filter — or
+    into a registered parent. Registration was checked at bind time, and the
+    binding stays until the server restarts. Only an MCP
+    ``AppContext`` carries a binding; ``comp`` never does.
     """
+    bound = getattr(app, "bound_project_root", None)
+    if bound is not None:
+        return bound
     return _resolve_project_context_from_dirs(app.config.indexing.project_memory_dirs)

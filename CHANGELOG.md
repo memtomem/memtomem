@@ -7,6 +7,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mem_project_bind` gives a stdio server started outside the project a
+  project context (#2920).** The project context comes from the server's
+  working directory. A host can start the server elsewhere: the Antigravity
+  CLI starts plugin servers in the plugin's directory, where `project_local`
+  never resolved. Binding pins the server to a project whose tier is
+  registered. Memory tools that use the project context then use that
+  project: search, recall, add, read and edit by id, and pinned context.
+  `mem_list` stays store-wide, as before. The context gateway's `context_*`
+  actions and the health watchdog keep using the working directory.
+  Reach it as
+  `mem_do(action="project_bind", params={"project_root": "<absolute path>"})`
+  in core mode. The binding is set once per server process; binding another
+  project needs a restart. It works only on a stdio server, because
+  streamable HTTP shares one context across clients. Registration is checked
+  when binding. After the tier is unregistered, reads stay on the bound
+  project. An add to the project's tier is refused at once, whether it goes
+  to the default file or to a named file that no other configured directory
+  covers. Pinned context and edits by id are not re-checked until the server
+  restarts, and `mem_status` warns until then. `mem_status` marks a
+  bound root `(bound)`, and `mm status --json` gains
+  `runtime.project_context_source` (`"bound"` or `"cwd"`).
 - **Cross-runtime `brief` and `update` project memory workflows (`claude` 0.5.20,
   `codex` 0.3.17, `opencode` 0.3.17, `kimi` 0.2.15).** The project-scoped
   plugin and skill bundles now include `brief` (`/memtomem:brief`,
