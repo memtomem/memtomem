@@ -13,6 +13,7 @@ from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.tools.consolidation_engine import (
     DEFAULT_SUMMARY_NAMESPACE,
+    _first_sentence,
     apply_consolidation,
     compute_source_hash,
     extract_bullet,
@@ -1176,6 +1177,33 @@ class TestConsolidationEngineUnit:
 
         without_hash = "## Metadata\n\n- Source: `/tmp/foo.md`\n- Generated: 2026-04-12\n"
         assert parse_source_hash(without_hash) is None
+
+
+class TestFirstSentenceBoundary:
+    """Boundary tests for _first_sentence helper in consolidation_engine."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("   ", ""),
+            ("", ""),
+            ("- - [ ] item", "[ ] item"),
+            ("A. B", "A."),
+            ("a\n\nb", "a"),
+            ("v1.2 is out", "v1.2 is out"),
+            ("Is this ready? Yes it is.", "Is this ready?"),
+            ("Watch out! It is dangerous.", "Watch out!"),
+            ("### Heading text. More text.", "Heading text."),
+            ("* Bullet item. Next item.", "Bullet item."),
+        ],
+    )
+    def test_first_sentence_boundary_cases(self, text: str, expected: str) -> None:
+        """Verify boundary stripping and sentence splitting."""
+        assert _first_sentence(text) == expected
+
+    def test_first_sentence_truncation_without_ellipsis(self) -> None:
+        """Plain truncation caps at max_len chars without adding an ellipsis."""
+        assert _first_sentence("abcdef", max_len=3) == "abc"
 
 
 # ── auto_consolidate handler (integration with storage) ──────────────
