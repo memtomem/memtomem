@@ -28,19 +28,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   project. An add to the project's tier is refused at once, whether it goes
   to the default file or to a named file that no other configured directory
   covers. Pinned context is not re-checked until the server restarts, and
-  `mem_status` warns until then.
-- **`mem_edit` and `mem_delete` refuse a rewrite that would turn project
-  memory into user memory (#2920).** They rewrite a chunk's file and re-index
-  all of it, and the re-index classifies by path against the tiers registered
-  now. A `project_local` row whose tier had been unregistered came back as
-  `user`, readable from every project. That row stays reachable from a server
-  bound to its project, and also from a server whose working directory is in
-  a project that kept its other tier registered. Both now refuse the rewrite
-  and name the `mm mem init` command that registers the tier again. Web edits,
-  an unregistration racing the edit, and a source moved behind a symlink still
-  re-index this way (#2923). `mem_status` marks a
-  bound root `(bound)`, and `mm status --json` gains
-  `runtime.project_context_source` (`"bound"` or `"cwd"`).
+  `mem_status` warns until then. `mem_status` marks a bound root `(bound)`,
+  and `mm status --json` gains `runtime.project_context_source` (`"bound"` or
+  `"cwd"`).
 - **Cross-runtime `brief` and `update` project memory workflows (`claude` 0.5.20,
   `codex` 0.3.17, `opencode` 0.3.17, `kimi` 0.2.15).** The project-scoped
   plugin and skill bundles now include `brief` (`/memtomem:brief`,
@@ -71,6 +61,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_edit` and `mem_delete` refuse a rewrite that would turn project
+  memory into user memory (#2920).** They rewrite a chunk's file and re-index
+  all of it, and the re-index classifies by path against the tiers registered
+  now. A `project_local` row whose tier had been unregistered came back as
+  `user`, readable from every project. That row stays reachable from a server
+  bound to its project, and also from a server whose working directory is in
+  a project that kept its other tier registered. Both now refuse the rewrite
+  and name the `mm mem init` command that registers the tier again. Web edits,
+  an unregistration racing the edit, and a source moved behind a symlink still
+  re-index this way (#2923).
 - **A frontmatter key with no space after its colon now logs a warning
   (#2885).** Since 0.7.0 reads frontmatter as YAML, a block
   made only of no-space lines such as `tags:[a, b]` or `valid_to:2024-12-31`
