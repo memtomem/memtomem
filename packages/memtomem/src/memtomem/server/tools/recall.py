@@ -55,7 +55,6 @@ async def mem_recall(
         source_filter: Filter by source file path (substring match, or glob pattern with *, ?, [])
         tag_filter: Comma-separated tags, matching ANY; applied before *limit*.
         namespace: Namespace scope — single, comma list, or glob ("project:*"), not both.
-            "!system" = every non-system namespace, overriding the session's.
         limit: Maximum number of chunks to return (default 20)
         output_format: Output format — "compact" (default, human-readable) or "structured"
             (JSON for machine parsing, includes trust-UX hints as a "hints" field).
