@@ -19,6 +19,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from helpers import StubCtx
+from memtomem._runtime_paths import _hint_quote
 from memtomem.server.context import AppContext
 from memtomem.server.tools.memory_crud import mem_delete, mem_edit
 from memtomem.storage.source_holds import SCOPE_LOST_HOLD
@@ -357,8 +358,12 @@ async def test_mcp_edit_names_the_commands(local_unregistered) -> None:
     edited = await mem_edit(chunk_id=chunk_id, new_content="revised", ctx=ctx)
 
     assert edited.startswith(f"Error: chunk {chunk_id} rewrite refused: "), edited
-    assert f"cd {root} && mm mem init --scope project_local" in edited
-    assert f"mm context memory-migrate {target} --from project_local --to user" in edited
+    # Paths are quoted for the shell the way every remedy quotes them, which on
+    # Windows wraps them (backslashes are not shell-safe): compute, never spell.
+    assert f"cd {_hint_quote(root)} && mm mem init --scope project_local" in edited
+    assert (
+        f"mm context memory-migrate {_hint_quote(target)} --from project_local --to user" in edited
+    )
 
 
 @pytest.mark.asyncio
