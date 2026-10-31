@@ -61,6 +61,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm mem init` no longer says a running server needs a restart to see the
+  new tier (#2925).** The note dated from before #2190. A running MCP server
+  picks up the tier on its next memory operation, and a running `mm web` the
+  next time its page loads. The note and the
+  `MEMTOMEM_INDEXING__PROJECT_MEMORY_DIRS` row in the configuration guide now
+  say so. The guide's read-only-dirs and `watcher_backend` entries said "next
+  tool call"; they now say "next memory operation", because
+  `mem_do(action="help")` answers without re-reading the config.
 - **`mem_edit` and `mem_delete` refuse a rewrite that would turn project
   memory into user memory (#2920).** They rewrite a chunk's file and re-index
   all of it, and the re-index classifies by path against the tiers registered

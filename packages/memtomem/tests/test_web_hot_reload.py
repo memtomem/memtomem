@@ -261,6 +261,55 @@ async def test_external_watcher_backend_edit_replaces_live_observer(
     old_observer.join.assert_called_once_with()
 
 
+async def test_mem_init_tier_reaches_running_web_on_config_read(
+    home: Path, app, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """``mm mem init`` tells the user a running ``mm web`` picks the new tier
+    up the next time its page loads: ``settings-config.js`` calls
+    GET /api/config at module load. No restart is involved."""
+    from click.testing import CliRunner
+
+    from memtomem.cli.mem_cmd import mem
+
+    watcher = MagicMock(name="watcher")
+    watcher.reconfigure = AsyncMock()
+    app.state.file_watcher = watcher
+
+    project = tmp_path / "proj"
+    (project / ".git").mkdir(parents=True)
+    monkeypatch.chdir(project)
+    result = CliRunner().invoke(mem, ["init"])
+    assert result.exit_code == 0, result.output
+    tier = (project / ".memtomem" / "memories.local").resolve()
+
+    resp = await client.get("/api/config")
+
+    assert resp.status_code == 200
+    live = app.state.config.indexing
+    assert tier in {Path(p).expanduser().resolve() for p in live.project_memory_dirs}
+    watcher.reconfigure.assert_awaited_once_with(live)
+    assert app.state.index_engine._config is live
+
+
+def test_every_page_load_reads_the_config():
+    """The other half of the ``mm mem init`` note: the single-page UI loads
+    ``settings-config.js``, whose module-level ``fetchServerConfig()`` sends
+    GET /api/config. If either side moves, the note's "next time its page
+    loads" stops being true."""
+    import re
+
+    import memtomem.web as web_pkg
+
+    static = Path(web_pkg.__file__).parent / "static"
+    index = (static / "index.html").read_text(encoding="utf-8")
+    assert re.search(r'<script src="/settings-config\.js(\?v=\d+)?"></script>', index)
+    script = (static / "settings-config.js").read_text(encoding="utf-8")
+    assert re.search(r"^fetchServerConfig\(\);$", script, re.MULTILINE)
+    assert (
+        "api('GET', '/api/config')" in script.split("async function fetchServerConfig()")[1][:200]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test 2 — PATCH re-reads before merge
 # ---------------------------------------------------------------------------

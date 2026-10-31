@@ -686,9 +686,10 @@ Two rules are worth knowing before you set it:
   scheduler. A process holding the old configuration keeps answering from
   it. Two details worth being precise about, because "it reloads
   eventually" is not the same as "it is protected now":
-  - The MCP server re-reads the file on its next tool call and installs
-    the root lists together, so protection arrives one tool call
-    after the edit.
+  - The MCP server re-reads the file on its next memory operation and
+    installs the root lists together, so protection arrives with the first
+    memory operation after the edit. A call that answers without the store,
+    such as `mem_do(action="help")`, does not re-read it.
   - `mm web` reloads on config-related requests (for example
     `GET /api/config`), **not** on the chunk edit/delete routes. Editing
     the config on disk and immediately deleting a chunk can still use the
@@ -708,7 +709,7 @@ is no in-place retarget.
 | `MEMTOMEM_INDEXING__READ_ONLY_MEMORY_DIRS` | `[]` | Index roots memtomem indexes and searches but never rewrites (see above); must be disjoint from the writable roots |
 | `MEMTOMEM_INDEXING__RETAIN_MISSING_DIRS` | `[]` | Directories whose files, once missing on disk, stay searchable instead of being held; see below |
 | `MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS` | `[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]` | File types accepted by the indexer and file watcher |
-| `MEMTOMEM_INDEXING__WATCHER_BACKEND` | `auto` | Watch backend: `auto` uses polling on macOS and native events elsewhere; set `native` or `polling` to override. A running MCP server applies a change on its next tool call |
+| `MEMTOMEM_INDEXING__WATCHER_BACKEND` | `auto` | Watch backend: `auto` uses polling on macOS and native events elsewhere; set `native` or `polling` to override. A running MCP server applies a change on its next memory operation |
 | `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Approximate packing preference; use the hard limit for an exact ceiling |
 | `MEMTOMEM_INDEXING__HARD_MAX_CHUNK_TOKENS` | `0` | Exact body ceiling (`0` disables); requires a matching local tokenizer |
 | `MEMTOMEM_INDEXING__CHUNK_TOKENIZER_PATH` | empty | Local embedding-model `tokenizer.json`; no model download |
@@ -722,7 +723,7 @@ is no in-place retarget.
 | `MEMTOMEM_INDEXING__EXCLUDE_PATTERNS` | `[]` | Pathspec (gitignore-style) globs for files the indexer should skip |
 | `MEMTOMEM_INDEXING__STARTUP_BACKFILL` | `false` | When `true`, `mm web` runs a one-shot backfill scan over `memory_dirs` on boot to catch files added while the server was down. Off by default — multi-minute embed jobs blocked the server on a multi-GB memory_dir during 0.1.24 testing, so the wizard offers it as opt-in. `mm index <dir>` and the Web UI per-dir Reindex button cover ad-hoc backfills idempotently without flipping this. |
 | `MEMTOMEM_INDEXING__TARGET_CHUNK_TOKENS` | `384` | Pass-2 semantic-packing target chunk size; `0` disables packing |
-| `MEMTOMEM_INDEXING__PROJECT_MEMORY_DIRS` | `[]` | Additional project-tier index roots (ADR-0011); APPEND-merged across `config.d/` fragments. Register per-project with `mm mem init` (run from the project root; a running server/web UI picks the new tier up after restart). Deliberately outside `mm config set`/`unset` — to deregister, edit `indexing.project_memory_dirs` in `~/.memtomem/config.json` directly |
+| `MEMTOMEM_INDEXING__PROJECT_MEMORY_DIRS` | `[]` | Additional project-tier index roots (ADR-0011); APPEND-merged across `config.d/` fragments. Register per-project with `mm mem init` (run from the project root; a running MCP server picks the new tier up on its next memory operation, and `mm web` the next time its page loads). Deliberately outside `mm config set`/`unset` — to deregister, edit `indexing.project_memory_dirs` in `~/.memtomem/config.json` directly |
 | `MEMTOMEM_INDEXING__AUTO_SUMMARIZE` | `false` | Generate a per-source LLM summary chunk at index time (requires LLM enabled) |
 | `MEMTOMEM_INDEXING__EXTRACT_ENTITIES` | `true` | Extract entities (person, date, decision, action_item, technology, concept) for every chunk the indexer writes, populating `chunk_entities`. Regex only — stdlib patterns, no model and no network, so it costs microseconds next to the embedding call on the same write. The LLM extractor stays opt-in via `mem_entity_scan(overwrite=True)`. Governs every write path that stores new content — the indexer, bundle imports, and consolidation summaries. Turning this off leaves the table at whatever a scan last wrote |
 | `MEMTOMEM_INDEXING__SUMMARY_LANGUAGE` | `en` | Language for auto-generated per-source summaries |
