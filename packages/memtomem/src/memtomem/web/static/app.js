@@ -766,6 +766,9 @@ async function _runChunkSaveConversation(chunkId, body, opts) {
       if (extra.force_unsafe) {
         showToast(t('toast.redaction_bypassed', { hits: bypassHits }), 'info');
       }
+      // The edit is on disk but its source was held instead of re-indexed:
+      // the project tier stopped being registered while it ran (#2923).
+      if (resp && resp.warning) showToast(resp.warning, 'warning');
       return resp;
     }
     if (resp.confirm !== 'confirm_project_shared') {
@@ -4008,7 +4011,8 @@ qs('d-save-btn').addEventListener('click', async () => {
     // request would pollute the undo stack with a no-op entry when the
     // user cancels the redaction-blocked confirm dialog.
     _pushHistory(STATE.selectedChunkId, STATE.selectedOriginal);
-    showToast(t('toast.chunk_saved'), 'success');
+    // ``saveChunkBody`` already showed a held re-index's warning (#2923).
+    if (!resp.warning) showToast(t('toast.chunk_saved'), 'success');
     STATE.selectedOriginal = newContent;
     _syncResultContent(STATE.selectedChunkId, newContent);
     _updateHistoryBtn(STATE.selectedChunkId);
@@ -4033,8 +4037,11 @@ qs('d-delete-btn').addEventListener('click', async () => {
   });
   if (!ok) return;
   try {
-    await api('DELETE', `/api/chunks/${STATE.selectedChunkId}`);
-    showToast(t('toast.chunk_deleted'), 'success');
+    const resp = await api('DELETE', `/api/chunks/${STATE.selectedChunkId}`);
+    // Set when the delete is on disk but its source was held instead of
+    // re-indexed (#2923); it replaces the plain success toast.
+    if (resp && resp.warning) showToast(resp.warning, 'warning');
+    else showToast(t('toast.chunk_deleted'), 'success');
     clearDetail();
     _markDataStale();
     doSearch();
@@ -6542,7 +6549,8 @@ function _startChunkEdit(card, chunk, sourcePath) {
         saveBtn.textContent = 'Save';
         return;
       }
-      showToast(t('toast.chunk_updated'), 'success');
+      // ``saveChunkBody`` already showed a held re-index's warning (#2923).
+      if (!resp.warning) showToast(t('toast.chunk_updated'), 'success');
       _syncResultContent(chunk.id, newContent);
       _markDataStale();
       // Refresh the browser to show updated content

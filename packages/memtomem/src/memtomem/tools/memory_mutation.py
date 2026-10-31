@@ -190,7 +190,9 @@ async def mutate_source_and_reindex(
     :class:`~memtomem.indexing.engine.PrivacyRejection` with
     ``mutation_outcome="not_written"``; a reviewed masking manifest, or a forced
     edit of a file that already holds something flagged, raises
-    :class:`~memtomem.indexing.engine.MutationBlockedError`. A refusal of the
+    :class:`~memtomem.indexing.engine.MutationBlockedError`, as does a rewrite
+    that would re-index the source's project rows as another scope or go
+    through a key that now names another file (#2923). A refusal of the
     result after the write restores the pre-image and re-raises with
     ``mutation_outcome="rolled_back"``, without the rollback re-index that would
     lift the hold the refusal placed.
@@ -216,6 +218,13 @@ async def mutate_source_and_reindex(
     blocker = preflight.blocker("edit", source_file.name, needs_valve=force_unsafe)
     if blocker is not None:
         raise MutationBlockedError(blocker)
+    # ``source_file`` is the chunk's stored key. Re-indexing must not store its
+    # project rows as another scope, and the write must not go through a key
+    # that now names another file (#2923); the engine would only hold the
+    # source after the write.
+    refusal = await index_engine.rewrite_refusal(str(source_file), op="edit", surface="web")
+    if refusal is not None:
+        raise MutationBlockedError(refusal)
     mutation_completed = False
     try:
         written = await asyncio.to_thread(mutate, pre_image)
