@@ -7,6 +7,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The web namespace rename route validates the new name (#2938).**
+  `POST /api/namespaces/{namespace}/rename` now runs `new_name` through the
+  same `validate_namespace` gate as the MCP `mem_ns_rename` tool and answers
+  400 with the tool's message for a name it refuses, such as
+  `agent-runtime:foo:bar`, `foo::bar`, or a name with a space. Before, only the
+  request schema's length limit and the storage charset applied, and both admit
+  those shapes. The source name in the path is still matched exactly as
+  stored, so a stored name that fails validation can be renamed to a valid one.
+  The route is on the dev-tier admin router; prod-tier `mm web` does not serve
+  it.
+
 - **`mem_add`'s "Similar memories found" warning compares stored vectors, not
   search scores (#2934).**
   It used to run a search over the new note and keep results scoring between

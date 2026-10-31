@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from memtomem.constants import InvalidNameError, validate_namespace
 from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.search.dedup import DedupCoverage
@@ -2327,6 +2328,34 @@ class TestNamespaceCRUD:
             json={"new_name": ""},
         )
         assert resp.status_code == 422
+
+    @pytest.mark.parametrize(
+        "new_name",
+        ["agent-runtime:foo:bar", "foo::bar", "a b", "!system", "a,b", "x*y"],
+    )
+    async def test_rename_refuses_new_name_mem_ns_rename_refuses(
+        self, app, client: AsyncClient, new_name: str
+    ):
+        """``new_name`` gets the MCP tool's gate: 400, the same message, no storage call."""
+        app.state.storage.reset_mock()
+        resp = await client.post("/api/namespaces/default/rename", json={"new_name": new_name})
+        assert resp.status_code == 400
+        with pytest.raises(InvalidNameError) as expected:
+            validate_namespace(new_name)
+        assert resp.json()["detail"] == str(expected.value)
+        # Not even the candidate read the rename coordinator starts with.
+        assert app.state.storage.method_calls == []
+
+    async def test_rename_moves_a_stored_name_that_fails_validation(self, app, client: AsyncClient):
+        """The path name is matched as stored, so a literal ``!system`` can be renamed out."""
+        app.state.storage.rename_namespace = AsyncMock(
+            return_value=NamespaceRenameResult(chunks_moved=4, metadata_renamed=False, merged=False)
+        )
+        app.state.storage.count_chunks_by_namespace = AsyncMock(return_value=4)
+        resp = await client.post("/api/namespaces/!system/rename", json={"new_name": "rescued"})
+        assert resp.status_code == 200
+        assert resp.json()["namespace"] == "rescued"
+        assert app.state.storage.rename_namespace.await_args.args[:2] == ("!system", "rescued")
 
     async def test_delete_namespace(self, app, client: AsyncClient):
         app.state.storage.delete_by_namespace = AsyncMock(return_value=30)
