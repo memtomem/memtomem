@@ -573,7 +573,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Tags** | `mem_tag_list`, `mem_tag_rename`, `mem_tag_merge`, `mem_tag_delete`, `mem_auto_tag` |
 | **Cross-ref** | `mem_link`, `mem_unlink`, `mem_related` |
 | **Fetch** | `mem_fetch` (URL → markdown → index) |
-| **Sessions** | `mem_session_start` (with optional `title`), `mem_session_end`, `mem_session_list` |
+| **Sessions** | `mem_session_start` (with optional `title`), `mem_session_end`, `mem_session_list`, `mem_project_bind` (pins a stdio server started outside the project to a registered project root) |
 | **Working Memory** | `mem_scratch_set`, `mem_scratch_get`, `mem_scratch_promote` |
 | **Procedures** | `mem_procedure_save`, `mem_procedure_list` |
 | **Multi-Agent** ([experimental](../../README.md#stability)) | `mem_agent_register`, `mem_agent_search`, `mem_agent_share` |
@@ -600,7 +600,7 @@ uses, so the output is identical. Useful as a sanity check between
 
 \* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`. The actions stay reachable in `core` and `standard` mode through the dispatcher — `mem_do(action="config", params={...})`, `mem_do(action="embedding_reset", params={...})`, `mem_do(action="reset", params={...})` — and the CLI equivalents are `mm config`, `mm embedding-reset`, and `mm reset`.
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (38 names), or `full` (100 names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (39 names), or `full` (101 names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
 
 `mem_candidate_propose(content, source, source_ref, idempotency_key)` lets an
 external agent submit a review candidate without writing durable memory.

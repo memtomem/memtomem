@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator
 
 from memtomem.errors import TransactionOwnedError
-from memtomem.runtime.project_context import _resolve_project_context_root
+from memtomem.runtime.project_context import _resolve_project_context_from_dirs
 from memtomem.server.health_store import HealthSnapshot
 from memtomem.storage.orphan_detect import RetainRule, orphan_candidate_sources, source_state
 from memtomem.storage.sqlite_backend import SqliteBackend
@@ -215,8 +215,13 @@ async def check_wal_status(app: AppContext) -> HealthSnapshot:
 async def check_full_health_report(app: AppContext) -> HealthSnapshot:
     """Reuse storage.get_health_report() for comprehensive metrics."""
     now = time.time()
+    # The cwd, never a ``mem_project_bind`` root: snapshots carry no project
+    # identity, so a scope that follows a client binding would mix projects
+    # in one trend history.
     report = await app.storage.get_health_report(
-        project_context_root=_resolve_project_context_root(app)
+        project_context_root=_resolve_project_context_from_dirs(
+            app.config.indexing.project_memory_dirs
+        )
     )
 
     # ``sessions`` has no project-scoped answer (#2281): the block arrives

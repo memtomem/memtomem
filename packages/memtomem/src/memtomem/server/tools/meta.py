@@ -151,6 +151,11 @@ CLI sessions are separate from these, and only "mm add" inherits them: "mm
 session start --agent-id planner" parks its session id in
 ~/.memtomem/.current_session, and a later "mm add" re-reads it and writes to
 "agent-runtime:planner" unless given its own --namespace.
+
+Project context comes from the server's working directory. A stdio server a
+host started elsewhere has none: mem_do(action="project_bind",
+params={"project_root": "<absolute project root>"}) pins it, once per process,
+to a project whose tier is registered.
 """,
     "multi_agent": """\
 Typical flow: mem_do(action="session_start", params={"agent_id": "planner"})
