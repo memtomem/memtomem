@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Upgrading
+
+- **`namespace="!system"` no longer names a namespace called `!system`.** On
+  `mem_search`, `mem_recall`, `mem_list`, `mm search` and `mm recall` it now
+  selects every namespace except the system ones (#2919). This change has no
+  deprecation window, an exception to the beta commitment. On
+  `mem_search`, `mem_recall`, `mm search` and `mm recall`, a comma list or a
+  list that includes it, such as `"!system,work"`, is refused; drop it from
+  saved filters and configuration. If you stored memory under a namespace
+  literally named `!system` (possible in 0.7.0 through `mm index --namespace`,
+  namespace rules, or raw MCP `mem_add`), find it with `mem_ns_list` and move
+  it with `mem_ns_rename(old="!system", new="<name>")` (#2937), then change
+  the rule or flag that produced the name, or a later re-index can write it
+  again.
+
 ### Added
 
 - **`namespace="!system"` selects every namespace except the system ones
@@ -91,6 +106,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_ns_rename` can move a stored namespace whose name is not valid
+  (#2937).**
+  `!system` now selects every non-system namespace on search and recall
+  (#2919), but 0.7.0 writers that never checked names (`mm index --namespace`,
+  namespace rules, raw MCP `mem_add`, the langgraph adapter) could store a
+  namespace with that literal name, and `mem_ns_rename` could not move it: it
+  refused any `old` that failed validation. It now accepts an `old` that fails
+  validation when that exact string is stored as a chunk namespace or a
+  metadata row; a name that is not stored gets the same refusal as before, and
+  `new` must still be valid. A non-string `old` sent through `mem_do` is
+  refused before the lookup, and so is an empty one: move a file indexed
+  under an empty namespace with `mm index <file> --force --namespace <name>`.
 - **`mm mem init` no longer says a running server needs a restart to see the
   new tier (#2925).** The note dated from before #2190. A running MCP server
   picks up the tier on its next memory operation, and a running `mm web` the
