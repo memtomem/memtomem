@@ -204,8 +204,8 @@ def init_cmd(scope: str, confirm_project_shared: bool) -> None:
         click.echo(
             f'  You can now run `mm add "..." --scope {scope}` from inside '
             f"{root}.\n"
-            "  note: a running MCP server / mm web picks up the new tier "
-            "after restart."
+            "  note: a running MCP server picks up the new tier on its next memory operation, "
+            "and a running `mm web` the next time its page loads."
         )
     elif not created:
         click.echo(f"Already initialized: {tier_dir} exists and is registered. Nothing to do.")
