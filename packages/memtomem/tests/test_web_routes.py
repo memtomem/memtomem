@@ -291,6 +291,7 @@ def app(_isolated_config_paths: Path):
     index_engine.is_excluded = MagicMock(return_value=False)
     index_engine.is_read_only_source = MagicMock(return_value=False)
     index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
+    index_engine.rewrite_refusal = AsyncMock(return_value=None)
     # ``mutated=True`` mirrors what an engine that indexed chunks really
     # returns; the index routes gate their cache invalidation on it (#2141).
     index_engine.index_path = AsyncMock(
@@ -8090,7 +8091,7 @@ class TestDeleteSourceParity:
         resp = await client.delete("/api/sources", params={"path": str(self.SOURCE)})
 
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"deleted": 1}
+        assert resp.json() == {"deleted": 1, "warning": None}
         app.state.search_pipeline.invalidate_cache.assert_called_once_with()
 
     async def test_user_scope_source_deletes_without_confirmation(self, app, client: AsyncClient):
@@ -8101,7 +8102,7 @@ class TestDeleteSourceParity:
         resp = await client.delete("/api/sources", params={"path": str(self.SOURCE)})
 
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"deleted": 1}
+        assert resp.json() == {"deleted": 1, "warning": None}
         app.state.storage.delete_by_source.assert_awaited_once()
 
     async def test_project_shared_without_flag_performs_no_write(self, app, client: AsyncClient):
@@ -8135,7 +8136,7 @@ class TestDeleteSourceParity:
         )
 
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"deleted": 1}
+        assert resp.json() == {"deleted": 1, "warning": None}
         app.state.storage.delete_by_source.assert_awaited_once()
         app.state.search_pipeline.invalidate_cache.assert_called_once_with()
 

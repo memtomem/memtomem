@@ -582,3 +582,8 @@ class IndexingStats:
     # ``SearchPipeline.invalidate_cache()`` on this flag instead.
     # Appended last for positional construction compatibility.
     mutated: bool = False
+    # The source's project rows were not rewritten: re-indexing would have
+    # stored them under another scope or project root, so the engine held the
+    # source instead (#2923). The reason is also in ``errors``; this lets a
+    # by-id rewrite tell its caller that its change is on disk but held.
+    scope_held: bool = False

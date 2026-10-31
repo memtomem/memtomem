@@ -321,6 +321,9 @@ class IndexFileResult(_IndexFileBase, total=False):
     # that returns before the transaction commits — read it with
     # ``.get("mutated", False)``.
     mutated: bool
+    # True when the source was held instead of re-indexed because its project
+    # rows would have changed scope or project root (#2923).
+    scope_held: bool
 
 
 class IndexEngine:
@@ -736,6 +739,7 @@ class IndexEngine:
             namespace_moves=tally.summary(),
             chunks_missing_vectors=missing_vectors,
             mutated=any(r.get("mutated", False) for r in file_results),
+            scope_held=any(r.get("scope_held", False) for r in file_results),
         )
 
     async def resolve_namespaces_for(
@@ -1390,6 +1394,7 @@ class IndexEngine:
             namespace_moves=tally.summary(),
             chunks_missing_vectors=await self._count_missing_vectors(self._unchanged_ids([result])),
             mutated=result.get("mutated", False),
+            scope_held=result.get("scope_held", False),
         )
 
     async def is_duplicate(
@@ -2246,6 +2251,17 @@ class IndexEngine:
         from memtomem.storage.sqlite_backend import SqliteBackend
         from memtomem.storage.sqlite_helpers import norm_path
 
+        # The source's stored scopes, read once under the lock and judged after
+        # the diff below (#2923). Read here because a source held for losing
+        # its scope must not take the receipt shortcut: an unchanged pass while
+        # the tier was unregistered records a receipt under the new scope, and
+        # reusing it would count as the clean pass that lifts the hold.
+        from memtomem.indexing.scope_guard import key_spellings, scope_change, scope_change_detail
+        from memtomem.storage.source_holds import SCOPE_LOST_HOLD
+
+        stored_scopes = self._stored_scope_rows(key_spellings(norm_path(file_path)))
+        held_scope_lost = any(r[3] == SCOPE_LOST_HOLD for r in stored_scopes)
+
         receipt_policy = ""
         # Hash the text directly. ``digest()`` exists for structured policy
         # payloads and pushes its argument through ``json.dumps`` first, which
@@ -2262,6 +2278,7 @@ class IndexEngine:
             and new_source_namespace is None
             and not self._config.enrich_chunk_context
             and not self._config.auto_summarize
+            and not held_scope_lost
         ):
             receipt_policy = digest(
                 {
@@ -2364,21 +2381,11 @@ class IndexEngine:
         # tier; scope-aware behavior lands in PR-C / PR-D once the read
         # / write surfaces are spec'd.
         #
-        # PR-D round 10 (M1) note: hash-diff means unchanged chunks
-        # aren't re-UPSERTed on a regular reindex, so a previously
-        # project_shared file whose project tier is later deregistered
-        # keeps its stale ``scope='project_shared'`` / ``project_root``
-        # rows in storage. The in-project default merge then surfaces
-        # them whenever the user is back in the deregistered cwd.
-        # ``mm reindex --force`` is the documented escape hatch:
-        # ``force=True`` promotes every unchanged chunk into
-        # ``to_upsert`` (line 789 below) and the subsequent UPSERT
-        # overwrites the persisted scope with the freshly-resolved
-        # value (defaults match ``ChunkMetadata.scope='user',
-        # project_root=None``, so the ("user", None) skip below is
-        # safe — the new chunks already carry the correct defaults).
-        # The CHANGELOG ADR-0011 PR-B entry documents the
-        # post-deregistration reindex requirement.
+        # A file whose project tier was unregistered classifies as ``user``
+        # here. Its stored project rows are not rewritten that way: the check
+        # after the diff below holds the source instead (#2923). Unchanged
+        # chunks are not re-UPSERTed on a regular reindex, so they keep their
+        # stored scope; changing it on purpose is ``mm context memory-migrate``.
         # ``scope_val`` / ``project_root`` were resolved above (just before the
         # redaction gate); reuse them here rather than re-resolving.
         if scope_val != "user" or project_root is not None:
@@ -2486,6 +2493,43 @@ class IndexEngine:
                 to_delete=diff_result.to_delete,
                 unchanged=[],
             )
+
+        # Project rows keep their scope and root (#2923). ``scope_val`` was
+        # classified against the tiers registered now; once a tier is
+        # unregistered it says ``user``, and writing that would make the rows
+        # readable from every project. Judged only where rows would be
+        # written, so an unchanged file whose receipt the unregistration
+        # invalidated is left alone — and on every pass while the source is
+        # already held for this, because a clean pass would lift the hold.
+        # Same ``scope_val`` as ``_apply_scope`` above, under the same lock: a
+        # tier unregistered after this point was not seen by either.
+        change = scope_change(((r[1], r[2]) for r in stored_scopes), scope_val, project_root)
+        if change is not None and (diff_result.to_upsert or held_scope_lost):
+            # Held under the key this pass writes and ``_index_file_locked``
+            # releases. Rows stored only under a legacy NFD spelling are
+            # judged above but not held: no clean pass would ever release that
+            # key. They keep their stored project scope, readable only there,
+            # but stay searchable with the content they were indexed from; the
+            # NFC/NFD key split behind that predates this check (#2926).
+            key = norm_path(file_path)
+            held = await self._storage.hold_source(file_path, SCOPE_LOST_HOLD)
+            logger.warning(
+                "Refusing to re-index %s: its %s rows would become %s",
+                file_path.name,
+                change.stored_scope,
+                change.new_scope,
+            )
+            return {
+                "total": 0,
+                "indexed": 0,
+                "skipped": 0,
+                "deleted": 0,
+                "errors": [scope_change_detail(change, str(file_path))],
+                # True only when every stored row is under the held key, so the
+                # source's memory really is hidden: surfaces tell the caller so.
+                "scope_held": bool(stored_scopes) and all(r[0] == key for r in stored_scopes),
+                "mutated": held,
+            }
 
         # Embed BEFORE any deletion — if embedding fails, DB stays untouched.
         # Refuse to silently produce BM25-only chunks when the configured
@@ -2958,6 +3002,7 @@ class IndexEngine:
                 "blocked_project_shared": 0,
             }
             any_mutated = False
+            any_scope_held = False
             all_errors: list[str] = []
             retryable_errors: list[str] = []
             blocked_paths: list[str] = []
@@ -3082,6 +3127,7 @@ class IndexEngine:
                 agg["blocked"] += result.get("blocked", 0)
                 agg["blocked_project_shared"] += result.get("blocked_project_shared", 0)
                 any_mutated = any_mutated or result.get("mutated", False)
+                any_scope_held = any_scope_held or result.get("scope_held", False)
                 if result.get("exempted"):
                     agg["exempted"] += 1
                     exempted_paths.append(str(fp))
@@ -3111,6 +3157,7 @@ class IndexEngine:
                     # disconnects mid-stream still needs to learn that files
                     # already committed (#2141).
                     "mutated": result.get("mutated", False),
+                    "scope_held": result.get("scope_held", False),
                 }
 
             duration = (time.monotonic() - start) * 1000
@@ -3132,6 +3179,7 @@ class IndexEngine:
                 "exempted_paths": exempted_paths,
                 "blocked_project_shared_files": agg["blocked_project_shared"],
                 "mutated": any_mutated,
+                "scope_held": any_scope_held,
                 "namespaces_preserved_against_rules": tally.preserved_against_rules,
                 "namespaces_reassigned": tally.reassigned,
                 "namespace_moves": list(tally.summary()),
@@ -3325,6 +3373,64 @@ class IndexEngine:
         without touching call sites.
         """
         return classify_scope(file_path, self._config.project_memory_dirs)
+
+    def _stored_scope_rows(
+        self, keys: Iterable[str]
+    ) -> list[tuple[str, str, str | None, str | None]]:
+        """``(key, scope, project_root, hold reason)`` for each distinct stored row under ``keys``.
+
+        Read on the writer connection, which a caller holding the source's lock
+        is the only one to write through for this source. A store that is not
+        SQLite has no rows to judge.
+        """
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        if not isinstance(self._storage, SqliteBackend):
+            return []
+        keys = list(dict.fromkeys(keys))
+        marks = ",".join("?" for _ in keys)
+        return [
+            (row[0], row[1], row[2], row[3])
+            for row in self._storage._get_db()
+            .execute(
+                "SELECT DISTINCT c.source_file, c.scope, c.project_root, h.reason "  # nosec B608
+                "FROM chunks c LEFT JOIN held_sources h ON h.source_file = c.source_file "
+                f"WHERE c.source_file IN ({marks})",
+                keys,
+            )
+            .fetchall()
+        ]
+
+    async def rewrite_refusal(
+        self, stored_key: str, *, op: str, surface: RemedySurface = "neutral"
+    ) -> str | None:
+        """Why a by-id rewrite of the source stored as ``stored_key`` must not run (#2923).
+
+        Asked under the caller's source locks, before it writes. ``None`` means
+        the rewrite may proceed. Two refusals: the key now resolves to another
+        file, so the write would land there; or re-indexing the file would
+        store the source's project rows under another scope or project root.
+        """
+        from memtomem.indexing.scope_guard import (
+            key_spellings,
+            relinked_detail,
+            scope_change,
+            scope_change_detail,
+        )
+        from memtomem.storage.sqlite_helpers import stored_key_moved
+
+        name = Path(stored_key).name
+        if await asyncio.to_thread(stored_key_moved, stored_key):
+            return relinked_detail(name, op=op)
+        rows = self._stored_scope_rows(key_spellings(stored_key))
+        if not rows:
+            return None
+        decision_path = await asyncio.to_thread(resolve_path, Path(stored_key))
+        scope_val, project_root = self._resolve_scope(decision_path)
+        change = scope_change(((r[1], r[2]) for r in rows), scope_val, project_root)
+        if change is None:
+            return None
+        return scope_change_detail(change, stored_key, op=op, surface=surface)
 
     _EXCLUDED_DIRS = frozenset(
         {

@@ -17,15 +17,17 @@ from memtomem.storage.source_holds import (
     PRESENCE_KEPT_HOLD_REASONS,
     REDACTION_BLOCKED_HOLD,
     RELINKED_HOLD,
+    SCOPE_LOST_HOLD,
 )
 from memtomem.storage.sqlite_helpers import fold_path_form, norm_path, utc_stamp
 from memtomem.storage.sqlite_meta import _standalone_commit, _standalone_write_guard
 
 
 # A hold keeps its reason against a lower-ranked one: redaction is about the
-# file's content and a relink about which file the path names, and neither is
-# answered by the availability observations every other reason records.
-_HOLD_RANKS = {REDACTION_BLOCKED_HOLD: 2, RELINKED_HOLD: 1}
+# file's content, a relink about which file the path names and a lost scope
+# about which tier it is registered in, and none is answered by the
+# availability observations every other reason records.
+_HOLD_RANKS = {REDACTION_BLOCKED_HOLD: 2, RELINKED_HOLD: 1, SCOPE_LOST_HOLD: 1}
 
 
 def _hold_rank(reason: str) -> int:

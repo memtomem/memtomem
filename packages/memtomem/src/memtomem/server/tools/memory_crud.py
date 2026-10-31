@@ -11,6 +11,7 @@ from uuid import UUID
 
 from memtomem.config import TargetScope
 from memtomem.errors import RetryableError
+from memtomem.indexing.scope_guard import scope_held_notice
 from memtomem.memory_scope import NS_RETARGET_ATTEMPTS, MemoryScopeError
 from memtomem.memory_scope import NS_RETARGET_EXHAUSTED_ERROR as _NS_RETARGET_EXHAUSTED
 from memtomem.server import mcp
@@ -329,7 +330,7 @@ async def _locked_chunk(
                         yield None, f"Error: chunk {chunk_id} not found.", cross_process_held
                         return
                     if AppContext.memory_file_lock_key(fresh.metadata.source_file) == key:
-                        refusal = _scope_loss_refusal(app, fresh, chunk_id)
+                        refusal = await _scope_loss_refusal(app, fresh, chunk_id)
                         if refusal is not None:
                             yield None, refusal, cross_process_held
                             return
@@ -351,29 +352,21 @@ async def _locked_chunk(
     yield None, f"Error: chunk {chunk_id} source file is being moved concurrently; retry.", False
 
 
-def _scope_loss_refusal(app: AppContext, chunk: Chunk, chunk_id: str) -> str | None:
-    """Refuse a rewrite that would re-index project memory as another scope.
+async def _scope_loss_refusal(app: AppContext, chunk: Chunk, chunk_id: str) -> str | None:
+    """Refuse a rewrite that would re-index project memory as another scope or project.
 
     Edit and delete rewrite the chunk's file and re-index all of it, and the
     re-index classifies by path against the tiers registered *now*. A row
     stored as ``project_local`` whose tier was unregistered since would come
-    back as ``user``, readable from every project (#2920). The row is still
-    reachable when a ``mem_project_bind`` binding outlives the registration,
-    or when the cwd's project keeps its other tier. Judged with the same
-    classifier the re-index uses, under the locks the rewrite holds.
+    back as ``user``, readable from every project (#2920). A key that became a
+    symlink would send the write into another file (#2923). Judged by the
+    engine, under the locks the rewrite holds; the re-index holds the source
+    rather than rewrite it if the registry changes after this check.
     """
-    stored = chunk.metadata.scope
-    if stored == "user":
-        return None
-    current, _ = app.index_engine._resolve_scope(Path(chunk.metadata.source_file))
-    if current == stored:
-        return None
-    root = chunk.metadata.project_root
-    return (
-        f"Error: chunk {chunk_id} is {stored} memory, but its tier is no longer registered, "
-        f"so rewriting its file would re-index it as {current} memory. Register the tier "
-        f"again first: cd {root} && mm mem init --scope {stored}"
+    detail = await app.index_engine.rewrite_refusal(
+        str(chunk.metadata.source_file), op=f"chunk {chunk_id} rewrite", surface="mcp"
     )
+    return None if detail is None else f"Error: {detail}"
 
 
 async def _flag_imprecise_write(
@@ -1513,7 +1506,7 @@ async def mem_edit(
             f"Memory updated in {meta.source_file}\n"
             f"- Lines {meta.start_line}-{meta.end_line} replaced\n"
             f"- Re-indexed: {stats.indexed_chunks} chunks"
-        )
+        ) + (f"\n- {scope_held_notice('edit')}" if stats.scope_held else "")
 
 
 @mcp.tool()
@@ -1616,7 +1609,7 @@ async def mem_delete(
                 f"Memory deleted from {meta.source_file}\n"
                 f"- Lines {meta.start_line}-{meta.end_line} removed\n"
                 f"- Re-indexed: {stats.indexed_chunks} chunks"
-            )
+            ) + (f"\n- {scope_held_notice('delete')}" if stats.scope_held else "")
 
     if source_file:
         # ``source_file`` usually names a stored key, as ``mem_list`` prints it
