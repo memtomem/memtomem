@@ -59,10 +59,13 @@ logger = logging.getLogger(__name__)
 _CHUNK_LOCK_MOVE_RETRIES = 3
 
 # ``mem_add``'s duplicate warning. The threshold is on the storage dense score,
-# ``1/(1+L2)``, not a cosine: for unit vectors 0.90 is a cosine of about 0.994,
-# so only near-identical notes are reported. At most this many of the write's
-# own chunks probe for neighbours; all of them are excluded as "self".
-_DUPLICATE_DENSE_MIN = 0.90
+# ``1/(1+L2)``, not a cosine: for unit vectors 0.85 is a cosine of about 0.984.
+# Stored vectors embed the title heading with the body (and an untagged entry's
+# ``created`` line), so on one bge-m3 store the same body under another title
+# scored 0.894; an unrelated note, 0.50. Provisional until calibrated (#2944).
+# At most this many of the write's own chunks probe for neighbours; all of
+# them are excluded as "self".
+_DUPLICATE_DENSE_MIN = 0.85
 _DUPLICATE_PROBES = 8
 
 
