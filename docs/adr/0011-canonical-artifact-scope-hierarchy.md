@@ -828,9 +828,12 @@ project from then on, for every tool that resolves it. The binding is set
 once per process and is not re-checked. A re-check that found the tier gone
 would have to return no project, and under an explicit scope filter no
 project reads every project's rows. Unregistering the tier leaves the binding
-in place until the server restarts, so reads stay on the bound project; adds
-to the tier are refused at once by the write path's own registration check,
-and `mem_status` warns. Network transports refuse
+in place until the server restarts, so reads stay on the bound project, and
+`mem_status` warns. Writes judge registration themselves. An add to the tier
+is refused unless another configured directory covers its file. An edit or
+delete by id is refused when the re-index would classify the chunk's file
+into a different scope than the row has, because a `project_local` row
+re-indexed as `user` becomes readable from every project. Network transports refuse
 the binding, because streamable HTTP shares one context across clients. The
 health watchdog keeps using the cwd, and so do the context gateway's
 `context_*` actions. They resolve their project separately, and moving them

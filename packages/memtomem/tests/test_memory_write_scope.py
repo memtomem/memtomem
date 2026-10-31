@@ -171,6 +171,9 @@ async def test_mem_edit_inferred_scope_blocks_project_shared_force_unsafe(
     # measures. Before #2346 the lock acquire created this tree itself — which
     # was the bug — so the fixture had been leaning on it.
     (proj / ".memtomem" / "memories").mkdir(parents=True)
+    # Registered, as the tier of any project_shared row is: a rewrite whose
+    # re-index would file the row as another scope is refused before Gate A.
+    comp.config.indexing.project_memory_dirs = [proj / ".memtomem" / "memories"]
     chunk_id = uuid4()
     fake_chunk = Chunk(
         content="original",
@@ -325,7 +328,10 @@ def _stage_edit_chunk(
     fetch it is aiming at never happened.
     """
     project_root = tmp_path / "proj_edit"
-    proj_dir = project_root / ".memtomem" / "memories"
+    # The tier the row's scope lives in: a rewrite re-indexes by path, and a
+    # project_local row filed under the shared tier is refused as a scope change.
+    tier = "memories.local" if (fresh_scope or scope) == "project_local" else "memories"
+    proj_dir = project_root / ".memtomem" / tier
     proj_dir.mkdir(parents=True, exist_ok=True)
     source = proj_dir / "rule.md"
     source.write_text(f"## team rule\n\n{body}\n", encoding="utf-8")

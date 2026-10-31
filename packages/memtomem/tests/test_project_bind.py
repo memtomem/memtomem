@@ -20,7 +20,7 @@ from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server import context as server_context
 from memtomem.server.context import AppContext
 from memtomem.server.health_checks import check_full_health_report
-from memtomem.server.tools.memory_crud import mem_add
+from memtomem.server.tools.memory_crud import mem_add, mem_delete, mem_edit
 from memtomem.server.tools.browse import mem_read
 from memtomem.server.tools.meta import mem_do
 from memtomem.server.tools.project_bind import mem_project_bind
@@ -407,6 +407,75 @@ async def test_bound_reads_exclude_another_projects_rows_before_and_after_unregi
     assert not found & other_ids
     assert not recalled & other_ids
     assert "not found" in (await mem_read(chunk_id=foreign, ctx=ctx)).lower()
+
+
+# ---------------------------------------------------------------------------
+# A rewrite must not re-index project memory as user memory
+# ---------------------------------------------------------------------------
+
+
+async def _only_chunk_id(coro) -> str:
+    ids = await _structured_ids(coro)
+    assert len(ids) == 1, ids
+    return next(iter(ids))
+
+
+@pytest.mark.asyncio
+async def test_edit_and_delete_refuse_a_row_whose_bound_tier_was_unregistered(
+    bm25_only_components, tmp_path: Path, stdio, plugin_cwd
+) -> None:
+    comp, _ = bm25_only_components
+    mine_root, mine_tier = _make_project(tmp_path, "mine")
+    other_root, other_tier = _make_project(tmp_path, "other")
+    comp.config.indexing.project_memory_dirs = [mine_tier, other_tier]
+    app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+    await mem_project_bind(project_root=str(mine_root), ctx=ctx)
+    await mem_add(content="private zephyr note", scope="project_local", ctx=ctx)
+    chunk_id = await _only_chunk_id(
+        mem_search(query="zephyr", scope="project_local", output_format="structured", ctx=ctx)
+    )
+    before = {path: path.read_bytes() for path in mine_tier.rglob("*.md")}
+
+    comp.config.indexing.project_memory_dirs = [other_tier]
+    edited = await mem_edit(chunk_id=chunk_id, new_content="private zephyr edited", ctx=ctx)
+    assert edited.startswith(f"Error: chunk {chunk_id} is project_local memory"), edited
+    assert "would re-index it as user memory" in edited
+    assert f"cd {mine_root} && mm mem init --scope project_local" in edited
+    deleted = await mem_delete(chunk_id=chunk_id, ctx=ctx)
+    assert deleted.startswith(f"Error: chunk {chunk_id} is project_local memory"), deleted
+    assert {path: path.read_bytes() for path in mine_tier.rglob("*.md")} == before
+
+    other_app = AppContext.from_components(comp)
+    other_ctx = StubCtx(other_app)
+    await mem_project_bind(project_root=str(other_root), ctx=other_ctx)
+    seen = json.loads(await mem_recall(output_format="structured", ctx=other_ctx))
+    assert chunk_id not in {row["chunk_id"] for row in seen["results"]}
+
+
+@pytest.mark.asyncio
+async def test_edit_refuses_a_cwd_projects_row_whose_tier_was_unregistered(
+    bm25_only_components, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No binding: the cwd's project keeps its shared tier, so the resolver still
+    # finds it after the local tier is unregistered, and the local row resolves.
+    comp, _ = bm25_only_components
+    root, local_tier = _make_project(tmp_path, "proj")
+    shared_tier = root / ".memtomem" / "memories"
+    shared_tier.mkdir()
+    comp.config.indexing.project_memory_dirs = [shared_tier, local_tier]
+    monkeypatch.chdir(root)
+    app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+    await mem_add(content="local quokka note", scope="project_local", ctx=ctx)
+    chunk_id = await _only_chunk_id(
+        mem_search(query="quokka", scope="project_local", output_format="structured", ctx=ctx)
+    )
+
+    comp.config.indexing.project_memory_dirs = [shared_tier]
+    assert _resolve_project_context_root(app) == root
+    edited = await mem_edit(chunk_id=chunk_id, new_content="local quokka edited", ctx=ctx)
+    assert edited.startswith(f"Error: chunk {chunk_id} is project_local memory"), edited
 
 
 # ---------------------------------------------------------------------------

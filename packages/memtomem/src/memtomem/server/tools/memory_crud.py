@@ -329,6 +329,10 @@ async def _locked_chunk(
                         yield None, f"Error: chunk {chunk_id} not found.", cross_process_held
                         return
                     if AppContext.memory_file_lock_key(fresh.metadata.source_file) == key:
+                        refusal = _scope_loss_refusal(app, fresh, chunk_id)
+                        if refusal is not None:
+                            yield None, refusal, cross_process_held
+                            return
                         yield fresh, None, cross_process_held
                         return
                     # Moved out from under us (migrate re-scoped the chunk before
@@ -345,6 +349,31 @@ async def _locked_chunk(
             )
             return
     yield None, f"Error: chunk {chunk_id} source file is being moved concurrently; retry.", False
+
+
+def _scope_loss_refusal(app: AppContext, chunk: Chunk, chunk_id: str) -> str | None:
+    """Refuse a rewrite that would re-index project memory as another scope.
+
+    Edit and delete rewrite the chunk's file and re-index all of it, and the
+    re-index classifies by path against the tiers registered *now*. A row
+    stored as ``project_local`` whose tier was unregistered since would come
+    back as ``user``, readable from every project (#2920). The row is still
+    reachable when a ``mem_project_bind`` binding outlives the registration,
+    or when the cwd's project keeps its other tier. Judged with the same
+    classifier the re-index uses, under the locks the rewrite holds.
+    """
+    stored = chunk.metadata.scope
+    if stored == "user":
+        return None
+    current, _ = app.index_engine._resolve_scope(Path(chunk.metadata.source_file))
+    if current == stored:
+        return None
+    root = chunk.metadata.project_root
+    return (
+        f"Error: chunk {chunk_id} is {stored} memory, but its tier is no longer registered, "
+        f"so rewriting its file would re-index it as {current} memory. Register the tier "
+        f"again first: cd {root} && mm mem init --scope {stored}"
+    )
 
 
 async def _flag_imprecise_write(

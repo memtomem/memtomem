@@ -24,8 +24,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   when binding. After the tier is unregistered, reads stay on the bound
   project. An add to the project's tier is refused at once, whether it goes
   to the default file or to a named file that no other configured directory
-  covers. Pinned context and edits by id are not re-checked until the server
-  restarts, and `mem_status` warns until then. `mem_status` marks a
+  covers. Pinned context is not re-checked until the server restarts, and
+  `mem_status` warns until then.
+- **`mem_edit` and `mem_delete` refuse a rewrite that would turn project
+  memory into user memory (#2920).** They rewrite a chunk's file and re-index
+  all of it, and the re-index classifies by path against the tiers registered
+  now. A `project_local` row whose tier had been unregistered came back as
+  `user`, readable from every project. That row stays reachable from a server
+  bound to its project, and also from a server whose working directory is in
+  a project that kept its other tier registered. Both now refuse the rewrite
+  and name the `mm mem init` command that registers the tier again. Web edits,
+  an unregistration racing the edit, and a source moved behind a symlink still
+  re-index this way (#2923). `mem_status` marks a
   bound root `(bound)`, and `mm status --json` gains
   `runtime.project_context_source` (`"bound"` or `"cwd"`).
 - **Cross-runtime `brief` and `update` project memory workflows (`claude` 0.5.20,
