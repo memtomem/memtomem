@@ -38,6 +38,8 @@ _VECTORS = {
     "vecmarkNEAR": _unit(1.0, 0.03),  # L2 ~0.030 -> ~0.971
     "vecmarkMID": _unit(1.0, 0.0, 0.08),  # L2 ~0.080 -> ~0.926
     "vecmarkFAR": _unit(1.0, 0.25),  # L2 ~0.245 -> ~0.803
+    "vecmarkABOVE": _unit(1.0, 0.0, 0.0, 0.1035),  # just above 0.90 (~0.9065)
+    "vecmarkBELOW": _unit(1.0, 0.0, 0.0, 0.1160),  # just below 0.90 (~0.8965)
 }
 _QUERY_VECTOR = _unit(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
 
@@ -180,16 +182,16 @@ class TestRealNeighboursAreReported:
 
     @pytest.mark.asyncio
     async def test_threshold_is_on_the_dense_score(self, stack):
-        assert _dense_score("vecmarkALPHA", "vecmarkNEAR") > 0.90
-        assert _dense_score("vecmarkALPHA", "vecmarkFAR") < 0.90
+        assert 0.90 < _dense_score("vecmarkALPHA", "vecmarkABOVE") < 0.91
+        assert 0.89 < _dense_score("vecmarkALPHA", "vecmarkBELOW") < 0.90
         comp, _ = stack
-        await _add(comp, _note("vecmarkNEAR", "Near neighbour"), title="Near", file="n.md")
-        await _add(comp, _note("vecmarkFAR", "Far neighbour"), title="Far", file="f.md")
+        await _add(comp, _note("vecmarkABOVE", "Above neighbour"), title="Above", file="a.md")
+        await _add(comp, _note("vecmarkBELOW", "Below neighbour"), title="Below", file="b.md")
         result = await _add(comp, _note("vecmarkALPHA", "The new note"), title="New", file="x.md")
         warned = _warned(result)
         assert len(warned) == 1, result
-        assert "Near neighbour" in warned[0]
-        assert f"(dense {_dense_score('vecmarkALPHA', 'vecmarkNEAR'):.2f})" in warned[0]
+        assert "Above neighbour" in warned[0]
+        assert f"(dense {_dense_score('vecmarkALPHA', 'vecmarkABOVE'):.2f})" in warned[0]
         assert "%" not in result
 
     @pytest.mark.asyncio
@@ -210,6 +212,31 @@ class TestRealNeighboursAreReported:
         warned = _warned(result)
         assert [w for w in warned if "Expired twin" in w] == [], result
         assert any("Still valid" in w for w in warned), result
+
+    @pytest.mark.asyncio
+    async def test_a_pool_that_stays_full_widens_only_once(self, stack, monkeypatch):
+        comp, mem_dir = stack
+        expired = mem_dir / "expired.md"
+        expired.write_text(
+            "---\nvalid_to: 2000-01-01\n---\n\n"
+            + "\n\n".join(
+                f"## Old {i}\n\n" + _note("vecmarkNEAR", f"Expired twin {i}") for i in range(40)
+            ),
+            encoding="utf-8",
+        )
+        await comp.index_engine.index_file(expired)
+        pools: list[int] = []
+        real = comp.storage.dense_search
+
+        async def spy(embedding, top_k=20, **kwargs):
+            pools.append(top_k)
+            return await real(embedding, top_k=top_k, **kwargs)
+
+        monkeypatch.setattr(comp.storage, "dense_search", spy)
+        result = await _add(comp, _note("vecmarkALPHA", "The new note"), title="New", file="x.md")
+        assert _warned(result) == [], result
+        # One probe: 3 neighbours + 1 excluded self, then one 4x retry.
+        assert pools == [4, 16]
 
 
 class TestScopeOfTheCheck:

@@ -363,10 +363,11 @@ async def nearest_stored_neighbours(
         if embedding is None:
             continue
         pool = per_probe_k + len(excluded)
-        while True:
+        widened = min(pool * 4, _STORED_NEIGHBOUR_POOL_CAP)
+        for attempt in (pool, widened) if widened > pool else (pool,):
             results = await storage.dense_search(
                 embedding,
-                top_k=pool,
+                top_k=attempt,
                 namespace_filter=namespace_filter,
                 project_context_root=project_context_root,
             )
@@ -375,10 +376,8 @@ async def nearest_stored_neighbours(
                 for r in results
                 if r.chunk.id not in excluded and chunk_valid_at(r.chunk.metadata, as_of_unix)
             ]
-            widened = min(pool * 4, _STORED_NEIGHBOUR_POOL_CAP)
-            if len(results) < pool or len(eligible) >= per_probe_k or widened <= pool:
+            if len(results) < attempt or len(eligible) >= per_probe_k:
                 break
-            pool = widened
         for r in eligible[:per_probe_k]:
             seen = best.get(r.chunk.id)
             if seen is None or r.score > seen.score:
