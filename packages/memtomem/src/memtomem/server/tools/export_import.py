@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from memtomem.constants import writable_namespace_arg
 from memtomem.generation import hold_app_generation
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
@@ -131,6 +132,7 @@ async def mem_import(
     read-side asymmetry with the root-bounded ``mem_index`` is intentional; see
     ADR-0006 Axis G before adding a path allowlist.
     """
+    namespace = writable_namespace_arg(namespace)
     from memtomem.tools.export_import import (
         ImportPrivacyError,
         _VALID_ON_CONFLICT,

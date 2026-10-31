@@ -260,6 +260,79 @@ def validate_namespace(value: object) -> str:
     return value
 
 
+def validate_writable_namespace(value: object) -> str:
+    """Return *value* unchanged if a write may store chunks under it.
+
+    The gate for caller-supplied ``namespace=`` on the surfaces that write
+    chunk rows: ``mem_add``, ``mem_batch_add``, ``mem_fetch``, ``mem_index``,
+    the importers, the web add/index routes, ``mm index --namespace`` and the
+    Python adapter (#2933). It is narrower than :func:`validate_namespace`
+    on purpose. Namespace rules produce shapes the strict gate refuses (a
+    ``claude:-Users-…`` segment with a leading dash, from a Claude Code
+    project directory name), and a write into a namespace a store already
+    uses has to keep working. What a write must not do is store a name the
+    read side cannot address by that exact name, so the reader decides:
+
+    * not a string, empty, or only whitespace: refused. Readers treat an
+      empty namespace as "no filter", and the indexer would store it as an
+      explicit one.
+    * first ``:`` segment is ``agent-runtime``: the strict
+      :func:`validate_namespace`, so a write cannot store an agent-runtime
+      name the agent-id contract refuses (``agent-runtime:foo:bar``, #496).
+    * anything else: :meth:`memtomem.models.NamespaceFilter.parse` must read
+      the string as exactly that one name. A comma reads as a list, a ``*``
+      as a glob, and ``!system`` as the every-non-system-namespace selector;
+      each is refused. A read syntax added to the parser later is covered
+      without changing this function.
+
+    Raises :class:`InvalidNameError`, like :func:`validate_namespace`.
+    """
+    from memtomem.models import InvalidNamespaceFilterError, NamespaceFilter
+
+    prefix = INVALID_NAMESPACE_MESSAGE_PREFIX
+    if not isinstance(value, str):
+        raise InvalidNameError(f"{prefix}: expected str, got {type(value).__name__}")
+    if not value.strip():
+        raise InvalidNameError(f"{prefix} {value!r}: empty")
+    if value.split(":", 1)[0] == AGENT_NAMESPACE_PREFIX.rstrip(":"):
+        return validate_namespace(value)
+    try:
+        parsed = NamespaceFilter.parse(value)
+    except InvalidNamespaceFilterError as exc:
+        raise InvalidNameError(f"{prefix} {value!r}: {exc}") from exc
+    if parsed != NamespaceFilter(namespaces=(value,)):
+        if value == NON_SYSTEM_NAMESPACES:
+            reading = "the selector for every non-system namespace"
+        elif parsed is not None and parsed.pattern is not None:
+            reading = "a glob pattern"
+        elif parsed is not None and len(parsed.namespaces) > 1:
+            reading = "a comma-separated list of namespaces"
+        else:
+            reading = "something other than this exact name"
+        raise InvalidNameError(
+            f"{prefix} {value!r}: a search or recall would read it as {reading}, "
+            "so nothing stored under it could be found by name. Choose a name "
+            "without ',' or '*' that is not '!system'."
+        )
+    return value
+
+
+def writable_namespace_arg(value: object) -> str | None:
+    """Normalize a write surface's optional ``namespace=`` argument.
+
+    ``None`` and ``""`` both mean "no namespace given" and return ``None``:
+    the MCP write tools have always read an empty string that way, and a
+    surface whose indexer treats any non-``None`` value as explicit
+    (``/api/index``, ``mem_import``'s override) would otherwise store it.
+    Anything else goes through :func:`validate_writable_namespace`, so a
+    whitespace-only string or a non-string value is refused rather than
+    read as absent. Callers rebind their argument to the result.
+    """
+    if value is None or (isinstance(value, str) and value == ""):
+        return None
+    return validate_writable_namespace(value)
+
+
 # Read-side selector for "every namespace except the system prefixes". It is
 # an explicit value, so ``namespace or current_namespace`` keeps it over an
 # active session or agent namespace, and :meth:`NamespaceFilter.parse` turns

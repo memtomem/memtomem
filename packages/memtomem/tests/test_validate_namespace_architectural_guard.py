@@ -20,11 +20,17 @@ This file makes the contract **declarative** rather than per-tool:
   in issue #500). Each entry carries the rationale inline so a future
   reader can look up *why* the deferral is in place rather than wonder
   whether it's an oversight.
+* :data:`WRITABLE_NS_SURFACES` — write surfaces that must rebind their
+  argument through ``writable_namespace_arg`` (#2933), the narrower gate
+  for names that land in chunk rows.
+* :data:`DELEGATED_NS_SURFACES` — functions that only forward a value
+  their callers already gated.
 * :func:`test_no_unclassified_ns_surfaces` — AST-scans
   ``server/tools/*.py`` for any tool that takes a namespace-shaped
   parameter. Every match must be classified into either set; an
   unclassified hit fails the test, forcing the author to make a decision
-  rather than ship a silent gap.
+  rather than ship a silent gap. Every match must be classified into one
+  of the four sets.
 
 The result: the next time someone adds ``mem_foo(namespace=...)``
 without calling ``validate_namespace``, this test fails at PR time and
@@ -68,21 +74,54 @@ VALIDATED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
     }
 )
 
-# Surfaces the project has explicitly left ungated as of this writing.
-# Each entry carries its rationale inline; if the deferral changes, move
-# the triple to ``VALIDATED_NS_SURFACES`` and add the validator call to
-# the function body in the same PR.
-#
-# Bulk deferral context — issue #500 "Out of scope":
-#   > ``mem_add`` / ``mem_search`` ``namespace=`` arguments — broader UX
-#   > call covered separately if pursued.
-#
-# That deferral covers the read-filter and per-write-path ``namespace=``
-# arguments below. The forward-shield at session-start /
-# ``mem_agent_share`` / ``mem_ns_*`` already prevents the bypass shape
-# from landing in app state or session rows; gating these would be a UX
-# decision (do we reject ``mem_add(namespace="foo bar")`` loudly, or
-# accept the legacy charset?) and is tracked as future work.
+# Write surfaces whose caller-supplied ``namespace`` lands in chunk rows
+# (#2933). Each must rebind the argument through ``writable_namespace_arg``
+# before anything is written: ``<param> = writable_namespace_arg(<param>)``.
+# The gate is narrower than ``validate_namespace`` on purpose -- namespace
+# rules store shapes the strict gate refuses (``claude:-Users-...``), and a
+# write into a namespace the store already uses must keep working -- so it
+# refuses what the read side cannot address by exact name: a comma list, a
+# glob, the ``!system`` selector, a blank, a malformed ``agent-runtime:`` id.
+# The web add/index routes, ``mm index --namespace`` and the LangGraph
+# ``MemtomemStore.add``/``.index`` call the same helper; their behaviour is
+# pinned in ``test_writable_namespace_gate.py``, since this guard scans
+# ``server/tools`` only.
+WRITABLE_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
+    {
+        ("export_import.py", "mem_import", "namespace"),
+        ("importers.py", "mem_import_notion", "namespace"),
+        ("importers.py", "mem_import_obsidian", "namespace"),
+        ("indexing.py", "mem_index", "namespace"),
+        ("memory_crud.py", "mem_add", "namespace"),
+        ("memory_crud.py", "mem_batch_add", "namespace"),
+        ("url_index.py", "mem_fetch", "namespace"),
+    }
+)
+
+# Functions that take a namespace-shaped parameter but only forward a value
+# their callers already gated. Gating here would double-validate the same
+# value; each entry names who gates it.
+DELEGATED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
+    {
+        # Shared core of ``mem_add``. Its other callers pass ``None``
+        # (formation, reflection, scratch), ``mem_agent_share``'s target
+        # (validated strictly above), or a namespace consolidation read back
+        # from stored rows -- re-gating that would refuse a summary for a
+        # legacy namespace the store already holds.
+        ("memory_crud.py", "_mem_add_core", "namespace"),
+        # Delegates to ``mem_add``, which gates the value.
+        ("procedure.py", "mem_procedure_save", "namespace"),
+        # Forward the write surfaces' already-gated ``namespace`` and only
+        # decide what to fall back to when it is None (#2104 split form
+        # reports which of the two sources answered).
+        ("_provenance.py", "capture_session_and_namespace", "namespace"),
+        ("_provenance.py", "capture_session_and_namespace_split", "namespace"),
+    }
+)
+
+# Surfaces the project has explicitly left ungated. Each entry carries its
+# rationale inline; if that changes, move the triple to the set that gates it
+# and add the call to the function body in the same PR.
 DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
     {
         # Read-filter surfaces — namespace narrows results, never writes.
@@ -100,30 +139,12 @@ DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         ("search.py", "mem_search", "namespace"),
         ("temporal.py", "mem_timeline", "namespace"),
         ("temporal.py", "mem_activity", "namespace"),
-        # Write-path surfaces — caller-supplied namespace lands in chunks
-        # rows. Deferred per the same issue-#500 "broader UX call" line;
-        # the storage layer's ``_NS_NAME_RE`` (``[\\w\\-.:@ ]{1,255}``)
-        # still rejects the most pathological shapes today, and tightening
-        # it to the strict gate would break legacy-shape rows. Tracked for
-        # follow-up.
+        # Select stored rows by namespace rather than naming where new rows
+        # go: ``mem_consolidate`` filters the sources it groups, and
+        # ``mem_delete`` removes the chunks stored under an exact name, which
+        # must keep working for a name no write would accept today.
         ("consolidation.py", "mem_consolidate", "namespace"),
-        ("export_import.py", "mem_import", "namespace"),
-        ("importers.py", "mem_import_notion", "namespace"),
-        ("importers.py", "mem_import_obsidian", "namespace"),
-        ("indexing.py", "mem_index", "namespace"),
-        ("memory_crud.py", "_mem_add_core", "namespace"),
-        ("memory_crud.py", "mem_add", "namespace"),
         ("memory_crud.py", "mem_delete", "namespace"),
-        ("memory_crud.py", "mem_batch_add", "namespace"),
-        ("procedure.py", "mem_procedure_save", "namespace"),
-        ("url_index.py", "mem_fetch", "namespace"),
-        # Not a surface of its own: ``capture_session_and_namespace``
-        # forwards its caller's already-classified ``namespace`` (the four
-        # write-path entries above) and only decides what to fall back to
-        # when it is None. Gating here would double-validate the same value
-        # and still leave the callers' own parameters ungated, so it is
-        # deferred with them and moves when they do.
-        ("_provenance.py", "capture_session_and_namespace", "namespace"),
         # Not a surface of its own (#2195): ``merge_agent_namespace_filter``
         # is a pure string-merge helper that picks which shared bucket the
         # agent's private scope is joined with. Both callers gate the value
@@ -131,14 +152,9 @@ DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         # ``VALIDATED_NS_SURFACES`` entry above, ``mm agent search`` via the
         # same ``validate_namespace`` call on its ``--shared-namespace``
         # option — so gating here would double-validate the same value while
-        # leaving neither caller's own parameter any safer. Same reasoning as
-        # the ``_provenance.py`` forwarders below; it moves if a caller that
-        # does not validate is ever added.
+        # leaving neither caller's own parameter any safer. It moves if a
+        # caller that does not validate is ever added.
         ("multi_agent.py", "merge_agent_namespace_filter", "shared_namespace"),
-        # Same rationale for the split form (#2104): it forwards the caller's
-        # already-classified ``namespace`` and only reports which of the two
-        # sources answered. Gating here would double-validate the same value.
-        ("_provenance.py", "capture_session_and_namespace_split", "namespace"),
         # ``mem_tag_merge.target`` is a *tag name*, not a namespace — caught
         # by the parameter-name heuristic but semantically distinct from the
         # ``mem_agent_share.target`` shape above. Tags travel through
@@ -155,6 +171,14 @@ DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         ("memory_crud.py", "_namespace_mix_refusal", "target"),
     }
 )
+
+
+_ALL_SETS: dict[str, frozenset[tuple[str, str, str]]] = {
+    "VALIDATED": VALIDATED_NS_SURFACES,
+    "WRITABLE": WRITABLE_NS_SURFACES,
+    "DELEGATED": DELEGATED_NS_SURFACES,
+    "DEFERRED": DEFERRED_NS_SURFACES,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +277,56 @@ def _calls_validate_namespace_on(node: ast.AsyncFunctionDef | ast.FunctionDef, p
     return False
 
 
+_NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+
+def _walk_own_scope(node: ast.AsyncFunctionDef | ast.FunctionDef):
+    """Yield the nodes of *node*'s body, not descending into nested scopes."""
+    stack: list[ast.AST] = list(node.body)
+    while stack:
+        current = stack.pop()
+        yield current
+        if isinstance(current, _NESTED_SCOPES):
+            continue
+        stack.extend(ast.iter_child_nodes(current))
+
+
+def _rebinds_through_writable_namespace_arg(
+    node: ast.AsyncFunctionDef | ast.FunctionDef, param: str
+) -> bool:
+    """Return True iff the body contains ``<param> = writable_namespace_arg(<param>)``.
+
+    The rebinding is the contract, not just the call: the helper normalizes
+    ``""`` to ``None``, so a bare ``writable_namespace_arg(namespace)`` whose
+    result is dropped would leave an empty string flowing on to an indexer
+    that stores it as an explicit namespace. Same strictness as
+    :func:`_calls_validate_namespace_on` on the call form. Nested function,
+    lambda and class bodies are not searched: a rebinding there gates a
+    closure's local, not the surface's argument.
+    """
+    for sub in _walk_own_scope(node):
+        if not isinstance(sub, ast.Assign) or len(sub.targets) != 1:
+            continue
+        target, value = sub.targets[0], sub.value
+        if not (isinstance(target, ast.Name) and target.id == param):
+            continue
+        if not isinstance(value, ast.Call) or not value.args:
+            continue
+        func = value.func
+        callee = (
+            func.attr
+            if isinstance(func, ast.Attribute)
+            else func.id
+            if isinstance(func, ast.Name)
+            else None
+        )
+        first = value.args[0]
+        if callee == "writable_namespace_arg" and isinstance(first, ast.Name):
+            if first.id == param:
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -289,6 +363,24 @@ def test_declared_validated_surfaces_call_validate_namespace(
     )
 
 
+@pytest.mark.parametrize("filename, fn_name, param", sorted(WRITABLE_NS_SURFACES))
+def test_declared_writable_surfaces_rebind_through_the_gate(
+    filename: str, fn_name: str, param: str
+) -> None:
+    """Every :data:`WRITABLE_NS_SURFACES` entry rebinds its argument through the gate."""
+    matches = [
+        node for fname, node in _iter_tool_functions() if fname == filename and node.name == fn_name
+    ]
+    assert matches, f"Declared writable surface not found in source: {filename}::{fn_name}."
+    assert _rebinds_through_writable_namespace_arg(matches[0], param), (
+        f"{filename}::{fn_name} declares ``{param}`` as a writable namespace "
+        f"surface but the body does not contain "
+        f"``{param} = writable_namespace_arg({param})``. Restore it before "
+        f"anything is written, or move the entry to the set that describes "
+        f"what the function does now."
+    )
+
+
 def test_no_unclassified_ns_surfaces() -> None:
     """Every tool function with a namespace-shaped parameter must be
     explicitly classified into either VALIDATED or DEFERRED. An
@@ -302,7 +394,8 @@ def test_no_unclassified_ns_surfaces() -> None:
     eventually drifts unless a guard forces re-classification when the
     code adds new ones.
     """
-    declared = VALIDATED_NS_SURFACES | DEFERRED_NS_SURFACES
+    declared = _ALL_SETS["VALIDATED"] | _ALL_SETS["WRITABLE"]
+    declared |= _ALL_SETS["DELEGATED"] | _ALL_SETS["DEFERRED"]
     found: set[tuple[str, str, str]] = set()
     for filename, node in _iter_tool_functions():
         for p in _ns_params(node):
@@ -316,15 +409,16 @@ def test_no_unclassified_ns_surfaces() -> None:
         msg_parts.append(
             "Unclassified namespace surfaces — every tool with a "
             "``namespace=``/``target=``/``old=``/``new=``/"
-            "``old_namespace=`` parameter must be added to either "
-            "VALIDATED_NS_SURFACES (if it gates the input) or "
-            "DEFERRED_NS_SURFACES (if the project explicitly leaves it "
-            "ungated for now, with rationale):\n  - "
+            "``old_namespace=`` parameter must be added to "
+            "VALIDATED_NS_SURFACES (strict gate), WRITABLE_NS_SURFACES "
+            "(writes chunk rows through writable_namespace_arg), "
+            "DELEGATED_NS_SURFACES (forwards a value its callers gated) or "
+            "DEFERRED_NS_SURFACES (left ungated, with rationale):\n  - "
             + "\n  - ".join(f"{f}::{n}({p})" for f, n, p in sorted(unclassified))
         )
     if stale:
         msg_parts.append(
-            "Stale entries — declared in VALIDATED/DEFERRED but no "
+            "Stale entries — declared in a surface set but no "
             "longer present in source. Remove them so the registry "
             "reflects the live surface:\n  - "
             + "\n  - ".join(f"{f}::{n}({p})" for f, n, p in sorted(stale))
@@ -333,11 +427,51 @@ def test_no_unclassified_ns_surfaces() -> None:
     assert not msg_parts, "\n\n".join(msg_parts)
 
 
-def test_validated_and_deferred_are_disjoint() -> None:
-    """A surface cannot be both gated and deferred — sanity check on
-    the registry definition itself.
-    """
-    overlap = VALIDATED_NS_SURFACES & DEFERRED_NS_SURFACES
-    assert not overlap, (
-        f"Surfaces declared in BOTH validated and deferred sets — choose one: {sorted(overlap)}"
-    )
+def test_surface_sets_are_disjoint() -> None:
+    """A surface belongs to exactly one set — sanity check on the registry itself."""
+    names = sorted(_ALL_SETS)
+    overlaps = {
+        (a, b): sorted(_ALL_SETS[a] & _ALL_SETS[b])
+        for i, a in enumerate(names)
+        for b in names[i + 1 :]
+        if _ALL_SETS[a] & _ALL_SETS[b]
+    }
+    assert not overlaps, f"Surfaces declared in more than one set — choose one: {overlaps}"
+
+
+def _fn(source: str) -> ast.AsyncFunctionDef:
+    node = ast.parse(source).body[0]
+    assert isinstance(node, ast.AsyncFunctionDef)
+    return node
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "    namespace = writable_namespace_arg(namespace)",
+        "    if x:\n        namespace = constants.writable_namespace_arg(namespace)",
+    ],
+)
+def test_rebinding_matcher_accepts(body: str) -> None:
+    node = _fn(f"async def f(namespace):\n{body}\n")
+    assert _rebinds_through_writable_namespace_arg(node, "namespace")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Result dropped: "" would flow on unnormalized.
+        "    writable_namespace_arg(namespace)",
+        # Bound to another name.
+        "    ns = writable_namespace_arg(namespace)",
+        # Another argument.
+        "    namespace = writable_namespace_arg(other)",
+        # Only inside a closure or class body that never runs as the surface.
+        "    def inner(namespace):\n        namespace = writable_namespace_arg(namespace)",
+        "    async def inner(namespace):\n        namespace = writable_namespace_arg(namespace)",
+        "    class C:\n        namespace = writable_namespace_arg(namespace)",
+    ],
+)
+def test_rebinding_matcher_rejects(body: str) -> None:
+    node = _fn(f"async def f(namespace, other):\n{body}\n")
+    assert not _rebinds_through_writable_namespace_arg(node, "namespace")

@@ -14,6 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from memtomem.constants import InvalidNameError, writable_namespace_arg
 from memtomem.errors import NamespaceResolutionError
 from memtomem.source_provenance import (
     EXCLUDED_TARGET_DETAIL,
@@ -51,6 +52,20 @@ logger = logging.getLogger("memtomem.web.routes.system")
 
 # Mounted only through ``system.router``, which carries the ``system`` tag.
 router = APIRouter()
+
+
+def _writable_namespace_or_400(value: str | None) -> str | None:
+    """``writable_namespace_arg`` for a request body: a refused name is a 400.
+
+    Runs before any file is written or indexing starts (#2933). ``""`` reads
+    as no namespace, as on the MCP tools; the indexer would otherwise store it
+    as an explicit one.
+    """
+    try:
+        return writable_namespace_arg(value)
+    except InvalidNameError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 _ADD_PATH_ERROR = "File path must be a relative path contained by the configured memory directory"
 
@@ -321,6 +336,7 @@ async def index_stream(
     search_pipeline=Depends(get_search_pipeline),
 ) -> StreamingResponse:
     """Stream CSRF-protected indexing progress as Server-Sent Events."""
+    req.namespace = _writable_namespace_or_400(req.namespace)
     resolved = Path(req.path).expanduser().resolve()
 
     async def _generate():
@@ -403,6 +419,7 @@ async def trigger_index(
     index_engine=Depends(get_index_engine),
     search_pipeline=Depends(get_search_pipeline),
 ) -> IndexResponse:
+    namespace = _writable_namespace_or_400(req.namespace)
     resolved = Path(req.path).expanduser().resolve()
     try:
         stats = await index_engine.index_path(
@@ -410,7 +427,7 @@ async def trigger_index(
             recursive=req.recursive,
             force=req.force,
             force_unsafe=req.force_unsafe,
-            namespace=req.namespace,
+            namespace=namespace,
             path_scope="explicit",
         )
     except NamespaceResolutionError as exc:
@@ -720,6 +737,8 @@ async def add_memory(
     from datetime import datetime, timezone
 
     from memtomem import privacy
+
+    req.namespace = _writable_namespace_or_400(req.namespace)
 
     # ADR-0011 §5 Gate B (PR-F slice 4): project_shared writes go to git;
     # require an explicit ``confirm_project_shared=true`` so the SPA

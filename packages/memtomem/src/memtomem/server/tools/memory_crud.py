@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from memtomem.config import TargetScope
+from memtomem.constants import writable_namespace_arg
 from memtomem.errors import RetryableError
 from memtomem.indexing.scope_guard import scope_held_notice
 from memtomem.memory_scope import NS_RETARGET_ATTEMPTS, MemoryScopeError
@@ -1322,6 +1323,11 @@ async def mem_add(
     """
     from memtomem.indexing.engine import PrivacyRejection
 
+    # Before anything is written: a namespace the read side cannot address by
+    # name (#2933). ``_mem_add_core`` is not gated itself; its other callers
+    # pass None, an already-validated target, or a namespace read back from
+    # stored rows (consolidation).
+    namespace = writable_namespace_arg(namespace)
     try:
         message, _stats = await _mem_add_core(
             content=content,
@@ -1864,6 +1870,7 @@ async def mem_batch_add(
                              batch's namespace (issue #2005); without it such
                              a call is refused.
     """
+    namespace = writable_namespace_arg(namespace)  # #2933, before anything is written
     if len(entries) > 500:
         return f"Error: batch too large (max 500 entries, got {len(entries)})."
     if idempotency_key is not None:

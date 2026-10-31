@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, get_args
 from uuid import UUID, uuid4
 
+from memtomem.constants import InvalidNameError, validate_writable_namespace
 from memtomem.errors import EmbeddingError, EmbeddingPolicyChangedError
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata, ChunkType
 from memtomem.storage.base import WRITER_WAIT_S
@@ -588,12 +589,21 @@ async def import_chunks(
             landed[bid] = chunk.id
         to_upsert.append(chunk)
 
-    # Validate the final post-carryover metadata too, before embeddings.
+    # Validate the final post-carryover metadata too, before embeddings. The
+    # namespace is checked here rather than on the raw record because a legacy
+    # record without one inherits the stored row's namespace on update, and a
+    # name the read side cannot address by name rejects the whole bundle
+    # (#2933); a valid ``namespace`` override is the way to import it. An
+    # invalid override is caught here too, since it is already applied.
     for index, (chunk, _) in enumerate(parsed):
         try:
             validate_records([_chunk_to_dict(chunk)], [], BUNDLE_VERSION)
         except BundleValidationError as exc:
             raise invalid(f"record {index}", exc.field) from exc
+        try:
+            validate_writable_namespace(chunk.metadata.namespace)
+        except InvalidNameError as exc:
+            raise invalid(f"record {index}", "namespace") from exc
     _scoped_matches(parsed, initial_rows, trust_ids=is_self_export)
     _enforce_import_redaction(
         parsed,
