@@ -95,7 +95,16 @@ def test_init_project_local_creates_registers_and_gitignores(home: Path, project
     # parity with ``memory_dirs``) — but this project lives OUTSIDE the
     # isolated HOME, so the raw entry stays absolute here; parity is pinned
     # separately in test_register_relativizes_under_home.
-    assert "restart" in result.output
+
+    # The note describes how running processes see the tier. Neither needs a
+    # restart. The MCP server reconciles roots on each tool call that reaches
+    # the store (test_server_watch_roots_reconcile.py); ``mem_do(action="help")``
+    # answers before that, hence "memory operation". mm web reloads its config
+    # on GET /api/config, which settings-config.js sends on every page load
+    # (test_web_hot_reload.py, project-tier tests).
+    assert "on its next memory operation" in result.output
+    assert "the next time its page loads" in result.output
+    assert "restart" not in result.output
 
 
 def test_init_is_idempotent(home: Path, project: Path) -> None:
