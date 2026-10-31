@@ -203,6 +203,14 @@ async def mutate_source_and_reindex(
         raise ReadOnlySourceError(str(source_file))
     from memtomem.indexing.engine import MutationBlockedError, PrivacyRejection
 
+    # ``source_file`` is the chunk's stored key. Re-indexing must not store its
+    # project rows as another scope, and the write must not go through a key
+    # that now names another file (#2923). Asked before the pre-image is read:
+    # through a relinked key the read, the privacy preflight and its hold would
+    # all act on the other file.
+    refusal = await index_engine.rewrite_refusal(str(source_file), op="edit", surface="web")
+    if refusal is not None:
+        raise MutationBlockedError(refusal)
     try:
         pre_image = await asyncio.to_thread(read_pre_image, source_file)
     except FileNotFoundError as exc:
@@ -218,13 +226,6 @@ async def mutate_source_and_reindex(
     blocker = preflight.blocker("edit", source_file.name, needs_valve=force_unsafe)
     if blocker is not None:
         raise MutationBlockedError(blocker)
-    # ``source_file`` is the chunk's stored key. Re-indexing must not store its
-    # project rows as another scope, and the write must not go through a key
-    # that now names another file (#2923); the engine would only hold the
-    # source after the write.
-    refusal = await index_engine.rewrite_refusal(str(source_file), op="edit", surface="web")
-    if refusal is not None:
-        raise MutationBlockedError(refusal)
     mutation_completed = False
     try:
         written = await asyncio.to_thread(mutate, pre_image)

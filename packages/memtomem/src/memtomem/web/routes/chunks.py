@@ -731,6 +731,16 @@ async def delete_chunk(
                             "namespace has its own, then retry."
                         ),
                     )
+                # The re-index below must not store the file's project rows as
+                # another scope, and the write must not go through a key that
+                # now names another file (#2923). Asked before the pre-image is
+                # read: through a relinked key the read, the privacy preflight
+                # and its hold would all act on the other file.
+                refusal = await index_engine.rewrite_refusal(
+                    str(source), op="delete", surface="web"
+                )
+                if refusal is not None:
+                    raise index_blocked_http(refusal)
                 # The re-index below judges the whole file, so a file whose
                 # content may not be indexed is refused before the line comes
                 # out, and held, as in the edit route's helper.
@@ -748,15 +758,6 @@ async def delete_chunk(
                 blocker = preflight.blocker("delete", source.name, needs_valve=False)
                 if blocker is not None:
                     raise index_blocked_http(blocker)
-                # The re-index below must not store the file's project rows as
-                # another scope, and the write must not go through a key that
-                # now names another file (#2923). Refused before the line comes
-                # out; the engine would only hold the source after it.
-                refusal = await index_engine.rewrite_refusal(
-                    str(source), op="delete", surface="web"
-                )
-                if refusal is not None:
-                    raise index_blocked_http(refusal)
                 try:
                     # Armed before the call, not after: a partial write that
                     # then raises is exactly the case the flag must cover.

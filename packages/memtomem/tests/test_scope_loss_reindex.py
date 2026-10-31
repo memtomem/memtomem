@@ -463,11 +463,14 @@ async def test_a_relinked_key_is_refused_before_writing_into_the_other_project(
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
-async def test_web_edit_refuses_a_key_whose_directory_became_a_symlink(
-    bm25_only_components, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("op", ["edit", "delete"])
+async def test_web_rewrite_refuses_a_key_whose_directory_became_a_symlink(
+    bm25_only_components, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, op: str
 ) -> None:
-    # The leaf is not a symlink, so the route's own ``is_symlink`` check passes;
-    # the helper's relink check is what refuses.
+    # The leaf is not a symlink, so the edit route's own ``is_symlink`` check
+    # passes; the relink check is what refuses. It must run before the privacy
+    # preflight: the file behind the link holds a flagged value, and judging it
+    # first would hold that other project's file instead of refusing.
     comp, _ = bm25_only_components
     a_root, a_local, a_shared = _project(tmp_path, "a")
     _b_root, b_local, _b_shared = _project(tmp_path, "b")
@@ -480,11 +483,18 @@ async def test_web_edit_refuses_a_key_whose_directory_became_a_symlink(
     moved_dir = b_local / "topic"
     shutil.move(sub, moved_dir)
     sub.symlink_to(moved_dir, target_is_directory=True)
-    before = (moved_dir / target.name).read_bytes()
+    other = moved_dir / target.name
+    with other.open("a", encoding="utf-8") as fh:
+        fh.write("\n## Keys\n\naws " + "AKIA" + "IOSFODNN7EXAMPLE" + "\n")
+    before = other.read_bytes()
 
     async with _web_client(comp) as client:
-        edited = await client.patch(f"/api/chunks/{chunk_id}", json={"new_content": "revised"})
+        if op == "edit":
+            resp = await client.patch(f"/api/chunks/{chunk_id}", json={"new_content": "revised"})
+        else:
+            resp = await client.delete(f"/api/chunks/{chunk_id}")
 
-    assert edited.status_code == 409, edited.text
-    assert "now resolves to another file" in edited.json()["detail"]["message"]
-    assert (moved_dir / target.name).read_bytes() == before
+    assert resp.status_code == 409, resp.text
+    assert "now resolves to another file" in resp.json()["detail"]["message"]
+    assert other.read_bytes() == before
+    assert _hold_reason(comp, str(other.resolve())) is None

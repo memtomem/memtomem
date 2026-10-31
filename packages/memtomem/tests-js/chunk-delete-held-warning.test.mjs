@@ -86,3 +86,20 @@ describe('chunk save — held re-index warning (#2923)', () => {
     expect(toasts.some((t) => t.sev === 'success')).toBe(false);
   });
 });
+
+describe('bulk delete — held re-index warning (#2923)', () => {
+  it('shows each distinct warning after the count toast', async () => {
+    const warning = 'The delete is on disk, but the file\'s project tier stopped being registered';
+    const { window, toasts } = await bootDelete({ deleted: 1, warning });
+    window.STATE.selectedIds.add(CHUNK_ID);
+    // The toolbar enables the button once something is selected.
+    const btn = window.document.getElementById('bulk-delete-btn');
+    btn.disabled = false;
+
+    btn.click();
+    for (let i = 0; i < 20; i++) await new Promise((r) => window.setTimeout(r, 0));
+
+    expect(toasts.some((t) => t.sev === 'success')).toBe(true);
+    expect(toasts).toContainEqual({ msg: warning, sev: 'warning' });
+  });
+});

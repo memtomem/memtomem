@@ -4258,8 +4258,15 @@ qs('bulk-delete-btn').addEventListener('click', async () => {
   const btn = qs('bulk-delete-btn');
   btnLoading(btn, true);
   let deleted = 0, failed = 0;
+  // A delete whose re-index was held answers with a warning (#2923); the
+  // count toast alone would hide it.
+  const warnings = new Set();
   for (const id of ids) {
-    try { await api('DELETE', `/api/chunks/${id}`); deleted++; }
+    try {
+      const resp = await api('DELETE', `/api/chunks/${id}`);
+      deleted++;
+      if (resp && resp.warning) warnings.add(resp.warning);
+    }
     catch (_) { failed++; }
   }
   btnLoading(btn, false);
@@ -4267,6 +4274,7 @@ qs('bulk-delete-btn').addEventListener('click', async () => {
     ? t('toast.bulk_delete_partial', { deleted, failed })
     : t('toast.bulk_delete_ok', { count: deleted });
   showToast(msg, failed ? 'error' : 'success');
+  for (const warning of warnings) showToast(warning, 'warning');
   STATE.selectedIds.clear();
   updateBulkToolbar(0);
   clearDetail();

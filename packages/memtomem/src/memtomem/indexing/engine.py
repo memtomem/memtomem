@@ -3412,6 +3412,7 @@ class IndexEngine:
         store the source's project rows under another scope or project root.
         """
         from memtomem.indexing.scope_guard import (
+            key_spellings,
             relinked_detail,
             scope_change,
             scope_change_detail,
@@ -3421,7 +3422,7 @@ class IndexEngine:
         name = Path(stored_key).name
         if await asyncio.to_thread(stored_key_moved, stored_key):
             return relinked_detail(name, op=op)
-        rows = self._stored_scope_rows([stored_key])
+        rows = self._stored_scope_rows(key_spellings(stored_key))
         if not rows:
             return None
         decision_path = await asyncio.to_thread(resolve_path, Path(stored_key))
