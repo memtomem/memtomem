@@ -208,16 +208,13 @@ async def _search(
             "Accepted formats: 'YYYY-MM-DD' (date) or 'YYYY-QN' (quarter, N in 1-4)."
         ) from None
 
-    # Same reason, same re-wording: the parser's message names the API
-    # argument, the user typed a flag.
+    # Two failures reach this catch — a comma/glob mix and the ``!system``
+    # selector inside a list — so the message is the exception's own, after
+    # the flag the user typed.
     try:
         NamespaceFilter.parse(namespace)
-    except InvalidNamespaceFilterError:
-        raise click.ClickException(
-            f"invalid --namespace value '{namespace}': a comma list and a glob "
-            "cannot be combined. Use either '-n work,personal' or '-n proj:*', "
-            "and run one query per pattern when you need several."
-        ) from None
+    except InvalidNamespaceFilterError as e:
+        raise click.ClickException(f"invalid --namespace value '{namespace}': {e}") from None
     # Two failures reach this catch now — a comma/glob mix and a value that is
     # not a tier — so the message has to be the exception's own. The previous
     # wording asserted the mix unconditionally and would have told someone who
