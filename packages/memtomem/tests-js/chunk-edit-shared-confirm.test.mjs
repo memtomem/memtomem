@@ -146,6 +146,20 @@ describe('chunk edit — project_shared confirm round-trip (#2317)', () => {
     expect(resp).toEqual(SAVED);
   });
 
+  it('shows the warning a held re-index attached to the save (#2923)', async () => {
+    // The edit is on disk, but the project tier stopped being registered while
+    // it ran, so the server held the source instead of re-indexing it.
+    const warning = 'The edit is on disk, but the file\'s project tier stopped being registered';
+    const { window, toasts } = await bootEdit({
+      responses: [{ ...SAVED, warning }],
+      confirmAnswers: [],
+    });
+
+    await window.saveChunkBody(CHUNK_ID, BODY);
+
+    expect(toasts).toContainEqual({ msg: warning, sev: 'warning' });
+  });
+
   it('re-sends with the field the envelope names, after checking it is one we answer', async () => {
     const { window, confirms, patches } = await bootEdit({
       responses: [SHARED_ENVELOPE, SAVED],

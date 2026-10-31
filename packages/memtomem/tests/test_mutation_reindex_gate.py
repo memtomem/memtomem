@@ -409,6 +409,7 @@ class TestRefusalAfterTheWriteReportsTheRestore:
         engine.is_excluded = MagicMock(return_value=False)
         engine.is_read_only_source = MagicMock(return_value=False)
         engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
+        engine.rewrite_refusal = AsyncMock(return_value=None)
         engine.index_file = AsyncMock(side_effect=refusal)
         monkeypatch.setattr(
             memory_mutation, "restore_pre_image_quietly", lambda *_: RestoreOutcome[restore]

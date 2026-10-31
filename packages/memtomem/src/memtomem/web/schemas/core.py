@@ -34,6 +34,10 @@ class ChunkOut(BaseModel):
     # ``memtomem/models.py``; missing on legacy chunks defaults to
     # ``user`` via ``chunk_to_out``.
     target_scope: str = "user"
+    # Set only on an edit's response, when the edit is on disk but the source
+    # was held instead of re-indexed: its project tier stopped being registered
+    # while the edit ran (#2923).
+    warning: str | None = None
 
 
 class ContextInfoOut(BaseModel):
@@ -66,6 +70,9 @@ class RetrievalStatsOut(BaseModel):
 
 class DeleteResponse(BaseModel):
     deleted: int
+    # Set when the delete is on disk but the source was held instead of
+    # re-indexed, because its project tier stopped being registered (#2923).
+    warning: str | None = None
 
 
 def chunk_to_out(chunk) -> ChunkOut:

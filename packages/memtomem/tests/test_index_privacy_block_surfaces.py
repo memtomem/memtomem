@@ -706,11 +706,11 @@ class TestIndexingStatsFieldOrder:
         from memtomem.models import IndexingStats
 
         names = [f.name for f in fields(IndexingStats)]
-        # #2141 appended ``mutated`` last.
-        assert names[-1] == "mutated"
-        assert names[-3:-1] == ["exempted_files", "exempted_paths"]
+        # #2923 appended ``scope_held`` last, after #2141's ``mutated``.
+        assert names[-2:] == ["mutated", "scope_held"]
+        assert names[-4:-2] == ["exempted_files", "exempted_paths"]
         # The tail that existed before #2076 keeps its order.
-        assert names[-7:-3] == [
+        assert names[-8:-4] == [
             "namespaces_preserved_against_rules",
             "namespaces_reassigned",
             "namespace_moves",

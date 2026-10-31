@@ -274,6 +274,7 @@ def app(_isolated_config_paths: Path):
     index_engine.is_excluded = MagicMock(return_value=False)
     index_engine.is_read_only_source = MagicMock(return_value=False)
     index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
+    index_engine.rewrite_refusal = AsyncMock(return_value=None)
 
     # -- dedup scanner mock --
     dedup_scanner = AsyncMock()

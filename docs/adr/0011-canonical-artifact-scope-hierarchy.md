@@ -844,6 +844,23 @@ health watchdog keeps using the cwd, and so do the context gateway's
 `context_*` actions. They resolve their project separately, and moving them
 would change which project's artifact files they write.
 
+**Amended 2026-10-31 (#2923): re-indexing keeps a project row's scope.** A
+re-index classifies by path against the tiers registered at that moment, so
+the guard on `mem_edit` and `mem_delete` above was one surface of a rule that
+every writer needed. The rule is now enforced where rows are written: the
+indexer never rewrites `project_shared` or `project_local` rows under another
+scope or another project root. It holds the source instead, until a clean pass
+after the tier is registered again. Roots compare by spelling and are never
+resolved, so a stored root whose directory became a symlink into another
+project does not match that project. A file whose content did not change is
+not rewritten, so it is neither re-scoped nor held. Changing a row's scope on
+purpose is `mm context memory-migrate`, which moves the file and its rows
+together. This replaces the earlier recovery path for an unregistration,
+a forced re-index that re-stamped the rows as `user`. The by-id rewrite
+surfaces (MCP and web edit and delete) judge the same rule before they write,
+and also refuse a stored path that has become a symlink, which would send the
+write into another file.
+
 ### 7. ADR-0001 §1 supersession
 
 This RFC supersedes the implicit "canonical = project-scope only"
