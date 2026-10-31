@@ -6,7 +6,11 @@ context comes from the working directory, so ``project_local`` never resolves
 there. Binding names the project explicitly, once, for the process.
 
 The binding is set-once and never re-checked. A rebind or a clear would let an
-operation that spans awaits see two roots, and re-checking registration on
+operation that spans awaits see two roots — and so would a first bind on a
+server whose working directory already resolves a different registered
+project, which is why that is refused too: the only boundary change a binding
+makes is from no project, where an in-flight check admits only user rows,
+which every project may read anyway. Re-checking registration on
 each call would have to answer "unregistered" with ``None`` (every project's
 rows under an explicit scope filter) or an exception (raised after a write
 already landed). Registration is checked here; after an unregistration the
@@ -84,6 +88,12 @@ async def mem_project_bind(project_root: str, ctx: CtxType = None) -> str:
         return (
             f"Error: no registered project tier covers {resolved}. Register one with: "
             f"cd {resolved} && mm mem init --scope project_local"
+        )
+    cwd_root = _resolve_project_context_from_dirs(app.config.indexing.project_memory_dirs)
+    if cwd_root is not None and cwd_root != root:
+        return (
+            f"Error: this server's working directory is already in project {cwd_root}; "
+            f"start the server outside it to bind {root}."
         )
     app.bound_project_root = root
     return (

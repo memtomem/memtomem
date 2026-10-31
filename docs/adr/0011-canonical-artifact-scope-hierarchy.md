@@ -834,7 +834,12 @@ is refused unless another configured directory covers its file. An edit or
 delete by id is refused when the re-index would classify the chunk's file
 into a different scope than the row has, because a `project_local` row
 re-indexed as `user` becomes readable from every project. Network transports refuse
-the binding, because streamable HTTP shares one context across clients. The
+the binding, because streamable HTTP shares one context across clients. So
+does a server whose cwd already resolves another registered project: the
+binding's one boundary change must be from no project, under which an
+in-flight check admits only user rows, never from one project to another,
+which could let an operation such as `mem_link` judge its two ends by
+different projects. The
 health watchdog keeps using the cwd, and so do the context gateway's
 `context_*` actions. They resolve their project separately, and moving them
 would change which project's artifact files they write.

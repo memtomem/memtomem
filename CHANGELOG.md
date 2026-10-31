@@ -20,7 +20,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mem_do(action="project_bind", params={"project_root": "<absolute path>"})`
   in core mode. The binding is set once per server process; binding another
   project needs a restart. It works only on a stdio server, because
-  streamable HTTP shares one context across clients. Registration is checked
+  streamable HTTP shares one context across clients, and only when the
+  server's working directory is not already in another registered project:
+  moving the boundary between two projects could split an operation already
+  running, such as a link checking its two ends. Registration is checked
   when binding. After the tier is unregistered, reads stay on the bound
   project. An add to the project's tier is refused at once, whether it goes
   to the default file or to a named file that no other configured directory

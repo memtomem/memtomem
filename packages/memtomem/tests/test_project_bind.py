@@ -122,20 +122,74 @@ async def test_a_path_inside_the_project_binds_its_root(bound_setup) -> None:
 
 
 @pytest.mark.asyncio
-async def test_binding_beats_a_registered_cwd(
+async def test_a_server_inside_another_project_cannot_bind(
     bm25_only_components, tmp_path: Path, stdio, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Binding would move the boundary from the cwd's project to another one
+    # under operations already running; only a move from no project is safe.
     comp, _ = bm25_only_components
     cwd_root, cwd_tier = _make_project(tmp_path, "cwd-proj")
     other_root, other_tier = _make_project(tmp_path, "other-proj")
     comp.config.indexing.project_memory_dirs = [cwd_tier, other_tier]
     monkeypatch.chdir(cwd_root)
     app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+
+    out = await mem_project_bind(project_root=str(other_root), ctx=ctx)
+    assert out.startswith(
+        f"Error: this server's working directory is already in project {cwd_root}"
+    )
+    assert app.bound_project_root is None
     assert _resolve_project_context_root(app) == cwd_root
 
-    out = await mem_project_bind(project_root=str(other_root), ctx=StubCtx(app))
-    assert out.startswith("Bound project root"), out
-    assert _resolve_project_context_root(app) == other_root
+    same = await mem_project_bind(project_root=str(cwd_root), ctx=ctx)
+    assert same.startswith(f"Bound project root: {cwd_root}"), same
+    assert _resolve_project_context_root(app) == cwd_root
+
+
+@pytest.mark.asyncio
+async def test_a_bind_during_a_link_cannot_split_its_two_lookups(
+    bm25_only_components, tmp_path: Path, stdio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memtomem.server.tools import cross_ref
+
+    comp, _ = bm25_only_components
+    a_root, a_tier = _make_project(tmp_path, "a")
+    b_root, b_tier = _make_project(tmp_path, "b")
+    comp.config.indexing.project_memory_dirs = [a_tier, b_tier]
+
+    async def _add_in(root: Path, content: str, word: str) -> str:
+        monkeypatch.chdir(root)
+        writer_ctx = StubCtx(AppContext.from_components(comp))
+        await mem_add(content=content, scope="project_local", ctx=writer_ctx)
+        return await _only_chunk_id(
+            mem_search(
+                query=word, scope="project_local", output_format="structured", ctx=writer_ctx
+            )
+        )
+
+    b_id = await _add_in(b_root, "b private walrus", "walrus")
+    a_id = await _add_in(a_root, "a private heron", "heron")
+    app = AppContext.from_components(comp)  # cwd is in project A
+    ctx = StubCtx(app)
+
+    binds: list[str] = []
+    real_resolve = cross_ref.resolve_chunk
+
+    async def _resolve_then_bind(app_, chunk_id):
+        chunk = await real_resolve(app_, chunk_id)
+        if not binds:
+            binds.append(await mem_project_bind(project_root=str(b_root), ctx=ctx))
+        return chunk
+
+    monkeypatch.setattr(cross_ref, "resolve_chunk", _resolve_then_bind)
+    out = await cross_ref.mem_link(source_id=a_id, target_id=b_id, ctx=ctx)
+
+    # The leak first: with the bind landing between the lookups, B's chunk
+    # resolved under B and the link answered with its preview.
+    assert "walrus" not in out, out
+    assert "not found" in out.lower(), out
+    assert binds and binds[0].startswith("Error: this server's working directory"), binds
 
 
 # ---------------------------------------------------------------------------
