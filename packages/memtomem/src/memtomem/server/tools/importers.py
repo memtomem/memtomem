@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from memtomem.constants import writable_namespace_arg
 from memtomem.errors import ConfigError
 from memtomem.memory_scope import require_user_base
 from memtomem.server import mcp
@@ -42,6 +43,7 @@ async def mem_import_notion(
             combination is hard-refused, because git history cannot be
             retracted from clones.
     """
+    namespace = writable_namespace_arg(namespace)
     from memtomem.indexing.importers import import_notion
 
     app = await _get_app_initialized(ctx)
@@ -195,6 +197,7 @@ async def mem_import_obsidian(
             combination is hard-refused, because git history cannot be
             retracted from clones.
     """
+    namespace = writable_namespace_arg(namespace)
     from memtomem.indexing.importers import import_obsidian
 
     app = await _get_app_initialized(ctx)

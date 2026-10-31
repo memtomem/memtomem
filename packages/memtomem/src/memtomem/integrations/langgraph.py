@@ -41,6 +41,7 @@ from memtomem.constants import (
     SUMMARY_PROVENANCE_MANUAL,
     normalize_bound_agent_id,
     validate_namespace,
+    writable_namespace_arg,
 )
 from memtomem.services.search_service import rrf_weights_from
 
@@ -469,6 +470,7 @@ class MemtomemStore:
                 reads, so it takes the same explicit consent ``mem_add``
                 takes for the same destination.
         """
+        namespace = writable_namespace_arg(namespace)  # #2933, before any write
         comp = await self._ensure_init()
         from datetime import datetime, timezone
 
@@ -1059,6 +1061,7 @@ class MemtomemStore:
         ``retryable_errors`` is the same-string subset of ``errors`` whose
         cause may be resolved by retrying the operation.
         """
+        namespace = writable_namespace_arg(namespace)  # #2933, before any write
         comp = await self._ensure_init()
         stats = await comp.index_engine.index_path(
             Path(path).expanduser().resolve(),

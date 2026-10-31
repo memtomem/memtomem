@@ -17,6 +17,7 @@ import click
 from click.core import ParameterSource
 
 from memtomem.cli._errors import exit_json_failure, raise_cli_error
+from memtomem.constants import InvalidNameError, writable_namespace_arg
 
 
 @click.command()
@@ -132,6 +133,12 @@ def index(
             "--reassign-namespaces only applies to direct indexing, not "
             "--debounce-window / --flush / --status."
         )
+    # Before either branch: a debounced entry carries the namespace into a later
+    # drain, so a refused name has to stop here, not in ``_index`` (#2933).
+    try:
+        namespace = writable_namespace_arg(namespace)
+    except InvalidNameError as exc:
+        raise click.BadParameter(str(exc), param_hint="'--namespace'") from exc
 
     # ``DebounceQueueError`` means the durable queue is unreadable or
     # internally inconsistent — a transient EACCES on the queue file, or a

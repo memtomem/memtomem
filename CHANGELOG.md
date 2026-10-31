@@ -7,6 +7,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Writes refuse a namespace a search could not find by name (#2933).**
+  `mem_add`, `mem_batch_add`, `mem_fetch`, `mem_index`, `mem_import` and the
+  Notion and Obsidian importers stored any string as a chunk's namespace,
+  including ones the read side parses as something else: `"a,b"` reads as a
+  list of two namespaces, `"x*y"` as a glob, and `"!system"` (since 0.7.1) as
+  the selector for every non-system namespace. Rows written under those names
+  could be reached only through some other spelling. These tools now refuse
+  such a name before anything is written, and so do the web `POST /api/add`,
+  `POST /api/index` and `POST /api/index/stream` routes (400),
+  `mm index --namespace`, and the LangGraph `MemtomemStore.add` and `.index`.
+  A bundle import refuses the whole bundle when any record would land under
+  such a name, including one a legacy record inherits from the row it
+  updates; a valid `namespace=` override on `mem_import` imports it.
+
+  The check is narrower than the one `mm add --namespace` and the session and
+  `mem_ns_*` tools apply. Namespace rules store names such as
+  `claude:-Users-me-project` that the strict check refuses, and writing into a
+  namespace a store already uses keeps working. Refused besides the three
+  shapes above: a blank or whitespace-only name, and an `agent-runtime:` name
+  whose agent id the agent tools would refuse (`agent-runtime:foo:bar`). An
+  empty string still means "no namespace given" on every one of these
+  surfaces; `POST /api/index` used to store it as a namespace.
+
+  Names already stored are left in place. `mem_ns_rename` can move one to a
+  valid name (0.7.1). Namespace rules, `enable_auto_ns` folder names and a
+  configured `default_namespace` are not checked by this change (#2946).
+
 - **The web namespace rename route validates the new name (#2938).**
   `POST /api/namespaces/{namespace}/rename` now runs `new_name` through the
   same `validate_namespace` gate as the MCP `mem_ns_rename` tool and answers

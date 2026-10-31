@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 
+from memtomem.constants import writable_namespace_arg
 from memtomem.errors import ConfigError
 from memtomem.memory_scope import require_user_base
 from memtomem.server import mcp
@@ -42,6 +43,7 @@ async def mem_fetch(
             combination is hard-refused, because git history cannot be
             retracted from clones.
     """
+    namespace = writable_namespace_arg(namespace)
     from memtomem.indexing.url_fetcher import fetch_url_with_text
 
     if not url.startswith(("http://", "https://")):

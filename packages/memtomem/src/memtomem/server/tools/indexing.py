@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+from memtomem.constants import writable_namespace_arg
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -54,6 +55,7 @@ async def mem_index(
         namespace: Assign all indexed chunks to this namespace
         auto_tag: If True, run keyword-based auto-tagging on newly indexed chunks
     """
+    namespace = writable_namespace_arg(namespace)
     app = await _get_app_initialized(ctx)
 
     # Block indexing if embedding config mismatches DB
