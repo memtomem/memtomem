@@ -69,24 +69,21 @@ jobs:
       - name: mypy (gradual)
         run: uv run mypy packages/memtomem/src
 
-  test:
-    # The name keeps the required checks `test (ubuntu-latest)` and
-    # `test (macos-latest)`; without it the `python` key would join the name.
-    name: test (${{ matrix.os }})
+  # Linux and macOS run the suite in cost-balanced shards, like Windows: run
+  # whole, each was the run's critical path at 24-25 minutes, ahead of the
+  # Windows shards' 16-19 while every required check outside the test suite
+  # finished in 3, and strict up-to-date merging pays that again on every
+  # update-branch. One job per OS rather than one os x shard matrix,
+  # because `needs.<job>.result` is a single result for a whole matrix, so a
+  # macOS failure would also turn `test (ubuntu-latest)` red. Keep each job's
+  # shard list and --shard-count in step.
+  test-ubuntu-shard:
+    name: ubuntu-test-shard (${{ matrix.shard }})
     strategy:
       fail-fast: false
       matrix:
-        # Pinned to what each runner image had been providing: Ubuntu's system
-        # 3.12 and macOS's Homebrew 3.14. Unpinned, uv uses an interpreter it
-        # discovers on the image, and macos-26-arm64 20261013 moved Homebrew's
-        # default to 3.15, for which onnxruntime 1.24.4 has no wheel, so
-        # `uv sync` failed before any test ran.
-        include:
-          - os: ubuntu-latest
-            python: "3.12"
-          - os: macos-latest
-            python: "3.14"
-    runs-on: ${{ matrix.os }}
+        shard: [0, 1]
+    runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -95,28 +92,86 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
-      - run: uv python pin ${{ matrix.python }}
+      # Pinned to what the runner image had been providing, Ubuntu's system
+      # 3.12; see the macOS job for why an unpinned interpreter broke.
+      - run: uv python pin 3.12
       - run: uv sync --frozen
       - run: >-
-          uv run pytest
-          --ignore=packages/memtomem/tests/test_golden_path.py
+          uv run python tools/run_pytest_shard.py
+          --shard-index ${{ matrix.shard }}
+          --shard-count 2 --
           -m "not ollama and not llm"
           --tb=short -q
+
+  test-ubuntu:
+    name: test (ubuntu-latest)
+    if: ${{ always() }}
+    needs: [test-ubuntu-shard]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every Linux shard to succeed
+        env:
+          SHARD_RESULT: ${{ needs.test-ubuntu-shard.result }}
+        run: test "$SHARD_RESULT" = success
+
+  test-macos-shard:
+    name: macos-test-shard (${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+      # Pinned to what the runner image had been providing, Homebrew's 3.14.
+      # Unpinned, uv uses an interpreter it discovers on the image, and
+      # macos-26-arm64 20261013 moved Homebrew's default to 3.15, for which
+      # onnxruntime 1.24.4 has no wheel, so `uv sync` failed before any test
+      # ran.
+      - run: uv python pin 3.14
+      - run: uv sync --frozen
+      - run: >-
+          uv run python tools/run_pytest_shard.py
+          --shard-index ${{ matrix.shard }}
+          --shard-count 2 --
+          -m "not ollama and not llm"
+          --tb=short -q
+
+  test-macos:
+    name: test (macos-latest)
+    if: ${{ always() }}
+    needs: [test-macos-shard]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every macOS shard to succeed
+        env:
+          SHARD_RESULT: ${{ needs.test-macos-shard.result }}
+        run: test "$SHARD_RESULT" = success
 
   test-windows-shard:
     name: windows-test-shard (${{ matrix.shard }})
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2]
+        shard: [0, 1, 2, 3]
     runs-on: windows-latest
-    # 35, matching the Linux/macOS `test` job, and a hang guard (#1642) that
+    # 35, matching the Linux and macOS shards, and a hang guard (#1642) that
     # still fires long before the 6-hour default. Three shards, not two
     # (#2720): with two, the heavier shard's job ran 25-28 minutes, and a
-    # Windows runner 1.4x slow pushed one past 35 at 96% done. Three put the
-    # heaviest shard at 16-18 minutes of test time on the recorded timings,
-    # so the same slowdown ends well inside the cap. Keep the shard list and
-    # --shard-count below in step.
+    # Windows runner 1.4x slow pushed one past 35 at 96% done. Four, not
+    # three, once Linux and macOS were sharded: at three the heaviest Windows
+    # shard (16-19 minutes) became the run's critical path. Keep the shard
+    # list and --shard-count below in step.
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -129,7 +184,7 @@ jobs:
       - run: >-
           uv run python tools/run_pytest_shard.py
           --shard-index ${{ matrix.shard }}
-          --shard-count 3 --
+          --shard-count 4 --
           -m "not ollama and not llm"
           --tb=short -q
           --junit-xml=junit-windows-shard-${{ matrix.shard }}.xml

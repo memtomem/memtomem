@@ -6,6 +6,7 @@ import importlib.util
 import itertools
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -14,6 +15,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+import yaml
 
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -473,3 +475,68 @@ def test_record_cli_averages_one_flag_per_run(
     assert rc == 0
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["durations"] == {"packages/memtomem/tests/test_pytest_shard.py": 4.0}
+
+
+def _ci_jobs() -> dict[str, dict]:
+    workflow = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    return yaml.safe_load(workflow)["jobs"]
+
+
+def _shard_jobs() -> dict[str, tuple[list[int], int]]:
+    """Map each CI job that runs the sharder to its matrix list and ``--shard-count``."""
+    found: dict[str, tuple[list[int], int]] = {}
+    for job_id, job in _ci_jobs().items():
+        commands = [step.get("run", "") for step in job.get("steps", [])]
+        sharded = [command for command in commands if "tools/run_pytest_shard.py" in command]
+        if not sharded:
+            continue
+        assert len(sharded) == 1, f"{job_id} runs the sharder more than once"
+        count = re.search(r"--shard-count (\d+)", sharded[0])
+        assert count, f"{job_id} runs the sharder without --shard-count"
+        # A literal index would run one partition on every leg of the matrix.
+        assert "--shard-index ${{ matrix.shard }}" in sharded[0], job_id
+        found[job_id] = (job["strategy"]["matrix"]["shard"], int(count.group(1)))
+    return found
+
+
+def test_every_ci_shard_list_matches_its_shard_count() -> None:
+    """A matrix list that disagrees with ``--shard-count`` runs part of the suite.
+
+    With ``shard: [0, 1]`` and ``--shard-count 3``, shard 2's files run nowhere
+    and every check stays green. The job set is pinned too, so a job that stops
+    calling the sharder cannot make this pass by having nothing to compare.
+    """
+    jobs = _shard_jobs()
+
+    assert set(jobs) == {"test-ubuntu-shard", "test-macos-shard", "test-windows-shard"}
+    for job_id, (shards, count) in jobs.items():
+        assert shards == list(range(count)), (job_id, shards, count)
+
+
+def test_each_required_test_check_gates_only_its_own_os() -> None:
+    """``test (<os>)`` are required checks; each must wait on that OS's shards alone.
+
+    ``needs.<job>.result`` is one result for a whole matrix, so an aggregator
+    that needed a combined os x shard job would turn red for another OS's
+    failure, and one that needed nothing would pass before any test ran. A
+    step condition or ``continue-on-error`` would let the gate step be skipped
+    or its failure ignored while the check still reports success.
+    """
+    expected = {
+        "test (ubuntu-latest)": "test-ubuntu-shard",
+        "test (macos-latest)": "test-macos-shard",
+        "test (windows-latest)": "test-windows-shard",
+    }
+    by_name = {job.get("name"): job for job in _ci_jobs().values()}
+
+    for check, shard_job in expected.items():
+        job = by_name[check]
+        assert job["needs"] == [shard_job], (check, job["needs"])
+        assert job["if"] == "${{ always() }}", check
+        assert "continue-on-error" not in job, check
+        [gate] = job["steps"]
+        assert set(gate) == {"name", "env", "run"}, (check, sorted(gate))
+        result = gate["env"]["SHARD_RESULT"]
+        assert result == f"${{{{ needs.{shard_job}.result }}}}", (check, result)
+        # rstrip: a ``run: |`` block of the same command ends in a newline.
+        assert gate["run"].rstrip("\n") == 'test "$SHARD_RESULT" = success', check
