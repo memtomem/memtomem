@@ -1323,6 +1323,10 @@ Example `~/.memtomem/config.d/10-namespace-rules.json`:
   grandparent) are supported. Unknown placeholders (e.g. `{unknown}`), or a
   non-integer / negative `ancestor` index, cause config load to fail so typos
   are caught at startup.
+- `mm config set`, web `PATCH /api/config` and `mem_config` refuse a rule whose
+  `namespace`, with each placeholder filled in, is a name a search could not
+  find by name (it contains `,` or `*`, or is `!system`), and the same for
+  `default_namespace`. A config file that already holds one still loads.
 
 **Verifying your rules:**
 

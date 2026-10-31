@@ -30,6 +30,7 @@ from memtomem.cli._index_progress import (
     run_with_progress as _run_index_with_progress,
 )
 from memtomem.cli.init_presets import PRESETS, _VALID_PRESETS, get_preset
+from memtomem.config import validate_default_namespace_write
 from memtomem.cli.wizard import (
     StepRetry,
     WizardCancel,
@@ -1047,7 +1048,17 @@ def _step_namespace(state: dict) -> None:
     state["enable_auto_ns"] = nav_confirm(
         "  Auto-assign namespace from folder name? (~/docs → 'docs')", default=False
     )
-    state["default_ns"] = nav_prompt("  Default namespace", default="default")
+    while True:
+        value = nav_prompt("  Default namespace", default="default")
+        try:
+            validate_default_namespace_write(value)
+        except ValueError as exc:
+            # The same check ``mm config set`` applies (#2946); ask again
+            # rather than write a default the indexer would skip.
+            click.echo(click.style(f"  {exc}", fg="red"))
+            continue
+        break
+    state["default_ns"] = value
     click.echo()
 
 
@@ -3221,6 +3232,13 @@ def init(
 
     if preset and advanced:
         raise click.UsageError("--preset and --advanced are mutually exclusive")
+
+    # Before any step writes a directory or a config file (#2946).
+    if namespace is not None:
+        try:
+            validate_default_namespace_write(namespace)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="'--namespace'") from exc
 
     # Explicit requests are checked before wizard steps can create memory
     # directories or settings. --mcp skip / kimi do not inspect Claude.

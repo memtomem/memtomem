@@ -94,6 +94,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   The route is on the dev-tier admin router; prod-tier `mm web` does not serve
   it.
 
+- **Setting a namespace default or rule that a search could not find is
+  refused (#2946).** `mm config set`, the web `PATCH /api/config` and
+  `mem_config` now refuse a `namespace.default_namespace` that contains `,` or
+  `*`, is `!system`, is blank, or is an `agent-runtime:` name the agent tools
+  refuse, and a `namespace.rules` entry whose `namespace` template is such a
+  name once each `{parent}` / `{ancestor:N}` is filled in (`a,b`,
+  `{parent},x`, `!system`; `claude:{parent}` is fine). `mm init --namespace`
+  refuses before it writes anything, and the wizard asks again. A value
+  already in `config.json` or a `config.d` fragment still loads unchanged;
+  editing `namespace.rules` through these surfaces means fixing such an entry
+  first, because the whole list is written at once.
+
 - **`mem_add`'s "Similar memories found" warning compares stored vectors, not
   search scores (#2934).**
   It used to run a search over the new note and keep results scoring between
