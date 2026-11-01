@@ -124,6 +124,29 @@ def _target_refusal(label: str, value: object) -> str | None:
     return None
 
 
+_JSON_TYPE_NAMES: dict[type, str] = {
+    list: "an array",
+    str: "a string",
+    bool: "a boolean",
+    int: "a number",
+    float: "a number",
+    type(None): "null",
+}
+
+
+def config_shape_error(config: object) -> str | None:
+    """Why *config* cannot be a policy config, or ``None`` when it can (#2955).
+
+    Every handler reads its settings with ``config.get``, so a config must be
+    a JSON object. ``mem_policy_add`` refuses anything else, and
+    ``run_policy`` refuses to run a row stored before that check.
+    """
+    if isinstance(config, dict):
+        return None
+    kind = _JSON_TYPE_NAMES.get(type(config), type(config).__name__)
+    return f"config must be a JSON object, got {kind}"
+
+
 def policy_target_errors(policy_type: str, config: object) -> list[str]:
     """Why the namespaces *config* names as write targets fail the write gate.
 
@@ -934,11 +957,24 @@ async def run_policy(
             ptype, policy_name=policy["name"], source=source
         )
 
+    config = policy.get("config", {})
+    shape_error = config_shape_error(config)
     try:
-        if ptype == "auto_consolidate":
+        if shape_error is not None:
+            # Not handed to the handler, which would raise on ``config.get``;
+            # an error result lets the row and ``run_all_enabled`` go on.
+            result = PolicyRunResult(
+                policy_name="",
+                policy_type=ptype,
+                affected_count=0,
+                dry_run=dry_run,
+                details=f"Error: {shape_error}",
+                error=shape_error,
+            )
+        elif ptype == "auto_consolidate":
             result = await execute_auto_consolidate(
                 storage,
-                policy.get("config", {}),
+                config,
                 policy.get("namespace_filter"),
                 dry_run,
                 llm_provider=llm_provider,
@@ -947,7 +983,7 @@ async def run_policy(
         else:
             result = await handler(
                 storage,
-                policy.get("config", {}),
+                config,
                 policy.get("namespace_filter"),
                 dry_run,
             )

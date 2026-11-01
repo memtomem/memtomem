@@ -158,6 +158,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `auto_archive` run: it raised an error reading the run's record. It now
   shows the chunks moved per target, and the skipped ones.
 
+- **A policy config must be a JSON object (#2955).** `mem_policy_add` stored
+  any value that parsed as JSON, such as `[1]`, `5` or `null`, and running
+  that policy raised an error that also stopped every enabled policy after it
+  in the same run. `mem_policy_add` now refuses such a config and names its
+  type (`config must be a JSON object, got an array`). A policy already stored
+  with one is refused when it runs: it does nothing and reports the error,
+  the applied run is recorded as `status=error`, and the other policies in the
+  batch still run.
+
 - **`mem_add`'s "Similar memories found" warning compares stored vectors, not
   search scores (#2934).**
   It used to run a search over the new note and keep results scoring between
