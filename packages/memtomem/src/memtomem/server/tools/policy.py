@@ -121,7 +121,11 @@ async def mem_policy_add(
     except json.JSONDecodeError as exc:
         return f"Error: invalid JSON config: {exc}"
 
-    from memtomem.tools.policy_engine import policy_target_errors
+    from memtomem.tools.policy_engine import config_shape_error, policy_target_errors
+
+    shape_error = config_shape_error(cfg)
+    if shape_error is not None:
+        return f"Error: {shape_error}"
 
     target_errors = policy_target_errors(policy_type, cfg)
     if target_errors:
