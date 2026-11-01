@@ -17,9 +17,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   returns when only a parent's tier is registered, stops the workflow, and so
   does any other result. The repository needs a registered tier
   (`mm mem init --scope project_local`). A binding lasts until the server
-  process restarts, so a second repository needs a restart. The other
-  runtimes' skills are unchanged. The six user-scope skills stay as they were,
-  except that `remember` and `setup` now describe what the workflow does
+  process restarts, so a second repository needs a restart. The Claude,
+  Codex, Kimi and OpenCode skills are unchanged. The six user-scope skills
+  stay as they were, except that `remember` and `setup` now describe what the workflow does
   instead of claiming the whole package is user scope only. That wording
   also reaches Hermes (`hermes` 0.1.11).
 
