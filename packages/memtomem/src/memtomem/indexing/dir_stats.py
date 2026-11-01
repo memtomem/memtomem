@@ -226,6 +226,8 @@ def _memo_fact(
 def resolve_owning_memory_dir(
     source_path: str | Path,
     configured_dirs: Iterable[str | Path],
+    *,
+    root_prefixes: Sequence[str] | None = None,
 ) -> Path | None:
     """Return the configured ``memory_dir`` that contains ``source_path``.
 
@@ -237,13 +239,19 @@ def resolve_owning_memory_dir(
     When configured dirs are nested (e.g. ``~/work`` and
     ``~/work/notes``), the longest-matching prefix wins so the source is
     attributed to the most specific grouping the user explicitly added.
+
+    ``root_prefixes`` is ``norm_dir_prefix`` of each entry of
+    ``configured_dirs``, in the same order. A caller that asks for many files
+    under one set of roots passes it so each root is normalised once, not once
+    per file (#2964); the lookup and its first-longest tie-break are unchanged.
     """
     from memtomem.storage.sqlite_helpers import norm_path
 
+    dirs = list(configured_dirs)
+    prefixes = [norm_dir_prefix(d) for d in dirs] if root_prefixes is None else root_prefixes
     target = norm_path(Path(source_path).expanduser())
     best: tuple[int, Path] | None = None
-    for d in configured_dirs:
-        prefix = norm_dir_prefix(d)
+    for d, prefix in zip(dirs, prefixes, strict=True):
         if target.startswith(prefix):
             length = len(prefix)
             if best is None or length > best[0]:
@@ -257,6 +265,7 @@ def _under_nested_worktree(
     cache: WorktreeMemo | None = None,
     *,
     walk_root: Path | None = None,
+    root_prefixes: Sequence[str] | None = None,
 ) -> bool:
     """True when a git worktree sits between ``file_path`` and its bound.
 
@@ -292,8 +301,10 @@ def _under_nested_worktree(
     :data:`WorktreeMemo`). It is deliberately not process-wide: a long-running
     server would otherwise never notice a worktree added after startup, and
     would keep skipping one that was removed.
+
+    ``root_prefixes`` is passed through to :func:`resolve_owning_memory_dir`.
     """
-    owning = resolve_owning_memory_dir(file_path, memory_dirs)
+    owning = resolve_owning_memory_dir(file_path, memory_dirs, root_prefixes=root_prefixes)
     try:
         target = Path(file_path).expanduser().resolve()
         if owning is not None:
@@ -440,11 +451,18 @@ def _count_files_on_disk(
     from memtomem.storage.sqlite_helpers import norm_path
 
     worktree_cache: WorktreeMemo = {}
-    roots = list(memory_dirs) or [p]
+    configured = list(memory_dirs)
+    roots = configured or [p]
     own_prefix = norm_dir_prefix(p)
-    prefixes = (
-        list(root_prefixes) if root_prefixes is not None else [norm_dir_prefix(r) for r in roots]
+    # One prefix per entry of ``roots``, in order, for the ownership lookup the
+    # worktree check makes per file. Before #2964 it normalised every root again
+    # for every file, which was most of a status request's time.
+    roots_prefixes = (
+        list(root_prefixes)
+        if root_prefixes is not None and configured
+        else [norm_dir_prefix(r) for r in roots]
     )
+    prefixes = list(roots_prefixes)
     if own_prefix not in prefixes:
         prefixes.append(own_prefix)
     try:
@@ -454,7 +472,7 @@ def _count_files_on_disk(
             if fp.is_file()
             and fp.suffix in extensions
             and _longest_owning_prefix(norm_path(fp), prefixes) == own_prefix
-            and not _under_nested_worktree(fp, roots, worktree_cache)
+            and not _under_nested_worktree(fp, roots, worktree_cache, root_prefixes=roots_prefixes)
         )
     except OSError:
         return 0
