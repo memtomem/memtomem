@@ -5,6 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-11-01
+
+### Upgrading
+
+- **Names a search could not find are refused or skipped as namespaces
+  (#2933, #2946, #2949).** Writes refuse a namespace that contains `,` or `*`,
+  is `!system`, is blank, or is an `agent-runtime:` name the agent tools
+  refuse. The indexer skips such a name from a namespace rule, a folder name
+  or `default_namespace` and moves on to the next source, and `mm config set`,
+  `mem_config` and `mem_policy_add` refuse one. Rows already stored under such
+  a name keep it: move them with `mem_ns_rename`, and after fixing a rule run
+  `mm index --reassign-namespaces`. The entries under Fixed give each surface.
+- **`MEMTOMEM_EXTRA_TOOLS` exposes `mem_update_coverage` individually
+  (#2918).** Set it in the environment the MCP server is launched with
+  (`MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`); the server reads it at startup,
+  so restart the server after changing it. In this release it only exposes the
+  tool: the `update` workflow in the plugins starts using it in the plugin
+  release that follows, which also sets the variable for the servers the
+  plugins launch.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.16 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.2;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.2`, confirm with `mm --version`, then start a new
+  Claude Code session.
+
 ### Added
 
 - **`mem_update_coverage` records which commits the `update` workflow has
@@ -12,9 +38,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   store, never a cursor: `record=false` returns the given SHAs no earlier run
   recorded, `record=true` records the ones a run read in full after its last
   `mem_add`, and rows older than 90 days are pruned on record. A first run
-  marks only what it saw, a `topic` run never records, a rewritten or
-  unreachable commit is simply absent, and two overlapping runs record the
-  union of what each read. The server never runs `git`; it validates the SHAs
+  marks only what it saw, a `topic` run never records, a rewritten commit
+  has a new SHA that no run recorded, a recorded SHA that is no longer
+  reachable stays inert until it is pruned, and two overlapping runs record
+  the union of what each read. Coverage lives only in the SQLite store: a JSON
+  export and import does not carry it, so the next run reviews those commits
+  again. The server never runs `git`; it validates the SHAs
   for shape only. The tool declares `readOnlyHint=false` so a caching proxy
   never replays a check. Registered under `maintenance`
   (`mem_do(action="update_coverage")`), and new `MEMTOMEM_EXTRA_TOOLS` lets a
