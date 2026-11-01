@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from memtomem.config import classify_scope
+from memtomem.config import classify_scope, resolve_project_memory_dirs
 
 
 class TestUserScope:
@@ -113,6 +113,74 @@ class TestRegistrationGuard:
         scope, root = classify_scope(f, project_memory_dirs=None)
         assert scope == "project_shared"
         assert root == proj
+
+
+class TestPreResolvedRoots:
+    """``resolved_roots`` is the registration list resolved once for a batch.
+
+    It must give the answer ``project_memory_dirs`` gives, including the
+    refusal an empty registration produces, and it wins when both are given.
+    """
+
+    @staticmethod
+    def _memdir(tmp_path):
+        proj = tmp_path / "proj"
+        memdir = proj / ".memtomem" / "memories"
+        memdir.mkdir(parents=True)
+        return proj, memdir
+
+    def test_registered_root_classifies_as_project_shared(self, tmp_path):
+        proj, memdir = self._memdir(tmp_path)
+        roots = resolve_project_memory_dirs([memdir])
+
+        assert classify_scope(memdir / "x.md", resolved_roots=roots) == ("project_shared", proj)
+        assert classify_scope(memdir / "x.md", resolved_roots=roots) == classify_scope(
+            memdir / "x.md", project_memory_dirs=[memdir]
+        )
+
+    def test_empty_resolved_roots_still_enforce_registration(self, tmp_path):
+        _proj, memdir = self._memdir(tmp_path)
+
+        assert classify_scope(memdir / "x.md", resolved_roots=frozenset()) == ("user", None)
+
+    def test_resolved_roots_win_over_project_memory_dirs(self, tmp_path):
+        proj, memdir = self._memdir(tmp_path)
+
+        refused = classify_scope(
+            memdir / "x.md", project_memory_dirs=[memdir], resolved_roots=frozenset()
+        )
+        admitted = classify_scope(
+            memdir / "x.md",
+            project_memory_dirs=[],
+            resolved_roots=resolve_project_memory_dirs([memdir]),
+        )
+
+        assert refused == ("user", None)
+        assert admitted == ("project_shared", proj)
+
+    def test_source_visibility_checks_against_its_resolved_roots(self, tmp_path, monkeypatch):
+        """``SourceVisibility.check`` runs once per source in the Sources tree
+        and the memory-dir counts, so it must reuse the set resolved when it
+        was built rather than resolve the registration again per path."""
+        from memtomem import config as config_mod
+        from memtomem.web.source_visibility import SourceVisibility
+
+        _proj, memdir = self._memdir(tmp_path)
+        visibility = SourceVisibility(
+            held=frozenset(),
+            project_memory_dirs=(memdir,),
+            resolved_project_roots=resolve_project_memory_dirs([memdir]),
+        )
+
+        def _refuse(_dirs):
+            raise AssertionError("project roots resolved again during check()")
+
+        monkeypatch.setattr(config_mod, "resolve_project_memory_dirs", _refuse)
+
+        unregistered = tmp_path / "other" / ".memtomem" / "memories" / "x.md"
+
+        assert visibility.check(memdir / "x.md") == (frozenset(), "project_shared")
+        assert visibility.check(unregistered) == (frozenset(), "user")
 
 
 class TestEdgeCases:

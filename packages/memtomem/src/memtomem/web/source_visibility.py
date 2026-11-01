@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from memtomem.config import classify_scope
+from memtomem.config import classify_scope, resolve_project_memory_dirs
 from memtomem.storage.base import StorageBackend
 from memtomem.storage.sqlite_visibility import hidden_source_paths
 
@@ -37,6 +37,7 @@ class SourceVisibility:
 
     held: frozenset[str]
     project_memory_dirs: tuple[Path | str, ...]
+    resolved_project_roots: frozenset[Path]
 
     def check(
         self, path: Path | str, target_scope: str | None = None
@@ -50,7 +51,9 @@ class SourceVisibility:
         tier from :func:`~memtomem.config.classify_scope`, which the list
         route reports as ``SourceOut.target_scope``.
         """
-        source_scope, _project_root = classify_scope(path, self.project_memory_dirs)
+        source_scope, _project_root = classify_scope(
+            path, self.project_memory_dirs, resolved_roots=self.resolved_project_roots
+        )
         reasons: set[HiddenReason] = set()
         if str(path) in self.held:
             reasons.add(HELD)
@@ -65,7 +68,9 @@ class SourceVisibility:
 async def load_source_visibility(storage: StorageBackend, config) -> SourceVisibility:
     """Read the held and pending set once and pin this request's config."""
     held = frozenset(str(path) for path in await hidden_source_paths(storage))
+    project_memory_dirs = tuple(config.indexing.project_memory_dirs)
     return SourceVisibility(
         held=held,
-        project_memory_dirs=tuple(config.indexing.project_memory_dirs),
+        project_memory_dirs=project_memory_dirs,
+        resolved_project_roots=resolve_project_memory_dirs(project_memory_dirs),
     )

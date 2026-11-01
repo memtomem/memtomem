@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from memtomem.config import (
@@ -28,12 +28,13 @@ from memtomem.config import (
     classify_scope,
     coerce_and_validate,
     memory_dir_kind,
+    resolve_project_memory_dirs,
     save_config_overrides,
     saved_embedding_identity,
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.search.reranker.factory import create_reranker
-from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_helpers import fold_path_form
 from memtomem.tools.memory_writer import append_entry
 from memtomem.web import hot_reload as _hot_reload
 from memtomem.web.deps import (
@@ -413,7 +414,15 @@ async def rebuild_fts(storage=Depends(get_storage)):
 
 
 @router.get("/stats", response_model=StatsResponse)
-async def get_stats(storage=Depends(get_storage), config=Depends(get_config)) -> StatsResponse:
+async def get_stats(
+    summary_only: bool = Query(
+        False,
+        description="Return only the totals and the chunk-size distribution. Skips the "
+        "per-source scan, so every home_* field comes back empty.",
+    ),
+    storage=Depends(get_storage),
+    config=Depends(get_config),
+) -> StatsResponse:
     from datetime import datetime, timezone
 
     from memtomem.indexing.engine import norm_dir_prefix
@@ -431,8 +440,17 @@ async def get_stats(storage=Depends(get_storage), config=Depends(get_config)) ->
 
     data = await storage.get_stats()
     distribution = await storage.get_chunk_size_distribution()
+    if summary_only:
+        # The header pill reads only the totals, and it refreshes on every tab
+        # switch; the per-source scan below is for the Home dashboard.
+        return StatsResponse(
+            total_chunks=data.get("total_chunks", 0),
+            total_sources=data.get("total_sources", 0),
+            chunk_size_distribution=distribution,
+        )
 
     pmdirs = config.indexing.project_memory_dirs
+    resolved_roots = resolve_project_memory_dirs(pmdirs)
     # Every index root owns its sources, matching ``GET /api/sources`` —
     # a read-only or project root's files are not orphans. (#2522)
     indexed_dirs = sorted(
@@ -446,12 +464,14 @@ async def get_stats(storage=Depends(get_storage), config=Depends(get_config)) ->
     all_sources: list[SourceOut] = []
     rows = await storage.get_source_files_with_counts()
     for p, cnt, last_indexed_iso, ns_csv, avg_tok, min_tok, max_tok in rows:
-        source_scope, _src_project_root = classify_scope(p, pmdirs)
+        source_scope, _src_project_root = classify_scope(p, pmdirs, resolved_roots=resolved_roots)
         if source_scope == "project_local":
             continue
 
         namespaces = ns_csv.split(",") if ns_csv else ["default"]
-        target = norm_path(p)
+        # Grouped by the stored key, as ``GET /api/sources`` groups it, not by
+        # where a since-relinked path points (#2878).
+        target = fold_path_form(str(p))
         match = next(
             (
                 (dir_path, dir_kind)

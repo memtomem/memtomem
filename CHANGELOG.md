@@ -31,6 +31,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Rerunning `mm init` with a preset leaves an existing `rerank` section in
   `config.json` as it is.
 
+- **The Web UI header no longer scans every source on each tab switch
+  (#2962).** The source and chunk counts in the header refresh on every tab
+  switch, and each refresh had `GET /api/stats` build the Home dashboard's
+  full source list. The header now asks `GET /api/stats?summary_only=true`,
+  which returns the totals and the chunk-size distribution with every
+  `home_*` field empty. Without the parameter the route still returns the full
+  dashboard response, and the Home dashboard still uses it. That response,
+  `GET /api/sources`, `GET /api/sources/content-matches` and
+  `GET /api/memory-dirs/status` also resolve the registered project memory
+  dirs once per request rather than once per source that could belong to one.
+  The Home dashboard now attributes a source to its memory dir by the stored
+  path, as the Sources tree has since #2878, so a path stored under an alias
+  of a memory dir is listed outside it in both.
+
 ## [0.7.2] — 2026-11-01
 
 ### Upgrading

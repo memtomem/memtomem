@@ -2406,7 +2406,9 @@ window.addEventListener('hashchange', () => {
 
 async function loadStats() {
   try {
-    const data = await api('GET', '/api/stats');
+    // Totals only: the per-source scan is for loadDashboard(), the one reader
+    // of the home_* fields, and this runs on every tab switch.
+    const data = await api('GET', '/api/stats?summary_only=true');
     const chunksEl = qs('stat-chunks');
     const sourcesEl = qs('stat-sources');
     chunksEl.removeAttribute('data-i18n');

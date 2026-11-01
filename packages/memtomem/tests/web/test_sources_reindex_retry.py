@@ -25,7 +25,7 @@ def _install_default_stubs(page) -> None:
     page.route("**/api/system/ui-mode", lambda r: _ok(r, {"mode": "prod"}))
     page.route("**/api/system/model-readiness", lambda r: _ok(r, {"ready": True}))
     page.route("**/api/sources?**", lambda r: _ok(r, {"sources": []}))
-    page.route("**/api/stats", lambda r: _ok(r, {}))
+    page.route("**/api/stats**", lambda r: _ok(r, {}))
     page.route(
         "**/api/memory-dirs/status",
         lambda r: _ok(
