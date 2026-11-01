@@ -55,9 +55,17 @@ def web_like_dir(pytester: pytest.Pytester) -> pytest.Pytester:
     # (strict) mode would not classify a bare coroutine as an async test at all
     # — the run has to match the repo's ``asyncio_mode = "auto"`` for the
     # rejection to mean anything here.
+    #
+    # ``runpytest`` runs in this process, inside the outer test's call phase.
+    # Since playwright 1.60, pytest-playwright wraps every call in playwright's
+    # module-global soft assertion scope, so the inner test would open a second
+    # one and fail with "nested soft assertion scopes are not supported". No
+    # probe here is a browser test, so the inner session runs without the
+    # plugin.
     pytester.makeini(
         """
         [pytest]
+        addopts = -p no:playwright
         asyncio_mode = auto
         asyncio_default_fixture_loop_scope = function
         markers =
