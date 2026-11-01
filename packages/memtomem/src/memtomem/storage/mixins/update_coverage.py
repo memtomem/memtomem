@@ -34,14 +34,15 @@ class UpdateCoverageMixin:
         if not shas:
             return []
         # Bounded by the tool's cap on the list (a ``git log -n 10`` window), so
-        # one IN clause stays far below SQLite's variable limit.
+        # one IN clause stays far below SQLite's variable limit. Only ``?``
+        # markers are interpolated; every value is bound.
         placeholders = ",".join("?" for _ in shas)
         # The writer when a caller's ``transaction()`` is open: a pooled reader
         # would see the snapshot from before that caller's own record call.
         async with self._lease_txn_read_db() as db:
             rows = db.execute(
                 "SELECT sha FROM update_review_coverage "
-                f"WHERE project_root = ? AND sha IN ({placeholders})",
+                f"WHERE project_root = ? AND sha IN ({placeholders})",  # nosec B608
                 (project_root, *shas),
             ).fetchall()
         reviewed = {r[0] for r in rows}
