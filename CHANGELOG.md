@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **The Antigravity plugin ships `handoff`, `brief` and `update` (first in
+  `antigravity` 0.2.0; #2920).** agy starts the plugin's server in the plugin
+  directory, which has no project context, so these three project workflows
+  were left out. Their Antigravity skills now begin by binding the server to
+  the repository with `mem_project_bind` (0.7.1), called through `mem_do`
+  with the root `git rev-parse --show-toplevel` printed. They continue only
+  when the tool names that same root. A parent directory, which the server
+  returns when only a parent's tier is registered, stops the workflow, and so
+  does any other result. The repository needs a registered tier
+  (`mm mem init --scope project_local`). A binding lasts until the server
+  process restarts, so a second repository needs a restart. The other
+  runtimes' skills are unchanged. The six user-scope skills stay as they were,
+  except that `remember` and `setup` now describe what the workflow does
+  instead of claiming the whole package is user scope only. That wording
+  also reaches Hermes (`hermes` 0.1.11).
+
 ### Fixed
 
 - **Handoff resume compares the record with the remote, not only the local

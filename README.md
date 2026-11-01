@@ -217,7 +217,7 @@ still open or an LLM writes what they produce:
 | [**Kimi Code skills**](packages/memtomem-kimi-skills/) | Skill bundle for Kimi Code (not a plugin) |
 | [**Hermes Agent plugin**](packages/memtomem-hermes-plugin/) | Exact-pinned MCP server and six workflow skills for Hermes Agent |
 | [**Hermes memory provider**](packages/memtomem-hermes-memory/) | Recall-only Hermes memory provider that adds relevant notes to each turn |
-| [**Antigravity CLI plugin**](packages/memtomem-antigravity-plugin/) | Exact-pinned MCP server and six workflow skills for `agy` — [experimental](#stability) |
+| [**Antigravity CLI plugin**](packages/memtomem-antigravity-plugin/) | Exact-pinned MCP server and nine workflow skills for `agy` — [experimental](#stability) |
 | [**memtomem-stm**](https://github.com/memtomem/memtomem-stm) | STM proxy — proactive memory surfacing via tool interception |
 
 ---

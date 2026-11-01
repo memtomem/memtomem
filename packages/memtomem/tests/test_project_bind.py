@@ -9,6 +9,10 @@ a directory (``plugin_cwd``) against a real BM25-only store.
 from __future__ import annotations
 
 import json
+import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -28,6 +32,9 @@ from memtomem.server.tools.project_bind import mem_project_bind
 from memtomem.server.tools.recall import mem_recall
 from memtomem.server.tools.search import mem_search
 from memtomem.server.tools.status_config import mem_status
+
+
+_REPO = Path(__file__).resolve().parents[3]
 
 
 def _make_project(base: Path, name: str) -> tuple[Path, Path]:
@@ -554,3 +561,93 @@ async def test_watchdog_report_ignores_the_binding(tmp_path: Path, plugin_cwd) -
 
     await check_full_health_report(app)  # type: ignore[arg-type]
     assert storage.get_health_report.await_args.kwargs == {"project_context_root": None}
+
+
+# ---------------------------------------------------------------------------
+# What the Antigravity workflows' bind step relies on (#2920)
+# ---------------------------------------------------------------------------
+#
+# handoff, brief and update ship to Antigravity with a bind step that calls this
+# tool through ``mem_do`` and continues only when the result's first line is one
+# of two quoted forms naming exactly the live Git root.
+
+
+def _bind_step_success_forms() -> tuple[str, str]:
+    """The two first-line forms the workflow's bind step quotes."""
+    source = (_REPO / "packages/memtomem-plugin-assets/workflows/handoff.md").read_text(
+        encoding="utf-8"
+    )
+    block = source.split("<!-- scope:bound -->", 1)[1].split("<!-- /scope -->", 1)[0]
+    forms = re.findall(r"`((?:Bound project root|Project root already bound): <root>)`", block)
+    assert len(forms) == 2, forms
+    return forms[0], forms[1]
+
+
+@pytest.mark.asyncio
+async def test_the_bind_step_success_forms_are_what_the_tool_prints(bound_setup) -> None:
+    _app, ctx, root, _tier = bound_setup
+    first_form, again_form = _bind_step_success_forms()
+
+    first = await mem_do(action="project_bind", params={"project_root": str(root)}, ctx=ctx)
+    again = await mem_do(action="project_bind", params={"project_root": str(root)}, ctx=ctx)
+
+    assert first.splitlines()[0] == first_form.replace("<root>", str(root)), first
+    assert again.splitlines()[0] == again_form.replace("<root>", str(root)), again
+
+
+@pytest.mark.asyncio
+async def test_a_repository_under_a_registered_parent_binds_the_parent(
+    bm25_only_components, tmp_path: Path, stdio, plugin_cwd
+) -> None:
+    """The case the bind step's root-equality check exists for.
+
+    With only a parent's tier registered, binding the repository succeeds and
+    names the parent. A workflow that accepted any success would then write the
+    repository's handoffs into the parent's tier, so it must compare the root.
+    """
+    comp, _mem_dir = bm25_only_components
+    parent_root, parent_tier = _make_project(tmp_path, "workspace")
+    repo = parent_root / "repo"
+    (repo / ".git").mkdir(parents=True)
+    comp.config.indexing.project_memory_dirs = [parent_tier]
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    out = await mem_do(action="project_bind", params={"project_root": str(repo)}, ctx=ctx)
+
+    assert out.splitlines()[0] == f"Bound project root: {parent_root}", out
+    assert parent_root != repo.resolve()
+
+
+@pytest.mark.asyncio
+async def test_a_symlinked_repository_binds_the_path_git_reports(
+    bm25_only_components, tmp_path: Path, stdio, plugin_cwd
+) -> None:
+    """The tool returns the resolved root, which is what Git prints as the top level."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    comp, _mem_dir = bm25_only_components
+    root, tier = _make_project(tmp_path, "real")
+    shutil.rmtree(root / ".git")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "init", "-q", str(root)], env=env, check=True, timeout=60)
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(root, target_is_directory=True)
+    except OSError as exc:  # Windows without the symlink privilege
+        pytest.skip(f"cannot create a symlink: {exc}")
+    comp.config.indexing.project_memory_dirs = [tier]
+    ctx = StubCtx(AppContext.from_components(comp))
+    top = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=link,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    ).stdout.strip()
+
+    out = await mem_do(action="project_bind", params={"project_root": top}, ctx=ctx)
+
+    assert out.splitlines()[0] == f"Bound project root: {root}", out
+    assert Path(top) == root

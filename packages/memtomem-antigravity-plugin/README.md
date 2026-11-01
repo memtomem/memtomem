@@ -5,7 +5,7 @@
 > [Stability](https://github.com/memtomem/memtomem#stability).
 
 Markdown-first long-term memory shared across your coding agents. This plugin starts a
-local memtomem MCP server in the Antigravity CLI (`agy`) and adds six memory workflow
+local memtomem MCP server in the Antigravity CLI (`agy`) and adds nine memory workflow
 skills. Notes saved here are searchable from Claude Code, Codex CLI, Kimi Code and any
 other client that uses the same `~/.memtomem` store.
 
@@ -51,7 +51,7 @@ again. `agy plugin uninstall memtomem` also removes the plugin; your memories st
 both servers run side by side: agy names the plugin's server `memtomem_memtomem`, so it
 does not replace your entry. Remove the hand-written one with `agy mcp remove memtomem`
 to keep a single server. To keep your manual registration and retain the plugin's
-six skills instead, use the source-checkout
+nine skills instead, use the source-checkout
 [skills-only reconciliation](../../docs/guides/mcp-clients.md#keep-manual-mcp-and-plugin-skills).
 It suppresses only the bundled MCP entry; plugin updates can restore that entry, so
 rerun the diagnostic after reinstalling. The manual server retains its existing
@@ -70,14 +70,23 @@ reported DB path before relying on sharing.
 
 ## Scope
 
-This plugin runs memtomem at **user scope**. agy starts the server in the plugin
-directory, so it has no project context: there is no per-project (`project_local`)
-memory, and paths given to indexing must be absolute. Notes are shared with your other
-agents through the user-scope store. The handoff workflow of the other memtomem plugins
-is not included, because it needs a project.
+agy starts the server in the plugin directory, and memtomem takes its project context from
+the directory its server starts in, so the server begins at **user scope**. Six skills
+(search, recall, remember, index, status, setup) work there: notes are shared with your
+other agents through the user-scope store, `remember` writes user-scope memory only, and
+paths given to indexing must be absolute.
 
-memtomem takes its project context from the directory the server starts in, so this
-plugin cannot provide project-scoped memory.
+The three project workflows (`memtomem-handoff`, `memtomem-brief`, `memtomem-update`)
+first bind the server to the repository you are working in (`mem_project_bind`, through
+`mem_do`), then use its `project_local` tier. They need:
+
+- a registered tier in that repository: `cd <repo> && mm mem init --scope project_local`;
+- a server that is not yet bound to another repository. A binding lasts until the memtomem
+  server process restarts, so working in a second repository needs that restart first.
+
+After a binding, search and recall in that server process also see the bound repository's
+project tiers. The skills-only setup above, whose manual server already starts in your
+workspace, binds the same way.
 
 ## Network
 
