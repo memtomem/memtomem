@@ -53,6 +53,7 @@ EXPECTED_USER_TABLES = frozenset(
         "search_feedback",
         "session_events",
         "sessions",
+        "update_review_coverage",
         "working_memory",
     }
 )

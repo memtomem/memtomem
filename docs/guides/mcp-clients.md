@@ -591,7 +591,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Schedule** | `mem_schedule_register`, `mem_schedule_list`, `mem_schedule_run_now`, `mem_schedule_delete` (cron-driven compaction, decay, dead-link cleanup, dedup; also reachable as `mem_do` actions) |
 | **Health** | `mem_watchdog`, `mem_cleanup_orphans` |
 | **Import** | `mem_import_notion`, `mem_import_obsidian` |
-| **Maintenance** | `mem_dedup_scan`, `mem_dedup_merge`, `mem_decay_scan`, `mem_decay_expire` |
+| **Maintenance** | `mem_dedup_scan`, `mem_dedup_merge`, `mem_decay_scan`, `mem_decay_expire`, `mem_update_coverage` (which commits the `update` workflow has reviewed for this project; exposed individually to plugin hosts through `MEMTOMEM_EXTRA_TOOLS`) |
 | **Data** | `mem_export`, `mem_import` |
 | **Config** | `mem_stats`, `mem_status`, `mem_config`\*, `mem_embedding_reset`\*, `mem_reset`\* |
 | **Evaluation** | `mem_eval` |
@@ -603,7 +603,7 @@ uses, so the output is identical. Useful as a sanity check between
 
 \* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`. The actions stay reachable in `core` and `standard` mode through the dispatcher — `mem_do(action="config", params={...})`, `mem_do(action="embedding_reset", params={...})`, `mem_do(action="reset", params={...})` — and the CLI equivalents are `mm config`, `mm embedding-reset`, and `mm reset`.
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (39 names), or `full` (101 names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (39 names), or `full` (102 names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents. `MEMTOMEM_EXTRA_TOOLS` names registered tools a deployment exposes individually on top of its mode (see [Configuration](configuration.md#tool-mode)).
 
 `mem_candidate_propose(content, source, source_ref, idempotency_key)` lets an
 external agent submit a review candidate without writing durable memory.

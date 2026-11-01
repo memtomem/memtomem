@@ -70,13 +70,24 @@ def test_core_is_nine_tools() -> None:
     assert len(_CORE_TOOLS) == 9
 
 
-def _tools_list_under_mode(mode: str, tmp_path: Path) -> set[str]:
+def _tools_list_under_mode(
+    mode: str, tmp_path: Path, *, extra_tools: str | None = None
+) -> set[str]:
+    """The tool names ``_tools_under_mode`` returns."""
+    return set(_tools_under_mode(mode, tmp_path, extra_tools=extra_tools))
+
+
+def _tools_under_mode(
+    mode: str, tmp_path: Path, *, extra_tools: str | None = None
+) -> dict[str, dict]:
     """Spawn the server with ``MEMTOMEM_TOOL_MODE=mode`` and return the
-    tool names it advertises via the ``tools/list`` RPC.
+    tool records it advertises via the ``tools/list`` RPC, by name.
 
     Isolates HOME/XDG under ``tmp_path`` (mirrors
     ``test_server_instructions.py``) so the probe never touches real
-    developer state.
+    developer state. ``extra_tools`` sets ``MEMTOMEM_EXTRA_TOOLS``; a test
+    session launched by a plugin may inherit that variable, so it is
+    cleared unless set here.
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -89,6 +100,9 @@ def _tools_list_under_mode(mode: str, tmp_path: Path) -> set[str]:
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
     env["MEMTOMEM_TOOL_MODE"] = mode
+    env.pop("MEMTOMEM_EXTRA_TOOLS", None)
+    if extra_tools is not None:
+        env["MEMTOMEM_EXTRA_TOOLS"] = extra_tools
 
     init = {
         "jsonrpc": "2.0",
@@ -117,7 +131,7 @@ def _tools_list_under_mode(mode: str, tmp_path: Path) -> set[str]:
         proc.stdin.flush()
 
         deadline = time.monotonic() + 20
-        tools: set[str] | None = None
+        tools: dict[str, dict] | None = None
         stdout_fd = proc.stdout.fileno()
         buf = b""
         while tools is None:
@@ -149,7 +163,7 @@ def _tools_list_under_mode(mode: str, tmp_path: Path) -> set[str]:
                 except json.JSONDecodeError:
                     continue
                 if resp.get("id") == 2 and "result" in resp:
-                    tools = {t["name"] for t in resp["result"]["tools"]}
+                    tools = {t["name"]: t for t in resp["result"]["tools"]}
                     break
         if tools is None:
             # Deadline hit with the server still alive and silent — kill
@@ -194,6 +208,46 @@ def test_tools_list_matches_expected_set(mode: str, tmp_path: Path) -> None:
         f"{mode} mode advertised {sorted(advertised - expected)} extra / "
         f"{sorted(expected - advertised)} missing vs expected"
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="server is POSIX-only")
+@pytest.mark.parametrize("mode", ["core", "standard"])
+def test_extra_tools_env_exposes_a_registered_tool_on_top_of_the_mode(
+    mode: str, tmp_path: Path
+) -> None:
+    """``MEMTOMEM_EXTRA_TOOLS`` (#2918) adds exactly the named registered tools.
+    A core name is redundant, an unknown name is dropped with a warning, and
+    whitespace around the comma-separated names is ignored."""
+    advertised = _tools_list_under_mode(
+        mode, tmp_path, extra_tools=" mem_update_coverage , mem_search,mem_not_a_tool"
+    )
+    assert advertised == _expected_tools(mode) | {"mem_update_coverage"}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="server is POSIX-only")
+def test_update_coverage_advertises_itself_as_a_non_destructive_writer(tmp_path: Path) -> None:
+    """A caching proxy that caches anything not declared a writer would replay
+    a coverage check from check → record → check; the wire annotations say
+    writer, never destructive (#2918)."""
+    records = _tools_under_mode("core", tmp_path, extra_tools="mem_update_coverage")
+    annotations = records["mem_update_coverage"].get("annotations") or {}
+    assert annotations.get("readOnlyHint") is False, annotations
+    assert annotations.get("destructiveHint") is False, annotations
+
+
+def test_extra_tools_helper_warns_about_and_drops_unknown_names(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from memtomem.server import _extra_tools
+
+    monkeypatch.setenv("MEMTOMEM_EXTRA_TOOLS", "mem_update_coverage,mem_typo, ,mem_search")
+    with caplog.at_level("WARNING", logger="memtomem.server"):
+        extras = _extra_tools(frozenset({"mem_update_coverage", "mem_search", "mem_do"}))
+    assert extras == frozenset({"mem_update_coverage", "mem_search"})
+    assert any("mem_typo" in rec.getMessage() for rec in caplog.records), caplog.text
+
+    monkeypatch.delenv("MEMTOMEM_EXTRA_TOOLS")
+    assert _extra_tools(frozenset({"mem_search"})) == frozenset()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="server is POSIX-only")

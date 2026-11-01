@@ -545,6 +545,7 @@ def test_initialize_response_carries_instructions(tmp_path: Path) -> None:
     # Pin the mode rather than inherit whatever the developer's shell
     # exports — this test asserts the shipping-default text.
     env["MEMTOMEM_TOOL_MODE"] = "core"
+    env.pop("MEMTOMEM_EXTRA_TOOLS", None)
 
     initialize_request = {
         "jsonrpc": "2.0",
