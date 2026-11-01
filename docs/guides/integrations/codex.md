@@ -35,7 +35,12 @@ skills, and MCP server are reloaded.
 > list`). Remove the manual section to switch to the plugin's pinned
 > server. A manual entry under any *other* name (say
 > `[mcp_servers.memtomem-local]`) is not deduplicated — both servers would
-> run against the same store — so keep the name `memtomem`.
+> run against the same store — so keep the name `memtomem`. A manual entry
+> that keeps serving also needs
+> `env = { MEMTOMEM_EXTRA_TOOLS = "mem_update_coverage" }`
+> (memtomem 0.7.2 or later): the plugin's bundled server sets it, and without it
+> `memtomem-update` stops before writing in its default incremental mode and
+> in `full`.
 
 ## Included skills
 

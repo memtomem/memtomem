@@ -1,6 +1,6 @@
 {
   "name": "memtomem",
-  "version": "0.3.22",
+  "version": "0.3.23",
   "description": "Search, recall, save, and index Markdown-first agent memory with memtomem",
   "author": {
     "name": "memtomem",

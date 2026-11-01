@@ -114,9 +114,10 @@ def _input_fallback(workflow: dict) -> list[str]:
     if workflow.get("input_optional"):
         # The workflow defines what runs without the input, so neither asking nor
         # refusing is right: both would keep the no-input mode from ever running.
+        mode = workflow["input_optional_mode"]
         return [
             f"If the request does not specify the {kind}, do not ask and do not stop: run the",
-            "minimal mode described below, in an interactive or a non-interactive context.",
+            f"{mode} mode described below, in an interactive or a non-interactive context.",
             f"A request that does specify the {kind} proceeds normally.",
             "",
         ]
@@ -252,6 +253,9 @@ def _mcp_requirement(core: dict) -> str:
 def _launch_env(core: dict) -> dict[str, str]:
     return {
         "MEMTOMEM_TOOL_MODE": core["tool_mode"],
+        # The update workflow's coverage tool, by name: the skill's allowlist can then
+        # carry that one tool instead of mem_do, which reaches every registered action.
+        "MEMTOMEM_EXTRA_TOOLS": ",".join(core["extra_tools"]),
         # ONNX Runtime 1.29+ uploads telemetry from official Linux and macOS builds unless
         # this is truthy before it initializes (#2664). uvx resolves onnxruntime fresh, so
         # the launch env carries it for every core version the plugins pin.
@@ -367,7 +371,13 @@ def expected_files() -> dict[Path, str]:
             f"CORE_VERSION = {_q(contract['core']['version'])}\n"
             f"MCP_REQUIREMENT = {_q(_mcp_requirement(contract['core']))}\n"
             f"TOOL_MODE = {_q(contract['core']['tool_mode'])}\n"
-            f"LAUNCH_ENV = {json.dumps(_launch_env(contract['core']))}\n"
+            # One entry per line with a trailing comma: the shape `ruff format` keeps.
+            "LAUNCH_ENV = {\n"
+            + "".join(
+                f"    {json.dumps(key)}: {json.dumps(value)},\n"
+                for key, value in _launch_env(contract["core"]).items()
+            )
+            + "}\n"
         ),
         CLAUDE_ROOT / ".mcp.json": _mcp_config(contract["core"]),
         CODEX_ROOT / ".mcp.json": _mcp_config(contract["core"]),

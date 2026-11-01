@@ -1586,7 +1586,7 @@ The keys may come either from the config surface above or from the Langfuse SDK'
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_TOOL_MODE` | `core` | Which MCP names are exposed: `core` (9), `standard` (39 incl. `mem_do`), `full` (102 tools) |
-| `MEMTOMEM_EXTRA_TOOLS` | *(unset)* | Comma-separated registered tool names exposed individually on top of the mode (no effect in `full`). A deployment that launches the server lists the tool its skill needs, so the skill's own allowlist can name it instead of being granted `mem_do`; the plugins will set `mem_update_coverage` once their `update` workflow uses it. Deployment configuration, not an authorization boundary: an unknown name is logged and ignored, and the surface only ever gains registered names. |
+| `MEMTOMEM_EXTRA_TOOLS` | *(unset)* | Comma-separated registered tool names exposed individually on top of the mode (no effect in `full`). A deployment that launches the server lists the tool its skill needs, so the skill's own allowlist can name it instead of being granted `mem_do`; the plugins' bundled server configurations set `mem_update_coverage`, which their `update` workflow needs outside `topic` mode, and a hand-written entry (or one `mm init` wrote) has to add it. Deployment configuration, not an authorization boundary: an unknown name is logged and ignored, and the surface only ever gains registered names. |
 
 In `core` mode, use `mem_do(action="...", params={...})` to access any of the 95 non-core actions. Fewer tools means less context usage for AI agents.
 
