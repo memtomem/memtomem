@@ -69,13 +69,16 @@ class TestStoredNonObjectConfig:
         assert run["status"] == "error"
         assert run["error"] == result.error
 
-    async def test_dry_run_writes_no_row(self, storage):
-        await storage.policy_add("p", "auto_archive", [1])
+    @pytest.mark.parametrize("ptype", sorted(_VALID_TYPES))
+    @pytest.mark.parametrize("config,kind", NON_OBJECTS)
+    async def test_dry_run_refuses_and_writes_no_row(self, storage, ptype, config, kind):
+        await storage.policy_add("p", ptype, json.loads(config))
         policy = await storage.policy_get("p")
 
         result = await run_policy(storage, policy, dry_run=True)
 
-        assert result.error
+        assert result.error == f"config must be a JSON object, got {kind}"
+        assert result.affected_count == 0 and result.mutated is False
         assert await storage.maintenance_run_latest(limit=5) == []
 
     async def test_a_missing_config_still_means_the_defaults(self, storage):
@@ -83,14 +86,18 @@ class TestStoredNonObjectConfig:
         result = await run_policy(storage, policy, dry_run=True)
         assert result.error is None
 
-    async def test_the_batch_continues_past_it(self, storage):
+    # Falsy shapes included: a loader that read them as "no config" (``or {}``)
+    # would run the bad policy with defaults. ``run_all_enabled`` reads rows
+    # through ``policy_get_enabled``, not the ``policy_get`` the tests above use.
+    @pytest.mark.parametrize("bad_config", [[1], None, False, 0, "", []])
+    async def test_the_batch_continues_past_it(self, storage, bad_config):
         chunk = make_chunk("stale")
         await storage.upsert_chunks([chunk])
         old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
         db = storage._get_db()
         db.execute("UPDATE chunks SET created_at = ?", [old])
         db.commit()
-        await storage.policy_add("bad", "auto_archive", [1])
+        await storage.policy_add("bad", "auto_archive", bad_config)
         await storage.policy_add("good", "auto_archive", {"max_age_days": 30})
         db.execute(
             "UPDATE memory_policies SET created_at = CASE name "
