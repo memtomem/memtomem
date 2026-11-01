@@ -11,11 +11,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - **Names a search could not find are refused or skipped as namespaces
   (#2933, #2946, #2949).** Writes refuse a namespace that contains `,` or `*`,
-  is `!system`, is blank, or is an `agent-runtime:` name the agent tools
-  refuse. The indexer skips such a name from a namespace rule, a folder name
-  or `default_namespace` and moves on to the next source, and `mm config set`,
+  is `!system`, is whitespace only, or is an `agent-runtime:` name the agent
+  tools refuse; an empty string still means no namespace was given. The
+  indexer skips such a name from a namespace rule, a folder name or
+  `default_namespace` and moves on to the next source, and `mm config set`,
   `mem_config` and `mem_policy_add` refuse one. Rows already stored under such
-  a name keep it: move them with `mem_ns_rename`, and after fixing a rule run
+  a name keep it: `mem_ns_rename` moves them out of a non-empty name (it
+  refuses an empty one), and after fixing a rule run
   `mm index --reassign-namespaces`. The entries under Fixed give each surface.
 - **`MEMTOMEM_EXTRA_TOOLS` exposes `mem_update_coverage` individually
   (#2918).** Set it in the environment the MCP server is launched with
@@ -42,8 +44,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   has a new SHA that no run recorded, a recorded SHA that is no longer
   reachable stays inert until it is pruned, and two overlapping runs record
   the union of what each read. Coverage lives only in the SQLite store: a JSON
-  export and import does not carry it, so the next run reviews those commits
-  again. The server never runs `git`; it validates the SHAs
+  export does not carry it and an import neither adds nor clears it, so
+  restoring a bundle into a store without that project's coverage means the
+  next run reviews those commits again. The server never runs `git`; it
+  validates the SHAs
   for shape only. The tool declares `readOnlyHint=false` so a caching proxy
   never replays a check. Registered under `maintenance`
   (`mem_do(action="update_coverage")`), and new `MEMTOMEM_EXTRA_TOOLS` lets a
