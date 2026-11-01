@@ -1017,6 +1017,7 @@ def _pydantic_section_env_vars(
 _ENV_ONLY_VARS = frozenset(
     {
         "MEMTOMEM_TOOL_MODE",  # server/__init__.py
+        "MEMTOMEM_EXTRA_TOOLS",  # server/__init__.py (#2918)
         "MEMTOMEM_WEB__MODE",  # web/app.py (_WEB_MODE_ENV)
         "MEMTOMEM_WEB__HOST",  # web/app.py
         "MEMTOMEM_WEB__PORT",  # web/app.py
@@ -1550,7 +1551,7 @@ class TestRegistryAndInstallDocs:
             f"MCP table drifted; missing={sorted(current - documented)}, "
             f"extra={sorted(documented - current)}"
         )
-        assert len(current) == 101
+        assert len(current) == 102
         assert len(_CORE_TOOLS) == 9
         standard = set(_CORE_TOOLS) | {
             f"mem_{name}" for name, info in ACTIONS.items() if info.category in _STANDARD_PACKS

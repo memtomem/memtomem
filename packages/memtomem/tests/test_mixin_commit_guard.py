@@ -755,6 +755,9 @@ _PARTICIPANT_HELPERS: dict[tuple[str, str], str] = {
     ("maintenance_runs.py", "MaintenanceRunMixin._prune_maintenance_runs"): (
         "DELETEs run rows past the retention window."
     ),
+    ("update_coverage.py", "UpdateCoverageMixin._prune_update_coverage"): (
+        "DELETEs coverage rows past the retention window."
+    ),
     ("history.py", "HistoryMixin._prune_old_history"): (
         "DELETEs history rows past the retention window."
     ),

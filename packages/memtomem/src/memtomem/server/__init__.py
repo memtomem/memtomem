@@ -137,6 +137,7 @@ from memtomem.server.tools.url_index import mem_fetch
 from memtomem.server.tools.cross_ref import mem_link, mem_unlink, mem_related
 from memtomem.server.tools.session import mem_session_start, mem_session_end, mem_session_list
 from memtomem.server.tools.project_bind import mem_project_bind
+from memtomem.server.tools.update_coverage import mem_update_coverage
 from memtomem.server.tools.scratch import mem_scratch_set, mem_scratch_get, mem_scratch_promote
 from memtomem.server.tools.procedure import mem_procedure_save, mem_procedure_list
 from memtomem.server.tools.pinned import (
@@ -245,6 +246,32 @@ def _registered_tool_names() -> frozenset[str]:
 # non-full mode has pruned ``mcp``. Used by the per-mode pin tests.
 _ALL_REGISTERED_TOOLS = _registered_tool_names()
 
+# ``MEMTOMEM_EXTRA_TOOLS``: registered tool names a deployment exposes
+# individually on top of its mode (#2918). A plugin that launches the server
+# lists the one tool its skill needs, so the skill's own allowlist can name it
+# instead of being granted ``mem_do``. This is deployment configuration, not an
+# authorization boundary: whoever writes the launch command can already pick
+# ``full`` mode. Unknown names are reported and dropped rather than raised —
+# pruning runs at import, and a typo or a hand-written config naming a tool
+# this (older) server lacks would otherwise take every tool down; the surface
+# can only ever gain registered names.
+_EXTRA_TOOLS_ENV = "MEMTOMEM_EXTRA_TOOLS"
+
+
+def _extra_tools(registered: frozenset[str]) -> frozenset[str]:
+    requested = {t.strip() for t in os.environ.get(_EXTRA_TOOLS_ENV, "").split(",") if t.strip()}
+    unknown = sorted(requested - registered)
+    if unknown:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "%s names tools this server does not register and ignores them: %s",
+            _EXTRA_TOOLS_ENV,
+            ", ".join(unknown),
+        )
+    return frozenset(requested & registered)
+
+
 if _TOOL_MODE != "full":
     if _TOOL_MODE == "standard":
         from memtomem.server.tool_registry import ACTIONS
@@ -254,6 +281,7 @@ if _TOOL_MODE != "full":
         }
     else:
         _allowed = _CORE_TOOLS
+    _allowed = set(_allowed) | _extra_tools(_ALL_REGISTERED_TOOLS)
     # ``MCPServer.remove_tool`` is the public removal API; raise rather
     # than silently no-op if a future release drops it, so pruning can't
     # fail open to full mode.

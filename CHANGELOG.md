@@ -7,6 +7,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mem_update_coverage` records which commits the `update` workflow has
+  reviewed (#2918).** Coverage is a per-project set of commit SHAs in the
+  store, never a cursor: `record=false` returns the given SHAs no earlier run
+  recorded, `record=true` records the ones a run read in full after its last
+  `mem_add`, and rows older than 90 days are pruned on record. A first run
+  marks only what it saw, a `topic` run never records, a rewritten or
+  unreachable commit is simply absent, and two overlapping runs record the
+  union of what each read. The server never runs `git`; it validates the SHAs
+  for shape only. The tool declares `readOnlyHint=false` so a caching proxy
+  never replays a check. Registered under `maintenance`
+  (`mem_do(action="update_coverage")`), and new `MEMTOMEM_EXTRA_TOOLS` lets a
+  deployment expose registered tools individually on top of its mode — the
+  plugins will list this one so the `update` skill can name it in its own
+  allowlist instead of being granted `mem_do`. An unknown name in the variable
+  is logged and ignored; the surface only ever gains registered names. The
+  workflow change that uses the tool follows in the plugin packages
+  (ADR-0040).
 - **The Antigravity plugin ships `handoff`, `brief` and `update` (first in
   `antigravity` 0.2.0; #2920).** agy starts the plugin's server in the plugin
   directory, which has no project context, so these three project workflows

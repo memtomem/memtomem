@@ -96,6 +96,7 @@ from memtomem.storage.mixins import (
     MaintenanceRunMixin,
     PolicyMixin,
     RelationMixin,
+    UpdateCoverageMixin,
     ScheduleMixin,
     ScratchMixin,
     SessionMixin,
@@ -252,6 +253,7 @@ class SqliteBackend(
     ScheduleMixin,
     FormationMixin,
     MaintenanceRunMixin,
+    UpdateCoverageMixin,
 ):
     def __init__(
         self,

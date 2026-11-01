@@ -1043,6 +1043,25 @@ def create_tables(
         "CREATE INDEX IF NOT EXISTS idx_maintenance_runs_started ON maintenance_runs(started_at)"
     )
 
+    # --- Update review coverage (#2918) ---
+    # The commits an ``update`` workflow run has reviewed, per project root. A
+    # set keyed by SHA, not a cursor; ``UpdateCoverageMixin`` prunes rows older
+    # than its retention window lazily. No FK anywhere: the SHAs are caller
+    # provenance and ``project_root`` is the same path string ``chunks`` carries.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS update_review_coverage (
+            project_root TEXT NOT NULL,
+            sha          TEXT NOT NULL,
+            run_id       TEXT NOT NULL,
+            reviewed_at  TEXT NOT NULL,
+            PRIMARY KEY (project_root, sha)
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_update_review_coverage_reviewed "
+        "ON update_review_coverage(reviewed_at)"
+    )
+
     # --- Health watchdog snapshots ---
     db.execute("""
         CREATE TABLE IF NOT EXISTS health_snapshots (
