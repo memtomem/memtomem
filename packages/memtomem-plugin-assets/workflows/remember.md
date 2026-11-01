@@ -9,9 +9,9 @@ Choose the destination from the user's context:
 - Use `project_shared` only after explicit confirmation and set `confirm_project_shared=true`.
 <!-- /scope -->
 <!-- scope:user -->
-This package runs memtomem at user scope only. Call `mem_add` with `scope="user"` and without a `file` argument (an explicit file path can carry its own scope); never pass `project_local` or `project_shared`.
+This workflow writes user-scope memory only. Call `mem_add` with `scope="user"` and without a `file` argument (an explicit file path can carry its own scope); never pass `project_local` or `project_shared`.
 
-- If the user explicitly asked for a project-only destination (for example "only in this project" or `project_local`), do not write. Explain that this package stores memories in the user-scope store shared with their other agents, and save there only if they then agree; in a non-interactive context, stop without writing and report `unsupported_scope`.
+- If the user explicitly asked for a project-only destination (for example "only in this project" or `project_local`), do not write. Explain that this workflow stores memories in the user-scope store shared with their other agents, and save there only if they then agree; in a non-interactive context, stop without writing and report `unsupported_scope`.
 - Otherwise, for a project-specific fact, name the project in the content or a tag so it stays findable.
 <!-- /scope -->
 

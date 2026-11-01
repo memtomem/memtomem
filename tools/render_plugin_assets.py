@@ -24,8 +24,10 @@ HERMES_MEMORY_ROOT = ROOT / "packages" / "memtomem-hermes-memory"
 
 # Workflow sources may carry scope variants: a host that starts the server inside the
 # user's project renders the `project` blocks, one that starts it elsewhere (no project
-# context) renders the `user` blocks. Text outside a block is shared by both.
-SCOPES = ("project", "user")
+# context) renders the `user` blocks. Text outside a block is shared by all of them.
+# `bound` is a host that starts the server elsewhere but binds it to the project with
+# `mem_project_bind` (#2920): it renders a project-only workflow plus its `bound` blocks.
+SCOPES = ("project", "user", "bound")
 _SCOPE_OPEN = re.compile(r"<!-- scope:([a-z]+) -->")
 _SCOPE_CLOSE = "<!-- /scope -->"
 # Each line with its own terminator; the last may have none.
@@ -70,7 +72,20 @@ def _select_scope(text: str, scope: str) -> str:
 
 def _workflow_body(workflow_id: str, scope: str) -> str:
     source = ASSETS / "workflows" / f"{workflow_id}.md"
-    return _select_scope(source.read_text(encoding="utf-8"), scope)
+    return _render_workflow(source.read_text(encoding="utf-8"), scope)
+
+
+def _render_workflow(text: str, scope: str) -> str:
+    """``_select_scope``, refusing a ``bound`` render that would drop other variants.
+
+    A ``bound`` render keeps only the shared text and the ``bound`` blocks, so a
+    source with ``project`` or ``user`` blocks would lose them silently.
+    """
+    if scope == "bound":
+        found = {m.group(1) for m in _SCOPE_OPEN.finditer(text)} & {"project", "user"}
+        if found:
+            raise ValueError(f"a bound render would drop the {sorted(found)} blocks")
+    return _select_scope(text, scope)
 
 
 def _q(value: str) -> str:
@@ -390,13 +405,18 @@ def expected_files() -> dict[Path, str]:
                 workflow, body, contract["opencode"]["version_range"]
             )
         # Hermes and Antigravity start the server in the plugin directory, so they
-        # render the user-scope variant and skip workflows that need a project root.
-        if "user" in workflow.get("scopes", SCOPES):
+        # render the user-scope variant. Hermes skips workflows that need a project
+        # root; Antigravity renders those with their bind step (`bound`, #2920).
+        scopes = workflow.get("scopes", ["project", "user"])
+        if "user" in scopes:
             user = dict(workflow)
             user["description"] = workflow.get("user_scope_description", workflow["description"])
             user_skill = _portable_skill(user, _workflow_body(workflow["id"], "user"))
             for root in (HERMES_ROOT, ANTIGRAVITY_ROOT):
                 files[root / "skills" / workflow["codex_name"] / "SKILL.md"] = user_skill
+        else:
+            bound_skill = _portable_skill(workflow, _workflow_body(workflow["id"], "bound"))
+            files[ANTIGRAVITY_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = bound_skill
     return files
 
 
