@@ -134,6 +134,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   editing `namespace.rules` through these surfaces means fixing such an entry
   first, because the whole list is written at once.
 
+- **Policies no longer move chunks into a namespace a search could not find
+  (#2949).** `auto_archive`, `auto_promote` and `auto_consolidate` wrote to the
+  namespaces their config named without the check above. `mem_policy_add` now
+  refuses an `archive_namespace`, `target_namespace` or `summary_namespace`
+  that fails it, and an `archive_namespace_template` that fails it once
+  `{first_tag}` is filled in (`a,b:{first_tag}`, `!system`;
+  `archive:{first_tag}` is fine). `archive_namespace` is judged only when the
+  policy can use it: with no template, or an empty one. A template that is
+  not a string or `null` is refused.
+
+  A policy already stored with such a target is refused when it runs, dry run
+  included: it moves nothing and reports an error, and the applied run is
+  recorded as `status=error`. Other policies in the same batch still run.
+  With a template, a chunk's tag can still produce a refused name (tag
+  `agent-runtime` under `{first_tag}`). That chunk stays where it is, the
+  others move, and the run reports the skipped chunks per target and is
+  recorded as an error. Chunks an earlier run already moved into such a
+  namespace stay there. `mem_ns_rename` moves them out of a non-empty name;
+  it refuses an empty one.
+
+  `mem_policy_list(runs=N)` also showed no history after an applied
+  `auto_archive` run: it raised an error reading the run's record. It now
+  shows the chunks moved per target, and the skipped ones.
+
 - **`mem_add`'s "Similar memories found" warning compares stored vectors, not
   search scores (#2934).**
   It used to run a search over the new note and keep results scoring between
