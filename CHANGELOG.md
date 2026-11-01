@@ -101,6 +101,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   re-index; `mm index --reassign-namespaces` moves it to the namespace the
   rules now resolve to.
 
+- **`mm agent migrate` no longer renames into an invalid `agent-runtime:`
+  name (#2946).** It renamed a stored `agent/{id}` to `agent-runtime:{id}`
+  without checking the result, so `agent/foo:bar` became
+  `agent-runtime:foo:bar`, the shape the agent tools refuse (#496). Such a
+  pair is now listed under "Cannot migrate" with the reason, in `--dry-run`
+  too, and left as it is; the other pairs migrate as before. Re-running does
+  not change the outcome, so the summary counts these apart from pairs skipped
+  for a target that appeared after the listing, and points to `mem_ns_rename`
+  for renaming them by hand.
+
 - **The web namespace rename route validates the new name (#2938).**
   `POST /api/namespaces/{namespace}/rename` now runs `new_name` through the
   same `validate_namespace` gate as the MCP `mem_ns_rename` tool and answers
@@ -111,6 +121,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   stored, so a stored name that fails validation can be renamed to a valid one.
   The route is on the dev-tier admin router; prod-tier `mm web` does not serve
   it.
+
+- **Setting a namespace default or rule that a search could not find is
+  refused (#2946).** `mm config set`, the web `PATCH /api/config` and
+  `mem_config` now refuse a `namespace.default_namespace` that contains `,` or
+  `*`, is `!system`, is blank, or is an `agent-runtime:` name the agent tools
+  refuse, and a `namespace.rules` entry whose `namespace` template is such a
+  name once each `{parent}` / `{ancestor:N}` is filled in (`a,b`,
+  `{parent},x`, `!system`; `claude:{parent}` is fine). `mm init --namespace`
+  refuses before it writes anything, and the wizard asks again. A value
+  already in `config.json` or a `config.d` fragment still loads unchanged;
+  editing `namespace.rules` through these surfaces means fixing such an entry
+  first, because the whole list is written at once.
 
 - **`mem_add`'s "Similar memories found" warning compares stored vectors, not
   search scores (#2934).**

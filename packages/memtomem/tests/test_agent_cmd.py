@@ -213,6 +213,42 @@ class TestAgentMigrate:
         assert result.exit_code == 0
         assert "Skipped: agent/alpha" in result.output
 
+    def test_a_target_the_agent_tools_refuse_is_not_renamed(self, monkeypatch):
+        """``agent/foo:bar`` would become ``agent-runtime:foo:bar`` (#496, #2946)."""
+        comp = _mock_components(["agent/alpha", "agent/foo:bar", "agent/"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate"])
+        assert result.exit_code == 0, result.output
+        comp.storage.rename_namespace.assert_awaited_once_with(
+            "agent/alpha", "agent-runtime:alpha", merge=False, candidates=[]
+        )
+        assert "Cannot migrate: 2" in result.output
+        assert "agent/foo:bar  ->  agent-runtime:foo:bar  (invalid namespace" in result.output
+        assert "agent/  ->  agent-runtime:  (invalid namespace" in result.output
+        assert 'mem_do action "ns_rename"' in result.output
+        assert "Migration complete. 1 namespace(s)" in result.output
+        assert "2 not migrated" in result.output
+        assert "re-run to migrate them" not in result.output
+
+    def test_dry_run_names_a_refused_target(self, monkeypatch):
+        comp = _mock_components(["agent/foo:bar"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "Cannot migrate: 1" in result.output
+        assert "agent/foo:bar  ->  agent-runtime:foo:bar" in result.output
+        assert "Nothing to migrate" not in result.output
+        comp.storage.rename_namespace.assert_not_awaited()
+
+    def test_only_refused_targets_rename_nothing(self, monkeypatch):
+        comp = _mock_components(["agent/foo:bar"])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = CliRunner().invoke(cli, ["agent", "migrate", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "Cannot migrate: 1" in result.output
+        assert "Migration complete" not in result.output
+        comp.storage.rename_namespace.assert_not_awaited()
+
     def test_yes_skips_the_merge_confirmation(self, monkeypatch):
         comp = _mock_components(["agent/alpha"], existing_new_namespaces=["agent-runtime:alpha"])
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
