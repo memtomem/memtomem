@@ -52,7 +52,7 @@ def _install_default_stubs(page) -> None:
     page.route("**/api/system/model-readiness", lambda r: _ok(r, {"ready": True}))
     page.route("**/api/sources", lambda r: _ok(r, {"sources": []}))
     page.route("**/api/namespaces", lambda r: _ok(r, {"namespaces": []}))
-    page.route("**/api/stats", lambda r: _ok(r, {}))
+    page.route("**/api/stats**", lambda r: _ok(r, {}))
     page.route("**/api/privacy/patterns", lambda r: _ok(r, {"patterns": []}))
 
 

@@ -609,6 +609,66 @@ class TestStats:
         txt_sizes = sum(p.stat().st_size for p in (tmp_path / "docs").glob("*.txt"))
         assert data["home_total_source_size"] == (md_sizes + txt_sizes)
 
+    async def test_stats_summary_only_skips_the_source_scan(self, app, client: AsyncClient):
+        """The header pill's call: totals only, no per-source pass."""
+        resp = await client.get("/api/stats", params={"summary_only": "true"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert (data["total_chunks"], data["total_sources"]) == (42, 3)
+        assert "chunk_size_distribution" in data
+        assert data["home_sources"] == []
+        assert data["home_recent_sources"] == []
+        assert data["home_file_type_distribution"] == []
+        assert data["home_total_source_size"] == 0
+        app.state.storage.get_source_files_with_counts.assert_not_called()
+
+    async def test_stats_resolves_each_project_root_once_per_request(
+        self, app, client: AsyncClient, tmp_path, monkeypatch
+    ):
+        """A project-tier source costs one ``resolve()`` (its own, in
+        ``classify_scope``), not one per registered root plus one for the
+        prefix key. With 8 roots that was 10 per source."""
+        pmdirs = [tmp_path / f"p{i}" / ".memtomem" / "memories" for i in range(8)]
+        for d in pmdirs:
+            d.mkdir(parents=True)
+        app.state.config.indexing.memory_dirs = []
+        app.state.config.indexing.read_only_memory_dirs = []
+        app.state.config.indexing.project_memory_dirs = pmdirs
+        rows = [
+            (pmdirs[i % 8] / f"n{i}.md", 1, "2026-09-23T10:00:00", "default", 1, 1, 1)
+            for i in range(4000)
+        ]
+        expected_dirs = [str(pmdirs[i % 8].resolve()) for i in range(4000)]
+
+        real_resolve = Path.resolve
+        calls = 0
+
+        def _counting_resolve(self: Path, strict: bool = False) -> Path:
+            nonlocal calls
+            calls += 1
+            return real_resolve(self, strict=strict)
+
+        storage = app.state.storage
+        with monkeypatch.context() as m:
+            m.setattr(Path, "resolve", _counting_resolve)
+            storage.get_source_files_with_counts.return_value = []
+            empty = await client.get("/api/stats")
+            fixed_cost = calls
+            storage.get_source_files_with_counts.return_value = rows
+            full = await client.get("/api/stats")
+            full_cost = calls - fixed_cost
+
+        assert empty.status_code == full.status_code == 200
+        # Per root: the prefix, the explicit ``resolve()`` and the one shared
+        # resolution ``classify_scope`` now reuses.
+        assert fixed_cost <= 3 * len(pmdirs)
+        assert full_cost - fixed_cost <= len(rows)
+        home = full.json()["home_sources"]
+        assert len(home) == len(rows)
+        assert {s["target_scope"] for s in home} == {"project_shared"}
+        assert [s["memory_dir"] for s in home] == expected_dirs
+
 
 # ---------------------------------------------------------------------------
 # GET /api/config
@@ -6573,12 +6633,17 @@ class TestRemoveMemoryDirChunkCleanup:
 
         shown = await self._shown(client, real)
         sources = (await client.get("/api/sources")).json()["sources"]
+        home = (await client.get("/api/stats")).json()["home_sources"]
         with patch("memtomem.web.routes.system.save_config_overrides"):
             resp = await client.post(
                 "/api/memory-dirs/remove", json={"path": str(real), "delete_chunks": True}
             )
 
         assert [(s["path"], s["memory_dir"]) for s in sources] == [(str(link / "a.md"), None)]
+        # The Home dashboard groups by the same stored key.
+        assert [(s["path"], s["memory_dir"], s["kind"]) for s in home] == [
+            (str(link / "a.md"), None, None)
+        ]
         assert resp.status_code == 200, resp.text
         assert resp.json()["deleted_chunks"] == shown == 0
         assert self._deleted(app) == []

@@ -3058,9 +3058,17 @@ _PROJECT_SCOPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+def resolve_project_memory_dirs(dirs: Iterable[Path | str]) -> frozenset[Path]:
+    """Resolve the registered project roots once, for a batch of
+    :func:`classify_scope` calls that share one config."""
+    return frozenset(Path(str(d)).expanduser().resolve() for d in dirs)
+
+
 def classify_scope(
     path: str | Path,
     project_memory_dirs: Iterable[Path | str] | None = None,
+    *,
+    resolved_roots: frozenset[Path] | None = None,
 ) -> tuple[str, Path | None]:
     """Classify ``path`` into a scope tier and project root (ADR-0011).
 
@@ -3075,9 +3083,15 @@ def classify_scope(
     Caller passes the configured ``project_memory_dirs`` so we can refuse
     to classify a project_* path that has not been registered (defense
     against unregistered project trees being silently picked up by the
-    indexer). When ``project_memory_dirs`` is ``None``, registration is
-    not enforced — used by lower-level callers that already gate on the
-    config field separately.
+    indexer). When ``project_memory_dirs`` and ``resolved_roots`` are both
+    ``None``, registration is not enforced — used by lower-level callers that
+    already gate on the config field separately.
+
+    ``resolved_roots`` is the same registration list already passed through
+    :func:`resolve_project_memory_dirs`. A caller classifying many paths
+    passes it so the roots are resolved once rather than once per path. When
+    given, it wins over ``project_memory_dirs``, and an empty set still
+    enforces registration: every project-shaped path comes back ``user``.
     """
     s = str(path).replace("\\", "/").rstrip("/")
     for scope_name, pat in _PROJECT_SCOPE_PATTERNS:
@@ -3089,8 +3103,10 @@ def classify_scope(
         if memtomem_idx <= 0:
             continue
         project_root = Path(str(path)[:memtomem_idx])
-        if project_memory_dirs is not None:
-            registered_roots = {Path(str(d)).expanduser().resolve() for d in project_memory_dirs}
+        registered_roots = resolved_roots
+        if registered_roots is None and project_memory_dirs is not None:
+            registered_roots = resolve_project_memory_dirs(project_memory_dirs)
+        if registered_roots is not None:
             try:
                 resolved_path = Path(str(path)).expanduser().resolve()
             except OSError:

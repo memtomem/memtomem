@@ -770,8 +770,8 @@ def test_api_upload_mixed_batch_cancel_refreshes_stale_state(
     skipped the staleness refresh, leaving the result list showing a
     fresh row while sources / stats panels stayed pinned to their
     pre-upload state. ``page.expect_request`` deterministically waits
-    for the cancel click to dispatch ``GET /api/stats`` (the unified
-    refresh branch's call) — better than racing a fixed sleep against
+    for the cancel click to dispatch ``GET /api/stats?summary_only=true``
+    (the unified refresh branch's ``loadStats``) — better than racing a fixed sleep against
     arbitrary boot traffic. ``install_default_stubs`` already fulfills
     ``/api/stats``, so no explicit route is needed.
     """
@@ -825,7 +825,7 @@ def test_api_upload_mixed_batch_cancel_refreshes_stale_state(
     # rather than asserting a count delta after a fixed sleep, which
     # races boot traffic on slow CI. Mutation check: restoring the
     # early ``return`` on ``cancelled`` makes this expectation time out.
-    with page.expect_request("**/api/stats", timeout=2_000):
+    with page.expect_request(re.compile(r"/api/stats\?summary_only=true$"), timeout=2_000):
         page.locator("#confirm-cancel-btn").click()
     page.wait_for_function(
         "() => document.getElementById('confirm-modal').hidden",
