@@ -1480,6 +1480,11 @@ _PRIOR_RELEASE_MENTIONS: tuple[tuple[str, str | None, str], ...] = (
     ("docs/guides/multi-device-sync.md", "memtomem 0.7.0 or later", "floor for a v4 bundle"),
     ("docs/guides/context-gateway.md", "since 0.7.0", "release that refused a bare --yes"),
     (
+        "docs/guides/mcp-clients.md",
+        "0.7.1 or later",
+        "floor for the doctor --mcp-client options",
+    ),
+    (
         "docs/guides/reference/operations.md",
         "0.6.12 added PKCS#8",
         "release that added the redaction pattern",
