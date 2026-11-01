@@ -19,6 +19,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   setup the request went from 2,118.8 ms to 489.7 ms (median of seven), with
   the same `file_count` for all 25 entries.
 
+- **`mm init`'s English preset no longer turns on a reranker (#2963).** The
+  preset picker defaults to **English (Recommended)**, which enabled the
+  `Xenova/ms-marco-MiniLM-L-6-v2` cross-encoder, so a new install rescored
+  the candidates of every search not served from the result cache. On one
+  7,397-chunk store an uncached search took 374.8 ms with that reranker and
+  49.8 ms without one (median of six queries; English retrieval quality with
+  and without it was not measured). Now no preset turns a reranker on,
+  matching `rerank.enabled`'s default and the Advanced wizard's reranker
+  step; `mm config set rerank.enabled true` or that wizard step adds one.
+  Rerunning `mm init` with a preset leaves an existing `rerank` section in
+  `config.json` as it is.
+
 ## [0.7.2] — 2026-11-01
 
 ### Upgrading

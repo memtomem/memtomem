@@ -68,12 +68,13 @@ PRESETS: dict[PresetName, PresetSpec] = {
     ),
     "english": PresetSpec(
         label="English (Recommended)",
-        description="ONNX multilingual-e5-small + English rerank + auto-discover providers",
+        description="ONNX multilingual-e5-small + auto-discover providers, no reranker",
         provider="onnx",
         model="multilingual-e5-small",
         dimension=384,
-        rerank_enabled=True,
-        rerank_model="Xenova/ms-marco-MiniLM-L-6-v2",
+        # Off like every preset: a cross-encoder costs every search (#2963).
+        rerank_enabled=False,
+        rerank_model=None,
         tokenizer="unicode61",
         default_top_k=10,
         enable_auto_ns=True,
