@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 _NS_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 
+# (template, target) pairs auto_archive has already warned about. A scheduled
+# policy meets the same refused target on every run; the run row records each
+# one, so the log says it once per process (#2949).
+_warned_refused_targets: set[tuple[str, str]] = set()
+
 _VALID_TYPES = {"auto_archive", "auto_promote", "auto_expire", "auto_consolidate", "auto_tag"}
 
 
@@ -280,7 +285,9 @@ async def execute_auto_archive(
                 continue  # already in target bucket
             if target not in refusal_by_target:
                 refusal_by_target[target] = _target_refusal("archive target", target)
-                if refusal_by_target[target]:
+                warn_key = (ns_template, target)
+                if refusal_by_target[target] and warn_key not in _warned_refused_targets:
+                    _warned_refused_targets.add(warn_key)
                     logger.warning("auto_archive skipped: %s", refusal_by_target[target])
             if refusal_by_target[target]:
                 refused_counts[target] = refused_counts.get(target, 0) + 1

@@ -314,17 +314,62 @@ class TestTemplateTargetsFromTags:
         assert "moved" not in result.outcome
 
     async def test_self_move_is_not_a_refusal(self, storage):
-        """A chunk already in its resolved target is skipped before the gate."""
-        chunk = make_chunk("in place", tags=("work",), namespace="archive:work")
+        """A chunk already in its resolved target is skipped before the gate.
+
+        The target here is itself refused, so judging it before the self-move
+        skip would count a chunk the run never meant to move.
+        """
+        chunk = make_chunk("in place", tags=("agent-runtime",), namespace="agent-runtime")
         await _old_chunks(storage, chunk)
 
         result = await execute_auto_archive(
             storage,
-            {"max_age_days": 30, "archive_namespace_template": "archive:{first_tag}"},
+            {"max_age_days": 30, "archive_namespace_template": "{first_tag}"},
             namespace=None,
             dry_run=False,
         )
         assert result.error is None and result.affected_count == 0
+        assert "refused" not in result.outcome
+
+    @pytest.mark.parametrize("with_movable_chunk", [True, False])
+    async def test_dry_run_counts_only_movable_chunks(self, storage, with_movable_chunk):
+        refused = make_chunk("runtime-tagged", tags=("agent-runtime",))
+        chunks = [refused]
+        if with_movable_chunk:
+            chunks.append(make_chunk("work-tagged", tags=("work",)))
+        await _old_chunks(storage, *chunks)
+
+        result = await run_policy(
+            storage,
+            _policy(
+                "arch",
+                "auto_archive",
+                {"max_age_days": 30, "archive_namespace_template": "{first_tag}"},
+            ),
+            dry_run=True,
+        )
+
+        assert result.affected_count == (1 if with_movable_chunk else 0)
+        assert result.outcome["refused"] == [{"target": "agent-runtime", "count": 1}]
+        assert result.error
+        assert all(_namespace_of(storage, c) == "default" for c in chunks)
+        assert await storage.maintenance_run_latest(limit=5) == []
+
+    async def test_a_refused_target_is_logged_once_per_process(self, storage, caplog):
+        from memtomem.tools import policy_engine
+
+        policy_engine._warned_refused_targets.discard(("{first_tag}", "agent-runtime"))
+        chunk = make_chunk("runtime-tagged", tags=("agent-runtime",))
+        await _old_chunks(storage, chunk)
+        config = {"max_age_days": 30, "archive_namespace_template": "{first_tag}"}
+
+        with caplog.at_level("WARNING", logger="memtomem.tools.policy_engine"):
+            for _ in range(2):
+                result = await execute_auto_archive(storage, config, namespace=None, dry_run=False)
+                assert result.error  # each run still reports it
+
+        warnings = [r for r in caplog.records if "auto_archive skipped" in r.getMessage()]
+        assert len(warnings) == 1
 
     async def test_run_all_enabled_continues_and_budgets_only_moved_chunks(self, storage):
         refused = make_chunk("runtime-tagged", tags=("agent-runtime",))
