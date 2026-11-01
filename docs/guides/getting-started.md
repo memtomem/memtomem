@@ -155,9 +155,15 @@ The picker offers four paths:
 | Preset | Search stack | Choose it when |
 |---|---|---|
 | **Minimal** | BM25 keyword search | You want no model download or external service |
-| **English (Recommended)** | Local ONNX `multilingual-e5-small` embedding + English reranker | Most notes are English |
+| **English (Recommended)** | Local ONNX `multilingual-e5-small` embedding, no reranker | Most notes are English |
 | **Korean-optimized** | Local ONNX `multilingual-e5-small` embedding + Korean tokenizer, no reranker | Notes include Korean, Chinese, or Japanese |
 | **Advanced** | Full ten-step wizard | You need to choose every provider and path |
+
+No preset turns on a reranker: when one is on, a cross-encoder rescores the
+candidates of each search that is not served from the result cache, which adds
+noticeable time to it. To add one later, run
+`mm config set rerank.enabled true`, or choose a model in the **Advanced**
+wizard's reranker step.
 
 For the most deterministic first proof, choose **Minimal**. It needs no model
 download or external service; you can rerun `mm init` after the round trip to

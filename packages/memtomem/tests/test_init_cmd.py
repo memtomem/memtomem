@@ -4223,9 +4223,9 @@ class TestPresetSelection:
         assert state["enable_auto_ns"] is False
         assert state["_preset_applied"] == "minimal"
 
-    def test_english_preset_applies_onnx_and_rerank(self) -> None:
-        """English preset: ONNX multilingual-e5-small + English rerank +
-        auto-discover providers (the recommended default)."""
+    def test_english_preset_applies_onnx_without_rerank(self) -> None:
+        """English preset: ONNX multilingual-e5-small + auto-discover providers
+        (the recommended default), reranker off (#2963)."""
         from memtomem.cli.init_cmd import _apply_preset
 
         state: dict = {}
@@ -4234,10 +4234,40 @@ class TestPresetSelection:
         assert state["provider"] == "onnx"
         assert state["model"] == "multilingual-e5-small"
         assert state["dimension"] == 384
-        assert state["rerank_enabled"] is True
-        assert state["rerank_model"] == "Xenova/ms-marco-MiniLM-L-6-v2"
+        assert state["rerank_enabled"] is False
+        assert not state.get("rerank_model")
         assert state["tokenizer"] == "unicode61"
         assert state["enable_auto_ns"] is True
+
+    @pytest.mark.parametrize("name", ["minimal", "english", "korean"])
+    def test_no_preset_turns_the_reranker_on(self, name: str) -> None:
+        """A cross-encoder rescores every search (#2963), so turning one on is
+        left to ``mm config set`` or the Advanced wizard. The README and the
+        getting-started guide say no preset does it."""
+        from memtomem.cli.init_cmd import _apply_preset
+        from memtomem.cli.init_presets import PRESETS
+
+        assert set(PRESETS) == {"minimal", "english", "korean"}
+        state: dict = {}
+        _apply_preset(state, name)
+
+        assert state["rerank_enabled"] is False
+        assert not state.get("rerank_model")
+
+    def test_repick_clears_a_stale_reranker(self) -> None:
+        """(#371) Going back to the picker reapplies a preset over the state the
+        first pass left. A reranker chosen there must not survive a preset
+        that has none, now that no preset sets one itself (#2963)."""
+        from memtomem.cli.init_cmd import _apply_preset
+
+        state: dict = {
+            "rerank_enabled": True,
+            "rerank_model": "Xenova/ms-marco-MiniLM-L-6-v2",
+        }
+        _apply_preset(state, "korean")
+
+        assert state["rerank_enabled"] is False
+        assert "rerank_model" not in state
 
     def test_korean_preset_applies_e5_and_kiwipiepy_without_rerank(self) -> None:
         """Korean preset: ONNX multilingual-e5-small + kiwipiepy tokenizer, reranker
@@ -4818,7 +4848,8 @@ class TestPresetWizardBackNav:
         # Korean re-pick, not the initial English pick.
         assert data["embedding"]["model"] == "multilingual-e5-small"
         assert data["search"]["tokenizer"] == "kiwipiepy"
-        # English's reranker must not survive the Korean re-pick.
+        # Neither preset writes a reranker (#2963); clearing a stale one on a
+        # re-pick is pinned by test_repick_clears_a_stale_reranker.
         assert "rerank" not in data, data.get("rerank")
         assert "Reranker:" not in result.output
 
