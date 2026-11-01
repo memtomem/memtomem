@@ -71,6 +71,34 @@ class TestPolicyTargetErrors:
         assert policy_target_errors("auto_archive", {"archive_namespace": "cold:2026"}) == []
         assert policy_target_errors("auto_promote", {"target_namespace": "work"}) == []
 
+    @pytest.mark.parametrize(
+        "key,ptype",
+        [
+            ("archive_namespace", "auto_archive"),
+            ("target_namespace", "auto_promote"),
+            ("summary_namespace", "auto_consolidate"),
+        ],
+    )
+    def test_a_name_only_the_strict_gate_refuses_passes(self, key, ptype):
+        """The write gate, not the strict one: a rule-made ``claude:-Users-…`` is findable."""
+        assert policy_target_errors(ptype, {key: "claude:-Users-me"}) == []
+
+    async def test_an_applied_run_moves_into_a_legacy_shaped_name(self, storage):
+        chunk = make_chunk("hot", namespace="archive")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET access_count = 10 WHERE id = ?", [str(chunk.id)])
+        db.commit()
+
+        result = await run_policy(
+            storage,
+            _policy("promote", "auto_promote", {"target_namespace": "claude:-Users-me"}),
+            dry_run=False,
+        )
+
+        assert result.error is None and result.affected_count == 1
+        assert _namespace_of(storage, chunk) == "claude:-Users-me"
+
     def test_a_key_the_type_does_not_read_is_not_judged(self):
         assert policy_target_errors("auto_archive", {"target_namespace": "!system"}) == []
         assert policy_target_errors("auto_expire", {"archive_namespace": "a,b"}) == []

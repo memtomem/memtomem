@@ -151,7 +151,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `agent-runtime` under `{first_tag}`). That chunk stays where it is, the
   others move, and the run reports the skipped chunks per target and is
   recorded as an error. Chunks an earlier run already moved into such a
-  namespace stay there; `mem_ns_rename` moves them.
+  namespace stay there. `mem_ns_rename` moves them out of a non-empty name;
+  it refuses an empty one.
 
   `mem_policy_list(runs=N)` also showed no history after an applied
   `auto_archive` run: it raised an error reading the run's record. It now
