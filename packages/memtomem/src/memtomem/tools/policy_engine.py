@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from memtomem.constants import InvalidNameError, validate_writable_namespace
 from memtomem.storage.sqlite_helpers import escape_like
 from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_PATH
 
@@ -105,6 +106,70 @@ def _resolve_archive_ns(template: str, tags_json: str | None, fallback: str) -> 
     return template.replace("{first_tag}", first_tag)
 
 
+# The config key each policy type moves or writes chunks into (#2949). The
+# archive template is judged on its own: its literal text here, each resolved
+# target per chunk in ``execute_auto_archive``.
+_TARGET_KEYS: dict[str, str] = {
+    "auto_archive": "archive_namespace",
+    "auto_promote": "target_namespace",
+    "auto_consolidate": "summary_namespace",
+}
+
+
+def _target_refusal(label: str, value: object) -> str | None:
+    try:
+        validate_writable_namespace(value)
+    except InvalidNameError as exc:
+        return f"{label}: {exc}"
+    return None
+
+
+def policy_target_errors(policy_type: str, config: object) -> list[str]:
+    """Why the namespaces *config* names as write targets fail the write gate.
+
+    The gate is :func:`validate_writable_namespace`: a policy must not move
+    chunks into a name a search cannot address by that exact name (#2949).
+    Only keys *policy_type* reads are judged, and a key left out is not: its
+    default passes. ``archive_namespace_template`` is judged with
+    ``{first_tag}`` replaced by ``x``, the same ``str.replace`` the resolver
+    does, so its literal text is what is judged. A non-empty template never
+    selects ``archive_namespace``, so the fallback is judged only without one
+    (``None``) or with an empty one. ``mem_policy_add`` refuses a policy on
+    these; the handlers refuse to run a stored one.
+    """
+    key = _TARGET_KEYS.get(policy_type)
+    if key is None or not isinstance(config, dict):
+        return []
+    if policy_type == "auto_archive":
+        template = config.get("archive_namespace_template")
+        if template is not None and not isinstance(template, str):
+            return [
+                "archive_namespace_template: expected a string or null, "
+                f"got {type(template).__name__}"
+            ]
+        if template:
+            sample = template.replace("{first_tag}", "x")
+            refusal = _target_refusal(f"archive_namespace_template {template!r}", sample)
+            return [refusal] if refusal else []
+    if key in config:
+        refusal = _target_refusal(key, config[key])
+        if refusal:
+            return [refusal]
+    return []
+
+
+def _refused_target_result(policy_type: str, dry_run: bool, errors: list[str]) -> PolicyRunResult:
+    message = "; ".join(errors)
+    return PolicyRunResult(
+        policy_name="",
+        policy_type=policy_type,
+        affected_count=0,
+        dry_run=dry_run,
+        details=f"Error: {message}",
+        error=message,
+    )
+
+
 async def execute_auto_archive(
     storage: SqliteBackend,
     config: dict,
@@ -152,6 +217,10 @@ async def execute_auto_archive(
             error=f"age_field must be 'created_at' or 'last_accessed_at', got {age_field!r}",
         )
 
+    target_errors = policy_target_errors("auto_archive", config)
+    if target_errors:
+        return _refused_target_result("auto_archive", dry_run, target_errors)
+
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age)).isoformat()
 
     db = storage._get_db()
@@ -195,6 +264,11 @@ async def execute_auto_archive(
 
     ids_by_target: dict[str, list[str]] = {}
     source_namespaces: set[str] = set()
+    # Template targets come from tag data, so a template that passed the check
+    # above can still resolve to a refused name (tag ``agent-runtime`` under
+    # ``{first_tag}``). Those chunks stay where they are (#2949).
+    refused_counts: dict[str, int] = {}
+    refusal_by_target: dict[str, str | None] = {}
     if ns_template is None:
         if rows:
             ids_by_target[archive_ns] = [r[0] for r in rows]
@@ -204,6 +278,13 @@ async def execute_auto_archive(
             target = _resolve_archive_ns(ns_template, tags_json, fallback=archive_ns)
             if target == current_ns:
                 continue  # already in target bucket
+            if target not in refusal_by_target:
+                refusal_by_target[target] = _target_refusal("archive target", target)
+                if refusal_by_target[target]:
+                    logger.warning("auto_archive skipped: %s", refusal_by_target[target])
+            if refusal_by_target[target]:
+                refused_counts[target] = refused_counts.get(target, 0) + 1
+                continue
             ids_by_target.setdefault(target, []).append(chunk_id)
             if current_ns:
                 source_namespaces.add(current_ns)
@@ -219,6 +300,10 @@ async def execute_auto_archive(
         record["omitted"] = record.pop("ids_omitted", 0)
         moved.append(record)
     outcome: dict = {"moved": moved} if moved else {}
+    if refused_counts:
+        outcome["refused"] = [
+            {"target": target, "count": n} for target, n in sorted(refused_counts.items())
+        ]
 
     if not dry_run and count > 0:
         for target, ids in ids_by_target.items():
@@ -237,6 +322,18 @@ async def execute_auto_archive(
     else:
         details = f"{verb} {count} chunks older than {max_age} days → '{archive_ns}'"
 
+    # Any refusal reads as an error even when other chunks moved, as a partly
+    # failed auto_consolidate does: the chunks the policy set out to archive
+    # were not all archived. ``affected_count`` still counts what moved.
+    error = None
+    if refused_counts:
+        skipped = sum(refused_counts.values())
+        details += f"; {skipped} skipped (target a search could not find)"
+        error = (
+            f"{skipped} chunk(s) not archived: target namespace a search could not find "
+            f"({', '.join(repr(t) for t in sorted(refused_counts))})"
+        )
+
     return PolicyRunResult(
         policy_name="",
         policy_type="auto_archive",
@@ -245,6 +342,7 @@ async def execute_auto_archive(
         details=details,
         namespaces=tuple(sorted(source_namespaces | set(ids_by_target))),
         outcome=outcome,
+        error=error,
     )
 
 
@@ -431,6 +529,10 @@ async def execute_auto_consolidate(
             details="Error: min_group_size must be at least 2",
             error="min_group_size must be at least 2",
         )
+
+    target_errors = policy_target_errors("auto_consolidate", config)
+    if target_errors:
+        return _refused_target_result("auto_consolidate", dry_run, target_errors)
 
     raw_groups = await storage.get_consolidation_groups(
         min_size=min_group_size,
@@ -714,6 +816,10 @@ async def execute_auto_promote(
     min_access_count = config.get("min_access_count", 3)
     min_importance_score = config.get("min_importance_score")
     recency_days = config.get("recency_days")
+
+    target_errors = policy_target_errors("auto_promote", config)
+    if target_errors:
+        return _refused_target_result("auto_promote", dry_run, target_errors)
 
     db = storage._get_db()
 

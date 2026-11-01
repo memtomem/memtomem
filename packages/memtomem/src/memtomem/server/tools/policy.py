@@ -121,6 +121,12 @@ async def mem_policy_add(
     except json.JSONDecodeError as exc:
         return f"Error: invalid JSON config: {exc}"
 
+    from memtomem.tools.policy_engine import policy_target_errors
+
+    target_errors = policy_target_errors(policy_type, cfg)
+    if target_errors:
+        return f"Error: {'; '.join(target_errors)}"
+
     app = await _get_app_initialized(ctx)
     existing = await app.storage.policy_get(name)
     if existing:
@@ -149,14 +155,20 @@ def _summary_line(summary: dict) -> str | None:
     for key in ("deleted_ids", "promoted_ids"):
         if key in summary:
             return _format_ids(key, summary[key], summary.get(f"{key}_omitted", 0))
-    if "moved" in summary:
-        moved = summary["moved"]
-        per_target = "; ".join(
-            f"{target}: {len(ids)}"
-            for target, ids in sorted(moved.items())
-            if not target.endswith("_omitted")
+    if "moved" in summary or "refused" in summary:
+        # auto_archive records: ``moved`` is ``{target, ids, omitted}``,
+        # ``refused`` is ``{target, count}`` (#2949).
+        parts = []
+        moved = "; ".join(
+            f"{r['target']}: {len(r.get('ids', [])) + r.get('omitted', 0)}"
+            for r in summary.get("moved", [])
         )
-        return f"moved → {per_target}" if per_target else None
+        if moved:
+            parts.append(f"moved → {moved}")
+        refused = "; ".join(f"{r['target']}: {r['count']}" for r in summary.get("refused", []))
+        if refused:
+            parts.append(f"refused → {refused}")
+        return ", ".join(parts) or None
     if "groups" in summary or "deleted_summary_ids" in summary:
         groups = len(summary.get("groups", []))
         deleted = len(summary.get("deleted_summary_ids", []))
