@@ -218,10 +218,15 @@ async def test_a_bound_server_uses_the_bound_root(
         ({"shas": [42]}, "not a full lowercase hexadecimal"),
         ({"shas": [SHAS[0], SHAS[0]]}, "duplicate"),
         ({"shas": SHAS[:1], "record": True}, "needs run_id"),
-        ({"shas": SHAS[:1], "record": True, "run_id": "not-a-uuid"}, "needs run_id"),
-        ({"shas": SHAS[:1], "record": True, "run_id": RUN.upper()}, "needs run_id"),
-        ({"shas": SHAS[:1], "record": True, "run_id": 7}, "needs run_id"),
-        ({"shas": SHAS[:1], "run_id": 7}, "run_id must be a string"),
+        ({"shas": SHAS[:1], "record": True, "run_id": "not-a-uuid"}, "canonical lowercase UUID"),
+        ({"shas": SHAS[:1], "record": True, "run_id": RUN.upper()}, "canonical lowercase UUID"),
+        ({"shas": SHAS[:1], "record": True, "run_id": 7}, "canonical lowercase UUID"),
+        # A check never stores run_id, but a malformed one is still refused: the
+        # record call of the same run would reject it anyway.
+        ({"shas": SHAS[:1], "run_id": 7}, "canonical lowercase UUID"),
+        ({"shas": SHAS[:1], "run_id": "not-a-uuid"}, "canonical lowercase UUID"),
+        ({"shas": SHAS[:1], "run_id": RUN.upper()}, "canonical lowercase UUID"),
+        ({"shas": SHAS[:1], "run_id": RUN}, None),  # control: a canonical run_id passes a check
     ],
 )
 async def test_mem_do_rejects_malformed_input_with_an_error_string(

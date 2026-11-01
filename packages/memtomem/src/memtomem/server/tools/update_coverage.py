@@ -78,13 +78,14 @@ async def mem_update_coverage(
     checked = _validate_shas(shas)
     if isinstance(checked, str):
         return checked
-    run_key: str | None = None
-    if record:
-        if not isinstance(run_id, str) or not _UUID_RE.fullmatch(run_id):
-            return "Error: record=true needs run_id, a canonical lowercase UUID (8-4-4-4-12)."
-        run_key = run_id
-    elif run_id is not None and not isinstance(run_id, str):
-        return "Error: run_id must be a string."
+    # A supplied run_id must be canonical on both paths, not only when it is
+    # stored: a malformed id accepted by a check would be rejected by the
+    # record call of the same run.
+    if run_id is not None and (not isinstance(run_id, str) or not _UUID_RE.fullmatch(run_id)):
+        return "Error: run_id must be a canonical lowercase UUID (8-4-4-4-12)."
+    if record and run_id is None:
+        return "Error: record=true needs run_id, a canonical lowercase UUID (8-4-4-4-12)."
+    run_key: str | None = run_id if record else None
 
     app = await _get_app_initialized(ctx)
     root = _resolve_project_context_root(app)
