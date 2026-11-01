@@ -66,9 +66,21 @@ async def _run_migrate(dry_run: bool, assume_yes: bool = False) -> None:
         # One listing serves both questions: which legacy namespaces exist,
         # and which of their targets are already taken.
         rows = await comp.storage.list_namespace_meta()
-        mapping = _collect_legacy_mapping(rows)
-        if not mapping:
+        mapping, invalid = _split_invalid_targets(_collect_legacy_mapping(rows))
+        if not mapping and not invalid:
             click.echo("No legacy `agent/` namespaces found. Nothing to migrate.")
+            return
+        if invalid:
+            # Re-running cannot fix these, so they are reported apart from the
+            # pairs skipped for a target that appeared after the listing.
+            click.echo(f"Cannot migrate: {len(invalid)}")
+            for old, new, reason in invalid:
+                click.echo(f"  {old}  ->  {new}  ({reason})")
+            click.echo(
+                "  Rename each to a valid agent-runtime:<agent_id> name with the "
+                'mem_ns_rename tool (mem_do action "ns_rename").'
+            )
+        if not mapping:
             return
 
         # Targets that already exist are consolidated into (rename passes
@@ -145,6 +157,30 @@ async def _run_migrate(dry_run: bool, assume_yes: bool = False) -> None:
         )
         if skipped:
             click.echo(f"{len(skipped)} skipped — re-run to migrate them.")
+        if invalid:
+            click.echo(f"{len(invalid)} not migrated — see 'Cannot migrate' above.")
+
+
+def _split_invalid_targets(
+    mapping: list[tuple[str, str]],
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, str]]]:
+    """Separate pairs whose ``agent-runtime:`` target the agent tools refuse.
+
+    A stored ``agent/foo:bar`` would become ``agent-runtime:foo:bar``, the
+    shape :func:`validate_namespace` exists to refuse (#496), and the storage
+    rename accepts it (#2946). Returns the migratable pairs and, for the
+    rest, ``(old, new, reason)``.
+    """
+    ok: list[tuple[str, str]] = []
+    invalid: list[tuple[str, str, str]] = []
+    for old, new in mapping:
+        try:
+            validate_namespace(new)
+        except InvalidNameError as exc:
+            invalid.append((old, new, str(exc)))
+        else:
+            ok.append((old, new))
+    return ok, invalid
 
 
 def _collect_legacy_mapping(rows: list[dict]) -> list[tuple[str, str]]:

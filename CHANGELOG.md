@@ -83,6 +83,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   re-index; `mm index --reassign-namespaces` moves it to the namespace the
   rules now resolve to.
 
+- **`mm agent migrate` no longer renames into an invalid `agent-runtime:`
+  name (#2946).** It renamed a stored `agent/{id}` to `agent-runtime:{id}`
+  without checking the result, so `agent/foo:bar` became
+  `agent-runtime:foo:bar`, the shape the agent tools refuse (#496). Such a
+  pair is now listed under "Cannot migrate" with the reason, in `--dry-run`
+  too, and left as it is; the other pairs migrate as before. Re-running does
+  not change the outcome, so the summary counts these apart from pairs skipped
+  for a target that appeared after the listing, and points to `mem_ns_rename`
+  for renaming them by hand.
+
 - **The web namespace rename route validates the new name (#2938).**
   `POST /api/namespaces/{namespace}/rename` now runs `new_name` through the
   same `validate_namespace` gate as the MCP `mem_ns_rename` tool and answers
