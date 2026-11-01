@@ -50,6 +50,10 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=6.0",
     "pytest-playwright>=0.8.0",
+    # Arrives via pytest-playwright, which only asks for >=1.18. 1.61 is the
+    # first release whose browser registry lists ubuntu26.04-x64, the image
+    # ubuntu-latest resolves to; older ones refuse to install chromium there.
+    "playwright>=1.61",
     "ruff>=0.15.17,<0.16",
     "mypy>=2.1.0",
     "types-PyYAML>=6.0",
