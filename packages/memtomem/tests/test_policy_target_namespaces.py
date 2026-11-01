@@ -355,21 +355,29 @@ class TestTemplateTargetsFromTags:
         assert all(_namespace_of(storage, c) == "default" for c in chunks)
         assert await storage.maintenance_run_latest(limit=5) == []
 
-    async def test_a_refused_target_is_logged_once_per_process(self, storage, caplog):
-        from memtomem.tools import policy_engine
-
-        policy_engine._warned_refused_targets.discard(("{first_tag}", "agent-runtime"))
-        chunk = make_chunk("runtime-tagged", tags=("agent-runtime",))
-        await _old_chunks(storage, chunk)
-        config = {"max_age_days": 30, "archive_namespace_template": "{first_tag}"}
+    async def test_each_refused_target_is_logged_once_per_run(self, storage, caplog):
+        tag_a, tag_b = "a" * 70, "b" * 70  # over the agent-id cap
+        chunks = [
+            make_chunk("first", tags=(tag_a,)),
+            make_chunk("second", tags=(tag_a,)),
+            make_chunk("third", tags=(tag_b,)),
+        ]
+        await _old_chunks(storage, *chunks)
+        config = {"max_age_days": 30, "archive_namespace_template": "agent-runtime:{first_tag}"}
 
         with caplog.at_level("WARNING", logger="memtomem.tools.policy_engine"):
-            for _ in range(2):
-                result = await execute_auto_archive(storage, config, namespace=None, dry_run=False)
-                assert result.error  # each run still reports it
+            result = await execute_auto_archive(storage, config, namespace=None, dry_run=False)
 
-        warnings = [r for r in caplog.records if "auto_archive skipped" in r.getMessage()]
-        assert len(warnings) == 1
+        assert result.outcome["refused"] == [
+            {"target": f"agent-runtime:{tag_a}", "count": 2},
+            {"target": f"agent-runtime:{tag_b}", "count": 1},
+        ]
+        warnings = [
+            r.getMessage() for r in caplog.records if "auto_archive skipped" in r.getMessage()
+        ]
+        assert len(warnings) == 2
+        assert sum(tag_a in w for w in warnings) == 1
+        assert sum(tag_b in w for w in warnings) == 1
 
     async def test_run_all_enabled_continues_and_budgets_only_moved_chunks(self, storage):
         refused = make_chunk("runtime-tagged", tags=("agent-runtime",))
