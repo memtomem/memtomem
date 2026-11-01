@@ -1060,3 +1060,104 @@ def test_budget_audit_passes_over_an_unresolvable_row(
     assert report["unclassified_sources"] == [str(broken)]
     assert report["complete"] is False
     assert str(broken) not in {e["source"] for e in report["reindex"]}
+
+
+# The status count's ownership lookup reads precomputed root prefixes (#2964).
+# Before, it normalised every configured root again for every file it counted:
+# 72,048 ``norm_dir_prefix`` calls for 3,001 files under 24 roots, most of a
+# ``GET /api/memory-dirs/status``.
+
+
+def _count_with_a_per_file_lookup(p: Path, exts: frozenset[str], roots: list[Path]) -> int:
+    """The count as it was before #2964: the owner is looked up per file."""
+    from memtomem.indexing.dir_stats import _longest_owning_prefix, norm_dir_prefix
+    from memtomem.storage.sqlite_helpers import norm_path
+
+    own = norm_dir_prefix(p)
+    prefixes = [norm_dir_prefix(r) for r in roots]
+    if own not in prefixes:
+        prefixes.append(own)
+    return sum(
+        1
+        for fp in p.rglob("*")
+        if fp.is_file()
+        and fp.suffix in exts
+        and _longest_owning_prefix(norm_path(fp), prefixes) == own
+        and not _under_nested_worktree(fp, roots, None)
+    )
+
+
+def test_the_disk_count_normalises_each_root_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memtomem.indexing import dir_stats
+
+    roots = [tmp_path / f"root{i}" for i in range(24)]
+    for r in roots:
+        r.mkdir()
+    (roots[0] / "sub").mkdir()
+    for i in range(40):
+        (roots[0] / "sub" / f"n{i}.md").write_text("x", encoding="utf-8")
+    real = dir_stats.norm_dir_prefix
+    calls = 0
+
+    def counting(d):
+        nonlocal calls
+        calls += 1
+        return real(d)
+
+    monkeypatch.setattr(dir_stats, "norm_dir_prefix", counting)
+
+    assert _count_files_on_disk(roots[0], frozenset({".md"}), roots) == 40
+    # Each root once, plus the walked root's own prefix — not once per file.
+    assert calls <= len(roots) + 1
+
+    calls = 0
+    prefixes = [real(r) for r in roots]
+    assert _count_files_on_disk(roots[0], frozenset({".md"}), roots, root_prefixes=prefixes) == 40
+    assert calls == 1
+
+
+def test_a_walk_root_outside_the_configured_roots_keeps_its_owner(repo: Path) -> None:
+    """The walked root need not be configured: here the configured parent owns
+    the worktree's file, so it is a nested worktree and is not counted."""
+    wt = repo / ".worktrees/wt"
+    run("worktree", "add", "-q", str(wt), "-b", "wt", cwd=repo)
+
+    expected = _count_with_a_per_file_lookup(wt, frozenset({".md"}), [repo])
+
+    assert expected == 0
+    assert _count_files_on_disk(wt, frozenset({".md"}), [repo]) == expected
+
+
+def test_an_unreadable_entry_still_zeroes_the_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_count_files_on_disk`` returns 0 on any ``OSError`` in the walk, and
+    ``is_file()`` runs before the suffix test, so an entry it cannot stat
+    zeroes the count even when its suffix would not be counted. Reordering
+    the two to save a ``stat`` changes that answer (#2964 review)."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "good.md").write_text("x", encoding="utf-8")
+    blocked = root / "blocked.txt"
+    blocked.write_text("x", encoding="utf-8")
+    real_is_file = Path.is_file
+
+    def is_file(self: Path, *args, **kwargs) -> bool:
+        if self == blocked:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_is_file(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+
+    assert _count_files_on_disk(root, frozenset({".md"}), [root]) == 0
+
+
+def test_root_prefixes_must_match_the_roots_one_to_one(tmp_path: Path) -> None:
+    from memtomem.indexing.dir_stats import resolve_owning_memory_dir
+
+    with pytest.raises(ValueError):
+        resolve_owning_memory_dir(
+            tmp_path / "a" / "n.md", [tmp_path / "a", tmp_path / "b"], root_prefixes=["x"]
+        )

@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **The memory-dir status no longer normalises every root once per file it
+  counts (#2964).** `GET /api/memory-dirs/status` counts the files under each
+  index root, and for each matching file the nested-worktree check looked up
+  the file's owning root by normalising every configured root again. With 24
+  roots and 3,001 matching files that was 72,024 root normalisations
+  (3,001 × 24), most of the request; the directory walk itself took under
+  50 ms of it. The lookup
+  now reads the prefixes the count already computed, with the same
+  longest-prefix rule and tie-break, so every count is unchanged. On that
+  setup the request went from 2,118.8 ms to 489.7 ms (median of seven), with
+  the same `file_count` for all 25 entries.
+
 ## [0.7.2] — 2026-11-01
 
 ### Upgrading
