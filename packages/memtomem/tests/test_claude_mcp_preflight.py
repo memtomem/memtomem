@@ -27,7 +27,11 @@ def pinned() -> dict:
     return {
         "command": "uvx",
         "args": ["--from", MCP_REQUIREMENT, "memtomem-server"],
-        "env": {"MEMTOMEM_TOOL_MODE": TOOL_MODE, "ORT_DISABLE_TELEMETRY": "1"},
+        "env": {
+            "MEMTOMEM_TOOL_MODE": TOOL_MODE,
+            "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage",
+            "ORT_DISABLE_TELEMETRY": "1",
+        },
     }
 
 
@@ -190,6 +194,15 @@ def test_preinstall_prediction_carries_the_plugin_launch_env(sandbox):
 def test_preinstall_prediction_flags_an_entry_without_the_telemetry_switch(sandbox):
     entry = pinned()
     del entry["env"]["ORT_DISABLE_TELEMETRY"]
+    manual(sandbox, entry=entry)
+    assert {"native_dedup", "environment_difference"} <= codes(checks.inspect_claude_mcp())
+
+
+def test_preinstall_prediction_flags_an_entry_without_the_extra_tools(sandbox):
+    # A manual entry copied from an earlier plugin launch wins over the plugin and
+    # hides the update workflow's coverage tool, so it is a difference worth naming.
+    entry = pinned()
+    del entry["env"]["MEMTOMEM_EXTRA_TOOLS"]
     manual(sandbox, entry=entry)
     assert {"native_dedup", "environment_difference"} <= codes(checks.inspect_claude_mcp())
 

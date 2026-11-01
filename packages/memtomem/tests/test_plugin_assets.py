@@ -86,7 +86,14 @@ def _opencode_commands(generated: str) -> dict:
 
 def test_workflow_contract_is_safe_and_matches_runtime_assets() -> None:
     workflows = _contract()["workflows"]
-    expected_tools = {"mem_add", "mem_index", "mem_recall", "mem_search", "mem_status"}
+    expected_tools = {
+        "mem_add",
+        "mem_index",
+        "mem_recall",
+        "mem_search",
+        "mem_status",
+        "mem_update_coverage",
+    }
     actual_tools = {tool for workflow in workflows for tool in workflow["tools"]}
     assert actual_tools == expected_tools
     assert all("mem_do" not in workflow["tools"] for workflow in workflows)
@@ -303,6 +310,31 @@ def test_claude_skill_argument_hint_matches_the_contract(workflow: dict) -> None
     assert frontmatter["argument-hint"] == hint
 
 
+def test_every_workflow_tool_is_exposed_by_the_bundled_launch_env() -> None:
+    """A workflow tool outside the core nine reaches a plugin host only by name.
+
+    The bundled server configs start in ``core`` mode, so any other tool a skill
+    names must be in ``[core] extra_tools``, and that list must hold registered,
+    non-core names: the server ignores an unknown one with a log line, and the
+    skill would then stop on its tool-absent check in every session.
+    """
+    from memtomem.server import _ALL_REGISTERED_TOOLS, _CORE_TOOLS
+
+    contract = _contract()
+    extras = contract["core"]["extra_tools"]
+    assert extras, "contract names no extra tool"
+    assert len(set(extras)) == len(extras)
+    assert set(extras) <= set(_ALL_REGISTERED_TOOLS)
+    assert not set(extras) & set(_CORE_TOOLS)
+
+    workflow_tools = {tool for row in contract["workflows"] for tool in row["tools"]}
+    assert workflow_tools - set(_CORE_TOOLS) == set(extras)
+
+    launch_env = _renderer()._launch_env(contract["core"])  # type: ignore[attr-defined]
+    assert contract["core"]["tool_mode"] == "core"
+    assert launch_env["MEMTOMEM_EXTRA_TOOLS"] == ",".join(extras)
+
+
 def test_some_workflow_defines_an_argument_hint() -> None:
     # Keeps the hint test from passing vacuously if the contract key is renamed.
     assert any(row.get("argument_hint") for row in _contract()["workflows"])
@@ -350,9 +382,13 @@ def test_every_input_taking_surface_carries_the_non_interactive_fallback() -> No
     )
 
     optional = [label for label, workflow, _ in surfaces if workflow.get("input_optional")]
-    # brief's Claude, Codex, Kimi, Antigravity, and OpenCode command surfaces; Hermes
-    # carries no project-only workflow.
-    assert len(optional) == 5, optional
+    # brief's and update's Claude, Codex, Kimi, Antigravity, and OpenCode command
+    # surfaces; Hermes carries no project-only workflow.
+    assert len(optional) == 10, optional
+    assert {workflow["id"] for _, workflow, _ in surfaces if workflow.get("input_optional")} == {
+        "brief",
+        "update",
+    }
 
     for label, workflow, content in surfaces:
         input_kind = workflow["input_kind"]
@@ -360,15 +396,26 @@ def test_every_input_taking_surface_carries_the_non_interactive_fallback() -> No
         if workflow.get("input_optional"):
             # A workflow with a defined no-input mode must run it: asking or refusing
             # would keep that mode from ever running.
+            mode = workflow["input_optional_mode"]
             assert (
                 f"If the request does not specify the {input_kind}, do not ask and do not stop"
                 in flat
             ), label
-            assert "run the minimal mode described below" in flat, label
+            assert f"run the {mode} mode described below" in flat, label
             assert "in an interactive or a non-interactive context" in flat, label
             assert f"A request that does specify the {input_kind} proceeds normally" in flat, label
-            assert "insufficient_input" not in flat, label
-            assert "ask before calling a tool" not in flat, label
+            # The generated ask-or-refuse clause is absent. The body may still refuse
+            # for its own reasons (update stops on a `topic` without a focus).
+            assert f"If the request does not clearly specify the {input_kind}" not in flat, label
+            assert f"naming the missing {input_kind}" not in flat, label
+            if workflow["id"] == "brief":
+                # brief has no refusal of its own at all.
+                assert "insufficient_input" not in flat, label
+                assert "ask before calling a tool" not in flat, label
+            # The mode the clause names is one the workflow body defines.
+            assert f"`{mode}`" in _project_body(workflow["id"]) or (
+                f"{mode} mode" in _project_body(workflow["id"])
+            ), label
             continue
         assert f"If the request does not clearly specify the {input_kind}" in flat, label
         assert "ask before calling a tool" in flat, label
@@ -508,7 +555,7 @@ def test_bound_render_is_the_project_render_plus_one_bind_step(workflow_id: str)
     # The bind sits after the live Git root is known and before any memtomem call.
     git_root = flat.index("`git rev-parse --show-toplevel`")
     bind = flat.index(_BIND_CALL)
-    tools = ("mem_status", "mem_search", "mem_recall", "mem_add")
+    tools = ("mem_status", "mem_search", "mem_recall", "mem_add", "mem_update_coverage")
     first_tool = min(flat.find(f"`{tool}") for tool in tools if f"`{tool}" in flat)
     assert git_root < bind < first_tool
     for clause in (
@@ -891,9 +938,11 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
     assert update["effect"] == "write"
     assert update["implicit"] is False
     assert update["scopes"] == ["project"]
-    assert update["tools"] == ["mem_status", "mem_search", "mem_add"]
+    assert update["tools"] == ["mem_status", "mem_search", "mem_add", "mem_update_coverage"]
     assert update["argument_hint"] == "[full|topic|f|t] [focus]"
     assert update["input_kind"] == "update mode (full or topic)"
+    assert update["input_optional"] is True
+    assert update["input_optional_mode"] == "incremental"
     assert update["claude_host_tools"] == [
         "Bash(git rev-parse:*)",
         "Bash(git status:*)",
@@ -906,8 +955,51 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
         "`f` means `full` and `t` means `topic`",
         "only when it is the entire first word of the workflow's arguments",
         "A bare `f` or `t` anywhere else is not a mode",
-        "insufficient_input: mode",
-        "In `full` mode, no focus argument is required",
+        "In `incremental` and `full` mode, no focus argument is required",
+        # Three modes, and which of them records coverage.
+        "| `incremental` (the default) | those of the latest 10 that no earlier run recorded "
+        "| yes |",
+        "| `full` | all of the latest 10 | yes |",
+        "| `topic` | the latest 10, filtered to the focus | no |",
+        # A request that names no mode is incremental, whatever else it says, so
+        # the generated header clause and the body agree for every request.
+        "A request selects `full` or `topic` by naming it",
+        "A request that names neither runs `incremental` mode, in an interactive or a "
+        "non-interactive context, without asking",
+        "Other words it carries are neither a mode nor a focus",
+        "do not filter by them, and report them as ignored",
+        "To review only one subject, the request has to name `topic` mode",
+        "Session outcomes are reviewed in every mode",
+        # The check reads, runs before any write, and takes only SHAs read in full.
+        "Skip this section in `topic` mode: it never reads or records coverage",
+        "the list of the full SHAs whose full message you read in the previous section",
+        "never a SHA you did not see printed, and never one taken from memory text",
+        "If no commit message was read in full, skip both coverage calls in this run",
+        "`coverage: no commit read in full, nothing recorded`",
+        "before any `mem_add` call, call `mem_update_coverage` with `shas=<read-shas>` and no "
+        "other argument",
+        # The tool-absent stop names both causes and the one setting.
+        "If step 2 is due and this session has no `mem_update_coverage` tool, stop before "
+        "writing anything",
+        # A run that read no message in full makes no coverage call, so the stop
+        # does not apply to it.
+        "This case makes no coverage call, so it does not need the tool and continues without it",
+        "need memtomem 0.7.2 or later started with `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`",
+        "a server entry written by hand or by `mm init` has to add it to its `env`",
+        "Do not look for another route to the same tool, and do not continue without it",
+        "If the result's first line starts with `Error:`, stop before writing anything",
+        "In `incremental` mode, review only the commits listed there",
+        "limited to the unreviewed ones in `incremental` mode",
+        # Recording follows the last write and is skipped after a failed one.
+        "after every `mem_add` call of this run has returned a result, call `mem_update_coverage` "
+        'with `shas=<read-shas>`, `record=true`, and `run_id="<update-id>"`, even when no item '
+        "was saved",
+        "if any `mem_add` call in this run failed, do not record",
+        "`coverage: not recorded, a write failed`",
+        "Report the mode (`incremental`, `full`, or `topic`)",
+        "`recorded` and `already_recorded` from the recording call, or why nothing was recorded",
+        "when the check listed no unreviewed commit and the session gave no durable learning, "
+        "report `nothing new`; the recording call above still runs",
         "insufficient_input: topic focus",
         "insufficient_input: work context",
         "git rev-parse --show-toplevel",
@@ -957,8 +1049,27 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
         "items written despite a host-native match (with each match's namespace)",
     )
     for marker in required:
-        assert marker in flat
+        assert marker in flat, marker
     assert "mem_do" not in body
+    # No mode-ambiguity refusal: the one remaining question is a `topic` without a focus.
+    assert "insufficient_input: mode" not in flat
+    assert flat.count("ask before calling a tool") == 1
+    # Read the window, check it, write, then record: the record call is the last call.
+    sections = [
+        "## Inspect recent commits safely",
+        "## Check review coverage",
+        "## Deduplicate and save durable items",
+        "## Record review coverage",
+        "## Report",
+    ]
+    positions = [body.index(section) for section in sections]
+    assert positions == sorted(positions)
+    record_section = body[positions[3] : positions[4]]
+    assert "record=true" in record_section
+    assert "record=true" not in body.replace(record_section, "")
+    # The opening describes the modes without naming a tool, so the first tool
+    # mention still follows the Antigravity bind step.
+    assert "`mem_" not in body.split("## Common checks", 1)[0]
     # No commit cursor: nothing recalled from memory may steer which commits are reviewed.
     for removed in ("mem_recall", "checkpoint", "merge-base", "<last_sha>", "until="):
         assert removed not in body

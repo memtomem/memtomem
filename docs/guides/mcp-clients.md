@@ -326,7 +326,9 @@ Restart Codex CLI after configuration.
 
 A manual `[mcp_servers.memtomem]` section also takes precedence over the
 plugin from Option A: with both present, only the manual entry's server runs
-(name-keyed; measured on codex-cli 0.145.0). Registering the manual entry
+(name-keyed; measured on codex-cli 0.145.0), so it also needs the plugin's
+`env = { MEMTOMEM_EXTRA_TOOLS = "mem_update_coverage" }` for the plugin's
+`memtomem-update` skill to run outside `topic` mode. Registering the manual entry
 under a different name instead would run both servers — see the
 [Codex integration guide](integrations/codex.md) for details.
 
@@ -352,9 +354,9 @@ Call mem_status to check the memtomem connection status
 
 ## 8. OpenCode
 
-The npm plugin for this core version is `opencode-memtomem@0.3.22` (bundling
+The npm plugin for this core version is `opencode-memtomem@0.3.23` (bundling
 core `0.7.2`). Add it through OpenCode's plugin form —
-`{"plugin": ["opencode-memtomem@0.3.22"]}` in `opencode.json`. The plugin
+`{"plugin": ["opencode-memtomem@0.3.23"]}` in `opencode.json`. The plugin
 supplies an exact-pinned MCP server, nine commands, three read-only skills,
 and conservative permissions. Upgrade any pin still on `0.1.3` or older:
 those bundle pre-`0.3.14` cores, whose `mcp` dependency has no `<2` upper

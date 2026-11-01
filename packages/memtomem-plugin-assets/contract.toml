@@ -2,16 +2,20 @@
 version = "0.7.2"
 tool_mode = "core"
 mcp_extras = ["onnx"]
+# Registered tools the bundled server configs expose on top of tool_mode, through
+# MEMTOMEM_EXTRA_TOOLS: the update workflow names mem_update_coverage in its own
+# allowlist instead of being granted mem_do.
+extra_tools = ["mem_update_coverage"]
 
 [plugins]
-claude_version = "0.5.25"
-codex_version = "0.3.22"
+claude_version = "0.5.26"
+codex_version = "0.3.23"
 automation_version = "0.3.16"
-opencode_version = "0.3.22"
-kimi_version = "0.2.20"
-hermes_version = "0.1.12"
+opencode_version = "0.3.23"
+kimi_version = "0.2.21"
+hermes_version = "0.1.13"
 hermes_memory_version = "0.1.1"
-antigravity_version = "0.2.1"
+antigravity_version = "0.2.2"
 
 [opencode]
 package = "opencode-memtomem"
@@ -143,6 +147,7 @@ argument_hint = "[task or topic]"
 input_kind = "task or topic to brief"
 # Without a topic, brief runs its minimal mode instead of asking or refusing.
 input_optional = true
+input_optional_mode = "minimal"
 ui_name = "memtomem Brief"
 ui_description = "Read-only task briefing from project memories"
 default_prompt = "Use $memtomem-brief to brief past decisions and active context for this task."
@@ -152,7 +157,7 @@ id = "update"
 codex_name = "memtomem-update"
 title = "Update project memories"
 description = "Review session outcomes and the latest Git commits, check existing memories for duplicates, and explicitly save durable project decisions, fixes, or preferences."
-tools = ["mem_status", "mem_search", "mem_add"]
+tools = ["mem_status", "mem_search", "mem_add", "mem_update_coverage"]
 claude_host_tools = [
   "Bash(git rev-parse:*)",
   "Bash(git status:*)",
@@ -164,6 +169,9 @@ effect = "write"
 implicit = false
 argument_hint = "[full|topic|f|t] [focus]"
 input_kind = "update mode (full or topic)"
+# Without a mode, update runs its incremental mode instead of asking or refusing.
+input_optional = true
+input_optional_mode = "incremental"
 ui_name = "memtomem Update"
 ui_description = "Save durable session and commit learnings"
 default_prompt = "Use $memtomem-update to review this session and recent commits for durable memories."

@@ -20,6 +20,7 @@ test("installs exact MCP, nine commands, three read skills, and safe permissions
   ]);
   assert.deepEqual(config.mcp.memtomem.environment, {
     MEMTOMEM_TOOL_MODE: "core",
+    MEMTOMEM_EXTRA_TOOLS: "mem_update_coverage",
     ORT_DISABLE_TELEMETRY: "1",
   });
   assert.equal(config.mcp.memtomem.timeout, 60000);

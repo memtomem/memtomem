@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Upgrading
+
+- **A hand-written MCP entry needs `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`
+  for `update` outside `topic` mode (#2918).** The plugins' bundled server
+  configurations now set it. An entry you wrote yourself, or one `mm init`
+  wrote, does not: Kimi Code's `mcp.json`, a Codex `[mcp_servers.memtomem]`
+  section (which wins over the plugin's server), or a Claude Code manual
+  registration that Claude deduplicates against the plugin. Add the variable to
+  that entry's `env` and restart the server; without it the `update` workflow
+  stops before writing and only `topic` mode runs. `mm doctor --claude-mcp`
+  reports a Claude manual entry without it as an environment difference.
+
 ### Changed
 
 - **The memory-dir status no longer normalises every root once per file it
@@ -44,6 +56,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   The Home dashboard now attributes a source to its memory dir by the stored
   path, as the Sources tree has since #2878, so a path stored under an alias
   of a memory dir is listed outside it in both.
+
+- **`update` without a mode runs an incremental review (first in `claude`
+  0.5.26, `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21, `antigravity`
+  0.2.2; #2918).** A request that names neither `full` nor `topic` no longer
+  asks for a mode or stops with `insufficient_input: mode`, whatever else it
+  says; words that are not a mode are reported as ignored, so a focus needs
+  `topic`. It reviews the session and those of the latest 10 commits that no
+  earlier run recorded as reviewed, asking `mem_update_coverage` (0.7.2) which
+  ones those are. `full` still reviews all 10, and both modes record the
+  commits whose full message the run read, after its last `mem_add`; a failed
+  write records nothing, so the next run reviews those commits again. `topic`
+  never reads or records coverage. The window is still the latest 10 commits;
+  the duplicate check against existing memories stays.
+- **The plugins' bundled server configurations expose `mem_update_coverage`
+  (also `hermes` 0.1.13).** They launch the server with
+  `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`, so the `update` skills name that
+  one tool in their allowlists instead of `mem_do`.
 
 ## [0.7.2] — 2026-11-01
 
