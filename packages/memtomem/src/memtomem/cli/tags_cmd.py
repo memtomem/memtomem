@@ -58,7 +58,9 @@ async def _run_list() -> None:
             project_context_root=_resolve_project_context_root(comp)
         )
         if not tag_counts:
-            click.secho("No tags found.", fg="yellow")
+            click.secho(
+                'No tags found. Use `mm add "..." --tags a,b` to add tags.', fg="yellow"
+            )
             return
         for tag, count in tag_counts:
             click.echo(f"  {tag}  — {count} chunks")
