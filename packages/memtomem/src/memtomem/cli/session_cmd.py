@@ -92,7 +92,20 @@ def _derive_session_namespace(agent_id: str, namespace: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@click.group()
+# ``\b`` is Click's raw-paragraph marker: without it Click rewraps the epilog as
+# prose and the examples collapse into one run-on paragraph, which is exactly
+# what makes them useless to copy-paste (#1667).
+SESSION_EPILOG = """\
+Examples:
+
+\b
+  mm session start --agent-id planner --title "Release prep"
+  mm session end --auto
+  mm session list --since 2026-10-01 --limit 10
+"""
+
+
+@click.group(epilog=SESSION_EPILOG)
 def session() -> None:
     """Manage agent sessions — start, end, list, events."""
 
