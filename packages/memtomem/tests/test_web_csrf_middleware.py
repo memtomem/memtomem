@@ -25,7 +25,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from memtomem.web.app import create_app, resolve_csrf_enforce_from_env
-from memtomem.web.middleware.csrf import CSRFGuardMiddleware
+from memtomem.web.middleware.csrf import (
+    CSRFGuardMiddleware,
+    _origin_host,
+    _strip_port,
+)
 
 _OBSERVE_RE = re.compile(
     r"web\.csrf\.observe method=(?P<method>\S+) path=(?P<path>\S+) "
@@ -504,3 +508,35 @@ def test_rotated_token_refuses_before_handler_then_accepts_explicit_retry():
         assert not applied
         assert client.post("/api/mutate", headers={"X-Memtomem-CSRF": fresh}).status_code == 200
         assert applied == [True]
+
+
+# Direct contract tests for the host parsing helpers (#2984).
+
+
+class TestStripPort:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("[::1]:8080", "::1"),
+            ("[::1]", "::1"),
+            ("[::1", None),
+            ("", None),
+            ("  Example.COM:443  ", "example.com"),
+            ("a:b:8080", "a:b"),
+        ],
+    )
+    def test_host_values(self, value: str, expected: str | None) -> None:
+        assert _strip_port(value) == expected
+
+
+class TestOriginHost:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("http://[::1]:8080", "::1"),
+            ("null", None),
+            ("http://[bad", None),
+        ],
+    )
+    def test_origin_values(self, value: str, expected: str | None) -> None:
+        assert _origin_host(value) == expected

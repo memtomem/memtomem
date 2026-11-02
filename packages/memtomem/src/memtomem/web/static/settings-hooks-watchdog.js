@@ -1086,7 +1086,7 @@ async function runWatchdogNow() {
     bar.style.display = 'block';
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Run Now';
+    btn.textContent = t('settings.watchdog.run_btn');
   }
 }
 
