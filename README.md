@@ -184,7 +184,7 @@ Hosted at **[memtomem.com](https://memtomem.com)** and available as Markdown in 
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and the contributor guide.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and the contributor guide. New here? Start with an issue labelled [`good first issue`](https://github.com/memtomem/memtomem/labels/good%20first%20issue).
 
 ## License
 
