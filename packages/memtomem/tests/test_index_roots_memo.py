@@ -43,8 +43,10 @@ def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     ``HOME`` is ``tmp_path`` so ``tilde_repo`` names the repository by an
     unexpanded ``~`` spelling: the memo keys the configured spelling and the
     worktree bound's expanded owner separately, and both must answer alike.
+    Windows' ``ntpath.expanduser`` reads ``USERPROFILE``, not ``HOME``.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     if shutil.which("git") is None:
         pytest.skip("needs a git binary")
     repo = tmp_path / "repo"
@@ -284,9 +286,27 @@ def test_a_walk_root_that_cannot_be_resolved_excludes_nothing_from_the_worktree_
 UNKNOWN_USER_ROOT = Path("~memtomem-no-such-user-2966/notes")
 
 
+@pytest.fixture
+def unusable_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``UNKNOWN_USER_ROOT.expanduser()`` raise on every platform.
+
+    POSIX raises ``RuntimeError`` for an unknown ``~user`` by itself; Windows'
+    ``ntpath.expanduser`` instead answers with a sibling of the home directory,
+    so the failure is injected rather than left to the platform.
+    """
+    original = pathlib.Path.expanduser
+
+    def expanduser(self):
+        if self == UNKNOWN_USER_ROOT:
+            raise RuntimeError("Could not determine home directory.")
+        return original(self)
+
+    monkeypatch.setattr(pathlib.Path, "expanduser", expanduser)
+
+
 @pytest.mark.parametrize("content", ["empty", "prefiltered"])
 async def test_an_unusable_root_does_not_fail_a_walk_that_checks_nothing(
-    bm25_only_components, tmp_path: Path, content: str
+    bm25_only_components, unusable_root, tmp_path: Path, content: str
 ) -> None:
     """Nothing is resolved at construction: a walk with no candidate stays ``[]``.
 
@@ -310,7 +330,7 @@ async def test_an_unusable_root_does_not_fail_a_walk_that_checks_nothing(
 
 
 async def test_an_unusable_root_still_fails_a_walk_that_checks_a_file(
-    bm25_only_components, tmp_path: Path
+    bm25_only_components, unusable_root, tmp_path: Path
 ) -> None:
     comp, _mem_dir = bm25_only_components
     engine = comp.index_engine
