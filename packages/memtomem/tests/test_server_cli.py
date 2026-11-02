@@ -55,6 +55,16 @@ def _run_callbacks(callbacks: list[tuple[Callable, tuple[object, ...], dict[str,
         fn(*args, **kwargs)
 
 
+def _contract_extra_tools() -> str:
+    import tomllib
+
+    root = Path(__file__).resolve().parents[3]
+    contract = root / "packages/memtomem-plugin-assets/contract.toml"
+    core = tomllib.loads(contract.read_text(encoding="utf-8"))["core"]
+    assert core["extra_tools"], "contract lists no extra tools; the expectation would be vacuous"
+    return ",".join(core["extra_tools"])
+
+
 def test_stdio_direct_terminal_prints_help_and_exits(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -76,10 +86,17 @@ def test_stdio_direct_terminal_prints_help_and_exits(
     assert "memtomem-server is an MCP stdio server." in out
     assert "No MCP client is connected; exiting." in out
     assert "--url http://127.0.0.1:8000/mcp" in out
-    assert (
-        "claude mcp add memtomem -s user -- uvx --isolated "
-        f"--from 'memtomem[all]=={server_mod._memtomem_version}' memtomem-server"
-    ) in out
+    # The registration it suggests carries the variable the `update` workflow
+    # needs (#2972). The value comes from contract.toml, not LAUNCH_ENV (the
+    # constant the code reads), so a renderer or code drift fails here.
+    extra_tools = _contract_extra_tools()
+    lines = out.splitlines()
+    assert f'  env: {{"MEMTOMEM_EXTRA_TOOLS": "{extra_tools}"}}' in lines
+    examples = [line for line in lines if "claude mcp add" in line]
+    assert examples == [
+        f"  claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS={extra_tools} "
+        f"-- uvx --isolated --from 'memtomem[all]=={server_mod._memtomem_version}' memtomem-server"
+    ]
     assert "-- memtomem-server\n" not in out
     # Direct server launches should point users to MCP setup/network transports.
     assert "mm status" not in out

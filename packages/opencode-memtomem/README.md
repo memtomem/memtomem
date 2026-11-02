@@ -50,7 +50,7 @@ configure the local MCP server directly instead, which pulls the
       "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.7.2", "memtomem-server"],
       "enabled": true,
       "timeout": 60000,
-      "environment": {"MEMTOMEM_TOOL_MODE": "core"}
+      "environment": {"MEMTOMEM_TOOL_MODE": "core", "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
     }
   }
 }

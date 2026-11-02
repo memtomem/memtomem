@@ -52,7 +52,7 @@ again. `agy plugin uninstall memtomem` also removes the plugin; your memories st
 `~/.memtomem`.
 
 **If you already registered memtomem by hand** (for example with
-`agy mcp add memtomem memtomem-server`, which writes `~/.gemini/config/mcp_config.json`),
+`agy mcp add -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage memtomem memtomem-server`, which writes `~/.gemini/config/mcp_config.json`),
 both servers run side by side: agy names the plugin's server `memtomem_memtomem`, so it
 does not replace your entry. Remove the hand-written one with `agy mcp remove memtomem`
 to keep a single server. To keep your manual registration and retain the plugin's

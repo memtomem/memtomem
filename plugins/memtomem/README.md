@@ -42,7 +42,11 @@ name — a differently named entry is not deduplicated and both servers would
 run. The source-checkout
 [coexistence diagnostic and reconciliation](../../docs/guides/mcp-clients.md#keep-manual-mcp-and-plugin-skills)
 can check both registrations and preview either choice. `keep-manual` leaves a
-canonical `[mcp_servers.memtomem]` entry and the plugin cache unchanged.
+canonical `[mcp_servers.memtomem]` entry and the plugin cache unchanged. A
+manual entry that keeps serving needs
+`env = { MEMTOMEM_EXTRA_TOOLS = "mem_update_coverage" }`, as the bundled server
+sets it; without it `memtomem-update` stops before writing whenever a coverage
+call is due, and only `topic` mode keeps working.
 
 For project-specific memories, keep the terminal in that project and create
 the gitignored local tier explicitly:

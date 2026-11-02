@@ -122,6 +122,9 @@ Add the following to your editor's MCP config file — e.g.,
 2026-06-18, while enterprise licenses and paid API keys remain supported). For
 Claude Code, use `claude mcp add` instead of editing a file. See
 [MCP Client Configuration](mcp-clients.md) for the full list.
+On a client that runs memtomem's `update` workflow (Claude Code, Codex,
+OpenCode, Kimi Code, Antigravity CLI), also keep
+`"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"` in this `env` block.
 
 ```json
 {

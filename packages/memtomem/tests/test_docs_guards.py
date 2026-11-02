@@ -2500,3 +2500,336 @@ class TestRegistryManifest:
         # Select by identifier too: picking "the first pypi row" would read a
         # stale memtomem version the moment a second pypi package is listed.
         assert self._pypi_package(manifest)["version"] == expected
+
+
+# ===========================================================================
+# Manual MCP registrations expose the `update` workflow's tool (#2972).
+#
+# The plugins' `update` workflow needs `mem_update_coverage` outside `topic`
+# mode, and a server prunes it unless it is launched with MEMTOMEM_EXTRA_TOOLS.
+# A manual registration copied from the docs, the Web UI's setup guide or the
+# server's terminal help is often the server that workflow talks to (Codex and
+# OpenCode keep a manual `memtomem` entry over the plugin's; the skills-only
+# reconciliation keeps it on purpose). Every registration found there is
+# classified: it carries the contract's value, or it is listed in
+# `_REGISTRATION_EXEMPT` with a reason. An unclassified one fails, so a new
+# example has to be decided, not merely written.
+# ===========================================================================
+
+_HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
+_FENCE = re.compile(r"^\s*```(\S*)\s*$")
+_INLINE_CODE = re.compile(r"`([^`\n]+)`")
+_CLI_ADD = re.compile(r"\b(claude|agy) mcp add\b")
+_PORTAL_JS = _SRC / "web" / "static" / "context-portal.js"
+_PORTAL_BRANCH = re.compile(r"runtimeName === '([a-z]+)'")
+_PORTAL_CODE = re.compile(r"<code>(.*?)</code>", re.DOTALL)
+_EXTRA_TOOLS_KEY = "MEMTOMEM_EXTRA_TOOLS"
+
+
+class _Registration(typing.NamedTuple):
+    source: str  # repo-relative path, or "stdio-help"
+    section: str  # nearest Markdown heading, the portal's runtime branch, or ""
+    kind: str  # "cli" | "json" | "toml"
+    ordinal: int  # 1-based among this (source, section, kind)
+    text: str
+    valid: bool | None  # None: the block names memtomem but does not parse
+
+
+def _expected_extra_tools() -> str:
+    tools = _plugin_contract()["core"]["extra_tools"]
+    assert tools, "contract lists no extra tools; every check below would be vacuous"
+    return ",".join(tools)
+
+
+def _cli_registration(command: str, expected: str) -> bool | None:
+    """None when *command* is not a memtomem registration, else whether it is valid.
+
+    Claude Code's ``-e`` is variadic, so the pair must come before the ``--``
+    that ends it; ``agy`` rejects a flag after the server name, so there the pair
+    must come before ``memtomem``.
+    """
+    match = _CLI_ADD.search(command)
+    if match is None:
+        return None
+    try:
+        tokens = shlex.split(command[match.start() :])
+    except ValueError:
+        return False
+    args = tokens[3:]
+    end = args.index("--") if "--" in args else len(args)
+    options = args[:end]
+    if "memtomem" not in options:
+        return None
+    if match.group(1) == "agy":
+        options = options[: options.index("memtomem")]
+    pair = f"{_EXTRA_TOOLS_KEY}={expected}"
+    return any(
+        flag in ("-e", "--env") and value == pair
+        for flag, value in zip(options, options[1:], strict=False)
+    )
+
+
+def _memtomem_entries(node: object) -> list[dict]:
+    found: list[dict] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "memtomem" and isinstance(value, dict) and "command" in value:
+                found.append(value)
+            else:
+                found.extend(_memtomem_entries(value))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_memtomem_entries(item))
+    return found
+
+
+def _block_registrations(block: str, expected: str) -> list[tuple[str, bool | None]]:
+    """``(kind, valid)`` for every memtomem registration in one code block."""
+    stripped = block.strip()
+    if stripped.startswith("{"):
+        if '"memtomem"' not in stripped:
+            return []
+        try:
+            entries = _memtomem_entries(json.loads(stripped))
+        except json.JSONDecodeError:
+            return [("json", None)]
+        return [
+            ("json", (e.get("env") or e.get("environment") or {}).get(_EXTRA_TOOLS_KEY) == expected)
+            for e in entries
+        ]
+    if "[mcp_servers.memtomem]" in stripped:
+        try:
+            entry = tomllib.loads(stripped)["mcp_servers"]["memtomem"]
+        except (tomllib.TOMLDecodeError, KeyError):
+            return [("toml", None)]
+        return [("toml", entry.get("env", {}).get(_EXTRA_TOOLS_KEY) == expected)]
+    found: list[tuple[str, bool | None]] = []
+    for line in re.sub(r"\\\n\s*", " ", block).splitlines():
+        valid = _cli_registration(line.lstrip("# "), expected)
+        if valid is not None:
+            found.append(("cli", valid))
+    return found
+
+
+def _number(source: str, items: list[tuple[str, str, bool | None, str]]) -> list[_Registration]:
+    counts: dict[tuple[str, str], int] = {}
+    out: list[_Registration] = []
+    for section, kind, valid, text in items:
+        counts[(section, kind)] = counts.get((section, kind), 0) + 1
+        out.append(_Registration(source, section, kind, counts[(section, kind)], text, valid))
+    return out
+
+
+def _markdown_registrations(path: Path, expected: str) -> list[_Registration]:
+    items: list[tuple[str, str, bool | None, str]] = []
+    section = ""
+    fence: list[str] | None = None
+    for line in _read(path).splitlines():
+        if fence is not None:
+            if _FENCE.match(line):
+                block = "\n".join(fence)
+                items.extend(
+                    (section, k, v, block) for k, v in _block_registrations(block, expected)
+                )
+                fence = None
+            else:
+                fence.append(line)
+            continue
+        if _FENCE.match(line):
+            fence = []
+            continue
+        heading = _HEADING.match(line)
+        if heading:
+            section = heading.group(1)
+            continue
+        for span in _INLINE_CODE.findall(line):
+            valid = _cli_registration(span, expected)
+            if valid is not None:
+                items.append((section, "cli", valid, span))
+    assert fence is None, f"{path}: unterminated code fence"
+    return _number(path.relative_to(_REPO_ROOT).as_posix(), items)
+
+
+def _portal_registrations(expected: str) -> list[_Registration]:
+    import html
+
+    text = _read(_PORTAL_JS)
+    branches = [(m.start(), m.group(1)) for m in _PORTAL_BRANCH.finditer(text)]
+    items: list[tuple[str, str, bool | None, str]] = []
+    for match in _PORTAL_CODE.finditer(text):
+        section = next((name for pos, name in reversed(branches) if pos < match.start()), "")
+        block = html.unescape(match.group(1))
+        items.extend((section, k, v, block) for k, v in _block_registrations(block, expected))
+    return _number(_PORTAL_JS.relative_to(_REPO_ROOT).as_posix(), items)
+
+
+def _stdio_help_registrations(expected: str) -> list[_Registration]:
+    import contextlib
+    import io
+
+    from memtomem.server import _print_direct_stdio_help
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        _print_direct_stdio_help()
+    items = [
+        ("", k, v, buffer.getvalue()) for k, v in _block_registrations(buffer.getvalue(), expected)
+    ]
+    return _number("stdio-help", items)
+
+
+def _all_registrations() -> list[_Registration]:
+    expected = _expected_extra_tools()
+    docs = [
+        p
+        for p in _tracked_markdown()
+        if p.name != "CHANGELOG.md" and "docs/adr/" not in p.as_posix()
+    ]
+    found: list[_Registration] = []
+    for path in docs:
+        found.extend(_markdown_registrations(path, expected))
+    found.extend(_portal_registrations(expected))
+    found.extend(_stdio_help_registrations(expected))
+    return found
+
+
+_NO_WORKFLOW = (
+    "client without memtomem's `update` workflow: the variable would add a tool nothing calls"
+)
+_SHARED = "client-neutral env example; the sentence above it says when to keep the variable"
+_MCP_CLIENTS = "docs/guides/mcp-clients.md"
+_REGISTRATION_EXEMPT: dict[tuple[str, str, str, int], str] = {
+    ("docs/guides/integrations/claude-desktop.md", "macOS", "json", 1): _NO_WORKFLOW,
+    ("docs/guides/integrations/claude-desktop.md", "Windows", "json", 1): _NO_WORKFLOW,
+    (
+        "docs/guides/integrations/cursor.md",
+        "Global Configuration (Applies to All Projects)",
+        "json",
+        1,
+    ): _NO_WORKFLOW,
+    (_MCP_CLIENTS, "2. Cursor", "json", 1): _NO_WORKFLOW,
+    (_MCP_CLIENTS, "3. Windsurf", "json", 1): _NO_WORKFLOW,
+    (_MCP_CLIENTS, "4. Claude Desktop", "json", 1): _NO_WORKFLOW,
+    (_MCP_CLIENTS, "5. Gemini CLI", "json", 1): _NO_WORKFLOW,
+    # The agy plugin and its workflows are a CLI surface; the IDE reads its own file.
+    (_MCP_CLIENTS, "Antigravity IDE", "json", 1): _NO_WORKFLOW,
+    (_MCP_CLIENTS, "Common Configuration Options", "json", 1): _SHARED,
+    (_MCP_CLIENTS, "Changing the Embedding Model", "json", 1): _SHARED,
+    ("docs/guides/llm-providers.md", "MCP Config Example", "json", 1): _SHARED,
+}
+
+
+def _section_text(path: Path, heading: str) -> str:
+    """The lines under *heading* up to the next heading, fences included."""
+    lines = _read(path).splitlines()
+    in_fence = False
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if _FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        match = None if in_fence else _HEADING.match(line)
+        if match and start is not None:
+            return "\n".join(lines[start:index])
+        if match and match.group(1) == heading:
+            start = index + 1
+    assert start is not None, f"{path}: no heading {heading!r}"
+    return "\n".join(lines[start:])
+
+
+@pytest.fixture(scope="module")
+def registrations() -> list[_Registration]:
+    return _all_registrations()
+
+
+class TestManualRegistrationsExposeTheUpdateTool:
+    @staticmethod
+    def _key(r: _Registration) -> tuple[str, str, str, int]:
+        return (r.source, r.section, r.kind, r.ordinal)
+
+    def test_every_registration_carries_the_variable_or_is_exempt(
+        self, registrations: list[_Registration]
+    ) -> None:
+        offenders = [
+            f"{r.source} [{r.section}] {r.kind} #{r.ordinal}: "
+            + ("does not parse" if r.valid is None else f"no {_EXTRA_TOOLS_KEY}")
+            for r in registrations
+            if not r.valid and self._key(r) not in _REGISTRATION_EXEMPT
+        ]
+        assert not offenders, (
+            f"Manual memtomem registrations without {_EXTRA_TOOLS_KEY}="
+            f"{_expected_extra_tools()} (#2972). Add it (claude: `-e` before `--`; "
+            "agy: `-e` before the name; JSON `env`/`environment`; Codex `env = {…}`), "
+            "or list the block in _REGISTRATION_EXEMPT with a reason:\n  " + "\n  ".join(offenders)
+        )
+
+    def test_every_exemption_names_a_registration_still_without_it(
+        self, registrations: list[_Registration]
+    ) -> None:
+        unexplained = {self._key(r) for r in registrations if not r.valid}
+        stale = sorted(set(_REGISTRATION_EXEMPT) - unexplained)
+        assert not stale, f"Exemptions that match no registration lacking the variable: {stale}"
+
+    def test_shared_examples_say_when_to_keep_the_variable(self) -> None:
+        sentence = f'`"{_EXTRA_TOOLS_KEY}": "{_expected_extra_tools()}"`'
+        shared = [key for key, reason in _REGISTRATION_EXEMPT.items() if reason == _SHARED]
+        assert shared, "no shared example is exempt; this check would be vacuous"
+        for source, section, _kind, _ordinal in shared:
+            # The text before the section's JSON example, where a reader copying
+            # the block reads it (a shell fence may come first).
+            before = _section_text(_REPO_ROOT / source, section).split("```json", 1)[0]
+            assert sentence in _unwrapped(before), (source, section)
+
+    def test_discovery_is_not_vacuous(self, registrations: list[_Registration]) -> None:
+        """Each source keeps finding what it found when the guard was written.
+
+        Floors, not exact counts, so a new valid example needs no edit here; a
+        scan that silently stops reading a source drops below them.
+        """
+        portal = _PORTAL_JS.relative_to(_REPO_ROOT).as_posix()
+        valid = [r for r in registrations if r.valid]
+        markdown = [r for r in valid if r.source.endswith(".md")]
+        assert sum(r.kind == "cli" for r in markdown) >= 11
+        assert sum(r.kind == "json" for r in markdown) >= 8
+        assert sum(r.kind == "toml" for r in markdown) >= 1
+        assert {(r.section, r.kind) for r in valid if r.source == portal} == {
+            ("claude", "cli"),
+            ("antigravity", "json"),
+            ("codex", "toml"),
+        }
+        assert [(r.kind, r.valid) for r in registrations if r.source == "stdio-help"] == [
+            ("cli", True)
+        ]
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("claude mcp add memtomem -s user -e K=V -- memtomem-server", True),
+            ("claude mcp add -s user -e K=V memtomem -- memtomem-server", True),
+            ("claude mcp add memtomem --env K=V -- memtomem-server", True),
+            ("claude mcp add memtomem -s user -- memtomem-server", False),
+            ("claude mcp add -s user memtomem -- memtomem-server", False),
+            ("claude mcp add memtomem -- memtomem-server -e K=V", False),
+            ("claude mcp add memtomem -e K=other -- memtomem-server", False),
+            ("agy mcp add -e K=V memtomem memtomem-server", True),
+            ("agy mcp add memtomem -e K=V memtomem-server", False),
+            ("claude mcp add other -- memtomem-server", None),
+            ("claude mcp remove memtomem -s user", None),
+        ],
+    )
+    def test_cli_classification(self, command: str, expected: bool | None) -> None:
+        assert _cli_registration(command.replace("K=", f"{_EXTRA_TOOLS_KEY}="), "V") is expected
+
+    def test_a_continued_command_is_one_registration(self) -> None:
+        block = (
+            "claude mcp add memtomem -s user \\\n"
+            f"  -e {_EXTRA_TOOLS_KEY}=V \\\n"
+            "  -- memtomem-server"
+        )
+        assert _block_registrations(block, "V") == [("cli", True)]
+        assert _block_registrations(block.replace("=V", "=W"), "V") == [("cli", False)]
+
+    def test_a_block_that_does_not_parse_is_reported(self) -> None:
+        broken_json = '{"mcpServers": {"memtomem": {"command": "x",}}}'
+        assert _block_registrations(broken_json, "V") == [("json", None)]
+        assert _block_registrations("[mcp_servers.memtomem]\ncommand = ", "V") == [("toml", None)]

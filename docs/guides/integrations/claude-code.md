@@ -168,14 +168,19 @@ silently spawns an MCP server.
 
 ```bash
 # User scope — install once, available in every project
-claude mcp add memtomem -s user -- memtomem-server
+claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- memtomem-server
 
 # Local scope — this project only, not committed (omitting -s is the same)
-claude mcp add memtomem -s local -- memtomem-server
+claude mcp add memtomem -s local -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- memtomem-server
 
 # Source install (running from a git clone)
-# claude mcp add memtomem -s user -- uv run --directory /path/to/memtomem memtomem-server
+# claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- uv run --directory /path/to/memtomem memtomem-server
 ```
+
+`-e` must come before the `--`: everything after it is the server's command.
+The variable exposes `mem_update_coverage`, which the plugin's `update`
+workflow needs outside `topic` mode when it talks to this server (see
+[Project workflows](../project-workflows.md)).
 
 Both `-s local` and `-s user` write to `~/.claude.json` — no need to edit
 that file by hand.
@@ -199,7 +204,8 @@ For a team-shared setup, commit a `.mcp.json` at the project root:
   "mcpServers": {
     "memtomem": {
       "command": "memtomem-server",
-      "args": []
+      "args": [],
+      "env": {"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
     }
   }
 }
@@ -209,9 +215,11 @@ Teammates see this server after approving the workspace-trust prompt on
 first use. To run against personal credentials without touching the
 shared file, add a `-s local` entry with the same name — local wins.
 
-The server reads `~/.memtomem/config.json`. Add a client `env` block only for
-an intentional highest-precedence override; see the
+The server reads its settings from `~/.memtomem/config.json`. Put a setting in
+the `env` block only for an intentional highest-precedence override; see the
 [MCP client configuration guide](../mcp-clients.md#11-environment-variable-overrides).
+`MEMTOMEM_EXTRA_TOOLS` is not a setting: the server reads it at launch, before
+any configuration, so it belongs in the entry.
 
 ---
 
