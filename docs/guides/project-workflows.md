@@ -33,7 +33,7 @@ behaviour is the same everywhere and only the invocation differs.
 
 This guide describes the workflows as shipped with memtomem `0.7.3` and these
 plugin versions:
-`claude` 0.5.29 · `codex` 0.3.26 · `opencode` 0.3.26 · `kimi` 0.2.24 · `antigravity` 0.2.5.
+`claude` 0.5.29 · `codex` 0.3.27 · `opencode` 0.3.26 · `kimi` 0.2.24 · `antigravity` 0.2.5.
 `update` runs its `incremental` mode by default from `claude` 0.5.26,
 `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
 older plugin releases ask for a mode instead (see the CHANGELOG).

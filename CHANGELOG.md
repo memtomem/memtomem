@@ -11,6 +11,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Plugin catalogs copy `plugins/memtomem` without the repository root, so
   the bundle now carries the full Apache-2.0 license and links back to the
   repository's security policy and advisory form.
+- **The Codex plugin has an icon.** Its manifest names
+  `interface.composerIcon`, which the awesome-codex-plugins catalog requires,
+  and the bundle ships the image at `plugins/memtomem/assets/icon.png`. It is
+  the same image as the Claude plugin's listing icon. Codex `0.3.27`, which also
+  carries the `update` item sizing below.
 
 ### Fixed
 

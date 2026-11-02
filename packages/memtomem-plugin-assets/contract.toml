@@ -9,7 +9,7 @@ extra_tools = ["mem_update_coverage"]
 
 [plugins]
 claude_version = "0.5.29"
-codex_version = "0.3.26"
+codex_version = "0.3.27"
 automation_version = "0.3.17"
 opencode_version = "0.3.26"
 kimi_version = "0.2.24"

@@ -194,6 +194,28 @@ def test_codex_plugin_matches_contract_and_marketplace() -> None:
     )
 
 
+def test_codex_plugin_composer_icon_is_a_bundled_png() -> None:
+    # The awesome-codex-plugins catalog requires interface.composerIcon and
+    # fetches the bundle on its own, so the icon has to live inside
+    # plugins/memtomem. Codex reads the path only when it starts with "./" and
+    # has no ".." component. The catalog asks for under 50 KB (its maintainer
+    # wrote 50 KiB); 50,000 bytes is the stricter of the two. It is the Claude
+    # plugin's icon byte for byte.
+    bundle = (_ROOT / "plugins/memtomem").resolve()
+    path = _json("plugins/memtomem/.codex-plugin/plugin.json")["interface"]["composerIcon"]
+    assert path.startswith("./")
+    assert ".." not in path.split("/")
+    icon = (bundle / path).resolve()
+    assert icon.is_relative_to(bundle)
+    data = icon.read_bytes()
+    assert len(data) < 50_000
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    assert data[12:16] == b"IHDR"
+    assert int.from_bytes(data[16:20], "big") == int.from_bytes(data[20:24], "big") == 512
+    claude_icon = _ROOT / "packages/memtomem-claude-plugin/.claude-plugin/icon.png"
+    assert data == claude_icon.read_bytes()
+
+
 def test_codex_plugin_bundle_ships_its_license_and_security_policy() -> None:
     # Plugin catalogs mirror plugins/memtomem on its own, without the repository
     # root. Redistributing it alone must carry the full license text (Apache-2.0
