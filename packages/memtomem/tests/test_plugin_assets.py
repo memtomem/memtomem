@@ -1049,9 +1049,20 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
         "A match there never skips the item",
         "Write the item and cite each match's namespace and `(source, chunk_id)` in it",
         "items written despite a host-native match (with each match's namespace)",
+        # Item size is set by the exact token ceiling, not by paragraph layout: a
+        # multilingual-e5-small store (384 tokens) cut items of 1,000-1,200 characters at a
+        # line boundary, so a trailing citation became its own chunk (#3002).
+        "at most 1,000 characters, or at most 600 when any of it is written in Korean, "
+        "Japanese, or Chinese, counting every citation steps 2 and 3 ask for",
+        "the limits are a practical target for that ceiling, not a guarantee",
+        "To fit the limit, shorten only that other prose; never drop or shorten a required "
+        "citation or a verbatim string",
+        "When they still do not fit, write the item anyway and report it as over the limit",
+        "items written over the length limit",
     )
     for marker in required:
         assert marker in flat, marker
+    assert "at most 1,200 characters" not in flat
     assert "mem_do" not in body
     # No mode-ambiguity refusal: the one remaining question is a `topic` without a focus.
     assert "insufficient_input: mode" not in flat
@@ -1651,6 +1662,17 @@ def test_project_workflows_guide_matches_the_workflow_contract() -> None:
     assert [row for row in source_rows if "(the default)" in row[0]] == [source_rows[0]]
     assert "`incremental`" in source_rows[0][0]
     assert _mode_rows(guide) == source_rows
+
+    # update's item size limits: the guide states the two numbers the workflow sets.
+    limits = re.search(
+        r"at most ([\d,]+) characters, or at most ([\d,]+) when any of it is written in",
+        " ".join(_UPDATE_WORKFLOW.read_text(encoding="utf-8").split()),
+    )
+    assert limits is not None
+    flat_guide = " ".join(guide.split())
+    assert (
+        f"is at most {limits[1]} characters, or {limits[2]} when any of it is in" in flat_guide
+    ), limits.groups()
 
     # Host table: one row per surface, shipped hosts carry the invocation, the rest say so.
     host_rows = {row[0]: row for row in _table_rows(guide, "") if len(row) == 5}
