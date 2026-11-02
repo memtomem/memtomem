@@ -8,14 +8,14 @@ mcp_extras = ["onnx"]
 extra_tools = ["mem_update_coverage"]
 
 [plugins]
-claude_version = "0.5.26"
-codex_version = "0.3.23"
+claude_version = "0.5.27"
+codex_version = "0.3.24"
 automation_version = "0.3.16"
-opencode_version = "0.3.23"
-kimi_version = "0.2.21"
+opencode_version = "0.3.24"
+kimi_version = "0.2.22"
 hermes_version = "0.1.13"
 hermes_memory_version = "0.1.1"
-antigravity_version = "0.2.2"
+antigravity_version = "0.2.3"
 
 [opencode]
 package = "opencode-memtomem"
