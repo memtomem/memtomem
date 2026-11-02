@@ -27,12 +27,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   writes (#2970), and so do the guides' manual examples (#2972). An entry an
   earlier `mm init` wrote, or one copied from the guides or the server's
   terminal help before that, does not: Kimi Code's `mcp.json`, a Codex
-  `[mcp_servers.memtomem]`
-  section (which wins over the plugin's server), a project `.mcp.json`, or a
-  Claude Code manual registration. Add the variable to that entry's `env` and
-  restart the server; without it the `update` workflow stops before writing
-  whenever a coverage call is due; `topic` mode still works.
-  Re-running `mm init --mcp kimi` rewrites the Kimi
+  `[mcp_servers.memtomem]` section (which wins over the plugin's server), an
+  OpenCode `mcp.memtomem` entry (the plugin keeps it instead of adding its
+  own), a project `.mcp.json`, or a Claude Code manual registration. Add the
+  variable to that entry's `env` (OpenCode: `environment`) and restart the
+  server; without it (a server in `full` tool mode exposes the tool anyway)
+  the `update` workflow stops before writing whenever a coverage call is due;
+  `topic` mode still works. Re-running `mm init --mcp kimi` rewrites the Kimi
   entry with it. `mm init --mcp claude` (or `json`) leaves an existing Claude
   registration as it is and writes nothing, so add the variable to that
   registration yourself. `mm doctor --claude-mcp` reports a Claude manual entry
