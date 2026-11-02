@@ -16,9 +16,10 @@ Thank you for your interest in contributing to memtomem!
 4. Open the pull request. On your first one the CLA bot asks you to sign,
    once per account (see
    [Contributor License Agreement](#contributor-license-agreement-cla)).
-   Until a pull request of yours has been merged, GitHub also holds each CI
-   run until a maintainer approves it. That hold is GitHub's rule for
-   first-time contributors, not a review verdict.
+   Until you have had a commit or pull request merged into this repository,
+   GitHub also holds each CI run on your pull requests until a maintainer
+   approves it. That hold is GitHub's rule for first-time contributors, not
+   a review verdict.
 5. After your first pull request, issues labelled
    [`help wanted`](https://github.com/memtomem/memtomem/labels/help%20wanted)
    are the next step: they are larger, and some need a browser test.
