@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 500" width="480" height="500" role="img" aria-labelledby="title desc">
+  <title id="title">The memtomem session loop</title>
+  <desc id="desc">Session 1 in Claude Code runs /memtomem:handoff save, which writes one checkpoint record into the project's .memtomem/memories.local Markdown files. Session 2 in Codex CLI runs $memtomem-brief, which lists handoff IDs and recent updates, and $memtomem-handoff resume, which loads the checkpoint. After work and commits, back in Claude Code, /memtomem:update writes decisions, fixes, and preferences back into the same files.</desc>
+  <style>
+    .bg { fill: #ffffff; }
+    .box { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+    .mem { fill: #ddf4ff; stroke: #54aeff; stroke-width: 1.5; }
+    .title { fill: #1f2328; font: 600 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .cmd { fill: #0550ae; font: 14px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .path { fill: #1f2328; font: 600 14px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .note { fill: #59636e; font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .label { fill: #59636e; font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .arrow { fill: none; stroke: #59636e; stroke-width: 1.5; }
+    .head { fill: #59636e; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .box { fill: #161b22; stroke: #3d444d; }
+      .mem { fill: #0c2d6b; stroke: #1f6feb; }
+      .title, .path { fill: #f0f6fc; }
+      .cmd { fill: #79c0ff; }
+      .note, .label { fill: #9198a1; }
+      .arrow { stroke: #9198a1; }
+      .head { fill: #9198a1; }
+    }
+  </style>
+  <defs>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="head" d="M 0 0 L 10 5 L 0 10 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="480" height="500" rx="12"/>
+
+  <!-- Session 1 -->
+  <rect class="box" x="20" y="16" width="280" height="64" rx="8"/>
+  <text class="title" x="160" y="42" text-anchor="middle">Session 1 · Claude Code</text>
+  <text class="cmd" x="160" y="64" text-anchor="middle">/memtomem:handoff save</text>
+
+  <path class="arrow" d="M 160 80 V 126" marker-end="url(#head)"/>
+  <text class="label" x="172" y="108">one checkpoint record</text>
+
+  <!-- Project memory -->
+  <path class="mem" d="M 20 142 A 140 12 0 0 1 300 142 V 212 A 140 12 0 0 1 20 212 Z"/>
+  <path class="mem" d="M 20 142 A 140 12 0 0 0 300 142"/>
+  <text class="path" x="160" y="180" text-anchor="middle">.memtomem/memories.local</text>
+  <text class="note" x="160" y="200" text-anchor="middle">Markdown files you own</text>
+
+  <path class="arrow" d="M 160 226 V 282" marker-end="url(#head)"/>
+  <text class="label" x="172" y="248">brief: handoff IDs · updates</text>
+  <text class="label" x="172" y="265">resume: the checkpoint</text>
+
+  <!-- Session 2 -->
+  <rect class="box" x="20" y="284" width="280" height="88" rx="8"/>
+  <text class="title" x="160" y="310" text-anchor="middle">Session 2 · Codex CLI</text>
+  <text class="cmd" x="160" y="334" text-anchor="middle">$memtomem-brief</text>
+  <text class="cmd" x="160" y="356" text-anchor="middle">$memtomem-handoff resume</text>
+
+  <path class="arrow" d="M 160 372 V 418" marker-end="url(#head)"/>
+  <text class="label" x="172" y="400">work · commits</text>
+
+  <!-- Update -->
+  <rect class="box" x="20" y="420" width="280" height="64" rx="8"/>
+  <text class="title" x="160" y="446" text-anchor="middle">Back in Claude Code</text>
+  <text class="cmd" x="160" y="468" text-anchor="middle">/memtomem:update</text>
+
+  <!-- Return into memory -->
+  <path class="arrow" d="M 300 452 H 455 V 177 H 304" marker-end="url(#head)"/>
+  <text class="label" x="378" y="430" text-anchor="middle">decisions · fixes ·</text>
+  <text class="label" x="378" y="445" text-anchor="middle">preferences</text>
+</svg>

@@ -11,7 +11,13 @@
 
 ## The session loop
 
-Three plugin workflows carry a project's memory from one session to the next, and from one coding agent to another. Illustrative output — agent wording and results vary.
+Three plugin workflows carry a project's memory from one session to the next, and from one coding agent to another.
+
+<p align="center">
+  <img src="docs/assets/session-loop.svg" width="480" alt="Session 1 in Claude Code runs /memtomem:handoff save, writing one checkpoint record into the project's .memtomem/memories.local Markdown files. Session 2 in Codex CLI runs $memtomem-brief to list handoff IDs and updates, then $memtomem-handoff resume to load the checkpoint. After work and commits, back in Claude Code, /memtomem:update writes decisions, fixes, and preferences back into the same files.">
+</p>
+
+Illustrative output — agent wording and results vary.
 
 ```text
 # End of a session, in Claude Code
