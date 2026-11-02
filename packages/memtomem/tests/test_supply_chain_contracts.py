@@ -383,6 +383,11 @@ def test_opencode_plugin_matches_contract() -> None:
     assert package["version"] == contract["plugins"]["opencode_version"]
     assert package["engines"]["opencode"] == contract["opencode"]["version_range"]
     assert package["license"] == "Apache-2.0"
+    # npm publishes this package on its own, so it carries the full license text
+    # (Apache-2.0 section 4(a)) and the root's copyright line: the root file, byte for byte.
+    assert "LICENSE" in package["files"]
+    license_path = _ROOT / "packages/opencode-memtomem/LICENSE"
+    assert license_path.read_bytes() == (_ROOT / "LICENSE").read_bytes()
     assert package.get("dependencies", {}) == {}
     assert f'CORE_VERSION = "{contract["core"]["version"]}"' in generated
     assert f"MCP_TIMEOUT_MS = {contract['opencode']['mcp_timeout_ms']}" in generated
