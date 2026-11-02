@@ -87,12 +87,11 @@ _BOLD_LABEL_RE = re.compile(r"^[ \t]*\*\*[^*\n]+\*\*", re.MULTILINE)
 
 
 def _fence_line_set(text: str) -> frozenset[int]:
-    """Return 1-indexed line numbers that sit *inside* a code fence (exclusive of
-    the opener/closer lines themselves — those are marker lines that should not
-    carry interior content like heading-looking strings).
+    """Return 1-indexed line numbers covered by a code fence, opener and closer
+    lines included.
 
-    Opener and closer lines are also included so that a ``# heading``-shaped
-    fence-marker metadata row is never treated as a true markdown heading.
+    Including the marker lines keeps a ``# heading``-shaped fence-marker
+    metadata row from being treated as a true markdown heading.
 
     Handles unclosed fences at EOF by treating the rest of the file as fenced.
     """
