@@ -1,5 +1,5 @@
 [core]
-version = "0.7.2"
+version = "0.7.3"
 tool_mode = "core"
 mcp_extras = ["onnx"]
 # Registered tools the bundled server configs expose on top of tool_mode, through
@@ -8,14 +8,14 @@ mcp_extras = ["onnx"]
 extra_tools = ["mem_update_coverage"]
 
 [plugins]
-claude_version = "0.5.27"
-codex_version = "0.3.24"
-automation_version = "0.3.16"
-opencode_version = "0.3.24"
-kimi_version = "0.2.22"
-hermes_version = "0.1.13"
+claude_version = "0.5.28"
+codex_version = "0.3.25"
+automation_version = "0.3.17"
+opencode_version = "0.3.25"
+kimi_version = "0.2.23"
+hermes_version = "0.1.14"
 hermes_memory_version = "0.1.1"
-antigravity_version = "0.2.3"
+antigravity_version = "0.2.4"
 
 [opencode]
 package = "opencode-memtomem"
