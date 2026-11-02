@@ -29,6 +29,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   not fit is written and reported as over the limit. The delivery versions move
   with that text: Claude `0.5.29`, Codex and OpenCode `0.3.26`, Kimi `0.2.24`,
   Antigravity `0.2.5`. Items already saved keep their chunks.
+- **The OpenCode plugin package carries the full Apache-2.0 license.** Its
+  `LICENSE` was the short application notice and left `DAPADA Inc.` out of the
+  copyright line; it is now the repository's `LICENSE` byte for byte, and ships
+  in the next npm release.
 
 ## [0.7.3] — 2026-11-02
 
