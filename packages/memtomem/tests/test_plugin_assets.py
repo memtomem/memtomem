@@ -1545,3 +1545,148 @@ def test_automation_failure_log_does_not_store_prompt(
     hook_log = (log.parent / "data" / "hook.log").read_text(encoding="utf-8")
     assert prompt not in hook_log
     assert "command search returned 2" in hook_log
+
+
+_PROJECT_WORKFLOWS_GUIDE = _ROOT / "docs/guides/project-workflows.md"
+_ROOT_README = _ROOT / "README.md"
+_PYPI_README = _ROOT / "packages/memtomem/README.md"
+_UPDATE_WORKFLOW = _ROOT / "packages/memtomem-plugin-assets/workflows/update.md"
+
+# How the guide's "Where they run" table and the README's "Works with" table name each host,
+# keyed by the plugin root the renderer writes that host's skills into. OpenCode ships the
+# project workflows as commands in generated.ts, not as skill files, so it is keyed on that.
+_HOST_SURFACES: dict[str, tuple[str, str, str]] = {
+    # renderer path prefix -> (guide row label, README package label, invocation template)
+    "packages/memtomem-claude-plugin/skills/{id}/SKILL.md": (
+        "Claude Code plugin",
+        "Claude Code plugin",
+        "/memtomem:{id}",
+    ),
+    "plugins/memtomem/skills/{codex_name}/SKILL.md": (
+        "Codex CLI plugin",
+        "Codex plugin",
+        "${codex_name}",
+    ),
+    "packages/opencode-memtomem/src/generated.ts": (
+        "OpenCode plugin",
+        "opencode-memtomem",
+        "/{codex_name}",
+    ),
+    "packages/memtomem-kimi-skills/skills/{codex_name}/SKILL.md": (
+        "Kimi Code skills",
+        "Kimi Code skills",
+        "{codex_name}",
+    ),
+    "packages/memtomem-antigravity-plugin/skills/{codex_name}/SKILL.md": (
+        "Antigravity CLI plugin",
+        "Antigravity CLI plugin",
+        "{codex_name}",
+    ),
+    "packages/memtomem-hermes-plugin/skills/{codex_name}/SKILL.md": (
+        "Hermes Agent plugin",
+        "Hermes Agent plugin",
+        "{codex_name}",
+    ),
+}
+
+
+def _table_rows(text: str, first_cell_prefix: str) -> list[list[str]]:
+    rows = []
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if cells and cells[0].startswith(first_cell_prefix):
+            rows.append(cells)
+    return rows
+
+
+def _mode_rows(text: str) -> list[tuple[str, ...]]:
+    # The update mode table: three cells, the first a backticked mode name.
+    return [tuple(row) for row in _table_rows(text, "`") if len(row) == 3]
+
+
+def _shipped_surfaces(workflow: dict) -> dict[str, str]:
+    """Guide-row label -> invocation, for every host the renderer ships this workflow to."""
+    rendered = _renderer().expected_files()  # type: ignore[attr-defined]
+    by_path = {path.relative_to(_ROOT).as_posix(): text for path, text in rendered.items()}
+    shipped: dict[str, str] = {}
+    for template, (guide_label, _readme_label, invocation) in _HOST_SURFACES.items():
+        path = template.format(**workflow)
+        if path.endswith("generated.ts"):
+            present = workflow["codex_name"] in _opencode_commands(by_path[path])
+        else:
+            present = path in by_path
+        if present:
+            shipped[guide_label] = invocation.format(**workflow)
+    return shipped
+
+
+def test_project_workflows_guide_matches_the_workflow_contract() -> None:
+    """The guide and the two READMEs state what the contract and renderer ship.
+
+    Names alone would still pass with "full is the default" or "Hermes ships them", so the
+    mode table is compared cell by cell, the host table against the renderer's output, and
+    the plugin versions against the contract (#2918 made incremental the default).
+    """
+    contract = _contract()
+    workflows = contract["workflows"]
+    project_only = [row for row in workflows if row not in _user_scope_workflows(workflows)]
+    assert {row["id"] for row in project_only} == {"handoff", "brief", "update"}
+    by_id = {row["id"]: row for row in project_only}
+
+    guide = _PROJECT_WORKFLOWS_GUIDE.read_text(encoding="utf-8")
+    readme = _ROOT_README.read_text(encoding="utf-8")
+    pypi = _PYPI_README.read_text(encoding="utf-8")
+    for row in project_only:
+        for text, name in ((guide, "guide"), (readme, "README"), (pypi, "PyPI README")):
+            assert f"/memtomem:{row['id']}" in text, (name, row["id"])
+        assert row["codex_name"] in guide, row["codex_name"]
+
+    # update's mode table: same rows, same values, same single default.
+    source_rows = _mode_rows(_UPDATE_WORKFLOW.read_text(encoding="utf-8"))
+    assert len(source_rows) == 3, source_rows
+    assert [row for row in source_rows if "(the default)" in row[0]] == [source_rows[0]]
+    assert "`incremental`" in source_rows[0][0]
+    assert _mode_rows(guide) == source_rows
+
+    # Host table: one row per surface, shipped hosts carry the invocation, the rest say so.
+    host_rows = {row[0]: row for row in _table_rows(guide, "") if len(row) == 5}
+    for workflow_id, column in (("handoff", 1), ("brief", 2), ("update", 3)):
+        shipped = _shipped_surfaces(by_id[workflow_id])
+        assert set(shipped) == {
+            "Claude Code plugin",
+            "Codex CLI plugin",
+            "OpenCode plugin",
+            "Kimi Code skills",
+            "Antigravity CLI plugin",
+        }, shipped
+        for label, invocation in shipped.items():
+            assert host_rows[label][column] == f"`{invocation}`", (label, workflow_id)
+            assert host_rows[label][4].startswith("yes"), label
+        for label in ("Hermes Agent plugin", "Gemini CLI"):
+            assert host_rows[label][column] == "—", label
+            assert host_rows[label][4].startswith("not shipped"), label
+
+    # Version line: the core version and every plugin version the contract names.
+    # Whitespace-tolerant (prose reflows) and token-bounded: the version must be the whole
+    # token, so `0.5.260`, `0.5.26.1`, `0.5.26rc1` and `0.5.26-rc.1` are all rejected for
+    # `0.5.26`, while a sentence-ending period or a list separator may follow it.
+    core = re.escape(contract["core"]["version"])
+    assert re.search(rf"memtomem\s+`{core}`", guide)
+    token_end = r"(?=[\s,;·]|\.(?!\S)|$)"
+    for plugin in ("claude", "codex", "opencode", "kimi", "antigravity"):
+        version = contract["plugins"][f"{plugin}_version"]
+        pattern = rf"`{plugin}`\s+{re.escape(version)}{token_end}"
+        assert re.search(pattern, guide), (plugin, version)
+
+    # README "Works with": the packages marked with the loop are the shipped hosts, no more.
+    readme_labels = {
+        guide_label: readme_label for _, (guide_label, readme_label, _) in _HOST_SURFACES.items()
+    }
+    expected_marked = {readme_labels[label] for label in _shipped_surfaces(by_id["brief"])}
+    marked = set()
+    for row in _table_rows(readme, "[**"):
+        if len(row) == 3 and row[2] == "handoff · brief · update":
+            marked.add(row[0].split("**")[1])
+    assert marked == expected_marked, (marked, expected_marked)
