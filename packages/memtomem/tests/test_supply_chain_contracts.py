@@ -194,6 +194,24 @@ def test_codex_plugin_matches_contract_and_marketplace() -> None:
     )
 
 
+def test_codex_plugin_bundle_ships_its_license_and_security_policy() -> None:
+    # Plugin catalogs mirror plugins/memtomem on its own, without the repository
+    # root, so the bundle carries both files and links back with absolute URLs.
+    bundle = _ROOT / "plugins/memtomem"
+    manifest = _json("plugins/memtomem/.codex-plugin/plugin.json")
+    license_text = (bundle / "LICENSE").read_text(encoding="utf-8")
+    assert manifest["license"] == "Apache-2.0"
+    assert "Apache License" in license_text
+    assert "http://www.apache.org/licenses/LICENSE-2.0" in license_text
+
+    policy = (bundle / "SECURITY.md").read_text(encoding="utf-8")
+    root_policy = (_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    advisory = "https://github.com/memtomem/memtomem/security/advisories/new"
+    assert "https://github.com/memtomem/memtomem/blob/main/SECURITY.md" in policy
+    assert advisory in policy
+    assert advisory in root_policy
+
+
 def test_kimi_skill_bundle_matches_contract() -> None:
     contract = _contract()
     root = _ROOT / "packages/memtomem-kimi-skills"
