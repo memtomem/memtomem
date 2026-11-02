@@ -22,10 +22,15 @@
 > `uvx <distribution>` and can only append arguments. It is stdio-only; network
 > transports and their flags live on `memtomem-server`.
 
-Normal registrations contain only the server command. The server reads the
-configuration written by `mm init` from `~/.memtomem/config.json`. Add an
-`env` block only when you deliberately want that client to override the saved
-configuration; environment variables have the highest precedence.
+Normal registrations contain the server command and, for a client that runs
+memtomem's `update` workflow (Claude Code, Codex, OpenCode, Kimi Code,
+Antigravity CLI), `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`. That variable is not a
+setting: it exposes the one tool the workflow needs outside `topic` mode, and
+the server reads it at launch, before any configuration, so `config.json`
+cannot provide it. Settings come from `~/.memtomem/config.json`, written by
+`mm init`. Put a setting in the `env` block only when you deliberately want
+that client to override the saved configuration; environment variables have
+the highest precedence.
 
 ### Listed in the MCP Registry
 
@@ -105,13 +110,13 @@ credentials.
 
 ```bash
 # Local scope (default) — this project only, not committed
-claude mcp add memtomem -- memtomem-server
+claude mcp add memtomem -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- memtomem-server
 
 # User scope — available in every project
-claude mcp add memtomem -s user -- memtomem-server
+claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- memtomem-server
 
 # Source (if running from git clone)
-# claude mcp add memtomem -s user -- uv run --directory /path/to/memtomem memtomem-server
+# claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- uv run --directory /path/to/memtomem memtomem-server
 ```
 
 Both write to `~/.claude.json` — no need to edit that file by hand.
@@ -138,7 +143,8 @@ For a team-shared setup, create a `.mcp.json` at the project root:
   "mcpServers": {
     "memtomem": {
       "command": "memtomem-server",
-      "args": []
+      "args": [],
+      "env": {"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
     }
   }
 }
@@ -263,7 +269,8 @@ home only, and new configuration is always written there.
   "mcpServers": {
     "memtomem": {
       "command": "memtomem-server",
-      "args": []
+      "args": [],
+      "env": {"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
     }
   }
 }
@@ -320,6 +327,7 @@ memtomem:
 [mcp_servers.memtomem]
 command = "memtomem-server"
 args = []
+env = { MEMTOMEM_EXTRA_TOOLS = "mem_update_coverage" }
 ```
 
 Restart Codex CLI after configuration.
@@ -374,7 +382,7 @@ skills — configure the released MCP server directly instead:
       "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.7.2", "memtomem-server"],
       "enabled": true,
       "timeout": 60000,
-      "environment": {"MEMTOMEM_TOOL_MODE": "core"}
+      "environment": {"MEMTOMEM_TOOL_MODE": "core", "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
     }
   }
 }
@@ -438,7 +446,7 @@ MCP servers from `~/.gemini/config/mcp_config.json` (key `mcpServers`),
 to register memtomem is to let `agy` write the entry:
 
 ```bash
-agy mcp add memtomem memtomem-server
+agy mcp add -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage memtomem memtomem-server
 ```
 
 Or create or edit that file yourself:
@@ -449,7 +457,8 @@ Or create or edit that file yourself:
     "memtomem": {
       "type": "stdio",
       "command": "memtomem-server",
-      "args": []
+      "args": [],
+      "env": {"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
     }
   }
 }
@@ -651,8 +660,11 @@ The STM proxy is distributed as a separate package: **[memtomem-stm](https://git
 
 You can override settings for one client by adding environment variables to
 the `env` block. This is an advanced, explicit override: these values win over
-`config.d/` and `config.json`. For ordinary setup, omit the block and manage
-settings with `mm init`, `mm config`, or the Web UI.
+`config.d/` and `config.json`. For ordinary setup, leave settings out of the
+block and manage them with `mm init`, `mm config`, or the Web UI.
+`MEMTOMEM_EXTRA_TOOLS`, which the registrations above carry for clients that
+run the `update` workflow, is a launch option rather than a setting, so it
+stays.
 
 The `env` block is also where unprefixed variables such as
 `FASTEMBED_CACHE_PATH` or `HF_HUB_OFFLINE` belong: the server applies only
@@ -665,6 +677,12 @@ the `MEMTOMEM_*` keys of a `.env` file
 > startup with a pydantic-settings parse error.
 
 ### Common Configuration Options
+
+When this entry is for a client that runs memtomem's `update` workflow and
+reads this JSON shape (a Claude Code project `.mcp.json`, Kimi Code,
+Antigravity CLI), also keep `"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"`
+in its `env` block. Codex and OpenCode use their own formats, shown in
+[Codex CLI](#7-codex-cli) and [OpenCode](#8-opencode).
 
 ```json
 {
@@ -691,6 +709,12 @@ The recommended Ollama embedding model is `nomic-embed-text` (768d). To use a di
 ```bash
 ollama pull bge-m3
 ```
+
+When this entry is for a client that runs memtomem's `update` workflow and
+reads this JSON shape (a Claude Code project `.mcp.json`, Kimi Code,
+Antigravity CLI), also keep `"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"`
+in its `env` block. Codex and OpenCode use their own formats, shown in
+[Codex CLI](#7-codex-cli) and [OpenCode](#8-opencode).
 
 ```json
 {

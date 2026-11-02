@@ -439,6 +439,11 @@ def _is_direct_stdio_terminal() -> bool:
 
 def _print_direct_stdio_help() -> None:
     """Explain why bare stdio server launches exit immediately."""
+    from memtomem._claude_plugin_contract import LAUNCH_ENV
+
+    # The plugins' `update` workflow needs this tool outside `topic` mode, and a
+    # registration copied from here may be the server that workflow talks to.
+    extra_tools = LAUNCH_ENV["MEMTOMEM_EXTRA_TOOLS"]
     print(
         "\n".join(
             [
@@ -450,10 +455,11 @@ def _print_direct_stdio_help() -> None:
                 "Configure your MCP client with:",
                 "  command: uvx",
                 f'  args: ["--isolated", "--from", "memtomem[all]=={_memtomem_version}", "memtomem-server"]',
+                f'  env: {{"MEMTOMEM_EXTRA_TOOLS": "{extra_tools}"}}',
                 "",
                 "Example:",
-                "  claude mcp add memtomem -s user -- uvx --isolated "
-                f"--from 'memtomem[all]=={_memtomem_version}' memtomem-server",
+                f"  claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS={extra_tools} "
+                f"-- uvx --isolated --from 'memtomem[all]=={_memtomem_version}' memtomem-server",
                 "",
                 "For a manually started network server, use:",
                 "  memtomem-server --transport sse --host 127.0.0.1 --port 8000 --url http://127.0.0.1:8000/sse",

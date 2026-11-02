@@ -57,11 +57,15 @@ instead:
       "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.7.2", "memtomem-server"],
       "enabled": true,
       "timeout": 60000,
-      "environment": {"MEMTOMEM_TOOL_MODE": "core"}
+      "environment": {"MEMTOMEM_TOOL_MODE": "core", "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
     }
   }
 }
 ```
+
+`MEMTOMEM_EXTRA_TOOLS` matters once you add the plugin too: an existing
+`mcp.memtomem` keeps serving (see the permission policy below), and the
+plugin's `/memtomem-update` needs `mem_update_coverage` outside `topic` mode.
 
 Restart OpenCode and call `memtomem_mem_status` to verify this path.
 

@@ -123,6 +123,12 @@ Add the following to your editor's MCP config file — e.g.,
 Claude Code, use `claude mcp add` instead of editing a file. See
 [MCP Client Configuration](mcp-clients.md) for the full list.
 
+When this entry is for a client that runs memtomem's `update` workflow and
+reads this JSON shape (a Claude Code project `.mcp.json`, Kimi Code,
+Antigravity CLI), also keep `"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"`
+in its `env` block. Codex and OpenCode use their own formats, shown in
+[Codex CLI](mcp-clients.md#7-codex-cli) and [OpenCode](mcp-clients.md#8-opencode).
+
 ```json
 {
   "mcpServers": {

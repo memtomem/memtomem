@@ -270,8 +270,12 @@ want an environment override.
 Claude Code's minimal manual registration is:
 
 ```bash
-claude mcp add memtomem -s user -- memtomem-server
+claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- memtomem-server
 ```
+
+`MEMTOMEM_EXTRA_TOOLS` is not a setting: it exposes `mem_update_coverage`,
+which the plugins' `update` workflow needs outside `topic` mode (see
+[Project workflows](project-workflows.md)).
 
 This reuses the persistent `memtomem[all]` environment installed above. For a
 one-off setup without a persistent install, use `uvx --isolated --from

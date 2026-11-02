@@ -194,7 +194,7 @@ workflow instead.
 If you moved or renamed your memtomem source directory:
 
 1. Update the `--directory` path in your MCP config:
-   - **Claude Code**: `claude mcp add memtomem -s user -- uv run --directory /new/path memtomem-server`
+   - **Claude Code**: `claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- uv run --directory /new/path memtomem-server`
    - **Cursor/Windsurf**: edit `mcp.json` and update the `args` array
 2. Restart or reconnect the MCP server from your editor (e.g., `/mcp` → Reconnect in Claude Code)
 3. If reconnect fails, fully quit and relaunch the editor

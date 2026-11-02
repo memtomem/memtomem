@@ -10,12 +10,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **A hand-written MCP entry needs `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`
   for `update` outside `topic` mode (#2918).** The plugins' bundled server
   configurations now set it, and so does every registration `mm init --mcp`
-  writes (#2970). An entry you wrote yourself, or one an earlier `mm init`
-  wrote, does not: Kimi Code's `mcp.json`, a Codex `[mcp_servers.memtomem]`
+  writes (#2970), and so do the guides' manual examples (#2972). An entry an
+  earlier `mm init` wrote, or one copied from the guides or the server's
+  terminal help before that, does not: Kimi Code's `mcp.json`, a Codex
+  `[mcp_servers.memtomem]`
   section (which wins over the plugin's server), a project `.mcp.json`, or a
   Claude Code manual registration. Add the variable to that entry's `env` and
   restart the server; without it the `update` workflow stops before writing
-  and only `topic` mode runs. Re-running `mm init --mcp kimi` rewrites the Kimi
+  whenever a coverage call is due; `topic` mode still works.
+  Re-running `mm init --mcp kimi` rewrites the Kimi
   entry with it. `mm init --mcp claude` (or `json`) leaves an existing Claude
   registration as it is and writes nothing, so add the variable to that
   registration yourself. `mm doctor --claude-mcp` reports a Claude manual entry
@@ -108,11 +111,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The manual MCP registrations the docs, the Web UI and the server's
+  terminal help show now expose the `update` workflow's tool (#2972).** The
+  manual examples for every client that runs memtomem's `update` workflow —
+  Claude Code (`claude mcp add` and a project `.mcp.json`), Codex
+  (`[mcp_servers.memtomem]`), OpenCode (`mcp.memtomem`), Kimi Code and
+  Antigravity CLI (`agy mcp add` and `mcp_config.json`) — now set
+  `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`: in the guides, in the Web UI's
+  per-client setup guide (Claude Code, Antigravity CLI, Codex) and in
+  `memtomem-server`'s terminal help. A registration copied from them before
+  had the server prune `mem_update_coverage`. Examples for
+  clients without that workflow (Cursor, Windsurf, Claude Desktop, Gemini CLI,
+  Antigravity IDE) are unchanged, because the variable would add a tenth tool
+  nothing calls there; the shared `env` examples in the LLM-provider and
+  environment-override guides say when to keep it. The guides also stop
+  saying that an ordinary registration has no `env` block: settings still
+  belong in `~/.memtomem/config.json`, and this variable is a launch option the
+  server reads before any configuration.
 - **`mm init --mcp` registrations now expose the `update` workflow's tool
   (#2970).** `mm init --mcp claude`, `--mcp json` and `--mcp kimi` registered
   the server with a command and arguments only. That server prunes
   `mem_update_coverage`, so on those registrations `update` without a mode, and
-  `update full`, stopped before writing and only `topic` ran. The three targets
+  `update full`, stopped before writing whenever a coverage call was due;
+  `topic` still worked. The three targets
   now set `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`, taken from the same
   contract value the plugins' bundled launch uses: `claude mcp add` gets
   `-e MEMTOMEM_EXTRA_TOOLS=…` before the `--`, and the `.mcp.json` and Kimi
