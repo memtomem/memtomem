@@ -2639,27 +2639,47 @@ def _markdown_registrations(text: str, source: str, expected: str) -> list[_Regi
 
     markdown-it-py (a declared runtime dependency) yields every code block —
     backtick or tilde fences, indented blocks, fences inside lists and
-    blockquotes — and every inline code span, multi-line ones included, so the
-    scan has no Markdown construct of its own to get wrong.
+    blockquotes — and every inline code span, multi-line ones and those in
+    headings included, so the scan has no Markdown construct of its own to get
+    wrong. Raw HTML is the one place Markdown leaves code to the author: a
+    ``<code>`` element in an HTML block or inline HTML is read too.
     """
+    import html
+
     from markdown_it import MarkdownIt
 
     tokens = MarkdownIt("commonmark").parse(text)
     items: list[_Found] = []
     section = ""
     lead: list[str] = []
+
+    def add_block(block: str) -> None:
+        found = _block_registrations(block, expected)
+        items.extend((section, kind, valid, block, " ".join(lead)) for kind, valid in found)
+
     for index, token in enumerate(tokens):
         if token.type == "heading_open":
             section = tokens[index + 1].content
             lead = []
         elif token.type in ("fence", "code_block"):
-            block = token.content
-            found = _block_registrations(block, expected)
-            items.extend((section, kind, valid, block, " ".join(lead)) for kind, valid in found)
-        elif token.type == "inline" and tokens[index - 1].type != "heading_open":
-            lead.append(token.content)
+            add_block(token.content)
+        elif token.type == "html_block":
+            for match in _PORTAL_CODE.finditer(token.content):
+                add_block(html.unescape(match.group(1)))
+        elif token.type == "inline":
+            if tokens[index - 1].type != "heading_open":
+                lead.append(token.content)
+            html_code: list[str] | None = None
             for child in token.children or []:
-                if child.type == "code_inline":
+                if child.type == "html_inline" and re.match(r"<code\b", child.content):
+                    html_code = []
+                elif child.type == "html_inline" and child.content == "</code>":
+                    if html_code is not None:
+                        add_block(html.unescape("".join(html_code)))
+                    html_code = None
+                elif html_code is not None:
+                    html_code.append(child.content)
+                elif child.type == "code_inline":
                     valid = _cli_registration(child.content, expected)
                     if valid is not None:
                         items.append((section, "cli", valid, child.content, " ".join(lead)))
@@ -2845,13 +2865,18 @@ class TestManualRegistrationsExposeTheUpdateTool:
             "# S\n\n    claude mcp add memtomem -- m\n",
             "# S\n\nRun `claude mcp add\nmemtomem -- m` once.\n",
             "# S\n\n```sh\nclaude \\\n  mcp add memtomem -- m\n```\n",
+            "# S\n\n<pre><code>claude mcp add memtomem -- m</code></pre>\n",
+            "# S\n\nRun <code>claude mcp add memtomem -- m</code> once.\n",
+            "# S `claude mcp add memtomem -- m`\n",
         ],
-        ids=["tilde", "blockquote", "list", "indented", "multiline-span", "split-prefix"],
+        ids=["tilde", "blockquote", "list", "indented", "multiline-span", "split-prefix"]
+        + ["html-block", "inline-html", "heading-span"],
     )
     def test_every_markdown_code_construct_is_scanned(self, markdown: str) -> None:
         """A registration lacking the variable is found wherever Markdown can put it."""
         found = _markdown_registrations(markdown, "x.md", "V")
-        assert [(r.section, r.valid) for r in found] == [("S", False)]
+        assert [r.valid for r in found] == [False]
+        assert found[0].section.startswith("S")
 
     def test_a_continued_command_is_one_registration(self) -> None:
         block = (

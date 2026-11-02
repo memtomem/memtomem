@@ -678,9 +678,11 @@ the `MEMTOMEM_*` keys of a `.env` file
 
 ### Common Configuration Options
 
-On a client that runs memtomem's `update` workflow (Claude Code, Codex,
-OpenCode, Kimi Code, Antigravity CLI), also keep
-`"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"` in this `env` block.
+When this entry is for a client that runs memtomem's `update` workflow and
+reads this JSON shape (a Claude Code project `.mcp.json`, Kimi Code,
+Antigravity CLI), also keep `"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"`
+in its `env` block. Codex and OpenCode use their own formats, shown in
+[Codex CLI](#7-codex-cli) and [OpenCode](#8-opencode).
 
 ```json
 {
@@ -708,9 +710,11 @@ The recommended Ollama embedding model is `nomic-embed-text` (768d). To use a di
 ollama pull bge-m3
 ```
 
-On a client that runs memtomem's `update` workflow (Claude Code, Codex,
-OpenCode, Kimi Code, Antigravity CLI), also keep
-`"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"` in this `env` block.
+When this entry is for a client that runs memtomem's `update` workflow and
+reads this JSON shape (a Claude Code project `.mcp.json`, Kimi Code,
+Antigravity CLI), also keep `"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"`
+in its `env` block. Codex and OpenCode use their own formats, shown in
+[Codex CLI](#7-codex-cli) and [OpenCode](#8-opencode).
 
 ```json
 {
