@@ -196,13 +196,13 @@ def test_codex_plugin_matches_contract_and_marketplace() -> None:
 
 def test_codex_plugin_bundle_ships_its_license_and_security_policy() -> None:
     # Plugin catalogs mirror plugins/memtomem on its own, without the repository
-    # root, so the bundle carries both files and links back with absolute URLs.
+    # root. Redistributing it alone must carry the full license text (Apache-2.0
+    # section 4(a)) and the root's copyright line, so the bundle copy is the root
+    # file byte for byte; the security policy links back with absolute URLs.
     bundle = _ROOT / "plugins/memtomem"
     manifest = _json("plugins/memtomem/.codex-plugin/plugin.json")
-    license_text = (bundle / "LICENSE").read_text(encoding="utf-8")
     assert manifest["license"] == "Apache-2.0"
-    assert "Apache License" in license_text
-    assert "http://www.apache.org/licenses/LICENSE-2.0" in license_text
+    assert (bundle / "LICENSE").read_bytes() == (_ROOT / "LICENSE").read_bytes()
 
     policy = (bundle / "SECURITY.md").read_text(encoding="utf-8")
     root_policy = (_ROOT / "SECURITY.md").read_text(encoding="utf-8")

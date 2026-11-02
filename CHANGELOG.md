@@ -9,7 +9,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - **The Codex plugin bundle ships its own `LICENSE` and `SECURITY.md`.**
   Plugin catalogs copy `plugins/memtomem` without the repository root, so
-  the bundle now states its Apache-2.0 license and links back to the
+  the bundle now carries the full Apache-2.0 license and links back to the
   repository's security policy and advisory form.
 
 ### Fixed
