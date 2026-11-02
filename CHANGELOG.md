@@ -5,8 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-11-02
+
 ### Upgrading
 
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.17 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.3;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.3`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.3`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
 - **A hand-written MCP entry needs `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`
   for `update` outside `topic` mode (#2918).** The plugins' bundled server
   configurations now set it, and so does every registration `mm init --mcp`
