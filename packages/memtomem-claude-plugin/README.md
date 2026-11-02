@@ -1,14 +1,18 @@
 # memtomem — Claude Code Plugin
 
-Safe Claude Code workflows for the memtomem Markdown-first memory MCP server.
-BM25 works without an embedding provider; dense retrieval is optional.
+Project memory for Claude Code, backed by the memtomem Markdown-first memory MCP
+server: `/memtomem:handoff` saves a checkpoint when a session ends, `/memtomem:brief`
+reads it back when the next one starts, and `/memtomem:update` turns finished work and
+recent commits into durable memories. BM25 works without an embedding provider; dense
+retrieval is optional.
 
 One install bundles:
 
 - **Exact-pinned MCP server** — launched on demand with the reviewed core version
+- **Session loop** — `/memtomem:handoff`, `/memtomem:brief`, `/memtomem:update`
+  (see [Project workflows](../../docs/guides/project-workflows.md))
 - **Read workflows** — `/memtomem:search`, `/memtomem:recall`, `/memtomem:status`
-- **Explicit workflows** — `/memtomem:remember`, `/memtomem:index`, `/memtomem:setup`,
-  `/memtomem:handoff`, `/memtomem:brief`, `/memtomem:update`
+- **Explicit workflows** — `/memtomem:remember`, `/memtomem:index`, `/memtomem:setup`
 
 The base plugin does not run background hooks or destructive curation. Install
 `memtomem-automation@memtomem` separately to opt into prompt-time retrieval and

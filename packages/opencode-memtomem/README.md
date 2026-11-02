@@ -1,8 +1,13 @@
 # opencode-memtomem
 
-Safe, configuration-only memtomem integration for OpenCode 1.17.18 through the
-current v1 line. It adds an exact-pinned local MCP server, nine slash commands,
-and three read-only skills. It does not add event hooks or automatic indexing.
+Project memory for OpenCode 1.17.18 through the current v1 line, backed by an
+exact-pinned local memtomem MCP server: `/memtomem-handoff` saves a checkpoint
+when a session ends, `/memtomem-brief` reads it back when the next one starts,
+and `/memtomem-update` turns finished work and recent commits into durable
+memories (see [Project workflows](../../docs/guides/project-workflows.md)). The
+plugin also adds commands for search, recall, status, explicit saves, indexing,
+and setup, plus three read-only skills. It is configuration-only: no event hooks,
+no automatic indexing.
 
 ## Install
 

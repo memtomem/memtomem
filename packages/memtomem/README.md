@@ -4,14 +4,30 @@
 
 > 🧪 **Beta** — the nine core MCP tools, the `mm` CLI, and the format of your memory files and config files change only with an `Upgrading` note in the [CHANGELOG](https://github.com/memtomem/memtomem/blob/main/CHANGELOG.md), and behind a deprecation window where one is possible. Features marked **experimental** can change or go away without either — see [Stability](https://github.com/memtomem/memtomem#stability). Feedback and issue reports are especially welcome at [github.com/memtomem/memtomem/issues](https://github.com/memtomem/memtomem/issues).
 
-Markdown-first long-term memory infrastructure for AI agents. Core usage is hook-free by default: your files remain the source of truth, and memory changes happen only when you or your agent explicitly call memtomem. Optional client hooks are separate, visible integrations.
+Long-term memory for AI coding agents, kept as Markdown you own. Core usage is hook-free by default: your `.md` files are the source of truth, the search database is a rebuildable cache, and memory changes happen only when you or your agent explicitly call memtomem. Optional client hooks are separate, visible integrations.
 
-**Core philosophy**: `.md` files are the source of truth and the vector database is a derived cache. Manage memories as plain text files — memtomem makes them instantly searchable.
+## The session loop
 
-**Built for:**
-- AI agents (Claude Code, Codex CLI, Cursor, Windsurf, Claude Desktop, OpenCode, Kimi Code, Antigravity CLI, Gemini CLI, Hermes Agent) that need to *remember* between sessions
-- Developers who want a searchable knowledge base built from their existing markdown notes — no proprietary database, no vendor lock-in
-- Multilingual content (English, Korean, Japanese, Chinese) via local `multilingual-e5-small` embeddings, the ONNX default (`bge-m3` remains available)
+Three plugin workflows carry a project's memory from one session to the next, and from one coding agent to another. Illustrative output — agent wording and results vary.
+
+```text
+# End of a session, in Claude Code
+> /memtomem:handoff save codex-cli
+handoff_id: 3f2a9c1e-7b4d-4e8a-9c2f-1d5e6a7b8c9d · scope: project_local · namespace: shared:retry-policy
+
+# Next session, in Codex CLI
+> $memtomem-brief
+Recent updates and active handoff IDs
+  - 3f2a9c1e-7b4d-4e8a-9c2f-1d5e6a7b8c9d  from claude-code → codex-cli
+> $memtomem-handoff resume 3f2a9c1e-7b4d-4e8a-9c2f-1d5e6a7b8c9d
+git_head matches the live HEAD · worktree clean · in sync with `origin` `refs/heads/main`
+
+# After a few commits
+> /memtomem:update
+mode: incremental · saved 2 items · commit-derived: 1 · session-derived: 1
+```
+
+`handoff save` writes one Markdown record into the project's own `.memtomem/memories.local`; `brief` only reads; `update` saves decisions, bug fixes, and preferences as separate items. All three run only when you invoke them. The [Project workflows](https://github.com/memtomem/memtomem/blob/main/docs/guides/project-workflows.md) guide has each one's modes, checks, and names per host.
 
 ## Quick Start
 
@@ -29,70 +45,37 @@ mm add "Deployment checklist uses blue-green rollout" --tags ops
 mm search "blue-green"
 ```
 
-The search should return the sentence you just added. `mm add` writes to your configured user memory directory and indexes the entry immediately, so this path works without an existing notes directory or a connected editor.
+The search should return the sentence you just added. `mm add` writes to your configured user memory directory and indexes the entry immediately, so this path works without an existing notes directory or a connected editor. Choose **Minimal** in the setup picker for a no-model-download first proof and rerun `mm init` later to add semantic search. To index existing files next, run `mm index /path/to/your/notes`.
 
-Choose **Minimal** in the setup picker for a no-model-download first proof;
-rerun `mm init` later to add semantic search.
+To run the session loop, install the plugin for your coding agent ([Claude Code](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-claude-plugin), [Codex CLI](https://github.com/memtomem/memtomem/tree/main/plugins/memtomem), [OpenCode](https://github.com/memtomem/memtomem/tree/main/packages/opencode-memtomem), [Kimi Code](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-kimi-skills), or [Antigravity](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-antigravity-plugin)), then register the project memory tier with `cd <your-project> && mm mem init --scope project_local` and ask for `/memtomem:brief` in a new session. The [Korean Claude Code/Codex quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md) walks this path in 10–15 minutes; [Getting Started](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md) covers install alternatives and [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) covers manual registration for other editors.
 
-To index existing files next:
-
-```bash
-mm index /path/to/your/notes
-```
-
-If `mm init` registered an MCP client, ask it to `Call the mem_status tool`. See [Getting Started](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md) for install alternatives, the [Korean Claude Code/Codex quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md) for a plugin-first path, and [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) for manual registration.
-
-`[all]` includes local ONNX embeddings, Korean tokenization, code chunking,
-the Web UI, Langfuse tracing, and LangGraph Store support. The Ollama and
-OpenAI embedding providers need no extra, so a bare `memtomem` install can
-use them; without a provider it searches by keyword (BM25). See the
-[optional extras table](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md#optional-extras)
-for smaller bundles. If `mm` is not on PATH, run `uv tool update-shell` and
-open a new shell. If an install appears stale, re-run it with `--refresh`.
-To upgrade an existing uv tool install, run `mm upgrade` rather than
-`uv tool install` again: it keeps the extras it detects and, on macOS and
-Linux, stops running servers first (see the
-[CLI reference](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/data-config-cli.md#cli-reference)).
+`[all]` includes local ONNX embeddings, Korean tokenization, code chunking, the Web UI, Langfuse tracing, and LangGraph Store support. The Ollama and OpenAI embedding providers need no extra, so a bare `memtomem` install can use them; without a provider it searches by keyword (BM25). See the [optional extras table](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md#optional-extras) for smaller bundles. If `mm` is not on PATH, run `uv tool update-shell` and open a new shell. If an install appears stale, re-run it with `--refresh`. To upgrade an existing uv tool install, run `mm upgrade` rather than `uv tool install` again: it keeps the extras it detects and, on macOS and Linux, stops running servers first (see the [CLI reference](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/data-config-cli.md#cli-reference)).
 
 > memtomem is the long-term-memory store. [memtomem-stm](https://github.com/memtomem/memtomem-stm) is a separate, optional MCP proxy for automatic surfacing, compression, and caching.
 
-## Key Features
+## What else is inside
 
-- **🔍 Hybrid search** — BM25 (FTS5) + dense vectors (sqlite-vec) merged via Reciprocal Rank Fusion. Exact terms via keyword, meaning via semantic, both at once.
-- **📦 Semantic chunking** — heading-aware Markdown, AST-based Python, tree-sitter JS/TS, structure-aware JSON/YAML/TOML
-- **♻️ Incremental indexing** — chunk-level SHA-256 diff means only changed chunks get re-embedded
-- **🏷️ Namespaces** — scope memories into groups (work / personal / project) with optional auto-derivation from folder names; label them (colour, description) from Settings → Namespaces in the Web UI
-- **🧹 Maintenance** — near-duplicate detection with merge, time-based score decay, TTL expiration, auto-tagging
-- **🔄 Export / import** — JSON bundle backup and restore with re-embedding ([experimental](https://github.com/memtomem/memtomem#stability))
-- **🌐 Web UI** — polished SPA dashboard for search, sources, indexing, tags, and timeline (`mm web --dev` unlocks the full maintainer surface including Sessions, Working Memory, and Health Report)
-- **🧭 Context Gateway** — keep canonical Skills, Commands, and Subagents in a project or user Store, optionally install reusable Wiki assets, then push them to supported runtimes
-- **⚙️ Scriptable CLI** — JSON output for scripts: `--json` on `mm status`, the write commands (`mm add` / `mm reset` / `mm purge`), `mm session start` / `end` / `list` / `events`, `mm schedule list`, `mm watchdog status` / `run` and `mm doctor`, and `--json` (or `--format json`) on `mm search` and `mm recall`; `mm warmup` pre-loads local models so the first query skips cold-start
-- **🛠️ 9-tool core mode** — a compact default surface, with `mem_do` routing the full feature set without loading every tool into agent context
-- **📌 Pinned Context** — small file-backed user/project/agent blocks are composed before retrieved memory
-- **🕸️ LangGraph Store** — optional `MemtomemBaseStore` supplies tuple-namespace JSON persistence and search
-- **Hybrid Store** — `MemtomemHybridStore` adds explicit-path SQLite persistence, BM25/dense/RRF retrieval, TTL, and diagnostics; see the [guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/langgraph-hybrid-store.md)
+| Your memory, your files | Operate it | Plug it in |
+|---|---|---|
+| Markdown is the source of truth; the search database is a rebuildable cache | Web UI for search, sources, tags, timeline, and dedup (`mm web`; `--dev` adds the maintainer pages) | Nine core MCP tools, with `mem_do` routing every other action so agents load a small tool surface |
+| Hybrid search: BM25 (FTS5) + dense vectors (sqlite-vec) merged by Reciprocal Rank Fusion | Namespaces, auto-derived from folder names and labelled from the Web UI | [Context Gateway](https://github.com/memtomem/memtomem/blob/main/docs/guides/context-gateway.md): keep Skills, Commands, and Subagents in one Store and push them to your AI runtimes |
+| Semantic chunking: heading-aware Markdown, AST-based Python, tree-sitter JS/TS, structure-aware JSON/YAML/TOML | Maintenance: near-duplicate detection with merge, time-based decay, TTL expiration, auto-tagging | [Pinned Context](https://github.com/memtomem/memtomem/blob/main/docs/guides/pinned-context.md): small user/project/agent Markdown blocks composed ahead of retrieved memory |
+| Incremental indexing: chunk-level SHA-256 diff, so only changed chunks are re-embedded | Scheduled jobs for compaction, decay, dead-link cleanup, and dedup scans | LangGraph `MemtomemBaseStore`, plus the [Hybrid Store](https://github.com/memtomem/memtomem/blob/main/docs/guides/langgraph-hybrid-store.md) with SQLite persistence and BM25/dense/RRF retrieval |
+| Export and import as JSON bundles ([experimental](https://github.com/memtomem/memtomem#stability)) | Scriptable CLI: `--json` output on status, search, recall, and the write commands; `mm warmup` pre-loads local models | Multilingual by default: English, Korean, Japanese, and Chinese through the local `multilingual-e5-small` ONNX model (`bge-m3` remains available) |
 
-The full surface contains **102 tools**. It includes the Pinned Context actions
-(`mem_pinned_list/get/set/delete`, `mem_context_compose`) and review-first
-formation actions (`mem_formation_scan`, `mem_candidate_propose/list/evidence/review/recover`). See the
-[complete MCP table](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md#available-mcp-tools)
-for every category.
+The [complete MCP table](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md#available-mcp-tools) lists every tool by category.
 
 ## Documentation
 
-Full documentation lives in the [memtomem GitHub repo](https://github.com/memtomem/memtomem):
+Full documentation lives in the [memtomem GitHub repo](https://github.com/memtomem/memtomem) and at [memtomem.com](https://memtomem.com):
 
 | Guide | Topic |
 |-------|-------|
 | [Getting Started](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md) | **Start here** — install, configure, save and find your first memory |
 | [한국어 바이브코딩 빠른 시작](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md) | Claude Code·Codex CLI에서 10~15분 안에 기억 저장·검색 |
+| [Project workflows](https://github.com/memtomem/memtomem/blob/main/docs/guides/project-workflows.md) | handoff, brief, and update: modes, checks, and names per host |
 | [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) | Connect Claude Code, Cursor, Codex, and other clients |
-| [Core memory tools](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/core-memory-tools.md) | Index existing notes, search, and manage memories |
-| [Configuration](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md) | Supported config files, precedence, and environment variables |
-| [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI providers, model dimensions, switching models |
-| [Context Gateway](https://github.com/memtomem/memtomem/blob/main/docs/guides/context-gateway.md) | Author and push canonical Skills, Commands, and Subagents to each type's supported AI tools |
-| [Operations & troubleshooting](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/operations.md) | Web UI, privacy audits, diagnostics, and recovery |
-| [Reference](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference.md) | Complete feature reference — all tools and patterns |
+| [All guides](https://github.com/memtomem/memtomem/blob/main/docs/guides/README.md) | Reference, configuration, embeddings, operations, and more, in a suggested reading order |
 | [memtomem-stm](https://github.com/memtomem/memtomem-stm) | Optional STM proxy for proactive memory surfacing (separate package) |
 
 ## License

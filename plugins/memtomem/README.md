@@ -1,9 +1,12 @@
 # memtomem for Codex
 
-This plugin bundles the exact-pinned memtomem MCP server and nine focused
-skills for search, date-based recall, status, explicit saves, explicit
-indexing, first-time setup, sequential cross-runtime handoff, project memory
-briefing, and project memory updates.
+Project memory for Codex CLI, backed by the exact-pinned memtomem MCP server:
+`$memtomem-handoff` saves a checkpoint when a session ends, `$memtomem-brief`
+reads it back when the next one starts, and `$memtomem-update` turns finished
+work and recent commits into durable memories (see
+[Project workflows](../../docs/guides/project-workflows.md)). The plugin also
+ships skills for search, date-based recall, status, explicit saves, explicit
+indexing, and first-time setup.
 
 ## Install from this repository
 

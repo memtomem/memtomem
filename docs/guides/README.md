@@ -21,6 +21,7 @@ guides are organized by outcome rather than by feature name.
    - [Claude Desktop](integrations/claude-desktop.md)
    - [OpenCode](integrations/opencode.md)
    - [Antigravity](mcp-clients.md#9-antigravity)
+   - [Project workflows: handoff, brief, update](project-workflows.md)
    - [Cross-runtime handoff](integrations/cross-runtime-handoff.md)
    - [사용자 주도 멀티 코딩 에이전트 Handoff 운영 가이드](integrations/user-controlled-handoff-ko.md)
 3. **[Use cases](use-cases.md)** — nine runnable scenarios for multi-tool

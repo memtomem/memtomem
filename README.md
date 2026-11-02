@@ -1,44 +1,45 @@
 # memtomem
 
-> Markdown-first long-term memory for AI coding agents — your files stay yours, and core usage is hook-free by default.
+> Long-term memory for AI coding agents, kept as Markdown you own. Core usage is hook-free by default: memory changes happen only when you or your agent call memtomem.
 
 [![PyPI](https://img.shields.io/pypi/v/memtomem)](https://pypi.org/project/memtomem/)
 [![Downloads](https://img.shields.io/pypi/dm/memtomem)](https://pypi.org/project/memtomem/)
 [![GitHub stars](https://img.shields.io/github/stars/memtomem/memtomem)](https://github.com/memtomem/memtomem/stargazers)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-green)](https://python.org)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![CLA](https://img.shields.io/badge/CLA-required-green)](CLA.md)
-[![Safety](https://img.shields.io/badge/safety-no%20vulnerabilities-brightgreen)](https://data.safetycli.com/packages/pypi/memtomem)
 
-> 🧪 **Beta** — the nine core MCP tools, the `mm` CLI, and the format of your memory files and config files change only with an `Upgrading` note in the [CHANGELOG](CHANGELOG.md), and behind a deprecation window where one is possible. Features marked **experimental** can change or go away without either — see [Stability](#stability). Feedback and issue reports are especially welcome: [Issues](https://github.com/memtomem/memtomem/issues) · [Discussions](https://github.com/memtomem/memtomem/discussions).
+> 🧪 **Beta** — the nine core MCP tools, the `mm` CLI, and the format of your memory and config files change only with an `Upgrading` note in the [CHANGELOG](CHANGELOG.md). Features marked **experimental** can change without one; see [Stability](#stability). Feedback is welcome: [Issues](https://github.com/memtomem/memtomem/issues) · [Discussions](https://github.com/memtomem/memtomem/discussions).
 
-<p align="center">
-  <img src="docs/assets/README-hero.gif" alt="memtomem Web UI dashboard — namespaces, file types, chunk-size buckets, activity timeline" width="640">
-</p>
+## The session loop
 
-memtomem turns your markdown notes, documents, and code into a searchable knowledge base that any AI coding agent can use. Write notes as plain `.md` files — memtomem indexes them and makes them searchable by both keywords and meaning.
+Three plugin workflows carry a project's memory from one session to the next, and from one coding agent to another. Illustrative output — agent wording and results vary.
 
-```mermaid
-flowchart LR
-    A["Your files\n.md .json .py"] -->|Index| B["memtomem"]
-    B -->|Search| C["AI agent\n(Claude Code, Cursor, etc.)"]
+```text
+# End of a session, in Claude Code
+> /memtomem:handoff save codex-cli
+handoff_id: 3f2a9c1e-7b4d-4e8a-9c2f-1d5e6a7b8c9d
+scope: project_local · namespace: shared:retry-policy · 1 file written, 2 chunks indexed
+
+# Next session, in Codex CLI
+> $memtomem-brief
+Recent updates and active handoff IDs
+  - 3f2a9c1e-7b4d-4e8a-9c2f-1d5e6a7b8c9d  from claude-code → codex-cli
+    load it with: $memtomem-handoff resume 3f2a9c1e-7b4d-4e8a-9c2f-1d5e6a7b8c9d
+> $memtomem-handoff resume 3f2a9c1e-7b4d-4e8a-9c2f-1d5e6a7b8c9d
+git_head matches the live HEAD · worktree clean · in sync with `origin` `refs/heads/main`
+
+# After a few commits
+> /memtomem:update
+mode: incremental · 4 of the latest 10 commits not yet reviewed
+saved 2 items · commit-derived: 1 · session-derived: 1
 ```
 
-> **First time here?** Follow the [Getting Started](docs/guides/getting-started.md) guide — you'll have a working setup in under 5 minutes. Claude Code or Codex CLI user? See the [Korean vibe-coding quickstart](docs/guides/vibe-coding-getting-started-ko.md).
-
----
+`handoff save` writes one Markdown record into the project's own `.memtomem/memories.local`; `brief` only reads; `update` saves decisions, bug fixes, and preferences as separate items. All three run only when you invoke them, and nothing runs in the background. The [Project workflows](docs/guides/project-workflows.md) guide has each one's modes, checks, and host-specific names.
 
 ## Why memtomem?
 
-| Problem | How memtomem solves it |
-|---------|------------------------|
-| AI forgets everything between sessions | Index your notes once, search them in every session |
-| Keyword search misses related content | Hybrid search: exact keywords + meaning-based similarity |
-| Notes scattered across tools | One searchable index for markdown, JSON, YAML, TOML, Python, JS/TS |
-| Vendor lock-in | Your `.md` files are the source of truth. The DB is a rebuildable cache |
-| Hidden automation is hard to reason about | Core memory operations run only when you call them; optional client hooks are explicit, removable integrations |
-
----
+- **Your files stay yours.** Memories are plain `.md` files you can read, edit, and version. The search database is a rebuildable cache.
+- **Explicit by default.** Memory operations run on your CLI or MCP calls (`mm add`, `mem_add`, `mem_index`). Optional client hooks are separate, removable integrations, not a hidden runtime default.
+- **One store, many tools.** Claude Code, Codex CLI, OpenCode, Kimi Code, and Antigravity share one local store, and any MCP client can search it. [memtomem-stm](https://github.com/memtomem/memtomem-stm) is a separate, optional proxy that surfaces memories proactively.
 
 ## Quick Start
 
@@ -49,20 +50,9 @@ uv tool install 'memtomem[all]'       # or: pipx install 'memtomem[all]'
 mm --version                          # verify install
 ```
 
-`[all]` bundles the features the sections below describe — ONNX dense embeddings, Korean tokenizer, code chunker, and the Web UI. The Ollama and OpenAI embedding providers need no extra; they work on any install. For a smaller install without those downloads (about 50 MB installed instead of about 340 MB, before any model download), see the [minimal install option](docs/guides/getting-started.md#option-a-from-pypi-recommended-for-most-users) in the Getting Started guide.
-
-> If `mm --version` shows an older version than the [latest release](https://github.com/memtomem/memtomem/releases) right after installing, `uv` is likely serving cached PyPI metadata — re-run with `uv tool install 'memtomem[all]' --refresh`, or clear the cache first: `uv cache clean memtomem`. To upgrade an existing uv tool install, use `mm upgrade` rather than re-running `uv tool install`; see the [CLI reference](docs/guides/reference/data-config-cli.md#cli-reference) for what it preserves and stops.
-
-> **`mm: command not found`?** `uv tool install` drops the shim into `~/.local/bin`, which isn't on `$PATH` in fresh shells on macOS/Linux. Run `uv tool update-shell`, then open a new shell and re-run `mm --version`.
+`[all]` bundles ONNX dense embeddings, the Korean tokenizer, the code chunker, and the Web UI (about 340 MB installed, before any model download). The Ollama and OpenAI embedding providers need no extra. A smaller install is under [Other install options](#minimal-install) below.
 
 ### 2. Setup
-
-> **After upgrading the Claude plugin:** re-check `/mcp` after reloading.
-> The plugin launches `memtomem[onnx]==0.7.2`. A manual registration whose launch
-> differs — base-only `memtomem`, or the ONNX launch pinned to an earlier
-> release — no longer matches for deduplication and may expose
-> duplicate tools. Confirm the manual entry's name and scope, then align its
-> launch command with the plugin or remove that redundant registration.
 
 ```bash
 mm init                               # preset picker, then memory_dir + MCP
@@ -70,25 +60,10 @@ mm init                               # preset picker, then memory_dir + MCP
 
 The interactive picker starts with three presets — **Minimal** (BM25, no downloads), **English (Recommended)** (ONNX `multilingual-e5-small` + auto-discover providers), **Korean-optimized** (ONNX `multilingual-e5-small` + `kiwipiepy` tokenizer); no preset turns on a reranker — plus an **Advanced** entry that opens the full 10-step wizard. Preset paths only ask about the memory directory and MCP registration; everything else is set from the preset.
 
-Choose **Minimal** for the fastest no-download first proof; rerun `mm init`
-later when you are ready to add semantic search.
-
-> **Indexing vs. discovery (Claude Code):** provider memory folders that setup auto-discovers (e.g. `~/.claude/projects/*/memory/`) are added to the search *index*. That is separate from the Web UI's opt-in Context Gateway scan of `~/.claude/projects/`, which discovers project *roots* for Skills, Custom Commands, and Subagents — see [Configuration → Context Gateway](docs/guides/configuration.md#context-gateway) for the distinction and the lossy-slug caveats.
-
-For automation / CI:
-
-```bash
-mm init --non-interactive                   # minimal preset, no prompts
-mm init --preset korean --non-interactive   # Korean-optimized bundle, no prompts
-mm init --advanced                          # force the full 10-step wizard
-```
-
-See [Embeddings](docs/guides/embeddings.md) for the full model/provider matrix.
+Choose **Minimal** for the fastest no-download first proof and rerun `mm init` later to add semantic search. For automation, `mm init --non-interactive` picks the minimal preset without prompts. See [Embeddings](docs/guides/embeddings.md) for the model and provider matrix.
 
 <a id="3-use"></a>
 ### 3. Verify a complete memory round trip
-
-The first success path does not require an existing notes directory or a connected editor:
 
 ```bash
 mm status
@@ -96,36 +71,28 @@ mm add "Deployment checklist uses blue-green rollout" --tags ops
 mm search "blue-green"
 ```
 
-`mm add` writes to your configured user memory directory and indexes the entry immediately. The final command should return the sentence you just added.
+The last command should return the sentence you just added. `mm add` writes to your user memory directory and indexes the entry immediately, so this works without an existing notes directory or a connected editor. To bring existing notes into the same index, run `mm index /path/to/your/notes`.
 
-Then verify the editor connection:
+### 4. Connect your coding agent
 
-```text
-"Call the mem_status tool"
-```
-
-To bring existing notes into the same index, point `mm index` at a directory that already exists:
+Install the plugin for your tool — [Claude Code](packages/memtomem-claude-plugin/), [Codex CLI](plugins/memtomem/), [OpenCode](packages/opencode-memtomem/), [Kimi Code](packages/memtomem-kimi-skills/), or [Antigravity](packages/memtomem-antigravity-plugin/) — then, in the project you work on, register the memory tier the session loop writes to:
 
 ```bash
-mm index /path/to/your/notes
+cd <your-project> && mm mem init --scope project_local
 ```
 
-`mm status --json` (or `--format json`) provides the same status as machine-readable output for scripts and CI.
+Start a new session and ask for `/memtomem:brief`. The Korean [바이브코딩 빠른 시작](docs/guides/vibe-coding-getting-started-ko.md) walks this path in Claude Code or Codex CLI in 10–15 minutes. For Cursor, Windsurf, Claude Desktop, Gemini CLI, and other MCP clients, see [MCP Client Setup](docs/guides/mcp-clients.md); from any client, asking it to call the `mem_status` tool confirms the connection.
 
 <a id="4-web-ui-optional"></a>
-### 4. Open the Web UI (optional)
+### 5. Open the Web UI (optional)
 
 ```bash
-mm web                # polished dashboard on http://127.0.0.1:8080
+mm web                # dashboard on http://127.0.0.1:8080
 mm web -b             # run in the background; logs go to ~/.memtomem/logs/web.log
-mm web status         # show pid/port/start time
 mm web stop           # stop the tracked Web UI process
-mm web --dev          # maintainer surface (adds opt-in pages)
 ```
 
-`mm web` shows the polished page set by default. Pass `--dev` (or set
-`MEMTOMEM_WEB__MODE=dev` in your shell profile) to expose maintainer pages
-like Sessions, Working Memory, and Health Report.
+`mm web` shows the polished page set. `mm web --dev` (or `MEMTOMEM_WEB__MODE=dev`) adds maintainer pages such as Sessions, Working Memory, and Health Report.
 
 <details>
 <summary><b>Other install options</b></summary>
@@ -135,7 +102,7 @@ like Sessions, Working Memory, and Health Report.
 ```bash
 uv tool install memtomem             # no extras — no local ONNX model, Web UI or Korean tokenizer until you add them; Ollama/OpenAI embeddings still work
 ```
-Opt in later per-feature: `uv tool install --reinstall 'memtomem[onnx,web]'` (see the [extras table](docs/guides/getting-started.md#optional-extras)). List every extra you want to keep, because `--reinstall` replaces the whole set. A plain `mm upgrade` keeps the extras it detects from the current install, but an explicit `mm upgrade --extras` list must name the complete set too.
+Opt in later per feature: `uv tool install --reinstall 'memtomem[onnx,web]'` (see the [extras table](docs/guides/getting-started.md#optional-extras)). List every extra you want to keep, because `--reinstall` replaces the whole set. A plain `mm upgrade` keeps the extras it detects from the current install, but an explicit `mm upgrade --extras` list must name the complete set too.
 
 **Project-scoped** (per-project isolation):
 ```bash
@@ -147,109 +114,67 @@ uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 claude mcp add memtomem -s user -- uvx --isolated --from "memtomem[all]==0.7.2" memtomem-server
 ```
 
-See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor / Antigravity / Windsurf / Claude Desktop / Gemini CLI / Kimi Code.
+</details>
+
+<details>
+<summary><b>Troubleshooting the install</b></summary>
+
+- **`mm --version` shows an older version than the [latest release](https://github.com/memtomem/memtomem/releases)** right after installing: `uv` is likely serving cached PyPI metadata. Re-run with `uv tool install 'memtomem[all]' --refresh`, or clear the cache first with `uv cache clean memtomem`. To upgrade an existing uv tool install, use `mm upgrade` rather than re-running `uv tool install`; see the [CLI reference](docs/guides/reference/data-config-cli.md#cli-reference) for what it preserves and stops.
+- **`mm: command not found`**: `uv tool install` drops the shim into `~/.local/bin`, which is not on `$PATH` in fresh shells on macOS/Linux. Run `uv tool update-shell`, then open a new shell and re-run `mm --version`.
+- **Duplicate tools after upgrading the Claude plugin**: re-check `/mcp` after reloading. The plugin launches `memtomem[onnx]==0.7.2`. A manual registration whose launch differs — base-only `memtomem`, or the ONNX launch pinned to an earlier release — no longer matches for deduplication. Confirm the manual entry's name and scope, then align its launch command with the plugin or remove the redundant registration.
+- **Indexing vs. discovery (Claude Code)**: provider memory folders that setup auto-discovers (such as `~/.claude/projects/*/memory/`) are added to the search *index*. That is separate from the Web UI's opt-in Context Gateway scan of `~/.claude/projects/`, which discovers project *roots* for Skills, Commands, and Subagents; see [Configuration → Context Gateway](docs/guides/configuration.md#context-gateway).
 
 </details>
 
----
+## What else is inside
 
-## Key Features
-
-- **Hybrid search** — BM25 keyword + dense vector + RRF fusion in one query
-- **Semantic chunking** — heading-aware Markdown, AST-based Python, tree-sitter JS/TS, structure-aware JSON/YAML/TOML
-- **Incremental indexing** — chunk-level SHA-256 diff; only changed chunks get re-embedded
-- **Namespaces** — organize memories into scoped groups with auto-derivation from folder names; review and label them (colour, description) from Settings → Namespaces in the Web UI
-- **Maintenance** — near-duplicate detection, time-based decay, TTL expiration, auto-tagging
-- **Web UI** — visual dashboard for search, sources, tags, timeline, dedup, and more (`mm web --dev` for the full maintainer surface)
-- **Context Gateway** — keep canonical Skills, Commands, and Subagents in a project or user Store, optionally install reusable assets from a separate Wiki, then push them to supported AI runtimes. See [Context Gateway](docs/guides/context-gateway.md).
-- **MCP tools** — `mem_do` meta-tool routes all non-core actions in `core` mode for minimal context usage
-- **Predictable core** — memory operations run on explicit CLI/MCP calls (`mm add`, `mem_add`, `mem_index`, etc.). Optional client hooks are installed and removed separately rather than being a hidden runtime default.
-- **Scriptable CLI** — JSON output for scripts: `--json` on `mm status`, the write commands (`mm add` / `mm reset` / `mm purge`), `mm session start` / `end` / `list` / `events`, `mm schedule list`, `mm watchdog status` / `run` and `mm doctor`, and `--json` (or `--format json`) on `mm search` and `mm recall`; `mm warmup` pre-loads local models so the first query skips the cold-start cost
-- **Scheduled jobs** — `mm schedule add/list/run-now/delete` (or `mem_do(action="schedule_*")`) for cron-driven compaction, importance decay, dead-link cleanup, and dedup scans
-- **Pinned Context** — keep small user/project/agent Markdown blocks ahead of retrieved results with `mm pinned compose`
-- **LangGraph Store** — optional `MemtomemBaseStore` implements LangGraph's tuple-namespace long-term-memory contract
-- **[Hybrid LangGraph Store](docs/guides/langgraph-hybrid-store.md)** — `MemtomemHybridStore` adds dedicated SQLite persistence, BM25/dense/RRF retrieval, TTL, and diagnostics
-
----
+| Your memory, your files | Operate it | Plug it in |
+|---|---|---|
+| Markdown is the source of truth; the search database is a rebuildable cache | [Web UI](docs/guides/reference/operations.md) for search, sources, tags, timeline, and dedup (`mm web`) | Nine core MCP tools, with `mem_do` routing every other action so agents load a small tool surface |
+| Hybrid search: BM25 keyword + dense vector + RRF fusion in one query | [Namespaces](docs/guides/reference/organization-maintenance.md), auto-derived from folder names and labelled from the Web UI | [Context Gateway](docs/guides/context-gateway.md): keep Skills, Commands, and Subagents in one Store and push them to your AI runtimes |
+| Semantic chunking: heading-aware Markdown, AST-based Python, tree-sitter JS/TS, structure-aware JSON/YAML/TOML | [Maintenance](docs/guides/reference/organization-maintenance.md): near-duplicate detection, time-based decay, TTL expiration, auto-tagging | [Pinned Context](docs/guides/pinned-context.md): small user/project/agent Markdown blocks composed ahead of retrieved results |
+| Incremental indexing: chunk-level SHA-256 diff, so only changed chunks are re-embedded | [Scheduled jobs](docs/guides/reference/automation.md) for compaction, decay, dead-link cleanup, and dedup scans | LangGraph `MemtomemBaseStore`, plus the [Hybrid Store](docs/guides/langgraph-hybrid-store.md) with SQLite persistence and BM25/dense/RRF retrieval |
+| | [Scriptable CLI](docs/guides/reference/data-config-cli.md#cli-reference): `--json` output on status, search, recall, and the write commands; `mm warmup` pre-loads local models | [memtomem-stm](https://github.com/memtomem/memtomem-stm): optional proxy for proactive surfacing, compression, and caching |
 
 ## Stability
 
-memtomem is beta (`0.x`). The nine core MCP tools, the `mm` CLI, and the
-format of your memory files and config files change only with an `Upgrading`
-note in the [CHANGELOG](CHANGELOG.md), and behind a deprecation window where
-one is possible. Other features not listed below are supported — maintained,
-with their changes recorded in the CHANGELOG — without that guarantee.
+memtomem is beta (`0.x`). The nine core MCP tools, the `mm` CLI, and the format of your memory files and config files change only with an `Upgrading` note in the [CHANGELOG](CHANGELOG.md), and behind a deprecation window where one is possible. Other features are supported — maintained, with their changes recorded in the CHANGELOG — without that guarantee.
 
-These are **experimental** — their behaviour, output or format can still
-change or go away without a window, because a decision that shapes them is
-still open or an LLM writes what they produce:
+These are **experimental** — their behaviour, output, or format can still change or go away without a window, because a decision that shapes them is still open or an LLM writes what they produce:
 
-- **Multi-agent memory** — `mem_agent_register`, `mem_agent_search`,
-  `mem_agent_share` and per-agent session scopes (`mem_session_start` with
-  `agent_id`). Open decisions: [#1477](https://github.com/memtomem/memtomem/issues/1477),
-  [#1478](https://github.com/memtomem/memtomem/issues/1478).
-- **Memory export and import bundles** — `mem_export` / `mem_import` and the
-  Web export/import. How a backup made before 0.7.0 (bundle v1–v3) that holds
-  project memories should be restored is still open.
-- **LLM-written output** — anything memtomem's configured LLM
-  (`MEMTOMEM_LLM__ENABLED=true`) writes: LLM auto-tagging and entity
-  extraction, `strategy="llm"` query expansion, LLM consolidation and policy
-  summaries, session auto-summaries, source summaries
-  (`indexing.auto_summarize`) and contextual chunk enrichment
-  (`indexing.enrich_chunk_context`). The rule-based modes beside them —
-  keyword auto-tagging, regex entity extraction, `tags`/`headings` expansion,
-  heuristic consolidation summaries — are supported.
-- **Claude projects scan** in the Context Gateway
-  (`MEMTOMEM_CONTEXT_GATEWAY__EXPERIMENTAL_CLAUDE_PROJECTS_SCAN`).
+- **Multi-agent memory** — `mem_agent_register`, `mem_agent_search`, `mem_agent_share`, and per-agent session scopes (`mem_session_start` with `agent_id`). Open decisions: [#1477](https://github.com/memtomem/memtomem/issues/1477), [#1478](https://github.com/memtomem/memtomem/issues/1478).
+- **Memory export and import bundles** — `mem_export` / `mem_import` and the Web export/import. How a backup made before 0.7.0 (bundle v1–v3) that holds project memories should be restored is still open.
+- **LLM-written output** — anything memtomem's configured LLM (`MEMTOMEM_LLM__ENABLED=true`) writes: LLM auto-tagging and entity extraction, `strategy="llm"` query expansion, LLM consolidation and policy summaries, session auto-summaries, source summaries (`indexing.auto_summarize`), and contextual chunk enrichment (`indexing.enrich_chunk_context`). The rule-based modes beside them are supported.
+- **Claude projects scan** in the Context Gateway (`MEMTOMEM_CONTEXT_GATEWAY__EXPERIMENTAL_CLAUDE_PROJECTS_SCAN`).
 - **Antigravity CLI plugin** ([`packages/memtomem-antigravity-plugin/`](packages/memtomem-antigravity-plugin/)).
 
----
+## Works with
 
-## Ecosystem
-
-| Package | Description |
-|---------|-------------|
-| [**memtomem**](https://pypi.org/project/memtomem/) | Core — MCP server, CLI, Web UI, hybrid search, storage |
-| [**Claude Code plugin**](packages/memtomem-claude-plugin/) | Exact-pinned MCP server and nine slash-command workflows |
-| [**Claude Code automation plugin**](packages/memtomem-claude-automation-plugin/) | Optional hooks for prompt-time search and write-time indexing |
-| [**Codex plugin**](plugins/memtomem/) | Exact-pinned MCP server and nine workflows for Codex CLI |
-| [**opencode-memtomem**](packages/opencode-memtomem/) | OpenCode — exact-pinned MCP, commands, read skills, safe permissions |
-| [**Kimi Code skills**](packages/memtomem-kimi-skills/) | Skill bundle for Kimi Code (not a plugin) |
-| [**Hermes Agent plugin**](packages/memtomem-hermes-plugin/) | Exact-pinned MCP server and six workflow skills for Hermes Agent |
-| [**Hermes memory provider**](packages/memtomem-hermes-memory/) | Recall-only Hermes memory provider that adds relevant notes to each turn |
-| [**Antigravity CLI plugin**](packages/memtomem-antigravity-plugin/) | Exact-pinned MCP server and nine workflow skills for `agy` — [experimental](#stability) |
-| [**memtomem-stm**](https://github.com/memtomem/memtomem-stm) | STM proxy — proactive memory surfacing via tool interception |
-
----
+| Package | What it adds | Session loop |
+|---------|--------------|--------------|
+| [**memtomem**](https://pypi.org/project/memtomem/) | Core: MCP server, CLI, Web UI, hybrid search, storage | — |
+| [**Claude Code plugin**](packages/memtomem-claude-plugin/) | Exact-pinned MCP server and slash-command workflows | handoff · brief · update |
+| [**Claude Code automation plugin**](packages/memtomem-claude-automation-plugin/) | Optional hooks for prompt-time search and write-time indexing | — |
+| [**Codex plugin**](plugins/memtomem/) | Exact-pinned MCP server and skills for Codex CLI | handoff · brief · update |
+| [**opencode-memtomem**](packages/opencode-memtomem/) | Exact-pinned MCP server, commands, and read skills for OpenCode | handoff · brief · update |
+| [**Kimi Code skills**](packages/memtomem-kimi-skills/) | Skill bundle for Kimi Code (not a plugin) | handoff · brief · update |
+| [**Antigravity CLI plugin**](packages/memtomem-antigravity-plugin/) | Exact-pinned MCP server and skills for `agy` — [experimental](#stability) | handoff · brief · update |
+| [**Hermes Agent plugin**](packages/memtomem-hermes-plugin/) | Exact-pinned MCP server and the search, recall, status, remember, index, and setup skills | — (needs a project root) |
+| [**Hermes memory provider**](packages/memtomem-hermes-memory/) | Recall-only provider that adds relevant notes to each Hermes turn | — |
+| [**memtomem-stm**](https://github.com/memtomem/memtomem-stm) | STM proxy: proactive memory surfacing via tool interception | — |
 
 ## Documentation
 
-Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdown in this repo. New to memtomem? The guides have a [suggested reading order](docs/guides/README.md). The table below follows it, with the two runnable examples placed after the first-run guides:
+Hosted at **[memtomem.com](https://memtomem.com)** and available as Markdown in this repo.
 
 | Guide | Description |
 |-------|-------------|
 | [Getting Started](docs/guides/getting-started.md) | Install, configure, save and find your first memory |
 | [한국어 바이브코딩 빠른 시작](docs/guides/vibe-coding-getting-started-ko.md) | Claude Code·Codex CLI에서 10~15분 안에 기억 저장·검색 |
+| [Project workflows](docs/guides/project-workflows.md) | handoff, brief, and update: modes, checks, and names per host |
 | [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
-| [Cross-runtime handoff](docs/guides/integrations/cross-runtime-handoff.md) | Claude Code·Codex CLI·Kimi Code 순차 공동 개발 |
 | [Use cases](docs/guides/use-cases.md) | Nine runnable scenarios for multi-tool developers, personal knowledge bases, and teams |
-| [프로젝트 업무별 체험](docs/guides/workflow-packages-ko.md) | 개발 작업 인계·제품 의사결정·온보딩: 모델 없는 체험, 기록 양식, 2주 파일럿 |
-| [Example notebooks](examples/notebooks/) and [coding-agent sample](examples/onboarding/retry-policy/) | Notebooks: start with 00 to recover decisions, code, and settings across 150 synthetic files without a model (Korean); 01–04 teach APIs, 05–06 teach LangGraph. Sample: recover a decision and its ADR source across sessions, with an isolated CLI proof and copyable prompts |
-| [Core memory tools](docs/guides/reference/core-memory-tools.md) | Index existing notes, search, and manage memories |
-| [Data, config & CLI](docs/guides/reference/data-config-cli.md) | Export and import, importers, `mm config`, and the full CLI reference |
-| [Organization & maintenance](docs/guides/reference/organization-maintenance.md) | Namespaces, deduplication, decay, tagging, orphan cleanup, and `mm doctor` |
-| [Automation](docs/guides/reference/automation.md) | Policies and scheduled jobs |
-| [Pinned Context](docs/guides/pinned-context.md) | Pinned-first composition, the approval queue, and LangGraph stores |
-| [Embeddings](docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI embedding providers |
-| [LLM Providers](docs/guides/llm-providers.md) | Ollama, OpenAI, Anthropic, and compatible endpoints |
-| [Configuration](docs/guides/configuration.md) | Supported config files, precedence, and `MEMTOMEM_*` variables |
-| [Context Gateway](docs/guides/context-gateway.md) | Share Skills, Commands, and Subagents across your AI tools from one Store |
-| [Multi-device sync](docs/guides/multi-device-sync.md) | Sync markdown memories across personal devices via a private git repo |
-| [Operations & troubleshooting](docs/guides/reference/operations.md) | Web UI, privacy audits, diagnostics, and recovery |
-| [Uninstalling memtomem](docs/guides/uninstall.md) | Clean removal steps |
-| [Reference](docs/guides/reference.md) | Complete tool and workflow reference |
-
----
+| [All guides](docs/guides/README.md) | Reference, configuration, embeddings, operations, and more, in a suggested reading order |
 
 ## Contributing
 
