@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Web UI's health watchdog Run Now button keeps its translated label after
+  a run.** It restored the English text `Run Now` when the run finished, so a
+  Korean UI showed 지금 실행 until the first click and English afterwards.
+
 ## [0.7.3] — 2026-11-02
 
 ### Upgrading
@@ -159,9 +165,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   tool-absent stop now says an entry written by an earlier `mm init` needs the
   variable, so the delivery versions move with that text: Claude `0.5.27`,
   Codex and OpenCode `0.3.24`, Kimi `0.2.22`, Antigravity `0.2.3`.
-- **The Web UI's health watchdog Run Now button keeps its translated label after
-  a run.** It restored the English text `Run Now` when the run finished, so a
-  Korean UI showed 지금 실행 until the first click and English afterwards.
 
 ## [0.7.2] — 2026-11-01
 
