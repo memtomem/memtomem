@@ -7,18 +7,18 @@ Thank you for your interest in contributing to memtomem!
 1. Pick an issue labelled
    [`good first issue`](https://github.com/memtomem/memtomem/labels/good%20first%20issue).
    Each one names the files to change, what to test, and the test file to run.
-2. Comment on the issue to claim it. GitHub only lets us assign people with
-   push access, so your comment is the claim. If someone has already claimed
-   it, pick another one.
+2. Comment on the issue to claim it. You don't need to be assigned: the
+   comment is the claim. If someone has already claimed it, pick another one.
 3. Set up with [Development Setup](#development-setup). While you work,
    running only the test file the issue names is enough; before you open the
    pull request, run the checks in
    [Pull Request Guidelines](#pull-request-guidelines).
-4. Open the pull request. Two one-time steps happen on your first one: the
-   CLA bot asks you to sign (see
-   [Contributor License Agreement](#contributor-license-agreement-cla)), and
-   GitHub holds the first CI run until a maintainer approves it. That hold is
-   GitHub's rule for first-time contributors, not a review verdict.
+4. Open the pull request. On your first one the CLA bot asks you to sign,
+   once per account (see
+   [Contributor License Agreement](#contributor-license-agreement-cla)).
+   Until a pull request of yours has been merged, GitHub also holds each CI
+   run until a maintainer approves it. That hold is GitHub's rule for
+   first-time contributors, not a review verdict.
 5. After your first pull request, issues labelled
    [`help wanted`](https://github.com/memtomem/memtomem/labels/help%20wanted)
    are the next step: they are larger, and some need a browser test.
