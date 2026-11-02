@@ -17,6 +17,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **The Web UI's health watchdog Run Now button keeps its translated label after
   a run.** It restored the English text `Run Now` when the run finished, so a
   Korean UI showed 지금 실행 until the first click and English afterwards.
+- **The `update` workflow sizes its items to stay one chunk (#3002).** Items
+  were capped at 1,200 characters, but a store indexing under
+  `multilingual-e5-small` splits any chunk over 384 tokens, at a line boundary
+  when one fits. About a third of items of 1,000 to 1,200 characters ran over,
+  and the last line, often the citation of a matching host-native memory, became
+  a chunk of its own that could rank beside the item. Items are now at most
+  1,000 characters, or 600 when any of the text is Korean, Japanese, or Chinese,
+  citations included. Only the prose is shortened to fit, never a required
+  citation or a verbatim path, symbol, command or quote; an item that still does
+  not fit is written and reported as over the limit. The delivery versions move
+  with that text: Claude `0.5.29`, Codex and OpenCode `0.3.26`, Kimi `0.2.24`,
+  Antigravity `0.2.5`. Items already saved keep their chunks.
 
 ## [0.7.3] — 2026-11-02
 
