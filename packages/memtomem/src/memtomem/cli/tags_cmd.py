@@ -59,7 +59,8 @@ async def _run_list() -> None:
         )
         if not tag_counts:
             click.secho(
-                'No tags found. Use `mm add "..." --tags a,b` to add tags.', fg="yellow"
+                'No tags found. Use `mm add "..." --tags a,b` to add tags.',
+                fg="yellow",
             )
             return
         for tag, count in tag_counts:
