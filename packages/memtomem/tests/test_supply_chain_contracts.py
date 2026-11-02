@@ -195,10 +195,12 @@ def test_codex_plugin_matches_contract_and_marketplace() -> None:
 
 
 def test_codex_plugin_composer_icon_is_a_bundled_png() -> None:
-    # Plugin catalogs require interface.composerIcon and fetch the bundle on its
-    # own, so the icon has to live inside plugins/memtomem. Codex reads the path
-    # only when it starts with "./" and has no ".." component, and the catalog
-    # caps the file at 50 KB. It is the Claude plugin's icon byte for byte.
+    # The awesome-codex-plugins catalog requires interface.composerIcon and
+    # fetches the bundle on its own, so the icon has to live inside
+    # plugins/memtomem. Codex reads the path only when it starts with "./" and
+    # has no ".." component. The catalog asks for under 50 KB (its maintainer
+    # wrote 50 KiB); 50,000 bytes is the stricter of the two. It is the Claude
+    # plugin's icon byte for byte.
     bundle = (_ROOT / "plugins/memtomem").resolve()
     path = _json("plugins/memtomem/.codex-plugin/plugin.json")["interface"]["composerIcon"]
     assert path.startswith("./")
