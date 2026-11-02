@@ -1,6 +1,6 @@
 {
   "name": "opencode-memtomem",
-  "version": "0.3.22",
+  "version": "0.3.24",
   "description": "Safe memtomem MCP, commands, and read skills for OpenCode",
   "type": "module",
   "sideEffects": false,
@@ -35,8 +35,8 @@
     "pack:check": "npm pack --dry-run"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.35",
-    "@types/node": "26.6.4",
+    "@opencode-ai/plugin": "1.19.5",
+    "@types/node": "26.6.6",
     "typescript": "5.9.3"
   },
   "publishConfig": {

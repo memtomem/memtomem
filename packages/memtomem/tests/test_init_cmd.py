@@ -2945,6 +2945,7 @@ class TestMcpPasteHints:
         assert data["mcpServers"]["memtomem"] == {
             "command": sys.executable,
             "args": ["-m", "memtomem.server"],
+            "env": _expected_registration_env(),
         }
         assert not (tmp_path / ".mcp.json").exists()
 
@@ -3029,6 +3030,153 @@ class TestMcpChoiceOneClaudeAddBranches:
         with pytest.raises(click.ClickException, match=reason):
             init_cmd._write_config_and_summary(self._state(tmp_path), tmp_path)
         assert not (tmp_path / ".mcp.json").exists()
+
+
+def _expected_registration_env() -> dict[str, str]:
+    """The env every `mm init` registration carries, read from the contract.
+
+    Parsed from ``contract.toml`` rather than taken from ``LAUNCH_ENV`` (the
+    constant the code reads), so a renderer or code drift fails here.
+    """
+    import tomllib
+
+    root = Path(__file__).resolve().parents[3]
+    contract = root / "packages/memtomem-plugin-assets/contract.toml"
+    core = tomllib.loads(contract.read_text(encoding="utf-8"))["core"]
+    assert core["extra_tools"], "contract lists no extra tools; the expectation would be vacuous"
+    return {"MEMTOMEM_EXTRA_TOOLS": ",".join(core["extra_tools"])}
+
+
+class TestRegistrationEnv:
+    """Every registration `mm init` writes exposes the `update` workflow's tool (#2970)."""
+
+    _SUMMARY = "MCP config holds the server command and MEMTOMEM_EXTRA_TOOLS (no settings)."
+
+    def test_expected_env_names_the_update_tool(self) -> None:
+        names = _expected_registration_env()["MEMTOMEM_EXTRA_TOOLS"].split(",")
+        assert "mem_update_coverage" in names
+
+    def test_claude_argv_carries_env_before_the_separator(self, tmp_path, monkeypatch, capsys):
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, timeout=10):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(init_cmd, "_run", fake_run)
+        state = _make_init_state(tmp_path)
+        state["mcp_choice"] = 1
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        server_cmd, server_args = init_cmd._mcp_server_command(state["_profile"])
+        env_args = [
+            arg
+            for key, value in _expected_registration_env().items()
+            for arg in ("-e", f"{key}={value}")
+        ]
+        assert calls == [
+            ["claude", "mcp", "add", "memtomem", "-s", "user", *env_args, "--", server_cmd]
+            + server_args
+        ]
+        assert unstyle(capsys.readouterr().out).count(self._SUMMARY) == 1
+
+    def test_mcp_json_entry_carries_env(self, tmp_path: Path, monkeypatch) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+        result = CliRunner().invoke(
+            init,
+            ["--preset", "minimal", "--mcp", "json"],
+            input=f"{tmp_path / 'memories'}\ny\n",
+        )
+        assert result.exit_code == 0, result.output
+        servers = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+        assert servers["memtomem"]["env"] == _expected_registration_env()
+        assert click.unstyle(result.output).count(self._SUMMARY) == 1
+
+    def test_kimi_rerun_replaces_an_entry_without_env(self, tmp_path, monkeypatch, capsys) -> None:
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        kimi_home = tmp_path / "kimi-code-home"
+        kimi_home.mkdir()
+        (kimi_home / "mcp.json").write_text(
+            json.dumps({"mcpServers": {"memtomem": {"command": "old", "args": []}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("KIMI_CODE_HOME", str(kimi_home))
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+        state = _make_init_state(tmp_path)
+        state["mcp_choice"] = 4
+        _write_config_and_summary(state, tmp_path)
+
+        servers = json.loads((kimi_home / "mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+        assert servers["memtomem"]["env"] == _expected_registration_env()
+        assert unstyle(capsys.readouterr().out).count(self._SUMMARY) == 1
+
+    @pytest.mark.parametrize("choice", [1, 2])
+    def test_preflight_skip_writes_nothing_and_omits_the_env_line(
+        self, tmp_path, monkeypatch, capsys, choice
+    ) -> None:
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        def no_run(cmd, timeout=10):
+            raise AssertionError("a reused registration must not be re-added")
+
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(init_cmd, "_preflight_mcp_choice", lambda c: False)
+        monkeypatch.setattr(init_cmd, "_run", no_run)
+        state = _make_init_state(tmp_path)
+        state["mcp_choice"] = choice
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "MEMTOMEM_EXTRA_TOOLS" not in out
+        assert "MCP config holds" not in out
+        assert not (tmp_path / ".mcp.json").exists()
+
+    def test_already_exists_skip_omits_the_env_line(self, tmp_path, monkeypatch, capsys) -> None:
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+        decisions = iter([True, True, False])
+        monkeypatch.setattr(init_cmd, "_preflight_mcp_choice", lambda choice: next(decisions))
+        monkeypatch.setattr(
+            init_cmd,
+            "_run",
+            lambda cmd, timeout=10: subprocess.CompletedProcess(
+                cmd, 1, "", "MCP server memtomem already exists in user config\n"
+            ),
+        )
+        state = _make_init_state(tmp_path)
+        state["mcp_choice"] = 1
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "existing registration confirmed" in out
+        assert "MCP config holds" not in out
 
 
 class TestClaudeDesktopConfigHint:

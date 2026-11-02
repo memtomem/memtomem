@@ -15,8 +15,15 @@ layout, which current Kimi Code does not read — move the entry if you
 registered with one of those. To write the file by hand instead, it needs
 exactly one `memtomem` entry. Its launch matches what `mm init` writes when
 run through `uvx` — the `[all]` extras let the server open a store
-configured for a local ONNX model. `mm init` writes no `env` block; the one
-below only states the default `core` tool mode explicitly:
+configured for a local ONNX model. The `env` block exposes
+`mem_update_coverage`, which the `memtomem-update` skill needs for its
+default incremental mode and for `full`; without that setting the skill
+stops before writing and only `topic` runs. `mm init` from this repository's
+current source writes the same `MEMTOMEM_EXTRA_TOOLS` line (the entry below
+also states the default `core` tool mode, which `mm init` leaves out).
+`0.7.2`, which the command above installs, and earlier releases write no
+`env` block, so add the `MEMTOMEM_EXTRA_TOOLS` line by hand to an entry they
+wrote:
 
 ```json
 {
@@ -24,7 +31,7 @@ below only states the default `core` tool mode explicitly:
     "memtomem": {
       "command": "uvx",
       "args": ["--isolated", "--from", "memtomem[all]==0.7.2", "memtomem-server"],
-      "env": {"MEMTOMEM_TOOL_MODE": "core"}
+      "env": {"MEMTOMEM_TOOL_MODE": "core", "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
     }
   }
 }

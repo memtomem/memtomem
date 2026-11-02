@@ -1494,6 +1494,22 @@ _PRIOR_RELEASE_MENTIONS: tuple[tuple[str, str | None, str], ...] = (
         "new in memtomem 0.7.0",
         "release the plugin first shipped in",
     ),
+    (
+        "docs/guides/integrations/codex.md",
+        "memtomem 0.7.2 or later",
+        "floor for mem_update_coverage",
+    ),
+    # The update workflow's tool-absent stop, in its source and every rendered skill.
+    *(
+        (path, "memtomem 0.7.2 or later", "floor for mem_update_coverage")
+        for path in (
+            "packages/memtomem-plugin-assets/workflows/update.md",
+            "packages/memtomem-claude-plugin/skills/update/SKILL.md",
+            "plugins/memtomem/skills/memtomem-update/SKILL.md",
+            "packages/memtomem-kimi-skills/skills/memtomem-update/SKILL.md",
+            "packages/memtomem-antigravity-plugin/skills/memtomem-update/SKILL.md",
+        )
+    ),
 )
 _VERSION_IN_FRAGMENT = re.compile(r"\d+\.\d+\.\d+")
 
