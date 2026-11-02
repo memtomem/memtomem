@@ -22,6 +22,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   without it as an environment difference only when the entry's launch matches
   the plugin's.
 
+### Documentation
+
+- **The README and the PyPI page lead with the session loop.** `handoff`,
+  `brief`, and `update` open both pages, the feature list is a grouped table,
+  and the install troubleshooting is folded away. The new
+  [Project workflows](docs/guides/project-workflows.md) guide documents `brief`
+  and `update` for the first time, with the names each host uses, the
+  project-tier prerequisite, and the `mem_update_coverage` requirement.
+
 ### Changed
 
 - **The memory-dir status no longer normalises every root once per file it
