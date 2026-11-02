@@ -7,8 +7,9 @@
 Markdown-first long-term memory shared across your coding agents. This plugin starts a
 local memtomem MCP server in the Antigravity CLI (`agy`) and adds the memory workflow
 skills, including the session loop: `memtomem-handoff` saves a checkpoint when a session
-ends, `memtomem-brief` reads it back when the next one starts, and `memtomem-update`
-turns finished work and recent commits into durable memories (see
+ends and loads it back with `resume`, `memtomem-brief` compiles the project context and
+the open handoff IDs when the next session starts, and `memtomem-update` turns finished
+work and recent commits into durable memories (see
 [Project workflows](../../docs/guides/project-workflows.md)). Notes saved here are
 searchable from Claude Code, Codex CLI, Kimi Code and any other client that uses the
 same `~/.memtomem` store.

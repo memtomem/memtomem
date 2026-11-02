@@ -1669,10 +1669,16 @@ def test_project_workflows_guide_matches_the_workflow_contract() -> None:
             assert host_rows[label][4].startswith("not shipped"), label
 
     # Version line: the core version and every plugin version the contract names.
-    assert f"memtomem `{contract['core']['version']}`" in guide
+    # Whitespace-tolerant (prose reflows) and token-bounded: the version must be the whole
+    # token, so `0.5.260`, `0.5.26.1`, `0.5.26rc1` and `0.5.26-rc.1` are all rejected for
+    # `0.5.26`, while a sentence-ending period or a list separator may follow it.
+    core = re.escape(contract["core"]["version"])
+    assert re.search(rf"memtomem\s+`{core}`", guide)
+    token_end = r"(?=[\s,;·]|\.(?!\S)|$)"
     for plugin in ("claude", "codex", "opencode", "kimi", "antigravity"):
         version = contract["plugins"][f"{plugin}_version"]
-        assert f"`{plugin}` {version}" in guide, (plugin, version)
+        pattern = rf"`{plugin}`\s+{re.escape(version)}{token_end}"
+        assert re.search(pattern, guide), (plugin, version)
 
     # README "Works with": the packages marked with the loop are the shipped hosts, no more.
     readme_labels = {

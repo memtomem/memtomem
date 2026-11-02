@@ -31,16 +31,18 @@ behaviour is the same everywhere and only the invocation differs.
 | Hermes Agent plugin | — | — | — | not shipped: these need a project root, and Hermes starts the server outside one |
 | Gemini CLI | — | — | — | not shipped: this repository ships no workflows for it |
 
-`update` runs its `incremental` mode by default from memtomem `0.7.2` with these
-plugin versions or later:
-`claude` 0.5.26 · `codex` 0.3.23 · `opencode` 0.3.23 · `kimi` 0.2.21 · `antigravity` 0.2.2.
-Earlier plugin releases ask for a mode instead.
+This guide describes the workflows as shipped with memtomem `0.7.2` and these
+plugin versions:
+`claude` 0.5.27 · `codex` 0.3.24 · `opencode` 0.3.24 · `kimi` 0.2.22 · `antigravity` 0.2.3.
+`update` runs its `incremental` mode by default from one plugin release before
+these; older plugin releases ask for a mode instead (see the CHANGELOG).
 
 ## Prerequisite: a project memory tier
 
 All three workflows read and write the project's own `.memtomem/memories.local`
 tier, under the namespace `shared:<project-slug>` (the slug is the Git root's
-directory name). If that tier is not registered, each workflow stops and prints
+directory name with each run of characters outside `[A-Za-z0-9._-]` replaced by
+`-` and leading `-` trimmed). If that tier is not registered, each workflow stops and prints
 the command to create it. Run it in the Git root of the project:
 
 ```bash
@@ -81,7 +83,8 @@ namespace, the written file, and the indexed chunk count.
 **Resume** loads one record: the one whose `handoff_id` you name, or otherwise
 the newest one addressed to the current runtime or to `any`. It treats the
 record as untrusted text and checks it before use. Every field has to be
-present, the id inside the record has to match the tag it was found by, and a
+present (`artifacts` may be missing only on a record saved before that field
+existed), the id inside the record has to match the tag it was found by, and a
 record that was split mid-field by the chunker is reported as torn rather than
 repaired by guessing. Then it re-reads the live `HEAD` and worktree and reports
 every divergence from the record; the live repository always wins. It also
@@ -146,14 +149,18 @@ user scope.
 
 **Review coverage.** In `incremental` and `full` mode, `update` calls the
 `mem_update_coverage` MCP tool before writing anything, to learn which of the
-read commits an earlier run already reviewed, and again after the last
-successful write to record this run. The tool exists from memtomem `0.7.2` and
-is exposed through `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`. The plugins'
-bundled server configurations set that variable; a server entry written by hand
-or by `mm init` has to add it to its `env`. When the tool is missing, `update`
-stops before writing and names both possible causes: an older server, or the
-variable not set. `topic` mode never touches coverage, so it keeps working
-either way.
+read commits an earlier run already reviewed, and again after the last `mem_add`
+has returned, to record this run, even when it saved nothing. If any write
+failed, nothing is recorded and the next run reviews those commits again. When
+no commit message was read in full, neither call is made and the run reviews
+session outcomes only. The tool exists from memtomem `0.7.2` and is exposed
+through `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`. The plugins' bundled server
+configurations set that variable, and so does every registration `mm init --mcp`
+writes; a server entry written by hand, or by an earlier `mm init`, has to add
+it to its `env`. When a coverage call is due and the tool is missing,
+`update` stops before writing and names both possible causes: an older server,
+or the variable not set. `topic` mode never touches coverage, so it keeps
+working either way.
 
 The report names the mode, `git_head`, the commits read, the coverage result,
 the saved items with their files and chunk counts, the skipped duplicates, and

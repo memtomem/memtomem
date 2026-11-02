@@ -28,8 +28,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `brief`, and `update` open both pages, the feature list is a grouped table,
   and the install troubleshooting is folded away. The new
   [Project workflows](docs/guides/project-workflows.md) guide documents `brief`
-  and `update` for the first time, with the names each host uses and the
-  version from which `update` runs its incremental mode by default.
+  and `update` for the first time, with the names each host uses, the
+  project-tier prerequisite, and the `mem_update_coverage` requirement.
 
 ### Changed
 

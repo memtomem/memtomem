@@ -1,9 +1,10 @@
 # memtomem — Claude Code Plugin
 
 Project memory for Claude Code, backed by the memtomem Markdown-first memory MCP
-server: `/memtomem:handoff` saves a checkpoint when a session ends, `/memtomem:brief`
-reads it back when the next one starts, and `/memtomem:update` turns finished work and
-recent commits into durable memories. BM25 works without an embedding provider; dense
+server: `/memtomem:handoff` saves a checkpoint when a session ends and loads it back with
+`resume`, `/memtomem:brief` compiles the project context and the open handoff IDs when the
+next session starts, and `/memtomem:update` turns finished work and recent commits into
+durable memories. BM25 works without an embedding provider; dense
 retrieval is optional.
 
 One install bundles:

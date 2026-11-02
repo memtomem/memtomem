@@ -27,7 +27,7 @@ Recent updates and active handoff IDs
 > $memtomem-handoff resume 3f2a9c1e-7b4d-4e8a-9c2f-1d5e6a7b8c9d
 git_head matches the live HEAD · worktree clean · in sync with `origin` `refs/heads/main`
 
-# After a few commits
+# After a few commits, back in Claude Code
 > /memtomem:update
 mode: incremental · 4 of the latest 10 commits not yet reviewed
 saved 2 items · commit-derived: 1 · session-derived: 1
@@ -81,7 +81,7 @@ Install the plugin for your tool — [Claude Code](packages/memtomem-claude-plug
 cd <your-project> && mm mem init --scope project_local
 ```
 
-Start a new session and ask for `/memtomem:brief`. The Korean [바이브코딩 빠른 시작](docs/guides/vibe-coding-getting-started-ko.md) walks this path in Claude Code or Codex CLI in 10–15 minutes. For Cursor, Windsurf, Claude Desktop, Gemini CLI, and other MCP clients, see [MCP Client Setup](docs/guides/mcp-clients.md); from any client, asking it to call the `mem_status` tool confirms the connection.
+Start a new session and run the brief workflow: `/memtomem:brief` in Claude Code, and the name each other host uses is in the [Project workflows](docs/guides/project-workflows.md) guide. The Korean [바이브코딩 빠른 시작](docs/guides/vibe-coding-getting-started-ko.md) walks this path in Claude Code or Codex CLI in 10–15 minutes. For Cursor, Windsurf, Claude Desktop, Gemini CLI, and other MCP clients, see [MCP Client Setup](docs/guides/mcp-clients.md); from any client, asking it to call the `mem_status` tool confirms the connection.
 
 <a id="4-web-ui-optional"></a>
 ### 5. Open the Web UI (optional)

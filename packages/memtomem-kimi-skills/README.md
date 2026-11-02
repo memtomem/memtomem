@@ -2,8 +2,9 @@
 
 This is a portable Kimi Code skill bundle, not a plugin. It carries the same
 workflow contracts shipped for Claude Code and Codex CLI, including the
-session loop — `memtomem-handoff` saves a checkpoint when a session ends,
-`memtomem-brief` reads it back when the next one starts, and `memtomem-update`
+session loop — `memtomem-handoff` saves a checkpoint when a session ends and
+loads it back with `resume`, `memtomem-brief` compiles the project context and
+the open handoff IDs when the next session starts, and `memtomem-update`
 turns finished work and recent commits into durable memories (see
 [Project workflows](../../docs/guides/project-workflows.md)). Kimi loads the
 skills from its Agent Skills directory while MCP registration remains a

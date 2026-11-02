@@ -1,8 +1,9 @@
 # memtomem for Codex
 
 Project memory for Codex CLI, backed by the exact-pinned memtomem MCP server:
-`$memtomem-handoff` saves a checkpoint when a session ends, `$memtomem-brief`
-reads it back when the next one starts, and `$memtomem-update` turns finished
+`$memtomem-handoff` saves a checkpoint when a session ends and loads it back
+with `resume`, `$memtomem-brief` compiles the project context and the open
+handoff IDs when the next session starts, and `$memtomem-update` turns finished
 work and recent commits into durable memories (see
 [Project workflows](../../docs/guides/project-workflows.md)). The plugin also
 ships skills for search, date-based recall, status, explicit saves, explicit
