@@ -68,6 +68,21 @@ class TestListCmd:
         result = runner.invoke(wiki, ["list"])
         assert result.exit_code == 0
         assert "no assets" in result.output
+        assert "mm wiki skill new <name>" in result.output
+
+    @pytest.mark.parametrize(
+        ("asset_type", "singular"),
+        [("skills", "skill"), ("agents", "agent"), ("commands", "command")],
+    )
+    def test_list_empty_wiki_by_type_names_create_command(
+        self, isolated_wiki: Path, asset_type: str, singular: str
+    ) -> None:
+        runner = CliRunner()
+        runner.invoke(wiki, ["init"])
+        result = runner.invoke(wiki, ["list", "--type", asset_type])
+        assert result.exit_code == 0
+        assert "no assets" in result.output
+        assert f"mm wiki {singular} new <name>" in result.output
 
     def test_list_unborn_wiki_degrades_head_line(self, unborn_wiki: Path) -> None:
         # A clone of an empty remote still carries working-tree assets — the

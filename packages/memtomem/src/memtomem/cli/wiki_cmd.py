@@ -590,6 +590,14 @@ def list_cmd(asset_type: str | None) -> None:
     if not assets:
         scope = asset_type or "any kind"
         click.echo(f"  (no assets of {scope})")
+        if asset_type is None:
+            click.echo(
+                "  Create one with `mm wiki skill new <name>` "
+                "(`agent` and `command` work the same way)."
+            )
+        else:
+            singular = asset_type[:-1]  # "skills" -> "skill": the per-type CLI verb is singular
+            click.echo(f"  Create one with `mm wiki {singular} new <name>`.")
         return
 
     click.secho(f"Wiki: {store.root}", fg="cyan")
