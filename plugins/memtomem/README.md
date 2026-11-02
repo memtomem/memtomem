@@ -66,7 +66,8 @@ capture a conversation or coordinate concurrent workers.
 
 ## Docs
 
-- [Korean Claude Code/Codex vibe-coding quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md)
+- [Claude Code & Codex CLI plugin quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/plugin-quickstart.md)
+  ([한국어](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md))
   — initialize one store, install one plugin, and verify a memory round trip
 - [Codex integration guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/codex.md)
   — complete skill reference and advanced MCP settings
