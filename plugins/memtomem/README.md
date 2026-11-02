@@ -44,9 +44,9 @@ run. The source-checkout
 can check both registrations and preview either choice. `keep-manual` leaves a
 canonical `[mcp_servers.memtomem]` entry and the plugin cache unchanged. A
 manual entry that keeps serving needs
-`env = { MEMTOMEM_EXTRA_TOOLS = "mem_update_coverage" }`, as the bundled server
-sets it; without it `memtomem-update` stops before writing whenever a coverage
-call is due, and only `topic` mode keeps working.
+`env = { MEMTOMEM_EXTRA_TOOLS = "mem_update_coverage" }` (the bundled server
+sets it): without it `memtomem-update` stops before writing whenever a coverage
+call is due, while `topic` mode still works.
 
 For project-specific memories, keep the terminal in that project and create
 the gitignored local tier explicitly:

@@ -17,7 +17,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   section (which wins over the plugin's server), a project `.mcp.json`, or a
   Claude Code manual registration. Add the variable to that entry's `env` and
   restart the server; without it the `update` workflow stops before writing
-  whenever a coverage call is due, and only `topic` mode keeps working.
+  whenever a coverage call is due; `topic` mode still works.
   Re-running `mm init --mcp kimi` rewrites the Kimi
   entry with it. `mm init --mcp claude` (or `json`) leaves an existing Claude
   registration as it is and writes nothing, so add the variable to that
@@ -132,8 +132,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (#2970).** `mm init --mcp claude`, `--mcp json` and `--mcp kimi` registered
   the server with a command and arguments only. That server prunes
   `mem_update_coverage`, so on those registrations `update` without a mode, and
-  `update full`, stopped before writing whenever a coverage call was due, and
-  only `topic` kept working. The three targets
+  `update full`, stopped before writing whenever a coverage call was due;
+  `topic` still worked. The three targets
   now set `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`, taken from the same
   contract value the plugins' bundled launch uses: `claude mcp add` gets
   `-e MEMTOMEM_EXTRA_TOOLS=…` before the `--`, and the `.mcp.json` and Kimi

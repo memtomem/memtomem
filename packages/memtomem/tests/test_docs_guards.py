@@ -2516,10 +2516,9 @@ class TestRegistryManifest:
 # example has to be decided, not merely written.
 # ===========================================================================
 
-_HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
-_FENCE = re.compile(r"^\s*```(\S*)\s*$")
-_INLINE_CODE = re.compile(r"`([^`\n]+)`")
-_CLI_ADD = re.compile(r"\b(claude|agy) mcp add\b")
+# Whitespace, not one space: a shell continuation can fall anywhere in the
+# prefix, and joining it leaves a run of blanks.
+_CLI_ADD = re.compile(r"\b(claude|agy)\s+mcp\s+add\b")
 _PORTAL_JS = _SRC / "web" / "static" / "context-portal.js"
 _PORTAL_BRANCH = re.compile(r"runtimeName === '([a-z]+)'")
 _PORTAL_CODE = re.compile(r"<code>(.*?)</code>", re.DOTALL)
@@ -2533,6 +2532,7 @@ class _Registration(typing.NamedTuple):
     ordinal: int  # 1-based among this (source, section, kind)
     text: str
     valid: bool | None  # None: the block names memtomem but does not parse
+    lead: str  # prose between the section's heading and this registration
 
 
 def _expected_extra_tools() -> str:
@@ -2583,6 +2583,19 @@ def _memtomem_entries(node: object) -> list[dict]:
     return found
 
 
+def _json_entry_valid(entry: dict, expected: str) -> bool:
+    """The variable under the key this entry's client reads.
+
+    OpenCode's local server takes ``command`` as one argv list and its
+    variables under ``environment``; every other JSON client here takes a
+    ``command`` string and ``env``. A variable under the other client's key is
+    not read, so it does not count.
+    """
+    key = "environment" if isinstance(entry.get("command"), list) else "env"
+    variables = entry.get(key)
+    return isinstance(variables, dict) and variables.get(_EXTRA_TOOLS_KEY) == expected
+
+
 def _block_registrations(block: str, expected: str) -> list[tuple[str, bool | None]]:
     """``(kind, valid)`` for every memtomem registration in one code block."""
     stripped = block.strip()
@@ -2593,10 +2606,7 @@ def _block_registrations(block: str, expected: str) -> list[tuple[str, bool | No
             entries = _memtomem_entries(json.loads(stripped))
         except json.JSONDecodeError:
             return [("json", None)]
-        return [
-            ("json", (e.get("env") or e.get("environment") or {}).get(_EXTRA_TOOLS_KEY) == expected)
-            for e in entries
-        ]
+        return [("json", _json_entry_valid(entry, expected)) for entry in entries]
     if "[mcp_servers.memtomem]" in stripped:
         try:
             entry = tomllib.loads(stripped)["mcp_servers"]["memtomem"]
@@ -2611,43 +2621,49 @@ def _block_registrations(block: str, expected: str) -> list[tuple[str, bool | No
     return found
 
 
-def _number(source: str, items: list[tuple[str, str, bool | None, str]]) -> list[_Registration]:
+_Found = tuple[str, str, bool | None, str, str]  # section, kind, valid, text, lead
+
+
+def _number(source: str, items: list[_Found]) -> list[_Registration]:
     counts: dict[tuple[str, str], int] = {}
     out: list[_Registration] = []
-    for section, kind, valid, text in items:
+    for section, kind, valid, text, lead in items:
         counts[(section, kind)] = counts.get((section, kind), 0) + 1
-        out.append(_Registration(source, section, kind, counts[(section, kind)], text, valid))
+        ordinal = counts[(section, kind)]
+        out.append(_Registration(source, section, kind, ordinal, text, valid, lead))
     return out
 
 
-def _markdown_registrations(path: Path, expected: str) -> list[_Registration]:
-    items: list[tuple[str, str, bool | None, str]] = []
+def _markdown_registrations(text: str, source: str, expected: str) -> list[_Registration]:
+    """Registrations in one Markdown document, found by a CommonMark parser.
+
+    markdown-it-py (a declared runtime dependency) yields every code block —
+    backtick or tilde fences, indented blocks, fences inside lists and
+    blockquotes — and every inline code span, multi-line ones included, so the
+    scan has no Markdown construct of its own to get wrong.
+    """
+    from markdown_it import MarkdownIt
+
+    tokens = MarkdownIt("commonmark").parse(text)
+    items: list[_Found] = []
     section = ""
-    fence: list[str] | None = None
-    for line in _read(path).splitlines():
-        if fence is not None:
-            if _FENCE.match(line):
-                block = "\n".join(fence)
-                items.extend(
-                    (section, k, v, block) for k, v in _block_registrations(block, expected)
-                )
-                fence = None
-            else:
-                fence.append(line)
-            continue
-        if _FENCE.match(line):
-            fence = []
-            continue
-        heading = _HEADING.match(line)
-        if heading:
-            section = heading.group(1)
-            continue
-        for span in _INLINE_CODE.findall(line):
-            valid = _cli_registration(span, expected)
-            if valid is not None:
-                items.append((section, "cli", valid, span))
-    assert fence is None, f"{path}: unterminated code fence"
-    return _number(path.relative_to(_REPO_ROOT).as_posix(), items)
+    lead: list[str] = []
+    for index, token in enumerate(tokens):
+        if token.type == "heading_open":
+            section = tokens[index + 1].content
+            lead = []
+        elif token.type in ("fence", "code_block"):
+            block = token.content
+            found = _block_registrations(block, expected)
+            items.extend((section, kind, valid, block, " ".join(lead)) for kind, valid in found)
+        elif token.type == "inline" and tokens[index - 1].type != "heading_open":
+            lead.append(token.content)
+            for child in token.children or []:
+                if child.type == "code_inline":
+                    valid = _cli_registration(child.content, expected)
+                    if valid is not None:
+                        items.append((section, "cli", valid, child.content, " ".join(lead)))
+    return _number(source, items)
 
 
 def _portal_registrations(expected: str) -> list[_Registration]:
@@ -2655,11 +2671,11 @@ def _portal_registrations(expected: str) -> list[_Registration]:
 
     text = _read(_PORTAL_JS)
     branches = [(m.start(), m.group(1)) for m in _PORTAL_BRANCH.finditer(text)]
-    items: list[tuple[str, str, bool | None, str]] = []
+    items: list[_Found] = []
     for match in _PORTAL_CODE.finditer(text):
         section = next((name for pos, name in reversed(branches) if pos < match.start()), "")
         block = html.unescape(match.group(1))
-        items.extend((section, k, v, block) for k, v in _block_registrations(block, expected))
+        items.extend((section, k, v, block, "") for k, v in _block_registrations(block, expected))
     return _number(_PORTAL_JS.relative_to(_REPO_ROOT).as_posix(), items)
 
 
@@ -2672,8 +2688,9 @@ def _stdio_help_registrations(expected: str) -> list[_Registration]:
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
         _print_direct_stdio_help()
-    items = [
-        ("", k, v, buffer.getvalue()) for k, v in _block_registrations(buffer.getvalue(), expected)
+    help_text = buffer.getvalue()
+    items: list[_Found] = [
+        ("", k, v, help_text, "") for k, v in _block_registrations(help_text, expected)
     ]
     return _number("stdio-help", items)
 
@@ -2687,7 +2704,8 @@ def _all_registrations() -> list[_Registration]:
     ]
     found: list[_Registration] = []
     for path in docs:
-        found.extend(_markdown_registrations(path, expected))
+        source = path.relative_to(_REPO_ROOT).as_posix()
+        found.extend(_markdown_registrations(_read(path), source, expected))
     found.extend(_portal_registrations(expected))
     found.extend(_stdio_help_registrations(expected))
     return found
@@ -2717,24 +2735,6 @@ _REGISTRATION_EXEMPT: dict[tuple[str, str, str, int], str] = {
     (_MCP_CLIENTS, "Changing the Embedding Model", "json", 1): _SHARED,
     ("docs/guides/llm-providers.md", "MCP Config Example", "json", 1): _SHARED,
 }
-
-
-def _section_text(path: Path, heading: str) -> str:
-    """The lines under *heading* up to the next heading, fences included."""
-    lines = _read(path).splitlines()
-    in_fence = False
-    start: int | None = None
-    for index, line in enumerate(lines):
-        if _FENCE.match(line):
-            in_fence = not in_fence
-            continue
-        match = None if in_fence else _HEADING.match(line)
-        if match and start is not None:
-            return "\n".join(lines[start:index])
-        if match and match.group(1) == heading:
-            start = index + 1
-    assert start is not None, f"{path}: no heading {heading!r}"
-    return "\n".join(lines[start:])
 
 
 @pytest.fixture(scope="module")
@@ -2770,15 +2770,17 @@ class TestManualRegistrationsExposeTheUpdateTool:
         stale = sorted(set(_REGISTRATION_EXEMPT) - unexplained)
         assert not stale, f"Exemptions that match no registration lacking the variable: {stale}"
 
-    def test_shared_examples_say_when_to_keep_the_variable(self) -> None:
+    def test_shared_examples_say_when_to_keep_the_variable(
+        self, registrations: list[_Registration]
+    ) -> None:
+        """The prose a reader reads before copying the block says when to keep it."""
         sentence = f'`"{_EXTRA_TOOLS_KEY}": "{_expected_extra_tools()}"`'
-        shared = [key for key, reason in _REGISTRATION_EXEMPT.items() if reason == _SHARED]
+        shared = {key for key, reason in _REGISTRATION_EXEMPT.items() if reason == _SHARED}
         assert shared, "no shared example is exempt; this check would be vacuous"
-        for source, section, _kind, _ordinal in shared:
-            # The text before the section's JSON example, where a reader copying
-            # the block reads it (a shell fence may come first).
-            before = _section_text(_REPO_ROOT / source, section).split("```json", 1)[0]
-            assert sentence in _unwrapped(before), (source, section)
+        checked = [r for r in registrations if self._key(r) in shared]
+        assert len(checked) == len(shared)
+        for r in checked:
+            assert sentence in _unwrapped(r.lead), self._key(r)
 
     def test_discovery_is_not_vacuous(self, registrations: list[_Registration]) -> None:
         """Each source keeps finding what it found when the guard was written.
@@ -2819,6 +2821,37 @@ class TestManualRegistrationsExposeTheUpdateTool:
     )
     def test_cli_classification(self, command: str, expected: bool | None) -> None:
         assert _cli_registration(command.replace("K=", f"{_EXTRA_TOOLS_KEY}="), "V") is expected
+
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            ({"command": "memtomem-server", "env": {_EXTRA_TOOLS_KEY: "V"}}, True),
+            ({"command": "memtomem-server", "environment": {_EXTRA_TOOLS_KEY: "V"}}, False),
+            ({"command": ["uvx", "memtomem-server"], "environment": {_EXTRA_TOOLS_KEY: "V"}}, True),
+            ({"command": ["uvx", "memtomem-server"], "env": {_EXTRA_TOOLS_KEY: "V"}}, False),
+            ({"command": "memtomem-server", "env": {_EXTRA_TOOLS_KEY: "W"}}, False),
+            ({"command": "memtomem-server", "env": "x"}, False),
+        ],
+    )
+    def test_json_reads_the_key_its_client_reads(self, entry: dict, expected: bool) -> None:
+        assert _json_entry_valid(entry, "V") is expected
+
+    @pytest.mark.parametrize(
+        "markdown",
+        [
+            "# S\n\n~~~json\n" + '{"x": {"memtomem": {"command": "m"}}}' + "\n~~~\n",
+            "# S\n\n> ```json\n> " + '{"x": {"memtomem": {"command": "m"}}}' + "\n> ```\n",
+            "# S\n\n1. Step\n\n   ```bash\n   claude mcp add memtomem -- m\n   ```\n",
+            "# S\n\n    claude mcp add memtomem -- m\n",
+            "# S\n\nRun `claude mcp add\nmemtomem -- m` once.\n",
+            "# S\n\n```sh\nclaude \\\n  mcp add memtomem -- m\n```\n",
+        ],
+        ids=["tilde", "blockquote", "list", "indented", "multiline-span", "split-prefix"],
+    )
+    def test_every_markdown_code_construct_is_scanned(self, markdown: str) -> None:
+        """A registration lacking the variable is found wherever Markdown can put it."""
+        found = _markdown_registrations(markdown, "x.md", "V")
+        assert [(r.section, r.valid) for r in found] == [("S", False)]
 
     def test_a_continued_command_is_one_registration(self) -> None:
         block = (
