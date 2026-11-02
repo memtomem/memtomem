@@ -223,9 +223,64 @@ def _memo_fact(
     return known
 
 
+class IndexRoots:
+    """One run's configured index roots, each normalised at most once.
+
+    The exclusion check asks the same two questions about every root for every
+    file — its :func:`norm_dir_prefix` (ownership) and its plain resolved path
+    (root-relative exclude keys, the worktree bound) — so a walk over N files
+    and R roots resolved N×R paths (#2966). This memo answers each question the
+    first time it is asked, at the call site and in the root order that asked
+    it, and keeps only answers that were successfully computed.
+
+    A computation that raises caches nothing and propagates its own exception,
+    so the next file asks again and raises afresh. That is what keeps the
+    secret denylist fail-closed: an unusable root fails every file that reaches
+    it, exactly as it did before the memo, and no failure is stored, replayed or
+    read back as "not excluded". Nothing is computed at construction, so a walk
+    that reaches no candidate file never touches a root at all.
+
+    The lifetime is one walk, like :data:`WorktreeMemo`: a root whose symlink is
+    retargeted mid-walk is seen as it was when first asked, and the next walk
+    builds a new memo. The methods do not await, so the concurrent workers of
+    one asyncio run can share it.
+    """
+
+    __slots__ = ("dirs", "_prefixes", "_resolved")
+
+    def __init__(self, dirs: Iterable[str | Path]) -> None:
+        self.dirs: tuple[str | Path, ...] = tuple(dirs)
+        self._prefixes: dict[str | Path, str] = {}
+        self._resolved: dict[str | Path, Path] = {}
+
+    def prefixes(self) -> list[str]:
+        """``norm_dir_prefix`` of each root, in order."""
+        out: list[str] = []
+        for d in self.dirs:
+            known = self._prefixes.get(d)
+            if known is None:
+                known = norm_dir_prefix(d)
+                self._prefixes[d] = known
+            out.append(known)
+        return out
+
+    def resolve_dir(self, d: str | Path) -> Path:
+        """``Path(d).expanduser().resolve()``, remembered when it succeeds."""
+        known = self._resolved.get(d)
+        if known is None:
+            known = Path(d).expanduser().resolve()
+            self._resolved[d] = known
+        return known
+
+
+#: "Ownership was not computed by the caller" — distinct from ``None``, which
+#: is a computed answer (an orphan source no configured root owns).
+_OWNER_NOT_COMPUTED: Any = object()
+
+
 def resolve_owning_memory_dir(
     source_path: str | Path,
-    configured_dirs: Iterable[str | Path],
+    configured_dirs: Iterable[str | Path] | IndexRoots,
     *,
     root_prefixes: Sequence[str] | None = None,
 ) -> Path | None:
@@ -244,11 +299,17 @@ def resolve_owning_memory_dir(
     ``configured_dirs``, in the same order. A caller that asks for many files
     under one set of roots passes it so each root is normalised once, not once
     per file (#2964); the lookup and its first-longest tie-break are unchanged.
+    Passing an :class:`IndexRoots` as ``configured_dirs`` does the same through
+    that walk's memo (#2966).
     """
     from memtomem.storage.sqlite_helpers import norm_path
 
-    dirs = list(configured_dirs)
-    prefixes = [norm_dir_prefix(d) for d in dirs] if root_prefixes is None else root_prefixes
+    if isinstance(configured_dirs, IndexRoots):
+        dirs = list(configured_dirs.dirs)
+        prefixes = configured_dirs.prefixes() if root_prefixes is None else root_prefixes
+    else:
+        dirs = list(configured_dirs)
+        prefixes = [norm_dir_prefix(d) for d in dirs] if root_prefixes is None else root_prefixes
     target = norm_path(Path(source_path).expanduser())
     best: tuple[int, Path] | None = None
     for d, prefix in zip(dirs, prefixes, strict=True):
@@ -261,11 +322,12 @@ def resolve_owning_memory_dir(
 
 def _under_nested_worktree(
     file_path: Path,
-    memory_dirs: Iterable[str | Path],
+    memory_dirs: Iterable[str | Path] | IndexRoots,
     cache: WorktreeMemo | None = None,
     *,
     walk_root: Path | None = None,
     root_prefixes: Sequence[str] | None = None,
+    owning: Path | None = _OWNER_NOT_COMPUTED,
 ) -> bool:
     """True when a git worktree sits between ``file_path`` and its bound.
 
@@ -303,12 +365,22 @@ def _under_nested_worktree(
     would keep skipping one that was removed.
 
     ``root_prefixes`` is passed through to :func:`resolve_owning_memory_dir`.
+    ``owning`` is that function's answer when the caller already has it —
+    ``None`` included, which means "no root owns this file", not "unknown".
+    With an :class:`IndexRoots`, the owning root's resolution comes from the
+    walk's memo; a failure is still caught here like any other.
     """
-    owning = resolve_owning_memory_dir(file_path, memory_dirs, root_prefixes=root_prefixes)
+    if owning is _OWNER_NOT_COMPUTED:
+        owning = resolve_owning_memory_dir(file_path, memory_dirs, root_prefixes=root_prefixes)
+    roots = memory_dirs if isinstance(memory_dirs, IndexRoots) else None
     try:
         target = Path(file_path).expanduser().resolve()
         if owning is not None:
-            bound: Path | None = Path(owning).expanduser().resolve()
+            bound: Path | None = (
+                roots.resolve_dir(owning)
+                if roots is not None
+                else Path(owning).expanduser().resolve()
+            )
         elif walk_root is not None:
             bound = Path(walk_root).expanduser().resolve()
             if not target.is_relative_to(bound):

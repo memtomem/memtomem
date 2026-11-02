@@ -23,6 +23,7 @@ import pytest
 
 from memtomem.indexing.engine import (
     _GIT_MARKER_LIMIT,
+    IndexRoots,
     _build_exclude_spec,
     _count_files_on_disk,
     _gitdir_target,
@@ -989,8 +990,9 @@ def test_the_predicate_raises_rather_than_answering_not_excluded(
         _path_is_excluded(target, memory_dirs, spec)
 
 
+@pytest.mark.parametrize("wrap", [list, IndexRoots], ids=["plain", "memo"])
 def test_a_denylisted_file_is_not_indexable_beside_an_unresolvable_root(
-    tmp_path: Path, spec
+    tmp_path: Path, spec, wrap
 ) -> None:
     """Review round 2's reproduction: a looping unrelated root flipped ``id_rsa.md`` to indexable.
 
@@ -1010,13 +1012,14 @@ def test_a_denylisted_file_is_not_indexable_beside_an_unresolvable_root(
     secret.write_text("-----BEGIN KEY-----\n", encoding="utf-8")
 
     try:
-        answer = _path_is_excluded(secret, [looping / "a" / "root", notes], spec)
+        answer = _path_is_excluded(secret, wrap([looping / "a" / "root", notes]), spec)
     except (OSError, ValueError, RuntimeError):
         return
     assert answer is True
 
 
-def test_a_looping_secret_is_excluded_on_every_python(tmp_path: Path, spec) -> None:
+@pytest.mark.parametrize("wrap", [list, IndexRoots], ids=["plain", "memo"])
+def test_a_looping_secret_is_excluded_on_every_python(tmp_path: Path, spec, wrap) -> None:
     """A denylisted name that is a symlink loop is excluded, not raised on (#2841).
 
     3.12's ``Path.resolve`` raised here and 3.13+ return a path; either way
@@ -1030,7 +1033,7 @@ def test_a_looping_secret_is_excluded_on_every_python(tmp_path: Path, spec) -> N
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"cannot create a symlink loop here: {exc}")
 
-    assert _path_is_excluded(secret, [notes], spec) is True
+    assert _path_is_excluded(secret, wrap([notes]), spec) is True
 
 
 def test_purge_classifies_past_an_unresolvable_row_and_reports_it(unresolvable, repo: Path) -> None:

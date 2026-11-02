@@ -7,6 +7,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **Indexing a directory no longer normalises every configured root once per
+  file it checks (#2966).** The exclusion check behind every directory walk —
+  `mm index`, Web Reindex, `mem_index` — judged each file against every index
+  root, resolving each root's path two or three times per file, and ran twice
+  per walked file (discovery, then the per-file guard). With 25 roots a
+  no-change re-index of a 2,739-file root spent 9.4–11.4 s in that check
+  (about 5,600 checks, about 85 path resolutions each). A walk now works out
+  each root's two normalised forms — its ownership prefix and its resolved
+  path — the first time a file needs them and shares them between discovery
+  and the per-file guard: the check took 2.1–2.3 s, and the whole re-index
+  went from 25.0–25.5 s to 16.8–17.9 s as reported by `mm index`. On an
+  unchanged filesystem and configuration every exclusion answer is the same
+  (a root re-linked mid-walk is seen as it was when first asked, as worktree
+  facts already were), and a root that cannot be resolved still fails each
+  file that reaches it rather than being skipped: only answers that were
+  computed are remembered, never a failure.
+
 - **The memory-dir status no longer normalises every root once per file it
   counts (#2964).** `GET /api/memory-dirs/status` counts the files under each
   index root, and for each matching file the nested-worktree check looked up
