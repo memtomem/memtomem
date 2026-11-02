@@ -58,6 +58,7 @@ from memtomem.storage.sqlite_helpers import resolve_path
 from memtomem.storage.orphan_detect import RetainRule
 from memtomem.tools.entity_sync import sync_entities_for_chunks
 from memtomem.indexing.dir_stats import (  # noqa: F401
+    IndexRoots,
     WorktreeMemo,
     _GITDIR_PREFIX,
     _GIT_MARKER_LIMIT,
@@ -194,7 +195,9 @@ def _build_exclude_spec(patterns: Iterable[str]) -> pathspec.GitIgnoreSpec:
 _BUILTIN_EXCLUDE_SPEC = _build_exclude_spec((*_BUILTIN_SECRET_PATTERNS, *_BUILTIN_NOISE_PATTERNS))
 
 
-def _exclude_match_keys(file_path: Path, memory_dirs: Iterable[str | Path]) -> list[str]:
+def _exclude_match_keys(
+    file_path: Path, memory_dirs: Iterable[str | Path] | IndexRoots
+) -> list[str]:
     """Build the lowercase path strings to feed an exclude spec.
 
     Includes the absolute path and one entry per ``memory_dirs`` parent the
@@ -203,12 +206,26 @@ def _exclude_match_keys(file_path: Path, memory_dirs: Iterable[str | Path]) -> l
     from being silently bypassed when ``~/.claude/projects`` itself is the
     indexed root, or when ``index_file`` is invoked from the file watcher
     (which doesn't go through ``_discover_files``).
+
+    With an :class:`IndexRoots`, each root's resolution comes from the walk's
+    memo, still inside the ``try`` so a ``ValueError`` skips that root as before.
     """
     resolved = resolve_path(file_path)
     keys: list[str] = [resolved.as_posix().lower()]
-    for mem_dir in memory_dirs:
+    roots: IndexRoots | None = None
+    dirs: Iterable[str | Path]
+    if isinstance(memory_dirs, IndexRoots):
+        roots, dirs = memory_dirs, memory_dirs.dirs
+    else:
+        dirs = memory_dirs
+    for mem_dir in dirs:
         try:
-            rel = resolved.relative_to(Path(mem_dir).expanduser().resolve())
+            root = (
+                roots.resolve_dir(mem_dir)
+                if roots is not None
+                else Path(mem_dir).expanduser().resolve()
+            )
+            rel = resolved.relative_to(root)
         except ValueError:
             continue
         keys.append(rel.as_posix().lower())
@@ -217,7 +234,7 @@ def _exclude_match_keys(file_path: Path, memory_dirs: Iterable[str | Path]) -> l
 
 def _path_is_excluded(
     file_path: Path,
-    memory_dirs: Iterable[str | Path],
+    memory_dirs: Iterable[str | Path] | IndexRoots,
     user_spec: pathspec.GitIgnoreSpec,
     *,
     worktree_cache: WorktreeMemo | None = None,
@@ -244,6 +261,10 @@ def _path_is_excluded(
     parent's convention — a plain ``project-docs/`` root configured under
     ``~/.codex/memories`` keeps its own ``README.md`` rather than
     inheriting Codex's exclude.
+
+    ``memory_dirs`` may be a walk's :class:`IndexRoots`, so each root is
+    normalised once per walk instead of once per file (#2966); the answer, and
+    every exception, is the same as for the plain list of those roots.
     """
     # A resolution failure here raises rather than answering. "Not excluded"
     # would be fail-open for the secret denylist: an unrelated configured root
@@ -258,7 +279,9 @@ def _path_is_excluded(
     for key in _exclude_match_keys(file_path, memory_dirs):
         if _BUILTIN_EXCLUDE_SPEC.match_file(key) or user_spec.match_file(key):
             return True
-    return _under_nested_worktree(file_path, memory_dirs, worktree_cache, walk_root=walk_root)
+    return _under_nested_worktree(
+        file_path, memory_dirs, worktree_cache, walk_root=walk_root, owning=owning
+    )
 
 
 class _IndexFileBase(TypedDict):
@@ -563,7 +586,12 @@ class IndexEngine:
 
         # File-set parity: route through ``discover_indexable_files`` so the
         # preview-namespace endpoint and the indexing run see the same set.
-        files = self.discover_indexable_files(path, recursive, path_scope=path_scope)
+        # One memo of the configured roots for the whole run: discovery and the
+        # per-file guard both judge every file against every root (#2966).
+        index_roots = IndexRoots(self._config.all_index_roots())
+        files = self.discover_indexable_files(
+            path, recursive, path_scope=path_scope, index_roots=index_roots
+        )
         if not files:
             return IndexingStats(0, 0, 0, 0, 0, 0.0)
 
@@ -607,6 +635,7 @@ class IndexEngine:
                 new_source_namespace=new_source_namespace,
                 engine_serialized=False,
                 walk_root=walk_root,
+                index_roots=index_roots,
             )
             return result
 
@@ -820,6 +849,7 @@ class IndexEngine:
         recursive: bool = True,
         *,
         path_scope: PathScope = "configured",
+        index_roots: IndexRoots | None = None,
     ) -> list[Path]:
         """Enumerate files ``index_path`` would visit for ``path``.
 
@@ -837,7 +867,7 @@ class IndexEngine:
             # preview that listed it would promise a row that never lands.
             return [] if self.is_excluded(path) else [path]
         if path.is_dir():
-            return self._discover_files(path, recursive)
+            return self._discover_files(path, recursive, index_roots=index_roots)
         return []
 
     def chunk_content(self, file_path: Path, content: str, *, exempt: bool = False) -> list[Chunk]:
@@ -1015,6 +1045,7 @@ class IndexEngine:
         new_source_namespace: str | None = None,
         engine_serialized: bool = True,
         walk_root: Path | None = None,
+        index_roots: IndexRoots | None = None,
     ) -> tuple[IndexFileResult, float]:
         """Run ``_index_file`` under the L2 sidecar → L3 ``_index_lock`` pair.
 
@@ -1080,6 +1111,7 @@ class IndexEngine:
                     reassign_namespaces=reassign_namespaces,
                     new_source_namespace=new_source_namespace,
                     walk_root=walk_root,
+                    index_roots=index_roots,
                 )
             except PrivacyRejection as exc:
                 await self._hold_blocked_source(path, exc)
@@ -2027,6 +2059,7 @@ class IndexEngine:
         reassign_namespaces: bool = False,
         new_source_namespace: str | None = None,
         walk_root: Path | None = None,
+        index_roots: IndexRoots | None = None,
     ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]), and resolved_namespace (str | None) when
@@ -2097,10 +2130,17 @@ class IndexEngine:
         # ``walk_root`` is set only by a directory walk, so a walked file is
         # judged by the bound discovery used; every other caller gets the
         # enclosing-repository bound (#2486).
+        # A walk passes its memo of the roots (#2966); it is used only while
+        # the configured roots are still the ones it memoised, so a root added
+        # or removed mid-walk is honoured here exactly as without the memo.
         user_spec = self._get_user_exclude_spec()
-        if _path_is_excluded(
-            file_path, self._config.all_index_roots(), user_spec, walk_root=walk_root
-        ):
+        current_roots = self._config.all_index_roots()
+        guard_roots: list[Path] | IndexRoots = (
+            index_roots
+            if index_roots is not None and tuple(current_roots) == index_roots.dirs
+            else current_roots
+        )
+        if _path_is_excluded(file_path, guard_roots, user_spec, walk_root=walk_root):
             logger.debug("Skipping excluded file %s", file_path)
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
@@ -2955,10 +2995,13 @@ class IndexEngine:
 
             # Same bound for the per-file guard as for the walk (#2486).
             stream_walk_root: Path | None = None
+            # One memo of the roots for discovery and the per-file guard (#2966).
+            stream_index_roots: IndexRoots | None = None
             if path.is_file():
                 files = [] if self.is_excluded(path) else [path]
             elif path.is_dir():
-                files = self._discover_files(path, recursive)
+                stream_index_roots = IndexRoots(self._config.all_index_roots())
+                files = self._discover_files(path, recursive, index_roots=stream_index_roots)
                 stream_walk_root = path
             else:
                 yield {
@@ -3084,6 +3127,7 @@ class IndexEngine:
                             reassign_namespaces=reassign_namespaces,
                             new_source_namespace=new_source_namespace,
                             walk_root=stream_walk_root,
+                            index_roots=stream_index_roots,
                         )
                         return result
                     finally:
@@ -3495,10 +3539,17 @@ class IndexEngine:
             return True
         return any(part.endswith(suffix) for suffix in cls._EXCLUDED_SUFFIXES)
 
-    def _discover_files(self, directory: Path, recursive: bool) -> list[Path]:
+    def _discover_files(
+        self, directory: Path, recursive: bool, *, index_roots: IndexRoots | None = None
+    ) -> list[Path]:
         supported = self._registry.supported_extensions() & self._config.supported_extensions
         user_spec = self._get_user_exclude_spec()
-        memory_dirs = self._config.all_index_roots()
+        # Every candidate is judged against every root, so normalise each root
+        # once for this walk, not once per file (#2966). A caller that also
+        # runs the per-file guard passes its own memo so both share it.
+        memory_dirs = (
+            index_roots if index_roots is not None else IndexRoots(self._config.all_index_roots())
+        )
 
         # One memo per walk: ``_under_nested_worktree`` probes the filesystem
         # for each directory between the bound and the file, and a walk
