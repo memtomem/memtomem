@@ -9,7 +9,9 @@ import re
 import subprocess
 import sys
 import tomllib
+from html.parser import HTMLParser
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 import yaml
@@ -1690,3 +1692,88 @@ def test_project_workflows_guide_matches_the_workflow_contract() -> None:
         if len(row) == 3 and row[2] == "handoff · brief · update":
             marked.add(row[0].split("**")[1])
     assert marked == expected_marked, (marked, expected_marked)
+
+
+_SESSION_LOOP_HEADING = "## The session loop"
+
+
+def _session_loop_section(text: str) -> str:
+    start = text.index(_SESSION_LOOP_HEADING) + len(_SESSION_LOOP_HEADING)
+    end = text.find("\n## ", start)
+    return text[start:] if end < 0 else text[start:end]
+
+
+def _fences(section: str, lang: str) -> list[str]:
+    return re.findall(rf"```{lang}\n(.*?)```", section, re.DOTALL)
+
+
+def _invocations(text: str) -> set[str]:
+    """The workflow invocations a passage names, as host prefix + id + optional operation.
+
+    `/memtomem:handoff save codex-cli` and `$memtomem-handoff resume <id>` become
+    `/memtomem:handoff save` and `$memtomem-handoff resume`: the host lives in the prefix,
+    the workflow in the id, the operation in the suffix, and arguments are dropped.
+    """
+    found: set[str] = set()
+    for match in re.finditer(r"(/memtomem:|\$memtomem-)([a-z]+)(?:\s+(save|resume)\b)?", text):
+        prefix, workflow, operation = match.groups()
+        found.add(f"{prefix}{workflow}" + (f" {operation}" if operation else ""))
+    return found
+
+
+_SESSION_LOOP_SVG = "docs/assets/session-loop.svg"
+_RAW_MAIN_PREFIX = "https://raw.githubusercontent.com/memtomem/memtomem/main/"
+
+
+class _ImgCollector(HTMLParser):
+    """`(src, alt)` of every `<img>`, by exact attribute name (`data-src` is not `src`)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.images: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "img":
+            values = dict(attrs)
+            self.images.append((values.get("src") or "", values.get("alt") or ""))
+
+
+def _img_tags(section: str) -> list[tuple[str, str]]:
+    collector = _ImgCollector()
+    collector.feed(section)
+    collector.close()
+    return collector.images
+
+
+def _svg_label_text(svg: str) -> str:
+    """The text each `<text>` element displays, `<tspan>` children included, attributes not."""
+    root = ElementTree.fromstring(svg)
+    labels = root.iter("{http://www.w3.org/2000/svg}text")
+    return "\n".join("".join(label.itertext()) for label in labels)
+
+
+def test_session_loop_diagram_and_transcript_name_the_same_invocations() -> None:
+    """The session-loop picture, its alt text, and the transcript tell one story, host by host.
+
+    The picture is an SVG rather than mermaid because mermaid shows as source on GitHub
+    Mobile and on PyPI. Only the invocation set is compared, not label wording, element
+    order, or element count: a picture that moves `brief` to Claude Code, drops `resume`,
+    or swaps `brief` for `update` fails, while reordering elements, adding a host-less
+    label, or rewording one does not.
+    """
+    drawn = _invocations(_svg_label_text((_ROOT / _SESSION_LOOP_SVG).read_text(encoding="utf-8")))
+
+    for readme, expected_src in (
+        (_ROOT_README, _SESSION_LOOP_SVG),
+        (_PYPI_README, _RAW_MAIN_PREFIX + _SESSION_LOOP_SVG),
+    ):
+        section = _session_loop_section(readme.read_text(encoding="utf-8"))
+        assert not _fences(section, "mermaid"), f"{readme.name}: mermaid does not render everywhere"
+        images = _img_tags(section)
+        assert [src for src, _ in images] == [expected_src], (readme.name, images)
+        transcripts = _fences(section, "text")
+        assert len(transcripts) == 1, (readme.name, len(transcripts))
+        told = _invocations(transcripts[0])
+        assert told, f"{readme.name}: the transcript names no invocation"
+        assert drawn == told, (readme.name, drawn, told)
+        assert _invocations(images[0][1]) == told, f"{readme.name}: alt text tells another story"

@@ -25,7 +25,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ### Documentation
 
 - **The README and the PyPI page lead with the session loop.** `handoff`,
-  `brief`, and `update` open both pages, the feature list is a grouped table,
+  `brief`, and `update` open both pages with a diagram of the loop (an SVG,
+  so it renders on mobile and on PyPI too), the feature list is a grouped table,
   and the install troubleshooting is folded away. The new
   [Project workflows](docs/guides/project-workflows.md) guide documents `brief`
   and `update` for the first time, with the names each host uses, the
