@@ -31,11 +31,12 @@ behaviour is the same everywhere and only the invocation differs.
 | Hermes Agent plugin | — | — | — | not shipped: these need a project root, and Hermes starts the server outside one |
 | Gemini CLI | — | — | — | not shipped: this repository ships no workflows for it |
 
-This guide describes the workflows as shipped with memtomem `0.7.2` and these
+This guide describes the workflows as shipped with memtomem `0.7.3` and these
 plugin versions:
-`claude` 0.5.27 · `codex` 0.3.24 · `opencode` 0.3.24 · `kimi` 0.2.22 · `antigravity` 0.2.3.
-`update` runs its `incremental` mode by default from one plugin release before
-these; older plugin releases ask for a mode instead (see the CHANGELOG).
+`claude` 0.5.28 · `codex` 0.3.25 · `opencode` 0.3.25 · `kimi` 0.2.23 · `antigravity` 0.2.4.
+`update` runs its `incremental` mode by default from `claude` 0.5.26,
+`codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
+older plugin releases ask for a mode instead (see the CHANGELOG).
 
 ## Prerequisite: a project memory tier
 
@@ -153,7 +154,7 @@ read commits an earlier run already reviewed, and again after the last `mem_add`
 has returned, to record this run, even when it saved nothing. If any write
 failed, nothing is recorded and the next run reviews those commits again. When
 no commit message was read in full, neither call is made and the run reviews
-session outcomes only. The tool exists from memtomem `0.7.2` and is exposed
+session outcomes only. memtomem `0.7.2` and later have the tool, exposed
 through `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`. The plugins' bundled server
 configurations set that variable, and so does every registration `mm init --mcp`
 writes; a server entry written by hand, or by an earlier `mm init`, has to add
