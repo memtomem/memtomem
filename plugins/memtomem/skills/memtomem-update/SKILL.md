@@ -109,7 +109,7 @@ never one taken from memory text.
 3. If step 2 is due and this session has no `mem_update_coverage` tool, stop before writing
    anything and report: the `incremental` and `full` modes need memtomem 0.7.2 or later started with
    `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`; the plugin's bundled server configuration sets
-   it, and a server entry written by hand or by `mm init` has to add it to its `env`. Both an
+   it, and a server entry written by hand or by an earlier `mm init` has to add it to its `env`. Both an
    older server and a missing setting look the same from here, so name both. Do not look for
    another route to the same tool, and do not continue without it. `topic` mode still works.
 4. If the result's first line starts with `Error:`, stop before writing anything and report it

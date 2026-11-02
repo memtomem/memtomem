@@ -29,6 +29,7 @@ from memtomem.cli._index_progress import (
 from memtomem.cli._index_progress import (
     run_with_progress as _run_index_with_progress,
 )
+from memtomem._claude_plugin_contract import LAUNCH_ENV
 from memtomem.cli.init_presets import PRESETS, _VALID_PRESETS, get_preset
 from memtomem.config import validate_default_namespace_write
 from memtomem.cli.wizard import (
@@ -2505,12 +2506,16 @@ def _write_config_and_summary(
     # the wizard remain available when an editor later starts the MCP server.
     server_cmd, server_args = _mcp_server_command(profile)
 
-    # All settings come from ~/.memtomem/config.json at startup via
-    # load_config_overrides() — no env overrides are written into .mcp.json.
-    # (Previously we wrote MEMTOMEM_INDEXING__MEMORY_DIRS here as a plain
-    # string, but pydantic-settings parses list[Path] env vars as JSON arrays,
-    # which caused the MCP server to crash on startup.)
-    mcp_env: dict[str, str] = {}
+    # Settings come from ~/.memtomem/config.json at startup via
+    # load_config_overrides(), never from the registration's env: a setting
+    # written here as a plain string once crashed the server
+    # (MEMTOMEM_INDEXING__MEMORY_DIRS is a list[Path] that pydantic-settings
+    # parses as a JSON array). The env carries only what the server reads
+    # before any config is loaded — MEMTOMEM_EXTRA_TOOLS, a plain
+    # comma-separated string read at import time — so the `update` workflow's
+    # tool is exposed here as it is under the plugins' bundled launch.
+    mcp_env = _mcp_registration_env()
+    wrote_registration = False
 
     # MCP integration
     mcp_choice = state["mcp_choice"]
@@ -2520,7 +2525,11 @@ def _write_config_and_summary(
     if not _preflight_mcp_choice(mcp_choice):
         mcp_choice = 3
     if mcp_choice == 1:
-        claude_cmd = ["claude", "mcp", "add", "memtomem", "-s", "user", "--"]
+        claude_cmd = ["claude", "mcp", "add", "memtomem", "-s", "user"]
+        # `-e` is variadic; the `--` below ends it before the server command.
+        for key, value in mcp_env.items():
+            claude_cmd.extend(["-e", f"{key}={value}"])
+        claude_cmd.append("--")
         claude_cmd.append(server_cmd)
         claude_cmd.extend(server_args)
 
@@ -2535,6 +2544,7 @@ def _write_config_and_summary(
                 "Check `mm doctor --claude-mcp` before retrying, or use --mcp skip."
             ) from None
         if result.returncode == 0:
+            wrote_registration = True
             click.secho("  Claude Code: configured (user scope)", fg="green")
             _emit_plugin_coexistence_note()
         elif "already exists" in (result.stderr or "") and not _preflight_mcp_choice(1):
@@ -2546,10 +2556,12 @@ def _write_config_and_summary(
             )
     elif mcp_choice == 2:
         _write_mcp_json(server_cmd, server_args, mcp_env)
+        wrote_registration = True
         click.echo("  MCP config: wrote ./.mcp.json")
         _emit_mcp_paste_hints()
     elif mcp_choice == 4:
         kimi_path = _write_kimi_mcp_json(server_cmd, server_args, mcp_env)
+        wrote_registration = True
         click.echo(f"  Kimi Code MCP config: wrote {kimi_path}")
 
     # Summary
@@ -2590,7 +2602,12 @@ def _write_config_and_summary(
     click.echo(f"  Config:     {config_path}")
     click.echo()
     click.secho("  All settings are stored in ~/.memtomem/config.json.", dim=True)
-    click.secho("  MCP config only contains the server command (no env overrides).", dim=True)
+    if wrote_registration:
+        env_names = ", ".join(mcp_env)
+        click.secho(
+            f"  MCP config holds the server command and {env_names} (no settings).",
+            dim=True,
+        )
 
     # Warn about missing extras (fastembed for onnx, fastapi/uvicorn for web)
     # before Next Steps so users don't hit "fastembed required" or "Web UI
@@ -2772,6 +2789,18 @@ def _merge_mcp_server_entry(mcp_path: Path, server_entry: dict) -> None:
         )
     servers["memtomem"] = server_entry
     atomic_write_text(target, json.dumps(existing, indent=2), mode=mode)
+
+
+def _mcp_registration_env() -> dict[str, str]:
+    """Env written into every registration `mm init` creates.
+
+    Only ``MEMTOMEM_EXTRA_TOOLS``, from the plugins' launch contract
+    (``contract.toml [core] extra_tools``) so the two cannot drift. The rest of
+    that launch env stays out: ``MEMTOMEM_TOOL_MODE=core`` would override a
+    mode the client's environment sets, and ``ORT_DISABLE_TELEMETRY`` is
+    already defaulted by ``memtomem/__init__.py``.
+    """
+    return {"MEMTOMEM_EXTRA_TOOLS": LAUNCH_ENV["MEMTOMEM_EXTRA_TOOLS"]}
 
 
 def _mcp_server_entry(server_cmd: str, server_args: list[str], mcp_env: dict[str, str]) -> dict:

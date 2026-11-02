@@ -985,7 +985,7 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
         # does not apply to it.
         "This case makes no coverage call, so it does not need the tool and continues without it",
         "need memtomem 0.7.2 or later started with `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`",
-        "a server entry written by hand or by `mm init` has to add it to its `env`",
+        "a server entry written by hand or by an earlier `mm init` has to add it to its `env`",
         "Do not look for another route to the same tool, and do not continue without it",
         "If the result's first line starts with `Error:`, stop before writing anything",
         "In `incremental` mode, review only the commits listed there",
