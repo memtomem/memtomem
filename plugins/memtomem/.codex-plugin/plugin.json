@@ -1,6 +1,6 @@
 {
   "name": "memtomem",
-  "version": "0.3.26",
+  "version": "0.3.27",
   "description": "Search, recall, save, and index Markdown-first agent memory with memtomem",
   "author": {
     "name": "memtomem",
@@ -19,6 +19,7 @@
     "category": "Productivity",
     "capabilities": ["Read", "Write"],
     "websiteURL": "https://github.com/memtomem/memtomem",
+    "composerIcon": "./assets/icon.png",
     "defaultPrompt": [
       "Search my memories for the authentication decision.",
       "Show memories created last week.",
