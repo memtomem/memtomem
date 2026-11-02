@@ -2086,10 +2086,12 @@ class SearchPipeline:
                         stats.score_scale = "rerank"
                         stats.reranker_model = rerank_cfg.model
 
-            # Stage 3c: defensive source filter. The canonical matcher is
-            # pushed into both retrievers before their LIMIT so selective
-            # sources cannot be crowded out of the candidate pool; retain this
-            # boundary check for alternate StorageBackend implementations.
+            # Stage 3c: defensive source filter. Both retrievers already apply
+            # the canonical matcher: BM25 in SQL before its LIMIT, so selective
+            # sources cannot be crowded out of its candidate pool, and
+            # ``dense_search`` in Python over its bounded KNN pool, so a match
+            # outside that pool is not seen. Retain this boundary check for
+            # alternate StorageBackend implementations.
             if source_filter:
                 fused = [
                     r
