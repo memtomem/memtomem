@@ -82,6 +82,8 @@ class TestTagsList:
 
         assert result.exit_code == 0, result.output
         assert "No tags found." in result.output
+        assert "mm add" in result.output
+        assert "--tags" in result.output
 
 
 # --------------------------------------------------------------------------- #
