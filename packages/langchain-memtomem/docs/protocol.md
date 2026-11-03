@@ -26,7 +26,7 @@ NFD-spelled root on macOS would otherwise match no hit.
                                 tombstone: the generation a deleted item reached (kept)
   projections/<seg>/…/<key>.md  one Markdown projection per indexed item
   projections/<seg>/…/<key>.md.indexed
-                                last-indexed marker: the generation the rows were built from
+                                last-indexed marker: generation, text digest, chunk ids
   projections/<seg>/…/.<key>.md.lock
                                 memtomem's sidecar lock for the item (see Locks)
 ```
@@ -50,8 +50,10 @@ on Windows, returned one namespace's item from the other's query search. The
 lowercase base32 alphabet (`a-z2-7`) has one case, so no fold can join two
 tokens. The marker `s` keeps a raw segment from equalling an encoded one and
 keeps a token off every Windows reserved device name (`CON`, `COM2`, `LPT3`,
-…). A token is at most 240 characters (a segment or key of up to 149
-bytes of UTF-8), so `<token>.json.deleting` fits a 255-byte file name.
+…). A token is at most 200 characters (a segment or key of up to 124
+bytes of UTF-8, measured). The longest name the store writes is the temporary
+file of an atomic marker write, `.<token>.json.deleting.<8 random>.tmp`, the
+token plus 28 characters, which then fits a 255-byte file name.
 
 The records themselves are `_records.py`'s, not `MemtomemBaseStore`'s: the
 same JSON shape (`schema_version` 1, `namespace`, `key`, `value`, `index`,
@@ -61,26 +63,14 @@ scanned before the first write), memtomem's atomic write and memtomem's
 `matches_filter` for `search(filter=…)`. A record must sit at the path its
 own `namespace` and `key` encode to, or it is treated as torn.
 
-A projection file:
-
-```
----
-tags: [lcmm-gen-7]
----
-<!-- langchain-memtomem v1 ns=sdXNlcnM:sYWxpY2U key=bm90ZQ gen=7 -->
-<rendered value>
-```
-
-- The frontmatter tag is copied by memtomem's chunker onto every row of the
-  file and is refreshed on re-index even for chunks whose text did not change
-  (measured: a plain re-index of a three-chunk file kept two chunk UUIDs and
-  re-tagged all three). It is how a search hit names the generation its row
-  came from.
-- The header comment names the item and the generation the file was rendered
-  from. A file whose comment and tag disagree, or whose comment names another
-  item, is not a whole projection and is treated as missing.
-- `<rendered value>` is `render_projection(value, index)`: the whole value for
-  `index=None`, the selected fields for a list of JSON-path selectors.
+A projection file is one empty line, then `render_projection(value, index)`:
+the whole value for `index=None`, the selected fields for a list of JSON-path
+selectors. Nothing of the store's own bookkeeping is in it, so none of it is
+searchable and no value can imitate it. The empty line keeps memtomem's
+chunker from reading a value that opens with `---` as frontmatter (measured:
+such a value setting `valid_to` in the past was otherwise hidden from search).
+A record whose selectors render to empty text has no projection, the same as
+`index=False`.
 
 ## Namespaces
 
@@ -94,24 +84,34 @@ rules, `indexing/engine.py:1580`).
 
 ## Generation agreement
 
-Each item carries three generations. `put` writes the record with
-`max(existing record, .last tombstone, .deleting marker) + 1`; the projection
-header carries the generation it was rendered from; the `.indexed` marker
-carries the generation the rows were built from, written after `index_file`
-returned clean. Rows carry it as the frontmatter tag.
+Each record carries a generation: `put` writes `max(existing record, .last
+tombstone, .deleting marker) + 1`. The `.indexed` marker, written after
+`index_file` returned clean, holds the generation it was indexed from, the
+SHA-256 of the projection text, and the memtomem chunk ids the index holds for
+the file afterwards.
 
 The generation is monotonic for a key across deletion: a delete writes the
 `.last` tombstone with the generation the item reached and never removes it.
-Without it a re-created key would start again at 1, so (a) a deletion marker
-left by an interrupted delete would outrank the new record and repair would
-delete it, and (b) a row cached by another instance before the delete would
-name the new record's generation and be served for the new value.
+Without it a re-created key would start again at 1 and a deletion marker left
+by an interrupted delete would outrank the new record, so repair would delete
+it.
 
-An item is **whole** when the record exists, is not `index=False`, has no
-deletion marker, the projection header and the marker both equal the record's
-generation, and the index holds at least one row for the projection path
-(`ItemState.agrees`). Only a whole item is served by a query search, and only
-from a hit whose row tag equals the record's generation.
+An item is **whole** when the record exists and has something to rank, has no
+deletion marker, the projection file holds exactly the text the record renders
+to, the marker names the record's generation and that text's digest, and the
+index holds at least one row for the projection path (`ItemState.agrees`).
+Only a whole item is served by a query search, and only from hits whose chunk
+ids are all in the marker's set.
+
+**Why chunk ids.** memtomem keeps a chunk's id across a re-index only when its
+text is unchanged and deletes the rest (`indexing/engine.py:1334-1339`,
+ADR-0005). A row left by an interrupted `put`, a row another instance cached
+before this one rewrote the item, or a row from before a delete is either of
+the same text as the current value (its score is still right) or carries an
+id outside the current set (it is not served). An earlier version carried the
+generation as a frontmatter tag inside the projection; a value quoting
+`tags: [lcmm-gen-999]` then hid its own item, and a superscript digit made
+any search that reached the item raise.
 
 ## Locks
 
@@ -205,8 +205,8 @@ ordered decision (`_protocol.classify`); the first matching row wins.
 | 1 | `.deleting` present and (no record, or record gen ≤ marker gen) | **finish delete**: write `.last`, unlink projection and `.indexed`, `delete_by_source`, unlink record, unlink `.deleting` |
 | 2 | `.deleting` present and record gen > marker gen | the marker is superseded: unlink it, continue below |
 | 3 | no readable record, or record has `index=False` | **purge projection** if a projection, an `.indexed` marker or rows exist (unlink both files, `delete_by_source`); else nothing |
-| 4 | projection missing, unparsable, naming another item, or header gen ≠ record gen | **render and index**: write the projection from the record, guard it (surface `langchain_memtomem_repair`), `index_file`, write `.indexed` |
-| 5 | header gen = record gen, but marker gen ≠ record gen or no rows | **index**: `index_file` the projection as it is, write `.indexed` |
+| 4 | projection missing, or not exactly the text the record renders to | **render and index**: write the projection from the record, guard it (surface `langchain_memtomem_repair`), `index_file`, write `.indexed` |
+| 5 | projection current, but the marker names another generation or digest, or no rows | **index**: `index_file` the projection, write `.indexed` |
 | 6 | whole | nothing |
 
 A guard block or a failed index in rows 4–5 is logged and the item stays
@@ -228,19 +228,22 @@ the item's previous generation, "B" the one being written.
 
 Put, over an existing indexed item (gen 1 = A):
 
+Columns: the record, the text in the projection file, the marker's
+generation, whose text the rows hold.
+
 | interrupted after | record | projection | marker | rows | row | outcome |
 |---|---|---|---|---|---|---|
-| step 1 (`put.before_record`) | A gen 1 | A gen 1 | 1 | A | 6 | A, whole |
-| step 2 (`put.after_record`) | B gen 2 | A gen 1 | 1 | A | 4 | B rendered and indexed |
-| step 4b (`put.after_projection`) — **the stale-rows case** | B gen 2 | B gen 2 | 1 | A | 5 | rows rebuilt from B |
-| step 5 (`put.after_index`) | B gen 2 | B gen 2 | 1 | B | 5 | marker written |
-| step 6 (`put.after_marker`) | B gen 2 | B gen 2 | 2 | B | 6 | whole (only the cache invalidation was skipped; a fresh open has a fresh cache) |
+| step 1 (`put.before_record`) | A gen 1 | A | 1 | A | 6 | A, whole |
+| step 2 (`put.after_record`) | B gen 2 | A | 1 | A | 4 | B rendered and indexed |
+| step 4b (`put.after_projection`) — **the stale-rows case** | B gen 2 | B | 1 | A | 5 | rows rebuilt from B |
+| step 5 (`put.after_index`) | B gen 2 | B | 1 | B | 5 | marker written |
+| step 6 (`put.after_marker`) | B gen 2 | B | 2 | B | 6 | whole (only the cache invalidation was skipped; a fresh open has a fresh cache) |
 
 Put with `index=False` over an indexed item:
 
 | interrupted after | record | projection | marker | rows | row | outcome |
 |---|---|---|---|---|---|---|
-| step 2 (`put.after_record`) | B, `index=False` | A gen 1 | 1 | A | 3 | projection and rows purged |
+| step 2 (`put.after_record`) | B, `index=False` | A | 1 | A | 3 | projection and rows purged |
 | step 4a, between the two unlinks (`put.between_unlinks`) | B, `index=False` | — | 1 | A | 3 | marker and rows purged |
 
 First put of a new item interrupted after step 2 (`put.after_record`): record
@@ -295,12 +298,12 @@ filtered like any other; a query-less search returns newest first, unscored). `s
    registered project tier.
 2. **Group chunks into items.** Hits are grouped by `(namespace, key)` in
    order of first appearance; the item's score is the best final pipeline
-   score among its chunks (after rerank and the later modifiers). The item's
-   row generation is the tag its chunks carry; chunks of one item disagreeing
-   is "unknown", which never equals the record's generation.
+   score among its chunks (after rerank and the later modifiers), and the
+   chunk ids of its hits go with it. A hit counts for an item only when the
+   row's own namespace is the one the path encodes.
 3. **Judge each item** against its files: served only when the item is whole
-   and the hit's row generation equals the record's generation, and the
-   record's value passes `filter` (memtomem's `matches_filter`, the predicate
+   and every hit's chunk id is in the marker's set, and the record's value
+   passes `filter` (memtomem's `matches_filter`, the predicate
    `MemtomemBaseStore` applies too, used on both paths here: dotted keys, literal
    equality, `$eq $ne $gt $gte $lt $lte $in $nin`; a nested mapping is
    compared for equality, where LangGraph's `InMemoryStore` matches a
@@ -309,7 +312,7 @@ filtered like any other; a query-less search returns newest first, unscored). `s
    again** from the fresh rows with `record=False` (which bypasses the result
    cache); on that second pass nothing is repaired and a still-disagreeing
    item is skipped. The hit in hand is never served after a repair: its score
-   was computed over rows of another generation.
+   was computed over rows of other text.
 4. **Paginate over items.** `offset + limit` eligible items are collected
    before slicing, so a later page never underfills because an earlier item
    had many chunks.

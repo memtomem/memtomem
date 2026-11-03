@@ -223,6 +223,18 @@ boundary of `put` and `delete` against the repair that restores agreement).
      three, so an interruption after the projection write and before the
      index (same record and projection generation, stale rows) is detected
      as well as a stale projection.
+     > **Amended 2026-11-03** with the implementation PR. The projection
+     > carries no header: it is the rendered value alone, behind one empty
+     > line, so none of the store's bookkeeping is searchable and no value
+     > can imitate it (measured: a value quoting the store's generation tag
+     > hid its own item; a superscript digit in that tag made any search
+     > that reached the item raise). Projection agreement is byte equality with the text the
+     > record renders to, and the persisted last-indexed state holds that
+     > text's digest and the memtomem chunk ids indexed from it. A hit is
+     > served only when its chunk id is in that set: memtomem keeps an id
+     > across a re-index only for unchanged text (ADR-0005). B2's header and
+     > B4's "decodes each hit's header" read accordingly: the hit's item is
+     > named by its source path and checked against the row's namespace.
    - A deletion marker carries the generation it was written for. A later
      `put` under the lock settles or supersedes the marker before it writes.
      Repair gives a marker precedence only over a record of the same or an

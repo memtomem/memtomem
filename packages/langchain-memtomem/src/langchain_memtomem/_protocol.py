@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -23,9 +25,11 @@ from memtomem.constants import validate_namespace
 #: ``COM2``, ``LPT3``, …) starts with ``s``.
 SEGMENT_MARKER = "s"
 
-#: Longest encoded segment. A record file is ``<token>.json.deleting``, and
-#: common filesystems cap a name at 255 bytes.
-SEGMENT_MAX_CHARS = 240
+#: Longest encoded segment. The longest name the store writes is the
+#: temporary file of an atomic marker write, ``.<token>.json.deleting.<8>.tmp``
+#: (``tempfile.mkstemp`` inside ``atomic_write_text``): the token plus 28
+#: characters. Common filesystems cap a name at 255 bytes; 200 leaves room.
+SEGMENT_MAX_CHARS = 200
 _TOKEN_RE = re.compile(r"s[a-z2-7]+")
 
 #: ``validate_namespace``'s total-length cap.
@@ -168,65 +172,72 @@ def item_from_path(root: Path, path: Path, suffix: str) -> tuple[tuple[str, ...]
 
 # --- the projection file -----------------------------------------------------
 
-#: Frontmatter tag every chunk of a projection carries: ``lcmm-gen-<n>``. The
-#: chunker copies a file's frontmatter tags onto each of its rows and refreshes
-#: them on re-index even for chunks whose text did not change (measured on
-#: memtomem ``bb0e63a9``), so a search hit names the generation its row was
-#: indexed from.
-GENERATION_TAG_PREFIX = "lcmm-gen-"
 
-_HEADER_VERSION = "langchain-memtomem v1"
-_HEADER_RE = re.compile(
-    r"^<!-- langchain-memtomem v1 ns=(?P<ns>s[a-z2-7]+(?::s[a-z2-7]+)*) "
-    r"key=(?P<key>s[a-z2-7]+) gen=(?P<gen>\d+) -->$"
-)
-#: The header comment is on this line (1-based) of a projection file.
-_HEADER_LINE = 4
+def render_projection_file(body: str) -> str:
+    """The text of a projection: one empty line, then the rendered value.
 
-
-def render_projection_file(namespace_enc: str, key_enc: str, generation: int, body: str) -> str:
-    """The text of a projection.
-
-    Three frontmatter lines carrying the generation tag, one header comment
-    naming the item and its generation, then the rendered value.
+    Nothing of the store's own bookkeeping is in the file, so nothing of it is
+    searchable. The leading empty line keeps memtomem's chunker from reading a
+    value that starts with ``---`` as frontmatter (measured: a value opening
+    with a frontmatter block that sets ``valid_to`` in the past was otherwise
+    hidden from search).
     """
-    head = (
-        f"---\ntags: [{GENERATION_TAG_PREFIX}{generation}]\n---\n"
-        f"<!-- {_HEADER_VERSION} ns={namespace_enc} key={key_enc} gen={generation} -->\n"
+    return "\n" + body + ("" if body.endswith("\n") else "\n")
+
+
+def text_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class IndexedMarker:
+    """What the last clean index of a projection produced.
+
+    ``generation`` is the record generation it was indexed from, ``digest`` the
+    SHA-256 of the projection text, ``chunks`` the memtomem chunk ids the index
+    holds for the file afterwards. A hit is served only when its chunk id is in
+    ``chunks``: memtomem keeps a chunk's id across a re-index only when its
+    text is unchanged (ADR-0005), so an id outside the set is a row of other
+    text than the current value's.
+    """
+
+    generation: int
+    digest: str
+    chunks: frozenset[str]
+
+
+def render_indexed_marker(marker: IndexedMarker) -> str:
+    return (
+        json.dumps(
+            {
+                "generation": marker.generation,
+                "digest": marker.digest,
+                "chunks": sorted(marker.chunks),
+            },
+            sort_keys=True,
+        )
+        + "\n"
     )
-    if not body:
-        return head
-    return head + body + ("" if body.endswith("\n") else "\n")
 
 
-def parse_projection_header(text: str) -> tuple[str, str, int] | None:
-    """``(namespace_enc, key_enc, generation)`` from a projection's header, or ``None``.
-
-    The frontmatter tag must name the same generation; a file whose two
-    generations disagree was not written whole and parses as ``None``.
-    """
-    lines = text.split("\n", _HEADER_LINE)
-    if len(lines) < _HEADER_LINE:
+def read_indexed_marker(path: Path) -> IndexedMarker | None:
+    """The marker at ``path``; ``None`` when absent or not one this store wrote."""
+    try:
+        payload = json.loads(path.read_bytes().decode("utf-8"))
+        generation = payload["generation"]
+        digest = payload["digest"]
+        chunks = payload["chunks"]
+        if (
+            type(generation) is not int
+            or generation < 0
+            or not isinstance(digest, str)
+            or not isinstance(chunks, list)
+            or not all(isinstance(chunk, str) for chunk in chunks)
+        ):
+            return None
+        return IndexedMarker(generation, digest, frozenset(chunks))
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
         return None
-    match = _HEADER_RE.match(lines[_HEADER_LINE - 1])
-    if match is None:
-        return None
-    generation = int(match.group("gen"))
-    if lines[1].strip() != f"tags: [{GENERATION_TAG_PREFIX}{generation}]":
-        return None
-    return match.group("ns"), match.group("key"), generation
-
-
-def generation_from_tags(tags: tuple[str, ...]) -> int | None:
-    """The generation a row's tags name, ``None`` when absent or ambiguous."""
-    found = {
-        int(tag[len(GENERATION_TAG_PREFIX) :])
-        for tag in tags
-        if tag.startswith(GENERATION_TAG_PREFIX) and tag[len(GENERATION_TAG_PREFIX) :].isdigit()
-    }
-    if len(found) != 1:
-        return None
-    return found.pop()
 
 
 # --- markers -----------------------------------------------------------------
@@ -235,13 +246,10 @@ def generation_from_tags(tags: tuple[str, ...]) -> int | None:
 def read_marker(path: Path) -> int | None:
     """The generation a marker file holds, ``None`` when absent or unreadable."""
     try:
-        text = path.read_text(encoding="utf-8")
-    except (FileNotFoundError, NotADirectoryError):
+        text = path.read_bytes().decode("ascii").strip()
+    except (OSError, UnicodeError):
         return None
-    except OSError:
-        return None
-    text = text.strip()
-    if not text.isdigit():
+    if re.fullmatch(r"0|[1-9][0-9]*", text) is None:
         return None
     return int(text)
 
@@ -263,34 +271,39 @@ class Action(Enum):
 class ItemState:
     """What one item looks like on disk and in the index, read under its lock.
 
-    ``record_gen`` is ``None`` with no readable record; ``projection_gen`` is
-    ``None`` when the projection is missing or its header does not name this
-    item; ``projection_present`` is whether the file exists at all;
-    ``marker_gen`` and ``deleting_gen`` are the marker files' contents; ``rows``
-    is the number of index rows stored for the projection path.
+    ``record_gen`` is ``None`` with no readable record. ``index_off`` is a
+    record that has nothing to rank: ``index=False``, or selectors that render
+    to empty text. ``projection_current`` is whether the projection file holds
+    exactly the text the record renders to; ``indexed_current`` whether the
+    ``.indexed`` marker names the record's generation and that text's digest;
+    ``indexed_chunks`` the chunk ids that marker lists. ``deleting_gen`` is the
+    deletion marker's generation; ``rows`` the index rows stored for the
+    projection path.
     """
 
     record_gen: int | None
     index_off: bool
     projection_present: bool
-    projection_gen: int | None
-    marker_gen: int | None
+    projection_current: bool
+    marker_present: bool
+    indexed_current: bool
+    indexed_chunks: frozenset[str]
     deleting_gen: int | None
     rows: int
 
     @property
     def has_derived(self) -> bool:
-        return self.projection_present or self.marker_gen is not None or self.rows > 0
+        return self.projection_present or self.marker_present or self.rows > 0
 
     @property
     def agrees(self) -> bool:
-        """The three generations agree and rows exist: the item is serveable."""
+        """Record, projection, marker and rows agree: the item is serveable."""
         return (
             self.record_gen is not None
             and not self.index_off
             and self.deleting_gen is None
-            and self.projection_gen == self.record_gen
-            and self.marker_gen == self.record_gen
+            and self.projection_current
+            and self.indexed_current
             and self.rows > 0
         )
 
@@ -308,8 +321,8 @@ def classify(state: ItemState) -> Action:
         return Action.FINISH_DELETE
     if state.record_gen is None or state.index_off:
         return Action.PURGE_PROJECTION if state.has_derived else Action.NOTHING
-    if state.projection_gen != state.record_gen:
+    if not state.projection_current:
         return Action.RENDER_AND_INDEX
-    if state.marker_gen != state.record_gen or state.rows == 0:
+    if not state.indexed_current or state.rows == 0:
         return Action.INDEX
     return Action.NOTHING

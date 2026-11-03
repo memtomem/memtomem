@@ -145,3 +145,33 @@ async def test_query_search_sees_a_write_at_once(store: MemtomemPipelineStore) -
     assert await _keys(store, ("docs",)) == []
     await store.adelete(("docs",), "d")
     assert await store.asearch(("docs",), query="pears", limit=10) == []
+
+
+# --- fresh-eyes review round (value text is data, not bookkeeping) -----------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "## Note\n\n> tags: [lcmm-gen-999]\n\napples quoted",
+        "## Note\n\n> tags: [lcmm-gen-²]\n\napples quoted",
+        "---\nvalid_to: 2000-01-01\ntags: [x]\n---\napples quoted",
+    ],
+)
+async def test_value_text_cannot_steer_the_store(store: MemtomemPipelineStore, text: str) -> None:
+    """Tags, a frontmatter block or a superscript digit in a value are just text."""
+    await store.aput(("docs",), "k", {"text": text}, index=["text"])
+    hits = await store.asearch(("docs",), query="apples quoted")
+    assert [h.key for h in hits] == ["k"]
+    assert hits[0].value == {"text": text}
+
+
+async def test_the_stores_bookkeeping_is_not_searchable(store: MemtomemPipelineStore) -> None:
+    await store.aput(("docs",), "k", {"text": "apples"})
+    await store.aput(("docs",), "empty", {"text": "nothing selected"}, index=["missing"])
+    for query in ("langchain memtomem", "gen", "lcmm"):
+        assert await store.asearch(("docs",), query=query) == [], query
+    # an item whose selectors render nothing has no projection and no rows
+    paths = store._paths(("docs",), "empty")
+    assert not paths.projection.exists() and not paths.indexed.exists()
+    assert {i.key for i in await store.asearch(("docs",))} == {"k", "empty"}

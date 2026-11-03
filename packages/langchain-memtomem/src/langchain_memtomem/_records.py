@@ -97,11 +97,11 @@ class RecordStore:
 
     def _read_path(self, path: Path) -> dict[str, Any] | None:
         try:
-            text = path.read_text(encoding="utf-8")
+            data = path.read_bytes()
         except (FileNotFoundError, NotADirectoryError):
             return None
         try:
-            payload = json.loads(text)
+            payload = json.loads(data.decode("utf-8"))
             if not isinstance(payload, dict) or payload.get("schema_version") != SCHEMA_VERSION:
                 raise ValueError("schema")
             namespace = payload["namespace"]

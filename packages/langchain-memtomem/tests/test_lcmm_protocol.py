@@ -455,3 +455,48 @@ async def test_repeated_delete_keeps_a_legacy_marker_generation(root: Path) -> N
         assert state.agrees and state.record_gen == 2
     finally:
         await store.aclose()
+
+
+# --- fresh-eyes review round -------------------------------------------------
+
+
+async def test_an_undecodable_record_does_not_take_the_store_down(root: Path) -> None:
+    store = await MemtomemPipelineStore.open(root)
+    await store.aput(NS, "good", A)
+    await store.aput(NS, KEY, B)
+    broken = store._paths(NS, KEY).record
+    await store.aclose()
+    broken.write_bytes(b"\xff")
+    reopened = await MemtomemPipelineStore.open(root)
+    try:
+        assert (await reopened.aget(NS, "good")).value == A  # type: ignore[union-attr]
+        assert {i.key for i in await reopened.asearch(NS)} == {"good"}
+        assert await _keys(reopened, "bananas") == set()
+        await reopened.adelete(NS, KEY)
+        assert not broken.exists()
+    finally:
+        await reopened.aclose()
+
+
+async def test_the_longest_accepted_key_can_be_written_and_deleted(root: Path) -> None:
+    store = await MemtomemPipelineStore.open(root)
+    try:
+        longest = "x" * 124
+        await store.aput(NS, longest, A)
+        assert await _keys(store, "apples") == {longest}
+        await store.adelete(NS, longest)
+        assert await store.aget(NS, longest) is None
+        with pytest.raises(ValueError, match="at most"):
+            await store.aput(NS, longest + "x", A)
+        assert not any(store.records_dir.rglob("*.json"))
+    finally:
+        await store.aclose()
+
+
+async def test_an_explicit_ttl_is_refused_as_the_readme_says(root: Path) -> None:
+    store = await MemtomemPipelineStore.open(root)
+    try:
+        with pytest.raises(NotImplementedError):
+            await store.aput(NS, KEY, A, ttl=5)
+    finally:
+        await store.aclose()

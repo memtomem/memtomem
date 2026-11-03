@@ -47,16 +47,17 @@ from memtomem.storage.sqlite_helpers import norm_path
 
 from langchain_memtomem._protocol import (
     Action,
+    IndexedMarker,
     ItemPaths,
     ItemState,
     classify,
-    encode_segment,
-    generation_from_tags,
     item_from_path,
     item_paths,
-    parse_projection_header,
+    read_indexed_marker,
     read_marker,
+    render_indexed_marker,
     render_projection_file,
+    text_digest,
     to_memtomem_namespace,
 )
 from langchain_memtomem._records import RecordError, RecordStore
@@ -112,6 +113,17 @@ def _write_marker(path: Path, generation: int) -> None:
     atomic_write_text(path, f"{generation}\n")
 
 
+def _expected_projection(record: dict[str, Any]) -> str | None:
+    """The projection text a record renders to; ``None`` when it has nothing to rank."""
+    index = record.get("index")
+    if index is False:
+        return None
+    body = render_projection(record["value"], index)
+    if not body:
+        return None
+    return render_projection_file(body)
+
+
 def _judge(stats: IndexingStats, path: Path) -> None:
     """Raise unless the index step took. Zero indexed chunks alone is not failure."""
     if stats.total_files == 0:
@@ -139,7 +151,8 @@ class MemtomemPipelineStore(BaseStore):
     ``MEMTOMEM_*`` variables reaches these components. The project registry is
     read from them, once, to find which tier ``root`` is in.
 
-    TTLs (``ttl=``, ``refresh_ttl=``) are accepted and ignored.
+    TTLs are not supported: ``supports_ttl`` is ``False``, so LangGraph
+    refuses an explicit ``ttl=`` with ``NotImplementedError``.
     """
 
     def __init__(
@@ -332,7 +345,10 @@ class MemtomemPipelineStore(BaseStore):
             return True
         raise ValueError(f"projection write blocked by {len(guard.hits)} privacy pattern(s)")
 
-    async def _index(self, paths: ItemPaths, namespace_enc: str, text: str, bypass: bool) -> None:
+    async def _index(
+        self, paths: ItemPaths, namespace_enc: str, text: str, bypass: bool
+    ) -> list[str]:
+        """Index the projection; return the chunk ids the index holds for it afterwards."""
         comp, _ = self._require_open()
         try:
             stats = await comp.index_engine.index_file(
@@ -348,6 +364,16 @@ class MemtomemPipelineStore(BaseStore):
                 f"projection {paths.projection.name} was refused by the redaction gate"
             ) from exc
         _judge(stats, paths.projection)
+        rows = await comp.storage.list_chunks_by_source(paths.projection, limit=None)
+        return [str(row.id) for row in rows]
+
+    @staticmethod
+    def _write_indexed(paths: ItemPaths, generation: int, text: str, chunks: list[str]) -> None:
+        paths.indexed.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(
+            paths.indexed,
+            render_indexed_marker(IndexedMarker(generation, text_digest(text), frozenset(chunks))),
+        )
 
     async def _drop_projection(self, paths: ItemPaths, *, boundary: str | None = None) -> None:
         comp, _ = self._require_open()
@@ -369,7 +395,8 @@ class MemtomemPipelineStore(BaseStore):
         key = str(key)
         namespace_enc = to_memtomem_namespace(namespace)
         paths = self._paths(namespace, key)
-        body = render_projection(value, index)
+        prepared = records.prepare(namespace, key, value, index)
+        text = _expected_projection({"value": prepared.value, "index": prepared.index})
         async with self._item_lock(paths, CRUD_SIDECAR_LOCK_BUDGET_S):
             existing = records.read(namespace, key)
             generation = (
@@ -380,27 +407,26 @@ class MemtomemPipelineStore(BaseStore):
                 )
                 + 1
             )
-            text = render_projection_file(namespace_enc, encode_segment(key), generation, body)
-            # Both guards run before the first write.
+            # Both guards run before the first write: the record's in
+            # ``prepare`` above, the projection's here.
             bypass = False
-            if index is not False:
+            if text is not None:
                 bypass = self._guard_projection(text, namespace_enc, _SURFACE_PUT)
-            prepared = records.prepare(namespace, key, value, index)
             await self._steps.at("put.before_record")
             records.write(prepared, generation=generation, existing=existing)
             await self._steps.at("put.after_record")
             # The record above outranks any deletion marker (its generation is
             # newer), so the marker is superseded; repair would drop it too.
             _unlink(paths.deleting)
-            if index is False:
+            if text is None:
                 await self._drop_projection(paths, boundary="put.between_unlinks")
                 await self._steps.at("put.after_projection")
             else:
                 atomic_write_text(paths.projection, text)
                 await self._steps.at("put.after_projection")
-                await self._index(paths, namespace_enc, text, bypass)
+                chunks = await self._index(paths, namespace_enc, text, bypass)
                 await self._steps.at("put.after_index")
-                _write_marker(paths.indexed, generation)
+                self._write_indexed(paths, generation, text, chunks)
                 await self._steps.at("put.after_marker")
         comp.search_pipeline.invalidate_cache()
 
@@ -450,27 +476,33 @@ class MemtomemPipelineStore(BaseStore):
         try:
             record = records.read(namespace, key)
         except RecordError:
-            logger.warning(
-                "Unreadable record for %s; its projection is treated as stray", paths.record
-            )
+            logger.warning("Unreadable record %s; its projection is treated as stray", paths.record)
             record = None
+        expected = _expected_projection(record) if record is not None else None
         projection_present = paths.projection.is_file()
-        projection_gen: int | None = None
-        if projection_present:
+        projection_current = False
+        if projection_present and expected is not None:
             try:
-                header = parse_projection_header(paths.projection.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError):
-                header = None
-            if header is not None and header[0] == to_memtomem_namespace(namespace):
-                if header[1] == encode_segment(key):
-                    projection_gen = header[2]
+                projection_current = paths.projection.read_bytes() == expected.encode("utf-8")
+            except OSError:
+                projection_current = False
+        marker = read_indexed_marker(paths.indexed)
+        record_gen = int(record.get("generation", 0)) if record is not None else None
+        indexed_current = (
+            marker is not None
+            and expected is not None
+            and marker.generation == record_gen
+            and marker.digest == text_digest(expected)
+        )
         counts = await comp.storage.count_chunks_by_sources([paths.projection])
         state = ItemState(
-            record_gen=int(record.get("generation", 0)) if record is not None else None,
-            index_off=record is not None and record.get("index") is False,
+            record_gen=record_gen,
+            index_off=record is not None and expected is None,
             projection_present=projection_present,
-            projection_gen=projection_gen,
-            marker_gen=read_marker(paths.indexed),
+            projection_current=projection_current,
+            marker_present=paths.indexed.exists(),
+            indexed_current=indexed_current,
+            indexed_chunks=marker.chunks if marker is not None and indexed_current else frozenset(),
             deleting_gen=read_marker(paths.deleting),
             rows=sum(counts.values()),
         )
@@ -503,21 +535,14 @@ class MemtomemPipelineStore(BaseStore):
         elif action in (Action.RENDER_AND_INDEX, Action.INDEX):
             assert record is not None and state.record_gen is not None
             namespace_enc = to_memtomem_namespace(namespace)
-            if action is Action.RENDER_AND_INDEX:
-                text = render_projection_file(
-                    namespace_enc,
-                    encode_segment(key),
-                    state.record_gen,
-                    render_projection(record["value"], record.get("index")),
-                )
-            else:
-                text = paths.projection.read_text(encoding="utf-8")
+            text = _expected_projection(record)
+            assert text is not None  # index_off was classified above
             try:
                 bypass = self._guard_projection(text, namespace_enc, _SURFACE_REPAIR)
                 if action is Action.RENDER_AND_INDEX:
                     atomic_write_text(paths.projection, text)
-                await self._index(paths, namespace_enc, text, bypass)
-                _write_marker(paths.indexed, state.record_gen)
+                chunks = await self._index(paths, namespace_enc, text, bypass)
+                self._write_indexed(paths, state.record_gen, text, chunks)
             except (ValueError, StoreIndexError) as exc:
                 # The item stays unserved (no agreeing marker); the next open
                 # or the next put retries. Nothing is lost: the record is whole.
@@ -625,10 +650,11 @@ class MemtomemPipelineStore(BaseStore):
     ) -> list[tuple[tuple[tuple[str, ...], str], dict[str, Any], float]]:
         """One pipeline window, judged item by item. Each window stands alone.
 
-        A hit whose row generation is not the record's current generation, or
-        whose files disagree, is not served from the hit in hand: the item is
-        repaired under its lock if the lock is free, and the window is then
-        retrieved again from the fresh rows, bypassing the result cache.
+        A hit whose chunk id is not among the ids last indexed for the record's
+        current text, or whose files disagree, is not served from the hit in
+        hand: the item is repaired under its lock if the lock is free, and the
+        window is then retrieved again from the fresh rows, bypassing the
+        result cache.
         Items still disagreeing on the second pass are skipped.
         """
         comp, _ = self._require_open()
@@ -645,9 +671,14 @@ class MemtomemPipelineStore(BaseStore):
 
     def _group(
         self, results: list[SearchResult], prefix: tuple[str, ...]
-    ) -> list[tuple[tuple[tuple[str, ...], str], int | None, float]]:
+    ) -> list[tuple[tuple[tuple[str, ...], str], frozenset[str], float]]:
+        """Hits grouped into items, in order of first appearance.
+
+        The item is named by the hit's source path and must agree with the
+        row's own namespace; the item's chunk ids and best score go with it.
+        """
         order: list[tuple[tuple[str, ...], str]] = []
-        best: dict[tuple[tuple[str, ...], str], tuple[int | None, float]] = {}
+        best: dict[tuple[tuple[str, ...], str], tuple[set[str], float]] = {}
         for result in results:
             metadata = result.chunk.metadata
             try:
@@ -656,20 +687,19 @@ class MemtomemPipelineStore(BaseStore):
                 )
             except ValueError:
                 continue
+            if metadata.namespace != to_memtomem_namespace(namespace):
+                continue  # not a row this store wrote for that path
             if namespace[: len(prefix)] != prefix:
                 continue
-            generation = generation_from_tags(tuple(metadata.tags))
             ident = (namespace, key)
             if ident not in best:
                 order.append(ident)
-                best[ident] = (generation, result.score)
+                best[ident] = ({str(result.chunk.id)}, result.score)
             else:
-                seen_gen, seen_score = best[ident]
-                best[ident] = (
-                    seen_gen if seen_gen == generation else None,
-                    max(seen_score, result.score),
-                )
-        return [(ident, *best[ident]) for ident in order]
+                ids, seen = best[ident]
+                ids.add(str(result.chunk.id))
+                best[ident] = (ids, max(seen, result.score))
+        return [(ident, frozenset(best[ident][0]), best[ident][1]) for ident in order]
 
     async def _judge_hits(
         self,
@@ -682,10 +712,10 @@ class MemtomemPipelineStore(BaseStore):
     ) -> tuple[list[tuple[tuple[tuple[str, ...], str], dict[str, Any], float]], bool]:
         served: list[tuple[tuple[tuple[str, ...], str], dict[str, Any], float]] = []
         repaired = False
-        for (namespace, key), hit_gen, score in self._group(results, prefix):
+        for (namespace, key), hit_chunks, score in self._group(results, prefix):
             paths = self._paths(namespace, key)
             state, record = await self._read_state(namespace, key, paths)
-            if record is not None and state.agrees and hit_gen == state.record_gen:
+            if record is not None and state.agrees and hit_chunks <= state.indexed_chunks:
                 if matches_filter(record["value"], filters):
                     served.append(((namespace, key), record, score))
                     if len(served) >= need:

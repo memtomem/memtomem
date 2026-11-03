@@ -93,12 +93,14 @@ belong to the store and are refused.
   and over the projection text before anything is written. A hit refuses the
   write; `force_unsafe=True` on the store lets it through, except in a
   `project_shared` tier.
-- **Names.** Each namespace segment and the key encode to at most 240
-  characters on disk (up to 149 bytes of UTF-8 each), and a whole namespace
+- **Names.** Each namespace segment and the key encode to at most 200
+  characters on disk (up to 124 bytes of UTF-8 each), and a whole namespace
   to at most 256; a longer one is refused at `put`. The encoding is
   single-case, so names that differ only in case stay apart on macOS and
   Windows too.
-- **TTLs** (`ttl=`, `refresh_ttl=`) are accepted and ignored in this version.
+- **TTLs** are not supported in this version: an explicit `ttl=` raises
+  `NotImplementedError` (LangGraph's own check, since `supports_ttl` is
+  `False`).
 
 The full protocol — write order, repair table, interruption matrix, search
 widening, measurements — is in [`docs/protocol.md`](docs/protocol.md).

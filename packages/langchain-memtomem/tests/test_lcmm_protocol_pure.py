@@ -6,22 +6,23 @@ from pathlib import Path
 
 import pytest
 from langchain_memtomem._protocol import (
-    GENERATION_TAG_PREFIX,
     NAMESPACE_MAX_CHARS,
     SEGMENT_MARKER,
     SEGMENT_MAX_CHARS,
     Action,
+    IndexedMarker,
     ItemState,
     classify,
     decode_segment,
     encode_segment,
     from_memtomem_namespace,
-    generation_from_tags,
     item_from_path,
     item_paths,
-    parse_projection_header,
+    read_indexed_marker,
     read_marker,
+    render_indexed_marker,
     render_projection_file,
+    text_digest,
     to_memtomem_namespace,
 )
 
@@ -56,7 +57,7 @@ def test_tokens_differ_under_case_folding(left: str, right: str) -> None:
     assert a.lower() != b.lower()
 
 
-@pytest.mark.parametrize("value", ["a", "a b", "한글", "-x", "a:b", ".", "..", "x" * 140])
+@pytest.mark.parametrize("value", ["a", "a b", "한글", "-x", "a:b", ".", "..", "x" * 124])
 def test_segment_codec_round_trips_canonically(value: str) -> None:
     token = encode_segment(value)
     assert decode_segment(token) == value
@@ -69,7 +70,7 @@ def test_decode_refuses_tokens_the_encoder_never_emits(token: str) -> None:
         decode_segment(token)
 
 
-@pytest.mark.parametrize("value", ["", "a\x00b", "x" * 200])
+@pytest.mark.parametrize("value", ["", "a\x00b", "x" * 125])
 def test_encode_refuses_empty_nul_and_overlong(value: str) -> None:
     with pytest.raises(ValueError):
         encode_segment(value)
@@ -131,69 +132,66 @@ def test_path_outside_root_is_refused(tmp_path: Path) -> None:
         item_from_path(tmp_path / "a", tmp_path / "b" / "YQ" / "YQ.md", ".md")
 
 
-# --- the projection file -----------------------------------------------------
+# --- the projection file and the markers ------------------------------------
 
 
-NS_ENC = to_memtomem_namespace(("users", "alice"))
-KEY_ENC = encode_segment("note")
+def test_segment_cap_is_exactly_the_documented_byte_length() -> None:
+    assert len(encode_segment("x" * 124)) <= SEGMENT_MAX_CHARS
+    with pytest.raises(ValueError):
+        encode_segment("x" * 125)
 
 
-def test_projection_file_round_trips_its_header() -> None:
-    text = render_projection_file(NS_ENC, KEY_ENC, 7, "body line\nsecond")
-    assert text.startswith(
-        f"---\ntags: [{GENERATION_TAG_PREFIX}7]\n---\n<!-- langchain-memtomem v1 "
-    )
-    assert text.endswith("second\n")
-    assert parse_projection_header(text) == (NS_ENC, KEY_ENC, 7)
-    assert parse_projection_header(render_projection_file(NS_ENC, KEY_ENC, 1, "")) == (
-        NS_ENC,
-        KEY_ENC,
-        1,
-    )
+def test_projection_file_is_the_value_text_behind_one_empty_line() -> None:
+    assert render_projection_file("body") == "\nbody\n"
+    assert render_projection_file("body\n") == "\nbody\n"
+    # nothing of the store's bookkeeping is in the text
+    text = render_projection_file("apples")
+    for word in ("langchain", "memtomem", "gen", "lcmm"):
+        assert word not in text
 
 
-def test_a_valid_header_is_what_the_rejections_below_differ_from() -> None:
-    # Witness for the parametrized rejections: each case changes one thing.
-    assert parse_projection_header(
-        f"---\ntags: [lcmm-gen-2]\n---\n<!-- langchain-memtomem v1 ns={NS_ENC} key={KEY_ENC} gen=2 -->\n"
-    ) == (NS_ENC, KEY_ENC, 2)
+def test_indexed_marker_round_trips() -> None:
+    marker = IndexedMarker(3, text_digest("\nx\n"), frozenset({"b", "a"}))
+    text = render_indexed_marker(marker)
+    assert '"chunks": ["a", "b"]' in text
+
+
+def test_indexed_marker_reads_back(tmp_path: Path) -> None:
+    marker = IndexedMarker(3, text_digest("\nx\n"), frozenset({"id-1", "id-2"}))
+    (tmp_path / "m").write_text(render_indexed_marker(marker))
+    assert read_indexed_marker(tmp_path / "m") == marker
 
 
 @pytest.mark.parametrize(
-    "text",
+    "content",
     [
-        "",
-        "plain markdown\n",
-        # tag and comment name different generations
-        f"---\ntags: [lcmm-gen-2]\n---\n<!-- langchain-memtomem v1 ns={NS_ENC} key={KEY_ENC} gen=3 -->\n",
-        # another header version
-        f"---\ntags: [lcmm-gen-2]\n---\n<!-- langchain-memtomem v2 ns={NS_ENC} key={KEY_ENC} gen=2 -->\n",
-        # no frontmatter
-        f"<!-- langchain-memtomem v1 ns={NS_ENC} key={KEY_ENC} gen=2 -->\n",
-        # a token outside the case-safe alphabet
-        "---\ntags: [lcmm-gen-2]\n---\n<!-- langchain-memtomem v1 ns=sYQ key=a2V5 gen=2 -->\n",
+        b"",
+        b"\xff",
+        b"3\n",
+        b'{"generation": true, "digest": "d", "chunks": []}',
+        b'{"generation": -1, "digest": "d", "chunks": []}',
+        b'{"generation": 1, "digest": 5, "chunks": []}',
+        b'{"generation": 1, "digest": "d", "chunks": [1]}',
+        b'{"generation": 1, "digest": "d"}',
     ],
 )
-def test_projection_header_rejects_torn_or_foreign_files(text: str) -> None:
-    assert parse_projection_header(text) is None
-
-
-def test_generation_from_tags() -> None:
-    assert generation_from_tags(("x", "lcmm-gen-4")) == 4
-    assert generation_from_tags(()) is None
-    assert generation_from_tags(("lcmm-gen-4", "lcmm-gen-5")) is None
-    assert generation_from_tags(("lcmm-gen-x",)) is None
-
-
-# --- markers -----------------------------------------------------------------
+def test_indexed_marker_refuses_what_it_did_not_write(tmp_path: Path, content: bytes) -> None:
+    (tmp_path / "m").write_bytes(content)
+    assert read_indexed_marker(tmp_path / "m") is None
 
 
 def test_read_marker(tmp_path: Path) -> None:
     assert read_marker(tmp_path / "missing") is None
-    (tmp_path / "m").write_text("12\n")
-    assert read_marker(tmp_path / "m") == 12
-    (tmp_path / "bad").write_text("twelve")
-    assert read_marker(tmp_path / "bad") is None
+    for content, expected in (
+        (b"12\n", 12),
+        (b"0", 0),
+        (b"twelve", None),
+        (b"\xff", None),
+        ("\u00b2".encode(), None),
+        (b"012", None),
+    ):
+        (tmp_path / "m").write_bytes(content)
+        assert read_marker(tmp_path / "m") == expected, content
 
 
 # --- repair table ------------------------------------------------------------
@@ -204,8 +202,10 @@ def _state(**overrides: object) -> ItemState:
         record_gen=2,
         index_off=False,
         projection_present=True,
-        projection_gen=2,
-        marker_gen=2,
+        projection_current=True,
+        marker_present=True,
+        indexed_current=True,
+        indexed_chunks=frozenset({"c1"}),
         deleting_gen=None,
         rows=3,
     )
@@ -213,79 +213,63 @@ def _state(**overrides: object) -> ItemState:
     return ItemState(**base)  # type: ignore[arg-type]
 
 
+_NOTHING_DERIVED = dict(
+    projection_present=False,
+    projection_current=False,
+    marker_present=False,
+    indexed_current=False,
+    indexed_chunks=frozenset(),
+    rows=0,
+)
+
+
 @pytest.mark.parametrize(
     ("state", "action"),
     [
         # whole item
         (_state(), Action.NOTHING),
-        # put interrupted after the record, before the projection (gen 2 vs 1)
-        (_state(projection_gen=1, marker_gen=1), Action.RENDER_AND_INDEX),
+        # put interrupted after the record, before the projection
+        (_state(projection_current=False, indexed_current=False), Action.RENDER_AND_INDEX),
         # put interrupted after the projection, before the index (stale rows)
-        (_state(marker_gen=1), Action.INDEX),
+        (_state(indexed_current=False), Action.INDEX),
         # put interrupted after the index, before the marker
-        (_state(marker_gen=None), Action.INDEX),
+        (_state(indexed_current=False, marker_present=True), Action.INDEX),
         # index lost (index.db deleted) while the files agree
         (_state(rows=0), Action.INDEX),
-        # projection unparsable for a whole record
-        (_state(projection_gen=None), Action.RENDER_AND_INDEX),
+        # projection edited by hand for a whole record
+        (_state(projection_current=False), Action.RENDER_AND_INDEX),
         # first put interrupted after the record: nothing derived yet
+        (_state(record_gen=1, **_NOTHING_DERIVED), Action.RENDER_AND_INDEX),
+        # index=False put interrupted after the record: the old projection remains
         (
-            _state(
-                record_gen=1, projection_present=False, projection_gen=None, marker_gen=None, rows=0
-            ),
-            Action.RENDER_AND_INDEX,
+            _state(index_off=True, projection_current=False, indexed_current=False),
+            Action.PURGE_PROJECTION,
         ),
-        # index=False put interrupted after the record: projection of gen 1 remains
-        (_state(index_off=True, projection_gen=1, marker_gen=1), Action.PURGE_PROJECTION),
-        # index=False put interrupted after the projection unlink, before the marker unlink
+        # index=False put interrupted between the two unlinks
         (
-            _state(
-                index_off=True, projection_present=False, projection_gen=None, marker_gen=1, rows=0
-            ),
+            _state(index_off=True, **{**_NOTHING_DERIVED, "marker_present": True}),
             Action.PURGE_PROJECTION,
         ),
         # index=False item, whole
-        (
-            _state(
-                index_off=True,
-                projection_present=False,
-                projection_gen=None,
-                marker_gen=None,
-                rows=0,
-            ),
-            Action.NOTHING,
-        ),
+        (_state(index_off=True, **_NOTHING_DERIVED), Action.NOTHING),
         # projection without a record
-        (_state(record_gen=None), Action.PURGE_PROJECTION),
-        # nothing at all
         (
-            _state(
-                record_gen=None,
-                projection_present=False,
-                projection_gen=None,
-                marker_gen=None,
-                rows=0,
-            ),
-            Action.NOTHING,
+            _state(record_gen=None, projection_current=False, indexed_current=False),
+            Action.PURGE_PROJECTION,
         ),
+        # nothing at all
+        (_state(record_gen=None, **_NOTHING_DERIVED), Action.NOTHING),
         # delete interrupted after the marker
         (_state(deleting_gen=2), Action.FINISH_DELETE),
         # delete interrupted after the record unlink, before the marker unlink
-        (
-            _state(
-                record_gen=None,
-                deleting_gen=2,
-                projection_present=False,
-                projection_gen=None,
-                marker_gen=None,
-                rows=0,
-            ),
-            Action.FINISH_DELETE,
-        ),
+        (_state(record_gen=None, deleting_gen=2, **_NOTHING_DERIVED), Action.FINISH_DELETE),
         # delete marker superseded by a later put (record gen 3 > marker gen 2)
-        (_state(record_gen=3, projection_gen=3, marker_gen=3, deleting_gen=2), Action.NOTHING),
+        (_state(record_gen=3, deleting_gen=2), Action.NOTHING),
         # superseded marker, and the later put was itself interrupted
-        (_state(record_gen=3, deleting_gen=2), Action.RENDER_AND_INDEX),
+        (
+            _state(record_gen=3, deleting_gen=2, projection_current=False, indexed_current=False),
+            Action.RENDER_AND_INDEX,
+        ),
     ],
 )
 def test_classify(state: ItemState, action: Action) -> None:
@@ -295,6 +279,7 @@ def test_classify(state: ItemState, action: Action) -> None:
 def test_agrees_needs_every_leg() -> None:
     assert _state().agrees
     assert not _state(rows=0).agrees
-    assert not _state(marker_gen=1).agrees
+    assert not _state(indexed_current=False).agrees
+    assert not _state(projection_current=False).agrees
     assert not _state(deleting_gen=2).agrees
     assert not _state(index_off=True).agrees
