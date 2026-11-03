@@ -341,7 +341,7 @@ def test_runtime_files_import_does_not_pull_in_the_mcp_server() -> None:
     ``context._atomic``; the in-process import must stay transport-free."""
     _run(
         "from memtomem.runtime.files import CRUD_SIDECAR_LOCK_BUDGET_S, "
-        "async_file_lock, atomic_write_text, memory_lock_path\n"
+        "async_file_lock, atomic_write_text, memory_lock_path, norm_path\n"
     )
 
 

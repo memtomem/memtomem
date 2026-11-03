@@ -1,0 +1,17 @@
+{
+  "name": "memtomem",
+  "owner": {
+    "name": "memtomem",
+    "url": "https://github.com/memtomem"
+  },
+  "metadata": {
+    "description": "Markdown-first long-term memory for coding agents"
+  },
+  "plugins": [
+    {
+      "name": "memtomem",
+      "source": "packages/memtomem-cursor-plugin",
+      "description": "Search, recall, save, and index Markdown-first agent memory"
+    }
+  ]
+}

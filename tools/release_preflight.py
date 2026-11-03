@@ -722,13 +722,24 @@ def _check_hermes_package(
     return True
 
 
-def _metadata_from_wheel(path: Path) -> email.message.Message:
+def _metadata_from_wheel(
+    path: Path, *, package: str = "memtomem", dist_info: str | None = None
+) -> email.message.Message:
+    """The wheel's METADATA, after refusing an unsafe or unexpected member.
+
+    Top-level members are *package* plus a ``.dist-info`` directory; with
+    *dist_info* given, that one directory name exactly.
+    """
     with zipfile.ZipFile(path) as archive:
         for name in archive.namelist():
             parts = Path(name).parts
             if not parts or name.startswith(("/", "\\")) or ".." in parts:
                 raise ReleaseCheckError(f"wheel contains unsafe member {name!r}")
-            if parts[0] != "memtomem" and not parts[0].endswith(".dist-info"):
+            if dist_info is None:
+                expected_top = parts[0] == package or parts[0].endswith(".dist-info")
+            else:
+                expected_top = parts[0] in (package, dist_info)
+            if not expected_top:
                 raise ReleaseCheckError(f"wheel contains unexpected top-level member {name!r}")
         names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
         if len(names) != 1:
@@ -736,7 +747,9 @@ def _metadata_from_wheel(path: Path) -> email.message.Message:
         return email.message_from_bytes(archive.read(names[0]))
 
 
-def _metadata_from_sdist(path: Path) -> email.message.Message:
+def _metadata_from_sdist(
+    path: Path, *, allowlist: frozenset[str] | set[str] = _SDIST_TOP_LEVEL_ALLOWLIST
+) -> email.message.Message:
     with tarfile.open(path, mode="r:gz") as archive:
         roots: set[str] = set()
         for member in archive.getmembers():
@@ -746,7 +759,7 @@ def _metadata_from_sdist(path: Path) -> email.message.Message:
             roots.add(parts[0])
             if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
                 raise ReleaseCheckError(f"sdist contains unsupported member {member.name!r}")
-            if len(parts) > 1 and parts[1] not in _SDIST_TOP_LEVEL_ALLOWLIST:
+            if len(parts) > 1 and parts[1] not in allowlist:
                 raise ReleaseCheckError(f"sdist contains unexpected member {member.name!r}")
         if len(roots) != 1:
             raise ReleaseCheckError(f"sdist must contain exactly one root directory, found {roots}")
@@ -862,6 +875,221 @@ def validate_artifacts(dist: Path, expected: str, repo_root: Path) -> tuple[Path
         _metadata_from_sdist(sdists[0]), expected, "sdist", direct_contract, urllib3_contract
     )
     return wheels[0], sdists[0]
+
+
+# ---------------------------------------------------------------------------
+# langchain-memtomem (ADR-0042): its own tags, version line and artifacts.
+# ---------------------------------------------------------------------------
+
+_LANGCHAIN = "packages/langchain-memtomem"
+_LANGCHAIN_NAME = "langchain-memtomem"
+_LANGCHAIN_MODULE = "langchain_memtomem"
+_LANGCHAIN_PROD_TAG_RE = re.compile(r"^langchain-v(?P<version>\d+\.\d+\.\d+)$")
+# Same one-shot rule as ``_TEST_TAG_RE``: the attempt suffix is dropped, so a
+# second ``aN`` for a version TestPyPI already has is refused below.
+_LANGCHAIN_TEST_TAG_RE = re.compile(r"^test-langchain-v(?P<version>\d+\.\d+\.\d+)a\d+$")
+_LANGCHAIN_SDIST_ALLOWLIST = frozenset(
+    {
+        ".gitignore",
+        "CHANGELOG.md",
+        "LICENSE",
+        "PKG-INFO",
+        "README.md",
+        "docs",
+        "pyproject.toml",
+        "src",
+    }
+)
+# Files whose absence would make the sdist a different product: the protocol
+# document is the package's contract (ADR-0042), the rest is what PyPI shows.
+_LANGCHAIN_SDIST_REQUIRED = (
+    "CHANGELOG.md",
+    "LICENSE",
+    "PKG-INFO",
+    "README.md",
+    "docs/protocol.md",
+    "pyproject.toml",
+    f"src/{_LANGCHAIN_MODULE}/__init__.py",
+)
+_PYPI_INDEXES = {False: "https://pypi.org", True: "https://test.pypi.org"}
+
+
+def langchain_version_from_tag(tag: str) -> tuple[str, bool]:
+    """The version a ``langchain-v*`` or ``test-langchain-v*`` tag names, and if it is a test."""
+    for pattern, is_test in ((_LANGCHAIN_PROD_TAG_RE, False), (_LANGCHAIN_TEST_TAG_RE, True)):
+        match = pattern.fullmatch(tag)
+        if match:
+            return match.group("version"), is_test
+    raise ReleaseCheckError(
+        f"unsupported tag {tag!r}; expected langchain-vX.Y.Z or test-langchain-vX.Y.ZaN"
+    )
+
+
+def _requirement_clauses(value: str) -> tuple[str, frozenset[str]]:
+    """``name`` and its specifier clauses, whitespace-free and order-independent.
+
+    Hatchling writes ``memtomem>=0.7.3,<0.8`` as ``memtomem<0.8,>=0.7.3`` in
+    METADATA, so a string comparison would refuse an identical requirement.
+    Extras, markers and URLs are refused: the package declares none, and a
+    comparison that ignored them would accept a changed one.
+    """
+    compact = re.sub(r"\s+", "", value)
+    if any(char in compact for char in ";[@"):
+        raise ReleaseCheckError(f"requirement {value!r} has extras, a marker or a URL")
+    name = _requirement_name(compact)
+    rest = compact[len(name) :]
+    clauses = frozenset(rest.split(",")) if rest else frozenset()
+    if not all(re.fullmatch(r"(?:>=|<=|==|!=|~=|<|>)[0-9][0-9A-Za-z.*+!-]*", c) for c in clauses):
+        raise ReleaseCheckError(f"cannot parse requirement {value!r}")
+    return name, clauses
+
+
+def _langchain_project(repo_root: Path) -> dict[str, Any]:
+    project = _load_toml(repo_root / _LANGCHAIN / "pyproject.toml").get("project")
+    if not isinstance(project, dict) or project.get("name") != _LANGCHAIN_NAME:
+        raise ReleaseCheckError(f"{_LANGCHAIN}/pyproject.toml does not declare {_LANGCHAIN_NAME}")
+    return project
+
+
+def _langchain_requirements(repo_root: Path) -> dict[str, frozenset[str]]:
+    dependencies = _langchain_project(repo_root).get("dependencies")
+    if not isinstance(dependencies, list) or not all(isinstance(d, str) for d in dependencies):
+        raise ReleaseCheckError(f"{_LANGCHAIN}/pyproject.toml dependencies must be strings")
+    parsed = [_requirement_clauses(item) for item in dependencies]
+    by_name = dict(parsed)
+    if len(by_name) != len(parsed):
+        raise ReleaseCheckError(f"{_LANGCHAIN}/pyproject.toml names a dependency twice")
+    return by_name
+
+
+def langchain_core_bounds(repo_root: Path) -> tuple[str, str]:
+    """The ``memtomem`` floor and upper bound, which must be written ``>=X.Y.Z,<A.B``."""
+    clauses = _langchain_requirements(repo_root).get("memtomem")
+    if clauses is None:
+        raise ReleaseCheckError(f"{_LANGCHAIN}/pyproject.toml does not depend on memtomem")
+    floors = [c[2:] for c in clauses if c.startswith(">=")]
+    uppers = [c[1:] for c in clauses if c.startswith("<") and not c.startswith("<=")]
+    if (
+        len(clauses) != 2
+        or len(floors) != 1
+        or len(uppers) != 1
+        or not re.fullmatch(r"\d+\.\d+\.\d+", floors[0])
+        or not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", uppers[0])
+    ):
+        raise ReleaseCheckError(
+            f"the memtomem requirement must be exactly '>=X.Y.Z,<A.B'; found {sorted(clauses)}"
+        )
+    return floors[0], uppers[0]
+
+
+def validate_langchain_contract(tag: str, repo_root: Path) -> tuple[str, str]:
+    """Refuse a tag whose version the package does not carry everywhere; return (version, floor)."""
+    version, _ = langchain_version_from_tag(tag)
+    declared = _langchain_project(repo_root).get("version")
+    if declared != version:
+        raise ReleaseCheckError(f"tag {tag!r} does not match {_LANGCHAIN} version {declared!r}")
+    init = (repo_root / _LANGCHAIN / "src" / _LANGCHAIN_MODULE / "__init__.py").read_text(
+        encoding="utf-8"
+    )
+    runtime = re.findall(r'^__version__ = "([^"\n]*)"$', init, re.MULTILINE)
+    if runtime != [version]:
+        raise ReleaseCheckError(f"{_LANGCHAIN_MODULE}.__version__ is {runtime!r}, not {version!r}")
+    lock_rows = [
+        row
+        for row in _load_toml(repo_root / "uv.lock").get("package", [])
+        if isinstance(row, dict)
+        and row.get("name") == _LANGCHAIN_NAME
+        and row.get("source") == {"editable": _LANGCHAIN}
+    ]
+    if [row.get("version") for row in lock_rows] != [version]:
+        raise ReleaseCheckError(
+            f"uv.lock must hold one editable {_LANGCHAIN_NAME} at {version}; run `uv lock`"
+        )
+    changelog = (repo_root / _LANGCHAIN / "CHANGELOG.md").read_text(encoding="utf-8")
+    heading = rf"^## \[{re.escape(version)}\] — \d{{4}}-\d{{2}}-\d{{2}}$"
+    if len(re.findall(heading, changelog, re.MULTILINE)) != 1:
+        raise ReleaseCheckError(
+            f"{_LANGCHAIN}/CHANGELOG.md needs one '## [{version}] — YYYY-MM-DD' heading"
+        )
+    floor, upper = langchain_core_bounds(repo_root)
+    core = project_version(repo_root)
+    # CI installs this wheel beside the checkout's own core wheel, so a floor
+    # above that version, or an upper bound at or below it, was never tested.
+    if not _version_tuple(floor) <= _version_tuple(core) < _version_tuple(upper):
+        raise ReleaseCheckError(
+            f"memtomem>={floor},<{upper} does not admit the checkout's memtomem {core}"
+        )
+    return version, floor
+
+
+def _require_unpublished(name: str, version: str, *, test: bool, fetch_json: _FetchJSON) -> None:
+    """Refuse a version the index already has: ``skip-existing`` would make it a silent no-op."""
+    base = _PYPI_INDEXES[test]
+    url = f"{base}/pypi/{name}/{urllib.parse.quote(version, safe='')}/json"
+    status, _ = fetch_json(url, 10)
+    if status == 200:
+        raise ReleaseCheckError(
+            f"{name}=={version} is already on {base}; publishing would upload nothing. "
+            "Release a new version instead of re-tagging"
+        )
+    if status != 404:
+        raise ReleaseCheckError(
+            f"cannot confirm {name}=={version} is unpublished: HTTP {status} at {url}"
+        )
+
+
+def validate_langchain_pypi(
+    tag: str, repo_root: Path, *, fetch_json: _FetchJSON | None = None
+) -> str:
+    """Require the memtomem floor on PyPI and the tag's version unused on its target index."""
+    fetch_json = fetch_json or _request_json
+    version, test = langchain_version_from_tag(tag)
+    floor, _ = langchain_core_bounds(repo_root)
+    try:
+        _probe_pypi_release(floor, fetch_json=fetch_json)
+    except ReleaseCheckError as exc:
+        raise ReleaseCheckError(
+            f"{_LANGCHAIN_NAME} cannot be published while its floor memtomem=={floor} is "
+            f"unverified: {exc}. Publish memtomem {floor} first and confirm propagation"
+        ) from exc
+    _require_unpublished(_LANGCHAIN_NAME, version, test=test, fetch_json=fetch_json)
+    return floor
+
+
+def validate_langchain_artifacts(dist: Path, version: str, repo_root: Path) -> tuple[Path, Path]:
+    """Exactly this version's wheel and sdist, nothing else in *dist*, metadata = pyproject."""
+    stem = f"{_LANGCHAIN_MODULE}-{version}"
+    wheel, sdist = dist / f"{stem}-py3-none-any.whl", dist / f"{stem}.tar.gz"
+    # The publish action uploads the whole directory: a stray file is a stray
+    # upload. ``uv build --out-dir`` writes a one-line ``.gitignore`` there.
+    present = sorted(path.name for path in dist.iterdir() if path.name != ".gitignore")
+    if present != sorted([wheel.name, sdist.name]):
+        raise ReleaseCheckError(
+            f"{dist} must hold exactly {wheel.name} and {sdist.name}; found {present}"
+        )
+    expected = _langchain_requirements(repo_root)
+    requires_python = _langchain_project(repo_root).get("requires-python")
+    wheel_meta = _metadata_from_wheel(
+        wheel, package=_LANGCHAIN_MODULE, dist_info=f"{stem}.dist-info"
+    )
+    sdist_meta = _metadata_from_sdist(sdist, allowlist=_LANGCHAIN_SDIST_ALLOWLIST)
+    for label, message in (("wheel", wheel_meta), ("sdist", sdist_meta)):
+        if message.get("Name") != _LANGCHAIN_NAME or message.get("Version") != version:
+            raise ReleaseCheckError(
+                f"{label} metadata is {message.get('Name')!r} {message.get('Version')!r}, "
+                f"not {_LANGCHAIN_NAME} {version}"
+            )
+        if message.get("Requires-Python") != requires_python:
+            raise ReleaseCheckError(f"{label} Requires-Python differs from pyproject")
+        found = [_requirement_clauses(value) for value in message.get_all("Requires-Dist", [])]
+        if len(dict(found)) != len(found) or dict(found) != expected:
+            raise ReleaseCheckError(f"{label} Requires-Dist {found!r} differs from pyproject")
+    with tarfile.open(sdist, mode="r:gz") as archive:
+        names = {member.name for member in archive.getmembers() if member.isfile()}
+    missing = [rel for rel in _LANGCHAIN_SDIST_REQUIRED if f"{stem}/{rel}" not in names]
+    if missing:
+        raise ReleaseCheckError(f"{sdist.name} lacks {missing}")
+    return wheel, sdist
 
 
 def _request_runs(repository: str, sha: str, token: str) -> list[dict[str, Any]]:
@@ -1012,6 +1240,20 @@ def _build_parser() -> argparse.ArgumentParser:
     claude_plugin.add_argument("--tag", required=True)
     claude_plugin.add_argument("--repo-root", type=Path, default=Path.cwd())
 
+    langchain_contract = subparsers.add_parser("langchain-contract", allow_abbrev=False)
+    langchain_contract.add_argument("--tag", required=True)
+    langchain_contract.add_argument("--repo-root", type=Path, default=Path.cwd())
+    langchain_contract.add_argument("--github-output")
+
+    langchain_pypi = subparsers.add_parser("langchain-pypi", allow_abbrev=False)
+    langchain_pypi.add_argument("--tag", required=True)
+    langchain_pypi.add_argument("--repo-root", type=Path, default=Path.cwd())
+
+    langchain_artifacts = subparsers.add_parser("langchain-artifacts", allow_abbrev=False)
+    langchain_artifacts.add_argument("--dist", type=Path, required=True)
+    langchain_artifacts.add_argument("--version", required=True)
+    langchain_artifacts.add_argument("--repo-root", type=Path, default=Path.cwd())
+
     wait_ci = subparsers.add_parser("wait-ci")
     wait_ci.add_argument("--repository", required=True)
     wait_ci.add_argument("--sha", required=True)
@@ -1051,6 +1293,19 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "opencode-pypi":
             version = validate_opencode_pypi(args.repo_root.resolve())
             print(f"OpenCode core pin memtomem=={version} is available on PyPI")
+        elif args.command == "langchain-contract":
+            version, floor = validate_langchain_contract(args.tag, args.repo_root.resolve())
+            _write_github_output(args.github_output, "version", version)
+            _write_github_output(args.github_output, "floor", floor)
+            print(version)
+        elif args.command == "langchain-pypi":
+            floor = validate_langchain_pypi(args.tag, args.repo_root.resolve())
+            print(f"memtomem=={floor} is on PyPI and the tag's version is unpublished")
+        elif args.command == "langchain-artifacts":
+            wheel, sdist = validate_langchain_artifacts(
+                args.dist.resolve(), args.version, args.repo_root.resolve()
+            )
+            print(f"validated {wheel.name} and {sdist.name}")
         elif args.command == "claude-plugin":
             version = validate_claude_plugin(args.tag, args.repo_root.resolve())
             print(f"Claude plugin {version} matches its tag and its core pin is on PyPI")

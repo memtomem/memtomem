@@ -1643,6 +1643,7 @@ _PRIOR_RELEASE_MENTIONS: tuple[tuple[str, str | None, str], ...] = (
             "plugins/memtomem/skills/memtomem-update/SKILL.md",
             "packages/memtomem-kimi-skills/skills/memtomem-update/SKILL.md",
             "packages/memtomem-antigravity-plugin/skills/memtomem-update/SKILL.md",
+            "packages/memtomem-cursor-plugin/skills/memtomem-update/SKILL.md",
         )
     ),
 )
@@ -1756,6 +1757,7 @@ class TestRegistryAndInstallDocs:
             _REPO_ROOT / "packages" / "memtomem-claude-automation-plugin" / "README.md",
             _REPO_ROOT / "packages" / "opencode-memtomem" / "README.md",
             _REPO_ROOT / "packages" / "memtomem-antigravity-plugin" / "README.md",
+            _REPO_ROOT / "packages" / "memtomem-cursor-plugin" / "README.md",
             _REPO_ROOT / "examples" / "onboarding" / "retry-policy" / "README.md",
             # Workflow sources and every rendered skill: the renderer copies a
             # stale pin verbatim, so its own check passes on a missed bump.

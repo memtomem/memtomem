@@ -1,0 +1,173 @@
+name: Publish langchain-memtomem
+
+# Publishes packages/langchain-memtomem to PyPI (or TestPyPI for a dry run)
+# through its own PyPI Trusted Publisher (OIDC). No API tokens are stored.
+#
+# Tag conventions (disjoint from release.yml's v* / test-v*):
+#   langchain-v0.1.0         → PyPI      (production)
+#   test-langchain-v0.1.0a1  → TestPyPI  (dry run)
+#
+# The `pypi-langchain` environment admits only these two tag patterns and
+# needs a reviewer. Its publisher on pypi.org and test.pypi.org is bound to
+# this workflow's file name and that environment, so renaming either breaks
+# publishing until the publisher is updated.
+#
+# Order:
+#   1. the memtomem release named by the package's floor is on PyPI (the
+#      `langchain-pypi` step refuses otherwise)
+#   2. the version PR is merged: pyproject version, `__version__`, uv.lock and
+#      a dated `## [X.Y.Z] — YYYY-MM-DD` heading in the package CHANGELOG
+#   3. the main-push CI run on that commit is green
+#   4. test-langchain-v<X>a1 → TestPyPI → smoke;  langchain-v<X> → PyPI
+#
+# The dry run is ONE SHOT PER VERSION: the attempt suffix is dropped, so
+# `a2` names the same version, and the preflight refuses a version the target
+# index already has (a second upload would be a silent no-op). A publish job
+# that failed half-way is finished with "Re-run failed jobs", which keeps the
+# passed preflight; `skip-existing` then lets the missing file go up.
+#
+# The preflight installs the built wheel and sdist next to exactly the
+# floor's memtomem from PyPI, not the newest one: that is the oldest core a
+# user can get, and the one the floor promises works.
+
+on:
+  push:
+    tags:
+      - "langchain-v[0-9]*"        # production
+      - "test-langchain-v[0-9]*"   # TestPyPI dry run
+
+# Keep in lockstep with ci.yml, release.yml and release-sbom.yml
+# (test_uv_toolchain_pin_matches_ci_release_and_sbom_workflows).
+env:
+  UV_VERSION: "0.11.16"
+
+jobs:
+  preflight:
+    name: langchain-memtomem release preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Validate tag, package version, lock, changelog and memtomem bounds
+        id: contract
+        run: >-
+          uv run --no-project --python 3.12 python tools/release_preflight.py langchain-contract
+          --tag "$GITHUB_REF_NAME"
+          --repo-root .
+          --github-output "$GITHUB_OUTPUT"
+      - name: Require the tag commit to be on main
+        id: on-main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      # Every gate below is one command, so test_release_preflight_langchain.py
+      # can parse it with the script's own parser instead of trusting a substring.
+      - name: Require the exact main-push CI run to succeed
+        id: wait-ci
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          uv run --no-project --python 3.12 python tools/release_preflight.py wait-ci
+          --repository "$GITHUB_REPOSITORY"
+          --sha "$GITHUB_SHA"
+          --timeout-seconds 2400
+          --interval-seconds 15
+      - name: Require uv.lock to match the manifests
+        id: lock-check
+        run: uv lock --check
+      - name: Require the memtomem floor on PyPI and the version unpublished
+        id: pypi
+        run: >-
+          uv run --no-project --python 3.12 python tools/release_preflight.py langchain-pypi
+          --tag "$GITHUB_REF_NAME"
+          --repo-root .
+      - name: Build preflight distributions
+        id: build
+        run: uv build packages/langchain-memtomem --out-dir preflight-dist
+      - name: Validate wheel and sdist metadata
+        id: artifacts
+        run: >-
+          uv run --no-project --python 3.12 python tools/release_preflight.py langchain-artifacts
+          --dist preflight-dist
+          --version "${{ steps.contract.outputs.version }}"
+          --repo-root .
+      # Exactly the floor's memtomem from PyPI, not the newest: the oldest core
+      # a user can get, and the one the floor promises works.
+      - name: Install the wheel beside the floor's memtomem and smoke it
+        id: smoke-wheel
+        run: >-
+          uv run --no-project --python 3.12 python tools/langchain_smoke.py install
+          --artifact "preflight-dist/langchain_memtomem-${{ steps.contract.outputs.version }}-py3-none-any.whl"
+          --core "memtomem==${{ steps.contract.outputs.floor }}"
+          --venv "$RUNNER_TEMP/lcmm-wheel"
+          --expect-version "${{ steps.contract.outputs.version }}"
+          --expect-core "${{ steps.contract.outputs.floor }}"
+      - name: Install the sdist beside the floor's memtomem and smoke it
+        id: smoke-sdist
+        run: >-
+          uv run --no-project --python 3.12 python tools/langchain_smoke.py install
+          --artifact "preflight-dist/langchain_memtomem-${{ steps.contract.outputs.version }}.tar.gz"
+          --core "memtomem==${{ steps.contract.outputs.floor }}"
+          --venv "$RUNNER_TEMP/lcmm-sdist"
+          --expect-version "${{ steps.contract.outputs.version }}"
+          --expect-core "${{ steps.contract.outputs.floor }}"
+
+  publish:
+    name: Build and publish to ${{ startsWith(github.ref_name, 'test-') && 'TestPyPI' || 'PyPI' }}
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi-langchain
+      url: ${{ startsWith(github.ref_name, 'test-') && 'https://test.pypi.org/p/langchain-memtomem' || 'https://pypi.org/p/langchain-memtomem' }}
+    permissions:
+      id-token: write   # required for OIDC token
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      # Rebuilt here rather than passed from preflight: no artifact crosses
+      # jobs, so what is uploaded is what these two steps validate.
+      - name: Build distribution
+        id: build
+        run: uv build packages/langchain-memtomem --out-dir dist
+      - name: Revalidate the tag contract
+        id: contract
+        run: >-
+          uv run --no-project --python 3.12 python tools/release_preflight.py langchain-contract
+          --tag "$GITHUB_REF_NAME"
+          --repo-root .
+          --github-output "$GITHUB_OUTPUT"
+      - name: Revalidate publish artifacts
+        id: artifacts
+        run: >-
+          uv run --no-project --python 3.12 python tools/release_preflight.py langchain-artifacts
+          --dist dist
+          --version "${{ steps.contract.outputs.version }}"
+          --repo-root .
+      - name: Publish to PyPI
+        if: ${{ !startsWith(github.ref_name, 'test-') }}
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+      - name: Publish to TestPyPI
+        if: ${{ startsWith(github.ref_name, 'test-') }}
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+          skip-existing: true
