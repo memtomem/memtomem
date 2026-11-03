@@ -374,8 +374,8 @@ or at once when one of its hits disagrees with the files (step 3 above).
 The components are built from `Mem2MemConfig.without_environment(...)` with
 `storage.sqlite_path = <root>/index.db`, `indexing.memory_dirs =
 [<root>/projections]`, `search.system_namespace_prefixes = []`, the caller's
-`config` sections (`embedding`, `search`, `rerank`, `chunking`, …; `storage`
-and `indexing` are refused) and `create_components(config,
+`config` sections (`embedding`, `search`, `rerank`, …; `storage` and
+`indexing` are refused; an undefined top-level section is ignored) and `create_components(config,
 load_ambient_config=False)`. No watcher runs. Measured on a scratch `HOME`
 with `config.json`, a `config.d` fragment and `MEMTOMEM_STORAGE__SQLITE_PATH`
 all pointing elsewhere: the store's index is under root and none of the
@@ -398,7 +398,9 @@ What the store still reads or writes outside root, by design:
   memtomem.
 - **The schema peer check** (`storage/schema_peers.py`), on a schema
   migration of an existing `index.db`, enumerates memtomem's runtime instance
-  registry; a fresh `index.db` takes no migration.
+  registry. That takes the registry's lock file in memtomem's runtime directory
+  (`/tmp/memtomem-<uid>` on POSIX, created if missing), and it removes aged
+  stale entries from every registry root it reads. A fresh `index.db` takes no migration.
 
 ## Measurements
 
