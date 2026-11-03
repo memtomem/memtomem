@@ -44,6 +44,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `get_tokenizer` are removed: pass `tokenizer=` to `tokenize_for_fts`, or call
   `set_fts_tokenizer` on the backend.
 
+- **The Hermes plugin's server no longer loads a `.env` file at startup.**
+  Its bundled server entry sets `PYTHON_DOTENV_DISABLED=1`, because Hermes's plugin
+  catalog rules say a plugin never reads `.env` files directly, and memtomem
+  otherwise parsed the nearest one at startup (normally `~/.env`) and applied
+  its `MEMTOMEM_*` keys. Under Hermes, configure memtomem through
+  `~/.memtomem/config.json`, or through your own `mcp_servers.memtomem` entry
+  with the settings under `env:`; the README's example for that entry now
+  carries the full launch environment, including the flag (quoted: Hermes
+  refuses a numeric `1`) and the `MEMTOMEM_EXTRA_TOOLS` it was missing.
+  Other clients are unchanged. `hermes` 0.1.15, `hermes_memory` 0.1.2
+  (README wording only).
+
 ### Fixed
 
 - **The Web UI's health watchdog Run Now button keeps its translated label after

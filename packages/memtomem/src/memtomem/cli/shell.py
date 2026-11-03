@@ -7,6 +7,8 @@ import shlex
 
 import click
 
+from memtomem.tools.temporal import format_source_name
+
 
 @click.command()
 def shell() -> None:
@@ -166,7 +168,7 @@ async def _cmd_ask(comp, args: list[str]) -> None:
             if r.chunk.metadata.heading_hierarchy
             else ""
         )
-        source = str(r.chunk.metadata.source_file).split("/")[-1]
+        source = format_source_name(r.chunk.metadata.source_file)
         label = heading or source
 
         click.echo(f"  {click.style(f'[{r.rank}]', fg='green')} {label} ({r.score:.2f})")
@@ -321,7 +323,7 @@ async def _cmd_recall(comp, args: list[str]) -> None:
 
     click.secho(f"Recent memories (last {days} days):", fg="cyan")
     for c in chunks:
-        src = str(c.metadata.source_file).split("/")[-1]
+        src = format_source_name(c.metadata.source_file)
         snippet = c.content[:80].replace("\n", " ")
         click.echo(f"  {click.style(src, fg='bright_black')} {snippet}")
 

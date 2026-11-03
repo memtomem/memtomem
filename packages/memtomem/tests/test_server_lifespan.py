@@ -507,6 +507,27 @@ def test_dotenv_honours_python_dotenv_disabled(dotenv_file, flag: str, loaded: b
 
 
 @pytest.mark.real_dotenv
+def test_dotenv_disabled_neither_searches_nor_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flag stops the loader before it looks for a file, not after reading one.
+
+    The Hermes plugin sets it because the catalog does not list a plugin that reads
+    `.env` files; a check placed after ``find_dotenv()`` would still apply nothing,
+    which ``test_dotenv_honours_python_dotenv_disabled`` cannot tell apart.
+    """
+    import dotenv
+    import dotenv.main
+
+    def _called(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the .env loader ran with PYTHON_DOTENV_DISABLED set")
+
+    monkeypatch.setattr(dotenv, "find_dotenv", _called)
+    monkeypatch.setattr(dotenv.main, "DotEnv", _called)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+
+    assert lifespan_mod._load_dotenv() == []
+
+
+@pytest.mark.real_dotenv
 def test_dotenv_missing_file_is_a_no_op(dotenv_file) -> None:
     before = dict(os.environ)
 

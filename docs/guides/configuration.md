@@ -25,7 +25,8 @@ variable, and it can override an exported upper-case one. Every other key is lef
 logged once at INFO, so the unprefixed variables above have no effect in
 `.env`: set them in the real environment or in your MCP client's `env` block
 ([MCP client setup](mcp-clients.md#11-environment-variable-overrides)).
-`PYTHON_DOTENV_DISABLED=1` turns the file off.
+`PYTHON_DOTENV_DISABLED=1` turns the file off; the Hermes plugin's bundled
+server entry sets it, so under Hermes a `.env` does not configure that server.
 
 ```bash
 # Example: switch from Ollama to OpenAI

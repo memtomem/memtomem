@@ -9,6 +9,7 @@ from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.tools._id_access import caller_boundary, in_boundary, resolve_chunk
+from memtomem.tools.temporal import format_source_name
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ async def mem_reflect(
         lines.append("### Frequently Accessed Topics")
         for row in top_topics:
             hierarchy = row["hierarchy"]
-            topic = " > ".join(hierarchy) if hierarchy else row["source_file"].split("/")[-1]
+            topic = " > ".join(hierarchy) if hierarchy else format_source_name(row["source_file"])
             lines.append(f"  {row['total_access']}x — {topic}")
         lines.append("")
 

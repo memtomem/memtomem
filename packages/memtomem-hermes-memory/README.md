@@ -96,7 +96,8 @@ check that server's transport or host: when the entry Hermes uses points at a re
 each recall call sends the message there, whatever that server's search configuration.
 
 What that call reaches is whatever the entry's memtomem configuration reaches: its store,
-the `.env` memtomem loads, and the network paths that configuration enables. The memtomem
+any `.env` that entry lets memtomem load (the memtomem plugin's own entry loads none), and
+the network paths that configuration enables. The memtomem
 plugin's README lists those under "Network"
 ([packages/memtomem-hermes-plugin/README.md](../memtomem-hermes-plugin/README.md#network));
 read it at the same release commit you installed.

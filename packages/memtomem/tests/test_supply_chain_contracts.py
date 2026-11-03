@@ -313,6 +313,8 @@ def test_hermes_plugin_matches_contract() -> None:
                     "MEMTOMEM_TOOL_MODE": core["tool_mode"],
                     "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage",
                     "ORT_DISABLE_TELEMETRY": "1",
+                    # Hermes only: its catalog rules forbid a plugin reading `.env` files.
+                    "PYTHON_DOTENV_DISABLED": "1",
                 },
             }
         },
@@ -331,6 +333,22 @@ def test_hermes_plugin_matches_contract() -> None:
     # sets it as `command:` right above its `args:` line.
     assert launches[0].lstrip(" -`").startswith("uvx --python"), launches[0]
     assert re.findall(r"^ *command: *(\S+)\n *args: \[\"--python\"", readme, re.M) == ["uvx"]
+
+    # The manual entry replaces this package's, so it must carry the whole launch env:
+    # without PYTHON_DOTENV_DISABLED the server reads ~/.env again, and Hermes refuses
+    # a non-string value (an unquoted `1` is an int once parsed).
+    blocks = [
+        block
+        for block in re.findall(r"^```yaml\n(.*?)^```", readme, re.M | re.S)
+        if "mcp_servers:" in block
+    ]
+    assert len(blocks) == 1, blocks
+    example_env = yaml.safe_load(blocks[0])["mcp_servers"]["memtomem"]["env"]
+    rendered = _json("packages/memtomem-hermes-plugin/mcp.json")
+    rendered_env = rendered["mcpServers"]["memtomem"]["env"]
+    for key, value in rendered_env.items():
+        assert isinstance(example_env.get(key), str), (key, example_env.get(key))
+        assert example_env[key] == value, (key, example_env[key], value)
 
     _assert_hermes_install_commands(readme, "packages/memtomem-hermes-plugin")
 
