@@ -61,7 +61,49 @@ flowchart LR
 
 **Index once, search forever.** memtomem reads your files, breaks them into meaningful chunks, and builds a searchable index. When your AI agent needs context, it searches by both keywords and meaning to find the most relevant pieces.
 
-Your `.md` files are the source of truth. The index is a rebuildable cache — delete it anytime and re-index.
+Your `.md` files are the source of truth for what you wrote. The search index is built from them, so deleting it and re-indexing brings back what the files hold. It does not bring back what only the database records — see below.
+
+### What a rebuild restores
+
+Re-indexing after the database is gone rebuilds each chunk from its file: the text, its heading,
+the tags written in the file (the `> tags:` line or a frontmatter `tags:` key), and a frontmatter
+validity window. Chunk ids are new, so a Web UI pinned chunk saved before the rebuild points at a
+chunk that no longer exists. The rest of what the database recorded is in no file, and a rebuild
+starts it over. That includes:
+
+- **Namespace.** A file is indexed into the namespace your configuration gives its path — a
+  namespace rule, a folder-based auto namespace, or else `default_namespace` (`default` out of the
+  box) — whatever namespace its memories were saved under. `mem_index` run in an MCP session with
+  an agent or a current namespace (`mem_ns_set`) puts every file into that namespace instead, so
+  rebuild with `mm index` when you want the path rules. With the stock configuration, a note
+  added with `--namespace shared:my-project` comes back in `default`, and a search or recall in
+  `shared:my-project` no longer finds it.
+- **Tag changes made after writing.** Auto-tagging and renaming, merging, deleting or replacing
+  tags change the database only, so a rebuild returns each chunk to the tags its file holds.
+- **Creation time.** A rebuilt chunk's `created_at` is the time of the re-index, not the
+  `> created:` line in the file, so date-ranged recall and newest-first ordering follow the
+  rebuild.
+- **Working state:** access and usage counts, importance scores, links made with `mem_link`,
+  summaries made by consolidation policies, sessions, schedules, and memory policies.
+
+[Pinned Context](pinned-context.md) blocks are read from their own files, not from the index, so a
+rebuild does not touch them.
+
+To put a file back in its namespace, index it with that namespace named:
+
+```bash
+mm index --force --namespace shared:my-project path/to/file.md
+```
+
+This re-embeds the whole file and puts every chunk in it in the namespace you name, so use it on
+a file that held one namespace. Indexing the file with `--namespace` before its directory has the
+same result, and `--force` is not needed on that first pass.
+
+You need to know each file's namespace yourself; the file does not record it. The file name is a
+hint: a memory saved outside the default namespace without naming a `file` goes to a day file of
+its own, `{date}--{slug}-{digest}.md`. The slug is a lossy, possibly truncated form of the
+namespace: `shared:my-project` becomes `shared-my-project`, and so does a namespace literally
+named `shared-my-project`.
 
 ### What happens under the hood
 

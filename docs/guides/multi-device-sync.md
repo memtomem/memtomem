@@ -5,10 +5,13 @@
 > server and without trusting a cloud-mount provider with the SQLite database.
 
 memtomem stores its source-of-truth as plain markdown under
-`indexing.memory_dirs`. The SQLite database is derived state — `mem_index`
-rebuilds it from those files. That gives you a transport-agnostic sync path:
-keep the markdown in a private git repo, leave the database local, and let
-`git pull` carry edits between machines.
+`indexing.memory_dirs`. The SQLite database's search index is derived — `mem_index`
+rebuilds it from those files. Namespaces, later tag edits and working state are not
+derived: they live only in the database, so a second machine indexes every file into the
+namespace its own configuration gives that path, or into an MCP session's namespace when
+`mem_index` runs in one ([what a rebuild restores](reference.md#what-a-rebuild-restores)). That gives you a
+transport-agnostic sync path: keep the markdown in a private git repo, leave the database
+local, and let `git pull` carry edits between machines.
 
 This guide describes the layout, what to commit (and what never to commit),
 the workflow around restarting the runtime after a pull, and `mm sync-doctor`
@@ -307,7 +310,9 @@ __pycache__/
 Why per category:
 
 - **`*.db` family** (and `cache/`, `proxy_*.db*`, `stm_feedback.db*`) —
-  derived state. Rebuilds from markdown via `mem_index`. Embedding model
+  derived state, except namespaces and other database-only state (see
+  [what a rebuild restores](reference.md#what-a-rebuild-restores)). Rebuilds from markdown via
+  `mem_index`. Embedding model
   versions can diverge across machines; tracking the DB makes that worse,
   not better. SQLite WAL/SHM are inherently process-local; copying them
   mid-write corrupts. The schema is versioned too: 0.6.5 migrates a store to
@@ -573,7 +578,9 @@ corruption or identity leaks:
    semantics are process-local. Embedding model versions can diverge
    across machines; copying the DB across them produces searchable
    nonsense. The DB rebuilds from markdown via `mem_index` — that's the
-   canonical recovery path and it's fast.
+   canonical recovery path and it's fast. It does not carry namespaces: re-index the files
+   saved outside the default namespace with `--namespace`, as
+   [what a rebuild restores](reference.md#what-a-rebuild-restores) describes.
 4. **Committing `config.json` itself.** `memory_dirs` and `sqlite_path`
    may legitimately differ across machines. Treat `config.json` as
    machine-local; `config.d/` is the synced policy layer.
