@@ -83,22 +83,17 @@ the reported DB path before relying on sharing.
 allowlist of environment variables to MCP servers (plus any variables supplied by an
 external secret source you configured in Hermes), so a `MEMTOMEM_*` variable exported in
 your shell (for example `MEMTOMEM_STORAGE__SQLITE_PATH`) does not reach this server, and
-it opens the store from `config.json`, a `.env` file (below), or the defaults instead. If
-you configure memtomem that way, add your own `mcp_servers.memtomem` entry with those
-variables under `env:` (see "Scope" below; it takes precedence over this package).
+it opens the store from `config.json` or the defaults instead. If you configure memtomem
+that way, add your own `mcp_servers.memtomem` entry with those variables under `env:` (see
+"Scope" below; it takes precedence over this package).
 
-memtomem also loads a `.env` file itself at startup, after Hermes's filtering.
-python-dotenv searches upward from memtomem's installed location, not from the working
-directory; with a `uvx` launch that location is inside uv's cache (normally `~/.cache/uv`),
-so the nearest `.env` among that cache's ancestor directories is applied — normally
-`~/.env`, unless a nearer one such as `~/.cache/.env` exists — while one in the plugin
-directory or where you start Hermes is not. A `MEMTOMEM_*` setting in
-`~/.env` therefore does reach this server. Only the file's `MEMTOMEM_*` keys are applied:
-the other variables in it, API keys for other tools included, never enter the server's
-environment, and the server names the keys it left out in one startup log line. A variable
-already set keeps its value. Before memtomem 0.6.10 (#2824), the file was applied whole,
-so with an older memtomem every unset variable in it reached the server
-regardless of Hermes's allowlist.
+**A `.env` file does not configure this server either.** This package's server entry sets
+`PYTHON_DOTENV_DISABLED=1`, which turns off the `.env` loading memtomem otherwise does at
+startup (it searches upward from its installed location inside uv's cache, so the file it
+finds is normally `~/.env`). Hermes's plugin catalog rules say a plugin never reads `.env`
+files directly. An entry of your own without that variable restores the search, so the
+example below sets it. Before this package's 0.1.15, the nearest `.env` was read and its
+`MEMTOMEM_*` keys were applied.
 
 ## Scope
 
@@ -132,9 +127,16 @@ mcp_servers:
     args: ["--python", "3.12", "--from", "memtomem[onnx]==0.7.3", "memtomem-server"]
     env:
       MEMTOMEM_TOOL_MODE: core
+      MEMTOMEM_EXTRA_TOOLS: mem_update_coverage
+      ORT_DISABLE_TELEMETRY: "1"
+      PYTHON_DOTENV_DISABLED: "1"
       # copy any MEMTOMEM_* settings you rely on here
     cwd: /path/to/project
 ```
+
+Keep the quotes around `"1"`: Hermes accepts only string values under `env:` and does not
+start a server whose value is the number `1`. Without `PYTHON_DOTENV_DISABLED`, memtomem
+reads the nearest `.env` again (see "First run" above).
 
 ## Network
 
