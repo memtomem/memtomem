@@ -15,8 +15,10 @@ unicode61 one by its spelling alone.
 from __future__ import annotations
 
 import ast
+import asyncio
 import sqlite3
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -174,22 +176,30 @@ class TestFallbackIsAProcessFact:
                 await close_components(stack)
 
 
-class TestOneTokenizerPerOperation:
-    @pytest.mark.asyncio
-    async def test_a_switch_during_rebuild_does_not_split_its_rows(
-        self, stub_kiwi, tmp_path, monkeypatch
-    ):
-        """The rebuild worker reads the tokenizer once, not per batch or per row."""
+class TestOneTokenizerPerRebuild:
+    """``rebuild_fts`` commits in one tokenizer, and it is the backend's current one."""
+
+    @staticmethod
+    async def _stack(tmp_path, rows: int = 5):
         stack = await create_components(
             _config(tmp_path, "s", "kiwipiepy"),
             load_ambient_config=False,
             entity_backfill=False,
         )
+        await stack.storage.upsert_chunks(
+            [make_chunk(f"wombat number{i}", source=f"n{i}.md") for i in range(rows)]
+        )
+        return stack
+
+    @pytest.mark.asyncio
+    async def test_a_switch_during_the_pass_redoes_it_in_the_new_tokenizer(
+        self, stub_kiwi, tmp_path, monkeypatch
+    ):
+        """No batch mixes forms, and the committed pass is the post-switch one."""
+        stack = await self._stack(tmp_path)
         try:
             storage = stack.storage
-            await storage.upsert_chunks(
-                [make_chunk(f"wombat number{i}", source=f"n{i}.md") for i in range(5)]
-            )
+            # Crosses a fetch-batch boundary, so a per-batch read would show here.
             monkeypatch.setattr(sqlite_backend_mod, "_REBUILD_FTS_BATCH_SIZE", 2)
             seen: list[str] = []
             real = fts_tokenizer.tokenize_for_fts
@@ -203,7 +213,78 @@ class TestOneTokenizerPerOperation:
 
             assert await storage.rebuild_fts() == 5
 
-            assert seen == ["kiwipiepy"] * 5
+            assert seen == ["kiwipiepy"] * 5 + ["unicode61"] * 5
+            assert sorted(_fts_content(stack.config.storage.sqlite_path)) == [
+                f"wombat number{i}" for i in range(5)
+            ]
+        finally:
+            await close_components(stack)
+
+    @pytest.mark.asyncio
+    async def test_an_older_rebuild_finishing_last_does_not_win(
+        self, stub_kiwi, tmp_path, monkeypatch
+    ):
+        """Two overlapping switches: the index ends in the tokenizer queries use.
+
+        The first rebuild is dispatched under kiwipiepy, and its worker is held
+        before it opens a connection; the backend then switches to unicode61
+        and a second rebuild runs to completion. Released, the first worker
+        must not put the kiwipiepy form back.
+        """
+        stack = await self._stack(tmp_path)
+        try:
+            storage = stack.storage
+            gate = threading.Event()
+            entered = threading.Event()
+            real_connect = sqlite3.connect
+            calls = {"n": 0}
+
+            def held_first(*args, **kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    entered.set()
+                    assert gate.wait(10), "the test never released the first worker"
+                return real_connect(*args, **kwargs)
+
+            monkeypatch.setattr(sqlite_backend_mod.sqlite3, "connect", held_first)
+
+            older = asyncio.create_task(storage.rebuild_fts())
+            assert await asyncio.to_thread(entered.wait, 10)
+            storage.set_fts_tokenizer("unicode61")
+            assert await storage.rebuild_fts() == 5
+            gate.set()
+            assert await older == 5
+
+            assert sorted(_fts_content(stack.config.storage.sqlite_path)) == [
+                f"wombat number{i}" for i in range(5)
+            ]
+            assert len(await storage.bm25_search("wombat", top_k=10)) == 5
+        finally:
+            gate.set()
+            await close_components(stack)
+
+    @pytest.mark.asyncio
+    async def test_a_tokenizer_that_never_settles_leaves_the_index_as_it_was(
+        self, stub_kiwi, tmp_path, monkeypatch
+    ):
+        stack = await self._stack(tmp_path, rows=2)
+        try:
+            storage = stack.storage
+            db_path = stack.config.storage.sqlite_path
+            before = sorted(_fts_content(db_path))
+            real = fts_tokenizer.tokenize_for_fts
+
+            def flipping(text, **kwargs):
+                flip = "unicode61" if kwargs["tokenizer"] == "kiwipiepy" else "kiwipiepy"
+                storage.set_fts_tokenizer(flip)
+                return real(text, **kwargs)
+
+            monkeypatch.setattr(sqlite_backend_mod._fts, "tokenize_for_fts", flipping)
+
+            with pytest.raises(RuntimeError, match="changed during every rebuild attempt"):
+                await storage.rebuild_fts()
+
+            assert sorted(_fts_content(db_path)) == before
         finally:
             await close_components(stack)
 
