@@ -19,18 +19,13 @@ projection per item, in an index the store owns.
 
 ## Install
 
-> **Not on PyPI yet.** The first release waits for the memtomem release that
-> carries the names this package imports. Until then, install from a checkout
-> of the memtomem repository: `uv pip install -e packages/memtomem -e
-> packages/langchain-memtomem`.
-
 ```bash
 pip install langchain-memtomem
 ```
 
-Requires Python 3.12+, `langgraph>=1.0` and the memtomem release that carries
-the ADR-0042 public names (the package refuses to import against an older
-memtomem). Embedding is off by default (`embedding.provider = "none"`,
+Requires Python 3.12+, `langgraph>=1.0,<2` and `memtomem>=0.7.4,<0.8`, the
+first memtomem release that carries the ADR-0042 public names (the package
+refuses to import against an older memtomem). Embedding is off by default (`embedding.provider = "none"`,
 BM25 only, no model download); pass an `embedding` section to turn it on.
 
 ## Use

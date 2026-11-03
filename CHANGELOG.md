@@ -5,6 +5,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.4] — 2026-11-04
+
+### Upgrading
+
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.18 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.4;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.4`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.4`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.4.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.3" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.3` to
+  `==0.7.4` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.4 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.4`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
+- **`MemtomemBaseStore` moves its records the first time 0.7.4 opens a store
+  (#3034).** Stop every process running an older memtomem on that store
+  before you upgrade (see Fixed for what happens to records they write
+  later). The move is not undone automatically, and an older memtomem does
+  not use records under `<root>/records.v2/`; to go back, restore a copy of the
+  store root taken before the upgrade.
+- **Hermes: `MEMTOMEM_*` keys in a `.env` file no longer reach the server.**
+  If you configured memtomem under Hermes through `~/.env` (or another `.env`
+  the server found at startup), move those settings to
+  `~/.memtomem/config.json`, or under `env:` in your own
+  `mcp_servers.memtomem` entry. Other clients are unchanged.
+- **Code that calls `memtomem.storage.fts_tokenizer.set_tokenizer` or
+  `get_tokenizer` (#3018).** Both are removed: pass `tokenizer=` to
+  `tokenize_for_fts`, or call `set_fts_tokenizer` on the backend. Components
+  that share one database need the same `search.tokenizer` in their config.
+- **A reranked search above `rerank.max_pool` costs more (#3043).** With a
+  reranker on, a request whose `top_k` exceeds `rerank.max_pool` (default 200)
+  now lets the reranking pool grow to `top_k` candidates, as many as retrieval
+  finds, and returns up to `top_k` results, where it used to stop at
+  `max_pool`.
+
 ### Added
 
 - **Public names for a package that stores beside memtomem (ADR-0042).**
@@ -44,6 +95,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `~/.cursor/plugins/local/memtomem`. Handoff and update in every plugin now accept
   `cursor` as a runtime label, so a handoff can be saved from Cursor and addressed to
   it. Cursor `0.1.0`.
+
+### Documentation
+
+- **English readers get a plugin quickstart (#3020).**
+  `docs/guides/plugin-quickstart.md` walks a plugin install through a saved
+  and re-found memory. The README, the PyPI page and both plugin READMEs link
+  it first, beside the Korean guide, which now says the Claude plugin shows 9
+  skills, not 7.
+- **A first-contribution path, a code of conduct and a pull request template
+  (#2991).** `CONTRIBUTING.md` gains a "Your first contribution" section, and
+  `CODE_OF_CONDUCT.md` is the Contributor Covenant 2.1.
 
 ### Changed
 
@@ -138,9 +200,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   new path. Under a `project_shared` root the move shows up in git as renames.
   Stop processes running an older memtomem on the same store before you
   upgrade: a record they write later in the old layout is moved on the next
-  open when its key is new, and when the key already has a record, the newer
-  layout's copy is kept and theirs goes to `<root>/quarantine.v2/` to be
-  resolved by hand. Files the migration cannot read, and symlinked legacy
+  open when its key is new; a byte-identical copy of an existing record is
+  removed; and when the existing record differs, the newer layout's copy is
+  kept (timestamps are not compared) and theirs goes to
+  `<root>/quarantine.v2/` to be resolved by hand. Files the migration cannot read, and symlinked legacy
   records, stay where they are.
 - **The Hermes plugin's README discloses that the server reaches files
   outside memtomem's own data.** The context-gateway actions behind `mem_do`
@@ -173,6 +236,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `LICENSE` was the short application notice and left `DAPADA Inc.` out of the
   copyright line; it is now the repository's `LICENSE` byte for byte, and ships
   in the next npm release.
+- **`mem_timeline` no longer misses in-window memories that out-of-window
+  matches crowded out (#3005).** It searched with `top_k=limit` and dropped
+  out-of-window results afterwards, so when more than `limit` memories matched
+  the topic, a window that had entries could answer "No memories found". The
+  `since`/`until` bounds now select inside the retrievers, and a closing note
+  says when more than `limit` in-window results matched. A malformed `since`
+  or `until` is now reported even when nothing matches.
+- **Settings sync writes through a symlinked target instead of replacing it
+  (#3021).** A user-scope settings file linked into a dotfiles repository (for
+  example `~/.codex/hooks.json`) became a regular file when `mm context
+  generate` or the Web UI's settings sync wrote it: the linked copy never got
+  the hook, and the result still said ok. The sync now writes the link's
+  destination and also takes a `.<name>.lock` beside it. A dangling, looping
+  or unreachable link, or one that reaches a directory, is reported as an
+  error for that target and left untouched. `mm context settings-copy`,
+  `mm context settings-migrate` and the Web UI's rule routes still replace a
+  symlinked file (#3023).
+- **On Windows, tool and CLI output names a source by its file name, not its
+  full path (#2932, #3028).** `mem_timeline`, `mem_related`, the
+  `mem_procedure_list`, `mem_ask` and `mem_reflect` fallback labels, the two
+  `mm shell` lists and `mm search`'s smart output split a source path on `/`
+  only, so on Windows they printed the full native path, and with it the
+  user's directory layout.
+- **`mm tags list`, `mm wiki list` and `mm pinned list` say how to create the
+  first entry when there is none (#2986, #2992, #3016).**
 
 ## [0.7.3] — 2026-11-02
 
