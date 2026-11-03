@@ -120,18 +120,20 @@ class TestPipelineQueryExpansion:
         from memtomem.search.expansion import expand_query_tags
 
         class FakeStorage:
-            async def get_tag_counts(self, *, project_context_root=None):
+            async def get_tag_counts(self, *, project_context_root=None, **filters):
                 return [("deployment", 10), ("kubernetes", 5), ("docker", 3)]
 
         result = await expand_query_tags("deploy containers", FakeStorage())
-        assert "deployment" in result or result == "deploy containers"
+        # A fake that rejected a keyword would raise inside the helper, which then
+        # returns the plain query; only the appended tag proves expansion ran.
+        assert result == "deploy containers deployment"
 
     @pytest.mark.asyncio
     async def test_tag_expansion_no_match(self):
         from memtomem.search.expansion import expand_query_tags
 
         class FakeStorage:
-            async def get_tag_counts(self, *, project_context_root=None):
+            async def get_tag_counts(self, *, project_context_root=None, **filters):
                 return [("python", 5)]
 
         result = await expand_query_tags("javascript frameworks", FakeStorage())
@@ -142,7 +144,7 @@ class TestPipelineQueryExpansion:
         from memtomem.search.expansion import expand_query_tags
 
         class BrokenStorage:
-            async def get_tag_counts(self, *, project_context_root=None):
+            async def get_tag_counts(self, *, project_context_root=None, **filters):
                 raise RuntimeError("DB error")
 
         result = await expand_query_tags("test", BrokenStorage())

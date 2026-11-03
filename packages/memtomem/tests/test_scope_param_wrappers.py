@@ -309,6 +309,12 @@ class TestScopeReachesTheActingLayer:
         scope_filter = kwargs["scope_filter"]
         assert (scope_filter.scopes if scope_filter is not None else None) == scopes
         assert kwargs["project_context_root"] == Path("/proj")
+        # The hidden-row hint counts inside the same boundary (#3039), so another
+        # project's or scope's archive is not reported as "hidden" here.
+        hint_boundary = app.storage.count_chunks_by_ns_prefix_detail.await_args.kwargs["boundary"]
+        hint_scope, hint_root = hint_boundary
+        assert (hint_scope.scopes if hint_scope is not None else None) == scopes
+        assert hint_root == Path("/proj")
 
 
 _HINT = "sentinel: semantic search degraded"

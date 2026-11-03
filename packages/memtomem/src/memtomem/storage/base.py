@@ -291,6 +291,7 @@ class StorageBackend(Protocol):
         source_filter: str | None = None,
         *,
         exhaustive: bool = False,
+        escalate: bool = True,
     ) -> list[SearchResult]: ...
 
     # Metadata
@@ -422,7 +423,10 @@ class StorageBackend(Protocol):
     async def count_chunks_by_namespace(self, namespace: str) -> int: ...
     async def count_chunks_by_ns_prefix(self, prefixes: Sequence[str]) -> int: ...
     async def count_chunks_by_ns_prefix_detail(
-        self, prefixes: Sequence[str]
+        self,
+        prefixes: Sequence[str],
+        *,
+        boundary: tuple[ScopeFilter | None, Path | None] | None = None,
     ) -> tuple[int, dict[str, int]]: ...
     async def delete_by_namespace(self, namespace: str) -> int: ...
     async def list_namespace_chunk_candidates(
@@ -443,7 +447,11 @@ class StorageBackend(Protocol):
 
     # Tags
     async def get_tag_counts(
-        self, *, project_context_root: Path | None = None
+        self,
+        *,
+        project_context_root: Path | None = None,
+        scope_filter: ScopeFilter | None = None,
+        namespace_filter: NamespaceFilter | None = None,
     ) -> list[tuple[str, int]]: ...
     async def list_chunks_by_tag(self, tag: str, limit: int = 10) -> list[Chunk]: ...
     async def count_chunks_by_tag(self, tag: str) -> int: ...

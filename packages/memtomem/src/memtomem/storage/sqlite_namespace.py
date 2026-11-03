@@ -8,7 +8,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncContextManager, AsyncIterator, Callable, Sequence
+from typing import TYPE_CHECKING, AsyncContextManager, AsyncIterator, Callable, Sequence
 from uuid import UUID
 
 from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError, StorageError
@@ -18,6 +18,10 @@ from memtomem.storage.base import (
     NamespaceRenameResult,
 )
 from memtomem.storage.sqlite_helpers import escape_like, now_iso, placeholders, quote_ident
+from memtomem.storage.sqlite_scope import scope_context_sql
+
+if TYPE_CHECKING:
+    from memtomem.models import ScopeFilter
 
 logger = logging.getLogger(__name__)
 
@@ -182,9 +186,19 @@ class NamespaceOps:
         return int(row[0]) if row else 0
 
     async def count_chunks_by_ns_prefix_detail(
-        self, prefixes: Sequence[str]
+        self,
+        prefixes: Sequence[str],
+        *,
+        boundary: tuple[ScopeFilter | None, Path | None] | None = None,
     ) -> tuple[int, dict[str, int]]:
         """Count hidden chunks, total and per prefix, in one pass.
+
+        ``boundary`` is the searching caller's ``(scope_filter,
+        project_context_root)``: the count then covers only rows that search
+        could return once it named the namespace, so another project's or
+        another scope's archive is not counted. ``(None, None)`` is a real
+        boundary (user rows only, as for an out-of-project default search);
+        omitting it counts every row.
 
         ``count_chunks_by_ns_prefix`` answers "how many are hidden"; a caller
         that wants to tell the user *which* namespace to search needs the
@@ -192,8 +206,9 @@ class NamespaceOps:
         same single scan rather than a query per prefix
         (``system_namespace_prefixes`` is capped at 10 by config validation).
 
-        The first element is the distinct row count and matches
-        ``count_chunks_by_ns_prefix``. A namespace matching two prefixes is
+        The first element is the distinct row count; with ``boundary``
+        omitted it matches ``count_chunks_by_ns_prefix``, which takes no
+        boundary. A namespace matching two prefixes is
         counted under both in the mapping, so its values can sum higher than
         that total. Prefixes with no matches are omitted rather than reported
         as zero, so callers can render the mapping without filtering.
@@ -209,10 +224,18 @@ class NamespaceOps:
             "SUM(CASE WHEN namespace LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)" for _ in prefixes
         )
         clauses = " OR ".join("namespace LIKE ? ESCAPE '\\'" for _ in prefixes)
+        where = f"({clauses})"
+        params = patterns + patterns
+        if boundary is not None:
+            # Grouped: the prefix predicates are OR-joined, so an ungrouped AND
+            # would bind to the last prefix only.
+            scope_frag, scope_params = scope_context_sql(boundary[0], boundary[1])
+            where = f"{where} AND ({scope_frag})"
+            params += scope_params
         async with self._lease_txn_read_db() as db:
             row = db.execute(
-                f"SELECT COUNT(*), {columns} FROM chunks WHERE {clauses}",
-                patterns + patterns,
+                f"SELECT COUNT(*), {columns} FROM chunks WHERE {where}",
+                params,
             ).fetchone()
         if not row:
             return 0, {}
