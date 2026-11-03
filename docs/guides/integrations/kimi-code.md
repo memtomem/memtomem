@@ -9,7 +9,7 @@ bundle is not a Kimi plugin and does not install hooks or slash commands.
 
 Kimi reads `~/.kimi-code/mcp.json`, or `$KIMI_CODE_HOME/mcp.json` when that
 environment variable is set. memtomem `0.4.0` and later write that path, so
-`uvx --from 'memtomem==0.7.3' mm init --mcp kimi` is the shortest route.
+`uvx --from 'memtomem==0.7.4' mm init --mcp kimi` is the shortest route.
 Releases up to and including `0.3.14` wrote the legacy `~/.kimi/mcp.json`
 layout, which current Kimi Code does not read — move the entry if you
 registered with one of those. To write the file by hand instead, it needs
@@ -19,8 +19,8 @@ configured for a local ONNX model. The `env` block exposes
 `mem_update_coverage`, which the `memtomem-update` skill needs for its
 default incremental mode and for `full`; without that setting the skill
 stops before writing whenever a coverage call is due, while `topic` still
-works. `mm init` writes the same `MEMTOMEM_EXTRA_TOOLS` line from memtomem
-`0.7.3` on (the entry below also states the default `core` tool mode, which
+works. `mm init` writes the same `MEMTOMEM_EXTRA_TOOLS` line in memtomem
+`0.7.3` and later (the entry below also states the default `core` tool mode, which
 `mm init` leaves out). `mm init` from 0.7.2 and earlier writes no `env`
 block, so add the `MEMTOMEM_EXTRA_TOOLS` line by hand to an entry it wrote:
 
@@ -29,7 +29,7 @@ block, so add the `MEMTOMEM_EXTRA_TOOLS` line by hand to an entry it wrote:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--isolated", "--from", "memtomem[all]==0.7.3", "memtomem-server"],
+      "args": ["--isolated", "--from", "memtomem[all]==0.7.4", "memtomem-server"],
       "env": {"MEMTOMEM_TOOL_MODE": "core", "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
     }
   }
@@ -70,7 +70,7 @@ From a Git worktree, initialize the private project tier once:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem==0.7.3' mm mem init --scope project_local
+uvx --from 'memtomem==0.7.4' mm mem init --scope project_local
 ```
 
 Then use the handoff skill explicitly:
