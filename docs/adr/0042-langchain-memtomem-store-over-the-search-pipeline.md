@@ -74,6 +74,9 @@ boundary of `put` and `delete` against the repair that restores agreement).
      `search_pipeline.search` and `search_pipeline.invalidate_cache`.
    - `memtomem.privacy.enforce_write_guard`.
    - `memtomem.constants.validate_namespace`.
+   - `memtomem.runtime.files.norm_path`, the spelling the index stores a
+     source path in. Added with the release PR: the store compares hit paths
+     and its sweep against its root, which an NFD spelling on macOS defeated.
 
    The ones a prerequisite memtomem PR adds, each with a test:
    - Public re-exports of `atomic_write_text`, `async_file_lock` and

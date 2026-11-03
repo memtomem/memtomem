@@ -16,8 +16,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   caller-owned `generation` integer that is persisted beside the value.
   `memtomem.integrations.langgraph` exports `resolve_target_scope` with
   `UnregisteredProjectTarget` and `TierWouldNotRoundTrip`. `memtomem.runtime.files`
-  re-exports `async_file_lock`, `atomic_write_text`, `memory_lock_path` and
-  `CRUD_SIDECAR_LOCK_BUDGET_S`. `Mem2MemConfig.without_environment(**data)`
+  re-exports `async_file_lock`, `atomic_write_text`, `memory_lock_path`,
+  `CRUD_SIDECAR_LOCK_BUDGET_S` and `norm_path`, the spelling memtomem stores a
+  source path in (resolved, one Unicode form where the filesystem folds them). `Mem2MemConfig.without_environment(**data)`
   builds a validated config from the given values with no `MEMTOMEM_*`
   variable layered on top. The underscore names keep working; nothing changes
   for existing callers.

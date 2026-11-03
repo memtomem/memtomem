@@ -21,6 +21,7 @@ from memtomem.integrations.langgraph_store import (
     render_projection,
 )
 from memtomem.runtime import files
+from memtomem.storage import sqlite_helpers
 
 
 @pytest.mark.parametrize(
@@ -156,11 +157,13 @@ def test_runtime_files_reexports_the_same_objects() -> None:
     assert files.atomic_write_text is _atomic.atomic_write_text
     assert files.memory_lock_path is _atomic.memory_lock_path
     assert files.CRUD_SIDECAR_LOCK_BUDGET_S == _atomic._CRUD_SIDECAR_LOCK_BUDGET_S
+    assert files.norm_path is sqlite_helpers.norm_path
     assert set(files.__all__) == {
         "CRUD_SIDECAR_LOCK_BUDGET_S",
         "async_file_lock",
         "atomic_write_text",
         "memory_lock_path",
+        "norm_path",
     }
 
 
