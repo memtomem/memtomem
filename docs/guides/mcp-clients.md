@@ -484,11 +484,12 @@ agy plugin install https://github.com/memtomem/memtomem/tree/main/packages/memto
 ```
 
 agy starts a plugin's server in the plugin directory, so the plugin's server
-starts at user scope (absolute paths for indexing). Its handoff, brief and
-update workflows first bind that server to your repository with
-`mem_project_bind`, which needs the repository's tier registered
-(`mm mem init --scope project_local`). The binding lasts until the server
-process restarts. Use one of the two, not both: a hand-registered `memtomem` entry
+starts at user scope (absolute paths for indexing). Its handoff, brief, update,
+search, recall and remember workflows first bind that server to your repository
+with `mem_project_bind`, which needs the repository's tier registered
+(`mm mem init --scope project_local`). Without a registered tier, or outside a
+Git repository, search and recall read user scope only and remember saves only
+cross-project memories. The binding lasts until the server process restarts. Use one of the two, not both: a hand-registered `memtomem` entry
 and the plugin's server (which agy names `memtomem_memtomem`) both run, and
 with a relative storage path in your memtomem config they open different
 stores — compare the DB path `mem_status` reports before removing either. See

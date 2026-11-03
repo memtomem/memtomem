@@ -44,6 +44,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   switch, recreate the others with the new `search.tokenizer` in their config. `memtomem.storage.fts_tokenizer.set_tokenizer` and
   `get_tokenizer` are removed: pass `tokenizer=` to `tokenize_for_fts`, or call
   `set_fts_tokenizer` on the backend.
+- **Antigravity search, recall and remember bind to your repository first
+  (#3035).** agy starts the server outside the project, so these three skills
+  read and wrote user scope only, and an explicit `project_local` filter read
+  every project's memories. Their results also changed once handoff, brief or
+  update had bound the server. They now bind to the live Git root first, as
+  those three do, then read the repository's project tier alongside user scope
+  and save project facts to `project_local`. Outside a Git repository, or
+  without a registered tier, search and recall say so and pass `scope="user"`,
+  and remember saves only cross-project preferences and refuses a project
+  fact or a project-only destination. remember never passes `file`. Hermes
+  keeps its user-scope skills. Antigravity `0.2.6`.
 
 - **The Hermes plugin's server no longer loads a `.env` file at startup.**
   Its bundled server entry sets `PYTHON_DOTENV_DISABLED=1`, because Hermes's plugin
