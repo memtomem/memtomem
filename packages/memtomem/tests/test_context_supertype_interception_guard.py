@@ -1605,6 +1605,11 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "no_recovery_callee",
         "settings target read; " + _NONSKILL,
     ),
+    ("context/settings.py", "_settings_write_destination", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "symlink realpath probe before a settings write; " + _RO,
+    ),
     ("context/settings_doctor.py", "_read_settings", ("OSError",), 0): (
         _U,
         "no_recovery_callee",

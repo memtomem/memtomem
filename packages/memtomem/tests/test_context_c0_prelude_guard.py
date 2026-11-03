@@ -674,7 +674,8 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
     ("context/settings.py", "generate_all_settings", 0, "_file_lock"): (
         NON_C0,
         "",
-        "Runtime settings.json targets — settings are not canonical artifacts.",
+        "Runtime settings.json targets (and a symlinked target's destination) — "
+        "settings are not canonical artifacts.",
     ),
     ("context/settings_copy.py", "apply_hook_copy", 0, "_file_lock"): (
         NON_C0,
