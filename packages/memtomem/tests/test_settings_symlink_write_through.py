@@ -261,44 +261,51 @@ def _retarget_at_acquire(link, new_destination):
     return lock
 
 
-def test_destination_is_taken_under_the_lock(home, tmp_path):
-    """Read, recheck and write all follow the link as it is under the lock,
-    so a retarget during the wait cannot merge one file into another."""
-    link = _codex_link(home)
-    old = tmp_path / "old.json"
+@pytest.mark.parametrize("shape", ["user-tier", "project-tier-to-host"])
+def test_link_repointed_while_waiting_is_aborted(shape, home, tmp_path):
+    """A link repointed while the sync waited names a file whose sidecar the
+    sync does not hold, and, for a project-tier link moved outside the
+    project, one the host-write gate never judged. Nothing is written."""
+    project = _project(tmp_path)
+    old = (project if shape == "project-tier-to-host" else tmp_path) / "old.json"
     old.write_text('{"hooks": {}}\n', encoding="utf-8")
-    new = tmp_path / "new.json"
-    new.write_text('{"keep": "new", "hooks": {}}\n', encoding="utf-8")
+    new = (home if shape == "project-tier-to-host" else tmp_path) / "new.json"
+    new.write_text('{"hooks": {}}\n', encoding="utf-8")
+    if shape == "user-tier":
+        link, scope, allow = _codex_link(home), "user", True
+    else:
+        (project / ".codex").mkdir()
+        link, scope, allow = project / ".codex" / "hooks.json", "project_shared", False
     link.symlink_to(old)
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(settings_mod, "_file_lock", _retarget_at_acquire(link, new))
-        results = generate_all_settings(_project(tmp_path), scope="user", allow_host_writes=True)
+        results = generate_all_settings(project, scope=scope, allow_host_writes=allow)
 
-    assert results["codex_settings"].status == "ok", results["codex_settings"].reason
+    assert results["codex_settings"].status == "aborted"
+    assert "repointed" in results["codex_settings"].reason
     assert old.read_text(encoding="utf-8") == '{"hooks": {}}\n'
-    written = json.loads(new.read_text(encoding="utf-8"))
-    assert written["keep"] == "new"
-    assert "echo hi" in json.dumps(written)
+    assert new.read_text(encoding="utf-8") == '{"hooks": {}}\n'
+    assert link.is_symlink()
 
 
-def test_link_retargeted_outside_the_project_needs_confirmation(home, tmp_path):
-    """The pre-lock gate passed a project-tier link that pointed inside the
-    project; repointed outside during the wait, it is a host write again."""
+def test_destination_lock_excludes_a_writer_of_the_aliased_path(home, tmp_path, monkeypatch):
+    """A project-tier link to the user-tier file takes that file's own
+    sidecar too: the one a writer configured with the user-tier path holds.
+    With only the link's sidecar, both would write the file at once."""
     project = _project(tmp_path)
     (project / ".codex").mkdir()
-    inside = project / "hooks-inside.json"
-    inside.write_text('{"hooks": {}}\n', encoding="utf-8")
-    outside = home / "codex-hooks.json"
-    outside.write_text('{"hooks": {}}\n', encoding="utf-8")
-    link = project / ".codex" / "hooks.json"
-    link.symlink_to(inside)
+    (home / ".codex").mkdir()
+    user_file = home / ".codex" / "hooks.json"
+    user_file.write_text('{"hooks": {}}\n', encoding="utf-8")
+    (project / ".codex" / "hooks.json").symlink_to(user_file)
+    monkeypatch.setattr(settings_mod, "_SETTINGS_LOCK_BUDGET_S", 0.3)
 
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(settings_mod, "_file_lock", _retarget_at_acquire(link, outside))
-        results = generate_all_settings(project, scope="project_shared")
+    with settings_mod._file_lock(_lock_path_for(user_file), timeout=1.0):
+        held = generate_all_settings(project, scope="project_shared", allow_host_writes=True)
+    assert held["codex_settings"].status == "aborted"
+    assert user_file.read_text(encoding="utf-8") == '{"hooks": {}}\n'
 
-    assert results["codex_settings"].status == "needs_confirmation"
-    assert outside.read_text(encoding="utf-8") == '{"hooks": {}}\n'
-    assert inside.read_text(encoding="utf-8") == '{"hooks": {}}\n'
-    assert link.is_symlink()
+    released = generate_all_settings(project, scope="project_shared", allow_host_writes=True)
+    assert released["codex_settings"].status == "ok", released["codex_settings"].reason
+    assert "echo hi" in user_file.read_text(encoding="utf-8")

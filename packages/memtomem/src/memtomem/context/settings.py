@@ -47,6 +47,7 @@ Merge semantics
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -1634,7 +1635,15 @@ def generate_all_settings(
                 reason=f"{name} has no fan-out target for scope {scope!r}",
             )
             continue
-        if not allow_host_writes and not _is_under_project_root(target_path, project_root):
+        # The file this target's write will land on: the target itself, or the
+        # destination of a symlink at it (#3021). The gate judges it, and its
+        # sidecar is locked beside the target's. A link that cannot be written
+        # through falls back to the target here and is reported under the lock.
+        try:
+            planned_path = _settings_write_destination(target_path)
+        except _SettingsLinkError:
+            planned_path = target_path
+        if not allow_host_writes and not _is_under_project_root(planned_path, project_root):
             results[name] = SettingsSyncResult(
                 status="needs_confirmation",
                 reason=(
@@ -1645,24 +1654,31 @@ def generate_all_settings(
             )
             continue
 
-        # Steps 0-4 run under a per-target cross-process lock so a separate
+        # Steps 0-4 run under cross-process sidecar locks so a separate
         # process (a CLI ``mm context sync`` / the MCP server) or the Web UI
         # cannot land a write between the mtime recheck (Step 3) and the atomic
         # rename inside ``_write_json`` (Step 4) and silently drop a concurrent
         # writer's hook rule (issue #1123 B3-3). This is the same sidecar-file
         # ``portalocker`` primitive skills uses; ``_write_json`` →
         # ``atomic_write_text`` is itself lock-free, so calling it under the held
-        # lock does not self-deadlock. Exactly one lock is held per iteration and
-        # released before the next target, so there is no cross-generator
-        # lock-ordering cycle. The ``st_mtime_ns`` recheck is KEPT as a second
+        # lock does not self-deadlock. The target's own sidecar is the key every
+        # other writer of that path takes; a symlinked target also takes its
+        # destination's, which is the key a writer configured with the
+        # destination path takes, so two paths aliasing one file still exclude
+        # each other. Both are taken in sorted order, as the two-file writers
+        # (settings-copy, settings-migrate) take theirs, and released before
+        # the next target. The ``st_mtime_ns`` recheck is KEPT as a second
         # layer: it still catches a non-gateway direct disk edit that bypasses
         # the sidecar lock entirely.
+        lock_paths = sorted({_lock_path_for(target_path), _lock_path_for(planned_path)}, key=str)
         try:
-            # Wait only the time left on the shared budget (not a fresh bound
-            # per target). A 0.0 here means the budget is spent → one
-            # non-blocking attempt: acquire iff instantly free, else abort.
-            lock_timeout = max(0.0, lock_deadline - time.monotonic())
-            with _file_lock(_lock_path_for(target_path), timeout=lock_timeout):
+            # Every acquire waits only the time left on the shared budget (not
+            # a fresh bound per target or per lock). A 0.0 means the budget is
+            # spent → one non-blocking attempt: acquire iff free, else abort.
+            with contextlib.ExitStack() as held_locks:
+                for lock_path in lock_paths:
+                    lock_timeout = max(0.0, lock_deadline - time.monotonic())
+                    held_locks.enter_context(_file_lock(lock_path, timeout=lock_timeout))
                 # Waiting for this lock is the longest a target can take, so
                 # it is where a caller most plausibly gave up. ``continue``
                 # releases the lock on the way out (#2218).
@@ -1700,11 +1716,10 @@ def generate_all_settings(
                     continue
                 contributions = raw_locked  # type: ignore[assignment]
 
-                # The file Steps 1-4 read, recheck and write: the target
-                # itself, or the destination of a symlink at it, so the link
-                # survives the write (#3021). Taken under the lock so a writer
-                # that swapped the link while this sync waited cannot leave it
-                # reading one file and writing another. The reason names only
+                # The file Steps 1-4 read, recheck and write, taken again
+                # under the locks: a link repointed while this sync waited
+                # names a file whose sidecar it does not hold and the gate did
+                # not judge, so that target is aborted. The reason names only
                 # the configured path: the destination can sit anywhere, and
                 # the web surface does not scrub paths outside HOME.
                 try:
@@ -1718,16 +1733,12 @@ def generate_all_settings(
                         f"re-run `mm context sync --include=settings`.",
                     )
                     continue
-                # The pre-lock gate judged the link as it was then; a link
-                # retargeted outside the project since must not ride on that.
-                if not allow_host_writes and not _is_under_project_root(write_path, project_root):
+                if write_path != planned_path:
                     results[name] = SettingsSyncResult(
-                        status="needs_confirmation",
-                        reason=(
-                            f"{target_path} is outside the project root; pass "
-                            f"allow_host_writes=True after confirming with the user."
-                        ),
-                        target=target_path,
+                        status="aborted",
+                        reason=f"{target_path} was repointed while this sync waited "
+                        f"for its lock; nothing was written. Re-run "
+                        f"`mm context sync --include=settings` to retry.",
                     )
                     continue
 
