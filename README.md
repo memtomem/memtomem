@@ -1,5 +1,7 @@
 # memtomem
 
+[![HOL Guard](https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Dmemtomem%252Fmemtomem%26metric%3Drelease)](https://hol.org/registry/plugins/memtomem%2Fmemtomem?utm_source=hol_marketplace&utm_medium=plugins_badge&utm_campaign=plugins&utm_content=memtomem%2Fmemtomem&ref=plugin-author-fe58c997)
+
 > Long-term memory for AI coding agents, kept as Markdown you own. Core usage is hook-free by default: memory changes happen only when you or your agent call memtomem.
 
 [![PyPI](https://img.shields.io/pypi/v/memtomem)](https://pypi.org/project/memtomem/)
