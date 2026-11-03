@@ -37,7 +37,7 @@ except ImportError as exc:
 
 from memtomem import privacy
 from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
-from memtomem.integrations.langgraph import _resolve_target_scope
+from memtomem.integrations.langgraph import resolve_target_scope
 from memtomem.storage.hybrid_store import HybridDatabase, encode, validate_filter
 
 logger = logging.getLogger(__name__)
@@ -147,7 +147,7 @@ class MemtomemHybridStore(BaseStore):
         config = Mem2MemConfig()
         load_config_d(config)
         load_config_overrides(config, migrate=False)
-        inferred = _resolve_target_scope(
+        inferred = resolve_target_scope(
             self.path, config.indexing.memory_dirs, config.indexing.project_memory_dirs
         )
         self.scope = "project_shared" if "project_shared" in (scope, inferred) else inferred

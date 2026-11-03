@@ -336,6 +336,15 @@ def test_runtime_factory_names_resolve_without_the_mcp_server() -> None:
     )
 
 
+def test_runtime_files_import_does_not_pull_in_the_mcp_server() -> None:
+    """``memtomem.runtime.files`` (ADR-0042) is a public facade over
+    ``context._atomic``; the in-process import must stay transport-free."""
+    _run(
+        "from memtomem.runtime.files import CRUD_SIDECAR_LOCK_BUDGET_S, "
+        "async_file_lock, atomic_write_text, memory_lock_path\n"
+    )
+
+
 def test_components_can_be_built_and_closed_without_the_mcp_server(tmp_path) -> None:
     """The full build/teardown cycle, not just the import.
 
