@@ -667,9 +667,7 @@ async def patch_config(
                     await search_pipeline.swap_reranker(pending_reranker, pending_rerank_config)
 
                 if tokenizer_changed:
-                    from memtomem.storage.fts_tokenizer import set_tokenizer
-
-                    set_tokenizer(config.search.tokenizer)
+                    storage.set_fts_tokenizer(config.search.tokenizer)
                     count = await storage.rebuild_fts()
                     logger.info(
                         "FTS index rebuilt with tokenizer=%s (%d chunks)",

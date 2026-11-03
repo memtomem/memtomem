@@ -91,6 +91,7 @@ def app(home: Path):
     # in the read-through case, but some write handlers pass them through.
     storage = AsyncMock()
     storage.rebuild_fts = AsyncMock(return_value=0)
+    storage.set_fts_tokenizer = MagicMock()  # synchronous on the real backend
     search_pipeline = AsyncMock()
     search_pipeline.invalidate_cache = MagicMock()
     index_engine = AsyncMock()
@@ -534,27 +535,24 @@ async def test_config_patch_persist_timeout_skips_tokenizer_fanout(
     home: Path, app, client: AsyncClient
 ):
     # Persist runs BEFORE the tokenizer/FTS fanout, so a persist timeout must
-    # leave the module-level tokenizer and FTS index untouched — not just the
+    # leave the backend's tokenizer and FTS index untouched — not just the
     # config field (#1567). Otherwise search would run on a tokenizer the user
     # was told was not saved.
     _write_config(home, {"search": {"tokenizer": "unicode61"}})
     app.state.config = _hot_reload._build_fresh_config()
     app.state.config_signature = _hot_reload.current_signature()
 
-    with (
-        patch(
-            "memtomem.web.routes.system.save_config_overrides",
-            side_effect=TimeoutError("locked"),
-        ),
-        patch("memtomem.storage.fts_tokenizer.set_tokenizer") as set_tok,
+    with patch(
+        "memtomem.web.routes.system.save_config_overrides",
+        side_effect=TimeoutError("locked"),
     ):
         resp = await client.patch(
             "/api/config?persist=true", json={"search": {"tokenizer": "kiwipiepy"}}
         )
 
     assert resp.status_code == 503, resp.text
-    # No fanout: tokenizer global never set, FTS never rebuilt.
-    set_tok.assert_not_called()
+    # No fanout: the backend's tokenizer never switched, FTS never rebuilt.
+    app.state.storage.set_fts_tokenizer.assert_not_called()
     app.state.storage.rebuild_fts.assert_not_called()
     # Config reverted to the on-disk tokenizer.
     assert app.state.config.search.tokenizer == "unicode61"
@@ -1461,21 +1459,14 @@ class TestApplyRuntimeConfigChanges:
         pipeline.invalidate_cache = MagicMock()  # type: ignore[method-assign]
         return pipeline
 
-    async def test_tokenizer_change_fires_set_tokenizer_and_rebuild(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        set_tokenizer_calls: list[str] = []
-
-        import memtomem.storage.fts_tokenizer as fts_tok
-
-        monkeypatch.setattr(fts_tok, "set_tokenizer", lambda t: set_tokenizer_calls.append(t))
-
+    async def test_tokenizer_change_switches_the_backend_and_rebuilds(self):
         old = MagicMock()
         old.search.tokenizer = "unicode61"
         new = MagicMock()
         new.search.tokenizer = "kiwi"
 
         storage = AsyncMock()
+        storage.set_fts_tokenizer = MagicMock()
         storage.rebuild_fts = AsyncMock(return_value=5)
         search_pipeline = MagicMock()
 
@@ -1486,7 +1477,8 @@ class TestApplyRuntimeConfigChanges:
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-        assert set_tokenizer_calls == ["kiwi"]
+        storage.set_fts_tokenizer.assert_called_once_with("kiwi")
+        storage.rebuild_fts.assert_awaited_once()
         search_pipeline.invalidate_cache.assert_called_once()
 
     async def test_no_tokenizer_change_skips_fts_rebuild(self):

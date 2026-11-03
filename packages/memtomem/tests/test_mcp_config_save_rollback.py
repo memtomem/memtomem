@@ -25,7 +25,9 @@ def install_app(monkeypatch, config):
     app = SimpleNamespace(
         config=config,
         search_pipeline=SimpleNamespace(invalidate_cache=MagicMock(), config=config.search),
-        storage=SimpleNamespace(rebuild_fts=AsyncMock(return_value=3)),
+        storage=SimpleNamespace(
+            rebuild_fts=AsyncMock(return_value=3), set_fts_tokenizer=MagicMock()
+        ),
         embedder=SimpleNamespace(config=config.embedding),
     )
     monkeypatch.setattr(status_config, "_get_app_initialized", AsyncMock(return_value=app))
@@ -131,9 +133,7 @@ async def test_failed_save_preserves_list_identity_and_skips_fanout(
     embedding_fields = config.embedding.model_fields_set.copy()
     weights = config.search.rrf_weights
     publish = MagicMock()
-    tokenizer = MagicMock()
     monkeypatch.setattr(status_config, "publish_onnx_batch_size", publish)
-    monkeypatch.setattr("memtomem.storage.fts_tokenizer.set_tokenizer", tokenizer)
     save = MagicMock(side_effect=failure("injected save failure"))
     monkeypatch.setattr(cfg_mod, "save_config_overrides", save)
 
@@ -148,7 +148,7 @@ async def test_failed_save_preserves_list_identity_and_skips_fanout(
     assert app.search_pipeline.config is config.search
     assert app.embedder.config is config.embedding
     publish.assert_not_called()
-    tokenizer.assert_not_called()
+    app.storage.set_fts_tokenizer.assert_not_called()
     app.search_pipeline.invalidate_cache.assert_not_called()
     app.storage.rebuild_fts.assert_not_called()
 
@@ -198,9 +198,7 @@ async def test_success_preserves_persistence_and_fanout(
     config = Mem2MemConfig()
     app = install_app(monkeypatch, config)
     publish = MagicMock()
-    tokenizer = MagicMock()
     monkeypatch.setattr(status_config, "publish_onnx_batch_size", publish)
-    monkeypatch.setattr("memtomem.storage.fts_tokenizer.set_tokenizer", tokenizer)
     save = MagicMock(wraps=cfg_mod.save_config_overrides)
     monkeypatch.setattr(cfg_mod, "save_config_overrides", save)
 
@@ -225,11 +223,11 @@ async def test_success_preserves_persistence_and_fanout(
         assert not config_path.exists()
     app.search_pipeline.invalidate_cache.assert_called_once_with()
     if key == "search.tokenizer":
-        tokenizer.assert_called_once_with(actual)
+        app.storage.set_fts_tokenizer.assert_called_once_with(actual)
         app.storage.rebuild_fts.assert_awaited_once_with()
         assert "FTS index rebuilt (3 chunks)." in response
     else:
-        tokenizer.assert_not_called()
+        app.storage.set_fts_tokenizer.assert_not_called()
         app.storage.rebuild_fts.assert_not_called()
     if key == "embedding.onnx_batch_size":
         publish.assert_called_once_with(app.embedder, actual)

@@ -255,27 +255,25 @@ class TestTheColumnFilterCannotBeEscaped:
         pytest.importorskip("kiwipiepy", reason="the korean extra is not installed")
         from memtomem.storage import fts_tokenizer
 
-        previous = fts_tokenizer.get_tokenizer()
-        fts_tokenizer.set_tokenizer("kiwipiepy")
+        kiwi = "kiwipiepy"
+        db = self._probe_db()
         try:
-            db = self._probe_db()
-            try:
-                for query in (*self._ADVERSARIAL, "비밀 } : (source_file"):
-                    for use_or in (False, True):
-                        bare = fts_tokenizer.tokenize_for_fts(query, for_query=True, use_or=use_or)
-                        expr = _column_match("content", query, use_or=use_or)
-                        assert expr == "{content} : (" + bare + ")", expr
-                        bare_rows, bare_error = self._run(db, bare)
-                        rows, error = self._run(db, expr)
-                        if bare_error is not None:
-                            assert error is not None, f"kiwi: filter fixed {query!r}"
-                            continue
-                        assert error is None, f"kiwi: filter broke {query!r}: {expr!r} ({error})"
-                        assert set(rows) <= set(bare_rows), f"kiwi: {query!r} gained rows"
-            finally:
-                db.close()
+            for query in (*self._ADVERSARIAL, "비밀 } : (source_file"):
+                for use_or in (False, True):
+                    bare = fts_tokenizer.tokenize_for_fts(
+                        query, for_query=True, use_or=use_or, tokenizer=kiwi
+                    )
+                    expr = _column_match("content", query, use_or=use_or, tokenizer=kiwi)
+                    assert expr == "{content} : (" + bare + ")", expr
+                    bare_rows, bare_error = self._run(db, bare)
+                    rows, error = self._run(db, expr)
+                    if bare_error is not None:
+                        assert error is not None, f"kiwi: filter fixed {query!r}"
+                        continue
+                    assert error is None, f"kiwi: filter broke {query!r}: {expr!r} ({error})"
+                    assert set(rows) <= set(bare_rows), f"kiwi: {query!r} gained rows"
         finally:
-            fts_tokenizer.set_tokenizer(previous)
+            db.close()
 
     @pytest.mark.asyncio
     async def test_naming_the_column_does_not_reopen_it(self, storage):
@@ -314,21 +312,14 @@ class TestTheOrFallbackUnderAMorphologicalTokenizer:
     @pytest.fixture
     def kiwi(self):
         pytest.importorskip("kiwipiepy", reason="the korean extra is not installed")
-        from memtomem.storage import fts_tokenizer
-
-        previous = fts_tokenizer.get_tokenizer()
-        fts_tokenizer.set_tokenizer("kiwipiepy")
-        try:
-            yield fts_tokenizer
-        finally:
-            fts_tokenizer.set_tokenizer(previous)
+        return "kiwipiepy"
 
     def test_a_space_free_korean_word_still_has_an_or_pass(self, kiwi):
         """The premise: one word, two different expressions."""
         query = "했습니다"
         assert " " not in query, "the fixture query must be the space-free case"
-        and_expr = _column_match("content", query, use_or=False)
-        or_expr = _column_match("content", query, use_or=True)
+        and_expr = _column_match("content", query, use_or=False, tokenizer=kiwi)
+        or_expr = _column_match("content", query, use_or=True, tokenizer=kiwi)
         assert and_expr != or_expr, (
             "kiwipiepy did not expand this word — pick one that it does, or the test proves nothing"
         )
@@ -337,6 +328,7 @@ class TestTheOrFallbackUnderAMorphologicalTokenizer:
     @pytest.mark.asyncio
     async def test_the_or_pass_actually_answers(self, kiwi, storage):
         """End of the argument: the AND form misses, the OR form finds it."""
+        storage.set_fts_tokenizer(kiwi)
         chunk = _make_chunk("회의를 진행합니다", source="notes/ko.md")
         await storage.upsert_chunks([chunk])
 
@@ -364,10 +356,10 @@ class TestTheLadderAnalysesTheQueryTwiceAtMost:
         calls: list[tuple[str, bool]] = []
         real = fts_tokenizer.tokenize_for_fts
 
-        def counting(text, *, for_query=False, use_or=False):
+        def counting(text, *, for_query=False, use_or=False, tokenizer):
             if for_query:
                 calls.append((text, use_or))
-            return real(text, for_query=for_query, use_or=use_or)
+            return real(text, for_query=for_query, use_or=use_or, tokenizer=tokenizer)
 
         await storage.upsert_chunks([_make_chunk("a note about wombats", source="notes/a.md")])
         monkeypatch.setattr("memtomem.storage.sqlite_backend._fts.tokenize_for_fts", counting)
@@ -385,10 +377,10 @@ class TestTheLadderAnalysesTheQueryTwiceAtMost:
         calls: list[tuple[str, bool]] = []
         real = fts_tokenizer.tokenize_for_fts
 
-        def counting(text, *, for_query=False, use_or=False):
+        def counting(text, *, for_query=False, use_or=False, tokenizer):
             if for_query:
                 calls.append((text, use_or))
-            return real(text, for_query=for_query, use_or=use_or)
+            return real(text, for_query=for_query, use_or=use_or, tokenizer=tokenizer)
 
         await storage.upsert_chunks([_make_chunk("unrelated body", source="notes/a.md")])
         monkeypatch.setattr("memtomem.storage.sqlite_backend._fts.tokenize_for_fts", counting)

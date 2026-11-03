@@ -137,6 +137,10 @@ __all__ = ["SqliteBackend"]
 # a megabyte while keeping round-trip overhead negligible.
 _REBUILD_FTS_BATCH_SIZE = 1000
 
+# How many times one rebuild_fts call redoes its pass when the backend's
+# tokenizer changes underneath it before it gives up (see rebuild_fts).
+_REBUILD_FTS_ATTEMPTS = 3
+
 
 # Prefix for per-source AI summary records in the ``_memtomem_meta`` k/v
 # table. The full key is ``ai_summary:<norm_path(source)>`` so a prefix
@@ -267,8 +271,14 @@ class SqliteBackend(
         strict_dim_check: bool = True,
         adopt_unpopulated_embedding_stamp: bool = False,
         chunk_budget_config: "IndexingConfig | None" = None,
+        fts_tokenizer: str = "unicode61",
     ) -> None:
         self._config = config
+        # This backend's FTS tokenizer, from ``search.tokenizer``. Index-time
+        # and query-time tokenization have to agree per database, and the
+        # backend that indexes a database is the one that queries it, so the
+        # choice lives here rather than in a process global (#3018).
+        self._fts_tokenizer = _fts.validate_tokenizer(fts_tokenizer)
         self._chunk_budget_config = chunk_budget_config
         self._dimension = dimension
         self._chunk_column_positions: dict[str, int] = {}
@@ -1141,6 +1151,34 @@ class SqliteBackend(
         return Path(self._config.sqlite_path).expanduser()
 
     @property
+    def fts_tokenizer(self) -> str:
+        """The FTS tokenizer this backend is configured with."""
+        return self._fts_tokenizer
+
+    @property
+    def fts_tokenizer_effective(self) -> str:
+        """The tokenizer this backend's FTS calls actually run.
+
+        Differs from :attr:`fts_tokenizer` only once ``kiwipiepy`` has failed
+        to import in this process (see ``fts_tokenizer.effective_tokenizer``).
+        """
+        return _fts.effective_tokenizer(self._fts_tokenizer)
+
+    def set_fts_tokenizer(self, name: str) -> None:
+        """Switch this backend's FTS tokenizer; the caller rebuilds the index.
+
+        Synchronous on purpose: the runtime config fanout in
+        ``web/hot_reload.py`` must apply it without yielding.
+
+        It switches this backend only. Another backend open on the same
+        database — another component stack in this process, or another
+        process such as ``mm web`` beside the MCP server — keeps the
+        tokenizer it was built with until it is recreated; stacks sharing a
+        database must be configured alike.
+        """
+        self._fts_tokenizer = _fts.validate_tokenizer(name)
+
+    @property
     def stored_embedding_info(self) -> dict:
         """Return the embedding config actually stored in the DB."""
         assert self._meta is not None
@@ -1714,6 +1752,8 @@ class SqliteBackend(
         if not chunks:
             return 0
 
+        # One tokenizer for the whole call, so a switch cannot split its rows.
+        tokenizer = self._fts_tokenizer
         db = self._get_db()
         try:
             chunk_ids = [str(c.id) for c in chunks]
@@ -1862,7 +1902,7 @@ class SqliteBackend(
                     "UPDATE chunks_fts SET content=?, source_file=? WHERE rowid=?",
                     [
                         (
-                            _fts.tokenize_for_fts(c.retrieval_content),
+                            _fts.tokenize_for_fts(c.retrieval_content, tokenizer=tokenizer),
                             norm_sources[c.metadata.source_file],
                             rowid,
                         )
@@ -1984,7 +2024,7 @@ class SqliteBackend(
                         [
                             (
                                 new_rowid_map[str(c.id)],
-                                _fts.tokenize_for_fts(c.retrieval_content),
+                                _fts.tokenize_for_fts(c.retrieval_content, tokenizer=tokenizer),
                                 norm_sources[c.metadata.source_file],
                             )
                             for c in to_insert
@@ -2790,7 +2830,7 @@ class SqliteBackend(
         return len(rowids)
 
     async def rebuild_fts(self) -> int:
-        """Rebuild the FTS5 index from chunks table using current tokenizer.
+        """Rebuild the FTS5 index from the chunks table with this backend's tokenizer.
 
         Returns the number of rows rebuilt.
 
@@ -2803,6 +2843,16 @@ class SqliteBackend(
         the main connection. Running it while this backend owns a transaction
         is rejected before dispatch so the worker cannot self-contend or evade
         the backend's task-affine transaction contract.
+
+        Each pass commits rows in one tokenizer. The worker reads the tokenizer
+        after its ``DELETE`` holds the write lock, so a rebuild that queued
+        behind a newer one uses the newer value, and reads it again before
+        committing: if the backend was switched during the pass, the pass is
+        rolled back and redone with the new value. A switch landing between
+        that check and the commit is not caught here; the rebuild that switch
+        schedules waits on the write lock and then rewrites the index. Once
+        the rebuilds for overlapping runtime switches finish, the index is in
+        the tokenizer that won, never the one that lost (#3018).
         """
         self._require_transaction_idle("rebuild_fts")
         assert self._db is not None
@@ -2813,38 +2863,47 @@ class SqliteBackend(
             try:
                 self._check_schema_current(conn, force=True)
                 conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("DELETE FROM chunks_fts")
-                cursor = conn.execute(
-                    "SELECT rowid, content, source_file, heading_hierarchy, retrieval_context FROM chunks"
+                for _attempt in range(_REBUILD_FTS_ATTEMPTS):
+                    conn.execute("DELETE FROM chunks_fts")
+                    tokenizer = self._fts_tokenizer
+                    cursor = conn.execute(
+                        "SELECT rowid, content, source_file, heading_hierarchy, retrieval_context FROM chunks"
+                    )
+                    total = 0
+                    try:
+                        while True:
+                            batch = cursor.fetchmany(_REBUILD_FTS_BATCH_SIZE)
+                            if not batch:
+                                break
+                            conn.executemany(
+                                "INSERT INTO chunks_fts(rowid, content, source_file) VALUES (?,?,?)",
+                                [
+                                    (
+                                        r[0],
+                                        _fts.tokenize_for_fts(
+                                            (
+                                                f"{r[4]}\n\n{r[1]}"
+                                                if r[4]
+                                                else _rebuild_fts_retrieval(r[1], r[3])
+                                            ),
+                                            tokenizer=tokenizer,
+                                        ),
+                                        r[2],
+                                    )
+                                    for r in batch
+                                ],
+                            )
+                            total += len(batch)
+                    finally:
+                        cursor.close()
+                    if tokenizer == self._fts_tokenizer:
+                        conn.commit()
+                        return total
+                    conn.rollback()
+                raise RuntimeError(
+                    "the FTS tokenizer changed during every rebuild attempt; "
+                    "the index was left as it was — run the rebuild again"
                 )
-                total = 0
-                try:
-                    while True:
-                        batch = cursor.fetchmany(_REBUILD_FTS_BATCH_SIZE)
-                        if not batch:
-                            break
-                        conn.executemany(
-                            "INSERT INTO chunks_fts(rowid, content, source_file) VALUES (?,?,?)",
-                            [
-                                (
-                                    r[0],
-                                    _fts.tokenize_for_fts(
-                                        (
-                                            f"{r[4]}\n\n{r[1]}"
-                                            if r[4]
-                                            else _rebuild_fts_retrieval(r[1], r[3])
-                                        )
-                                    ),
-                                    r[2],
-                                )
-                                for r in batch
-                            ],
-                        )
-                        total += len(batch)
-                finally:
-                    cursor.close()
-                conn.commit()
-                return total
             except Exception:
                 conn.rollback()
                 raise

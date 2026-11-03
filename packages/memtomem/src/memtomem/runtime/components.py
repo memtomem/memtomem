@@ -202,12 +202,6 @@ async def create_components(
     apply_e5_defaults(config)
     await asyncio.to_thread(validate_budget_configuration, config)
 
-    # Initialize FTS tokenizer from config
-    from memtomem.storage.fts_tokenizer import set_tokenizer
-
-    if config.search.tokenizer != "unicode61":
-        set_tokenizer(config.search.tokenizer)
-
     storage = create_storage(config)
     embedder: EmbeddingProvider | None = None
     embedding_broken: dict | None = None
@@ -252,6 +246,7 @@ async def create_components(
             embedding_max_sequence_tokens=config.embedding.max_sequence_tokens,
             strict_dim_check=False,
             chunk_budget_config=config.indexing,
+            fts_tokenizer=config.search.tokenizer,
         )
         try:
             await storage.initialize()

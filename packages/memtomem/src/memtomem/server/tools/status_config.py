@@ -35,6 +35,7 @@ from memtomem.storage.orphan_detect import RetainRule, orphan_candidate_sources,
 if TYPE_CHECKING:
     from memtomem.config import EmbeddingConfig, Mem2MemConfig, SaveReceipt, SearchConfig
     from memtomem.server.context import AppContext
+    from memtomem.storage.sqlite_backend import SqliteBackend
 
 logger = logging.getLogger(__name__)
 
@@ -261,23 +262,22 @@ def _collect_concurrent_writers(db_path: Path) -> dict | None:
     return warning
 
 
-def _tokenizer_fallback_warning(configured: str) -> dict | None:
+def _tokenizer_fallback_warning(configured: str, storage: SqliteBackend) -> dict | None:
     """Warn while a ``kiwipiepy`` store is being tokenized as ``unicode61`` (#2647).
 
-    Without ``kiwipiepy`` the tokenizer switches this process to ``unicode61``
-    on first use and keeps writing, so one FTS index ends up holding two token
+    Without ``kiwipiepy`` the store's backend tokenizes as ``unicode61`` from
+    the first kiwipiepy call on and keeps writing, so one FTS index ends up holding two token
     representations and Korean BM25 queries miss rows across them. Two
     signals, either sufficient: the process already fell back (sticky — a
     later install does not undo it), or the module cannot be found (the
     fallback is pending; status never tokenizes, so it would not trip it).
     Neither imports Kiwi. Rows written during a fallback stay damaged after
-    the extra is installed, so the fix ends with a rebuild.
+    the extra is installed, so the fix ends with a rebuild. *storage* is the
+    store's backend; only a kiwipiepy store reads its ``fts_tokenizer_effective``.
     """
     if configured != "kiwipiepy":
         return None
-    from memtomem.storage.fts_tokenizer import get_tokenizer
-
-    active = get_tokenizer()
+    active = storage.fts_tokenizer_effective
     installed = bool(_dependency_state("kiwipiepy")["available"])
     if active == "kiwipiepy" and installed:
         return None
@@ -503,7 +503,7 @@ async def collect_status_report(app: AppContext) -> dict:
                 "doc": "docs/guides/configuration.md#reset-flow",
             }
         )
-    tokenizer_warning = _tokenizer_fallback_warning(config.search.tokenizer)
+    tokenizer_warning = _tokenizer_fallback_warning(config.search.tokenizer, app.storage)
     if tokenizer_warning is not None:
         warnings.append(tokenizer_warning)
     # #1619: an explicitly enabled MMR silently does nothing without dense
@@ -1279,9 +1279,7 @@ async def mem_config(
                 publish_onnx_batch_size(app.embedder, app.config.embedding.onnx_batch_size)
             # Rebuild FTS index when tokenizer changes.
             if key == "search.tokenizer":
-                from memtomem.storage.fts_tokenizer import set_tokenizer
-
-                set_tokenizer(app.config.search.tokenizer)
+                app.storage.set_fts_tokenizer(app.config.search.tokenizer)
                 count = await app.storage.rebuild_fts()
                 result += f"\nFTS index rebuilt ({count} chunks)."
 

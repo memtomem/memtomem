@@ -189,18 +189,22 @@ def _restrict_to_column(column: str, body: str) -> str:
     return "{" + column + "} : (" + body + ")"
 
 
-def _column_match(column: str, query: str, *, use_or: bool) -> str:
+def _column_match(column: str, query: str, *, use_or: bool, tokenizer: str = "unicode61") -> str:
     """Tokenize *query* and restrict it to one column — one call, one analysis.
 
     The search path builds the bodies itself (it needs each form once, not once
     per column); this is the convenience spelling the tests and any future
     single-shot caller use.
     """
-    return _restrict_to_column(column, _fts.tokenize_for_fts(query, for_query=True, use_or=use_or))
+    return _restrict_to_column(
+        column, _fts.tokenize_for_fts(query, for_query=True, use_or=use_or, tokenizer=tokenizer)
+    )
 
 
 class SearchOpsMixin:
     """Search, recall, context-window, and audit read operations for SqliteBackend."""
+
+    _fts_tokenizer: str  # set by ``SqliteBackend.__init__``
 
     async def bm25_search(
         self,
@@ -283,8 +287,9 @@ class SearchOpsMixin:
             # for the four ``(column, form)`` expressions directly would analyse
             # the query once per expression, which for a morphological backend
             # is the expensive half of the call.
-            and_body = _fts.tokenize_for_fts(query, for_query=True)
-            or_body = _fts.tokenize_for_fts(query, for_query=True, use_or=True)
+            tokenizer = self._fts_tokenizer
+            and_body = _fts.tokenize_for_fts(query, for_query=True, tokenizer=tokenizer)
+            or_body = _fts.tokenize_for_fts(query, for_query=True, use_or=True, tokenizer=tokenizer)
             bodies = [and_body] if or_body == and_body else [and_body, or_body]
 
             def _query(conn: sqlite3.Connection) -> list:

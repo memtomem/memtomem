@@ -84,6 +84,7 @@ async def _run(mode: str, *, assume_yes: bool = False) -> None:
         embedding_policy_fingerprint=embedding_policy_fingerprint(cfg.embedding),
         embedding_max_sequence_tokens=cfg.embedding.max_sequence_tokens,
         strict_dim_check=False,
+        fts_tokenizer=cfg.search.tokenizer,
     )
     await storage.initialize()
     try:

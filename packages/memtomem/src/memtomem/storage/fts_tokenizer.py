@@ -4,7 +4,12 @@ Supports two tokenizer backends:
 - ``unicode61`` (default): FTS5's built-in tokenizer. Zero dependencies.
 - ``kiwipiepy``: Korean morphological analyzer. Requires ``pip install kiwipiepy``.
 
-The tokenizer backend is selected at module level via ``set_tokenizer()``.
+Nothing here selects a backend. Each caller names one: a storage backend
+carries its tokenizer as an instance attribute (``SqliteBackend.fts_tokenizer``,
+from ``search.tokenizer``) and passes it on every call, so two component stacks
+in one process tokenize their own databases their own way (#3018). The module
+keeps only what is genuinely process-wide: the loaded ``Kiwi`` analyser, and
+whether ``kiwipiepy`` failed to import here.
 """
 
 from __future__ import annotations
@@ -24,30 +29,42 @@ _FTS5_SPECIAL_RE = re.compile(r"[^\w]", re.UNICODE)
 # by a stray ``*`` and fails the whole MATCH (#2576), so they are quoted.
 _FTS5_KEYWORDS = frozenset({"AND", "OR", "NOT"})
 
-# Active tokenizer backend: "unicode61" or "kiwipiepy"
-_active_tokenizer: str = "unicode61"
+TOKENIZERS = ("unicode61", "kiwipiepy")
 
-# Lazy-loaded Kiwi instance
+# The loaded analyser, shared by every backend that tokenizes with kiwipiepy:
+# it is expensive to build and holds no per-database state.
 _kiwi_instance = None
 
+# Set once ``kiwipiepy`` fails to import. Import availability belongs to the
+# process (one ``sys.path``), and it is sticky like the fallback it reports
+# (#2647): installing the extra later does not undo rows already written.
+_kiwi_unavailable = False
 
-def set_tokenizer(name: str) -> None:
-    """Set the active tokenizer backend."""
-    global _active_tokenizer, _kiwi_instance
-    if name not in ("unicode61", "kiwipiepy"):
+
+def validate_tokenizer(name: str) -> str:
+    """Return *name* if it names a tokenizer backend, else raise ``ValueError``."""
+    if name not in TOKENIZERS:
         raise ValueError(f"Unknown tokenizer: {name!r}. Use 'unicode61' or 'kiwipiepy'.")
-    _active_tokenizer = name
-    _kiwi_instance = None  # reset lazy instance
+    return name
 
 
-def get_tokenizer() -> str:
-    """Return the name of the active tokenizer."""
-    return _active_tokenizer
+def effective_tokenizer(name: str) -> str:
+    """The backend a call naming *name* actually tokenizes with in this process.
+
+    ``kiwipiepy`` reads as ``unicode61`` once its import has failed here. Before
+    the first kiwipiepy call nothing has tried the import, so it still reads as
+    ``kiwipiepy`` — the "pending" state ``mem_status`` reports separately.
+    """
+    if name == "kiwipiepy" and _kiwi_unavailable:
+        return "unicode61"
+    return name
 
 
 def _get_kiwi():
-    """Lazy-load a Kiwi instance."""
-    global _kiwi_instance
+    """Lazy-load the shared Kiwi instance; ``None`` if kiwipiepy cannot be imported."""
+    global _kiwi_instance, _kiwi_unavailable
+    if _kiwi_unavailable:
+        return None
     if _kiwi_instance is None:
         try:
             from kiwipiepy import Kiwi
@@ -60,13 +77,13 @@ def _get_kiwi():
                 "korean extra where memtomem runs (memtomem[korean]) and restart; "
                 "mem_status shows how to rebuild the rows written meanwhile"
             )
-            set_tokenizer("unicode61")
+            _kiwi_unavailable = True
             return None
     return _kiwi_instance
 
 
 def _kiwi_tokenize(text: str) -> list[str]:
-    """Tokenize text using kiwipiepy morphological analysis."""
+    """Tokenize text using kiwipiepy morphological analysis (whitespace split without it)."""
     kiwi = _get_kiwi()
     if kiwi is None:
         return text.split()
@@ -88,7 +105,7 @@ def tokenize_for_fts(
     *,
     for_query: bool = False,
     use_or: bool = False,
-    tokenizer: str | None = None,
+    tokenizer: str = "unicode61",
 ) -> str:
     """Tokenize *text* for FTS5 insertion or query.
 
@@ -100,13 +117,17 @@ def tokenize_for_fts(
     When *use_or* is True, query terms are joined with ``OR`` instead of
     the default AND (implicit space) so partial-match queries still return
     results.
+
+    *tokenizer* names the backend; production callers always pass it (a
+    guard in ``test_fts_tokenizer_instance.py`` pins that), so the default
+    only serves direct calls in tests and notebooks. A ``kiwipiepy`` call in
+    a process where kiwipiepy cannot be imported tokenizes as ``unicode61``.
     """
     if not text:
         return text
 
-    if tokenizer not in (None, "unicode61", "kiwipiepy"):
-        raise ValueError(f"Unknown tokenizer: {tokenizer!r}")
-    if (tokenizer or _active_tokenizer) == "kiwipiepy":
+    validate_tokenizer(tokenizer)
+    if tokenizer == "kiwipiepy" and _get_kiwi() is not None:
         tokens = _kiwi_tokenize(text)
         if for_query:
             parts = [_format_query_token(t) for t in tokens]
