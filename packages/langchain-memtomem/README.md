@@ -80,8 +80,7 @@ belong to the store and are refused.
 
 - **Recall is bounded.** A query search reads at most `max_chunks_per_search`
   pipeline chunks (default 200), widening its window until it has
-  `offset + limit` items or hits that bound. With reranking on, the bound is
-  `min(max_chunks_per_search, rerank.max_pool)`.
+  `offset + limit` items or hits that bound; `rerank.max_pool` does not lower it.
 - **Read-after-write.** The instance that wrote sees its write at once.
   Another store instance over the same root sees it after its
   `search.cache_ttl` (30 s by default), or at once if a cached hit disagrees

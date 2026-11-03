@@ -471,15 +471,18 @@ class TestRerankCandidatePool:
             (40, 1.5, 20, 200, 60),  # 1.5× at mid-size
             (10, 2.0, 1, 200, 20),  # min_pool=1 → 2×10 wins
             (10, 2.0, 50, 200, 50),  # elevated floor wins
+            (250, 2.0, 20, 200, 250),  # request above max_pool → pool = top_k
+            (500, 2.0, 20, 200, 500),  # request above max_pool → pool = top_k
+            (100, 0.5, 20, 200, 100),  # oversample < 1 never shrinks below top_k
         ],
     )
     async def test_pool_size_scaling_table(
         self, top_k, oversample, min_pool, max_pool, expected_pool
     ):
-        """Pool formula: ``max(min_pool, min(max_pool, int(oversample*top_k)))``."""
+        """Pool formula: ``max(top_k, min_pool, min(max_pool, int(oversample*top_k)))``."""
         from memtomem.config import RerankConfig
 
-        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(250)]
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(600)]
         received: list[int] = []
         pipeline = self._make_pipeline(
             fused_input,
@@ -588,9 +591,11 @@ class TestRerankCandidatePool:
             RerankConfig(enabled=True, oversample=0.0)
 
     @pytest.mark.asyncio
-    async def test_rerank_failure_falls_back_to_top_k_not_rerank_pool(self):
+    @pytest.mark.parametrize("top_k", [10, 250])
+    async def test_rerank_failure_falls_back_to_top_k_not_rerank_pool(self, top_k):
         """If the reranker raises, the caller must still get ``top_k`` items —
-        not the wider ``rerank_pool`` that fusion produced upstream.
+        not the wider ``rerank_pool`` that fusion produced upstream, and not
+        fewer when ``top_k`` exceeds ``max_pool``.
 
         Regression guard: PR #308 widened fusion to rerank_pool but the
         ``except`` branch left ``fused`` at that wider size, leaking pool
@@ -598,10 +603,13 @@ class TestRerankCandidatePool:
         """
         from memtomem.config import RerankConfig
 
-        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(300)]
+
+        calls: list[int] = []
 
         class BrokenReranker:
             async def rerank(self, query, results, top_k):
+                calls.append(len(results))
                 raise RuntimeError("model unavailable")
 
         pipeline = self._make_pipeline(
@@ -610,11 +618,13 @@ class TestRerankCandidatePool:
             rerank_config=RerankConfig(enabled=True),
         )
 
-        results, _ = await pipeline.search("anything", top_k=10)
-        assert len(results) == 10
+        results, _ = await pipeline.search("anything", top_k=top_k)
+        assert calls, "the reranker must actually have been invoked"
+        assert len(results) == top_k
 
     @pytest.mark.asyncio
-    async def test_rerank_timeout_falls_back_to_top_k(self):
+    @pytest.mark.parametrize("top_k", [10, 250])
+    async def test_rerank_timeout_falls_back_to_top_k(self, top_k):
         """A hung reranker (wedged ONNX session, stuck connection) must not
         hang the whole search: rerank_cfg.timeout_s is the only wall-clock
         bound on that await, and on expiry the caller still gets top_k in
@@ -623,7 +633,7 @@ class TestRerankCandidatePool:
 
         from memtomem.config import RerankConfig
 
-        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(300)]
         started = asyncio.Event()
 
         class HungReranker:
@@ -637,9 +647,9 @@ class TestRerankCandidatePool:
             rerank_config=RerankConfig(enabled=True, timeout_s=0.05),
         )
 
-        results, _ = await pipeline.search("anything", top_k=10)
+        results, _ = await pipeline.search("anything", top_k=top_k)
         assert started.is_set(), "the reranker must actually have been invoked"
-        assert len(results) == 10
+        assert len(results) == top_k
 
     def test_rerank_timeout_must_be_positive(self):
         from memtomem.config import RerankConfig
@@ -659,6 +669,56 @@ class TestRerankCandidatePool:
         assert FIELD_CONSTRAINTS["rerank.min_pool"]["type"] is int
         assert FIELD_CONSTRAINTS["rerank.max_pool"]["type"] is int
         assert FIELD_CONSTRAINTS["rerank.enabled"]["type"] is bool
+
+
+class TestRerankedResponseNotCappedByPool:
+    """A reranked search returns as many results as an unreranked one.
+
+    Real pipeline over a real BM25-only store: with a pool sized at
+    ``min(max_pool, …)`` a request above ``rerank.max_pool`` came back at
+    ``max_pool`` results (200/200/200 for 200/250/500), with nothing saying so.
+    """
+
+    MATCHES = 300
+
+    @pytest.mark.asyncio
+    async def test_reranked_count_matches_unreranked_above_max_pool(self, bm25_only_components):
+        from memtomem.config import RerankConfig
+
+        comp, mem_dir = bm25_only_components
+        await comp.storage.upsert_chunks(
+            [
+                Chunk(
+                    content=f"zephyrine ledger entry number {i}",
+                    metadata=ChunkMetadata(source_file=mem_dir / f"note{i}.md"),
+                    embedding=[0.0] * 1024,
+                )
+                for i in range(self.MATCHES)
+            ]
+        )
+
+        received: list[int] = []
+
+        class IdentityReranker:
+            async def rerank(self, query, results, top_k):
+                received.append(len(results))
+                return results[:top_k]
+
+        pipeline = comp.search_pipeline
+        pipeline._reranker = IdentityReranker()
+        pipeline._rerank_config = RerankConfig(enabled=True)
+        assert pipeline._rerank_config.max_pool == 200
+
+        for top_k, expected in ((200, 200), (250, 250), (500, self.MATCHES)):
+            received.clear()
+            reranked, stats = await pipeline.search("zephyrine", top_k=top_k, record=False)
+            assert stats.rerank_applied is True
+            # The reranker ran, and on a pool no smaller than the request
+            # (bounded by the matches that exist).
+            assert received == [min(top_k, self.MATCHES)]
+            plain, _ = await pipeline.search("zephyrine", top_k=top_k, rerank=False, record=False)
+            assert len(reranked) == expected
+            assert len(reranked) == len(plain)
 
 
 class TestPerCallRerankBypass:

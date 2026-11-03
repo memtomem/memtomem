@@ -89,6 +89,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A reranked search is no longer capped at `rerank.max_pool` results
+  (#3043).** With a reranker active, the candidate pool was
+  `clamp(oversample × top_k, [min_pool, max_pool])`, and the reranker can only
+  return what it is given, so a request above `max_pool` (default 200) came back
+  with at most 200 results, with nothing saying so: the web search (`top_k` up to 500),
+  `mem_timeline` (`limit` up to 500) and `mm search -k`. The pool is now never
+  smaller than `top_k`, so a search returns up to `top_k` results as it does
+  without a reranker; `max_pool` bounds how far a request is oversampled, and
+  reranking cost grows with `top_k` above it. The same floor fixes a
+  `rerank.oversample` below 1, which sized the pool below `top_k` even when
+  `top_k` was within `max_pool`. Requests at or below `max_pool` with
+  `oversample` of 1 or more keep their pool and order. The LangGraph store's
+  recall bound is `max_chunks_per_search` with or without a reranker.
 - **Query expansion and the hidden-memory hint respect the search's scope
   (#3039).** Tag and heading expansion sampled terms with the search's project
   context but not its explicit scope or namespace filter, so a
