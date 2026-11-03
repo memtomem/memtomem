@@ -107,6 +107,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   layout's copy is kept and theirs goes to `<root>/quarantine.v2/` to be
   resolved by hand. Files the migration cannot read, and symlinked legacy
   records, stay where they are.
+- **The Hermes plugin's README discloses that the server reaches files
+  outside memtomem's own data.** The context-gateway actions behind `mem_do`
+  read and write other coding agents' files (instruction files, skills,
+  sub-agents, commands, hook settings, MCP server lists) in projects and in
+  those agents' configuration directories, and path-taking actions such as
+  `ingest`, export and import read or write wherever the server's user can. The
+  skills never call the context-gateway actions or `ingest`. It also names the
+  file watcher over the configured index roots, and `fetch`, which downloads a
+  URL on request even with a fresh BM25-only configuration. The README no
+  longer says the server can never reach project memory: `project_bind` binds
+  it to a registered project.
+
 - **The Web UI's health watchdog Run Now button keeps its translated label after
   a run.** It restored the English text `Run Now` when the run finished, so a
   Korean UI showed 지금 실행 until the first click and English afterwards.
