@@ -50,7 +50,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
+import stat
 import time
 import tomllib
 from dataclasses import dataclass, field
@@ -1470,6 +1472,57 @@ def _write_settings_target(name: str, path: Path, data: dict) -> None:
     _write_json(path, data)
 
 
+class _SettingsLinkError(Exception):
+    """A symlinked settings target that cannot be written through."""
+
+
+def _settings_write_destination(path: Path) -> Path:
+    """The file a write to *path* must replace so that a symlink survives it.
+
+    ``atomic_write_text`` renames a tempfile onto the path it is given, and a
+    rename replaces whatever directory entry is there: a symlink at *path*
+    would be swapped for a regular file, and the file it pointed to (often a
+    dotfiles copy under version control) would never see the change (#3021).
+    Writing to the link's destination instead keeps the link and updates the
+    file it names.
+
+    A non-link *path* is returned unchanged, so regular targets keep exactly
+    today's behavior. Only the final component matters: a symlinked parent
+    directory is already followed by the rename itself.
+
+    A link is written through only when the kernel can follow it to a regular
+    file (``os.stat`` on the link), and the destination is then named by
+    ``os.path.realpath(strict=True)``. The kernel check is what the runtime
+    reading the link will see; realpath alone is not enough on POSIX, where it
+    walks links itself instead of asking the kernel: on 3.12 it folds
+    ``regular-file/..`` textually and names a file no open() through the link
+    would reach, and it walks chains longer than the kernel will follow. Once
+    the kernel has followed the link, realpath has no such case left to get
+    wrong. A loop fails both (``Path.resolve(strict=False)`` would not do: it
+    returns a looping link unchanged on 3.13).
+
+    Raises :class:`_SettingsLinkError` otherwise: a dangling, looping or
+    unreachable link, or one that reaches a directory or other non-regular
+    file. A dangling link is refused rather than created through, since the
+    file it would create is exactly what the textual folding above can get
+    wrong.
+    """
+    if not os.path.islink(path):
+        return path
+    try:
+        reached = os.stat(path)
+        destination = Path(os.path.realpath(path, strict=True))
+    except FileNotFoundError:
+        raise _SettingsLinkError("it points at a file that does not exist") from None
+    except OSError as exc:
+        raise _SettingsLinkError(
+            f"it could not be followed: {exc.strerror or type(exc).__name__}"
+        ) from exc
+    if not stat.S_ISREG(reached.st_mode):
+        raise _SettingsLinkError("it points at a directory or another non-regular file")
+    return destination
+
+
 def _normalize_settings_target(name: str, data: dict) -> str:
     if name == "kimi_settings":
         payload = data.get(_KIMI_TOML_TEXT_KEY)
@@ -1647,8 +1700,39 @@ def generate_all_settings(
                     continue
                 contributions = raw_locked  # type: ignore[assignment]
 
+                # The file Steps 1-4 read, recheck and write: the target
+                # itself, or the destination of a symlink at it, so the link
+                # survives the write (#3021). Taken under the lock so a writer
+                # that swapped the link while this sync waited cannot leave it
+                # reading one file and writing another. The reason names only
+                # the configured path: the destination can sit anywhere, and
+                # the web surface does not scrub paths outside HOME.
+                try:
+                    write_path = _settings_write_destination(target_path)
+                except _SettingsLinkError as exc:
+                    results[name] = SettingsSyncResult(
+                        status="error",
+                        reason=f"{target_path} is a symbolic link that cannot be "
+                        f"written through: {exc}. The link and the file it points "
+                        f"to were left untouched. Fix or remove the link, then "
+                        f"re-run `mm context sync --include=settings`.",
+                    )
+                    continue
+                # The pre-lock gate judged the link as it was then; a link
+                # retargeted outside the project since must not ride on that.
+                if not allow_host_writes and not _is_under_project_root(write_path, project_root):
+                    results[name] = SettingsSyncResult(
+                        status="needs_confirmation",
+                        reason=(
+                            f"{target_path} is outside the project root; pass "
+                            f"allow_host_writes=True after confirming with the user."
+                        ),
+                        target=target_path,
+                    )
+                    continue
+
                 # Step 1: read existing + capture mtime (ns)
-                existing_raw, existing_mtime_ns = _read_settings_target(name, target_path)
+                existing_raw, existing_mtime_ns = _read_settings_target(name, write_path)
                 if existing_raw is _MALFORMED:
                     syntax_label = "TOML" if name == "kimi_settings" else "JSON"
                     results[name] = SettingsSyncResult(
@@ -1674,7 +1758,7 @@ def generate_all_settings(
                     continue
 
                 # Step 3: mtime check (concurrent-write guard)
-                if target_path.is_file() and target_path.stat().st_mtime_ns != existing_mtime_ns:
+                if write_path.is_file() and write_path.stat().st_mtime_ns != existing_mtime_ns:
                     results[name] = SettingsSyncResult(
                         status="aborted",
                         reason=f"{target_path} was modified by another "
@@ -1693,7 +1777,7 @@ def generate_all_settings(
                     continue
 
                 # Step 4: write
-                _write_settings_target(name, target_path, merged)
+                _write_settings_target(name, write_path, merged)
                 results[name] = SettingsSyncResult(
                     status="ok",
                     warnings=warnings,
