@@ -23,6 +23,8 @@ _DISPATCHER = _ROOT / "packages/memtomem-claude-automation-plugin/bin/hook_dispa
 _RENDERER = _ROOT / "tools/render_plugin_assets.py"
 _HERMES_SKILLS = _ROOT / "packages/memtomem-hermes-plugin/skills"
 _ANTIGRAVITY_SKILLS = _ROOT / "packages/memtomem-antigravity-plugin/skills"
+_CURSOR_SKILLS = _ROOT / "packages/memtomem-cursor-plugin/skills"
+_CURSOR_EXPLICIT_ONLY = "disable-model-invocation: true\n"
 
 
 def _contract() -> dict:
@@ -154,6 +156,37 @@ def test_antigravity_skills_are_the_hermes_user_scope_render_plus_the_bound_ones
         row["codex_name"] for row in _user_scope_workflows(workflows)
     }
     assert project_only == _PROJECT_ONLY_SKILLS
+
+
+def test_cursor_skills_are_the_antigravity_render_plus_explicit_only_frontmatter() -> None:
+    """Cursor also starts the server outside the project (in the home directory), so it
+    gets the Antigravity skills, bound ones included.
+
+    Compared byte for byte after removing the one frontmatter line Cursor adds: every
+    user-scope, bound, and leak check pinned for the Antigravity skills then holds here
+    too. The line sits in the frontmatter exactly when the workflow is not implicit, so
+    Cursor runs the write and project workflows only on an explicit `/skill-name`.
+    """
+    antigravity = {
+        path.parent.name: path.read_text(encoding="utf-8")
+        for path in _skill_files(_ANTIGRAVITY_SKILLS)
+    }
+    cursor = {
+        path.parent.name: path.read_text(encoding="utf-8") for path in _skill_files(_CURSOR_SKILLS)
+    }
+    assert set(cursor) == set(antigravity)
+    implicit = {row["codex_name"]: row["implicit"] for row in _contract()["workflows"]}
+    assert set(implicit) == set(cursor)
+    for name, text in cursor.items():
+        frontmatter, separator, _ = text.partition("\n---\n")
+        assert separator, name
+        assert text.count(_CURSOR_EXPLICIT_ONLY) == (0 if implicit[name] else 1), name
+        assert yaml.safe_load(frontmatter.removeprefix("---\n")).get(
+            "disable-model-invocation", False
+        ) is (not implicit[name]), name
+        assert text.replace(_CURSOR_EXPLICIT_ONLY, "", 1) == antigravity[name], name
+    # Keeps the comparison from passing vacuously: some skills are explicit-only, some not.
+    assert set(implicit.values()) == {True, False}
 
 
 def test_generated_assets_have_no_cross_runtime_or_legacy_leaks() -> None:
@@ -386,19 +419,20 @@ def test_every_input_taking_surface_carries_the_non_interactive_fallback() -> No
 
     # Every non-status workflow renders to four SKILL.md surfaces except the
     # OpenCode skills, which carry only the implicit read workflows; the Hermes
-    # skills, which carry only the user-scope ones; and the Antigravity skills,
-    # which carry every workflow (the project-only ones in their bound variant).
+    # skills, which carry only the user-scope ones; and the Antigravity and Cursor
+    # skills, which each carry every workflow (those with a bound render in that
+    # variant).
     non_status = [row for row in contract["workflows"] if row["id"] != "status"]
     opencode_skills = [row for row in non_status if row["implicit"] and row["effect"] == "read"]
     user_scope_skills = _user_scope_workflows(non_status)
     assert len(surfaces) == (
-        len(non_status) * 4 + len(opencode_skills) + len(user_scope_skills) + len(non_status)
+        len(non_status) * 4 + len(opencode_skills) + len(user_scope_skills) + len(non_status) * 2
     )
 
     optional = [label for label, workflow, _ in surfaces if workflow.get("input_optional")]
-    # brief's and update's Claude, Codex, Kimi, Antigravity, and OpenCode command
+    # brief's and update's Claude, Codex, Kimi, Antigravity, Cursor, and OpenCode command
     # surfaces; Hermes carries no project-only workflow.
-    assert len(optional) == 10, optional
+    assert len(optional) == 12, optional
     assert {workflow["id"] for _, workflow, _ in surfaces if workflow.get("input_optional")} == {
         "brief",
         "update",
@@ -451,7 +485,7 @@ def test_hermes_skills_carry_the_user_scope_rules() -> None:
     index = _flat_body(_HERMES_SKILLS / "memtomem-index/SKILL.md")
     assert "Require an explicit absolute file or directory path" in index
     assert "never pass a relative path" in index
-    assert "this server's working directory is the plugin directory" in index
+    assert "this host starts the server outside the user's project" in index
 
     remember = _flat_body(_HERMES_SKILLS / "memtomem-remember/SKILL.md")
     assert 'Call `mem_add` with `scope="user"`' in remember
@@ -1717,6 +1751,11 @@ _HOST_SURFACES: dict[str, tuple[str, str, str]] = {
         "Antigravity CLI plugin",
         "{codex_name}",
     ),
+    "packages/memtomem-cursor-plugin/skills/{codex_name}/SKILL.md": (
+        "Cursor plugin",
+        "Cursor plugin",
+        "/{codex_name}",
+    ),
     "packages/memtomem-hermes-plugin/skills/{codex_name}/SKILL.md": (
         "Hermes Agent plugin",
         "Hermes Agent plugin",
@@ -1806,6 +1845,7 @@ def test_project_workflows_guide_matches_the_workflow_contract() -> None:
             "OpenCode plugin",
             "Kimi Code skills",
             "Antigravity CLI plugin",
+            "Cursor plugin",
         }, shipped
         for label, invocation in shipped.items():
             assert host_rows[label][column] == f"`{invocation}`", (label, workflow_id)
@@ -1821,7 +1861,7 @@ def test_project_workflows_guide_matches_the_workflow_contract() -> None:
     core = re.escape(contract["core"]["version"])
     assert re.search(rf"memtomem\s+`{core}`", guide)
     token_end = r"(?=[\s,;·]|\.(?!\S)|$)"
-    for plugin in ("claude", "codex", "opencode", "kimi", "antigravity"):
+    for plugin in ("claude", "codex", "opencode", "kimi", "antigravity", "cursor"):
         version = contract["plugins"][f"{plugin}_version"]
         pattern = rf"`{plugin}`\s+{re.escape(version)}{token_end}"
         assert re.search(pattern, guide), (plugin, version)

@@ -6,6 +6,7 @@ import ast
 import json
 import re
 import shlex
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -390,6 +391,78 @@ def test_antigravity_plugin_matches_contract() -> None:
     assert installs and all(
         target.endswith("/packages/memtomem-antigravity-plugin") for target in installs
     ), installs
+
+
+def test_cursor_plugin_matches_contract() -> None:
+    contract = _contract()
+    core = contract["core"]
+    root = _ROOT / "packages/memtomem-cursor-plugin"
+    requirement = f"memtomem[{','.join(core['mcp_extras'])}]=={core['version']}"
+
+    manifest = _json("packages/memtomem-cursor-plugin/.cursor-plugin/plugin.json")
+    assert manifest["name"] == "memtomem"
+    assert manifest["version"] == contract["plugins"]["cursor_version"]
+    assert manifest["license"] == "Apache-2.0"
+    assert manifest["skills"] == "./skills/"
+    assert manifest["mcpServers"] == "./mcp.json"
+    # The same launch as the Antigravity bundle: Cursor starts the server outside the
+    # project too, and the pinned Python keeps uvx off a Command Line Tools 3.9.
+    assert _json("packages/memtomem-cursor-plugin/mcp.json") == _json(
+        "packages/memtomem-antigravity-plugin/mcp_config.json"
+    )
+    assert _json("packages/memtomem-cursor-plugin/mcp.json")["mcpServers"]["memtomem"]["args"] == [
+        "--python",
+        "3.12",
+        "--from",
+        requirement,
+        "memtomem-server",
+    ]
+
+    # The logo is a bundled file: .gitignore ignores *.png, so a missing exception
+    # would ship a manifest pointing at nothing.
+    logo = (root / manifest["logo"]).resolve()
+    assert logo.is_relative_to(root.resolve())
+    assert logo.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    # check-ignore exits 1 when the path is not ignored (0 = ignored, 128 = error).
+    # --no-index: without it a tracked file is never reported, so the check would pass
+    # after the .gitignore exception is removed.
+    logo_path = logo.relative_to(_ROOT.resolve()).as_posix()
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", "--no-index", "--", logo_path],
+        cwd=_ROOT,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert ignored.returncode == 1, (ignored.returncode, ignored.stderr)
+
+    # The marketplace takes this directory on its own, so it carries the license and
+    # the security policy the way plugins/memtomem does.
+    assert (root / "LICENSE").read_bytes() == (_ROOT / "LICENSE").read_bytes()
+    policy = (root / "SECURITY.md").read_text(encoding="utf-8")
+    assert "https://github.com/memtomem/memtomem/blob/main/SECURITY.md" in policy
+    assert "https://github.com/memtomem/memtomem/security/advisories/new" in policy
+
+    # The repo-root catalog points at this directory and names no version of its own.
+    catalog = _json(".cursor-plugin/marketplace.json")
+    assert [entry["source"] for entry in catalog["plugins"]] == ["packages/memtomem-cursor-plugin"]
+    assert all("version" not in entry for entry in catalog["plugins"])
+
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    launches = [line for line in readme.splitlines() if "memtomem[" in line]
+    assert len(launches) == 1, launches
+    assert re.findall(r"memtomem\[[^\]]*\]==[^\s'\"\],]*", launches[0]) == [requirement]
+    assert re.findall(r"--python\s+(\S+)", launches[0]) == ["3.12"], launches[0]
+    # Install and update copy the same directory. Copying onto an existing install nests
+    # the new bundle inside the old one, so the update copy follows a delete.
+    copies = re.findall(r"^cp -R (\S+) ~/.cursor/plugins/local/memtomem$", readme, re.M)
+    assert copies == ["memtomem/packages/memtomem-cursor-plugin"] * 2, copies
+    update = re.search(r"^git -C memtomem pull\n(.*?)\n```", readme, re.M | re.S)
+    assert update is not None
+    assert update[1].splitlines() == [
+        "rm -rf ~/.cursor/plugins/local/memtomem",
+        "cp -R memtomem/packages/memtomem-cursor-plugin ~/.cursor/plugins/local/memtomem",
+    ], update[1]
 
 
 def test_hermes_memory_plugin_matches_contract() -> None:

@@ -64,6 +64,8 @@ BUG_REPORT.md
 !packages/memtomem-claude-plugin/.claude-plugin/icon.png
 # The Codex plugin's interface.composerIcon, the same image
 !plugins/memtomem/assets/icon.png
+# The Cursor plugin's manifest logo, the same image
+!packages/memtomem-cursor-plugin/assets/icon.png
 main.py
 scripts/
 .agents-dev/
