@@ -151,6 +151,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A rebuilt index puts a day file back in the namespace it was written for
+  (#3051, ADR-0043).** A namespace is stored only in the database, so deleting
+  it and re-indexing, or indexing a synced memory directory on another machine,
+  put every file in the namespace its path rules give it — `default` with the
+  stock configuration, or the session's namespace for `mem_index` in a bound
+  MCP session — and a handoff saved under `shared:<project-slug>` was no longer
+  found there. A non-default day file is named
+  `{date}--{slug}-{digest}.md`, and for the namespaces memtomem writes the name
+  is enough to recover the namespace exactly, so a file with no stored rows now
+  gets it back, ahead of a session binding and behind stored rows, an explicit
+  `namespace` and `--reassign-namespaces`. Files already on disk are covered.
+  `{date}.md`, explicit `file` targets not named like a day file, and day-file
+  names that do not decode (a truncated slug, characters other than `:`
+  outside `[A-Za-z0-9._-]`) rebuild as before. Index results count the
+  restored files as `namespaces_restored_from_name` and the day-file names
+  that did not decode as `day_file_names_undecoded`, on the MCP, CLI and web
+  surfaces. A file named like a day file now declares its
+  namespace whoever wrote it: an unbound `mem_add(file=...)` into such a file
+  with no stored rows lands in that namespace, and a write under another
+  namespace into it is refused like any other namespace mix
+  (`allow_namespace_mix` overrides). Namespace moves made after writing
+  (`mem_ns_rename`, `mem_ns_assign`, archive and promote policies) are still
+  database-only, so a rebuild returns those files to the namespace in their
+  name.
 - **A reranked search is no longer capped at `rerank.max_pool` results
   (#3043).** With a reranker active, the candidate pool was
   `clamp(oversample × top_k, [min_pool, max_pool])`, and the reranker can only

@@ -193,6 +193,54 @@ class TestMemIndexNamespaceAdvisory:
         assert "Namespaces preserved" not in output
 
 
+class TestMemIndexDayFileNameAdvisory:
+    """ADR-0043: same hand-rendered surface — the namespaces a rebuild read back
+    from day-file names, and the names it could not read, with the remedy."""
+
+    async def test_restored_and_undecoded_names_are_reported(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_index_result(
+            monkeypatch,
+            IndexingStats(
+                total_files=3,
+                total_chunks=3,
+                indexed_chunks=3,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+                namespaces_restored_from_name=2,
+                day_file_names_undecoded=1,
+            ),
+        )
+
+        output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
+
+        assert "- Namespaces from file names: 2 file(s)" in output
+        assert "- Namespaces not restored: 1 day file(s)" in output
+        assert "mm index --force --namespace <namespace> <file>" in output
+
+    async def test_quiet_when_no_name_was_read(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_index_result(
+            monkeypatch,
+            IndexingStats(
+                total_files=1,
+                total_chunks=1,
+                indexed_chunks=1,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+            ),
+        )
+
+        output = await mem_index(path=str(tmp_path))  # type: ignore[arg-type]
+
+        assert "Namespaces from file names" not in output
+        assert "Namespaces not restored" not in output
+
+
 class TestMemIndexMissingVectorAdvisory:
     """#2115: same hand-rendered surface, same rule — a field that is not
     rendered here never reaches an MCP caller."""

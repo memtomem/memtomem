@@ -4494,6 +4494,31 @@ class TestIndex:
         resp = await client.post("/api/index", json={"path": "/etc"})
         assert resp.status_code == 200
 
+    async def test_trigger_index_reports_namespaces_read_from_day_file_names(
+        self, app, client: AsyncClient
+    ):
+        """ADR-0043: the response model carries both counters, so the JS
+        reporter can say which namespaces a rebuild did not get back."""
+        app.state.index_engine.index_path = AsyncMock(
+            return_value=IndexingStats(
+                total_files=3,
+                total_chunks=3,
+                indexed_chunks=3,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+                namespaces_restored_from_name=2,
+                day_file_names_undecoded=1,
+            )
+        )
+
+        resp = await client.post("/api/index", json={"path": "/tmp/memories"})
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["namespaces_restored_from_name"] == 2
+        assert data["day_file_names_undecoded"] == 1
+
     async def test_trigger_index_returns_namespace_provenance(self, app, client: AsyncClient):
         """The response preserves the hybrid namespace union and identifies
         its authoritative applied subset without collapsing multi-NS runs."""
@@ -4747,6 +4772,8 @@ class TestReindexAll:
                     deleted_chunks=0,
                     duration_ms=1.0,
                     namespaces_preserved_against_rules=2,
+                    namespaces_restored_from_name=4,
+                    day_file_names_undecoded=1,
                 ),
                 IndexingStats(
                     total_files=1,
@@ -4768,6 +4795,11 @@ class TestReindexAll:
         assert results[0]["namespaces_reassigned"] == 0
         assert results[0]["namespace_moves"] == []
         assert results[1]["namespace_moves"] == []
+        # ADR-0043: unconditional for the same reason.
+        assert results[0]["namespaces_restored_from_name"] == 4
+        assert results[0]["day_file_names_undecoded"] == 1
+        assert results[1]["namespaces_restored_from_name"] == 0
+        assert results[1]["day_file_names_undecoded"] == 0
 
 
 # ---------------------------------------------------------------------------

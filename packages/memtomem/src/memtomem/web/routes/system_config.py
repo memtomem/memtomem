@@ -897,6 +897,8 @@ async def add_memory_dir(
                 "namespaces_preserved_against_rules": (stats.namespaces_preserved_against_rules),
                 "namespaces_reassigned": stats.namespaces_reassigned,
                 "namespace_moves": list(stats.namespace_moves),
+                "namespaces_restored_from_name": stats.namespaces_restored_from_name,
+                "day_file_names_undecoded": stats.day_file_names_undecoded,
             }
             has_issues = bool(stats.errors or stats.blocked_files)
             has_processed_chunks = (stats.indexed_chunks + stats.skipped_chunks) > 0

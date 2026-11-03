@@ -180,6 +180,10 @@ async def run_with_progress(
         "namespaces_preserved_against_rules": 0,
         "namespaces_reassigned": 0,
         "namespace_moves": [],
+        # ADR-0043: namespaces a rebuild read back from day-file names, and
+        # day-file-shaped names it could not read.
+        "namespaces_restored_from_name": 0,
+        "day_file_names_undecoded": 0,
         # #2115: chunks the run skipped as unchanged that carry no vector.
         # Summed across streams like the counters above — a multi-root run
         # reports one total, matching the single ``--force`` that repairs it.
@@ -346,6 +350,12 @@ async def run_with_progress(
                             )
                             agg["namespaces_reassigned"] += evt.get("namespaces_reassigned", 0)
                             agg["namespace_moves"].extend(evt.get("namespace_moves") or [])
+                            agg["namespaces_restored_from_name"] += evt.get(
+                                "namespaces_restored_from_name", 0
+                            )
+                            agg["day_file_names_undecoded"] += evt.get(
+                                "day_file_names_undecoded", 0
+                            )
                             agg["chunks_missing_vectors"] += evt.get("chunks_missing_vectors", 0)
     finally:
         _close_bar()
@@ -450,6 +460,27 @@ def print_missing_vector_advisory(*, chunks_missing_vectors: int, force_hint: st
     click.secho(f"  → To re-embed: {force_hint}", fg="yellow")
 
 
+def print_day_file_name_advisory(*, restored: int, undecoded: int) -> None:
+    """Report namespaces a run read back from day-file names (ADR-0043).
+
+    ``restored`` is good news on a rebuild and says where the namespaces came
+    from; ``undecoded`` is the part a rebuild did not recover, with the command
+    that puts one file back. No-op when both are zero.
+    """
+    if restored:
+        click.echo(f"  {restored} file(s) took their namespace from their day-file name.")
+    if undecoded:
+        click.secho(
+            f"  {undecoded} day file(s) are named for a namespace that could not be read "
+            "from the name, and were indexed into the rules' or session's namespace.",
+            fg="yellow",
+        )
+        click.secho(
+            "  → To put one back: mm index --force --namespace <namespace> <file>",
+            fg="yellow",
+        )
+
+
 def print_namespace_advisory(
     *,
     preserved_against_rules: int,
@@ -550,6 +581,7 @@ __all__ = [
     "print_blocked_summary",
     "print_exempted_summary",
     "print_index_errors",
+    "print_day_file_name_advisory",
     "print_namespace_advisory",
     "run_with_progress",
     "_collect_seed_scale",

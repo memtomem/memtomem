@@ -6,10 +6,10 @@
 
 memtomem stores its source-of-truth as plain markdown under
 `indexing.memory_dirs`. The SQLite database's search index is derived — `mem_index`
-rebuilds it from those files. Namespaces, later tag edits and working state are not
-derived: they live only in the database, so a second machine indexes every file into the
-namespace its own configuration gives that path, or into an MCP session's namespace when
-`mem_index` runs in one ([what a rebuild restores](reference.md#what-a-rebuild-restores)). That gives you a
+rebuilds it from those files, and a day file written outside the default namespace gets
+its namespace back from its name. Namespace moves and tag edits made after writing, other
+files' namespaces and working state are not derived: they live only in the database
+([what a rebuild restores](reference.md#what-a-rebuild-restores)). That gives you a
 transport-agnostic sync path: keep the markdown in a private git repo, leave the database
 local, and let `git pull` carry edits between machines.
 
@@ -578,9 +578,9 @@ corruption or identity leaks:
    semantics are process-local. Embedding model versions can diverge
    across machines; copying the DB across them produces searchable
    nonsense. The DB rebuilds from markdown via `mem_index` — that's the
-   canonical recovery path and it's fast. It does not carry namespaces: re-index the files
-   saved outside the default namespace with `--namespace`, as
-   [what a rebuild restores](reference.md#what-a-rebuild-restores) describes.
+   canonical recovery path and it's fast. Day files get their namespace back from their
+   names; [what a rebuild restores](reference.md#what-a-rebuild-restores) lists what does
+   not come back and how to re-index a file into its namespace.
 4. **Committing `config.json` itself.** `memory_dirs` and `sqlite_path`
    may legitimately differ across machines. Treat `config.json` as
    machine-local; `config.d/` is the synced policy layer.

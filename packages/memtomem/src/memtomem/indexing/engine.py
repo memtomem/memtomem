@@ -770,6 +770,8 @@ class IndexEngine:
             namespaces_preserved_against_rules=tally.preserved_against_rules,
             namespaces_reassigned=tally.reassigned,
             namespace_moves=tally.summary(),
+            namespaces_restored_from_name=tally.restored_from_name,
+            day_file_names_undecoded=tally.undecoded_names,
             chunks_missing_vectors=missing_vectors,
             mutated=any(r.get("mutated", False) for r in file_results),
             scope_held=any(r.get("scope_held", False) for r in file_results),
@@ -1428,6 +1430,8 @@ class IndexEngine:
             namespaces_preserved_against_rules=tally.preserved_against_rules,
             namespaces_reassigned=tally.reassigned,
             namespace_moves=tally.summary(),
+            namespaces_restored_from_name=tally.restored_from_name,
+            day_file_names_undecoded=tally.undecoded_names,
             chunks_missing_vectors=await self._count_missing_vectors(self._unchanged_ids([result])),
             mutated=result.get("mutated", False),
             scope_held=result.get("scope_held", False),
@@ -1551,6 +1555,7 @@ class IndexEngine:
         |---|---|---|
         | explicit namespace | any | that namespace |
         | plain or ``force`` | one, unanimous | preserved |
+        | plain or ``force`` | none, day-file name decodes | the name's namespace (ADR-0043) |
         | plain or ``force`` | none | ``new_source_namespace`` if given, else rules → auto_ns → default |
         | plain (no force) | several | rules — only the *changed* chunks move, which is the pre-existing ADR-0032 ambiguity |
         | ``force`` | several | refused (:class:`NamespaceMixedUnderForceError`) — force rewrites *every* row, so one namespace would swallow the rest |
@@ -1604,18 +1609,10 @@ class IndexEngine:
             # several is the ambiguity #2005 is about, and there is no
             # per-line provenance to split it by.
             #
-            # Normalise the untagged carve-out back to ``None``: with the
-            # configured default at "default", ``_resolve_namespace`` answers
-            # ``None`` and the chunk model's own default stores the literal
-            # "default" — the same state by two names. Returning the stored
-            # spelling would make this resolver answer ``None`` before a file
-            # is written and "default" after, so the preview and the
-            # ``/api/index`` echo would disagree about a file that never moved.
-            target = (
-                None
-                if (stored[0] == "default" and self._ns_config.default_namespace == "default")
-                else stored[0]
-            )
+            # Normalise the untagged carve-out back to ``None`` (``_carve_out``):
+            # returning the stored spelling would make this resolver answer
+            # ``None`` before a file is written and "default" after.
+            target = self._carve_out(stored[0])
             # "Against the rules" requires a rule to have spoken. Without
             # ``rule_directed`` a stock config — no rules, no auto_ns — would
             # report every non-default file as one the rules disagree with,
@@ -1631,14 +1628,48 @@ class IndexEngine:
         if len(stored) > 1 and force:
             return NamespaceDecision(target=ruled, stored=stored, reason="mixed_force_refused")
 
+        undecoded_name = False
+        if not stored:
+            # A source the store has never seen, or one whose database is gone:
+            # a day file's name still says which namespace it was written for
+            # (ADR-0043). Above the session binding, so ``mem_index`` in a bound
+            # session rebuilds a tree into the namespaces it was written in;
+            # below stored rows, so a file whose rows were moved keeps the move.
+            from memtomem.memory_scope import day_file_declaration
+
+            declared, shaped = day_file_declaration(file_path)
+            if declared is not None:
+                return NamespaceDecision(
+                    target=self._carve_out(declared), reason="declared_by_name"
+                )
+            undecoded_name = shaped
+
         if not stored and new_source_namespace is not None:
             # The only place a bound namespace applies: a source the store has
             # never seen. Deliberately *below* the preserved and mixed-force
             # branches, so binding can neither move an indexed file nor slip
             # past the refusal a mixed file earns (#2104).
-            return NamespaceDecision(target=new_source_namespace, reason="bound_new_source")
+            return NamespaceDecision(
+                target=new_source_namespace,
+                reason="bound_new_source",
+                undecoded_name=undecoded_name,
+            )
 
-        return NamespaceDecision(target=ruled, stored=stored, reason="resolved")
+        return NamespaceDecision(
+            target=ruled, stored=stored, reason="resolved", undecoded_name=undecoded_name
+        )
+
+    def _carve_out(self, namespace: str) -> str | None:
+        """``namespace`` as the resolver answers it: ``None`` for the untagged default.
+
+        With the configured default at "default", ``_resolve_namespace`` answers
+        ``None`` and the chunk model stores the literal "default" — one state by
+        two names. A decision returning the literal would make the preview and
+        the ``/api/index`` echo disagree about a file that never moved.
+        """
+        if namespace == "default" and self._ns_config.default_namespace == "default":
+            return None
+        return namespace
 
     async def namespace_decision_for(
         self,
@@ -3257,6 +3288,8 @@ class IndexEngine:
                 "namespaces_preserved_against_rules": tally.preserved_against_rules,
                 "namespaces_reassigned": tally.reassigned,
                 "namespace_moves": list(tally.summary()),
+                "namespaces_restored_from_name": tally.restored_from_name,
+                "day_file_names_undecoded": tally.undecoded_names,
                 "chunks_missing_vectors": await self._count_missing_vectors(unchanged_ids),
             }
 

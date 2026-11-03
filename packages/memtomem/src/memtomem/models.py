@@ -610,3 +610,10 @@ class IndexingStats:
     # source instead (#2923). The reason is also in ``errors``; this lets a
     # by-id rewrite tell its caller that its change is on disk but held.
     scope_held: bool = False
+    # ADR-0043: files with no stored rows that took their namespace from their
+    # day-file name, and day-file-shaped names that did not decode, which fell
+    # back to the session binding or the rules (committed writes only, both).
+    # The second is the signal that a rebuild did not recover every namespace.
+    # Appended last for positional construction compatibility.
+    namespaces_restored_from_name: int = 0
+    day_file_names_undecoded: int = 0
