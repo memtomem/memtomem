@@ -45,7 +45,14 @@ from memtomem.constants import (
 )
 from memtomem.services.search_service import rrf_weights_from
 
-__all__ = ["MemtomemBaseStore", "MemtomemHybridStore", "MemtomemStore"]
+__all__ = [
+    "MemtomemBaseStore",
+    "MemtomemHybridStore",
+    "MemtomemStore",
+    "TierWouldNotRoundTrip",
+    "UnregisteredProjectTarget",
+    "resolve_target_scope",
+]
 
 if TYPE_CHECKING:
     from memtomem.integrations.langgraph_hybrid_store import MemtomemHybridStore
@@ -76,7 +83,7 @@ def __getattr__(name: str) -> Any:
 _CHUNK_LOCK_MOVE_RETRIES = 3
 
 
-class _UnregisteredProjectTarget(Exception):
+class UnregisteredProjectTarget(Exception):
     """A target names a project tree that no config entry covers.
 
     Raised rather than returned so the refusal cannot be dropped. An optional
@@ -86,7 +93,7 @@ class _UnregisteredProjectTarget(Exception):
     """
 
 
-class _TierWouldNotRoundTrip(Exception):
+class TierWouldNotRoundTrip(Exception):
     """The tier the gates would use is not the tier the indexer would store.
 
     The gates need to know which tier they are protecting; the indexer decides,
@@ -116,7 +123,7 @@ def _owned_tier(
     """Which tier *owns* ``target``, by configured directory rather than spelling.
 
     ``classify_scope`` decides from the path's shape, and a path can be shaped
-    to defeat it in both directions — see :func:`_resolve_target_scope`, which
+    to defeat it in both directions — see :func:`resolve_target_scope`, which
     is what callers should use. This half answers only the ownership question.
     """
     # 1. A registered project root that covers the target decides the tier.
@@ -162,7 +169,7 @@ def _owned_tier(
     #    onto a git-tracked path with both gates bypassed.
     pattern_scope, _ = classify_scope(target, None)
     if pattern_scope != "user":
-        raise _UnregisteredProjectTarget(
+        raise UnregisteredProjectTarget(
             f"{target} is a project-canonical path, but no "
             "indexing.project_memory_dirs entry covers it. Register the tier "
             "or choose a target inside a configured memory directory."
@@ -171,7 +178,7 @@ def _owned_tier(
     return "user"
 
 
-def _resolve_target_scope(
+def resolve_target_scope(
     target: Path,
     memory_dirs: list,
     project_memory_dirs: list,
@@ -185,13 +192,16 @@ def _resolve_target_scope(
     later surface — ``mem_edit``, ``mem_delete`` — trusts the second. A write
     whose two answers differ is one this adapter declines.
 
-    Raises :class:`_UnregisteredProjectTarget` or
-    :class:`_TierWouldNotRoundTrip`; never returns a tier it is unsure of.
+    Raises :class:`UnregisteredProjectTarget` or
+    :class:`TierWouldNotRoundTrip`; never returns a tier it is unsure of.
+
+    Public since ADR-0042: a package that stores beside memtomem needs the same
+    gate, and a copy of it would be a second safety policy to keep in step.
     """
     owned = _owned_tier(target, memory_dirs, project_memory_dirs)
     indexed, _ = classify_scope(target, project_memory_dirs)
     if owned != indexed:
-        raise _TierWouldNotRoundTrip(
+        raise TierWouldNotRoundTrip(
             f"{target} would be gated as {owned!r} but stored as {indexed!r}, so "
             "the gates and every later edit or delete would disagree about which "
             "tier it is in. Choose a target that is not nested inside another "
@@ -201,21 +211,27 @@ def _resolve_target_scope(
     return owned
 
 
+# The names these were born under, kept for in-tree importers and tests.
+_UnregisteredProjectTarget = UnregisteredProjectTarget
+_TierWouldNotRoundTrip = TierWouldNotRoundTrip
+_resolve_target_scope = resolve_target_scope
+
+
 def _gate_scope_for(comp: "Components", target: Path) -> str | dict:
-    """``_resolve_target_scope`` with this adapter's error-dict contract.
+    """``resolve_target_scope`` with this adapter's error-dict contract.
 
     Both destinations — a caller's ``file=`` and the derived day file — go
     through it, so neither can be given a tier the other would not be.
     """
     try:
-        return _resolve_target_scope(
+        return resolve_target_scope(
             target,
             comp.config.indexing.memory_dirs,
             comp.config.indexing.project_memory_dirs,
         )
-    except _UnregisteredProjectTarget as exc:
+    except UnregisteredProjectTarget as exc:
         return {"error": "unregistered_project_target", "detail": str(exc)}
-    except _TierWouldNotRoundTrip as exc:
+    except TierWouldNotRoundTrip as exc:
         return {"error": "tier_would_not_round_trip", "detail": str(exc)}
 
 

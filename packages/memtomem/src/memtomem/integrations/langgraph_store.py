@@ -50,10 +50,48 @@ class StoreRecordError(ValueError):
 _TOKEN_RE = re.compile(r"[\w.-]+", re.UNICODE)
 
 
-def _encode_segment(value: str) -> str:
+def encode_segment(value: str) -> str:
+    """Encode one LangGraph namespace segment or key as a path-safe token.
+
+    URL-safe base64 without padding, so the output is in ``[A-Za-z0-9_-]`` and
+    doubles as a file name. Empty, ``.``, ``..`` and NUL-bearing values are
+    refused because they cannot name a file. Public so that a package built on
+    this store (ADR-0042) shares one encoding instead of copying it.
+    """
     if not value or value in {".", ".."} or "\x00" in value:
         raise ValueError("LangGraph namespace segments and keys must be non-empty and safe")
     return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+_SEGMENT_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def decode_segment(token: str) -> str:
+    """Inverse of :func:`encode_segment`; refuses anything it did not produce.
+
+    A naive re-pad-and-decode accepts tokens the encoder never emits: ``Zh``
+    decodes to ``f`` through non-canonical padding bits, ``Lg`` to ``.``, ``AA``
+    to NUL. So the token must be non-empty, URL-safe, decode as UTF-8, and
+    re-encode to exactly itself.
+    """
+    if not isinstance(token, str) or not token or not _SEGMENT_TOKEN_RE.fullmatch(token):
+        raise ValueError("not an encoded LangGraph segment")
+    padded = token + "=" * (-len(token) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        value = raw.decode("utf-8")
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("not an encoded LangGraph segment") from exc
+    try:
+        canonical = encode_segment(value)
+    except ValueError as exc:
+        raise ValueError("not an encoded LangGraph segment") from exc
+    if canonical != token:
+        raise ValueError("not an encoded LangGraph segment")
+    return value
+
+
+_encode_segment = encode_segment
 
 
 def _parse_datetime(value: str) -> datetime:
@@ -76,7 +114,12 @@ def _read_path(value: Any, path: str) -> list[Any]:
     return list(cast(list[str], found))
 
 
-def _projection(value: dict[str, Any], index: bool | list[str] | None) -> str:
+def render_projection(value: dict[str, Any], index: bool | list[str] | None) -> str:
+    """The text of ``value`` that ``index`` selects for search, ``""`` for ``False``.
+
+    ``None`` and ``True`` take the whole value; a list of JSON-path selectors
+    takes those fields, strings verbatim and other values as sorted JSON.
+    """
     if index is False:
         return ""
     fields = ["$"] if index is None or index is True else index
@@ -88,6 +131,9 @@ def _projection(value: dict[str, Any], index: bool | list[str] | None) -> str:
             else:
                 parts.append(json.dumps(found, ensure_ascii=False, sort_keys=True))
     return "\n".join(parts)
+
+
+_projection = render_projection
 
 
 def _lookup(value: dict[str, Any], dotted: str) -> Any:
@@ -346,6 +392,56 @@ class MemtomemBaseStore(BaseStore):
             updated_at=_parse_datetime(record["updated_at"]),
         )
 
+    # -- record contract (public, ADR-0042 §A2) -------------------------------
+    #
+    # A package that composes over this store's JSON records needs to read and
+    # write them without reaching for the underscore helpers. These three
+    # methods are that contract. ``write_record`` and ``_put`` share one
+    # implementation, ``_write_record_locked``, so the BaseStore path and the
+    # record path cannot drift apart.
+
+    def record_path(self, namespace: tuple[str, ...], key: str) -> Path:
+        """Where the record for ``(namespace, key)`` lives under ``root``."""
+        return self._path(tuple(namespace), key)
+
+    def read_record(self, namespace: tuple[str, ...], key: str) -> dict[str, Any] | None:
+        """The stored record, ``None`` when absent.
+
+        Raises :class:`StoreRecordError` for a present file that cannot be read
+        safely, exactly as the BaseStore operations do.
+        """
+        with self._lock:
+            return self._read_record(self._path(tuple(namespace), key))
+
+    def write_record(
+        self,
+        namespace: tuple[str, ...],
+        key: str,
+        value: dict[str, Any],
+        *,
+        index: bool | list[str] | None = None,
+        generation: int | None = None,
+    ) -> dict[str, Any]:
+        """Write the record for ``(namespace, key)`` and return what was written.
+
+        Runs the same privacy guard and ``project_shared`` refusal as ``put``,
+        over the serialized value, the namespace, the key and the selectors.
+        ``generation`` is a caller-owned non-negative integer persisted beside
+        the value; this store never reads it. An overwrite that omits it drops
+        the key, because the caller owns it. ``created_at`` is preserved across
+        overwrites.
+        """
+        namespace = tuple(namespace)
+        if not isinstance(key, str):
+            raise ValueError("key must be a string")
+        if generation is not None and (
+            type(generation) is not int or generation < 0  # bool is excluded on purpose
+        ):
+            raise ValueError("generation must be a non-negative int")
+        path = self._path(namespace, key)
+        with self._lock:
+            return self._write_record_locked(path, namespace, key, value, index, generation)
+
     def _put(self, op: PutOp) -> None:
         namespace, key = tuple(op.namespace), op.key
         if not isinstance(key, str):
@@ -362,47 +458,61 @@ class MemtomemBaseStore(BaseStore):
                         break
                     current = current.parent
                 return
-            if not isinstance(op.value, dict):
-                raise ValueError("Store value must be a JSON object")
-            serialized = json.dumps(op.value, ensure_ascii=False, sort_keys=True, allow_nan=False)
-            value = json.loads(serialized)
-            index = list(op.index) if isinstance(op.index, list) else op.index
-            if (
-                index is not None
-                and type(index) is not bool
-                and not (isinstance(index, list) and all(isinstance(x, str) for x in index))
-            ):
-                raise ValueError("index must be a boolean, None, or string selectors")
-            scan_text = "\n".join(
-                [serialized, *namespace, key, *(index if isinstance(index, list) else [])]
+            self._write_record_locked(path, namespace, key, op.value, op.index, None)
+
+    def _write_record_locked(
+        self,
+        path: Path,
+        namespace: tuple[str, ...],
+        key: str,
+        raw_value: Any,
+        raw_index: Any,
+        generation: int | None,
+    ) -> dict[str, Any]:
+        if not isinstance(raw_value, dict):
+            raise ValueError("Store value must be a JSON object")
+        serialized = json.dumps(raw_value, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        value = json.loads(serialized)
+        index = list(raw_index) if isinstance(raw_index, list) else raw_index
+        if (
+            index is not None
+            and type(index) is not bool
+            and not (isinstance(index, list) and all(isinstance(x, str) for x in index))
+        ):
+            raise ValueError("index must be a boolean, None, or string selectors")
+        scan_text = "\n".join(
+            [serialized, *namespace, key, *(index if isinstance(index, list) else [])]
+        )
+        guard = privacy.enforce_write_guard(
+            scan_text,
+            surface="langgraph_basestore_put",
+            scope=self.scope,
+            force_unsafe=self.force_unsafe,
+        )
+        if guard.decision != "pass" and not (
+            guard.decision == "bypassed" and self.scope != "project_shared"
+        ):
+            raise ValueError(
+                f"LangGraph store write blocked by {len(guard.hits)} privacy pattern(s)"
             )
-            guard = privacy.enforce_write_guard(
-                scan_text,
-                surface="langgraph_basestore_put",
-                scope=self.scope,
-                force_unsafe=self.force_unsafe,
-            )
-            if guard.decision != "pass" and not (
-                guard.decision == "bypassed" and self.scope != "project_shared"
-            ):
-                raise ValueError(
-                    f"LangGraph store write blocked by {len(guard.hits)} privacy pattern(s)"
-                )
-            existing = self._read_record(path)
-            now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
-            record = {
-                "schema_version": 1,
-                "namespace": list(namespace),
-                "key": key,
-                "value": value,
-                "index": index,
-                "projection": _projection(value, index),
-                "created_at": existing["created_at"] if existing else now,
-                "updated_at": now,
-            }
-            atomic_write_text(
-                path, json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-            )
+        existing = self._read_record(path)
+        now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        record = {
+            "schema_version": 1,
+            "namespace": list(namespace),
+            "key": key,
+            "value": value,
+            "index": index,
+            "projection": render_projection(value, index),
+            "created_at": existing["created_at"] if existing else now,
+            "updated_at": now,
+        }
+        if generation is not None:
+            record["generation"] = generation
+        atomic_write_text(
+            path, json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        )
+        return record
 
     def _get(self, op: GetOp) -> Item | None:
         with self._lock:

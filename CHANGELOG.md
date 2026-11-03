@@ -7,6 +7,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Public names for a package that stores beside memtomem (ADR-0042).**
+  `memtomem.integrations.langgraph_store` exports `encode_segment`,
+  `decode_segment` (which refuses any token the encoder would not emit),
+  `render_projection`, and a record contract on `MemtomemBaseStore`:
+  `record_path`, `read_record` and `write_record`, the last taking an optional
+  caller-owned `generation` integer that is persisted beside the value.
+  `memtomem.integrations.langgraph` exports `resolve_target_scope` with
+  `UnregisteredProjectTarget` and `TierWouldNotRoundTrip`. `memtomem.runtime.files`
+  re-exports `async_file_lock`, `atomic_write_text`, `memory_lock_path` and
+  `CRUD_SIDECAR_LOCK_BUDGET_S`. `Mem2MemConfig.without_environment(**data)`
+  builds a validated config from the given values with no `MEMTOMEM_*`
+  variable layered on top. The underscore names keep working; nothing changes
+  for existing callers.
 - **The Codex plugin bundle ships its own `LICENSE` and `SECURITY.md`.**
   Plugin catalogs copy `plugins/memtomem` without the repository root, so
   the bundle now carries the full Apache-2.0 license and links back to the

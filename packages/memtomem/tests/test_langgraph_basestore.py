@@ -13,6 +13,7 @@ from langgraph.store.base import GetOp, PutOp, SearchOp
 from memtomem import privacy
 from memtomem.config import EmbeddingConfig
 from memtomem.integrations.langgraph import MemtomemBaseStore
+from memtomem.integrations.langgraph_store import StoreRecordError
 
 
 @pytest.fixture
@@ -241,3 +242,64 @@ def test_classifying_an_explicit_root_does_not_rewrite_global_config(tmp_path, m
 def test_ttl_is_explicitly_unsupported(store):
     with pytest.raises(NotImplementedError, match="TTL"):
         store.put(("users",), "ttl", {"x": 1}, ttl=10)
+
+
+def test_write_record_persists_a_caller_owned_generation(store):
+    written = store.write_record(("users", "alice"), "prefs", {"food": "pizza"}, generation=3)
+    assert written["generation"] == 3
+    record = store.read_record(("users", "alice"), "prefs")
+    assert record is not None
+    assert record["generation"] == 3
+    assert record["projection"] == '{"food": "pizza"}'  # index=None takes the whole value
+    assert record["created_at"] == written["created_at"]
+    # The BaseStore view is unchanged by the extra key.
+    item = store.get(("users", "alice"), "prefs")
+    assert item and item.value == {"food": "pizza"}
+    assert (
+        store.record_path(("users", "alice"), "prefs").read_text(encoding="utf-8").startswith("{")
+    )
+
+
+def test_write_record_without_generation_drops_the_key_on_overwrite(store):
+    store.write_record(("users", "alice"), "prefs", {"food": "pizza"}, generation=3)
+    first = store.read_record(("users", "alice"), "prefs")
+    store.write_record(("users", "alice"), "prefs", {"food": "pasta"})
+    second = store.read_record(("users", "alice"), "prefs")
+    assert second is not None and first is not None
+    assert "generation" not in second
+    assert second["created_at"] == first["created_at"]
+    assert second["value"] == {"food": "pasta"}
+
+
+def test_put_writes_no_generation_and_read_record_sees_the_same_file(store):
+    store.put(("users", "alice"), "prefs", {"food": "pizza"})
+    record = store.read_record(("users", "alice"), "prefs")
+    assert record is not None and "generation" not in record
+    assert store.read_record(("users", "alice"), "missing") is None
+
+
+@pytest.mark.parametrize("bad", [True, False, -1, 1.5, "3"])
+def test_write_record_rejects_invalid_generations(store, bad):
+    with pytest.raises(ValueError, match="generation"):
+        store.write_record(("users", "alice"), "prefs", {"food": "pizza"}, generation=bad)
+    assert store.read_record(("users", "alice"), "prefs") is None
+
+
+def test_write_record_runs_the_privacy_guard_over_the_whole_record(store):
+    secret = "ghp_" + "A" * 36
+    with pytest.raises(ValueError, match="privacy"):
+        store.write_record(("users", "alice"), "token", {"v": secret})
+    with pytest.raises(ValueError, match="privacy"):
+        # A secret in a selector name is scanned too, not only the value.
+        store.write_record(("users", "alice"), "prefs", {"v": "x"}, index=[secret])
+    assert store.read_record(("users", "alice"), "token") is None
+    assert store.read_record(("users", "alice"), "prefs") is None
+
+
+def test_write_record_refuses_a_corrupt_existing_record(store):
+    path = store.record_path(("users", "alice"), "prefs")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(StoreRecordError):
+        store.write_record(("users", "alice"), "prefs", {"food": "pizza"})
+    assert path.read_text(encoding="utf-8") == "{not json", "the corrupt file is left for a person"
