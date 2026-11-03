@@ -76,22 +76,34 @@ reported DB path before relying on sharing.
 ## Scope
 
 agy starts the server in the plugin directory, and memtomem takes its project context from
-the directory its server starts in, so the server begins at **user scope**. Six skills
-(search, recall, remember, index, status, setup) work there: notes are shared with your
-other agents through the user-scope store, `remember` writes user-scope memory only, and
-paths given to indexing must be absolute.
+the directory its server starts in, so the server begins at **user scope**.
 
-The three project workflows (`memtomem-handoff`, `memtomem-brief`, `memtomem-update`)
-first bind the server to the repository you are working in (`mem_project_bind`, through
-`mem_do`), then use its `project_local` tier. They need:
+Six skills first bind the server to the repository you are working in (`mem_project_bind`,
+through `mem_do`), then use its `project_local` tier:
+
+- `memtomem-search` and `memtomem-recall` read your user-scope memory plus this repository's
+  project memory;
+- `memtomem-remember` saves a project fact to this repository's `project_local` tier and a
+  cross-project preference to user scope;
+- `memtomem-handoff`, `memtomem-brief` and `memtomem-update` need the repository's registered
+  tier and stop without one.
+
+Binding needs:
 
 - a registered tier in that repository: `cd <repo> && mm mem init --scope project_local`;
 - a server that is not yet bound to another repository. A binding lasts until the memtomem
   server process restarts, so working in a second repository needs that restart first.
 
-After a binding, search and recall in that server process also see the bound repository's
-project tiers. The skills-only setup above, whose manual server already starts in your
-workspace, binds the same way.
+Without a registered tier, or outside a Git repository, search and recall say so and read
+user-scope memory only; remember saves only cross-project preferences and personal notes,
+and refuses a project fact or a project-only destination rather than storing it in user
+scope. The three project workflows stop in both cases, and print the `mm mem init` command
+when the repository has no registered tier.
+
+`memtomem-index`, `memtomem-status` and `memtomem-setup` do not bind: paths given to indexing
+must be absolute. They read whatever the server has, so after another skill has bound it,
+setup's verification search sees that repository's project tier too. The skills-only setup
+above, whose manual server already starts in your workspace, binds the same way.
 
 ## Network
 
