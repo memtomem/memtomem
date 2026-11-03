@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PureWindowsPath
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,7 @@ def build_timeline(
                 period_start=first_dt.strftime("%Y-%m-%d"),
                 period_end=last_dt.strftime("%Y-%m-%d"),
                 chunk_count=len(items),
-                sources=[str(s).split("/")[-1] for s in sources[:3]],
+                sources=[PureWindowsPath(str(s)).name or str(s) for s in sources[:3]],
                 key_topics=key_topics,
                 sample_content=sample,
             )

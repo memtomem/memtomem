@@ -2654,6 +2654,37 @@ class TestTemporal:
         for s in buckets[0].sources:
             assert "/" not in s
 
+    async def test_build_timeline_windows_source_paths(self):
+        """Windows native paths should be stripped to bare filenames without drive or directories."""
+        chunks = [
+            {
+                "content": "Windows path memory 1",
+                "created_at": "2025-05-01T00:00:00+00:00",
+                "source_file": r"C:\Users\Ada Lovelace\memories\default.md",
+                "tags": [],
+                "score": 0.5,
+            },
+            {
+                "content": "Windows path memory 2",
+                "created_at": "2025-05-01T00:00:00+00:00",
+                "source_file": r"D:\workspace\project\docs\notes.md",
+                "tags": [],
+                "score": 0.5,
+            },
+        ]
+        buckets = build_timeline(chunks, granularity="week")
+        assert len(buckets) == 1
+        assert set(buckets[0].sources) == {"default.md", "notes.md"}
+        for s in buckets[0].sources:
+            assert "\\" not in s
+            assert ":" not in s
+
+        # Verify format_timeline output doesn't contain Windows path fragments
+        formatted = format_timeline("test", buckets)
+        assert "C:\\" not in formatted
+        assert "default.md" in formatted
+        assert "notes.md" in formatted
+
     async def test_format_timeline_empty(self):
         result = format_timeline("Python", [])
         assert "No memories found" in result
