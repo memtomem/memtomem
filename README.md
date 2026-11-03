@@ -87,7 +87,7 @@ Install the plugin for your tool — [Claude Code](packages/memtomem-claude-plug
 cd <your-project> && mm mem init --scope project_local
 ```
 
-Start a new session and run the brief workflow: `/memtomem:brief` in Claude Code, and the name each other host uses is in the [Project workflows](docs/guides/project-workflows.md) guide. The Korean [바이브코딩 빠른 시작](docs/guides/vibe-coding-getting-started-ko.md) walks this path in Claude Code or Codex CLI in 10–15 minutes. For Cursor, Windsurf, Claude Desktop, Gemini CLI, and other MCP clients, see [MCP Client Setup](docs/guides/mcp-clients.md); from any client, asking it to call the `mem_status` tool confirms the connection.
+Start a new session and run the brief workflow: `/memtomem:brief` in Claude Code, and the name each other host uses is in the [Project workflows](docs/guides/project-workflows.md) guide. The [Claude Code & Codex CLI plugin quickstart](docs/guides/plugin-quickstart.md) ([한국어](docs/guides/vibe-coding-getting-started-ko.md)) walks through plugin installation and a first memory save-and-search round trip in 10–15 minutes. For Cursor, Windsurf, Claude Desktop, Gemini CLI, and other MCP clients, see [MCP Client Setup](docs/guides/mcp-clients.md); from any client, asking it to call the `mem_status` tool confirms the connection.
 
 <a id="4-web-ui-optional"></a>
 ### 5. Open the Web UI (optional)
@@ -176,6 +176,7 @@ Hosted at **[memtomem.com](https://memtomem.com)** and available as Markdown in 
 | Guide | Description |
 |-------|-------------|
 | [Getting Started](docs/guides/getting-started.md) | Install, configure, save and find your first memory |
+| [Plugin quickstart](docs/guides/plugin-quickstart.md) | Save and find a memory from Claude Code or Codex CLI in 10–15 minutes |
 | [한국어 바이브코딩 빠른 시작](docs/guides/vibe-coding-getting-started-ko.md) | Claude Code·Codex CLI에서 10~15분 안에 기억 저장·검색 |
 | [Project workflows](docs/guides/project-workflows.md) | handoff, brief, and update: modes, checks, and names per host |
 | [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |

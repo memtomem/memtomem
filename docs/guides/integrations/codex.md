@@ -3,9 +3,9 @@
 The native Codex plugin bundles an exact-pinned memtomem MCP server and nine
 skills. BM25 is enabled by default; an embedding provider is optional.
 
-Prefer a short Korean first-success path? Follow the [Claude Code·Codex CLI
-vibe-coding quickstart](../vibe-coding-getting-started-ko.md), then return here
-for the complete skill reference.
+Prefer a short first-success path? Follow the [Claude Code & Codex CLI plugin
+quickstart](../plugin-quickstart.md) ([한국어](../vibe-coding-getting-started-ko.md)),
+then return here for the complete skill reference.
 
 ## Install
 
