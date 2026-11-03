@@ -52,8 +52,8 @@ jobs:
       # `uv sync --frozen` (which neither checks nor regenerates the lock).
       - run: uv lock --check
       - run: uv sync --frozen
-      - run: uv run ruff check packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
-      - run: uv run ruff format --check packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
+      - run: uv run ruff check packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
+      - run: uv run ruff format --check packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
 
   typecheck:
     runs-on: ubuntu-latest

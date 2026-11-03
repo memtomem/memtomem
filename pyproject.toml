@@ -6,10 +6,11 @@ requires-python = ">=3.12"
 dependencies = []
 
 [tool.uv.workspace]
-members = ["packages/memtomem"]
+members = ["packages/memtomem", "packages/langchain-memtomem"]
 
 [tool.uv.sources]
 memtomem = { workspace = true }
+langchain-memtomem = { workspace = true }
 
 [tool.ruff]
 target-version = "py312"
@@ -21,7 +22,7 @@ extend-exclude = ["*.ipynb"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["packages/memtomem/tests"]
+testpaths = ["packages/memtomem/tests", "packages/langchain-memtomem/tests"]
 markers = [
     "ollama: requires a running Ollama instance (auto-skipped when unavailable)",
     "llm: requires a live LLM API key (OpenAI/Anthropic); CI runs these in the nightly job only",
@@ -41,6 +42,7 @@ disable_error_code = ["has-type", "attr-defined"]
 [dependency-groups]
 dev = [
     "memtomem[all]",
+    "langchain-memtomem",
     # Imported directly by test_supply_chain_contracts to parse the PEP 508
     # requirements in packages/memtomem/pyproject.toml. Arrives via pytest in
     # practice; declared because that guard's whole argument is that a

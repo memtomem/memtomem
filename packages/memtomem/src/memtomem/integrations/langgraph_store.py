@@ -168,10 +168,21 @@ def _compare(actual: Any, expected: Any) -> bool:
     return True
 
 
-def _matches_filter(value: dict[str, Any], filters: dict[str, Any] | None) -> bool:
+def matches_filter(value: dict[str, Any], filters: dict[str, Any] | None) -> bool:
+    """Whether ``value`` satisfies a LangGraph ``search(filter=...)`` mapping.
+
+    Each key is a dotted path into ``value``; each expected value is either a
+    literal (equality) or an operator mapping (``$eq``, ``$ne``, ``$gt``,
+    ``$gte``, ``$lt``, ``$lte``, ``$in``, ``$nin``). ``None`` or an empty
+    mapping matches everything. Public since ADR-0042: a store that ranks
+    this store's records by another engine still applies the same filter.
+    """
     return not filters or all(
         _compare(_lookup(value, key), expected) for key, expected in filters.items()
     )
+
+
+_matches_filter = matches_filter
 
 
 def _namespace_matches(namespace: tuple[str, ...], condition: MatchCondition) -> bool:
@@ -573,7 +584,7 @@ class MemtomemBaseStore(BaseStore):
             record
             for record in self._records()
             if tuple(record["namespace"][: len(op.namespace_prefix)]) == op.namespace_prefix
-            and _matches_filter(record["value"], op.filter)
+            and matches_filter(record["value"], op.filter)
             and (not op.query or bool(record.get("projection")))
         ]
         scores: list[float | None]

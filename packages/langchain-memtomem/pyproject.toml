@@ -1,0 +1,47 @@
+[project]
+name = "langchain-memtomem"
+version = "0.1.0"
+description = "A LangGraph BaseStore whose query search runs the memtomem pipeline over Markdown projections"
+authors = [
+    {name = "DAPADA Inc.", email = "contact@dapada.co.kr"},
+    {name = "memtomem contributors"},
+]
+license = {text = "Apache-2.0"}
+keywords = ["langgraph", "langchain", "memory", "memtomem", "store", "markdown"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+readme = "README.md"
+requires-python = ">=3.12"
+# The real floor is the first memtomem release that carries the ADR-0042 public
+# names (memtomem.runtime.files, MemtomemBaseStore.write_record, matches_filter,
+# instance-local FTS tokenizer). The workspace member is still 0.7.3, so the
+# floor is written at the workspace's version to keep the lock resolvable, and
+# ``langchain_memtomem/__init__.py`` refuses to import against a memtomem that
+# lacks the names. The release PR sets the floor to the release that has them.
+dependencies = [
+    "langgraph>=1.0,<2",
+    "memtomem>=0.7.3,<0.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/memtomem/memtomem"
+Repository = "https://github.com/memtomem/memtomem"
+Issues = "https://github.com/memtomem/memtomem/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/langchain_memtomem"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/langchain_memtomem", "docs", "README.md", "LICENSE", "CHANGELOG.md"]

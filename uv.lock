@@ -10,6 +10,7 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "langchain-memtomem",
     "memtomem",
     "memtomem-workspace",
 ]
@@ -847,6 +848,21 @@ wheels = [
 ]
 
 [[package]]
+name = "langchain-memtomem"
+version = "0.1.0"
+source = { editable = "packages/langchain-memtomem" }
+dependencies = [
+    { name = "langgraph" },
+    { name = "memtomem" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "langgraph", specifier = ">=1.0,<2" },
+    { name = "memtomem", editable = "packages/memtomem" },
+]
+
+[[package]]
 name = "langchain-protocol"
 version = "0.0.18"
 source = { registry = "https://pypi.org/simple" }
@@ -1260,6 +1276,7 @@ source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [
+    { name = "langchain-memtomem" },
     { name = "memtomem", extra = ["all"] },
     { name = "mypy" },
     { name = "packaging" },
@@ -1276,6 +1293,7 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "langchain-memtomem", editable = "packages/langchain-memtomem" },
     { name = "memtomem", extras = ["all"], editable = "packages/memtomem" },
     { name = "mypy", specifier = ">=2.1.0" },
     { name = "packaging", specifier = ">=22" },

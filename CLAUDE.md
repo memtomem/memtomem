@@ -12,9 +12,9 @@ Requires Python 3.12+ and `uv` (workspace-managed monorepo).
 ```bash
 uv pip install -e "packages/memtomem[all]"             # install deps
 uv run pytest -m "not ollama"                          # tests (CI filter)
-uv run ruff check packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py && \
+uv run ruff check packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py && \
     uv run ruff format --check \
-    packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py   # lint (required)
+    packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py   # lint (required)
 uv run mypy packages/memtomem/src                         # typecheck (advisory)
 ```
 

@@ -1,0 +1,373 @@
+# langchain-memtomem — the store protocol
+
+What `MemtomemPipelineStore` writes, in what order, what repair does with
+whatever an interruption left behind, and how a query search widens its
+window. ADR-0042 in the memtomem repository records the decisions; this
+document is the contract the code and the tests in `tests/` implement. Every
+row of the interruption matrix is one test case in `tests/test_lcmm_protocol.py`.
+
+Source references are to memtomem at `bb0e63a9` (2026-11-03).
+
+## Layout
+
+One caller-chosen `root`, normalised once at construction with memtomem's
+`norm_path` (resolved, and NFC-folded where the filesystem folds Unicode
+forms), because that is the spelling the index stores source paths under and
+both hit decoding and the orphan sweep compare paths against the root. An
+NFD-spelled root on macOS would otherwise match no hit.
+
+```
+<root>/
+  index.db                      the store's SQLite (+ -wal, -shm)
+  records/<seg>/…/<key>.json    one JSON record per item — the source of truth
+  records/<seg>/…/<key>.json.deleting
+                                deletion marker: the generation a delete started on
+  records/<seg>/…/<key>.json.last
+                                tombstone: the generation a deleted item reached (kept)
+  projections/<seg>/…/<key>.md  one Markdown projection per indexed item
+  projections/<seg>/…/<key>.md.indexed
+                                last-indexed marker: the generation the rows were built from
+  projections/<seg>/…/.<key>.md.lock
+                                memtomem's sidecar lock for the item (see Locks)
+```
+
+`<seg>` and `<key>` are `memtomem.integrations.langgraph_store.encode_segment`
+of each namespace segment and of the key (base64url, no padding), so the
+record tree is exactly `MemtomemBaseStore`'s layout and the projection tree
+mirrors it. `records/` is outside the index's `memory_dirs`, so its `.json`
+files are never indexed; `projections/` is the index's only memory dir.
+
+A projection file:
+
+```
+---
+tags: [lcmm-gen-7]
+---
+<!-- langchain-memtomem v1 ns=sdXNlcnM:sYWxpY2U key=bm90ZQ gen=7 -->
+<rendered value>
+```
+
+- The frontmatter tag is copied by memtomem's chunker onto every row of the
+  file and is refreshed on re-index even for chunks whose text did not change
+  (measured: a plain re-index of a three-chunk file kept two chunk UUIDs and
+  re-tagged all three). It is how a search hit names the generation its row
+  came from.
+- The header comment names the item and the generation the file was rendered
+  from. A file whose comment and tag disagree, or whose comment names another
+  item, is not a whole projection and is treated as missing.
+- `<rendered value>` is `render_projection(value, index)`: the whole value for
+  `index=None`, the selected fields for a list of JSON-path selectors.
+
+## Namespaces
+
+A LangGraph tuple maps to one memtomem namespace: every segment encoded,
+prefixed with the marker letter `s`, joined with `:`
+(`_protocol.to_memtomem_namespace`). The marker keeps a token from starting
+with `-` (refused by `validate_namespace`) and keeps a raw segment from ever
+equalling an encoded one. The joined form must pass
+`memtomem.constants.validate_namespace`; a tuple over 256 characters is
+refused at `put` with the cap and the encoded length. Every `index_file` call
+passes `namespace=` explicitly (an explicit namespace wins over stored rows and
+rules, `indexing/engine.py:1580`).
+
+## Generation agreement
+
+Each item carries three generations. `put` writes the record with
+`max(existing record, .last tombstone, .deleting marker) + 1`; the projection
+header carries the generation it was rendered from; the `.indexed` marker
+carries the generation the rows were built from, written after `index_file`
+returned clean. Rows carry it as the frontmatter tag.
+
+The generation is monotonic for a key across deletion: a delete writes the
+`.last` tombstone with the generation the item reached and never removes it.
+Without it a re-created key would start again at 1, so (a) a deletion marker
+left by an interrupted delete would outrank the new record and repair would
+delete it, and (b) a row cached by another instance before the delete would
+name the new record's generation and be served for the new value.
+
+An item is **whole** when the record exists, is not `index=False`, has no
+deletion marker, the projection header and the marker both equal the record's
+generation, and the index holds at least one row for the projection path
+(`ItemState.agrees`). Only a whole item is served by a query search, and only
+from a hit whose row tag equals the record's generation.
+
+## Locks
+
+Every mutation and every repair of an item runs under that item's memtomem
+sidecar lock: `async_file_lock(memory_lock_path(<projection path>),
+timeout=…)` from `memtomem.runtime.files`, the lock memtomem's own writers
+take for a memory file. The projection's directory is created before the
+acquire because `memory_lock_path` resolves its argument. Two store instances
+over one root, in one process or two, serialise on it. `index_file` is called
+with `lock_held=True`, so the engine does not re-acquire the sidecar (which
+would self-deadlock within one process) and goes straight to its own
+in-process index lock. The order sidecar → engine lock → storage follows the
+level rule in `memtomem/context/_atomic.py` (low to high). `MemtomemBaseStore`
+holds its own in-process `RLock` for the duration of a record read or write
+only.
+
+Cancellation: the store's own file work under the lock — reading and
+writing the record, the projection and the markers — runs synchronously on
+the event loop, not in a worker thread. A task cancelled while awaiting a
+thread releases the lock while the thread keeps working, and a late unlink
+could remove a record another instance wrote in between. The awaited
+memtomem calls (`index_file`, `delete_by_source`) protect their own work; a
+cancellation there leaves the item non-whole and repairable.
+
+Timeouts: `put`, `delete` and open-time repair wait
+`CRUD_SIDECAR_LOCK_BUDGET_S` (5 s, memtomem's own CRUD budget). A query search
+that finds a disagreeing item waits `SEARCH_REPAIR_LOCK_S` (0.25 s) and skips
+the item when the lock is still held, because a held lock means a writer is
+mid-mutation and the item will disagree until it finishes.
+
+## Put
+
+`put(namespace, key, value, index)`, under the item's lock:
+
+| step | writes |
+|---|---|
+| 0 | render the projection text; read the existing record; `generation = max(record, .last, .deleting) + 1` |
+| 1 | **guard the projection text** (`enforce_write_guard`, surface `langchain_memtomem_put`, the store's tier, `force_unsafe` as configured); `blocked` or `blocked_project_shared` raises `ValueError` and nothing has been written |
+| 2 | `write_record(…, generation=)` — **guards the record** (value, namespace, key, selectors) and writes it atomically in one call; a block raises before the write |
+| 3 | unlink `.deleting` if present — the record just written outranks the marker |
+| 4a | `index=False`: unlink the projection and `.indexed`, `storage.delete_by_source(projection)`; done |
+| 4b | `atomic_write_text(projection)` |
+| 5 | `index_file(projection, namespace=, lock_held=True, ingress_guarded=True, valve_text=<file text>, force_unsafe=<step 1 said bypassed>)`; judge the stats |
+| 6 | write `.indexed` = generation |
+| after the lock | `search_pipeline.invalidate_cache()` |
+
+Step 4a's two unlinks have a boundary of their own (`put.between_unlinks`).
+Both guards run before the first write (ADR B8): step 1 precedes every write,
+and step 2's guard is the last thing before its own write. A blocked record
+leaves the projection guard's audit line and nothing else.
+
+Judging step 5 (`_judge`): `total_files == 0` (the engine excluded or skipped
+the path), a non-empty `errors`, or `blocked_files > 0` is a failed `put` and
+raises `StoreIndexError` — the record is written, the item is not whole, and
+the next open or the next `put` repairs it. `indexed_chunks == 0` alone is
+not failure: unchanged chunks are reported as skipped. A `PrivacyRejection`
+from the engine is re-raised as `ValueError`.
+
+`PutOp(value=None)` (LangGraph's delete-by-put) runs Delete. `abatch` runs
+its ops in order; each `PutOp` is one indexed `put` (see Measurements for why
+there is no cross-item batching yet).
+
+## Delete
+
+`delete(namespace, key)`, under the item's lock. A missing record with no
+projection, marker or deletion marker is a no-op.
+
+| step | writes |
+|---|---|
+| 1 | write `.deleting` and `.last` = `max(record generation, .last, .deleting)` (`0` with none) |
+| 2 | unlink the projection and `.indexed` |
+| 3 | `storage.delete_by_source(projection)` |
+| 4 | unlink the record |
+| 5 | unlink `.deleting` |
+| after the lock | `invalidate_cache()` |
+
+## Repair
+
+Repair runs at open, over every item named by a record, a `.deleting`
+marker, a projection or an `.indexed` marker, each under its lock, and before
+the store serves any operation. A query search runs the same single-item
+repair on a disagreeing hit. Repair is idempotent: a second pass finds every
+item whole or absent.
+
+The state is read under the lock (`_read_state`) and classified by one
+ordered decision (`_protocol.classify`); the first matching row wins.
+
+| # | state | action |
+|---|---|---|
+| 1 | `.deleting` present and (no record, or record gen ≤ marker gen) | **finish delete**: write `.last`, unlink projection and `.indexed`, `delete_by_source`, unlink record, unlink `.deleting` |
+| 2 | `.deleting` present and record gen > marker gen | the marker is superseded: unlink it, continue below |
+| 3 | no readable record, or record has `index=False` | **purge projection** if a projection, an `.indexed` marker or rows exist (unlink both files, `delete_by_source`); else nothing |
+| 4 | projection missing, unparsable, naming another item, or header gen ≠ record gen | **render and index**: write the projection from the record, guard it (surface `langchain_memtomem_repair`), `index_file`, write `.indexed` |
+| 5 | header gen = record gen, but marker gen ≠ record gen or no rows | **index**: `index_file` the projection as it is, write `.indexed` |
+| 6 | whole | nothing |
+
+A guard block or a failed index in rows 4–5 is logged and the item stays
+unserved (no agreeing marker); the record is intact and the next open or
+`put` retries. After the per-item pass: a projection file whose path does not
+decode to an item is unlinked and its rows deleted; every source path the
+index holds that is not in the snapshot of present projection files is
+re-judged **under its item's lock** — a put on another instance can land
+between the snapshot and the row listing — and its rows are deleted only
+when the projection is still absent (a path that decodes to no item is
+deleted outright). Paths are compared in memtomem's stored spelling
+(`norm_path`: realpath, NFC on macOS).
+
+### Interruption matrix
+
+Each row: the step boundary a crash (or the test's `Steps.at`) interrupts,
+what repair observes, which row above classifies it, and the outcome. "A" is
+the item's previous generation, "B" the one being written.
+
+Put, over an existing indexed item (gen 1 = A):
+
+| interrupted after | record | projection | marker | rows | row | outcome |
+|---|---|---|---|---|---|---|
+| step 1 (`put.before_record`) | A gen 1 | A gen 1 | 1 | A | 6 | A, whole |
+| step 2 (`put.after_record`) | B gen 2 | A gen 1 | 1 | A | 4 | B rendered and indexed |
+| step 4b (`put.after_projection`) — **the stale-rows case** | B gen 2 | B gen 2 | 1 | A | 5 | rows rebuilt from B |
+| step 5 (`put.after_index`) | B gen 2 | B gen 2 | 1 | B | 5 | marker written |
+| step 6 (`put.after_marker`) | B gen 2 | B gen 2 | 2 | B | 6 | whole (only the cache invalidation was skipped; a fresh open has a fresh cache) |
+
+Put with `index=False` over an indexed item:
+
+| interrupted after | record | projection | marker | rows | row | outcome |
+|---|---|---|---|---|---|---|
+| step 2 (`put.after_record`) | B, `index=False` | A gen 1 | 1 | A | 3 | projection and rows purged |
+| step 4a, between the two unlinks (`put.between_unlinks`) | B, `index=False` | — | 1 | A | 3 | marker and rows purged |
+
+First put of a new item interrupted after step 2 (`put.after_record`): record
+gen 1, nothing derived → row 4 → rendered and indexed.
+
+Delete, over a whole item (gen 1):
+
+| interrupted after | record | `.deleting` | projection | marker | rows | row | outcome |
+|---|---|---|---|---|---|---|---|
+| step 1 | gen 1 | 1 | yes | 1 | yes | 1 | finished |
+| step 2 | gen 1 | 1 | — | — | yes | 1 | finished |
+| step 3 | gen 1 | 1 | — | — | — | 1 | finished |
+| step 4 | — | 1 | — | — | — | 1 | finished (marker removed) |
+
+Delete interrupted after step 4, then a put of the same key interrupted
+after its record write: the new record is generation 2 (from the `.last`
+tombstone), the marker says 1, so row 2 drops the marker and row 4 finishes
+the put. Without the tombstone the record would be generation 1 and row 1
+would delete it.
+
+Delete marker superseded: delete interrupted after step 2, then a `put`
+completes (record gen 2 > marker gen 1): the put unlinks the marker at its
+step 3; had it crashed before that, row 2 drops the marker and row 6 (or
+4–5) finishes the put.
+
+### Two instances, `delete` racing `put`
+
+Both serialise on the item's sidecar lock, so the outcome is one of the two
+serial orders: `put` then `delete` (item absent, only the `.last` tombstone)
+or `delete` then `put` (record, projection, marker and rows at generation 2,
+whole). Each
+instance's next search sees the outcome: the writing instance invalidated its
+cache; the other sees it after its `search.cache_ttl`, or at once if its hit
+disagrees with the files.
+
+## Search
+
+`get`, `list_namespaces` and a `search` without `query` read the JSON records
+only, through `MemtomemBaseStore` (an `index=False` item is listed and
+filtered like any other). `search(query=…)`:
+
+1. **Narrow by namespace.** For a non-empty `namespace_prefix`, the pipeline
+   is called with the pattern `<encoded prefix>*`; for the empty prefix, with
+   no namespace filter (the store's `system_namespace_prefixes` is `[]`, so
+   nothing is hidden). The pattern over-matches on purpose: it is a SQL
+   `LIKE`, so the base64 of a shorter segment can prefix a longer one's
+   (`abc` → `YWJj`, `abcdef` → `YWJjZGVm`) and ASCII case folds (`aaa` →
+   `YWFh`, `aaG` → `YWFH`). The hit's source path is decoded back to its tuple
+   and kept only when `tuple[:len(prefix)] == prefix` — the prefix itself
+   included. The store's own tier is passed as `scope=`; the pipeline's
+   default SQL is `scope = 'user'`, which would return nothing for a root in a
+   registered project tier.
+2. **Group chunks into items.** Hits are grouped by `(namespace, key)` in
+   order of first appearance; the item's score is the best final pipeline
+   score among its chunks (after rerank and the later modifiers). The item's
+   row generation is the tag its chunks carry; chunks of one item disagreeing
+   is "unknown", which never equals the record's generation.
+3. **Judge each item** against its files: served only when the item is whole
+   and the hit's row generation equals the record's generation, and the
+   record's value passes `filter` (`matches_filter`, the same predicate
+   `MemtomemBaseStore` applies on the query-less path: dotted keys, literal
+   equality, `$eq $ne $gt $gte $lt $lte $in $nin`; a nested mapping is
+   compared for equality, where LangGraph's `InMemoryStore` matches a
+   subset and refuses `$in`/`$nin`). A disagreeing item is repaired under its lock
+   if the lock is free within 0.25 s, and the window is then **retrieved
+   again** from the fresh rows with `record=False` (which bypasses the result
+   cache); on that second pass nothing is repaired and a still-disagreeing
+   item is skipped. The hit in hand is never served after a repair: its score
+   was computed over rows of another generation.
+4. **Paginate over items.** `offset + limit` eligible items are collected
+   before slicing, so a later page never underfills because an earlier item
+   had many chunks.
+5. **Widen.** The first window asks the pipeline for `top_k = min(budget,
+   max(2 · (offset + limit), 20))` chunks, where `budget` is the store's
+   `max_chunks_per_search` (default 200, at least 1). While fewer than
+   `offset + limit` items are eligible and `top_k < budget`, `top_k =
+   min(budget, 2 · top_k)` and the window is retrieved again. Each window
+   stands alone: its ranking is rebuilt from that window's hits (a window is
+   never merged with the previous one, so a reranker that fell back to fused
+   scores mid-widening cannot mix two scales in one list). A window that adds
+   no eligible item does not by itself end the search: the pipeline truncates
+   to `top_k` before its validity filter, so two windows of filtered-out
+   chunks can precede an eligible item at the next rank. Termination is
+   `offset + limit` items or `top_k == budget`.
+
+Bounds the docs state: recall is bounded by `max_chunks_per_search`; with
+reranking on, the candidate pool is capped at `clamp(oversample · top_k,
+[min_pool, max_pool])` (`search/pipeline.py:1981`), so the effective bound is
+`min(max_chunks_per_search, rerank.max_pool)`. The store never passes
+`rerank=False` per call. An item whose new generation is not yet indexed (an
+interrupted `put`) is found by a query on its **old** text, which repairs it,
+and by every query after that; a query on its new text alone finds nothing to
+repair until the next open.
+
+## Read-after-write
+
+The writing instance sees its own write at once (its cache is invalidated).
+Another instance over the same root sees it after its `search.cache_ttl`
+(30 s by default, settable through `config={"search": {"cache_ttl": …}}`),
+or at once when one of its hits disagrees with the files (step 3 above).
+
+## Isolation and the ambient inputs that remain
+
+The components are built from `Mem2MemConfig.without_environment(...)` with
+`storage.sqlite_path = <root>/index.db`, `indexing.memory_dirs =
+[<root>/projections]`, `search.system_namespace_prefixes = []`, the caller's
+`config` sections (`embedding`, `search`, `rerank`, `chunking`, …; `storage`
+and `indexing` are refused) and `create_components(config,
+load_ambient_config=False)`. No watcher runs. Measured on a scratch `HOME`
+with `config.json`, a `config.d` fragment and `MEMTOMEM_STORAGE__SQLITE_PATH`
+all pointing elsewhere: the store's index is under root and none of the
+other paths is created.
+
+What the store still reads or writes outside root, by design:
+
+- **The project registry** (`indexing.project_memory_dirs`), read once at
+  open from the developer's `config.json`, `config.d` and `MEMTOMEM_*`, the
+  way `MemtomemBaseStore` reads it (ADR B7): it decides the store's tier, is
+  written into the store's own configuration so the indexer's scope guard
+  agrees, and gates `project_shared` (`confirm_project_shared=True`
+  required; `force_unsafe` hard-refused there). Because this read is the
+  personal configuration, a malformed unrelated `MEMTOMEM_*` variable fails
+  `open()` the way it fails `MemtomemBaseStore` today.
+- **Embedding model caches** under `~/.memtomem/cache` when an ONNX profile
+  is configured.
+- **Entity backfill** (`create_components(entity_backfill=True)`) writes to
+  the store's own database once, on first open of an index built by an older
+  memtomem.
+- **The schema peer check** (`storage/schema_peers.py`), on a schema
+  migration of an existing `index.db`, enumerates memtomem's runtime instance
+  registry; a fresh `index.db` takes no migration.
+
+## Measurements
+
+On memtomem `bb0e63a9`, macOS, Apple Silicon, 50 single-paragraph items:
+
+| profile | `put` mean | notes |
+|---|---|---|
+| `embedding.provider = "none"` (default, BM25 only) | 3.2 ms | `tests/test_lcmm_latency.py` |
+| E5 (`onnx` / `multilingual-e5-small`) | 39.3 ms | model already cached; `LANGCHAIN_MEMTOMEM_E5=1` runs the test |
+
+A five-hit query search under E5 took 7 ms.
+
+Open with a fresh root: 16 ms (`provider="none"`); reopen with 23 items: 20 ms.
+
+Because a `put` costs a few milliseconds without an embedder, `abatch` indexes
+each `PutOp` separately; batching several items into one index call is left
+for a measurement that shows it is needed.
+
+`max_chunks_per_search` default 200: a single-paragraph value is one chunk,
+`long_text` in the tests (six headed sections) is six; 200 chunks therefore
+cover between 33 and 200 items per query. The default is a placeholder until
+a corpus-based chunk-per-item distribution is measured.
