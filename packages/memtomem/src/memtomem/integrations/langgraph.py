@@ -197,7 +197,14 @@ def resolve_target_scope(
 
     Public since ADR-0042: a package that stores beside memtomem needs the same
     gate, and a copy of it would be a second safety policy to keep in step.
+
+    ``target`` is normalised here (``expanduser().resolve()``), the way the
+    configured roots are. The in-tree callers already pass a resolved path; a
+    caller of the public name may not, and an unresolved symlink into a
+    registered ``project_shared`` directory would otherwise be gated as
+    ``user`` while the indexer stored its rows as ``project_shared``.
     """
+    target = Path(target).expanduser().resolve()
     owned = _owned_tier(target, memory_dirs, project_memory_dirs)
     indexed, _ = classify_scope(target, project_memory_dirs)
     if owned != indexed:

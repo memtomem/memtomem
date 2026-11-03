@@ -8,6 +8,7 @@ and ``Mem2MemConfig.model_validate({})`` both read ``MEMTOMEM_*``;
 from __future__ import annotations
 
 import pickle
+from pathlib import Path
 
 import pytest
 
@@ -22,11 +23,11 @@ def test_default_constructor_reads_the_environment_but_without_environment_does_
 
     ambient = Mem2MemConfig()
     assert ambient.search.cache_ttl == 7.0
-    assert str(ambient.storage.sqlite_path) == "/nowhere/env.db"
+    assert ambient.storage.sqlite_path == Path("/nowhere/env.db")
 
     explicit = Mem2MemConfig.without_environment()
     assert explicit.search.cache_ttl == 30.0
-    assert str(explicit.storage.sqlite_path) != "/nowhere/env.db"
+    assert explicit.storage.sqlite_path != Path("/nowhere/env.db")
 
 
 def test_without_environment_takes_the_given_values(monkeypatch) -> None:

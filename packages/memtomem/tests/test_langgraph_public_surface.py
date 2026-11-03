@@ -122,6 +122,27 @@ def test_scope_resolver_raises_its_public_exceptions(tmp_path: Path) -> None:
     assert lg.resolve_target_scope(user_dir / "note.md", [user_dir], [shared]) == "user"
 
 
+def test_scope_resolver_normalises_its_target(tmp_path: Path, monkeypatch) -> None:
+    # The configured roots are resolved; the target must be too, or a symlink
+    # into a registered shared directory is gated as ``user`` while the
+    # indexer files its rows as ``project_shared``. In-tree callers resolve
+    # before calling; the public name cannot assume that.
+    user_dir = tmp_path / ".memtomem" / "memories"
+    shared = tmp_path / "proj" / ".memtomem" / "memories"
+    shared.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(shared, target_is_directory=True)
+    direct = lg.resolve_target_scope(shared / "note.md", [user_dir], [shared])
+    via_alias = lg.resolve_target_scope(alias / "note.md", [user_dir], [shared])
+    assert direct == via_alias == "project_shared"
+    # A relative path is resolved against the working directory.
+    monkeypatch.chdir(tmp_path)
+    relative = lg.resolve_target_scope(
+        Path("proj/.memtomem/memories/note.md"), [user_dir], [shared]
+    )
+    assert relative == "project_shared"
+
+
 def test_runtime_files_reexports_the_same_objects() -> None:
     assert files.async_file_lock is _atomic.async_file_lock
     assert files.atomic_write_text is _atomic.atomic_write_text
