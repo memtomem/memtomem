@@ -147,8 +147,8 @@ class MemtomemPipelineStore(BaseStore):
     item an interrupted mutation left behind, and returns a store ready for
     the five ``BaseStore`` operations. ``config`` holds the sections of
     ``Mem2MemConfig`` the caller sets (``embedding``, ``search``, ``rerank``,
-    ``chunking``, …); ``storage`` and ``indexing`` are the store's own and are
-    refused. Nothing from the developer's ``config.json``, ``config.d`` or
+    …); ``storage`` and ``indexing`` are the store's own and are refused.
+    Nothing from the developer's ``config.json``, ``config.d`` or
     ``MEMTOMEM_*`` variables reaches these components. The project registry is
     read from them, once, to find which tier ``root`` is in.
 
