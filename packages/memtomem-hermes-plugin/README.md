@@ -98,10 +98,16 @@ example below sets it. Before this package's 0.1.15, the nearest `.env` was read
 ## Scope
 
 This package runs memtomem at **user scope**. The server starts in the plugin directory,
-so it has no project context: there is no per-project (`project_local`) memory, and
-paths given to indexing must be absolute. Notes are shared with your other agents through
-the user-scope store. The handoff workflow of the other memtomem plugins is not included,
-because it needs a project.
+so it starts with no project context: there is no per-project (`project_local`) memory,
+and paths given to indexing must be absolute. Notes are shared with your other agents
+through the user-scope store. The six skills are written for that scope, and the handoff
+workflow of the other memtomem plugins is not included, because it needs a project.
+
+The server does accept one explicit binding, which the skills never use:
+`mem_do(action="project_bind", params={"project_root": "/absolute/path"})` binds it, once
+per server process, to a project whose `.memtomem` tier is registered. Project-scoped
+memory then resolves against that project, so a model that calls it on request reads and
+writes that project's memory from this server.
 
 Indexing a whole project directory also reads any project memory inside it
 (`<project>/.memtomem/memories*`). What happens to those files depends on memtomem's
@@ -138,14 +144,40 @@ Keep the quotes around `"1"`: Hermes accepts only string values under `env:` and
 start a server whose value is the number `1`. Without `PYTHON_DOTENV_DISABLED`, memtomem
 reads the nearest `.env` again (see "First run" above).
 
+## Files outside memtomem's own data
+
+The server is not confined to `~/.memtomem` or to the directories you ask it to index. It
+runs as your user, and some of its `mem_do` actions read and write files wherever you can:
+
+- The context-gateway actions (`context_init`, `context_detect`, `context_generate`,
+  `context_diff`, `context_sync`, `context_pull`, `context_version`, `context_promote`,
+  `context_memory_migrate`, `context_artifact_migrate`, `context_artifact_transfer`) keep
+  other coding agents' instruction files, skills, sub-agents, commands, hook settings and
+  MCP server lists in step with a canonical copy under `.memtomem/`. They read and write
+  those agents' files in projects and in the agents' own configuration, for example
+  `~/.claude.json`, `~/.claude/`, `~/.codex/`, `~/.gemini/` and `~/.kimi-code/`.
+- Actions that take a path from the caller, such as indexing, `ingest` (which imports other
+  agents' instruction files and native memory), export and import, read or write that path.
+- While the server runs, a file watcher watches memtomem's configured index roots (its
+  memory directories and registered project memory directories) and re-indexes files that
+  change there, and an existing configuration can enable scheduled maintenance jobs.
+
+Those files can hold other tools' credentials, and hooks are commands those agents run.
+Some of these actions ask for confirmation through a parameter (`allow_host_writes`,
+`confirm_project_shared`) before certain writes, but this package adds no limit of its own.
+The six skills call none of the context-gateway actions or `ingest`; they run only when the
+model passes them to `mem_do`.
+
 ## Network
 
 Memory is stored locally in `~/.memtomem`. The server is downloaded from PyPI on first
 start, and uv downloads Python 3.12 then too if it cannot find one. With a fresh BM25-only
-configuration nothing else leaves the machine. An existing
-memtomem configuration may enable its own network paths: model downloads from Hugging Face
-(ONNX embedding or local reranker), a remote embedding or LLM provider, Cohere reranking
-(sends the query and candidate chunks), or search webhooks (send events including the query).
+configuration nothing else leaves the machine on its own. One action reaches the network
+on request: `mem_do(action="fetch", params={"url": ...})` downloads the page at the URL it
+is given and indexes it; the skills never call it. An existing memtomem configuration may
+enable its own network paths: model downloads from Hugging Face (ONNX embedding or local
+reranker), a remote embedding or LLM provider, Cohere reranking (sends the query and
+candidate chunks), or search webhooks (send events including the query).
 
 ## License
 
