@@ -43,7 +43,7 @@ def test_sync_crud_preserves_created_at_and_file_truth(store):
 
 def test_search_skips_corrupt_records(store):
     store.put(("users", "alice"), "good", {"food": "pizza"})
-    corrupt = store.root / "corrupt.json"
+    corrupt = store.root / "records.v2" / "corrupt.json"
     corrupt.write_text("{not-json", encoding="utf-8")
     results = store.search(("users",), query="pizza")
     assert [result.key for result in results] == ["good"]

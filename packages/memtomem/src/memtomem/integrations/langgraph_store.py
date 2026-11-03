@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import math
 import logging
+import os
 import re
 import threading
+import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +38,12 @@ except ImportError as exc:  # pragma: no cover - exercised by minimal-install sm
 
 from memtomem import privacy
 from memtomem.config import EmbeddingConfig, Mem2MemConfig, TargetScope
-from memtomem.context._atomic import atomic_write_text
+from memtomem.context._atomic import (
+    _file_lock,
+    atomic_write_bytes,
+    atomic_write_text,
+    rename_no_replace,
+)
 from memtomem.embedding.base import EmbeddingProvider
 from memtomem.embedding.factory import create_embedder
 from memtomem.memory_scope import require_user_base, resolve_memory_scope_dir
@@ -49,36 +57,66 @@ class StoreRecordError(ValueError):
 
 _TOKEN_RE = re.compile(r"[\w.-]+", re.UNICODE)
 
+# On-disk layout. Records live under ``root/records.v2``; files the layout
+# migration could not import go to ``root/quarantine.v2``. Both names hold a
+# ``.``, which the legacy base64url alphabet lacks, so no legacy token can
+# collide with them.
+_RECORDS_DIR = "records.v2"
+_QUARANTINE_DIR = "quarantine.v2"
+_LAYOUT_LOCK = ".layout.lock"
+_LAYOUT_LOCK_TIMEOUT_S = 30.0
+
+# A record is written through ``atomic_write_text``, whose temporary file is
+# ``.<token>.json.<8 random>.tmp``: 19 characters beside the token. 255 - 19.
+_MAX_TOKEN = 236
+
+
+def _check_segment(value: str) -> bytes:
+    if not value or value in {".", ".."} or "\x00" in value:
+        raise ValueError("LangGraph namespace segments and keys must be non-empty and safe")
+    return value.encode("utf-8")
+
+
+def _b32_lower(raw: bytes) -> str:
+    return base64.b32encode(raw).decode("ascii").rstrip("=").lower()
+
 
 def encode_segment(value: str) -> str:
     """Encode one LangGraph namespace segment or key as a path-safe token.
 
-    URL-safe base64 without padding, so the output is in ``[A-Za-z0-9_-]`` and
-    doubles as a file name. Empty, ``.``, ``..`` and NUL-bearing values are
-    refused because they cannot name a file. Public so that a package built on
-    this store (ADR-0042) shares one encoding instead of copying it.
+    ``s`` + lowercase RFC 4648 base32 of the UTF-8 value, without padding. The
+    alphabet has one case only, so two different values never share a path on
+    a filesystem that folds case (APFS as macOS formats it, NTFS). A token that
+    would be longer than :data:`_MAX_TOKEN` characters is replaced by ``h`` +
+    lowercase base32 of the value's SHA-256 (53 characters), which keeps every
+    file name inside the 255-byte limit; the store reads identity from the
+    record, never from the name. Empty, ``.``, ``..`` and NUL-bearing values
+    are refused. Public so that a package built on this store (ADR-0042) can
+    share one encoding instead of copying it.
     """
-    if not value or value in {".", ".."} or "\x00" in value:
-        raise ValueError("LangGraph namespace segments and keys must be non-empty and safe")
-    return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+    raw = _check_segment(value)
+    token = "s" + _b32_lower(raw)
+    if len(token) <= _MAX_TOKEN:
+        return token
+    return "h" + _b32_lower(hashlib.sha256(raw).digest())
 
 
-_SEGMENT_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+")
+_SEGMENT_TOKEN_RE = re.compile(r"s[a-z2-7]+")
 
 
 def decode_segment(token: str) -> str:
     """Inverse of :func:`encode_segment`; refuses anything it did not produce.
 
-    A naive re-pad-and-decode accepts tokens the encoder never emits: ``Zh``
-    decodes to ``f`` through non-canonical padding bits, ``Lg`` to ``.``, ``AA``
-    to NUL. So the token must be non-empty, URL-safe, decode as UTF-8, and
-    re-encode to exactly itself.
+    Only ``s`` tokens decode. A hashed ``h`` token has no inverse, and an ``s``
+    token longer than the limit is one the encoder would have hashed. A naive
+    re-pad-and-decode also accepts tokens with non-canonical trailing bits, so
+    the value must re-encode to exactly the token.
     """
-    if not isinstance(token, str) or not token or not _SEGMENT_TOKEN_RE.fullmatch(token):
+    if not isinstance(token, str) or not _SEGMENT_TOKEN_RE.fullmatch(token):
         raise ValueError("not an encoded LangGraph segment")
-    padded = token + "=" * (-len(token) % 4)
+    body = token[1:].upper()
     try:
-        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        raw = base64.b32decode(body + "=" * (-len(body) % 8))
         value = raw.decode("utf-8")
     except (ValueError, UnicodeError) as exc:
         raise ValueError("not an encoded LangGraph segment") from exc
@@ -94,8 +132,73 @@ def decode_segment(token: str) -> str:
 _encode_segment = encode_segment
 
 
+def _legacy_encode_segment(value: str) -> str:
+    """The base64url codec of the pre-``records.v2`` layout, for migration only.
+
+    base64url is case-sensitive, so on a case-folding filesystem ``aaa``
+    (``YWFh``) and ``aaG`` (``YWFH``) named the same path (#3034).
+    """
+    return base64.urlsafe_b64encode(_check_segment(value)).decode("ascii").rstrip("=")
+
+
 def _parse_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value)
+
+
+def _parse_record(text: str) -> dict[str, Any]:
+    """Validate a record's shape; the caller checks that its path matches its identity."""
+    try:
+
+        def reject(value):
+            raise ValueError("non-finite number")
+
+        def finite_float(value):
+            number = float(value)
+            if not math.isfinite(number):
+                raise ValueError("non-finite number")
+            return number
+
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate key")
+                result[key] = value
+            return result
+
+        payload = json.loads(
+            text, parse_constant=reject, parse_float=finite_float, object_pairs_hook=unique
+        )
+        if (
+            not isinstance(payload, dict)
+            or type(payload.get("schema_version")) is not int
+            or payload["schema_version"] != 1
+            or not isinstance(payload.get("value"), dict)
+        ):
+            raise ValueError("schema")
+        ns, key = payload["namespace"], payload["key"]
+        if not isinstance(ns, list) or not all(isinstance(x, str) for x in ns):
+            raise ValueError("identity")
+        if not isinstance(key, str):
+            raise ValueError("identity")
+        for field in ("created_at", "updated_at"):
+            if (
+                not isinstance(payload[field], str)
+                or _parse_datetime(payload[field]).tzinfo is None
+            ):
+                raise ValueError("timestamp")
+        index = payload["index"]
+        if (
+            index is not None
+            and type(index) is not bool
+            and not (isinstance(index, list) and all(isinstance(x, str) for x in index))
+        ):
+            raise ValueError("index")
+        if not isinstance(payload["projection"], str):
+            raise ValueError("projection")
+        return payload
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError) as exc:
+        raise StoreRecordError("Stored LangGraph record is malformed or unsupported") from exc
 
 
 def _read_path(value: Any, path: str) -> list[Any]:
@@ -201,6 +304,11 @@ class MemtomemBaseStore(BaseStore):
     Exact operations require no embedding provider. Semantic search uses the
     configured memtomem embedder when available and degrades to lexical
     overlap for a BM25-only/minimal installation.
+
+    Records live under ``root/records.v2``, one directory per namespace segment
+    and one file per key, named by :func:`encode_segment`. Opening a store moves
+    records of the earlier base64url layout there; see
+    :meth:`_migrate_legacy_layout`.
     """
 
     supports_ttl = False
@@ -312,10 +420,12 @@ class MemtomemBaseStore(BaseStore):
         self._embedding_cache: OrderedDict[str, list[float]] = OrderedDict()
         self._embedding_cache_limit = 1024
         self._lock = threading.RLock()
+        self._records_dir = self.root / _RECORDS_DIR
+        self._migrate_legacy_layout()
 
     def _path(self, namespace: tuple[str, ...], key: str) -> Path:
         parts = [_encode_segment(segment) for segment in namespace]
-        return self.root.joinpath(*parts, f"{_encode_segment(str(key))}.json")
+        return self._records_dir.joinpath(*parts, f"{_encode_segment(str(key))}.json")
 
     def _read_record(self, path: Path) -> dict[str, Any] | None:
         try:
@@ -324,66 +434,134 @@ class MemtomemBaseStore(BaseStore):
             return None
         except UnicodeError as exc:
             raise StoreRecordError("Stored LangGraph record is not UTF-8") from exc
+        payload = _parse_record(text)
         try:
-
-            def reject(value):
-                raise ValueError("non-finite number")
-
-            def finite_float(value):
-                number = float(value)
-                if not math.isfinite(number):
-                    raise ValueError("non-finite number")
-                return number
-
-            def unique(pairs):
-                result = {}
-                for key, value in pairs:
-                    if key in result:
-                        raise ValueError("duplicate key")
-                    result[key] = value
-                return result
-
-            payload = json.loads(
-                text, parse_constant=reject, parse_float=finite_float, object_pairs_hook=unique
-            )
-            if (
-                not isinstance(payload, dict)
-                or type(payload.get("schema_version")) is not int
-                or payload["schema_version"] != 1
-                or not isinstance(payload.get("value"), dict)
-            ):
-                raise ValueError("schema")
-            ns, key = payload["namespace"], payload["key"]
-            if (
-                not isinstance(ns, list)
-                or not all(isinstance(x, str) for x in ns)
-                or not isinstance(key, str)
-                or self._path(tuple(ns), key) != path
-            ):
+            if self._path(tuple(payload["namespace"]), payload["key"]) != path:
                 raise ValueError("identity")
-            for field in ("created_at", "updated_at"):
-                if (
-                    not isinstance(payload[field], str)
-                    or _parse_datetime(payload[field]).tzinfo is None
-                ):
-                    raise ValueError("timestamp")
-            index = payload["index"]
-            if (
-                index is not None
-                and type(index) is not bool
-                and not (isinstance(index, list) and all(isinstance(x, str) for x in index))
-            ):
-                raise ValueError("index")
-            if not isinstance(payload["projection"], str):
-                raise ValueError("projection")
-            return payload
-        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError) as exc:
+        except ValueError as exc:
             raise StoreRecordError("Stored LangGraph record is malformed or unsupported") from exc
+        return payload
+
+    # -- layout migration (#3034) ---------------------------------------------
+    #
+    # Records used to sit directly under ``root`` in base64url, which a
+    # case-folding filesystem cannot keep apart. Opening a store moves every
+    # such record to ``records.v2`` once. A record names its own identity, so
+    # the legacy file name is only checked, never decoded.
+
+    def _legacy_files(self) -> list[Path]:
+        found: list[Path] = []
+        for entry in sorted(self.root.iterdir()):
+            if entry.name in {_RECORDS_DIR, _QUARANTINE_DIR}:
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                found.extend(sorted(entry.rglob("*.json")))
+            elif entry.suffix == ".json" and (entry.is_file() or entry.is_symlink()):
+                found.append(entry)
+        return found
+
+    def _migrate_legacy_layout(self) -> None:
+        # The unlocked look keeps a fresh or migrated store from creating a
+        # lock file; anything that appears after it is picked up next open.
+        if not self._legacy_files():
+            return
+        with _file_lock(self.root / _LAYOUT_LOCK, timeout=_LAYOUT_LOCK_TIMEOUT_S):
+            legacy = self._legacy_files()
+            if legacy:
+                self._migrate_locked(legacy)
+
+    def _importable(self, path: Path) -> tuple[tuple[str, ...], str, bytes] | None:
+        """The identity and bytes of a legacy record this store wrote, else ``None``.
+
+        The path must be the legacy path for the identity the record holds, or
+        another spelling of it that the filesystem resolves to the same file.
+        That second case is a case-folding filesystem storing a record under a
+        directory a case variant had created; on a case-sensitive filesystem a
+        variant spelling is a different file and is not imported. Symlinks
+        anywhere below ``root`` are not followed.
+        """
+        current = path
+        while current != self.root:
+            if current.is_symlink():
+                return None
+            current = current.parent
+        try:
+            data = path.read_bytes()
+            payload = _parse_record(data.decode("utf-8"))
+            namespace, key = tuple(payload["namespace"]), payload["key"]
+            expected = self.root.joinpath(
+                *(_legacy_encode_segment(s) for s in namespace),
+                f"{_legacy_encode_segment(key)}.json",
+            )
+            # The filesystem decides, not path equality: WindowsPath compares
+            # case-insensitively even in a case-sensitive directory.
+            if not os.path.samefile(path, expected):
+                return None
+        except (OSError, ValueError):  # StoreRecordError and UnicodeError are ValueErrors
+            return None
+        return namespace, key, data
+
+    def _migrate_locked(self, legacy: list[Path]) -> None:
+        migrated = quarantined = left = 0
+        for path in legacy:
+            found = self._importable(path)
+            if found is None:
+                left += 1
+                continue
+            namespace, key, data = found
+            target = self._path(namespace, key)
+            try:
+                current: bytes | None = target.read_bytes()
+            except FileNotFoundError:
+                current = None
+            if current is None:
+                # Write before unlink: a crash in between leaves two identical
+                # copies, which the next open resolves below.
+                atomic_write_bytes(target, data)
+                path.unlink()
+                migrated += 1
+            elif current == data:
+                path.unlink()
+                migrated += 1
+            else:
+                # A newer record already holds this identity (or a corrupt one,
+                # which is never silently replaced). Keeping the legacy file
+                # where the scan finds it would bring it back after a delete.
+                self._quarantine(path)
+                quarantined += 1
+            self._prune_legacy_dirs(path.parent)
+
+        if migrated:
+            logger.info("Moved %d LangGraph record(s) to the case-safe layout", migrated)
+        if quarantined or left:
+            logger.warning(
+                "LangGraph store layout migration: moved %d conflicting legacy record(s) to "
+                "%s and left %d legacy file(s) it could not import in place",
+                quarantined,
+                _QUARANTINE_DIR,
+                left,
+            )
+
+    def _quarantine(self, path: Path) -> None:
+        directory = self.root / _QUARANTINE_DIR
+        directory.mkdir(exist_ok=True, mode=0o700)
+        rename_no_replace(
+            path, directory / f"{uuid.uuid4().hex}.json.conflict", allow_cross_parent=True
+        )
+        self._prune_legacy_dirs(path.parent)
+
+    def _prune_legacy_dirs(self, current: Path) -> None:
+        while current != self.root and self.root in current.parents:
+            try:
+                current.rmdir()
+            except OSError:
+                break
+            current = current.parent
 
     def _records(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         with self._lock:
-            for path in sorted(self.root.rglob("*.json")):
+            for path in sorted(self._records_dir.rglob("*.json")):
                 try:
                     record = self._read_record(path)
                 except (StoreRecordError, UnicodeError, OSError):
@@ -412,7 +590,7 @@ class MemtomemBaseStore(BaseStore):
     # record path cannot drift apart.
 
     def record_path(self, namespace: tuple[str, ...], key: str) -> Path:
-        """Where the record for ``(namespace, key)`` lives under ``root``."""
+        """Where the record for ``(namespace, key)`` lives, under ``root/records.v2``."""
         return self._path(tuple(namespace), key)
 
     def read_record(self, namespace: tuple[str, ...], key: str) -> dict[str, Any] | None:
@@ -462,7 +640,7 @@ class MemtomemBaseStore(BaseStore):
             if op.value is None:
                 path.unlink(missing_ok=True)
                 current = path.parent
-                while current != self.root:
+                while current != self._records_dir:
                     try:
                         current.rmdir()
                     except OSError:
