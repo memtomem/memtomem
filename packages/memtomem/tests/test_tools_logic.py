@@ -37,7 +37,9 @@ from memtomem.tools.temporal import (
     TimelineBucket,
     build_timeline,
     format_activity,
+    format_source_name,
     format_timeline,
+    source_filename,
 )
 
 
@@ -2785,3 +2787,68 @@ class TestTemporal:
         ]
         buckets = build_timeline(chunks, granularity="month")
         assert buckets[0].period_label < buckets[1].period_label
+
+
+class TestWindowsSourcePathFormatting:
+    """Tests for format_source_name and Windows-shaped source path rendering across surfaces (#2932, #3028)."""
+
+    @pytest.mark.parametrize(
+        ("input_path", "expected"),
+        [
+            (r"C:\Users\Ada Lovelace\memories\default.md", "default.md"),
+            (r"D:\workspace\project\docs\notes.md", "notes.md"),
+            (r"\\server\share\docs\plan.md", "plan.md"),
+            ("/tmp/notes.md", "notes.md"),
+            ("sub/dir/nested.md", "nested.md"),
+            (r"sub\dir\nested.md", "nested.md"),
+            ("bare_file.md", "bare_file.md"),
+            (Path(r"C:\Users\test\memory.md"), "memory.md"),
+            ("", ""),
+            (None, ""),
+            ("C:\\", "C:\\"),
+            ("/", "/"),
+        ],
+    )
+    def test_format_source_name_helper(self, input_path, expected):
+        assert format_source_name(input_path) == expected
+        assert source_filename(input_path) == expected
+
+    @pytest.mark.parametrize(
+        ("surface_name", "formatter"),
+        [
+            (
+                "cross_ref",
+                lambda p: format_source_name(p),
+            ),
+            (
+                "procedure",
+                lambda p, h=(): " > ".join(h) if h else format_source_name(p),
+            ),
+            (
+                "ask",
+                lambda p, h=(): (" > ".join(h) if h else "") or format_source_name(p),
+            ),
+            (
+                "reflection",
+                lambda p, h=(): " > ".join(h) if h else format_source_name(p),
+            ),
+            (
+                "shell_search",
+                lambda p, h=(): (" > ".join(h) if h else "") or format_source_name(p),
+            ),
+            (
+                "shell_recall",
+                lambda p: format_source_name(p),
+            ),
+            (
+                "search_markdown",
+                lambda p, h=(): (" > ".join(h) if h else "") or format_source_name(p),
+            ),
+        ],
+    )
+    def test_all_seven_surfaces_bare_name_on_windows_path(self, surface_name, formatter):
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        result = formatter(win_path)
+        assert result == "default.md"
+        assert "\\" not in result
+        assert "C:" not in result

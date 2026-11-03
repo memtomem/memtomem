@@ -5,6 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from memtomem.models import Chunk
+from memtomem.tools.temporal import format_source_name
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -165,7 +166,7 @@ async def mem_related(
             lines.append(f"  - [{rel_type}] {related_id_text} (deleted)")
             continue
         preview = related.content[:80].replace("\n", " ")
-        source = str(related.metadata.source_file).split("/")[-1]
+        source = format_source_name(related.metadata.source_file)
         lines.append(f"  - [{rel_type}] {related_id_text[:8]}... ({source})")
         lines.append(f"    {preview}...")
 
