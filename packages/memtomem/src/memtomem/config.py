@@ -1331,6 +1331,48 @@ class Mem2MemConfig(BaseSettings):
         apply_e5_defaults(self)
         return self
 
+    @classmethod
+    def without_environment(cls, **data: Any) -> "Mem2MemConfig":
+        """A config built from ``data`` alone: no ``MEMTOMEM_*`` variables.
+
+        ``Mem2MemConfig()`` and ``Mem2MemConfig.model_validate`` both fill any
+        setting the given values leave out from the process environment
+        (pydantic-settings reads ``MEMTOMEM_*`` in either path; explicit values
+        still win), and ``model_construct`` skips every validator. A host that embeds memtomem beside its own configuration
+        (ADR-0042) needs the third option: the given values, fully validated,
+        and nothing from the operator's shell.
+
+        The guarantee covers the ``MEMTOMEM_*`` settings sources only. The
+        Langfuse validator still reads ``LANGFUSE_PUBLIC_KEY`` and
+        ``LANGFUSE_SECRET_KEY`` from the environment when tracing is enabled
+        without explicit keys, as it does for every constructor.
+
+        The instance is a module-level subclass of ``Mem2MemConfig`` (so it
+        pickles) and passes ``isinstance`` checks; its ``repr`` names
+        ``ExplicitMem2MemConfig``.
+        """
+        return ExplicitMem2MemConfig(**data)
+
+
+class ExplicitMem2MemConfig(Mem2MemConfig):
+    """:meth:`Mem2MemConfig.without_environment`'s concrete type.
+
+    pydantic-settings chooses its value sources per class, so skipping the
+    environment needs a class whose sources are the init values alone. It is
+    module-level, not created inside the classmethod, so instances pickle.
+    """
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        return (init_settings,)
+
 
 # ---------------------------------------------------------------------------
 # Canonical mutable-field definitions and validation
