@@ -17,9 +17,6 @@ def format_source_name(source: object) -> str:
     return PureWindowsPath(s).name or s
 
 
-source_filename = format_source_name
-
-
 @dataclass(frozen=True)
 class TimelineBucket:
     period_label: str

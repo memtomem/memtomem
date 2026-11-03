@@ -39,7 +39,6 @@ from memtomem.tools.temporal import (
     format_activity,
     format_source_name,
     format_timeline,
-    source_filename,
 )
 
 
@@ -2811,44 +2810,201 @@ class TestWindowsSourcePathFormatting:
     )
     def test_format_source_name_helper(self, input_path, expected):
         assert format_source_name(input_path) == expected
-        assert source_filename(input_path) == expected
 
-    @pytest.mark.parametrize(
-        ("surface_name", "formatter"),
-        [
-            (
-                "cross_ref",
-                lambda p: format_source_name(p),
-            ),
-            (
-                "procedure",
-                lambda p, h=(): " > ".join(h) if h else format_source_name(p),
-            ),
-            (
-                "ask",
-                lambda p, h=(): (" > ".join(h) if h else "") or format_source_name(p),
-            ),
-            (
-                "reflection",
-                lambda p, h=(): " > ".join(h) if h else format_source_name(p),
-            ),
-            (
-                "shell_search",
-                lambda p, h=(): (" > ".join(h) if h else "") or format_source_name(p),
-            ),
-            (
-                "shell_recall",
-                lambda p: format_source_name(p),
-            ),
-            (
-                "search_markdown",
-                lambda p, h=(): (" > ".join(h) if h else "") or format_source_name(p),
-            ),
-        ],
-    )
-    def test_all_seven_surfaces_bare_name_on_windows_path(self, surface_name, formatter):
+    def test_surface_render_search_results_windows_path(self, capsys):
+        """render_search_results (smart/markdown) outputs bare default.md without Windows backslashes (#3028)."""
+        from memtomem.cli.search import SearchPayload, render_search_results
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+        from memtomem.search.pipeline import RetrievalStats
+        from uuid import uuid4
+
         win_path = r"C:\Users\Ada Lovelace\memories\default.md"
-        result = formatter(win_path)
-        assert result == "default.md"
-        assert "\\" not in result
-        assert "C:" not in result
+        chunk = Chunk(
+            content="Deploy note content",
+            metadata=ChunkMetadata(
+                source_file=Path(win_path), heading_hierarchy=(), tags=frozenset()
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        res = SearchResult(chunk=chunk, score=0.95, rank=1, source="fused")
+        payload = SearchPayload(results=[res], stats=RetrievalStats(), hints=[], empty_message="")
+        render_search_results(query="deploy", fmt="smart", payload=payload)
+        out = capsys.readouterr().out
+        assert "**default.md**" in out
+        assert "C:\\" not in out
+
+    async def test_surface_shell_cmd_ask_windows_path(self, capsys, monkeypatch):
+        """_cmd_ask in mm shell outputs bare default.md without Windows path prefixes (#3028)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from memtomem.cli.shell import _cmd_ask
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+        import memtomem.server.tools.search as search_tools
+
+        monkeypatch.setattr(search_tools, "_resolve_project_context_root", lambda comp: None)
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        chunk = Chunk(
+            content="Answer content here",
+            metadata=ChunkMetadata(
+                source_file=Path(win_path), heading_hierarchy=(), tags=frozenset()
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        res = SearchResult(chunk=chunk, score=0.9, rank=1, source="fused")
+        comp = MagicMock()
+        comp.search_pipeline.search = AsyncMock(return_value=([res], MagicMock()))
+
+        await _cmd_ask(comp, ["how", "to", "deploy?"])
+        out = capsys.readouterr().out
+        assert "default.md (0.90)" in out
+        assert "C:\\" not in out
+
+    async def test_surface_shell_cmd_recall_windows_path(self, capsys, monkeypatch):
+        """_cmd_recall in mm shell outputs bare default.md for recent memories (#3028)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from memtomem.cli.shell import _cmd_recall
+        from memtomem.models import Chunk, ChunkMetadata
+        import memtomem.server.tools.search as search_tools
+
+        monkeypatch.setattr(search_tools, "_resolve_project_context_root", lambda comp: None)
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        chunk = Chunk(
+            content="Recent memory snippet",
+            metadata=ChunkMetadata(
+                source_file=Path(win_path), heading_hierarchy=(), tags=frozenset()
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        comp = MagicMock()
+        comp.storage.recall_chunks = AsyncMock(return_value=[chunk])
+
+        await _cmd_recall(comp, [])
+        out = capsys.readouterr().out
+        assert "default.md" in out
+        assert "C:\\" not in out
+
+    async def test_surface_mem_ask_windows_path(self, monkeypatch):
+        """mem_ask MCP tool outputs bare default.md in its memory heading (#3028)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+        from memtomem.search.pipeline import RetrievalStats
+        from memtomem.server.tools.ask import mem_ask
+
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        chunk = Chunk(
+            content="Grounded memory text",
+            metadata=ChunkMetadata(
+                source_file=Path(win_path), heading_hierarchy=(), tags=frozenset()
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        res = SearchResult(chunk=chunk, score=0.88, rank=1, source="fused")
+        stats = RetrievalStats()
+        app = MagicMock()
+        app.webhook_manager.fire = AsyncMock()
+        monkeypatch.setattr(
+            "memtomem.server.tools.ask._get_app_initialized", AsyncMock(return_value=app)
+        )
+        monkeypatch.setattr(
+            "memtomem.server.tools.ask.run_search", AsyncMock(return_value=([res], stats, []))
+        )
+
+        out = await mem_ask(question="what is this?", ctx=None)
+        assert "### [1] default.md (relevance: 0.88)" in out
+        assert "### [1] C:\\" not in out
+
+    async def test_surface_mem_reflect_windows_path(self, monkeypatch):
+        """mem_reflect frequently accessed topics output bare default.md (#3028)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from memtomem.server.tools.reflection import mem_reflect
+
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        app = MagicMock()
+        app.storage.get_frequently_accessed = AsyncMock(
+            return_value=[{"hierarchy": [], "source_file": win_path, "total_access": 7}]
+        )
+        app.storage.get_tag_counts = AsyncMock(return_value=[])
+        app.storage.get_knowledge_gaps = AsyncMock(return_value=[])
+        app.storage.get_agent_sessions = AsyncMock(return_value=[])
+        app.storage.get_health_metrics = AsyncMock(return_value=None)
+        app.storage.get_most_connected = AsyncMock(return_value=[])
+        app.storage.get_chunk_factors = AsyncMock(return_value=[])
+        app.storage.get_activity_days = AsyncMock(return_value=[])
+        app.search_pipeline.flush_observation = AsyncMock()
+        monkeypatch.setattr(
+            "memtomem.server.tools.reflection._get_app_initialized", AsyncMock(return_value=app)
+        )
+
+        out = await mem_reflect(ctx=None)
+        assert "7x — default.md" in out
+        assert "C:\\" not in out
+
+    async def test_surface_mem_procedure_list_windows_path(self, monkeypatch):
+        """mem_procedure_list outputs bare default.md when heading hierarchy is absent (#3028)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+        from memtomem.server.tools.procedure import mem_procedure_list
+
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        chunk = Chunk(
+            content="Step 1: run deploy",
+            metadata=ChunkMetadata(
+                source_file=Path(win_path), heading_hierarchy=(), tags=frozenset(["procedure"])
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        res = SearchResult(chunk=chunk, score=0.9, rank=1, source="fused")
+        app = MagicMock()
+        app.search_pipeline.search = AsyncMock(return_value=([res], None))
+        monkeypatch.setattr(
+            "memtomem.server.tools.procedure._get_app_initialized", AsyncMock(return_value=app)
+        )
+
+        out = await mem_procedure_list(ctx=None)
+        assert "  default.md" in out
+        assert "C:\\" not in out
+
+    async def test_surface_mem_related_windows_path(self, monkeypatch):
+        """mem_related outputs bare default.md for related memory chunks (#3028)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from memtomem.models import Chunk, ChunkMetadata
+        from memtomem.server.tools.cross_ref import mem_related
+
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        source_chunk = Chunk(
+            content="Primary concept",
+            metadata=ChunkMetadata(
+                source_file=Path("root.md"), heading_hierarchy=(), tags=frozenset()
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        related_chunk = Chunk(
+            content="Related concept note",
+            metadata=ChunkMetadata(
+                source_file=Path(win_path), heading_hierarchy=(), tags=frozenset()
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        app = MagicMock()
+        app.storage.get_chunk = AsyncMock(
+            side_effect=lambda cid, **kw: source_chunk if cid == source_chunk.id else related_chunk
+        )
+        app.storage.get_related = AsyncMock(return_value=[(related_chunk.id, "related")])
+        monkeypatch.setattr(
+            "memtomem.server.tools.cross_ref._get_app_initialized", AsyncMock(return_value=app)
+        )
+
+        out = await mem_related(str(source_chunk.id), ctx=None)
+        assert "(default.md)" in out
+        assert "C:\\" not in out

@@ -5,7 +5,6 @@ from __future__ import annotations
 from uuid import UUID
 
 from memtomem.models import Chunk
-from memtomem.tools.temporal import format_source_name
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -16,6 +15,7 @@ from memtomem.server.tools._id_access import (
     not_found,
     resolve_chunk,
 )
+from memtomem.tools.temporal import format_source_name
 
 
 @mcp.tool()
