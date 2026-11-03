@@ -40,7 +40,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   three project workflows are marked `disable-model-invocation`, so Cursor runs
   them only on an explicit `/skill-name`. Until it is listed in the Cursor
   Marketplace, install it by copying the directory to
-  `~/.cursor/plugins/local/memtomem`. Cursor `0.1.0`.
+  `~/.cursor/plugins/local/memtomem`. Handoff and update in every plugin now accept
+  `cursor` as a runtime label, so a handoff can be saved from Cursor and addressed to
+  it. Cursor `0.1.0`.
 
 ### Changed
 

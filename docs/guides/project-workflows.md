@@ -62,8 +62,8 @@ fall back to your user-scope memory for project records.
 `handoff` takes exactly one operation, `save` or `resume`. As a shorthand, `s`
 and `r` count only when they are the whole first word after the invocation, as
 in `s to codex-cli` or `r <handoff-id>`. The target runtime is one of
-`claude-code`, `codex-cli`, `kimi-code`, `opencode`, `antigravity-cli`, or
-`any` (the default).
+`claude-code`, `codex-cli`, `kimi-code`, `opencode`, `antigravity-cli`,
+`cursor`, or `any` (the default).
 
 **Save** records work that actually happened, so it refuses to run when there
 is nothing observed to record and reports `insufficient_input: work context`

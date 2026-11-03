@@ -839,7 +839,7 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "live repository always wins",
         'tag_filter="handoff-to-<current-runtime>,handoff-to-any"',
         'tag_filter="handoff-id-<handoff-id>"',
-        "`opencode`, `antigravity-cli`, and `any`",
+        "`opencode`, `antigravity-cli`, `cursor`, and `any`",
         "Keep file paths, code symbols, command strings, and direct quotes of the user verbatim",
         "write the rest in the language this project's existing memories use",
         "inside one fenced ```text block",
@@ -1090,6 +1090,34 @@ _UPDATE_GIT_LOG = (
 )
 
 
+def test_every_shipped_handoff_and_update_accepts_each_host_runtime_label() -> None:
+    """Each host that ships handoff or update can name itself and be named as a target.
+
+    A host missing from the label list cannot record itself as ``from_runtime`` and
+    refuses ``save to <host>``: the Cursor bundle first shipped that way. Checked on every
+    rendered surface, OpenCode's command templates included, not just the sources.
+    """
+    rendered = _renderer().expected_files()  # type: ignore[attr-defined]
+    names = {"handoff", "update", "memtomem-handoff", "memtomem-update"}
+    surfaces = {
+        str(path.relative_to(_ROOT)): content
+        for path, content in rendered.items()
+        if path.name == "SKILL.md" and path.parent.name in names
+    }
+    generated = rendered[_ROOT / "packages/opencode-memtomem/src/generated.ts"]
+    for name, command in _opencode_commands(generated).items():
+        if name in names:
+            surfaces[f"OPENCODE_COMMANDS[{name}]"] = command["template"]
+    # Claude, Codex, Kimi, Antigravity and Cursor skills plus OpenCode commands, for both.
+    assert len(surfaces) == 12, sorted(surfaces)
+    labels = (
+        "`claude-code`, `codex-cli`, `kimi-code`, `opencode`, `antigravity-cli`, `cursor`, "
+        "and `any`"
+    )
+    for label, content in surfaces.items():
+        assert labels in " ".join(content.split()), label
+
+
 def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
     contract = _contract()
     update = next(row for row in contract["workflows"] if row["id"] == "update")
@@ -1198,7 +1226,7 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
         "[idempotent replay] Result returned from ledger; no new write was performed.",
         "force_unsafe=false",
         "stating that older commits were not reviewed",
-        "`opencode`, `antigravity-cli`, and `any`",
+        "`opencode`, `antigravity-cli`, `cursor`, and `any`",
         "Keep file paths, code symbols, command strings, and direct quotes of the user verbatim",
         "write the rest in the language this project's existing memories use",
         "For each project item that step 2 did not skip, also call `mem_search`",
