@@ -26,7 +26,8 @@ HERMES_MEMORY_ROOT = ROOT / "packages" / "memtomem-hermes-memory"
 # user's project renders the `project` blocks, one that starts it elsewhere (no project
 # context) renders the `user` blocks. Text outside a block is shared by all of them.
 # `bound` is a host that starts the server elsewhere but binds it to the project with
-# `mem_project_bind` (#2920): it renders a project-only workflow plus its `bound` blocks.
+# `mem_project_bind`: it renders the `project` blocks plus the `bound` blocks, which carry
+# the bind step. A workflow's contract `scopes` names the renders it ships in.
 SCOPES = ("project", "user", "bound")
 _SCOPE_OPEN = re.compile(r"<!-- scope:([a-z]+) -->")
 _SCOPE_CLOSE = "<!-- /scope -->"
@@ -36,6 +37,9 @@ _LINES = re.compile(r"[^\n]*\n|[^\n]+\Z")
 
 def _select_scope(text: str, scope: str) -> str:
     """Keep the shared text and the ``scope`` blocks of a workflow source.
+
+    A ``bound`` render also keeps the ``project`` blocks: it is the project render with
+    the bind step added.
 
     Marker lines are dropped together with their own line ending and every other
     line is kept byte for byte, so a source without markers renders unchanged.
@@ -63,7 +67,7 @@ def _select_scope(text: str, scope: str) -> str:
             continue
         if "<!--" in line or "-->" in line:
             raise ValueError(f"line {number}: malformed scope marker or stray HTML comment")
-        if current is None or current == scope:
+        if current is None or current == scope or (scope == "bound" and current == "project"):
             kept.append(line)
     if current is not None:
         raise ValueError(f"unterminated scope:{current} block")
@@ -76,15 +80,13 @@ def _workflow_body(workflow_id: str, scope: str) -> str:
 
 
 def _render_workflow(text: str, scope: str) -> str:
-    """``_select_scope``, refusing a ``bound`` render that would drop other variants.
+    """``_select_scope``, refusing a ``bound`` render of a source without a bind step.
 
-    A ``bound`` render keeps only the shared text and the ``bound`` blocks, so a
-    source with ``project`` or ``user`` blocks would lose them silently.
+    Without a ``bound`` block the render would be the project render, shipped to a host
+    whose server has no project until something binds it.
     """
-    if scope == "bound":
-        found = {m.group(1) for m in _SCOPE_OPEN.finditer(text)} & {"project", "user"}
-        if found:
-            raise ValueError(f"a bound render would drop the {sorted(found)} blocks")
+    if scope == "bound" and "bound" not in {m.group(1) for m in _SCOPE_OPEN.finditer(text)}:
+        raise ValueError("a bound render needs a scope:bound block")
     return _select_scope(text, scope)
 
 
@@ -417,19 +419,23 @@ def expected_files() -> dict[Path, str]:
             files[OPENCODE_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _opencode_skill(
                 workflow, body, contract["opencode"]["version_range"]
             )
-        # Hermes and Antigravity start the server in the plugin directory, so they
-        # render the user-scope variant. Hermes skips workflows that need a project
-        # root; Antigravity renders those with their bind step (`bound`, #2920).
+        # Hermes and Antigravity start the server in the plugin directory. Hermes has no
+        # project, so it ships the user render and skips the workflows without one.
+        # Antigravity ships the bound render, which binds to the project first, where the
+        # workflow has one, and the user render otherwise.
         scopes = workflow.get("scopes", ["project", "user"])
+        if "user" not in scopes and "bound" not in scopes:
+            raise ValueError(f"workflow {workflow['id']!r} has no render for Antigravity")
         if "user" in scopes:
             user = dict(workflow)
             user["description"] = workflow.get("user_scope_description", workflow["description"])
             user_skill = _portable_skill(user, _workflow_body(workflow["id"], "user"))
-            for root in (HERMES_ROOT, ANTIGRAVITY_ROOT):
-                files[root / "skills" / workflow["codex_name"] / "SKILL.md"] = user_skill
+            files[HERMES_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = user_skill
+        if "bound" in scopes:
+            agy_skill = _portable_skill(workflow, _workflow_body(workflow["id"], "bound"))
         else:
-            bound_skill = _portable_skill(workflow, _workflow_body(workflow["id"], "bound"))
-            files[ANTIGRAVITY_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = bound_skill
+            agy_skill = user_skill
+        files[ANTIGRAVITY_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = agy_skill
     return files
 
 
