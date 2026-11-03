@@ -43,11 +43,14 @@ from memtomem.models import (
     Chunk,
     ChunkMetadata,
     ChunkType,
+    NamespaceFilter,
+    ScopeFilter,
 )
 from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_helpers import (
     deserialize_f32,
     match_source_filter_value,
+    namespace_sql,
     norm_path,
     placeholders,
     quote_ident,
@@ -3691,8 +3694,25 @@ class SqliteBackend(
         self,
         *,
         project_context_root: Path | None = None,
+        scope_filter: ScopeFilter | None = None,
+        namespace_filter: NamespaceFilter | None = None,
     ) -> list[tuple[str, int]]:
-        scope_frag, scope_params = scope_context_sql(None, project_context_root, column_alias="c.")
+        """Tag counts within one search boundary.
+
+        ``scope_filter`` and ``namespace_filter`` are the outer search's, so
+        query expansion names only tags that search could return. Without
+        them the count is the project-context boundary alone, as for the tag
+        listings.
+        """
+        scope_frag, scope_params = scope_context_sql(
+            scope_filter, project_context_root, column_alias="c."
+        )
+        ns_frag, ns_params = ("", [])
+        if namespace_filter is not None:
+            # ``json_each`` has no ``namespace`` column, so the bare name is
+            # the chunk's.
+            ns_frag, ns_params = namespace_sql(namespace_filter)
+        ns_clause = f"AND ({ns_frag}) " if ns_frag else ""
         async with self._lease_read_db() as db:
             rows = db.execute(
                 "SELECT value, COUNT(*) as cnt "
@@ -3700,13 +3720,13 @@ class SqliteBackend(
                 # Held sources are out of the counts like they are out of search:
                 # a tag only held chunks carry would otherwise list a tag no
                 # query can return, and name it in query expansion.
-                f"WHERE {scope_frag} {_VISIBLE_SOURCE_C} "  # nosec B608
+                f"WHERE {scope_frag} {ns_clause}{_VISIBLE_SOURCE_C} "  # nosec B608
                 # ``value ASC`` breaks count ties deterministically so tag-strategy
                 # query expansion (which truncates to max_terms) is order-stable
                 # across runs — a replay-determinism requirement (#1802). Completes
                 # the #516/#1817 tie-break series for the tags leg.
                 "GROUP BY value ORDER BY cnt DESC, value ASC",
-                scope_params,
+                scope_params + ns_params,
             ).fetchall()
         return [(row[0], row[1]) for row in rows]
 
@@ -3771,10 +3791,13 @@ class SqliteBackend(
         return await self._ns.count_chunks_by_ns_prefix(prefixes)
 
     async def count_chunks_by_ns_prefix_detail(
-        self, prefixes: Sequence[str]
+        self,
+        prefixes: Sequence[str],
+        *,
+        boundary: tuple[ScopeFilter | None, Path | None] | None = None,
     ) -> tuple[int, dict[str, int]]:
         assert self._ns is not None
-        return await self._ns.count_chunks_by_ns_prefix_detail(prefixes)
+        return await self._ns.count_chunks_by_ns_prefix_detail(prefixes, boundary=boundary)
 
     async def delete_by_namespace(self, namespace: str) -> int:
         ns = self._ns

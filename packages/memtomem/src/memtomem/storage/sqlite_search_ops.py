@@ -370,7 +370,15 @@ class SearchOpsMixin:
         source_filter: str | None = None,
         *,
         exhaustive: bool = False,
+        escalate: bool = True,
     ) -> list[SearchResult]:
+        """``escalate=False`` keeps a non-exhaustive search to its first KNN pass.
+
+        For a best-effort caller (query expansion's heading probe) a selective
+        filter would otherwise drive the larger attempts, up to a full-table
+        pass, for a handful of rows; it gets fewer than ``top_k`` instead.
+        ``exhaustive`` is one full pass already and ignores it.
+        """
         # bm25-only mode (dimension=0) — no chunks_vec table to query. Return
         # early instead of raising OperationalError that the search pipeline
         # would log as a misleading "Dense search unavailable" warning.
@@ -518,15 +526,13 @@ class SearchOpsMixin:
                 # available, so retrying cannot find more). Clamped and de-duplicated
                 # so a large ``top_k`` cannot spend three identical round-trips.
                 attempts: list[int] = []
-                for raw_k in (
-                    [total_vec_rows or 1]
-                    if exhaustive
-                    else [
-                        max(top_k * 5, 100),
-                        max(top_k * 50, 1000),
-                        total_vec_rows,
-                    ]
-                ):
+                if exhaustive:
+                    schedule = [total_vec_rows or 1]
+                elif escalate:
+                    schedule = [max(top_k * 5, 100), max(top_k * 50, 1000), total_vec_rows]
+                else:
+                    schedule = [max(top_k * 5, 100)]
+                for raw_k in schedule:
                     clamped = max(1, min(raw_k, knn_ceiling))
                     if clamped not in attempts:
                         attempts.append(clamped)

@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
     from memtomem.embedding.base import EmbeddingProvider
     from memtomem.llm.base import LLMProvider
+    from memtomem.models import NamespaceFilter, ScopeFilter
     from memtomem.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
@@ -23,12 +24,17 @@ async def expand_query_tags(
     max_terms: int = 3,
     *,
     project_context_root: Path | None = None,
+    scope_filter: ScopeFilter | None = None,
+    namespace_filter: NamespaceFilter | None = None,
     report_failure: Callable[[], None] | None = None,
 ) -> str:
     """Expand query by appending matching tag names.
 
-    ``project_context_root`` keeps tag discovery inside the same ADR-0011
-    boundary as the retrieval stages that consume the expanded query.
+    ``project_context_root``, ``scope_filter`` and ``namespace_filter`` are the
+    outer search's, so tag discovery stays inside the scope, project and
+    namespace boundary of the retrieval stages that consume the expanded query.
+    The expanded query is embedded and reranked, so a tag from outside that
+    boundary would reach those providers on a search that excludes it.
 
     ``report_failure`` (#1802) is an optional no-op-by-default callback invoked
     when expansion catches an error and falls back to the original query. It lets
@@ -36,7 +42,11 @@ async def expand_query_tags(
     changing the fallback behavior — the function still returns the plain query.
     """
     try:
-        tag_counts = await storage.get_tag_counts(project_context_root=project_context_root)
+        tag_counts = await storage.get_tag_counts(
+            project_context_root=project_context_root,
+            scope_filter=scope_filter,
+            namespace_filter=namespace_filter,
+        )
     except Exception:
         logger.warning("Tag expansion failed; returning original query", exc_info=True)
         if report_failure is not None:
@@ -67,17 +77,20 @@ async def expand_query_headings(
     max_terms: int = 3,
     *,
     project_context_root: Path | None = None,
+    scope_filter: ScopeFilter | None = None,
+    namespace_filter: NamespaceFilter | None = None,
     exhaustive: bool = False,
     report_failure: Callable[[], None] | None = None,
 ) -> str:
     """Expand query by appending related heading terms from dense search.
 
-    ``project_context_root`` is threaded onto the always-on storage
-    scope filter (ADR-0011 PR-D round 11) so heading-expansion
-    candidates respect the same project boundary as the outer
-    ``SearchPipeline.search`` call. Without it, expansion would
-    silently sample only user-tier headings even when the outer
-    search is pinned to a project context.
+    ``project_context_root``, ``scope_filter`` and ``namespace_filter`` are the
+    outer ``SearchPipeline.search`` call's, threaded onto this probe's
+    ``dense_search`` so heading candidates respect the same scope, project and
+    namespace boundary as the retrieval stages (ADR-0011). Without them a
+    ``scope="user"`` search inside a project would sample that project's
+    headings, and an out-of-project search with an explicit project scope
+    would sample only user-tier headings.
 
     ``exhaustive`` propagates the caller's deterministic-evaluation mode
     (#1802) into this leg's own dense probe: heading expansion changes the
@@ -93,8 +106,15 @@ async def expand_query_headings(
         results = await storage.dense_search(
             embedding,
             top_k=3,
+            namespace_filter=namespace_filter,
+            scope_filter=scope_filter,
             project_context_root=project_context_root,
             exhaustive=exhaustive,
+            # The boundary filters run after the KNN pool is cut, so a sparse one
+            # would escalate this optional probe up to a full-table pass before
+            # retrieval starts. Outside exhaustive mode it keeps to its first KNN
+            # attempt and appends fewer heading terms when few rows survive.
+            escalate=False,
         )
     except Exception:
         logger.warning("Heading expansion failed; returning original query", exc_info=True)

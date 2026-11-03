@@ -1703,7 +1703,8 @@ class SearchPipeline:
                         hidden_system_ns,
                         hidden_by_prefix,
                     ) = await self._storage.count_chunks_by_ns_prefix_detail(
-                        list(ns_filter.exclude_prefixes)
+                        list(ns_filter.exclude_prefixes),
+                        boundary=(scope_filter, project_context_root),
                     )
                 except Exception:
                     logger.debug("count_chunks_by_ns_prefix failed; skipping hint", exc_info=True)
@@ -1800,6 +1801,8 @@ class SearchPipeline:
                         self._storage,
                         max_terms,
                         project_context_root=project_context_root,
+                        scope_filter=scope_filter,
+                        namespace_filter=ns_filter,
                         report_failure=_mark_expansion_failed,
                     )
                 if strategy in ("headings", "both"):
@@ -1814,6 +1817,8 @@ class SearchPipeline:
                         self._embedder,
                         max_terms,
                         project_context_root=project_context_root,
+                        scope_filter=scope_filter,
+                        namespace_filter=ns_filter,
                         exhaustive=exhaustive,
                         report_failure=_mark_expansion_failed,
                     )

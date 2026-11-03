@@ -13,9 +13,15 @@ class FakeStorage:
     def __init__(self, tags):
         self._tags = tags
         self.project_context_root = None
+        self.scope_filter = None
+        self.namespace_filter = None
 
-    async def get_tag_counts(self, *, project_context_root=None):
+    async def get_tag_counts(
+        self, *, project_context_root=None, scope_filter=None, namespace_filter=None
+    ):
         self.project_context_root = project_context_root
+        self.scope_filter = scope_filter
+        self.namespace_filter = namespace_filter
         return self._tags
 
 
@@ -62,9 +68,27 @@ class TestExpandQueryTags:
 
         assert storage.project_context_root == boundary
 
+    @pytest.mark.asyncio
+    async def test_scope_and_namespace_filters_are_forwarded_to_tag_counts(self):
+        """The outer search's boundary reaches the tag sample, so a tag outside it
+        is never appended to a query that is then embedded and reranked."""
+        from memtomem.models import NamespaceFilter, ScopeFilter
+
+        storage = FakeStorage([("deployment", 1)])
+        scope = ScopeFilter.parse("user")
+        namespaces = NamespaceFilter.parse(None, system_prefixes=("archive:",))
+
+        result = await expand_query_tags(
+            "deploy strategy", storage, scope_filter=scope, namespace_filter=namespaces
+        )
+
+        assert result == "deploy strategy deployment"
+        assert storage.scope_filter is scope
+        assert storage.namespace_filter is namespaces
+
 
 class _RaisingTagStorage:
-    async def get_tag_counts(self, *, project_context_root=None):
+    async def get_tag_counts(self, *, project_context_root=None, **filters):
         raise RuntimeError("tag store unavailable")
 
 
@@ -74,13 +98,60 @@ class _RaisingEmbedder:
 
 
 class _RaisingDenseStorage:
-    async def dense_search(self, embedding, top_k=3):
+    async def dense_search(self, embedding, top_k=3, **filters):
         raise RuntimeError("dense index offline")
 
 
 class _OkEmbedder:
     async def embed_query(self, query):
         return [0.0, 0.0, 0.0]
+
+
+class _RecordingDenseStorage:
+    """Returns one chunk whose heading words expansion appends, and records the
+    probe's filters."""
+
+    def __init__(self):
+        self.kwargs: dict = {}
+
+    async def dense_search(self, embedding, top_k=3, **filters):
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+
+        self.kwargs = {"top_k": top_k, **filters}
+        chunk = Chunk(
+            content="x",
+            metadata=ChunkMetadata(
+                source_file=Path("/notes/a.md"), heading_hierarchy=("## Rollout Window",)
+            ),
+        )
+        return [SearchResult(chunk=chunk, score=1.0, rank=1, source="dense")]
+
+
+@pytest.mark.asyncio
+async def test_heading_probe_carries_the_outer_search_boundary():
+    from memtomem.models import NamespaceFilter, ScopeFilter
+
+    storage = _RecordingDenseStorage()
+    scope = ScopeFilter.parse("user")
+    namespaces = NamespaceFilter.parse(None, system_prefixes=("archive:",))
+    root = Path("/registered/project")
+
+    result = await expand_query_headings(
+        "deploy",
+        storage,
+        _OkEmbedder(),
+        project_context_root=root,
+        scope_filter=scope,
+        namespace_filter=namespaces,
+    )
+
+    assert result == "deploy rollout window"
+    assert storage.kwargs["scope_filter"] is scope
+    assert storage.kwargs["namespace_filter"] is namespaces
+    assert storage.kwargs["project_context_root"] == root
+    # The boundary filters run after the KNN pool is cut; the optional probe must
+    # not escalate to a full-table pass on a sparse one.
+    assert storage.kwargs["escalate"] is False
 
 
 class TestExpansionFailureLogging:

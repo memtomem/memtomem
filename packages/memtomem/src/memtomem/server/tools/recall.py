@@ -130,7 +130,8 @@ async def mem_recall(
         hidden_by_prefix: dict[str, int] = {}
         try:
             hidden_count, hidden_by_prefix = await app.storage.count_chunks_by_ns_prefix_detail(
-                tuple(app.config.search.system_namespace_prefixes)
+                tuple(app.config.search.system_namespace_prefixes),
+                boundary=(scope_filter, project_context_root),
             )
         except Exception:
             logger.debug("count_chunks_by_ns_prefix failed; skipping hint", exc_info=True)

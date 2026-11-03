@@ -89,6 +89,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Query expansion and the hidden-memory hint respect the search's scope
+  (#3039).** Tag and heading expansion sampled terms with the search's project
+  context but not its explicit scope or namespace filter, so a
+  `scope="user"` search inside a project appended that project's tags and
+  heading words, and a default search could append terms from hidden
+  `archive:` and `agent-runtime:` namespaces. The expanded query is embedded and
+  passed to the reranker, so with a remote embedding provider or an external
+  reranker those terms left the machine on a search that excluded their rows.
+  Expansion now draws only from the search's scope, project and namespace
+  boundaries; source, tag and time filters still do not constrain it. An
+  out-of-project search with an explicit project scope, such as a
+  `langchain-memtomem` store on a project tier, now expands from that tier
+  instead of from user memories only. The "N hidden — pass `namespace=`" hint on
+  `mem_search` and `mem_recall` counted hidden rows across every project and
+  scope; it now counts only rows inside the same boundary.
+  `StorageBackend.get_tag_counts` takes optional `scope_filter` and
+  `namespace_filter`, and `count_chunks_by_ns_prefix_detail` an optional
+  `boundary`; callers that pass neither are unchanged. The heading probe is now
+  limited to its first KNN attempt outside exhaustive mode: `dense_search`
+  takes a keyword-only `escalate=True`, and the probe passes `False`, so a
+  sparse boundary (including a sparse project boundary, which could escalate
+  the probe before) yields fewer heading terms instead of a full-table pass.
 - **`MemtomemBaseStore` keeps names apart that differ only in case (#3034).**
   Its record files were named in base64url, which is case-sensitive, so on
   macOS (APFS as macOS formats it) and Windows two names whose encodings

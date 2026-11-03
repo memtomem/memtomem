@@ -533,6 +533,8 @@ Chunks in system namespaces (e.g. `archive:*` and the per-agent `agent-runtime:*
 
 The `llm` strategy uses an LLM to generate semantic synonyms (requires `MEMTOMEM_LLM__ENABLED=true`). Other strategies use index metadata and do not need LLM. See [LLM Providers](llm-providers.md).
 
+Tag and heading expansion respect the search's scope, project and namespace boundaries: a `scope="user"` search inside a project does not draw terms from that project's tiers, and a default search does not draw them from hidden system namespaces. The search's other filters (source, tag, time) do not constrain expansion.
+
 ## Context Window
 
 | Variable | Default | Description |
