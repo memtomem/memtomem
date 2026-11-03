@@ -65,7 +65,7 @@ from functools import lru_cache
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from dataclasses import dataclass, field
 
@@ -105,6 +105,15 @@ from memtomem.storage.base import ContextWindowRows, SearchMetadataFilter, parse
 from memtomem.storage.sqlite_helpers import match_source_filter_value, norm_path
 
 logger = logging.getLogger(__name__)
+
+
+class _MetadataKwargs(TypedDict, total=False):
+    """``**``-spread into a leg's search call: absent, not ``None``, when the caller
+    supplied no metadata filter. Typed so ``**`` cannot be read as filling the
+    calls' boolean keywords (``exhaustive``, ``escalate``)."""
+
+    metadata_filter: SearchMetadataFilter
+
 
 # Fallback for the rescue leg's RRF weight when no SessionSummaryConfig
 # is wired. Mirrors ``SessionSummaryConfig.expansion_rescue_weight``'s
@@ -1150,7 +1159,7 @@ class SearchPipeline:
         # Headroom for RRF and downstream validity/decay/MMR attrition.
         # Bounded by existing candidate caps.
         oversample = max(top_k, self._config.bm25_candidates)
-        dense_metadata_kwargs = (
+        dense_metadata_kwargs: _MetadataKwargs = (
             {"metadata_filter": metadata_filter} if metadata_filter is not None else {}
         )
 
@@ -1757,7 +1766,7 @@ class SearchPipeline:
                     metadata_filter if metadata_filter is not None else SearchMetadataFilter(),
                     tags_any=required_tags,
                 )
-            metadata_kwargs = (
+            metadata_kwargs: _MetadataKwargs = (
                 {"metadata_filter": retrieval_metadata_filter}
                 if retrieval_metadata_filter is not None
                 else {}

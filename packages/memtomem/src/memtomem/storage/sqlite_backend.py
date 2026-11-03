@@ -3707,7 +3707,8 @@ class SqliteBackend(
         scope_frag, scope_params = scope_context_sql(
             scope_filter, project_context_root, column_alias="c."
         )
-        ns_frag, ns_params = ("", [])
+        ns_frag: str = ""
+        ns_params: list = []
         if namespace_filter is not None:
             # ``json_each`` has no ``namespace`` column, so the bare name is
             # the chunk's.
