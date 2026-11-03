@@ -24,7 +24,15 @@ This is a regression tripwire on a trusted local filesystem, not a general
 filesystem-integrity library.  It does not walk home-directory trees, recover
 after SIGKILL, detect a write that is fully restored before teardown, or make
 an adversarial pathname-swap guarantee.  Existing final-component symlinks and
-reparse points are refused rather than followed.  The witness sees only audit
+reparse points are never fingerprinted through: ``strict`` refuses to run when
+a settings target is one at session start, and ``on`` leaves that target out of
+the content comparison and checks it by write observation only (#3019), so a
+dotfiles symlink does not cost the guard on every other target.  For such a
+target the witness's blind spots below are detection gaps, not attribution
+gaps: with no fingerprint, an unseen write is not reported at all.  So is a
+change made to the link's destination through the destination's own pathname,
+and a link replaced unseen stays degraded for the rest of the session, because
+degradation is decided once, when the session arms.  The witness sees only audit
 events raised in *this* process: a subprocess's writes, ``mmap`` stores, writes
 through a descriptor opened before the hook armed, and writes aimed at a
 relative pathname under a ``dir_fd`` all stay invisible to it, so
@@ -232,6 +240,63 @@ def fingerprint(path: Path, *, max_bytes: int = MAX_CONFIG_BYTES) -> FileFingerp
 def snapshot_files(paths: tuple[Path, ...]) -> dict[str, FileFingerprint]:
     """Fingerprint all watched files on every call; there is no metadata fast path."""
     return {str(path): fingerprint(path) for path in paths}
+
+
+@dataclass(frozen=True)
+class DegradedTarget:
+    """A settings target that was unsafe to fingerprint when the session armed.
+
+    ``aliases`` are the witness keys whose writes count as writes to it: the
+    target's own pathname and, for a symlink, the file it named at that moment.
+    The second matters because a settings writer that keeps the link intact
+    replaces the link's destination, not the link, and the witness compares
+    pathnames rather than files.  Naming the destination reads nothing through
+    the link; its content is still never compared.
+    """
+
+    path: str
+    reason: str
+    aliases: tuple[str, ...]
+
+
+def _link_destination(path: Path) -> str | None:
+    """Return the normalised destination of a symlink at ``path``, if it has one."""
+    try:
+        if not os.path.islink(path):
+            return None
+        return normalise_target(os.path.realpath(path))
+    except (OSError, ValueError):
+        return None
+
+
+def partition_baseline(
+    targets: tuple[Path, ...], snapshot: dict[str, FileFingerprint], mode: GuardMode
+) -> tuple[tuple[Path, ...], tuple[DegradedTarget, ...]]:
+    """Split the session's targets into fingerprinted ones and degraded ones.
+
+    ``strict`` keeps failing closed: any unsafe target refuses the session.
+    Otherwise an unsafe target is degraded instead of refusing the session —
+    the usual cause is a settings file kept in a dotfiles repository and
+    symlinked into place, and refusing would leave ``off`` as the only way to
+    run, which unguards every other target too.  The decision is made once,
+    here; a target that turns unsafe later is a change, not a degradation.
+    """
+    if mode == "strict":
+        require_armable(snapshot)
+        return targets, ()
+    watched: list[Path] = []
+    degraded: list[DegradedTarget] = []
+    for target in targets:
+        value = snapshot[str(target)]
+        if value.state != "unsafe":
+            watched.append(target)
+            continue
+        aliases = [normalise_target(target)]
+        destination = _link_destination(target)
+        if destination is not None and destination not in aliases:
+            aliases.append(destination)
+        degraded.append(DegradedTarget(str(target), value.detail, tuple(aliases)))
+    return tuple(watched), tuple(degraded)
 
 
 def require_armable(snapshot: dict[str, FileFingerprint]) -> None:
@@ -452,7 +517,7 @@ class WriteWitness:
 @dataclass(frozen=True)
 class Violation:
     path: str
-    kind: Literal["created", "deleted", "modified", "unsafe"]
+    kind: Literal["created", "deleted", "modified", "unsafe", "written"]
     detail: str
 
     def __str__(self) -> str:
@@ -496,6 +561,38 @@ def classify(
         target = attributed if normalise_target(violation.path) in written else unattributed
         target.append(violation)
     return attributed, unattributed
+
+
+def degraded_writes(
+    degraded: tuple[DegradedTarget, ...], observations: list[WriteObservation]
+) -> list[Violation]:
+    """Report each observed write to a degraded target or its link destination.
+
+    A degraded target has no before/after fingerprint, so an observed write is
+    the whole verdict: there is no net change to compare it against.  The
+    violation names the pathname that was written, so the failure message can
+    show the write site the witness recorded for it.
+    """
+    written = {observation.path for observation in observations}
+    violations: list[Violation] = []
+    for target in degraded:
+        own = normalise_target(target.path)
+        for alias in target.aliases:
+            if alias not in written:
+                continue
+            where = (
+                "a write was observed on this target"
+                if alias == own
+                else f"a write was observed on the file the symlink {target.path} points to"
+            )
+            violations.append(
+                Violation(
+                    alias,
+                    "written",
+                    f"{where}; its content is not compared because {target.reason}",
+                )
+            )
+    return violations
 
 
 def _witness_lines(violations: list[Violation], observations: list[WriteObservation]) -> list[str]:
