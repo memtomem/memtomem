@@ -133,6 +133,13 @@ boundary of `put` and `delete` against the repair that restores agreement).
    > A2 added to `MemtomemBaseStore` stays public and unused by the package.
    > `packages/langchain-memtomem/docs/protocol.md` §Layout has the detail.
 
+   > **Amended 2026-11-03** after #3034. `MemtomemBaseStore` now lays its
+   > records out in the same single-case alphabet (`s` + lowercase base32,
+   > under `records.v2/`), with a hashed name for a value too long for a
+   > file, so the collision above no longer applies to it. The package
+   > still owns its records and its codec: it decodes identity back from its
+   > paths, which a hashed name would not allow.
+
 ### B. The store over its own pipeline
 
 1. **Own components, own configuration.** The store builds a `Mem2MemConfig`
@@ -173,6 +180,10 @@ boundary of `put` and `delete` against the repair that restores agreement).
    `index_file` call passes `namespace=` explicitly, and an explicit
    namespace wins over stored rows and rules (`indexing/engine.py:1552`,
    `1580`).
+
+   > **Amended 2026-11-03.** The segments are the package's own codec,
+   > `s` + lowercase base32 (`[a-z2-7]`), not base64url; see the A4
+   > amendments.
 4. **Search.** `get`, `list_namespaces` and a query-less `search` read only
    the JSON records. `search(query=...)`:
    - Narrows the pipeline by namespace and then checks the tuple. The
