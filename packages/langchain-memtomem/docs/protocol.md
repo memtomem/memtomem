@@ -26,7 +26,7 @@ NFD-spelled root on macOS would otherwise match no hit.
                                 tombstone: the generation a deleted item reached (kept)
   projections/<seg>/…/<key>.md  one Markdown projection per indexed item
   projections/<seg>/…/<key>.md.indexed
-                                last-indexed marker: generation, text digest, chunk ids
+                                last-indexed marker: generation, text digest, row stamps
   projections/<seg>/…/.<key>.md.lock
                                 memtomem's sidecar lock for the item (see Locks)
 ```
@@ -87,8 +87,11 @@ rules, `indexing/engine.py:1580`).
 Each record carries a generation: `put` writes `max(existing record, .last
 tombstone, .deleting marker) + 1`. The `.indexed` marker, written after
 `index_file` returned clean, holds the generation it was indexed from, the
-SHA-256 of the projection text, and the memtomem chunk ids the index holds for
-the file afterwards.
+SHA-256 of the projection text, and a **stamp** for every row the index holds
+for the file afterwards: the memtomem chunk id and the SHA-256 of the text the
+row is ranked by (`Chunk.retrieval_content`, the heading path or retrieval
+context and then the body). Every index step unlinks the marker first, so an
+interruption before the new marker is written leaves none.
 
 The generation is monotonic for a key across deletion: a delete writes the
 `.last` tombstone with the generation the item reached and never removes it.
@@ -100,18 +103,22 @@ An item is **whole** when the record exists and has something to rank, has no
 deletion marker, the projection file holds exactly the text the record renders
 to, the marker names the record's generation and that text's digest, and the
 index holds at least one row for the projection path (`ItemState.agrees`).
-Only a whole item is served by a query search, and only from hits whose chunk
-ids are all in the marker's set.
+Only a whole item is served by a query search, and only from hits whose
+stamps are all in the marker's set. Repair also compares the rows the index
+holds now with the marker's stamps, so rows the marker does not describe (an
+older `index.db` restored under current files) are rebuilt.
 
-**Why chunk ids.** memtomem keeps a chunk's id across a re-index only when its
-text is unchanged and deletes the rest (`indexing/engine.py:1334-1339`,
-ADR-0005). A row left by an interrupted `put`, a row another instance cached
-before this one rewrote the item, or a row from before a delete is either of
-the same text as the current value (its score is still right) or carries an
-id outside the current set (it is not served). An earlier version carried the
-generation as a frontmatter tag inside the projection; a value quoting
-`tags: [lcmm-gen-999]` then hid its own item, and a superscript digit made
-any search that reached the item raise.
+**Why stamps.** A row left by an interrupted `put`, a row another instance
+cached before this one rewrote the item, or a row from before a delete is
+either ranked by the same text as the current rows (its score is still right)
+or carries a stamp outside the current set (it is not served). The chunk id
+alone does not establish that: memtomem keeps an id across a re-index when the
+body hash matches (`indexing/engine.py:1334-1339`, ADR-0005), and the body
+hash leaves out the heading path, so a value whose heading alone changed kept
+its ids and a cached hit for the old heading was served with the new value.
+An earlier version carried the generation as a frontmatter tag inside the
+projection; a value quoting `tags: [lcmm-gen-999]` then hid its own item, and
+a superscript digit made any search that reached the item raise.
 
 ## Locks
 
@@ -206,7 +213,7 @@ ordered decision (`_protocol.classify`); the first matching row wins.
 | 2 | `.deleting` present and record gen > marker gen | the marker is superseded: unlink it, continue below |
 | 3 | no readable record, or record has `index=False` | **purge projection** if a projection, an `.indexed` marker or rows exist (unlink both files, `delete_by_source`); else nothing |
 | 4 | projection missing, or not exactly the text the record renders to | **render and index**: write the projection from the record, guard it (surface `langchain_memtomem_repair`), `index_file`, write `.indexed` |
-| 5 | projection current, but the marker names another generation or digest, or no rows | **index**: `index_file` the projection, write `.indexed` |
+| 5 | projection current, but the marker names another generation or digest, no rows, or rows whose stamps differ from the marker's | **index**: unlink `.indexed`, `index_file` the projection, write `.indexed` |
 | 6 | whole | nothing |
 
 A guard block or a failed index in rows 4–5 is logged and the item stays
@@ -248,6 +255,9 @@ Put with `index=False` over an indexed item:
 
 First put of a new item interrupted after step 2 (`put.after_record`): record
 gen 1, nothing derived → row 4 → rendered and indexed.
+
+A repair interrupted between its index and its marker (`repair.after_index`)
+leaves new rows and no marker → row 5 → indexed again, marker written.
 
 Delete, over a whole item (gen 1):
 
@@ -299,10 +309,10 @@ filtered like any other; a query-less search returns newest first, unscored). `s
 2. **Group chunks into items.** Hits are grouped by `(namespace, key)` in
    order of first appearance; the item's score is the best final pipeline
    score among its chunks (after rerank and the later modifiers), and the
-   chunk ids of its hits go with it. A hit counts for an item only when the
+   stamps of its hits go with it. A hit counts for an item only when the
    row's own namespace is the one the path encodes.
 3. **Judge each item** against its files: served only when the item is whole
-   and every hit's chunk id is in the marker's set, and the record's value
+   and every hit's stamp is in the marker's set, and the record's value
    passes `filter` (memtomem's `matches_filter`, the predicate
    `MemtomemBaseStore` applies too, used on both paths here: dotted keys, literal
    equality, `$eq $ne $gt $gte $lt $lte $in $nin`; a nested mapping is

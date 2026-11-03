@@ -500,3 +500,77 @@ async def test_an_explicit_ttl_is_refused_as_the_readme_says(root: Path) -> None
             await store.aput(NS, KEY, A, ttl=5)
     finally:
         await store.aclose()
+
+
+# --- review of the chunk-id provenance ---------------------------------------
+
+
+async def test_a_heading_only_change_is_not_served_from_a_cached_hit(root: Path) -> None:
+    """memtomem keeps a chunk id when the body hash matches; the heading is not in it."""
+    writer = await MemtomemPipelineStore.open(root)
+    reader = await MemtomemPipelineStore.open(root)
+    try:
+        old = {"text": "# Quasar\n\nA stable paragraph about garden fruit."}
+        new = {"text": "# Nebula\n\nA stable paragraph about garden fruit."}
+        await writer.aput(NS, KEY, old, index=["text"])
+        assert await _keys(reader, "Quasar") == {KEY}  # cached in the reader
+        await writer.aput(NS, KEY, new, index=["text"])
+        assert await _keys(reader, "Quasar") == set()
+        [hit] = await reader.asearch(NS, query="Nebula", limit=10)
+        assert hit.value == new
+    finally:
+        await writer.aclose()
+        await reader.aclose()
+
+
+async def test_a_repair_interrupted_between_its_index_and_its_marker(root: Path) -> None:
+    store = await MemtomemPipelineStore.open(root)
+    await store.aput(NS, KEY, A)
+    await store.aclose()
+    for leftover in root.glob("index.db*"):
+        leftover.unlink()
+    interrupted = MemtomemPipelineStore(root)
+    interrupt_at(interrupted, "repair.after_index")
+    with pytest.raises(Interrupted):
+        await interrupted._open()
+    reopened = await MemtomemPipelineStore.open(root)
+    try:
+        assert await _keys(reopened, "apples") == {KEY}
+        assert (await _state(reopened)).agrees
+    finally:
+        await reopened.aclose()
+
+
+async def test_an_older_index_restored_under_current_files_is_rebuilt(root: Path) -> None:
+    store = await MemtomemPipelineStore.open(root)
+    await store.aput(NS, KEY, {"text": "# Quasar\n\nA stable paragraph about garden fruit."})
+    await store.aclose()
+    backup = root / "index.db.bak"
+    backup.write_bytes((root / "index.db").read_bytes())
+    store = await MemtomemPipelineStore.open(root)
+    await store.aput(NS, KEY, {"text": "# Nebula\n\nA stable paragraph about garden fruit."})
+    await store.aclose()
+    for leftover in root.glob("index.db-*"):
+        leftover.unlink()
+    (root / "index.db").write_bytes(backup.read_bytes())
+    reopened = await MemtomemPipelineStore.open(root)
+    try:
+        assert await _keys(reopened, "Quasar") == set()
+        assert await _keys(reopened, "Nebula") == {KEY}
+        assert (await _state(reopened)).agrees
+    finally:
+        await reopened.aclose()
+
+
+async def test_context_window_expansion_does_not_change_a_hits_stamp(root: Path) -> None:
+    store = await MemtomemPipelineStore.open(
+        root, config={"context_window": {"enabled": True, "window_size": 2}}
+    )
+    try:
+        text = "\n\n".join(f"## part {n}\n\nparagraph {n} " + "filler " * 80 for n in range(5))
+        # index=["text"]: the whole-value default renders JSON, where "\n\napples"
+        # would tokenize as "napples".
+        await store.aput(NS, KEY, {"text": text + "\n\n## last\n\napples here"}, index=["text"])
+        assert await _keys(store, "apples") == {KEY}
+    finally:
+        await store.aclose()

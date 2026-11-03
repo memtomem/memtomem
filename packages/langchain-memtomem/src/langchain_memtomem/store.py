@@ -47,6 +47,7 @@ from memtomem.storage.sqlite_helpers import norm_path
 
 from langchain_memtomem._protocol import (
     Action,
+    ChunkStamp,
     IndexedMarker,
     ItemPaths,
     ItemState,
@@ -345,11 +346,22 @@ class MemtomemPipelineStore(BaseStore):
             return True
         raise ValueError(f"projection write blocked by {len(guard.hits)} privacy pattern(s)")
 
+    async def _stored_stamps(self, paths: ItemPaths) -> frozenset[ChunkStamp]:
+        comp, _ = self._require_open()
+        rows = await comp.storage.list_chunks_by_source(paths.projection, limit=None)
+        return frozenset((str(row.id), text_digest(row.retrieval_content)) for row in rows)
+
     async def _index(
         self, paths: ItemPaths, namespace_enc: str, text: str, bypass: bool
-    ) -> list[str]:
-        """Index the projection; return the chunk ids the index holds for it afterwards."""
+    ) -> frozenset[ChunkStamp]:
+        """Index the projection; return the stamps of the rows the index holds afterwards.
+
+        The ``.indexed`` marker goes first, so an interruption anywhere before
+        the new one is written leaves no marker to vouch for rows it did not
+        describe.
+        """
         comp, _ = self._require_open()
+        _unlink(paths.indexed)
         try:
             stats = await comp.index_engine.index_file(
                 paths.projection,
@@ -364,15 +376,16 @@ class MemtomemPipelineStore(BaseStore):
                 f"projection {paths.projection.name} was refused by the redaction gate"
             ) from exc
         _judge(stats, paths.projection)
-        rows = await comp.storage.list_chunks_by_source(paths.projection, limit=None)
-        return [str(row.id) for row in rows]
+        return await self._stored_stamps(paths)
 
     @staticmethod
-    def _write_indexed(paths: ItemPaths, generation: int, text: str, chunks: list[str]) -> None:
+    def _write_indexed(
+        paths: ItemPaths, generation: int, text: str, chunks: frozenset[ChunkStamp]
+    ) -> None:
         paths.indexed.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(
             paths.indexed,
-            render_indexed_marker(IndexedMarker(generation, text_digest(text), frozenset(chunks))),
+            render_indexed_marker(IndexedMarker(generation, text_digest(text), chunks)),
         )
 
     async def _drop_projection(self, paths: ItemPaths, *, boundary: str | None = None) -> None:
@@ -470,8 +483,18 @@ class MemtomemPipelineStore(BaseStore):
     # -- repair ------------------------------------------------------------
 
     async def _read_state(
-        self, namespace: tuple[str, ...], key: str, paths: ItemPaths
+        self,
+        namespace: tuple[str, ...],
+        key: str,
+        paths: ItemPaths,
+        *,
+        check_rows: bool = False,
     ) -> tuple[ItemState, dict[str, Any] | None]:
+        """The item's state. ``check_rows`` also compares the stored rows with the marker.
+
+        Repair asks for it; the search path does not, because every hit is
+        compared with the marker stamp by stamp anyway.
+        """
         comp, records = self._require_open()
         try:
             record = records.read(namespace, key)
@@ -495,6 +518,9 @@ class MemtomemPipelineStore(BaseStore):
             and marker.digest == text_digest(expected)
         )
         counts = await comp.storage.count_chunks_by_sources([paths.projection])
+        rows_match = True
+        if check_rows and indexed_current and marker is not None:
+            rows_match = await self._stored_stamps(paths) == marker.chunks
         state = ItemState(
             record_gen=record_gen,
             index_off=record is not None and expected is None,
@@ -505,6 +531,7 @@ class MemtomemPipelineStore(BaseStore):
             indexed_chunks=marker.chunks if marker is not None and indexed_current else frozenset(),
             deleting_gen=read_marker(paths.deleting),
             rows=sum(counts.values()),
+            rows_match=rows_match,
         )
         return state, record
 
@@ -512,7 +539,7 @@ class MemtomemPipelineStore(BaseStore):
         """One repair pass over one item, under its lock. Returns the state after it."""
         comp, _ = self._require_open()
         paths = self._paths(namespace, key)
-        state, record = await self._read_state(namespace, key, paths)
+        state, record = await self._read_state(namespace, key, paths, check_rows=True)
         action = classify(state)
         if action is Action.FINISH_DELETE:
             reached = max(
@@ -542,6 +569,7 @@ class MemtomemPipelineStore(BaseStore):
                 if action is Action.RENDER_AND_INDEX:
                     atomic_write_text(paths.projection, text)
                 chunks = await self._index(paths, namespace_enc, text, bypass)
+                await self._steps.at("repair.after_index")
                 self._write_indexed(paths, state.record_gen, text, chunks)
             except (ValueError, StoreIndexError) as exc:
                 # The item stays unserved (no agreeing marker); the next open
@@ -650,8 +678,9 @@ class MemtomemPipelineStore(BaseStore):
     ) -> list[tuple[tuple[tuple[str, ...], str], dict[str, Any], float]]:
         """One pipeline window, judged item by item. Each window stands alone.
 
-        A hit whose chunk id is not among the ids last indexed for the record's
-        current text, or whose files disagree, is not served from the hit in
+        A hit whose stamp (chunk id and retrieval-text digest) is not among
+        those last indexed for the record's current text, or whose files
+        disagree, is not served from the hit in
         hand: the item is repaired under its lock if the lock is free, and the
         window is then retrieved again from the fresh rows, bypassing the
         result cache.
@@ -671,14 +700,15 @@ class MemtomemPipelineStore(BaseStore):
 
     def _group(
         self, results: list[SearchResult], prefix: tuple[str, ...]
-    ) -> list[tuple[tuple[tuple[str, ...], str], frozenset[str], float]]:
+    ) -> list[tuple[tuple[tuple[str, ...], str], frozenset[ChunkStamp], float]]:
         """Hits grouped into items, in order of first appearance.
 
         The item is named by the hit's source path and must agree with the
-        row's own namespace; the item's chunk ids and best score go with it.
+        row's own namespace; the stamps of the item's hits and its best score
+        go with it.
         """
         order: list[tuple[tuple[str, ...], str]] = []
-        best: dict[tuple[tuple[str, ...], str], tuple[set[str], float]] = {}
+        best: dict[tuple[tuple[str, ...], str], tuple[set[ChunkStamp], float]] = {}
         for result in results:
             metadata = result.chunk.metadata
             try:
@@ -692,13 +722,14 @@ class MemtomemPipelineStore(BaseStore):
             if namespace[: len(prefix)] != prefix:
                 continue
             ident = (namespace, key)
+            stamp = (str(result.chunk.id), text_digest(result.chunk.retrieval_content))
             if ident not in best:
                 order.append(ident)
-                best[ident] = ({str(result.chunk.id)}, result.score)
+                best[ident] = ({stamp}, result.score)
             else:
-                ids, seen = best[ident]
-                ids.add(str(result.chunk.id))
-                best[ident] = (ids, max(seen, result.score))
+                stamps, seen = best[ident]
+                stamps.add(stamp)
+                best[ident] = (stamps, max(seen, result.score))
         return [(ident, frozenset(best[ident][0]), best[ident][1]) for ident in order]
 
     async def _judge_hits(

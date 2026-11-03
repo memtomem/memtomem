@@ -151,13 +151,13 @@ def test_projection_file_is_the_value_text_behind_one_empty_line() -> None:
 
 
 def test_indexed_marker_round_trips() -> None:
-    marker = IndexedMarker(3, text_digest("\nx\n"), frozenset({"b", "a"}))
+    marker = IndexedMarker(3, text_digest("\nx\n"), frozenset({("b", "d2"), ("a", "d1")}))
     text = render_indexed_marker(marker)
-    assert '"chunks": ["a", "b"]' in text
+    assert '"chunks": {"a": "d1", "b": "d2"}' in text
 
 
 def test_indexed_marker_reads_back(tmp_path: Path) -> None:
-    marker = IndexedMarker(3, text_digest("\nx\n"), frozenset({"id-1", "id-2"}))
+    marker = IndexedMarker(3, text_digest("\nx\n"), frozenset({("id-1", "d1"), ("id-2", "d2")}))
     (tmp_path / "m").write_text(render_indexed_marker(marker))
     assert read_indexed_marker(tmp_path / "m") == marker
 
@@ -171,7 +171,8 @@ def test_indexed_marker_reads_back(tmp_path: Path) -> None:
         b'{"generation": true, "digest": "d", "chunks": []}',
         b'{"generation": -1, "digest": "d", "chunks": []}',
         b'{"generation": 1, "digest": 5, "chunks": []}',
-        b'{"generation": 1, "digest": "d", "chunks": [1]}',
+        b'{"generation": 1, "digest": "d", "chunks": ["id"]}',
+        b'{"generation": 1, "digest": "d", "chunks": {"id": 1}}',
         b'{"generation": 1, "digest": "d"}',
     ],
 )
@@ -205,7 +206,7 @@ def _state(**overrides: object) -> ItemState:
         projection_current=True,
         marker_present=True,
         indexed_current=True,
-        indexed_chunks=frozenset({"c1"}),
+        indexed_chunks=frozenset({("c1", "d1")}),
         deleting_gen=None,
         rows=3,
     )
@@ -236,6 +237,9 @@ _NOTHING_DERIVED = dict(
         (_state(indexed_current=False, marker_present=True), Action.INDEX),
         # index lost (index.db deleted) while the files agree
         (_state(rows=0), Action.INDEX),
+        # rows the marker does not describe (an older index.db restored, or a
+        # repair interrupted between its index and its marker)
+        (_state(rows_match=False), Action.INDEX),
         # projection edited by hand for a whole record
         (_state(projection_current=False), Action.RENDER_AND_INDEX),
         # first put interrupted after the record: nothing derived yet
@@ -283,3 +287,4 @@ def test_agrees_needs_every_leg() -> None:
     assert not _state(projection_current=False).agrees
     assert not _state(deleting_gen=2).agrees
     assert not _state(index_off=True).agrees
+    assert not _state(rows_match=False).agrees

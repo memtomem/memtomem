@@ -189,21 +189,29 @@ def text_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+#: One row's provenance: its memtomem chunk id and the SHA-256 of the text
+#: retrieval ranked it by (``Chunk.retrieval_content``: the heading path or
+#: retrieval context, then the body).
+ChunkStamp = tuple[str, str]
+
+
 @dataclass(frozen=True, slots=True)
 class IndexedMarker:
     """What the last clean index of a projection produced.
 
     ``generation`` is the record generation it was indexed from, ``digest`` the
-    SHA-256 of the projection text, ``chunks`` the memtomem chunk ids the index
-    holds for the file afterwards. A hit is served only when its chunk id is in
-    ``chunks``: memtomem keeps a chunk's id across a re-index only when its
-    text is unchanged (ADR-0005), so an id outside the set is a row of other
-    text than the current value's.
+    SHA-256 of the projection text, ``chunks`` the stamp of every row the index
+    holds for the file afterwards. A hit is served only when its stamp is in
+    ``chunks``. The id alone is not enough: memtomem keeps a chunk's id across
+    a re-index when its body hash matches (ADR-0005), and the body hash leaves
+    out the heading path that retrieval ranks by, so a row whose heading
+    changed keeps its id (measured by review: a cached hit for the old heading
+    was served with the new value).
     """
 
     generation: int
     digest: str
-    chunks: frozenset[str]
+    chunks: frozenset[ChunkStamp]
 
 
 def render_indexed_marker(marker: IndexedMarker) -> str:
@@ -212,7 +220,7 @@ def render_indexed_marker(marker: IndexedMarker) -> str:
             {
                 "generation": marker.generation,
                 "digest": marker.digest,
-                "chunks": sorted(marker.chunks),
+                "chunks": dict(sorted(marker.chunks)),
             },
             sort_keys=True,
         )
@@ -231,11 +239,11 @@ def read_indexed_marker(path: Path) -> IndexedMarker | None:
             type(generation) is not int
             or generation < 0
             or not isinstance(digest, str)
-            or not isinstance(chunks, list)
-            or not all(isinstance(chunk, str) for chunk in chunks)
+            or not isinstance(chunks, dict)
+            or not all(isinstance(k, str) and isinstance(v, str) for k, v in chunks.items())
         ):
             return None
-        return IndexedMarker(generation, digest, frozenset(chunks))
+        return IndexedMarker(generation, digest, frozenset(chunks.items()))
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         return None
 
@@ -276,8 +284,10 @@ class ItemState:
     to empty text. ``projection_current`` is whether the projection file holds
     exactly the text the record renders to; ``indexed_current`` whether the
     ``.indexed`` marker names the record's generation and that text's digest;
-    ``indexed_chunks`` the chunk ids that marker lists. ``deleting_gen`` is the
-    deletion marker's generation; ``rows`` the index rows stored for the
+    ``indexed_chunks`` the row stamps that marker lists. ``rows_match`` is
+    whether the rows the index holds now carry exactly those stamps; it is
+    only computed for repair and is ``True`` when not checked. ``deleting_gen``
+    is the deletion marker's generation; ``rows`` the index rows stored for the
     projection path.
     """
 
@@ -287,9 +297,10 @@ class ItemState:
     projection_current: bool
     marker_present: bool
     indexed_current: bool
-    indexed_chunks: frozenset[str]
+    indexed_chunks: frozenset[ChunkStamp]
     deleting_gen: int | None
     rows: int
+    rows_match: bool = True
 
     @property
     def has_derived(self) -> bool:
@@ -305,6 +316,7 @@ class ItemState:
             and self.projection_current
             and self.indexed_current
             and self.rows > 0
+            and self.rows_match
         )
 
 
@@ -323,6 +335,6 @@ def classify(state: ItemState) -> Action:
         return Action.PURGE_PROJECTION if state.has_derived else Action.NOTHING
     if not state.projection_current:
         return Action.RENDER_AND_INDEX
-    if not state.indexed_current or state.rows == 0:
+    if not state.indexed_current or state.rows == 0 or not state.rows_match:
         return Action.INDEX
     return Action.NOTHING

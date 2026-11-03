@@ -228,13 +228,16 @@ boundary of `put` and `delete` against the repair that restores agreement).
      > line, so none of the store's bookkeeping is searchable and no value
      > can imitate it (measured: a value quoting the store's generation tag
      > hid its own item; a superscript digit in that tag made any search
-     > that reached the item raise). Projection agreement is byte equality with the text the
-     > record renders to, and the persisted last-indexed state holds that
-     > text's digest and the memtomem chunk ids indexed from it. A hit is
-     > served only when its chunk id is in that set: memtomem keeps an id
-     > across a re-index only for unchanged text (ADR-0005). B2's header and
-     > B4's "decodes each hit's header" read accordingly: the hit's item is
-     > named by its source path and checked against the row's namespace.
+     > that reached the item raise). Projection agreement is byte equality
+     > with the text the record renders to. The persisted last-indexed state
+     > holds that text's digest and, for every row indexed from it, the
+     > memtomem chunk id with a digest of the text the row is ranked by. A
+     > hit is served only when that pair is in the set. The id alone would
+     > not do: memtomem keeps an id when the body hash matches (ADR-0005),
+     > and the body hash leaves out the heading path retrieval ranks by.
+     > B2's header and B4's "decodes each hit's header" read accordingly:
+     > the hit's item is named by its source path and checked against the
+     > row's namespace.
    - A deletion marker carries the generation it was written for. A later
      `put` under the lock settles or supersedes the marker before it writes.
      Repair gives a marker precedence only over a record of the same or an
