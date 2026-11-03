@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Render the shipped Claude, Codex, Kimi, OpenCode, and Hermes assets from one contract."""
+"""Render the shipped Claude, Codex, Kimi, OpenCode, Hermes, Antigravity, and Cursor assets
+from one contract."""
 
 from __future__ import annotations
 
@@ -20,6 +21,8 @@ KIMI_ROOT = ROOT / "packages" / "memtomem-kimi-skills"
 OPENCODE_ROOT = ROOT / "packages" / "opencode-memtomem"
 HERMES_ROOT = ROOT / "packages" / "memtomem-hermes-plugin"
 ANTIGRAVITY_ROOT = ROOT / "packages" / "memtomem-antigravity-plugin"
+CURSOR_ROOT = ROOT / "packages" / "memtomem-cursor-plugin"
+CURSOR_MARKETPLACE = ROOT / ".cursor-plugin" / "marketplace.json"
 HERMES_MEMORY_ROOT = ROOT / "packages" / "memtomem-hermes-memory"
 
 # Workflow sources may carry scope variants: a host that starts the server inside the
@@ -157,11 +160,12 @@ def _claude_skill(workflow: dict, body: str) -> str:
     return "\n".join(frontmatter) + body.strip() + "\n"
 
 
-def _portable_skill(workflow: dict, body: str) -> str:
+def _portable_skill(workflow: dict, body: str, extra_frontmatter: tuple[str, ...] = ()) -> str:
     lines = [
         "---",
         f"name: {workflow['codex_name']}",
         f"description: {workflow['description']}",
+        *extra_frontmatter,
         "---",
         "",
         f"# {workflow['title']}",
@@ -308,9 +312,10 @@ def _hermes_mcp_config(contract: dict) -> str:
     return json.dumps(payload, indent=2) + "\n"
 
 
-def _antigravity_mcp_config(contract: dict) -> str:
+def _pinned_mcp_config(contract: dict) -> str:
     # No "type": agy takes the transport from the fields ("command" = stdio), and
-    # `agy plugin validate --strict` fails on the key as an unknown field.
+    # `agy plugin validate --strict` fails on the key as an unknown field. Cursor reads the
+    # same shape; its own Playwright plugin omits "type" too.
     payload = {
         "mcpServers": {
             "memtomem": {
@@ -331,6 +336,47 @@ def _antigravity_plugin_manifest(contract: dict) -> str:
             "Markdown-first long-term memory shared across your coding agents: one local "
             "memtomem store, searchable from Antigravity, Claude Code, Codex CLI and Kimi Code."
         ),
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def _cursor_plugin_manifest(contract: dict) -> str:
+    payload = {
+        "name": "memtomem",
+        "displayName": "memtomem",
+        "version": contract["plugins"]["cursor_version"],
+        "description": (
+            "Markdown-first long-term memory shared across your coding agents: one local "
+            "memtomem store, searchable from Cursor, Claude Code, Codex CLI and Antigravity."
+        ),
+        "author": {"name": "memtomem", "url": "https://github.com/memtomem"},
+        "homepage": "https://github.com/memtomem/memtomem",
+        "repository": "https://github.com/memtomem/memtomem",
+        "license": "Apache-2.0",
+        "logo": "assets/icon.png",
+        "keywords": ["memory", "semantic-search", "rag", "mcp", "markdown"],
+        "category": "productivity",
+        "skills": "./skills/",
+        "mcpServers": "./mcp.json",
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def _cursor_marketplace() -> str:
+    # No per-entry "version": the plugin manifest is the one place the version lives, and
+    # the marketplace schema in cursor/plugins (ae5650f) closes an entry to name, source,
+    # description and minClientVersions.
+    payload = {
+        "name": "memtomem",
+        "owner": {"name": "memtomem", "url": "https://github.com/memtomem"},
+        "metadata": {"description": "Markdown-first long-term memory for coding agents"},
+        "plugins": [
+            {
+                "name": "memtomem",
+                "source": CURSOR_ROOT.relative_to(ROOT).as_posix(),
+                "description": "Search, recall, save, and index Markdown-first agent memory",
+            }
+        ],
     }
     return json.dumps(payload, indent=2) + "\n"
 
@@ -391,8 +437,11 @@ def expected_files() -> dict[Path, str]:
         HERMES_ROOT / "mcp.json": _hermes_mcp_config(contract),
         HERMES_ROOT / "plugin.json": _hermes_plugin_manifest(contract),
         HERMES_MEMORY_ROOT / "plugin.yaml": _hermes_memory_manifest(contract),
-        ANTIGRAVITY_ROOT / "mcp_config.json": _antigravity_mcp_config(contract),
+        ANTIGRAVITY_ROOT / "mcp_config.json": _pinned_mcp_config(contract),
         ANTIGRAVITY_ROOT / "plugin.json": _antigravity_plugin_manifest(contract),
+        CURSOR_ROOT / ".cursor-plugin" / "plugin.json": _cursor_plugin_manifest(contract),
+        CURSOR_ROOT / "mcp.json": _pinned_mcp_config(contract),
+        CURSOR_MARKETPLACE: _cursor_marketplace(),
     }
     for workflow in contract["workflows"]:
         body = _workflow_body(workflow["id"], "project")
@@ -419,23 +468,32 @@ def expected_files() -> dict[Path, str]:
             files[OPENCODE_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _opencode_skill(
                 workflow, body, contract["opencode"]["version_range"]
             )
-        # Hermes and Antigravity start the server in the plugin directory. Hermes has no
-        # project, so it ships the user render and skips the workflows without one.
-        # Antigravity ships the bound render, which binds to the project first, where the
-        # workflow has one, and the user render otherwise.
+        # Hermes and Antigravity start the server in the plugin directory, and Cursor starts
+        # it in the home directory. Hermes has no project, so it ships the user render and
+        # skips the workflows without one. Antigravity and Cursor ship the bound render, which
+        # binds to the project first, where the workflow has one, and the user render
+        # otherwise. Cursor alone honours `disable-model-invocation`, so its explicit-only
+        # workflows carry that one line on top of the Antigravity text.
         scopes = workflow.get("scopes", ["project", "user"])
         if "user" not in scopes and "bound" not in scopes:
             raise ValueError(f"workflow {workflow['id']!r} has no render for Antigravity")
         if "user" in scopes:
             user = dict(workflow)
             user["description"] = workflow.get("user_scope_description", workflow["description"])
-            user_skill = _portable_skill(user, _workflow_body(workflow["id"], "user"))
+            user_body = _workflow_body(workflow["id"], "user")
+            user_skill = _portable_skill(user, user_body)
             files[HERMES_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = user_skill
         if "bound" in scopes:
-            agy_skill = _portable_skill(workflow, _workflow_body(workflow["id"], "bound"))
+            agy_workflow, agy_body = workflow, _workflow_body(workflow["id"], "bound")
         else:
-            agy_skill = user_skill
-        files[ANTIGRAVITY_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = agy_skill
+            agy_workflow, agy_body = user, user_body
+        files[ANTIGRAVITY_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _portable_skill(
+            agy_workflow, agy_body
+        )
+        cursor_frontmatter = () if workflow["implicit"] else ("disable-model-invocation: true",)
+        files[CURSOR_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _portable_skill(
+            agy_workflow, agy_body, cursor_frontmatter
+        )
     return files
 
 

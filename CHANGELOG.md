@@ -31,8 +31,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   and the bundle ships the image at `plugins/memtomem/assets/icon.png`. It is
   the same image as the Claude plugin's listing icon. Codex `0.3.27`, which also
   carries the `update` item sizing below.
+- **A Cursor plugin (experimental).** `packages/memtomem-cursor-plugin` ships the
+  exact-pinned memtomem server and the nine memory skills, and a repo-root
+  `.cursor-plugin/marketplace.json` lists it. Cursor does not start a plugin's
+  server in the open workspace (on macOS with Cursor 3.27.22 it started in the home
+  directory), so the bundle carries the Antigravity skill set: search, recall,
+  remember, handoff, brief and update bind the server to the repository first,
+  and index, status and setup work at user scope. Remember, index, setup and the
+  three project workflows are marked `disable-model-invocation`, so Cursor runs
+  them only on an explicit `/skill-name`. Until it is listed in the Cursor
+  Marketplace, install it by copying the directory to
+  `~/.cursor/plugins/local/memtomem`. Handoff and update in every plugin now accept
+  `cursor` as a runtime label, so a handoff can be saved from Cursor and addressed to
+  it. Cursor `0.1.0`.
 
 ### Changed
+
+- **The user-scope `setup` and `index` skills no longer say the server runs in the
+  plugin directory.** Cursor started it in the home directory, so the reason a
+  relative path is refused now reads "outside the user's project". Hermes `0.1.15`,
+  Antigravity `0.2.6`.
 
 - **Each storage backend carries its own FTS tokenizer (#3018).** The
   tokenizer used to be one setting for the whole process: building a second

@@ -24,6 +24,16 @@ memtomem **does not replace** these, but complements Cursor with **hybrid semant
 
 ## Step 1: MCP Registration
 
+### Plugin (experimental)
+
+The [memtomem Cursor plugin](https://github.com/memtomem/memtomem/blob/main/packages/memtomem-cursor-plugin/README.md) registers an
+exact-pinned memtomem server and adds the memory skills, including the session loop
+(`/memtomem-handoff`, `/memtomem-brief`, `/memtomem-update`). Its README covers the local
+install and what the plugin can and cannot see: Cursor does not start the plugin's
+server in your workspace (on macOS it started in the home directory), so search, recall,
+remember and the three project workflows bind the server to your repository first. If you use the plugin, skip the
+manual registration below. Having both gives you two memtomem servers.
+
 ### Global Configuration (Applies to All Projects)
 
 Create or edit the `~/.cursor/mcp.json` file:
@@ -84,7 +94,7 @@ Index my project docs directory
 
 Agent:
 ```
-mem_index(path="./docs", recursive=True)
+mem_index(path="/path/to/your/project/docs", recursive=True)
 → Indexing complete:
   - Files scanned: 23
   - Total chunks: 567
