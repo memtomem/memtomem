@@ -5,6 +5,14 @@ whatever an interruption left behind, and how a query search widens its
 window. ADR-0042 in the memtomem repository records the decisions; this
 document is the contract the code and the tests in `tests/` implement. Every
 row of the interruption matrix is one test case in `tests/test_lcmm_protocol.py`.
+`tests/test_lcmm_model.py` checks the same contract on generated sequences:
+two instances over one root, puts (heading-only edits and `index=False`
+included), deletes, crashes at every step boundary followed by a restart, and
+loss of `index.db` with an interrupted first repair. After every step no
+query search may serve a deleted item, an old value or a word the value no
+longer holds; at intervals a freshly opened instance must find every item by
+every word. Seeds are fixed (20 by default, `LANGCHAIN_MEMTOMEM_MODEL_SEEDS`
+for more; 300 passed when this was written).
 
 Source references are to memtomem at `bb0e63a9` (2026-11-03).
 
