@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from langchain_memtomem import MemtomemPipelineStore
-from langchain_memtomem._protocol import to_memtomem_namespace
+from langchain_memtomem._protocol import encode_segment, to_memtomem_namespace
 
 
 async def _keys(store: MemtomemPipelineStore, prefix: tuple[str, ...], **kwargs) -> list[str]:
@@ -15,8 +15,8 @@ async def _keys(store: MemtomemPipelineStore, prefix: tuple[str, ...], **kwargs)
 
 
 async def test_base64_prefix_collision_does_not_leak(store: MemtomemPipelineStore) -> None:
-    # ``abc`` encodes to ``YWJj``; ``abcdef`` to ``YWJjZGVm`` — a LIKE prefix
-    # over-matches, the decode-then-filter step must not.
+    # ``abc`` encodes to ``smfrgg``; ``abcdef`` to ``smfrggzdfmy`` — a LIKE
+    # prefix over-matches, the decode-then-filter step must not.
     assert to_memtomem_namespace(("abcdef",)).startswith(to_memtomem_namespace(("abc",)))
     await store.aput(("abc",), "short", {"text": "apples short"})
     await store.aput(("abcdef",), "long", {"text": "apples long"})
@@ -25,13 +25,51 @@ async def test_base64_prefix_collision_does_not_leak(store: MemtomemPipelineStor
     assert set(await _keys(store, ())) == {"short", "long"}
 
 
-async def test_ascii_case_folded_sibling_does_not_leak(store: MemtomemPipelineStore) -> None:
-    # ``aaa`` → ``YWFh`` and ``aaG`` → ``YWFH``: equal under LIKE's ASCII folding.
-    assert to_memtomem_namespace(("aaa",)).lower() == to_memtomem_namespace(("aaG",)).lower()
-    await store.aput(("aaa",), "lower", {"text": "apples lower"})
-    await store.aput(("aaG",), "upper", {"text": "apples upper"})
-    assert await _keys(store, ("aaa",)) == ["lower"]
-    assert await _keys(store, ("aaG",)) == ["upper"]
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [(("aaa",), ("aaG",)), (("users", "aaa"), ("users", "aaG")), (("Users",), ("users",))],
+)
+async def test_namespaces_whose_base64_differs_only_in_case_stay_apart(
+    root: Path, left: tuple[str, ...], right: tuple[str, ...]
+) -> None:
+    """``aaa``/``aaG`` are ``YWFh``/``YWFH`` in base64: one path on a case-folding fs.
+
+    The store's own codec is single-case, so the two namespaces are two
+    directories everywhere, and neither leaks into the other's search, before
+    or after a reopen (CI caught the leak on Windows; the reopen loss
+    reproduced on macOS).
+    """
+    store = await MemtomemPipelineStore.open(root)
+    try:
+        await store.aput(left, "k", {"text": "apples left"})
+        await store.aput(right, "k", {"text": "apples right"})
+        assert await _keys(store, left) == ["k"]
+        assert (await store.asearch(left, query="apples"))[0].value == {"text": "apples left"}
+        assert (await store.asearch(right, query="apples"))[0].value == {"text": "apples right"}
+    finally:
+        await store.aclose()
+    reopened = await MemtomemPipelineStore.open(root)
+    try:
+        for namespace, text in ((left, "apples left"), (right, "apples right")):
+            hits = await reopened.asearch(namespace, query="apples")
+            assert [(h.namespace, h.value["text"]) for h in hits] == [(namespace, text)]
+            assert (await reopened.aget(namespace, "k")).value == {"text": text}  # type: ignore[union-attr]
+        assert set(await reopened.alist_namespaces()) >= {left, right}
+    finally:
+        await reopened.aclose()
+
+
+async def test_keys_whose_base64_differs_only_in_case_coexist(root: Path) -> None:
+    store = await MemtomemPipelineStore.open(root)
+    try:
+        await store.aput(("docs",), "aaa", {"text": "apples lower"})
+        await store.aput(("docs",), "aaG", {"text": "apples upper"})
+        assert (await store.aget(("docs",), "aaa")).value == {"text": "apples lower"}  # type: ignore[union-attr]
+        assert (await store.aget(("docs",), "aaG")).value == {"text": "apples upper"}  # type: ignore[union-attr]
+        assert sorted(await _keys(store, ("docs",))) == ["aaG", "aaa"]
+        assert sorted(i.key for i in await store.asearch(("docs",))) == ["aaG", "aaa"]
+    finally:
+        await store.aclose()
 
 
 async def test_multi_chunk_items_appear_once_with_their_best_score(
@@ -52,8 +90,6 @@ async def test_multi_chunk_items_appear_once_with_their_best_score(
         key = Path(result.chunk.metadata.source_file).stem
         by_item[key] = max(by_item.get(key, 0.0), result.score)
     for item in hits:
-        from memtomem.integrations.langgraph_store import encode_segment
-
         assert item.score == pytest.approx(by_item[encode_segment(item.key)])
 
 

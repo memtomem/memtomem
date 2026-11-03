@@ -5,15 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from memtomem.integrations.langgraph_store import encode_segment
-
 from langchain_memtomem._protocol import (
     GENERATION_TAG_PREFIX,
     NAMESPACE_MAX_CHARS,
     SEGMENT_MARKER,
+    SEGMENT_MAX_CHARS,
     Action,
     ItemState,
     classify,
+    decode_segment,
+    encode_segment,
     from_memtomem_namespace,
     generation_from_tags,
     item_from_path,
@@ -40,14 +41,44 @@ def test_namespace_round_trips_and_validates(namespace: tuple[str, ...]) -> None
 
 
 def test_raw_and_encoded_segments_never_collide() -> None:
-    # ``("a b",)`` encodes to ``YSBi``; a raw ``("YSBi",)`` encodes again.
-    assert to_memtomem_namespace(("a b",)) != to_memtomem_namespace(("YSBi",))
+    # ``("a b",)`` encodes to ``smeqge``; a raw ``("smeqge",)`` encodes again.
+    assert to_memtomem_namespace(("a b",)) != to_memtomem_namespace((encode_segment("a b"),))
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [("aaa", "aaG"), ("users", "USERS"), ("Ab", "aB"), ("x" * 50, "x" * 49 + "X")],
+)
+def test_tokens_differ_under_case_folding(left: str, right: str) -> None:
+    """The codec's point: a filesystem that folds case keeps two segments apart."""
+    a, b = encode_segment(left), encode_segment(right)
+    assert a == a.lower() and b == b.lower()
+    assert a.lower() != b.lower()
+
+
+@pytest.mark.parametrize("value", ["a", "a b", "한글", "-x", "a:b", ".", "..", "x" * 140])
+def test_segment_codec_round_trips_canonically(value: str) -> None:
+    token = encode_segment(value)
+    assert decode_segment(token) == value
+    assert token.startswith(SEGMENT_MARKER) and len(token) <= SEGMENT_MAX_CHARS
+
+
+@pytest.mark.parametrize("token", ["", "s", "sMFQWC", "mfqwc", "s!!", "sb", "sme======"])
+def test_decode_refuses_tokens_the_encoder_never_emits(token: str) -> None:
+    with pytest.raises(ValueError):
+        decode_segment(token)
+
+
+@pytest.mark.parametrize("value", ["", "a\x00b", "x" * 200])
+def test_encode_refuses_empty_nul_and_overlong(value: str) -> None:
+    with pytest.raises(ValueError):
+        encode_segment(value)
 
 
 def test_namespace_over_the_cap_is_refused_with_the_numbers() -> None:
-    long = ("x" * 300,)
+    many = tuple(f"seg{n:05d}" for n in range(20))
     with pytest.raises(ValueError) as excinfo:
-        to_memtomem_namespace(long)
+        to_memtomem_namespace(many)
     assert str(NAMESPACE_MAX_CHARS) in str(excinfo.value)
     assert "encodes to" in str(excinfo.value)
 
@@ -57,7 +88,7 @@ def test_empty_namespace_is_refused() -> None:
         to_memtomem_namespace(())
 
 
-@pytest.mark.parametrize("value", ["YQ", "s", "sYQ:YWI", "sYQ:s!!", "s=="])
+@pytest.mark.parametrize("value", ["YQ", "s", "sYQ", "smfqwc:mfqwc", "smfqwc:s!!", "s=="])
 def test_foreign_namespaces_do_not_decode(value: str) -> None:
     with pytest.raises(ValueError):
         from_memtomem_namespace(value)
@@ -88,7 +119,7 @@ def test_item_paths_mirror_the_record_layout(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "relative",
-    ["stray.md", "YQ/stray.txt", "not-base64!/YQ.md", "YQ/Zh.md"],
+    ["stray.md", "smfqwc/stray.txt", "not-ours!/smfqwc.md", "smfqwc/sYQ.md", "smfqwc/sb.md"],
 )
 def test_foreign_paths_are_refused(tmp_path: Path, relative: str) -> None:
     with pytest.raises(ValueError):
@@ -103,18 +134,29 @@ def test_path_outside_root_is_refused(tmp_path: Path) -> None:
 # --- the projection file -----------------------------------------------------
 
 
+NS_ENC = to_memtomem_namespace(("users", "alice"))
+KEY_ENC = encode_segment("note")
+
+
 def test_projection_file_round_trips_its_header() -> None:
-    text = render_projection_file("sYQ", "a2V5", 7, "body line\nsecond")
+    text = render_projection_file(NS_ENC, KEY_ENC, 7, "body line\nsecond")
     assert text.startswith(
         f"---\ntags: [{GENERATION_TAG_PREFIX}7]\n---\n<!-- langchain-memtomem v1 "
     )
     assert text.endswith("second\n")
-    assert parse_projection_header(text) == ("sYQ", "a2V5", 7)
-    assert parse_projection_header(render_projection_file("sYQ", "a2V5", 1, "")) == (
-        "sYQ",
-        "a2V5",
+    assert parse_projection_header(text) == (NS_ENC, KEY_ENC, 7)
+    assert parse_projection_header(render_projection_file(NS_ENC, KEY_ENC, 1, "")) == (
+        NS_ENC,
+        KEY_ENC,
         1,
     )
+
+
+def test_a_valid_header_is_what_the_rejections_below_differ_from() -> None:
+    # Witness for the parametrized rejections: each case changes one thing.
+    assert parse_projection_header(
+        f"---\ntags: [lcmm-gen-2]\n---\n<!-- langchain-memtomem v1 ns={NS_ENC} key={KEY_ENC} gen=2 -->\n"
+    ) == (NS_ENC, KEY_ENC, 2)
 
 
 @pytest.mark.parametrize(
@@ -122,9 +164,14 @@ def test_projection_file_round_trips_its_header() -> None:
     [
         "",
         "plain markdown\n",
-        "---\ntags: [lcmm-gen-2]\n---\n<!-- langchain-memtomem v1 ns=sYQ key=a2V5 gen=3 -->\n",
-        "---\ntags: [lcmm-gen-2]\n---\n<!-- langchain-memtomem v2 ns=sYQ key=a2V5 gen=2 -->\n",
-        "<!-- langchain-memtomem v1 ns=sYQ key=a2V5 gen=2 -->\n",
+        # tag and comment name different generations
+        f"---\ntags: [lcmm-gen-2]\n---\n<!-- langchain-memtomem v1 ns={NS_ENC} key={KEY_ENC} gen=3 -->\n",
+        # another header version
+        f"---\ntags: [lcmm-gen-2]\n---\n<!-- langchain-memtomem v2 ns={NS_ENC} key={KEY_ENC} gen=2 -->\n",
+        # no frontmatter
+        f"<!-- langchain-memtomem v1 ns={NS_ENC} key={KEY_ENC} gen=2 -->\n",
+        # a token outside the case-safe alphabet
+        "---\ntags: [lcmm-gen-2]\n---\n<!-- langchain-memtomem v1 ns=sYQ key=a2V5 gen=2 -->\n",
     ],
 )
 def test_projection_header_rejects_torn_or_foreign_files(text: str) -> None:

@@ -1,9 +1,9 @@
 """A LangGraph ``BaseStore`` whose ``search(query=...)`` runs the memtomem pipeline.
 
-ADR-0042. Each item is a JSON record (through ``MemtomemBaseStore``, the
-source of truth), an indexed item also has one Markdown projection, and the
-projection is indexed by a memtomem component stack the store builds for
-itself under ``root``. The developer's own memtomem index is never touched.
+ADR-0042. Each item is a JSON record (``_records.py``, the source of truth),
+an indexed item also has one Markdown projection, and the projection is
+indexed by a memtomem component stack the store builds for itself under
+``root``. The developer's own memtomem index is never touched.
 
 The order of every mutation, what repair does with an interrupted one, and
 how a query widens its window: ``docs/protocol.md`` in this package.
@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from langgraph.store.base import (
     BaseStore,
@@ -31,21 +31,10 @@ from langgraph.store.base import (
     SearchOp,
 )
 from memtomem import privacy
-from memtomem.config import (
-    EmbeddingConfig,
-    Mem2MemConfig,
-    load_config_d,
-    load_config_overrides,
-)
+from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
 from memtomem.indexing.privacy_gate import PrivacyRejection
 from memtomem.integrations.langgraph import resolve_target_scope
-from memtomem.integrations.langgraph_store import (
-    MemtomemBaseStore,
-    StoreRecordError,
-    encode_segment,
-    matches_filter,
-    render_projection,
-)
+from memtomem.integrations.langgraph_store import matches_filter, render_projection
 from memtomem.models import IndexingStats, SearchResult
 from memtomem.runtime import Components, close_components, create_components
 from memtomem.runtime.files import (
@@ -61,6 +50,7 @@ from langchain_memtomem._protocol import (
     ItemPaths,
     ItemState,
     classify,
+    encode_segment,
     generation_from_tags,
     item_from_path,
     item_paths,
@@ -69,6 +59,7 @@ from langchain_memtomem._protocol import (
     render_projection_file,
     to_memtomem_namespace,
 )
+from langchain_memtomem._records import RecordError, RecordStore
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +166,7 @@ class MemtomemPipelineStore(BaseStore):
         self._config = copy.deepcopy(config or {})
         self._confirm_project_shared = confirm_project_shared
         self._comp: Components | None = None
-        self._records: MemtomemBaseStore | None = None
+        self._records: RecordStore | None = None
         self._steps = Steps()
         self._opened = False
 
@@ -206,16 +197,19 @@ class MemtomemPipelineStore(BaseStore):
         self.scope = tier
         for directory in (self.records_dir, self.projections_dir):
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if tier == "project_shared":
+            # ADR-0011 §5 Gate B consent, once per store as ``MemtomemBaseStore``
+            # records it; every put still runs Gate A for the tier.
+            privacy.emit_project_shared_confirmation(
+                surface="langchain_memtomem_open",
+                mechanism="param",
+                action="init",
+            )
         config = Mem2MemConfig.without_environment(**self._config_sections(registry))
         comp = await create_components(config, load_ambient_config=False)
         try:
-            self._records = await asyncio.to_thread(
-                MemtomemBaseStore,
-                root=self.records_dir,
-                scope=tier,  # type: ignore[arg-type]
-                confirm_project_shared=self._confirm_project_shared,
-                embedding=EmbeddingConfig(),
-                force_unsafe=self.force_unsafe,
+            self._records = RecordStore(
+                self.records_dir, scope=tier, force_unsafe=self.force_unsafe
             )
             self._comp = comp
             await self._repair_all()
@@ -243,7 +237,7 @@ class MemtomemPipelineStore(BaseStore):
             },
         }
 
-    def _require_open(self) -> tuple[Components, MemtomemBaseStore]:
+    def _require_open(self) -> tuple[Components, RecordStore]:
         if self._comp is None or self._records is None:
             raise RuntimeError(
                 "the store is not open: use `await MemtomemPipelineStore.open(root)`"
@@ -252,10 +246,8 @@ class MemtomemPipelineStore(BaseStore):
 
     async def aclose(self) -> None:
         comp, self._comp = self._comp, None
-        records, self._records = self._records, None
+        self._records = None
         self._opened = False
-        if records is not None:
-            await records.aclose()
         if comp is not None:
             await close_components(comp)
 
@@ -287,11 +279,14 @@ class MemtomemPipelineStore(BaseStore):
                     await self._put(op.namespace, op.key, op.value, op.index)
                 results.append(None)
             elif isinstance(op, GetOp):
-                results.append((await records.abatch([op]))[0])
+                record = records.read(tuple(op.namespace), str(op.key))
+                results.append(records.item(record) if record is not None else None)
             elif isinstance(op, SearchOp):
                 results.append(await self._search(op))
             elif isinstance(op, ListNamespacesOp):
-                results.append((await records.abatch([op]))[0])
+                results.append(
+                    records.list_namespaces(op.match_conditions, op.max_depth, op.limit, op.offset)
+                )
             else:  # pragma: no cover - a future LangGraph op must fail closed
                 raise TypeError(f"unsupported LangGraph store operation: {type(op).__name__}")
         return results
@@ -370,15 +365,13 @@ class MemtomemPipelineStore(BaseStore):
         index: bool | list[str] | None,
     ) -> None:
         comp, records = self._require_open()
-        if not isinstance(value, dict):
-            raise ValueError("Store value must be a JSON object")
         namespace = tuple(namespace)
         key = str(key)
         namespace_enc = to_memtomem_namespace(namespace)
         paths = self._paths(namespace, key)
         body = render_projection(value, index)
         async with self._item_lock(paths, CRUD_SIDECAR_LOCK_BUDGET_S):
-            existing = records.read_record(namespace, key)
+            existing = records.read(namespace, key)
             generation = (
                 max(
                     int(existing.get("generation", 0)) if existing else 0,
@@ -388,13 +381,13 @@ class MemtomemPipelineStore(BaseStore):
                 + 1
             )
             text = render_projection_file(namespace_enc, encode_segment(key), generation, body)
-            # Both guards run before the first write: the projection's here,
-            # the record's inside ``write_record`` right before its own write.
+            # Both guards run before the first write.
             bypass = False
             if index is not False:
                 bypass = self._guard_projection(text, namespace_enc, _SURFACE_PUT)
+            prepared = records.prepare(namespace, key, value, index)
             await self._steps.at("put.before_record")
-            records.write_record(namespace, key, value, index=index, generation=generation)
+            records.write(prepared, generation=generation, existing=existing)
             await self._steps.at("put.after_record")
             # The record above outranks any deletion marker (its generation is
             # newer), so the marker is superseded; repair would drop it too.
@@ -417,8 +410,17 @@ class MemtomemPipelineStore(BaseStore):
         key = str(key)
         paths = self._paths(namespace, key)
         async with self._item_lock(paths, CRUD_SIDECAR_LOCK_BUDGET_S):
-            existing = records.read_record(namespace, key)
-            derived = paths.projection.exists() or paths.indexed.exists() or paths.deleting.exists()
+            try:
+                existing = records.read(namespace, key)
+            except RecordError:
+                # A torn record is still this item's: deleting it is the remedy.
+                existing = None
+            derived = (
+                paths.record.exists()
+                or paths.projection.exists()
+                or paths.indexed.exists()
+                or paths.deleting.exists()
+            )
             if existing is None and not derived:
                 return
             generation = max(
@@ -446,8 +448,8 @@ class MemtomemPipelineStore(BaseStore):
     ) -> tuple[ItemState, dict[str, Any] | None]:
         comp, records = self._require_open()
         try:
-            record = records.read_record(namespace, key)
-        except StoreRecordError:
+            record = records.read(namespace, key)
+        except RecordError:
             logger.warning(
                 "Unreadable record for %s; its projection is treated as stray", paths.record
             )
@@ -587,7 +589,7 @@ class MemtomemPipelineStore(BaseStore):
     async def _search(self, op: SearchOp) -> list[SearchItem]:
         _, records = self._require_open()
         if not op.query:
-            return cast(list[SearchItem], (await records.abatch([op]))[0])
+            return records.search(tuple(op.namespace_prefix), op.filter, op.limit, op.offset)
         if op.limit <= 0:
             return []
         need = op.offset + op.limit

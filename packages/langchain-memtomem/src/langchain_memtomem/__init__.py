@@ -14,8 +14,7 @@ try:
 except ImportError as exc:  # pragma: no cover - exercised against an older memtomem
     raise ImportError(
         "langchain-memtomem needs the memtomem public names added for ADR-0042 "
-        "(memtomem.runtime.files, MemtomemBaseStore.write_record, matches_filter); "
-        "upgrade memtomem"
+        "(memtomem.runtime.files, matches_filter); upgrade memtomem"
     ) from exc
 
 from langchain_memtomem.store import (

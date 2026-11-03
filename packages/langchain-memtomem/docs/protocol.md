@@ -31,11 +31,35 @@ NFD-spelled root on macOS would otherwise match no hit.
                                 memtomem's sidecar lock for the item (see Locks)
 ```
 
-`<seg>` and `<key>` are `memtomem.integrations.langgraph_store.encode_segment`
-of each namespace segment and of the key (base64url, no padding), so the
-record tree is exactly `MemtomemBaseStore`'s layout and the projection tree
-mirrors it. `records/` is outside the index's `memory_dirs`, so its `.json`
-files are never indexed; `projections/` is the index's only memory dir.
+`<seg>` and `<key>` are `_protocol.encode_segment` of each namespace segment
+and of the key: the letter `s`, then the lowercase RFC 4648 base32 of the
+UTF-8, without padding. The record tree and the projection tree mirror each
+other. `records/` is outside the index's `memory_dirs`, so its `.json` files
+are never indexed; `projections/` is the index's only memory dir.
+
+**Why base32, not memtomem's base64url segment codec.** The paths have to be
+distinct on a filesystem that folds case — NTFS, and APFS as macOS formats it
+by default. base64url is case-sensitive: `aaa` and `aaG` encode to `YWFh`
+and `YWFH`, which name one directory there. Measured on macOS (APFS, case
+folding): with `MemtomemBaseStore`'s layout, two keys of one namespace whose
+encodings differ only in case cannot both be written (the second `put` raises
+`StoreRecordError`), and of two such namespaces the second drops out of
+`list_namespaces` and `search`. An earlier version of this store, which reused
+that layout, lost the second namespace's projection on reopen on macOS and,
+on Windows, returned one namespace's item from the other's query search. The
+lowercase base32 alphabet (`a-z2-7`) has one case, so no fold can join two
+tokens. The marker `s` keeps a raw segment from equalling an encoded one and
+keeps a token off every Windows reserved device name (`CON`, `COM2`, `LPT3`,
+…). A token is at most 240 characters (a segment or key of up to 149
+bytes of UTF-8), so `<token>.json.deleting` fits a 255-byte file name.
+
+The records themselves are `_records.py`'s, not `MemtomemBaseStore`'s: the
+same JSON shape (`schema_version` 1, `namespace`, `key`, `value`, `index`,
+`generation`, `created_at`, `updated_at`), the same record guard (the
+serialized value, every namespace segment, the key and the selectors are
+scanned before the first write), memtomem's atomic write and memtomem's
+`matches_filter` for `search(filter=…)`. A record must sit at the path its
+own `namespace` and `key` encode to, or it is treated as torn.
 
 A projection file:
 
@@ -60,11 +84,9 @@ tags: [lcmm-gen-7]
 
 ## Namespaces
 
-A LangGraph tuple maps to one memtomem namespace: every segment encoded,
-prefixed with the marker letter `s`, joined with `:`
-(`_protocol.to_memtomem_namespace`). The marker keeps a token from starting
-with `-` (refused by `validate_namespace`) and keeps a raw segment from ever
-equalling an encoded one. The joined form must pass
+A LangGraph tuple maps to one memtomem namespace: every segment encoded with
+the same codec as the paths, joined with `:`
+(`_protocol.to_memtomem_namespace`). The joined form must pass
 `memtomem.constants.validate_namespace`; a tuple over 256 characters is
 refused at `put` with the cap and the encoded length. Every `index_file` call
 passes `namespace=` explicitly (an explicit namespace wins over stored rows and
@@ -102,9 +124,9 @@ over one root, in one process or two, serialise on it. `index_file` is called
 with `lock_held=True`, so the engine does not re-acquire the sidecar (which
 would self-deadlock within one process) and goes straight to its own
 in-process index lock. The order sidecar → engine lock → storage follows the
-level rule in `memtomem/context/_atomic.py` (low to high). `MemtomemBaseStore`
-holds its own in-process `RLock` for the duration of a record read or write
-only.
+level rule in `memtomem/context/_atomic.py` (low to high). The store takes no
+other lock: a record is written with an atomic replace, so a read without the
+lock sees either the previous record or the new one.
 
 Cancellation: the store's own file work under the lock — reading and
 writing the record, the projection and the markers — runs synchronously on
@@ -128,7 +150,8 @@ mid-mutation and the item will disagree until it finishes.
 |---|---|
 | 0 | render the projection text; read the existing record; `generation = max(record, .last, .deleting) + 1` |
 | 1 | **guard the projection text** (`enforce_write_guard`, surface `langchain_memtomem_put`, the store's tier, `force_unsafe` as configured); `blocked` or `blocked_project_shared` raises `ValueError` and nothing has been written |
-| 2 | `write_record(…, generation=)` — **guards the record** (value, namespace, key, selectors) and writes it atomically in one call; a block raises before the write |
+| 1b | **guard the record** (`RecordStore.prepare`: the serialized value, namespace, key and selectors); a block raises and nothing has been written |
+| 2 | write the record atomically with the new generation |
 | 3 | unlink `.deleting` if present — the record just written outranks the marker |
 | 4a | `index=False`: unlink the projection and `.indexed`, `storage.delete_by_source(projection)`; done |
 | 4b | `atomic_write_text(projection)` |
@@ -137,9 +160,9 @@ mid-mutation and the item will disagree until it finishes.
 | after the lock | `search_pipeline.invalidate_cache()` |
 
 Step 4a's two unlinks have a boundary of their own (`put.between_unlinks`).
-Both guards run before the first write (ADR B8): step 1 precedes every write,
-and step 2's guard is the last thing before its own write. A blocked record
-leaves the projection guard's audit line and nothing else.
+Both guards run before the first write (ADR B8): steps 1 and 1b precede every
+write. A blocked record leaves the projection guard's audit line and nothing
+else.
 
 Judging step 5 (`_judge`): `total_files == 0` (the engine excluded or skipped
 the path), a non-empty `errors`, or `blocked_files > 0` is a failed `put` and
@@ -256,16 +279,16 @@ disagrees with the files.
 ## Search
 
 `get`, `list_namespaces` and a `search` without `query` read the JSON records
-only, through `MemtomemBaseStore` (an `index=False` item is listed and
-filtered like any other). `search(query=…)`:
+only, through `_records.RecordStore` (an `index=False` item is listed and
+filtered like any other; a query-less search returns newest first, unscored). `search(query=…)`:
 
 1. **Narrow by namespace.** For a non-empty `namespace_prefix`, the pipeline
    is called with the pattern `<encoded prefix>*`; for the empty prefix, with
    no namespace filter (the store's `system_namespace_prefixes` is `[]`, so
    nothing is hidden). The pattern over-matches on purpose: it is a SQL
-   `LIKE`, so the base64 of a shorter segment can prefix a longer one's
-   (`abc` → `YWJj`, `abcdef` → `YWJjZGVm`) and ASCII case folds (`aaa` →
-   `YWFh`, `aaG` → `YWFH`). The hit's source path is decoded back to its tuple
+   `LIKE`, so the encoding of a shorter segment can prefix a longer one's
+   (`abc` → `smfrgg`, `abcdef` → `smfrggzdfmy`). LIKE also folds ASCII
+   case, which a single-case codec makes moot. The hit's source path is decoded back to its tuple
    and kept only when `tuple[:len(prefix)] == prefix` — the prefix itself
    included. The store's own tier is passed as `scope=`; the pipeline's
    default SQL is `scope = 'user'`, which would return nothing for a root in a
@@ -277,8 +300,8 @@ filtered like any other). `search(query=…)`:
    is "unknown", which never equals the record's generation.
 3. **Judge each item** against its files: served only when the item is whole
    and the hit's row generation equals the record's generation, and the
-   record's value passes `filter` (`matches_filter`, the same predicate
-   `MemtomemBaseStore` applies on the query-less path: dotted keys, literal
+   record's value passes `filter` (memtomem's `matches_filter`, the predicate
+   `MemtomemBaseStore` applies too, used on both paths here: dotted keys, literal
    equality, `$eq $ne $gt $gte $lt $lte $in $nin`; a nested mapping is
    compared for equality, where LangGraph's `InMemoryStore` matches a
    subset and refuses `$in`/`$nin`). A disagreeing item is repaired under its lock

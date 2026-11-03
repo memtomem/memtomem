@@ -114,6 +114,22 @@ boundary of `put` and `delete` against the repair that restores agreement).
    query path. It does not route through `MemtomemStore.add`, because append
    cannot replace an item.
 
+   > **Amended 2026-11-03** with the implementation PR. The store owns its
+   > records instead of wrapping `MemtomemBaseStore`. That store's path
+   > layout is base64url, which is case-sensitive, and on a filesystem that
+   > folds case (NTFS; APFS as macOS formats it) two segments whose encodings
+   > differ only in case share one path (`aaa` → `YWFh`, `aaG` → `YWFH`).
+   > Measured: `MemtomemBaseStore` refuses the second of two such keys and
+   > drops the second of two such namespaces from `list_namespaces` and
+   > `search`; the implementation that wrapped it lost a projection on
+   > reopen on macOS and, on Windows CI, served one namespace's item to
+   > another namespace's query. The package keeps the same record shape and
+   > the same record guard under a single-case layout (`s` + lowercase
+   > base32), and still imports memtomem's guard, atomic write and filter
+   > predicate (`matches_filter`, made public for this). The record contract
+   > A2 added to `MemtomemBaseStore` stays public and unused by the package.
+   > `packages/langchain-memtomem/docs/protocol.md` §Layout has the detail.
+
 ### B. The store over its own pipeline
 
 1. **Own components, own configuration.** The store builds a `Mem2MemConfig`

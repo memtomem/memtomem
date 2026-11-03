@@ -8,19 +8,25 @@ contract these helpers implement is written in ``docs/protocol.md``.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 from memtomem.constants import validate_namespace
-from memtomem.integrations.langgraph_store import decode_segment, encode_segment
 
-#: Prefix of every encoded segment in a memtomem namespace. ``encode_segment``
-#: emits base64url without padding, so a token can start with ``-``, which
-#: ``validate_namespace`` refuses; the marker also keeps an encoded segment
-#: from ever equalling a raw one (``("a b",)`` and ``("YSBi",)`` stay apart).
+#: Prefix of every encoded segment, on disk and in a memtomem namespace. It
+#: keeps an encoded segment from ever equalling a raw one (``("a b",)`` and
+#: ``("meqge",)`` stay apart), and no Windows reserved device name (``CON``,
+#: ``COM2``, ``LPT3``, …) starts with ``s``.
 SEGMENT_MARKER = "s"
+
+#: Longest encoded segment. A record file is ``<token>.json.deleting``, and
+#: common filesystems cap a name at 255 bytes.
+SEGMENT_MAX_CHARS = 240
+_TOKEN_RE = re.compile(r"s[a-z2-7]+")
 
 #: ``validate_namespace``'s total-length cap.
 NAMESPACE_MAX_CHARS = 256
@@ -34,11 +40,42 @@ DELETING_SUFFIX = ".deleting"
 #: delete never names the new record's generation.
 LAST_SUFFIX = ".last"
 
-_HEADER_VERSION = "langchain-memtomem v1"
-_HEADER_RE = re.compile(
-    r"^<!-- langchain-memtomem v1 ns=(?P<ns>[A-Za-z0-9_:-]+) "
-    r"key=(?P<key>[A-Za-z0-9_-]+) gen=(?P<gen>\d+) -->$"
-)
+
+# --- the segment codec -------------------------------------------------------
+
+
+def encode_segment(value: str) -> str:
+    """``s`` + lowercase RFC 4648 base32 of ``value``'s UTF-8, without padding.
+
+    The alphabet is ``a-z2-7``: one case only, so two different segments never
+    share a path on a filesystem that folds case. base64url (the codec
+    ``MemtomemBaseStore`` uses) is case-sensitive and does (``aaa`` →
+    ``YWFh``, ``aaG`` → ``YWFH``).
+    """
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError("a namespace segment or key is a non-empty string without NUL")
+    body = base64.b32encode(value.encode("utf-8")).decode("ascii").rstrip("=").lower()
+    token = SEGMENT_MARKER + body
+    if len(token) > SEGMENT_MAX_CHARS:
+        raise ValueError(
+            f"{value[:20]!r}… encodes to {len(token)} characters; a segment or key "
+            f"may encode to at most {SEGMENT_MAX_CHARS}"
+        )
+    return token
+
+
+def decode_segment(token: str) -> str:
+    """Inverse of :func:`encode_segment`; ``ValueError`` for a token it would not emit."""
+    if not isinstance(token, str) or _TOKEN_RE.fullmatch(token) is None:
+        raise ValueError(f"{token!r} is not an encoded segment")
+    body = token[len(SEGMENT_MARKER) :].upper()
+    try:
+        value = base64.b32decode(body + "=" * (-len(body) % 8)).decode("utf-8")
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"{token!r} is not an encoded segment") from exc
+    if encode_segment(value) != token:
+        raise ValueError(f"{token!r} is not the canonical encoding of its value")
+    return value
 
 
 # --- namespaces --------------------------------------------------------------
@@ -53,7 +90,7 @@ def to_memtomem_namespace(namespace: tuple[str, ...]) -> str:
     """
     if not namespace:
         raise ValueError("a LangGraph namespace has at least one segment")
-    joined = ":".join(SEGMENT_MARKER + encode_segment(segment) for segment in namespace)
+    joined = ":".join(encode_segment(segment) for segment in namespace)
     if len(joined) > NAMESPACE_MAX_CHARS:
         raise ValueError(
             f"namespace {namespace!r} encodes to {len(joined)} characters; "
@@ -69,12 +106,7 @@ def from_memtomem_namespace(value: str) -> tuple[str, ...]:
     A segment without the marker, or whose token is not the canonical encoding
     of some string, was not written by this store.
     """
-    segments: list[str] = []
-    for token in value.split(":"):
-        if not token.startswith(SEGMENT_MARKER):
-            raise ValueError(f"namespace segment {token!r} does not carry the store marker")
-        segments.append(decode_segment(token[len(SEGMENT_MARKER) :]))
-    return tuple(segments)
+    return tuple(decode_segment(token) for token in value.split(":"))
 
 
 # --- paths -------------------------------------------------------------------
@@ -91,14 +123,16 @@ class ItemPaths:
     indexed: Path
 
 
+def record_path(records_dir: Path, namespace: tuple[str, ...], key: str) -> Path:
+    """One directory per encoded segment, the encoded key as the file name."""
+    parts = [encode_segment(segment) for segment in namespace]
+    return records_dir.joinpath(*parts, f"{encode_segment(str(key))}.json")
+
+
 def item_paths(
     records_dir: Path, projections_dir: Path, namespace: tuple[str, ...], key: str
 ) -> ItemPaths:
-    """Where an item's files live under the two roots.
-
-    Mirrors ``MemtomemBaseStore.record_path``: one directory per encoded
-    segment, the encoded key as the file name.
-    """
+    """Where an item's files live: the record tree and the projection tree mirror each other."""
     parts = [encode_segment(segment) for segment in namespace]
     name = encode_segment(str(key))
     record = records_dir.joinpath(*parts, f"{name}.json")
@@ -143,8 +177,8 @@ GENERATION_TAG_PREFIX = "lcmm-gen-"
 
 _HEADER_VERSION = "langchain-memtomem v1"
 _HEADER_RE = re.compile(
-    r"^<!-- langchain-memtomem v1 ns=(?P<ns>[A-Za-z0-9_:-]+) "
-    r"key=(?P<key>[A-Za-z0-9_-]+) gen=(?P<gen>\d+) -->$"
+    r"^<!-- langchain-memtomem v1 ns=(?P<ns>s[a-z2-7]+(?::s[a-z2-7]+)*) "
+    r"key=(?P<key>s[a-z2-7]+) gen=(?P<gen>\d+) -->$"
 )
 #: The header comment is on this line (1-based) of a projection file.
 _HEADER_LINE = 4
