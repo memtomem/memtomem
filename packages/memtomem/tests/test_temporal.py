@@ -288,3 +288,269 @@ class TestActivityRejectsIntradayBounds:
 
         assert not out.startswith("Error: ")
         assert captured["until"] == "2026-04-06"
+
+
+class TestTimelineWindowSelectsAtRetrieval:
+    """``since``/``until`` select inside the retrievers, before the ``top_k``
+    cut (#3005). Filtering after the cut let out-of-window matches fill every
+    slot, so an in-window memory ranked below them never reached the timeline.
+    """
+
+    LIMIT = 3
+    # More distractors than ``limit + 1`` slots: with only one bound forwarded,
+    # the other side's distractors still fill the whole retrieval.
+    DISTRACTORS = LIMIT + 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("side", "distractor_at"),
+        [
+            ("older", datetime(2026, 3, 10, tzinfo=timezone.utc)),
+            ("newer", datetime(2026, 5, 1, tzinfo=timezone.utc)),
+        ],
+    )
+    async def test_an_in_window_memory_outranked_by_out_of_window_ones_is_kept(
+        self, bm25_only_components, side: str, distractor_at: datetime
+    ):
+        from helpers import StubCtx
+
+        from memtomem.server.context import AppContext
+        from memtomem.server.tools.temporal import mem_timeline
+
+        comp, _mem_dir = bm25_only_components
+        # Short notes dense in the topic term outrank the one long note that
+        # mentions it once, so BM25 puts every distractor above the target.
+        distractors = [
+            _make_chunk(
+                f"zephyrine zephyrine zephyrine {side} distractor {i}",
+                source=f"{side}-{i}.md",
+                created_at=distractor_at,
+            )
+            for i in range(self.DISTRACTORS)
+        ]
+        target = _make_chunk(
+            "aprilmarker: zephyrine came up once in a long planning note that "
+            "mostly discusses budgets, hiring, release dates, office moves, "
+            "vendor contracts, onboarding checklists and the quarterly offsite.",
+            source="target.md",
+            created_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+        )
+        await comp.storage.upsert_chunks([*distractors, target])
+
+        # The premise: without a window the target ranks below every distractor.
+        unbounded, _ = await comp.search_pipeline.search(
+            query="zephyrine", top_k=self.DISTRACTORS + 1
+        )
+        ids = [r.chunk.id for r in unbounded]
+        assert sorted(ids) == sorted([*(c.id for c in distractors), target.id])
+        assert ids[-1] == target.id
+
+        out = await mem_timeline(
+            topic="zephyrine",
+            since="2026-04",
+            until="2026-04",
+            limit=self.LIMIT,
+            ctx=StubCtx(AppContext.from_components(comp)),
+        )
+
+        assert "aprilmarker" in out
+        assert "distractor" not in out
+        assert "Total: 1 memories" in out
+
+
+def _timeline_app(results_for_top_k):
+    """A stub app whose pipeline honours the requested ``top_k``."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from memtomem.search.pipeline import RetrievalStats
+
+    async def search(**kwargs):
+        return results_for_top_k(kwargs["top_k"]), RetrievalStats()
+
+    app = MagicMock()
+    app.search_pipeline.search = AsyncMock(side_effect=search)
+    return app
+
+
+def _april_results(count: int):
+    from memtomem.models import SearchResult
+
+    return [
+        SearchResult(
+            chunk=_make_chunk(
+                f"april note {i}",
+                source=f"apr-{i}.md",
+                created_at=datetime(2026, 4, 1 + i % 28, tzinfo=timezone.utc),
+            ),
+            score=1.0 - i / 1000,
+            rank=i + 1,
+            source="bm25",
+        )
+        for i in range(count)
+    ]
+
+
+class TestTimelineForwardsTheWindow:
+    @pytest.mark.asyncio
+    async def test_the_bounds_and_one_extra_slot_reach_the_pipeline(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from memtomem.server.tools import temporal as temporal_mod
+
+        app = _timeline_app(lambda _k: [])
+        monkeypatch.setattr(temporal_mod, "_get_app_initialized", AsyncMock(return_value=app))
+
+        await temporal_mod.mem_timeline(
+            topic="anything", since="2026-04", until="2026-04", limit=7, ctx=None
+        )
+
+        kwargs = app.search_pipeline.search.await_args.kwargs
+        assert kwargs["created_from"] == datetime(2026, 4, 1, tzinfo=timezone.utc)
+        assert kwargs["created_before"] == datetime(2026, 5, 1, tzinfo=timezone.utc)
+        assert kwargs["top_k"] == 8
+
+    @pytest.mark.asyncio
+    async def test_no_window_forwards_no_bounds(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from memtomem.server.tools import temporal as temporal_mod
+
+        app = _timeline_app(lambda _k: [])
+        monkeypatch.setattr(temporal_mod, "_get_app_initialized", AsyncMock(return_value=app))
+
+        await temporal_mod.mem_timeline(topic="anything", ctx=None)
+
+        kwargs = app.search_pipeline.search.await_args.kwargs
+        assert kwargs["created_from"] is None
+        assert kwargs["created_before"] is None
+
+    @pytest.mark.asyncio
+    async def test_mem_do_dispatch_forwards_the_bounds(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from memtomem.server.tools import temporal as temporal_mod
+        from memtomem.server.tools.meta import mem_do
+
+        app = _timeline_app(lambda _k: [])
+        monkeypatch.setattr(temporal_mod, "_get_app_initialized", AsyncMock(return_value=app))
+
+        await mem_do(
+            action="timeline",
+            params={"topic": "anything", "since": "2026-04-02", "until": "2026-04-09"},
+            ctx=None,
+        )
+
+        kwargs = app.search_pipeline.search.await_args.kwargs
+        assert kwargs["created_from"] == datetime(2026, 4, 2, tzinfo=timezone.utc)
+        assert kwargs["created_before"] == datetime(2026, 4, 10, tzinfo=timezone.utc)
+
+
+class TestTimelineOverflowNote:
+    @pytest.mark.asyncio
+    async def test_more_matches_than_limit_are_reported(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from memtomem.server.tools import temporal as temporal_mod
+
+        app = _timeline_app(lambda k: _april_results(10)[:k])
+        monkeypatch.setattr(temporal_mod, "_get_app_initialized", AsyncMock(return_value=app))
+
+        out = await temporal_mod.mem_timeline(
+            topic="april", since="2026-04", until="2026-04", limit=3, ctx=None
+        )
+
+        assert "Total: 3 memories" in out
+        assert out.endswith(
+            "More memories in this period match; showing the top 3. "
+            "Raise limit (max 500) to see more."
+        )
+
+    @pytest.mark.asyncio
+    async def test_exactly_limit_matches_get_no_note(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from memtomem.server.tools import temporal as temporal_mod
+
+        app = _timeline_app(lambda k: _april_results(3)[:k])
+        monkeypatch.setattr(temporal_mod, "_get_app_initialized", AsyncMock(return_value=app))
+
+        out = await temporal_mod.mem_timeline(
+            topic="april", since="2026-04", until="2026-04", limit=3, ctx=None
+        )
+
+        assert "Total: 3 memories" in out
+        assert "More memories" not in out
+
+    @pytest.mark.asyncio
+    async def test_at_the_maximum_limit_the_note_does_not_suggest_raising_it(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from memtomem.server.tools import temporal as temporal_mod
+
+        app = _timeline_app(lambda k: _april_results(501)[:k])
+        monkeypatch.setattr(temporal_mod, "_get_app_initialized", AsyncMock(return_value=app))
+
+        out = await temporal_mod.mem_timeline(
+            topic="april", since="2026-04", until="2026-04", limit=500, ctx=None
+        )
+
+        assert "Total: 500 memories" in out
+        assert "Raise limit" not in out
+        assert out.endswith(
+            "More memories in this period match; showing the top 500. "
+            "Try a narrower topic or since/until; the timeline may still be incomplete."
+        )
+
+
+class TestTimelineRefusesBeforeSearching:
+    @pytest.mark.asyncio
+    async def test_a_malformed_bound_is_reported_even_when_nothing_would_match(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from memtomem.server.tools import temporal as temporal_mod
+
+        app = _timeline_app(lambda _k: [])
+        get_app = AsyncMock(return_value=app)
+        monkeypatch.setattr(temporal_mod, "_get_app_initialized", get_app)
+
+        out = await temporal_mod.mem_timeline(topic="anything", since="2026-13", ctx=None)
+
+        assert out.startswith("Error: ")
+        get_app.assert_not_awaited()
+        app.search_pipeline.search.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("topic", ["", "   "])
+    async def test_a_blank_topic_does_not_browse_the_window(self, monkeypatch, topic):
+        from unittest.mock import AsyncMock
+
+        from memtomem.server.tools import temporal as temporal_mod
+
+        app = _timeline_app(lambda k: _april_results(5)[:k])
+        monkeypatch.setattr(temporal_mod, "_get_app_initialized", AsyncMock(return_value=app))
+
+        out = await temporal_mod.mem_timeline(
+            topic=topic, since="2026-04", until="2026-04", ctx=None
+        )
+
+        assert out == f"No memories found for topic '{topic}'."
+        app.search_pipeline.search.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_null_topic_through_mem_do_does_not_browse_the_window(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from memtomem.server.tools import temporal as temporal_mod
+        from memtomem.server.tools.meta import mem_do
+
+        app = _timeline_app(lambda k: _april_results(5)[:k])
+        monkeypatch.setattr(temporal_mod, "_get_app_initialized", AsyncMock(return_value=app))
+
+        out = await mem_do(
+            action="timeline",
+            params={"topic": None, "since": "2026-04", "until": "2026-04"},
+            ctx=None,
+        )
+
+        assert out == "No memories found for topic 'None'."
+        app.search_pipeline.search.assert_not_awaited()
