@@ -15,7 +15,7 @@ uv run pytest -m "not ollama"                          # tests (CI filter)
 uv run ruff check packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py && \
     uv run ruff format --check \
     packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py   # lint (required)
-uv run mypy packages/memtomem/src                         # typecheck (advisory)
+uv run mypy packages/memtomem/src packages/langchain-memtomem/src   # typecheck (advisory)
 ```
 
 The `ollama` marker auto-skips when Ollama isn't running; CI always uses

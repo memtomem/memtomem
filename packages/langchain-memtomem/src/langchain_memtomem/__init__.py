@@ -10,11 +10,11 @@ __version__ = "0.1.0"
 
 try:
     from memtomem.integrations.langgraph_store import matches_filter as _matches_filter  # noqa: F401
-    from memtomem.runtime.files import CRUD_SIDECAR_LOCK_BUDGET_S as _budget  # noqa: F401
+    from memtomem.runtime.files import norm_path as _norm_path  # noqa: F401
 except ImportError as exc:  # pragma: no cover - exercised against an older memtomem
     raise ImportError(
         "langchain-memtomem needs the memtomem public names added for ADR-0042 "
-        "(memtomem.runtime.files, matches_filter); upgrade memtomem"
+        "(memtomem.runtime.files with norm_path, matches_filter); upgrade memtomem"
     ) from exc
 
 from langchain_memtomem.store import (

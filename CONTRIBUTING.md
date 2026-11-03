@@ -46,7 +46,7 @@ uv run ruff check packages/memtomem/src packages/memtomem/tests packages/langcha
 uv run ruff format packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
 
 # Type check
-uv run mypy packages/memtomem/src
+uv run mypy packages/memtomem/src packages/langchain-memtomem/src
 ```
 
 ## Project Structure

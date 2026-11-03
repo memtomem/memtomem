@@ -7,6 +7,11 @@ sidecar lock or the same atomic replace that memtomem's writers take. This
 module is that way: the same objects, re-exported, so a lock acquired here and
 one acquired inside memtomem are the same lock.
 
+``norm_path`` is how memtomem spells a source path when it stores one: resolved,
+and folded to one Unicode form where the filesystem folds them (macOS). A caller
+that compares its own paths with the paths the index returns normalises them the
+same way, or an NFD spelling of the same file never matches.
+
 ``CRUD_SIDECAR_LOCK_BUDGET_S`` is the timeout memtomem's own memory-file CRUD
 paths pass to ``async_file_lock``; a caller that wants to queue behind them
 with the same patience uses it too.
@@ -20,6 +25,7 @@ from memtomem.context._atomic import (
     atomic_write_text,
     memory_lock_path,
 )
+from memtomem.storage.sqlite_helpers import norm_path
 
 CRUD_SIDECAR_LOCK_BUDGET_S: float = _CRUD_SIDECAR_LOCK_BUDGET_S
 
@@ -28,4 +34,5 @@ __all__ = [
     "async_file_lock",
     "atomic_write_text",
     "memory_lock_path",
+    "norm_path",
 ]
