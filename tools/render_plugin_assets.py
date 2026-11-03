@@ -296,7 +296,10 @@ def _hermes_mcp_config(contract: dict) -> str:
                 "type": "stdio",
                 "command": "uvx",
                 "args": _pinned_python_args(contract),
-                "env": _launch_env(contract["core"]),
+                # Hermes's plugin catalog does not list a plugin that reads `.env` files
+                # itself (rule 11), and the server otherwise parses the nearest one,
+                # normally ~/.env. Hermes passes an entry's own `env` through its filter.
+                "env": {**_launch_env(contract["core"]), "PYTHON_DOTENV_DISABLED": "1"},
             }
         },
     }
