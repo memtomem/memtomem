@@ -16,6 +16,7 @@ import click
 
 from memtomem.cli._errors import exit_json_failure, raise_cli_error
 from memtomem.services.search_service import run_search
+from memtomem.tools.temporal import format_source_name
 
 # ADR-0011 §6: re-export the project-context resolver from the MCP tool so
 # CLI and MCP surfaces share one resolution rule. Both ``app`` (server) and
@@ -413,7 +414,7 @@ def render_search_results(query: str, fmt: str, payload: SearchPayload) -> None:
                     else ""
                 )
                 tags = ", ".join(r.chunk.metadata.tags) if r.chunk.metadata.tags else ""
-                label = heading or source.split("/")[-1]
+                label = heading or format_source_name(source)
                 tag_suffix = f" `{tags}`" if tags else ""
 
                 # High relevance (top 3): full content; lower: truncated

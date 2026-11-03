@@ -7,6 +7,16 @@ from datetime import datetime
 from pathlib import PureWindowsPath
 
 
+def format_source_name(source: object) -> str:
+    """Return the bare filename of a source path, normalized across Windows and POSIX (#2932, #3028).
+
+    Splits on both '/' and '\\' on every OS using PureWindowsPath. Falls back to the raw
+    string when the path has no filename component (e.g. empty string or bare drive root).
+    """
+    s = str(source) if source is not None else ""
+    return PureWindowsPath(s).name or s
+
+
 @dataclass(frozen=True)
 class TimelineBucket:
     period_label: str
@@ -95,7 +105,7 @@ def build_timeline(
                 period_start=first_dt.strftime("%Y-%m-%d"),
                 period_end=last_dt.strftime("%Y-%m-%d"),
                 chunk_count=len(items),
-                sources=[PureWindowsPath(str(s)).name or str(s) for s in sources[:3]],
+                sources=[format_source_name(s) for s in sources[:3]],
                 key_topics=key_topics,
                 sample_content=sample,
             )

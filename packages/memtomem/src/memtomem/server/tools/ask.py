@@ -18,6 +18,7 @@ from memtomem.services.search_service import (
     run_search,
     validate_scope_vocabulary,
 )
+from memtomem.tools.temporal import format_source_name
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,7 @@ async def mem_ask(
             if r.chunk.metadata.heading_hierarchy
             else ""
         )
-        label = heading or source.split("/")[-1]
+        label = heading or format_source_name(source)
         tags = ", ".join(r.chunk.metadata.tags) if r.chunk.metadata.tags else ""
 
         lines.append(f"### [{r.rank}] {label} (relevance: {r.score:.2f})")
