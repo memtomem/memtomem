@@ -823,10 +823,11 @@ class RerankConfig(ConfigModel):
     timeout_s: float = 30.0
 
     # Candidate pool (Stage 3b oversample) — the reranker sees
-    # ``max(min_pool, min(max_pool, int(oversample * response_top_k)))``
-    # items, then returns the caller's response top_k. Defaults give the
-    # classic 2× oversample at top_k=10 (pool=20) while scaling with
-    # larger requests.
+    # ``max(top_k, min_pool, min(max_pool, int(oversample * top_k)))``
+    # items (top_k = the response size), then returns up to top_k. Defaults give
+    # the classic 2× oversample at top_k=10 (pool=20) while scaling with
+    # larger requests. ``max_pool`` is the ceiling of the oversampled pool;
+    # a larger top_k overrides it, so it no longer caps the response size.
     oversample: float = 2.0
     min_pool: int = 20
     max_pool: int = 200

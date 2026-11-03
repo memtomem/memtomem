@@ -1973,13 +1973,17 @@ class SearchPipeline:
             # Stage 3: fusion (or single-retriever passthrough)
             # When reranking is active, widen the candidate pool so the
             # cross-encoder can rescue items RRF ranked just outside top_k.
-            # pool = clamp(oversample * top_k, [min_pool, max_pool]) — scales
-            # with the request and bounded by cost controls. Collapses to
+            # pool = clamp(oversample * top_k, [min_pool, max_pool]), never
+            # below top_k: the reranker returns at most what it is given, so
+            # a pool smaller than the request silently shortens the response
+            # (top_k > max_pool, or oversample < 1). ``max_pool`` therefore
+            # bounds the oversampling, not the response size. Collapses to
             # top_k when reranking is disabled or bypassed per-call
             # (rerank=False, #1766) so single-retriever passthrough size is
             # unchanged — the widening exists only to feed the reranker.
             if apply_rerank and rerank_cfg is not None:
                 rerank_pool = max(
+                    top_k,
                     rerank_cfg.min_pool,
                     min(rerank_cfg.max_pool, int(rerank_cfg.oversample * top_k)),
                 )

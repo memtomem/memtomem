@@ -1098,17 +1098,17 @@ any leftover source the exclude rules don't cover, remove it directly with
 | `MEMTOMEM_RERANK__MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | Reranker model name (provider-specific — see below) |
 | `MEMTOMEM_RERANK__OVERSAMPLE` | `2.0` | Candidate-pool multiplier applied to response `top_k` |
 | `MEMTOMEM_RERANK__MIN_POOL` | `20` | Lower bound on the candidate pool (floor for small queries) |
-| `MEMTOMEM_RERANK__MAX_POOL` | `200` | Upper bound on the candidate pool (cost cap for large queries) |
+| `MEMTOMEM_RERANK__MAX_POOL` | `200` | Ceiling of the oversampled candidate pool (cost cap on oversampling); a larger response `top_k` overrides it |
 | `MEMTOMEM_RERANK__API_KEY` | _(empty)_ | API key (required for Cohere) |
 | `MEMTOMEM_RERANK__TIMEOUT_S` | `30.0` | Wall-clock bound on one rerank call; on timeout the search falls back to the fused order (read at load time — restart to change) |
 
 Reranking runs as Stage 3b in the search pipeline — after BM25 + dense fusion, before the source filter. (The tag filter is not a post-fusion stage: it is applied at retrieval, so the pool the reranker sees already carries the tag.) The candidate pool passed to the cross-encoder is
 
 ```
-pool = max(min_pool, min(max_pool, int(oversample * response_top_k)))
+pool = max(response_top_k, min_pool, min(max_pool, int(oversample * response_top_k)))
 ```
 
-so the pool scales with the caller's requested `top_k` while staying bounded by both the floor (rescues small queries) and the cap (controls cost on large ones). The reranker then returns the caller's `top_k` — pool sizing only controls how many items it gets to choose from. If reranking fails with a runtime error the pipeline falls back to the original fused order, trimmed to the caller's `top_k`, with a warning; configuration errors (unsupported model name, missing fastembed install) surface directly so the misconfiguration is visible.
+so the pool scales with the caller's requested `top_k` while the floor rescues small queries and the cap limits how far large ones are oversampled. The pool is never smaller than the request: neither a `top_k` above `max_pool` nor an `oversample` below 1 can size it below `top_k` (`min_pool` can still raise it), so the reranker always has `top_k` candidates to choose from when that many are retrieved, and reranking cost grows with `top_k` past `max_pool`. The reranker then returns up to the caller's `top_k` — pool sizing only controls how many items it gets to choose from. If reranking fails with a runtime error the pipeline falls back to the original fused order, trimmed to the caller's `top_k`, with a warning; configuration errors (unsupported model name, missing fastembed install) surface directly so the misconfiguration is visible.
 
 `rerank.enabled`, `rerank.oversample`, `rerank.min_pool`, and `rerank.max_pool` are runtime-tunable via `mm config set` or the Web UI Settings panel — no restart required. `rerank.provider` / `rerank.model` / `rerank.api_key` are load-time only because the reranker instance is cached on startup.
 

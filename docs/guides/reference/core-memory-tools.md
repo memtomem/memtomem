@@ -275,9 +275,9 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > **Result count with filters**: `mem_search` returns *up to* `top_k` results.
 > Increase `top_k` when one call needs more results. When reranking is enabled,
 > the candidate pool is automatically computed from `rerank.oversample`,
-> `rerank.min_pool`, and `rerank.max_pool`; passing `rerank=false` skips
-> reranking for the call and collapses that pool to `top_k`. Post-rank filters
-> can still reduce the final count.
+> `rerank.min_pool`, and `rerank.max_pool`, and is never smaller than `top_k`;
+> passing `rerank=false` skips reranking for the call and collapses that pool
+> to `top_k`. Post-rank filters can still reduce the final count.
 
 > **source_filter tip**: Use substrings like `"docs/adr"` or `".py"` for filtering. Glob patterns (`*`, `?`) are matched against the **full absolute path** via `fnmatch`, so `"*.py"` won't work as expected — use `".py"` instead.
 
