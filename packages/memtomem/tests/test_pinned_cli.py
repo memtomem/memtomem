@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import inspect
+import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -84,3 +87,49 @@ def test_agent_selector_help_advertises_canonical_and_compatible_spellings(comma
     agent_option = next((line for line in result.output.splitlines() if "--agent-id" in line), "")
     assert "-a, --agent-id, --agent TEXT" in agent_option
     assert "Agent identifier" in result.output
+
+
+_EMPTY_LINE = "No Pinned Context blocks found."
+_CREATE_HINT = "mm pinned set <block_id> --content"
+
+
+def _fake_store(monkeypatch: pytest.MonkeyPatch, blocks: list[SimpleNamespace]) -> None:
+    @asynccontextmanager
+    async def fake():
+        yield None, SimpleNamespace(list=lambda agent_id=None: blocks)
+
+    monkeypatch.setattr(pinned_cmd, "_store_context", fake)
+
+
+@pytest.mark.parametrize("agent_args", ((), ("--agent-id", "planner")), ids=("no-agent", "agent"))
+def test_list_empty_text_output_names_the_create_command(
+    monkeypatch: pytest.MonkeyPatch, agent_args: tuple[str, ...]
+) -> None:
+    _fake_store(monkeypatch, [])
+
+    result = CliRunner().invoke(pinned_cmd.pinned, ["list", *agent_args])
+
+    assert result.exit_code == 0, result.output
+    assert _EMPTY_LINE in result.output
+    assert _CREATE_HINT in result.output
+
+
+def test_list_empty_json_output_stays_an_empty_array(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_store(monkeypatch, [])
+
+    result = CliRunner().invoke(pinned_cmd.pinned, ["list", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == []
+    assert _CREATE_HINT not in result.output
+
+
+def test_list_non_empty_output_has_no_create_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    block = SimpleNamespace(block_id="demo", scope="user", agent_id=None, description="tone")
+    _fake_store(monkeypatch, [block])
+
+    result = CliRunner().invoke(pinned_cmd.pinned, ["list"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output == "demo [user] tone\n"
+    assert _CREATE_HINT not in result.output
