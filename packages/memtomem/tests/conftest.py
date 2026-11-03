@@ -51,34 +51,57 @@ _SESSION_TRACE_ENV_PREFIX = "MEMTOMEM_SESSION_TRACE__"
 #: ``filterwarnings = error``, and it must not be able to fail a test.
 _UNATTRIBUTED_HOME_CHANGES: list[tuple[str, _home_guard.Violation]] = []
 
+#: Settings targets this session checks by write observation only, rendered by
+#: ``pytest_terminal_summary`` for the same reasons as the list above.
+_DEGRADED_HOME_TARGETS: list[_home_guard.DegradedTarget] = []
+
 
 class _HomeGuardSession:
-    """Session-scoped state for the real-settings tripwire."""
+    """Session-scoped state for the real-settings tripwire.
 
-    def __init__(self, mode: _home_guard.GuardMode, targets: tuple[Path, ...]) -> None:
+    ``targets`` are fingerprinted around every test.  ``degraded`` targets
+    could not be fingerprinted when the session armed, and are checked only
+    by the witness.  The witness is built from both, so it exists even when
+    every target is degraded.
+    """
+
+    def __init__(
+        self,
+        mode: _home_guard.GuardMode,
+        targets: tuple[Path, ...],
+        degraded: tuple[_home_guard.DegradedTarget, ...],
+    ) -> None:
         self.mode = mode
         self.targets = targets
-        self.witness = _home_guard.WriteWitness(targets) if targets else None
+        self.degraded = degraded
+        watched = targets + tuple(Path(alias) for item in degraded for alias in item.aliases)
+        self.witness = _home_guard.WriteWitness(watched) if watched else None
 
 
 @pytest.fixture(scope="session")
-def _real_home_guard_targets() -> tuple[Path, ...]:
+def _real_home_guard_targets() -> tuple[tuple[Path, ...], tuple[_home_guard.DegradedTarget, ...]]:
     """Capture the real user-settings targets before tests can redirect HOME."""
     if not _home_guard.guard_enabled():
-        return ()
+        return (), ()
     targets = _home_guard.derive_targets(Path.home())
-    _home_guard.require_armable(_home_guard.snapshot_files(targets))
-    return targets
+    watched, degraded = _home_guard.partition_baseline(
+        targets, _home_guard.snapshot_files(targets), _home_guard.guard_mode()
+    )
+    _DEGRADED_HOME_TARGETS.extend(degraded)
+    return watched, degraded
 
 
 @pytest.fixture(scope="session")
-def _real_home_guard_session(_real_home_guard_targets: tuple[Path, ...]) -> _HomeGuardSession:
+def _real_home_guard_session(
+    _real_home_guard_targets: tuple[tuple[Path, ...], tuple[_home_guard.DegradedTarget, ...]],
+) -> _HomeGuardSession:
     """Arm the in-process write witness once for the whole session.
 
     ``sys.addaudithook`` cannot be removed, so the hook is installed at most
     once per pytest process and stays inert while no window is open.
     """
-    session = _HomeGuardSession(_home_guard.guard_mode(), _real_home_guard_targets)
+    targets, degraded = _real_home_guard_targets
+    session = _HomeGuardSession(_home_guard.guard_mode(), targets, degraded)
     if session.witness is not None:
         session.witness.install()
     return session
@@ -115,6 +138,7 @@ def _real_home_write_guard(
     observations = witness.drain()
     violations = _home_guard.diff_files(before, after)
     attributed, unattributed = _home_guard.classify(violations, observations)
+    attributed += _home_guard.degraded_writes(guard.degraded, observations)
     if attributed:
         pytest.fail(
             _home_guard.format_violations(nodeid, attributed, observations),
@@ -133,9 +157,34 @@ def _real_home_write_guard(
 #: its presence and its absence.
 HOME_GUARD_SUMMARY_HEADER = "home guard: unattributed real-settings change(s)"
 
+#: Header of the degraded-target section, named for the same reason.
+HOME_GUARD_DEGRADED_HEADER = "home guard: settings target(s) checked by write observation only"
+
 
 def pytest_terminal_summary(terminalreporter) -> None:
-    """Report changes to the real settings files that nobody here was seen making."""
+    """Report what the real-settings guard could not fully watch this session."""
+    _report_degraded_home_targets(terminalreporter)
+    _report_unattributed_home_changes(terminalreporter)
+
+
+def _report_degraded_home_targets(terminalreporter) -> None:
+    if not _DEGRADED_HOME_TARGETS:
+        return
+    terminalreporter.write_sep("=", HOME_GUARD_DEGRADED_HEADER)
+    for target in _DEGRADED_HOME_TARGETS:
+        terminalreporter.write_line(f"  {target.path} — {target.reason}")
+    terminalreporter.write_line(
+        "  The guard does not read through these, so their content is not compared "
+        "around each test. A test fails only when this process is seen writing the "
+        "path or, for a symlink, the file it named at session start. A write from a "
+        "subprocess, through mmap or a pre-opened descriptor, or under a dir_fd goes "
+        f"unseen. Set {_home_guard.DISABLE_ENV}=strict to refuse to run instead, or "
+        "point HOME and USERPROFILE at an empty directory to keep every target out "
+        "of reach."
+    )
+
+
+def _report_unattributed_home_changes(terminalreporter) -> None:
     if not _UNATTRIBUTED_HOME_CHANGES:
         return
     terminalreporter.write_sep("=", HOME_GUARD_SUMMARY_HEADER)
