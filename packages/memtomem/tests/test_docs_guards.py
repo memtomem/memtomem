@@ -1634,6 +1634,11 @@ _PRIOR_RELEASE_MENTIONS: tuple[tuple[str, str | None, str], ...] = (
         "from 0.7.2 and earlier writes no `env`",
         "last release whose mm init wrote no MEMTOMEM_EXTRA_TOOLS (#2970)",
     ),
+    (
+        "docs/guides/integrations/kimi-code.md",
+        "`0.7.3` and later (the entry below",
+        "first release whose mm init writes MEMTOMEM_EXTRA_TOOLS (#2970)",
+    ),
     # The update workflow's tool-absent stop, in its source and every rendered skill.
     *(
         (path, "memtomem 0.7.2 or later", "floor for mem_update_coverage")
