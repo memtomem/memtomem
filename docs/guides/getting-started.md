@@ -415,6 +415,7 @@ database or remove client registrations and project artifacts.
 
 - [Coding-agent sample](../../examples/onboarding/retry-policy/README.md) — recover a decision and its ADR source.
 - [Model-free LangGraph notebooks](../../examples/notebooks/README.md) — two self-contained Korean beginner labs, without API keys.
+- [Claude Code & Codex CLI plugin quickstart](plugin-quickstart.md) — save and find your first memory through the plugin instead of the CLI.
 - [한국어 바이브코딩 빠른 시작](vibe-coding-getting-started-ko.md) — Claude Code·Codex CLI 플러그인으로 첫 기억을 저장·검색하세요.
 - [MCP Client Setup](mcp-clients.md) — connect an editor.
 - [Core memory tools](reference/core-memory-tools.md) — index and search real data.

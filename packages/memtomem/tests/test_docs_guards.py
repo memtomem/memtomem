@@ -78,6 +78,7 @@ _CONTEXT_GATEWAY = _GUIDES / "context-gateway.md"
 _UNINSTALL_GUIDE = _GUIDES / "uninstall.md"
 _PLUGIN_CONTRACT = _REPO_ROOT / "packages" / "memtomem-plugin-assets" / "contract.toml"
 _VIBE_GUIDE = _GUIDES / "vibe-coding-getting-started-ko.md"
+_PLUGIN_QUICKSTART = _GUIDES / "plugin-quickstart.md"
 _SRC = _REPO_ROOT / "packages" / "memtomem" / "src" / "memtomem"
 _AUTOMATION_HOOKS_JSON = (
     _REPO_ROOT / "packages" / "memtomem-claude-automation-plugin" / "hooks" / "hooks.json"
@@ -714,6 +715,7 @@ class TestPluginManualCoexistenceCallout:
         for path in (
             _PLUGIN_README,
             _VIBE_GUIDE,
+            _PLUGIN_QUICKSTART,
             _INTEGRATIONS / "claude-code.md",
             *plugin_guidance,
         ):
@@ -1308,9 +1310,75 @@ def _markdown_link_targets(text: str) -> set[str]:
     return targets
 
 
-class TestVibeCodingQuickstart:
-    def test_public_entrypoints_link_quickstart(self) -> None:
-        relative = "vibe-coding-getting-started-ko.md"
+class _QuickstartLocale(typing.NamedTuple):
+    """The localized strings one quickstart pins; the commands are shared."""
+
+    path: Path
+    preparation: str
+    round_trip: str
+    new_session: str
+    memory: str
+    codex_remember: str
+    claude_search: str
+    codex_search: str
+    skill_count: str
+    required: tuple[str, ...]
+
+
+_QUICKSTARTS = (
+    _QuickstartLocale(
+        path=_PLUGIN_QUICKSTART,
+        preparation="check the one tool you use",
+        round_trip="Save your first memory",
+        new_session="Find it again in a new session",
+        memory=(
+            "In every project, keep explanations short and quote code identifiers "
+            "exactly as written."
+        ),
+        codex_remember="Use the $memtomem-remember skill to save this personal preference: ",
+        claude_search="/memtomem:search code identifiers exactly",
+        codex_search=(
+            'Use the $memtomem-search skill to find "code identifiers exactly" and show the source.'
+        ),
+        skill_count="show {} skills, including `status`",
+        required=("BM25-only", "cloud sync", "API key", "explicitly"),
+    ),
+    _QuickstartLocale(
+        path=_VIBE_GUIDE,
+        preparation="평소 쓰는 도구",
+        round_trip="첫 기억을 저장",
+        new_session="새 세션에서 다시 찾기",
+        memory="모든 프로젝트에서 설명은 한국어로 받고, 코드 식별자는 원문 표기를 유지한다.",
+        codex_remember="$memtomem-remember 스킬로 다음 개인 선호를 저장해줘: ",
+        claude_search="/memtomem:search 코드 식별자는 원문",
+        codex_search='$memtomem-search 스킬로 "코드 식별자는 원문"을 찾고 출처도 보여줘.',
+        skill_count="`status`를 포함한 스킬 {}개",
+        required=("BM25-only", "클라우드 동기화", "API key", "명시적"),
+    ),
+)
+_QUICKSTART_IDS = [locale.path.name for locale in _QUICKSTARTS]
+
+
+def _fenced_commands(text: str) -> list[str]:
+    """Lines of the ``bash`` fences, trailing comments dropped — the copy-pasted part."""
+    commands: list[str] = []
+    for block in re.findall(r"^```bash\n(.*?)^```", text, re.MULTILINE | re.DOTALL):
+        for line in block.splitlines():
+            command = line.partition(" #")[0].strip()
+            if command:
+                commands.append(command)
+    return commands
+
+
+class TestPluginQuickstarts:
+    """The English plugin quickstart and its Korean counterpart.
+
+    The two are written separately, not generated, so the localized prose is
+    pinned per guide and the shared parts are pinned as parity: a command added
+    to one guide alone fails here rather than leaving the other a step behind.
+    """
+
+    def test_public_entrypoints_link_both_quickstarts(self) -> None:
         entrypoints = (
             _README,
             _PYPI_README,
@@ -1322,17 +1390,54 @@ class TestVibeCodingQuickstart:
             _PLUGIN_README,
             _CODEX_PLUGIN_README,
         )
-        for entrypoint in entrypoints:
-            targets = _markdown_link_targets(_read(entrypoint))
-            assert any(target.endswith(relative) for target in targets), (
-                f"{entrypoint.relative_to(_REPO_ROOT)} must link the Korean vibe-coding quickstart"
-            )
-        assert (
-            f"https://github.com/memtomem/memtomem/blob/main/docs/guides/{relative}"
-        ) in _markdown_link_targets(_read(_PYPI_README))
+        for locale in _QUICKSTARTS:
+            relative = locale.path.name
+            for entrypoint in entrypoints:
+                targets = _markdown_link_targets(_read(entrypoint))
+                assert any(
+                    target.endswith(f"/{relative}") or target == relative for target in targets
+                ), f"{entrypoint.relative_to(_REPO_ROOT)} must link {relative}"
+            assert (
+                f"https://github.com/memtomem/memtomem/blob/main/docs/guides/{relative}"
+            ) in _markdown_link_targets(_read(_PYPI_README))
 
-    def test_plugin_install_commands_match_supported_public_flow(self) -> None:
-        guide = _read(_VIBE_GUIDE)
+    def test_the_two_quickstarts_link_each_other(self) -> None:
+        english, korean = (_read(locale.path) for locale in _QUICKSTARTS)
+        assert _VIBE_GUIDE.name in _markdown_link_targets(english)
+        assert _PLUGIN_QUICKSTART.name in _markdown_link_targets(korean)
+
+    def test_the_two_quickstarts_run_the_same_commands(self) -> None:
+        english, korean = (_fenced_commands(_read(locale.path)) for locale in _QUICKSTARTS)
+        assert english, "the English quickstart lost its bash blocks"
+        assert english == korean
+
+    def test_the_two_quickstarts_invoke_the_same_workflows(self) -> None:
+        """The slash commands and Codex skills live in ``text`` fences and prose.
+
+        Those are localized around the workflow name, so the bash parity above
+        does not see them; the sequence of workflow names is what both share.
+        """
+        workflow = re.compile(r"/memtomem:[a-z-]+|\$memtomem-[a-z-]+")
+        english, korean = (workflow.findall(_read(locale.path)) for locale in _QUICKSTARTS)
+        assert english, "the English quickstart names no workflow"
+        assert english == korean
+
+    @pytest.mark.parametrize("locale", _QUICKSTARTS, ids=_QUICKSTART_IDS)
+    def test_quickstart_states_the_shipped_skill_count(self, locale: _QuickstartLocale) -> None:
+        skills = [path for path in (_PLUGIN_README.parent / "skills").iterdir() if path.is_dir()]
+        assert locale.skill_count.format(len(skills)) in _read(locale.path)
+
+    def test_the_two_quickstarts_keep_the_same_outline(self) -> None:
+        english, korean = (
+            re.findall(r"^(#{2,3}) ", _read(locale.path), re.MULTILINE) for locale in _QUICKSTARTS
+        )
+        assert english == korean
+
+    @pytest.mark.parametrize("locale", _QUICKSTARTS, ids=_QUICKSTART_IDS)
+    def test_plugin_install_commands_match_supported_public_flow(
+        self, locale: _QuickstartLocale
+    ) -> None:
+        guide = _read(locale.path)
         commands = (
             "claude plugin marketplace add memtomem/memtomem",
             "claude plugin install memtomem@memtomem --scope project",
@@ -1350,7 +1455,8 @@ class TestVibeCodingQuickstart:
         )
         status = f"uvx --from 'memtomem[onnx]=={version}' mm status"
 
-        for path in (_VIBE_GUIDE, _PLUGIN_README, _CODEX_PLUGIN_README):
+        guides = tuple(locale.path for locale in _QUICKSTARTS)
+        for path in (*guides, _PLUGIN_README, _CODEX_PLUGIN_README):
             text = _read(path)
             name = path.relative_to(_REPO_ROOT)
             assert text.count(bootstrap) == 1, f"{name} must keep exactly one shared bootstrap"
@@ -1364,7 +1470,6 @@ class TestVibeCodingQuickstart:
                         f"{name} documents an `mm init` without `--mcp skip`: {line!r}"
                     )
 
-        guide = _read(_VIBE_GUIDE)
         claude_flow = (
             bootstrap,
             status,
@@ -1383,23 +1488,30 @@ class TestVibeCodingQuickstart:
             "$memtomem-remember",
             "$memtomem-search",
         )
-        for flow in (claude_flow, codex_flow):
-            positions = [guide.index(step) for step in flow]
-            assert positions == sorted(positions), f"vibe guide onboarding order drifted: {flow}"
+        for path in guides:
+            guide = _read(path)
+            for flow in (claude_flow, codex_flow):
+                positions = [guide.index(step) for step in flow]
+                assert positions == sorted(positions), (
+                    f"{path.name} onboarding order drifted: {flow}"
+                )
 
-    def test_mixed_beginner_path_links_official_client_install_docs(self) -> None:
-        preparation = _vibe_section(_read(_VIBE_GUIDE), "평소 쓰는 도구")
+    @pytest.mark.parametrize("locale", _QUICKSTARTS, ids=_QUICKSTART_IDS)
+    def test_mixed_beginner_path_links_official_client_install_docs(
+        self, locale: _QuickstartLocale
+    ) -> None:
+        preparation = _vibe_section(_read(locale.path), locale.preparation)
         targets = _markdown_link_targets(preparation)
         assert "https://code.claude.com/docs/en/quickstart" in targets
         assert "https://learn.chatgpt.com/docs/codex/cli" in targets
 
-    def test_first_round_trip_uses_user_scope_and_exact_keyword_search(self) -> None:
-        guide = _read(_VIBE_GUIDE)
-        round_trip = _vibe_section(guide, "첫 기억을 저장")
-        new_session = _vibe_section(guide, "새 세션에서 다시 찾기")
-        memory = "모든 프로젝트에서 설명은 한국어로 받고, 코드 식별자는 원문 표기를 유지한다."
-        claude_search = "/memtomem:search 코드 식별자는 원문"
-        codex_search = '$memtomem-search 스킬로 "코드 식별자는 원문"을 찾고 출처도 보여줘.'
+    @pytest.mark.parametrize("locale", _QUICKSTARTS, ids=_QUICKSTART_IDS)
+    def test_first_round_trip_uses_user_scope_and_exact_keyword_search(
+        self, locale: _QuickstartLocale
+    ) -> None:
+        guide = _read(locale.path)
+        round_trip = _vibe_section(guide, locale.round_trip)
+        new_session = _vibe_section(guide, locale.new_session)
 
         # The first save targets the default user scope — no project-tier init
         # inside the round trip or the new-session verification.
@@ -1407,22 +1519,27 @@ class TestVibeCodingQuickstart:
             assert "mm mem init" not in section
             assert "project_local" not in section
 
-        assert f"/memtomem:remember {memory}" in round_trip
-        assert f"$memtomem-remember 스킬로 다음 개인 선호를 저장해줘: {memory}" in round_trip
-        assert round_trip.index("/memtomem:remember") < round_trip.index(claude_search)
-        assert round_trip.index("$memtomem-remember") < round_trip.index(codex_search)
+        assert f"/memtomem:remember {locale.memory}" in round_trip
+        assert f"{locale.codex_remember}{locale.memory}" in round_trip
+        assert round_trip.index("/memtomem:remember") < round_trip.index(locale.claude_search)
+        assert round_trip.index("$memtomem-remember") < round_trip.index(locale.codex_search)
+
+        # The search keywords are a verbatim run of the stored sentence: BM25
+        # matches words, so a paraphrase would make the first check fail.
+        keywords = locale.claude_search.removeprefix("/memtomem:search ")
+        assert keywords in locale.memory
+        assert f'"{keywords}"' in locale.codex_search
 
         # The new-session check repeats the exact stored keywords for both clients.
-        assert claude_search in new_session
-        assert codex_search in new_session
+        assert locale.claude_search in new_session
+        assert locale.codex_search in new_session
 
         # Project-tier init is introduced only after the round trip succeeds.
-        assert guide.index("mm mem init --scope project_local") > guide.index(
-            "새 세션에서 다시 찾기"
-        )
+        assert guide.index("mm mem init --scope project_local") > guide.index(locale.new_session)
 
-    def test_first_success_workflows_match_plugin_contract(self) -> None:
-        guide = _read(_VIBE_GUIDE)
+    @pytest.mark.parametrize("locale", _QUICKSTARTS, ids=_QUICKSTART_IDS)
+    def test_first_success_workflows_match_plugin_contract(self, locale: _QuickstartLocale) -> None:
+        guide = _read(locale.path)
         workflows = {row["id"]: row for row in _plugin_contract()["workflows"]}
         for workflow_id in ("status", "remember", "search"):
             row = workflows[workflow_id]
@@ -1433,9 +1550,12 @@ class TestVibeCodingQuickstart:
         assert workflows["status"]["effect"] == "read"
         assert workflows["search"]["effect"] == "read"
 
-    def test_public_quickstart_keeps_beginner_scope_and_safety_boundaries(self) -> None:
-        guide = _read(_VIBE_GUIDE)
-        for required in ("BM25-only", "클라우드 동기화", "API key", "명시적"):
+    @pytest.mark.parametrize("locale", _QUICKSTARTS, ids=_QUICKSTART_IDS)
+    def test_public_quickstart_keeps_beginner_scope_and_safety_boundaries(
+        self, locale: _QuickstartLocale
+    ) -> None:
+        guide = _read(locale.path)
+        for required in locale.required:
             assert required in guide
         for advanced_or_private in (
             "docs/reports/",

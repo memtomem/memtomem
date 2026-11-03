@@ -106,7 +106,7 @@ diagnostic after installation.
 ```
 
 For project-scoped onboarding, run `claude plugin install memtomem@memtomem --scope project`
-from that project directory instead. The [Korean onboarding guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md#3-경로-a-claude-code-플러그인-설치)
+from that project directory instead. The [plugin quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/plugin-quickstart.md#3-path-a-install-the-claude-code-plugin)
 explains effective enablement and disabling a manual server only in that project.
 
 The bundled server includes the ONNX dependencies so existing ONNX/E5 configurations
@@ -162,7 +162,8 @@ must be checked in `/mcp`. The diagnostic does not execute configured servers.
 
 ## Docs
 
-- [Korean Claude Code/Codex vibe-coding quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md)
+- [Claude Code & Codex CLI plugin quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/plugin-quickstart.md)
+  ([한국어](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md))
   — initialize one store, install one plugin, and verify a memory round trip
 - [Claude Code integration guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/claude-code.md)
   — setup, optional automation, and CLAUDE.md guidelines

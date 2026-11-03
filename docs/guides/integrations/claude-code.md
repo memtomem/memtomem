@@ -4,9 +4,9 @@
 **Prerequisites**: memtomem installation complete ([Quick Start](../getting-started.md)), Claude Code installed
 **Estimated Time**: About 15 minutes
 
-Prefer a short Korean first-success path? Follow the [Claude Code·Codex CLI
-vibe-coding quickstart](../vibe-coding-getting-started-ko.md), then return here
-for automation and advanced setup.
+Prefer a short first-success path? Follow the [Claude Code & Codex CLI plugin
+quickstart](../plugin-quickstart.md) ([한국어](../vibe-coding-getting-started-ko.md)),
+then return here for automation and advanced setup.
 
 **On this page**
 
@@ -75,7 +75,7 @@ It does not intercept Claude's installation command.
 ```
 
 For project-scoped onboarding, run `claude plugin install memtomem@memtomem --scope project`
-from that project directory instead. The [Korean onboarding guide](../vibe-coding-getting-started-ko.md#3-경로-a-claude-code-플러그인-설치)
+from that project directory instead. The [plugin quickstart](../plugin-quickstart.md#3-path-a-install-the-claude-code-plugin)
 explains effective enablement and disabling a manual server only in that project.
 
 The plugin launches the server via an exact reviewed `uvx --from

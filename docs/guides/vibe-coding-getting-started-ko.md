@@ -6,6 +6,8 @@
 **목표**: 10~15분 안에 기억 하나를 저장하고, 새 세션에서도 출처와
 함께 다시 찾기
 
+English version: [Claude Code & Codex CLI plugin quickstart](plugin-quickstart.md)
+
 memtomem은 AI가 이전 대화와 프로젝트 결정을 세션 너머에서도 찾아
 쓸 수 있게 해 주는 Markdown-first 장기 기억 도구입니다. 이 가이드는
 복잡한 검색 설정 없이 플러그인과 기본 키워드 검색만으로 첫 성공을 만듭니다.
@@ -133,7 +135,7 @@ claude plugin update memtomem@memtomem --scope project
 
 설치 목록에서 해당 프로젝트의 `memtomem@memtomem` 항목을 확인하세요.
 `version`과 `projectPath`가 맞고 **`enabled: true`**여야 합니다.
-컴포넌트 목록에는 `status`를 포함한 스킬 7개와 MCP 서버 `memtomem` 1개가 있어야 합니다.
+컴포넌트 목록에는 `status`를 포함한 스킬 9개와 MCP 서버 `memtomem` 1개가 있어야 합니다.
 
 ### 설치됐는데 명령이 안 보일 때
 

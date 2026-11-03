@@ -1026,7 +1026,12 @@ def test_only_root_config_is_base_settings() -> None:
         if issubclass(obj, pydantic.BaseModel) and obj.__module__ == _cfg.__name__
     }
     settings_classes = [n for n, o in model_classes.items() if issubclass(o, BaseSettings)]
-    assert settings_classes == ["Mem2MemConfig"], settings_classes
+    # ``ExplicitMem2MemConfig`` is the root config again, not a section: it is
+    # ``Mem2MemConfig.without_environment``'s concrete type, and its settings
+    # sources are the init values alone (test_config_without_environment.py
+    # pins that it reads no MEMTOMEM_* variable). It narrows the env surface
+    # rather than re-opening it.
+    assert settings_classes == ["ExplicitMem2MemConfig", "Mem2MemConfig"], settings_classes
 
     # Every other model must go through ConfigModel so it keeps the
     # BaseSettings-era strictness (extra="forbid", validate_default=True) —
@@ -1034,7 +1039,8 @@ def test_only_root_config_is_base_settings() -> None:
     non_strict = [
         n
         for n, o in model_classes.items()
-        if n not in ("Mem2MemConfig", "ConfigModel") and not issubclass(o, ConfigModel)
+        if n not in ("Mem2MemConfig", "ExplicitMem2MemConfig", "ConfigModel")
+        and not issubclass(o, ConfigModel)
     ]
     assert non_strict == [], non_strict
 
