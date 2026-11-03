@@ -42,8 +42,8 @@ from memtomem.runtime.files import (
     async_file_lock,
     atomic_write_text,
     memory_lock_path,
+    norm_path,
 )
-from memtomem.storage.sqlite_helpers import norm_path
 
 from langchain_memtomem._protocol import (
     Action,

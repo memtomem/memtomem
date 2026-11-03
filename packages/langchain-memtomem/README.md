@@ -19,6 +19,11 @@ projection per item, in an index the store owns.
 
 ## Install
 
+> **Not on PyPI yet.** The first release waits for the memtomem release that
+> carries the names this package imports. Until then, install from a checkout
+> of the memtomem repository: `uv pip install -e packages/memtomem -e
+> packages/langchain-memtomem`.
+
 ```bash
 pip install langchain-memtomem
 ```

@@ -24,7 +24,7 @@ on:
 # Single source of truth for the uv toolchain setup-uv installs. Pinning (vs
 # "latest") keeps CI reproducible; Dependabot's github-actions updater can't
 # touch a `with:` input, so bump this by hand — in lockstep with the same pin
-# in release.yml.
+# in release.yml, release-langchain.yml and release-sbom.yml.
 env:
   UV_VERSION: "0.11.16"
   # A CI runner has no owner for ~/.claude/settings.json and its siblings
@@ -67,7 +67,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
       - name: mypy (gradual)
-        run: uv run mypy packages/memtomem/src
+        run: uv run mypy packages/memtomem/src packages/langchain-memtomem/src
 
   # Linux and macOS run the suite in cost-balanced shards, like Windows: run
   # whole, each was the run's critical path at 24-25 minutes, ahead of the
@@ -548,6 +548,30 @@ jobs:
           uv pip install --python "$RUNNER_TEMP/ci-all/bin/python" "${wheel}[all]"
           uv pip check --python "$RUNNER_TEMP/ci-all/bin/python"
           "$RUNNER_TEMP/ci-all/bin/python" tools/extras_import_smoke.py
+      # Its own out-dir, so the core steps above keep finding exactly one wheel.
+      - name: Build langchain-memtomem wheel and sdist
+        run: uv build packages/langchain-memtomem --out-dir ci-dist-langchain
+      - name: Validate langchain-memtomem artifacts
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' packages/langchain-memtomem/pyproject.toml)
+          uv run --no-project --python 3.12 python tools/release_preflight.py langchain-artifacts \
+            --dist ci-dist-langchain --version "$version" --repo-root .
+      # The checkout's core wheel, not a PyPI release: the floor is not on
+      # PyPI before its release, and this is the core the package must work with.
+      - name: langchain-memtomem installs beside the checkout's core and works
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          core=(ci-dist/memtomem-*.whl)
+          langchain=(ci-dist-langchain/langchain_memtomem-*.whl)
+          test "${#core[@]}" -eq 1
+          test "${#langchain[@]}" -eq 1
+          expect_core=$(sed -n 's/^version = "\(.*\)"$/\1/p' packages/memtomem/pyproject.toml)
+          test -n "$expect_core"
+          uv run --no-project --python 3.12 python tools/langchain_smoke.py install \
+            --artifact "${langchain[0]}" --core "${core[0]}" \
+            --venv "$RUNNER_TEMP/ci-langchain" --expect-core "$expect_core"
 
   vendored-assets:
     name: vendored-assets (OSV blocking)
