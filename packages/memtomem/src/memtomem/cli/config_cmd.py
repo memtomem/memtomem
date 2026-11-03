@@ -213,10 +213,11 @@ def _rebuild_fts(cfg: Mem2MemConfig, *, requested: str, effective: str) -> None:
       what makes re-running the command a working retry after a failure.
     """
     from memtomem.storage.factory import create_storage
-    from memtomem.storage.fts_tokenizer import get_tokenizer, set_tokenizer
 
-    set_tokenizer(effective)
     storage = create_storage(cfg)
+    # ``cfg`` may carry the requested value while the environment outranks it
+    # (see above); the index must be built for the effective one.
+    storage.set_fts_tokenizer(effective)
 
     async def _run() -> int:
         # ``initialize`` is inside the try: it opens the connection partway
@@ -248,13 +249,13 @@ def _rebuild_fts(cfg: Mem2MemConfig, *, requested: str, effective: str) -> None:
         )
         raise SystemExit(1) from None
 
-    # ``set_tokenizer`` is not the last word: tokenizing with kiwipiepy when it
-    # is not installed silently reverts to unicode61 mid-rebuild, so the name
+    # ``set_fts_tokenizer`` is not the last word: tokenizing with kiwipiepy when
+    # it is not installed silently falls back to unicode61 mid-rebuild, so the name
     # we asked for is not necessarily the name the rows were built under. Read
     # back what actually ran, and name *that* in the success line — announcing
     # the requested name and then retracting it two lines later is the same
     # class of false claim this whole fix is about.
-    built = get_tokenizer()
+    built = storage.fts_tokenizer_effective
     if built != effective:
         click.echo(
             click.style(

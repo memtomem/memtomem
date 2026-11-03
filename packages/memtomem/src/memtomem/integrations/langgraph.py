@@ -257,6 +257,16 @@ class MemtomemStore:
             ``~/.memtomem`` location. The constructor itself does not
             validate (the config object is built lazily) — the first
             ``await``-ed call surfaces the error.
+
+    The FTS tokenizer (``search.tokenizer``) is read once, when the
+    components are built. A later ``mm config set search.tokenizer``, or a
+    tokenizer change made through the MCP server or the Web UI, rebuilds the
+    index for that process's backend only. To query the rebuilt index with the
+    new tokenizer, close and recreate the store with the new value in its
+    config: persisted to ``config.json`` (``mem_config`` and the Web UI keep a
+    change runtime-only unless asked to persist it), or passed as
+    ``config_overrides={"search": {"tokenizer": ...}}``, which outranks the
+    file.
     """
 
     def __init__(self, config_overrides: dict[str, Any] | None = None):

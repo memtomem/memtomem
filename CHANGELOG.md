@@ -30,6 +30,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the same image as the Claude plugin's listing icon. Codex `0.3.27`, which also
   carries the `update` item sizing below.
 
+### Changed
+
+- **Each storage backend carries its own FTS tokenizer (#3018).** The
+  tokenizer used to be one setting for the whole process: building a second
+  set of components (for example a LangGraph store beside a server) changed how
+  the first one tokenized its searches from then on. A backend now takes
+  `search.tokenizer` from its own config, and a runtime tokenizer change
+  (`mm config set`, `mem_config`, the Web UI, a config reload) switches and
+  rebuilds that backend only. Components that share one database have to be
+  configured alike, as two processes on one database already did; after a
+  switch, recreate the others with the new `search.tokenizer` in their config. `memtomem.storage.fts_tokenizer.set_tokenizer` and
+  `get_tokenizer` are removed: pass `tokenizer=` to `tokenize_for_fts`, or call
+  `set_fts_tokenizer` on the backend.
+
 ### Fixed
 
 - **The Web UI's health watchdog Run Now button keeps its translated label after

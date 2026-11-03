@@ -285,7 +285,7 @@ class TestConfigCLI:
     def test_config_set_tokenizer_triggers_fts_rebuild(
         self, tmp_path, monkeypatch, runner: CliRunner
     ) -> None:
-        """Changing search.tokenizer via CLI must trigger set_tokenizer + FTS rebuild.
+        """Changing search.tokenizer via CLI must switch the backend + rebuild FTS.
 
         ``rebuild_fts`` and ``initialize`` are ``AsyncMock``, not ``MagicMock``:
         the bug in #2112 was a bare call to an ``async def``, and a plain
@@ -298,19 +298,14 @@ class TestConfigCLI:
         mock_storage.initialize = AsyncMock()
         mock_storage.rebuild_fts = AsyncMock(return_value=42)
         mock_storage.close = AsyncMock()
+        # The read-back of what actually ran: no fallback here.
+        mock_storage.fts_tokenizer_effective = "kiwipiepy"
 
-        with (
-            patch("memtomem.storage.fts_tokenizer.set_tokenizer") as mock_set_tok,
-            # ``set_tokenizer`` is mocked, so the module global never moves —
-            # pin the read-back too, or the command correctly reports a
-            # fallback that only the mock created.
-            patch("memtomem.storage.fts_tokenizer.get_tokenizer", return_value="kiwipiepy"),
-            patch("memtomem.storage.factory.create_storage", return_value=mock_storage),
-        ):
+        with patch("memtomem.storage.factory.create_storage", return_value=mock_storage):
             result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
             assert result.exit_code == 0, result.output
 
-            mock_set_tok.assert_called_once_with("kiwipiepy")
+            mock_storage.set_fts_tokenizer.assert_called_once_with("kiwipiepy")
             mock_storage.rebuild_fts.assert_awaited_once()
             mock_storage.close.assert_awaited_once()
 
@@ -334,15 +329,13 @@ class TestConfigCLI:
         mock_storage.initialize = AsyncMock()
         mock_storage.rebuild_fts = AsyncMock(return_value=7)
         mock_storage.close = AsyncMock()
+        mock_storage.fts_tokenizer_effective = "unicode61"
 
-        with (
-            patch("memtomem.storage.fts_tokenizer.set_tokenizer") as mock_set_tok,
-            patch("memtomem.storage.factory.create_storage", return_value=mock_storage),
-        ):
+        with patch("memtomem.storage.factory.create_storage", return_value=mock_storage):
             result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
             assert result.exit_code == 0, result.output
 
-            mock_set_tok.assert_called_once_with("unicode61")
+            mock_storage.set_fts_tokenizer.assert_called_once_with("unicode61")
             mock_storage.rebuild_fts.assert_awaited_once()
 
         assert "MEMTOMEM_SEARCH__TOKENIZER is set and takes precedence" in result.output
@@ -354,9 +347,9 @@ class TestConfigCLI:
     ) -> None:
         """kiwipiepy missing: the success line names the fallback, not the request.
 
-        ``_get_kiwi`` reverts the module-global to unicode61 mid-rebuild when
-        the package is absent, so announcing the requested name would be a
-        second false claim on top of the one #2112 fixed.
+        The backend tokenizes as unicode61 from the first kiwipiepy call when the
+        package is absent, so announcing the requested name would be a second
+        false claim on top of the one #2112 fixed.
         """
         monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
 
@@ -364,12 +357,9 @@ class TestConfigCLI:
         mock_storage.initialize = AsyncMock()
         mock_storage.rebuild_fts = AsyncMock(return_value=5)
         mock_storage.close = AsyncMock()
+        mock_storage.fts_tokenizer_effective = "unicode61"  # fell back mid-rebuild
 
-        with (
-            patch("memtomem.storage.fts_tokenizer.set_tokenizer"),
-            patch("memtomem.storage.fts_tokenizer.get_tokenizer", return_value="unicode61"),
-            patch("memtomem.storage.factory.create_storage", return_value=mock_storage),
-        ):
+        with patch("memtomem.storage.factory.create_storage", return_value=mock_storage):
             result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
             assert result.exit_code == 0, result.output
 
@@ -388,10 +378,7 @@ class TestConfigCLI:
         mock_storage.rebuild_fts = AsyncMock(return_value=1)
         mock_storage.close = AsyncMock()
 
-        with (
-            patch("memtomem.storage.fts_tokenizer.set_tokenizer"),
-            patch("memtomem.storage.factory.create_storage", return_value=mock_storage),
-        ):
+        with patch("memtomem.storage.factory.create_storage", return_value=mock_storage):
             result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
 
         assert result.exit_code != 0
@@ -458,10 +445,10 @@ class TestConfigCLI:
         """Non-tokenizer config changes must NOT trigger FTS rebuild."""
         monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
 
-        with patch("memtomem.storage.fts_tokenizer.set_tokenizer") as mock_set_tok:
+        with patch("memtomem.storage.factory.create_storage") as mock_create:
             result = runner.invoke(cli, ["config", "set", "search.default_top_k", "20"])
             assert result.exit_code == 0, result.output
-            mock_set_tok.assert_not_called()
+            mock_create.assert_not_called()
 
     def test_config_set_immutable_field(self, runner: CliRunner) -> None:
         """Attempting to set a non-mutable field is rejected."""

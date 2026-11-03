@@ -396,8 +396,9 @@ async def apply_runtime_config_changes(
 ) -> None:
     """Propagate runtime-mutable config changes to live components.
 
-    * ``search.tokenizer`` changed → re-register global tokenizer + run
-      ``storage.rebuild_fts()`` (backgrounded when there is an ``app``).
+    * ``search.tokenizer`` changed → switch *storage*'s tokenizer
+      (``set_fts_tokenizer``) + run ``storage.rebuild_fts()`` (backgrounded
+      when there is an ``app``).
     * ``rerank`` changed → rebuild the live reranker attached to the search
       pipeline.
     * ``embedding.onnx_batch_size`` changed → publish it to the live ONNX
@@ -420,7 +421,7 @@ async def apply_runtime_config_changes(
     # Deliberately *not* offloaded, unlike the pre-commit validation in
     # ``reload_if_stale``. This call runs after the caller installed the new
     # config, and the head of this function — ``configure_chunk_budget`` (no
-    # await inside it), the ONNX batch publish, ``set_tokenizer`` — must reach
+    # await inside it), the ONNX batch publish, ``set_fts_tokenizer`` — must reach
     # the runtime without yielding: a suspension here lets a second reload
     # commit and run its own fanout in between, after which neither ordering is
     # recoverable (the loser's values land on top, or are dropped while the
@@ -448,9 +449,7 @@ async def apply_runtime_config_changes(
         publish_onnx_batch_size(embedder, new_cfg.embedding.onnx_batch_size)
 
     if tokenizer_changed and storage is not None:
-        from memtomem.storage.fts_tokenizer import set_tokenizer
-
-        set_tokenizer(new_cfg.search.tokenizer)
+        storage.set_fts_tokenizer(new_cfg.search.tokenizer)
         await _schedule_fts_rebuild(storage, new_cfg.search.tokenizer, app=app)
 
     if search_pipeline is not None:

@@ -267,8 +267,14 @@ class SqliteBackend(
         strict_dim_check: bool = True,
         adopt_unpopulated_embedding_stamp: bool = False,
         chunk_budget_config: "IndexingConfig | None" = None,
+        fts_tokenizer: str = "unicode61",
     ) -> None:
         self._config = config
+        # This backend's FTS tokenizer, from ``search.tokenizer``. Index-time
+        # and query-time tokenization have to agree per database, and the
+        # backend that indexes a database is the one that queries it, so the
+        # choice lives here rather than in a process global (#3018).
+        self._fts_tokenizer = _fts.validate_tokenizer(fts_tokenizer)
         self._chunk_budget_config = chunk_budget_config
         self._dimension = dimension
         self._chunk_column_positions: dict[str, int] = {}
@@ -1141,6 +1147,34 @@ class SqliteBackend(
         return Path(self._config.sqlite_path).expanduser()
 
     @property
+    def fts_tokenizer(self) -> str:
+        """The FTS tokenizer this backend is configured with."""
+        return self._fts_tokenizer
+
+    @property
+    def fts_tokenizer_effective(self) -> str:
+        """The tokenizer this backend's FTS calls actually run.
+
+        Differs from :attr:`fts_tokenizer` only once ``kiwipiepy`` has failed
+        to import in this process (see ``fts_tokenizer.effective_tokenizer``).
+        """
+        return _fts.effective_tokenizer(self._fts_tokenizer)
+
+    def set_fts_tokenizer(self, name: str) -> None:
+        """Switch this backend's FTS tokenizer; the caller rebuilds the index.
+
+        Synchronous on purpose: the runtime config fanout in
+        ``web/hot_reload.py`` must apply it without yielding.
+
+        It switches this backend only. Another backend open on the same
+        database — another component stack in this process, or another
+        process such as ``mm web`` beside the MCP server — keeps the
+        tokenizer it was built with until it is recreated; stacks sharing a
+        database must be configured alike.
+        """
+        self._fts_tokenizer = _fts.validate_tokenizer(name)
+
+    @property
     def stored_embedding_info(self) -> dict:
         """Return the embedding config actually stored in the DB."""
         assert self._meta is not None
@@ -1714,6 +1748,8 @@ class SqliteBackend(
         if not chunks:
             return 0
 
+        # One tokenizer for the whole call, so a switch cannot split its rows.
+        tokenizer = self._fts_tokenizer
         db = self._get_db()
         try:
             chunk_ids = [str(c.id) for c in chunks]
@@ -1862,7 +1898,7 @@ class SqliteBackend(
                     "UPDATE chunks_fts SET content=?, source_file=? WHERE rowid=?",
                     [
                         (
-                            _fts.tokenize_for_fts(c.retrieval_content),
+                            _fts.tokenize_for_fts(c.retrieval_content, tokenizer=tokenizer),
                             norm_sources[c.metadata.source_file],
                             rowid,
                         )
@@ -1984,7 +2020,7 @@ class SqliteBackend(
                         [
                             (
                                 new_rowid_map[str(c.id)],
-                                _fts.tokenize_for_fts(c.retrieval_content),
+                                _fts.tokenize_for_fts(c.retrieval_content, tokenizer=tokenizer),
                                 norm_sources[c.metadata.source_file],
                             )
                             for c in to_insert
@@ -2790,7 +2826,7 @@ class SqliteBackend(
         return len(rowids)
 
     async def rebuild_fts(self) -> int:
-        """Rebuild the FTS5 index from chunks table using current tokenizer.
+        """Rebuild the FTS5 index from the chunks table with this backend's tokenizer.
 
         Returns the number of rows rebuilt.
 
@@ -2807,6 +2843,9 @@ class SqliteBackend(
         self._require_transaction_idle("rebuild_fts")
         assert self._db is not None
         db_path = str(Path(self._config.sqlite_path).expanduser())
+        # Read once, before the worker starts: every row of this rebuild is
+        # tokenized the same way even if the backend is switched meanwhile.
+        tokenizer = self._fts_tokenizer
 
         def _run() -> int:
             conn = sqlite3.connect(db_path, timeout=10)
@@ -2833,7 +2872,8 @@ class SqliteBackend(
                                             f"{r[4]}\n\n{r[1]}"
                                             if r[4]
                                             else _rebuild_fts_retrieval(r[1], r[3])
-                                        )
+                                        ),
+                                        tokenizer=tokenizer,
                                     ),
                                     r[2],
                                 )

@@ -1515,6 +1515,7 @@ async def _check_embedding_mismatch(state: dict, *, interactive: bool) -> None:
         embedding_provider=state["provider"],
         embedding_model=state["model"],
         strict_dim_check=False,
+        fts_tokenizer=state.get("tokenizer") or "unicode61",
     )
     await storage.initialize()
     try:

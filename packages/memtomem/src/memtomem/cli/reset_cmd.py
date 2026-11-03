@@ -416,6 +416,7 @@ async def _run(
             dimension=cfg.embedding.dimension,
             embedding_provider=cfg.embedding.provider,
             embedding_model=cfg.embedding.model,
+            fts_tokenizer=cfg.search.tokenizer,
         )
 
     warnings: list[str] = []
