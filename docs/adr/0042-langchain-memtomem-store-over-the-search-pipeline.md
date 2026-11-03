@@ -220,6 +220,12 @@ boundary of `put` and `delete` against the repair that restores agreement).
      reranker is not switched off per call to widen further, because that
      would mix post-rerank and fused scores in one list. The docs state the
      bound.
+     > **Amended 2026-11-03** after #3043. The reranker's candidate pool is
+     > no longer smaller than the request: it is `max(top_k, clamp(...))`,
+     > because a pool below `top_k` returned fewer results than asked for
+     > with nothing saying so. `max_pool` now bounds only the oversampling,
+     > and the budget is `max_chunks_per_search` with or without a reranker,
+     > on a memtomem that carries this fix.
 5. **Mutation and repair: the constraints the protocol must meet.**
    - The JSON record is the source of truth. The projection and the index
      rows are derived from it.

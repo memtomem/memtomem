@@ -352,11 +352,12 @@ filtered like any other; a query-less search returns newest first, unscored). `s
    chunks can precede an eligible item at the next rank. Termination is
    `offset + limit` items or `top_k == budget`.
 
-Bounds the docs state: recall is bounded by `max_chunks_per_search`; with
-reranking on, the candidate pool is capped at `clamp(oversample · top_k,
-[min_pool, max_pool])` (`search/pipeline.py:1981`), so the effective bound is
-`min(max_chunks_per_search, rerank.max_pool)`. The store never passes
-`rerank=False` per call. An item whose new generation is not yet indexed (an
+Bounds the docs state: recall is bounded by `max_chunks_per_search`, with or
+without a reranker — the reranker's candidate pool is never smaller than the
+requested `top_k` (`rerank.max_pool` bounds only its oversampling), so
+`rerank.max_pool` does not cap a window. A window still holds at most `top_k`
+chunks, fewer when fewer match or the pipeline's later filters drop some. The
+store never passes `rerank=False` per call. An item whose new generation is not yet indexed (an
 interrupted `put`) is found by a query on its **old** text, which repairs it,
 and by every query after that; a query on its new text alone finds nothing to
 repair until the next open.
