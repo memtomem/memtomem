@@ -29,10 +29,12 @@ a settings target is one at session start, and ``on`` leaves that target out of
 the content comparison and checks it by write observation only (#3019), so a
 dotfiles symlink does not cost the guard on every other target.  For such a
 target the witness's blind spots below are detection gaps, not attribution
-gaps: with no fingerprint, an unseen write is not reported at all.  So is a
-change made to the link's destination through the destination's own pathname,
-and a link replaced unseen stays degraded for the rest of the session, because
-degradation is decided once, when the session arms.  The witness sees only audit
+gaps: with no fingerprint, an unseen write is not reported at all.  A
+symlink's destination is watched under the one spelling ``realpath`` gave it
+when the session armed, so a write to it under another spelling, or to a new
+destination after the link is retargeted, is not seen either.  A link replaced
+unseen stays degraded for the rest of the session, because degradation is
+decided once, when the session arms.  The witness sees only audit
 events raised in *this* process: a subprocess's writes, ``mmap`` stores, writes
 through a descriptor opened before the hook armed, and writes aimed at a
 relative pathname under a ``dir_fd`` all stay invisible to it, so

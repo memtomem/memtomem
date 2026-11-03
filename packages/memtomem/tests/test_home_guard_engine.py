@@ -606,6 +606,43 @@ def test_pytest_wiring_watches_writes_when_every_target_is_a_symlink(tmp_path: P
     assert combined.count("final entry is a symlink or reparse point") >= len(_ALL_TARGETS)
 
 
+def _directory_targets(home: Path) -> None:
+    """Make every settings target a directory: unsafe without needing symlinks."""
+    for parent, name in _ALL_TARGETS:
+        (home / parent / name).mkdir(parents=True)
+
+
+#: Moving a target aside is a write to its pathname whatever the entry is.
+_MOVE_THE_TARGET_ASIDE_TEST = """
+import os
+from pathlib import Path
+
+def test_moves_the_target_aside():
+    target = Path.home() / ".codex" / "hooks.json"
+    os.rename(target, target.with_name("hooks.json.aside"))
+"""
+
+
+def test_pytest_wiring_watches_writes_when_no_target_can_be_fingerprinted(
+    tmp_path: Path,
+) -> None:
+    """The degraded wiring on a host that cannot create symlinks (Windows CI)."""
+    (tmp_path / "clean").mkdir()
+    (tmp_path / "moved").mkdir()
+    clean = _run_nested_pytest(tmp_path / "clean", _CLEAN_TEST, prepare=_directory_targets)
+    combined = clean.stdout + clean.stderr
+    assert clean.returncode == 0, combined
+    assert combined.count("final entry is not a regular file") == len(_ALL_TARGETS)
+
+    moved = _run_nested_pytest(
+        tmp_path / "moved", _MOVE_THE_TARGET_ASIDE_TEST, prepare=_directory_targets
+    )
+    combined = moved.stdout + moved.stderr
+    assert moved.returncode == 1, combined
+    assert "— written: a write was observed on this target" in combined
+    assert "observed os.rename on thread MainThread" in combined
+
+
 def test_pytest_wiring_honours_the_escape_hatch(tmp_path: Path) -> None:
     result = _run_nested_pytest(tmp_path, _INDIRECT_WRITE_TEST, disabled=True)
     assert result.returncode == 0, result.stdout + result.stderr
