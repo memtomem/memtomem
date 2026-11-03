@@ -154,3 +154,17 @@ def test_runtime_files_reexports_the_same_objects() -> None:
         "atomic_write_text",
         "memory_lock_path",
     }
+
+
+def test_matches_filter_is_the_private_predicate() -> None:
+    from memtomem.integrations import langgraph_store as module
+
+    assert module.matches_filter is module._matches_filter
+    value = {"n": 3, "meta": {"kind": "fruit"}}
+    assert module.matches_filter(value, None)
+    assert module.matches_filter(value, {})
+    assert module.matches_filter(value, {"n": 3, "meta.kind": "fruit"})
+    assert module.matches_filter(value, {"n": {"$gt": 2, "$lte": 3}})
+    assert not module.matches_filter(value, {"n": {"$in": [1, 2]}})
+    assert not module.matches_filter(value, {"meta.kind": {"$ne": "fruit"}})
+    assert not module.matches_filter(value, {"missing": 1})

@@ -10,7 +10,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **Public names for a package that stores beside memtomem (ADR-0042).**
   `memtomem.integrations.langgraph_store` exports `encode_segment`,
   `decode_segment` (which refuses any token the encoder would not emit),
-  `render_projection`, and a record contract on `MemtomemBaseStore`:
+  `render_projection`, `matches_filter` (the `search(filter=...)` predicate), and a record contract on `MemtomemBaseStore`:
   `record_path`, `read_record` and `write_record`, the last taking an optional
   caller-owned `generation` integer that is persisted beside the value.
   `memtomem.integrations.langgraph` exports `resolve_target_scope` with

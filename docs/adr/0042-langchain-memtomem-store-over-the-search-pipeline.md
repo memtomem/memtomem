@@ -114,6 +114,22 @@ boundary of `put` and `delete` against the repair that restores agreement).
    query path. It does not route through `MemtomemStore.add`, because append
    cannot replace an item.
 
+   > **Amended 2026-11-03** with the implementation PR. The store owns its
+   > records instead of wrapping `MemtomemBaseStore`. That store's path
+   > layout is base64url, which is case-sensitive, and on a filesystem that
+   > folds case (NTFS; APFS as macOS formats it) two segments whose encodings
+   > differ only in case share one path (`aaa` → `YWFh`, `aaG` → `YWFH`).
+   > Measured: `MemtomemBaseStore` refuses the second of two such keys and
+   > drops the second of two such namespaces from `list_namespaces` and
+   > `search`; the implementation that wrapped it lost a projection on
+   > reopen on macOS and, on Windows CI, served one namespace's item to
+   > another namespace's query. The package keeps the same record shape and
+   > the same record guard under a single-case layout (`s` + lowercase
+   > base32), and still imports memtomem's guard, atomic write and filter
+   > predicate (`matches_filter`, made public for this). The record contract
+   > A2 added to `MemtomemBaseStore` stays public and unused by the package.
+   > `packages/langchain-memtomem/docs/protocol.md` §Layout has the detail.
+
 ### B. The store over its own pipeline
 
 1. **Own components, own configuration.** The store builds a `Mem2MemConfig`
@@ -207,6 +223,21 @@ boundary of `put` and `delete` against the repair that restores agreement).
      three, so an interruption after the projection write and before the
      index (same record and projection generation, stale rows) is detected
      as well as a stale projection.
+     > **Amended 2026-11-03** with the implementation PR. The projection
+     > carries no header: it is the rendered value alone, behind one empty
+     > line, so none of the store's bookkeeping is searchable and no value
+     > can imitate it (measured: a value quoting the store's generation tag
+     > hid its own item; a superscript digit in that tag made any search
+     > that reached the item raise). Projection agreement is byte equality
+     > with the text the record renders to. The persisted last-indexed state
+     > holds that text's digest and, for every row indexed from it, the
+     > memtomem chunk id with a digest of the text the row is ranked by. A
+     > hit is served only when that pair is in the set. The id alone would
+     > not do: memtomem keeps an id when the body hash matches (ADR-0005),
+     > and the body hash leaves out the heading path retrieval ranks by.
+     > B2's header and B4's "decodes each hit's header" read accordingly:
+     > the hit's item is named by its source path and checked against the
+     > row's namespace.
    - A deletion marker carries the generation it was written for. A later
      `put` under the lock settles or supersedes the marker before it writes.
      Repair gives a marker precedence only over a record of the same or an

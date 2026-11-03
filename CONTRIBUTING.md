@@ -42,8 +42,8 @@ uv run pytest -m "not ollama"          # skip Ollama-dependent tests
 uv run pytest                          # full suite (requires running Ollama)
 
 # Lint and format (same paths CI checks)
-uv run ruff check packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py --fix
-uv run ruff format packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
+uv run ruff check packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py --fix
+uv run ruff format packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
 
 # Type check
 uv run mypy packages/memtomem/src
@@ -59,6 +59,7 @@ uv run mypy packages/memtomem/src
 - `packages/memtomem-kimi-skills/` — Kimi Code skill bundle (not a plugin)
 - `packages/memtomem-hermes-plugin/` — Hermes Agent portable plugin (user scope: MCP server + six workflow skills)
 - `packages/memtomem-antigravity-plugin/` — Antigravity CLI (`agy`) plugin (MCP server + six user-scope workflow skills + three project workflows that bind the server with `mem_project_bind`)
+- `packages/langchain-memtomem/` — `langchain-memtomem`: a LangGraph `BaseStore` whose query search runs the memtomem pipeline in an index the store owns (ADR-0042); second workspace member, own version line
 - `packages/memtomem-hermes-memory/` — Hermes Agent memory provider `memtomem-memory` (recall-only, through Hermes's own memtomem MCP connection; standard library, Python 3.11+)
 - `packages/memtomem-plugin-assets/` — shared plugin contract (`contract.toml`) and workflow sources rendered into the plugins by `tools/render_plugin_assets.py`
 
@@ -69,8 +70,8 @@ The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](ht
 1. Create a feature branch from `main`
 2. Keep changes focused — one feature or fix per PR
 3. Add tests for new functionality
-4. Ensure `uv run ruff check packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py` and
-   `uv run ruff format --check packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py` pass
+4. Ensure `uv run ruff check packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py` and
+   `uv run ruff format --check packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py` pass
 5. Ensure `uv run pytest -m "not ollama"` passes
 6. Write a clear commit message describing the "why"
 7. Sign the CLA on your first pull request (see below)

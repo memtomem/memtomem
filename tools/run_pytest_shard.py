@@ -32,8 +32,15 @@ def test_files(repo_root: Path) -> list[Path]:
     dedicated golden-path suite runs in its own job, so it is excluded here to
     mirror the ``--ignore`` the cross-platform ``test`` job applies.
     """
-    tests_root = repo_root / "packages" / "memtomem" / "tests"
-    matches = {*tests_root.rglob("test_*.py"), *tests_root.rglob("*_test.py")}
+    tests_roots = (
+        repo_root / "packages" / "memtomem" / "tests",
+        repo_root / "packages" / "langchain-memtomem" / "tests",
+    )
+    matches = {
+        path
+        for tests_root in tests_roots
+        for path in (*tests_root.rglob("test_*.py"), *tests_root.rglob("*_test.py"))
+    }
     return sorted(path for path in matches if path.name != "test_golden_path.py")
 
 
