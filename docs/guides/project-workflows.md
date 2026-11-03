@@ -28,12 +28,13 @@ behaviour is the same everywhere and only the invocation differs.
 | OpenCode plugin | `/memtomem-handoff` | `/memtomem-brief` | `/memtomem-update` | yes (commands, not skills) |
 | Kimi Code skills | `memtomem-handoff` | `memtomem-brief` | `memtomem-update` | yes |
 | Antigravity CLI plugin | `memtomem-handoff` | `memtomem-brief` | `memtomem-update` | yes (binds the server to the repository first) |
+| Cursor plugin | `/memtomem-handoff` | `/memtomem-brief` | `/memtomem-update` | yes (binds the server to the repository first) |
 | Hermes Agent plugin | — | — | — | not shipped: these need a project root, and Hermes starts the server outside one |
 | Gemini CLI | — | — | — | not shipped: this repository ships no workflows for it |
 
 This guide describes the workflows as shipped with memtomem `0.7.3` and these
 plugin versions:
-`claude` 0.5.29 · `codex` 0.3.27 · `opencode` 0.3.26 · `kimi` 0.2.24 · `antigravity` 0.2.5.
+`claude` 0.5.29 · `codex` 0.3.27 · `opencode` 0.3.26 · `kimi` 0.2.24 · `antigravity` 0.2.6 · `cursor` 0.1.0.
 `update` runs its `incremental` mode by default from `claude` 0.5.26,
 `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
 older plugin releases ask for a mode instead (see the CHANGELOG).
@@ -51,9 +52,9 @@ cd <project-root> && mm mem init --scope project_local
 ```
 
 The next memory operation picks the tier up; a running memtomem server does not
-usually need a restart. The exception is the Antigravity plugin, whose server
-binds to one project root per process: a server already bound to another
-project has to be restarted before it can bind to this one. The workflows never
+usually need a restart. The exceptions are the Antigravity and Cursor plugins,
+whose servers bind to one project root per process: a server already bound to
+another project has to be restarted before it can bind to this one. The workflows never
 fall back to your user-scope memory for project records.
 
 ## handoff
@@ -61,8 +62,8 @@ fall back to your user-scope memory for project records.
 `handoff` takes exactly one operation, `save` or `resume`. As a shorthand, `s`
 and `r` count only when they are the whole first word after the invocation, as
 in `s to codex-cli` or `r <handoff-id>`. The target runtime is one of
-`claude-code`, `codex-cli`, `kimi-code`, `opencode`, `antigravity-cli`, or
-`any` (the default).
+`claude-code`, `codex-cli`, `kimi-code`, `opencode`, `antigravity-cli`,
+`cursor`, or `any` (the default).
 
 **Save** records work that actually happened, so it refuses to run when there
 is nothing observed to record and reports `insufficient_input: work context`

@@ -5,7 +5,7 @@
 <!-- /scope -->
 <!-- scope:user -->
 2. A fresh machine needs no bootstrap: without a memtomem config the server uses its defaults (BM25, `~/.memtomem`). Do not suggest `mm init` or any other command that rewrites memtomem's configuration; an existing configuration may serve other agents. This workflow does not initialize or register project tiers; do not suggest project-specific setup from it.
-3. Obtain an explicit notes or memory directory from the request; ask for one when absent. The path must be absolute (or start with `~`): this server's working directory is the plugin directory, so a relative path would point inside the plugin.
+3. Obtain an explicit notes or memory directory from the request; ask for one when absent. The path must be absolute (or start with `~`): this host starts the server outside the user's project (in the plugin or home directory), so a relative path would resolve against that directory instead.
 <!-- /scope -->
 4. Call `mem_index` on that path with `force=false` and `auto_tag=false`. This is a one-shot index and must not silently register a watcher root.
 5. Choose a representative phrase from the indexed material and call `mem_search` to verify retrieval.

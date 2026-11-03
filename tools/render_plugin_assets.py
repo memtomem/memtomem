@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Render the shipped Claude, Codex, Kimi, OpenCode, and Hermes assets from one contract."""
+"""Render the shipped Claude, Codex, Kimi, OpenCode, Hermes, Antigravity, and Cursor assets
+from one contract."""
 
 from __future__ import annotations
 
@@ -20,13 +21,16 @@ KIMI_ROOT = ROOT / "packages" / "memtomem-kimi-skills"
 OPENCODE_ROOT = ROOT / "packages" / "opencode-memtomem"
 HERMES_ROOT = ROOT / "packages" / "memtomem-hermes-plugin"
 ANTIGRAVITY_ROOT = ROOT / "packages" / "memtomem-antigravity-plugin"
+CURSOR_ROOT = ROOT / "packages" / "memtomem-cursor-plugin"
+CURSOR_MARKETPLACE = ROOT / ".cursor-plugin" / "marketplace.json"
 HERMES_MEMORY_ROOT = ROOT / "packages" / "memtomem-hermes-memory"
 
 # Workflow sources may carry scope variants: a host that starts the server inside the
 # user's project renders the `project` blocks, one that starts it elsewhere (no project
 # context) renders the `user` blocks. Text outside a block is shared by all of them.
 # `bound` is a host that starts the server elsewhere but binds it to the project with
-# `mem_project_bind` (#2920): it renders a project-only workflow plus its `bound` blocks.
+# `mem_project_bind`: it renders the `project` blocks plus the `bound` blocks, which carry
+# the bind step. A workflow's contract `scopes` names the renders it ships in.
 SCOPES = ("project", "user", "bound")
 _SCOPE_OPEN = re.compile(r"<!-- scope:([a-z]+) -->")
 _SCOPE_CLOSE = "<!-- /scope -->"
@@ -36,6 +40,9 @@ _LINES = re.compile(r"[^\n]*\n|[^\n]+\Z")
 
 def _select_scope(text: str, scope: str) -> str:
     """Keep the shared text and the ``scope`` blocks of a workflow source.
+
+    A ``bound`` render also keeps the ``project`` blocks: it is the project render with
+    the bind step added.
 
     Marker lines are dropped together with their own line ending and every other
     line is kept byte for byte, so a source without markers renders unchanged.
@@ -63,7 +70,7 @@ def _select_scope(text: str, scope: str) -> str:
             continue
         if "<!--" in line or "-->" in line:
             raise ValueError(f"line {number}: malformed scope marker or stray HTML comment")
-        if current is None or current == scope:
+        if current is None or current == scope or (scope == "bound" and current == "project"):
             kept.append(line)
     if current is not None:
         raise ValueError(f"unterminated scope:{current} block")
@@ -76,15 +83,13 @@ def _workflow_body(workflow_id: str, scope: str) -> str:
 
 
 def _render_workflow(text: str, scope: str) -> str:
-    """``_select_scope``, refusing a ``bound`` render that would drop other variants.
+    """``_select_scope``, refusing a ``bound`` render of a source without a bind step.
 
-    A ``bound`` render keeps only the shared text and the ``bound`` blocks, so a
-    source with ``project`` or ``user`` blocks would lose them silently.
+    Without a ``bound`` block the render would be the project render, shipped to a host
+    whose server has no project until something binds it.
     """
-    if scope == "bound":
-        found = {m.group(1) for m in _SCOPE_OPEN.finditer(text)} & {"project", "user"}
-        if found:
-            raise ValueError(f"a bound render would drop the {sorted(found)} blocks")
+    if scope == "bound" and "bound" not in {m.group(1) for m in _SCOPE_OPEN.finditer(text)}:
+        raise ValueError("a bound render needs a scope:bound block")
     return _select_scope(text, scope)
 
 
@@ -155,11 +160,12 @@ def _claude_skill(workflow: dict, body: str) -> str:
     return "\n".join(frontmatter) + body.strip() + "\n"
 
 
-def _portable_skill(workflow: dict, body: str) -> str:
+def _portable_skill(workflow: dict, body: str, extra_frontmatter: tuple[str, ...] = ()) -> str:
     lines = [
         "---",
         f"name: {workflow['codex_name']}",
         f"description: {workflow['description']}",
+        *extra_frontmatter,
         "---",
         "",
         f"# {workflow['title']}",
@@ -306,9 +312,10 @@ def _hermes_mcp_config(contract: dict) -> str:
     return json.dumps(payload, indent=2) + "\n"
 
 
-def _antigravity_mcp_config(contract: dict) -> str:
+def _pinned_mcp_config(contract: dict) -> str:
     # No "type": agy takes the transport from the fields ("command" = stdio), and
-    # `agy plugin validate --strict` fails on the key as an unknown field.
+    # `agy plugin validate --strict` fails on the key as an unknown field. Cursor reads the
+    # same shape; its own Playwright plugin omits "type" too.
     payload = {
         "mcpServers": {
             "memtomem": {
@@ -329,6 +336,47 @@ def _antigravity_plugin_manifest(contract: dict) -> str:
             "Markdown-first long-term memory shared across your coding agents: one local "
             "memtomem store, searchable from Antigravity, Claude Code, Codex CLI and Kimi Code."
         ),
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def _cursor_plugin_manifest(contract: dict) -> str:
+    payload = {
+        "name": "memtomem",
+        "displayName": "memtomem",
+        "version": contract["plugins"]["cursor_version"],
+        "description": (
+            "Markdown-first long-term memory shared across your coding agents: one local "
+            "memtomem store, searchable from Cursor, Claude Code, Codex CLI and Antigravity."
+        ),
+        "author": {"name": "memtomem", "url": "https://github.com/memtomem"},
+        "homepage": "https://github.com/memtomem/memtomem",
+        "repository": "https://github.com/memtomem/memtomem",
+        "license": "Apache-2.0",
+        "logo": "assets/icon.png",
+        "keywords": ["memory", "semantic-search", "rag", "mcp", "markdown"],
+        "category": "productivity",
+        "skills": "./skills/",
+        "mcpServers": "./mcp.json",
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def _cursor_marketplace() -> str:
+    # No per-entry "version": the plugin manifest is the one place the version lives, and
+    # the marketplace schema in cursor/plugins (ae5650f) closes an entry to name, source,
+    # description and minClientVersions.
+    payload = {
+        "name": "memtomem",
+        "owner": {"name": "memtomem", "url": "https://github.com/memtomem"},
+        "metadata": {"description": "Markdown-first long-term memory for coding agents"},
+        "plugins": [
+            {
+                "name": "memtomem",
+                "source": CURSOR_ROOT.relative_to(ROOT).as_posix(),
+                "description": "Search, recall, save, and index Markdown-first agent memory",
+            }
+        ],
     }
     return json.dumps(payload, indent=2) + "\n"
 
@@ -389,8 +437,11 @@ def expected_files() -> dict[Path, str]:
         HERMES_ROOT / "mcp.json": _hermes_mcp_config(contract),
         HERMES_ROOT / "plugin.json": _hermes_plugin_manifest(contract),
         HERMES_MEMORY_ROOT / "plugin.yaml": _hermes_memory_manifest(contract),
-        ANTIGRAVITY_ROOT / "mcp_config.json": _antigravity_mcp_config(contract),
+        ANTIGRAVITY_ROOT / "mcp_config.json": _pinned_mcp_config(contract),
         ANTIGRAVITY_ROOT / "plugin.json": _antigravity_plugin_manifest(contract),
+        CURSOR_ROOT / ".cursor-plugin" / "plugin.json": _cursor_plugin_manifest(contract),
+        CURSOR_ROOT / "mcp.json": _pinned_mcp_config(contract),
+        CURSOR_MARKETPLACE: _cursor_marketplace(),
     }
     for workflow in contract["workflows"]:
         body = _workflow_body(workflow["id"], "project")
@@ -417,19 +468,32 @@ def expected_files() -> dict[Path, str]:
             files[OPENCODE_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _opencode_skill(
                 workflow, body, contract["opencode"]["version_range"]
             )
-        # Hermes and Antigravity start the server in the plugin directory, so they
-        # render the user-scope variant. Hermes skips workflows that need a project
-        # root; Antigravity renders those with their bind step (`bound`, #2920).
+        # Hermes and Antigravity start the server in the plugin directory, and Cursor starts
+        # it in the home directory. Hermes has no project, so it ships the user render and
+        # skips the workflows without one. Antigravity and Cursor ship the bound render, which
+        # binds to the project first, where the workflow has one, and the user render
+        # otherwise. Cursor alone honours `disable-model-invocation`, so its explicit-only
+        # workflows carry that one line on top of the Antigravity text.
         scopes = workflow.get("scopes", ["project", "user"])
+        if "user" not in scopes and "bound" not in scopes:
+            raise ValueError(f"workflow {workflow['id']!r} has no render for Antigravity")
         if "user" in scopes:
             user = dict(workflow)
             user["description"] = workflow.get("user_scope_description", workflow["description"])
-            user_skill = _portable_skill(user, _workflow_body(workflow["id"], "user"))
-            for root in (HERMES_ROOT, ANTIGRAVITY_ROOT):
-                files[root / "skills" / workflow["codex_name"] / "SKILL.md"] = user_skill
+            user_body = _workflow_body(workflow["id"], "user")
+            user_skill = _portable_skill(user, user_body)
+            files[HERMES_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = user_skill
+        if "bound" in scopes:
+            agy_workflow, agy_body = workflow, _workflow_body(workflow["id"], "bound")
         else:
-            bound_skill = _portable_skill(workflow, _workflow_body(workflow["id"], "bound"))
-            files[ANTIGRAVITY_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = bound_skill
+            agy_workflow, agy_body = user, user_body
+        files[ANTIGRAVITY_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _portable_skill(
+            agy_workflow, agy_body
+        )
+        cursor_frontmatter = () if workflow["implicit"] else ("disable-model-invocation: true",)
+        files[CURSOR_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _portable_skill(
+            agy_workflow, agy_body, cursor_frontmatter
+        )
     return files
 
 

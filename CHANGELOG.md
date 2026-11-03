@@ -9,14 +9,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - **Public names for a package that stores beside memtomem (ADR-0042).**
   `memtomem.integrations.langgraph_store` exports `encode_segment`,
-  `decode_segment` (which refuses any token the encoder would not emit),
+  `decode_segment` (which refuses any token the encoder would not emit,
+  including a hashed one; see the #3034 entry under Fixed for the encoding),
   `render_projection`, `matches_filter` (the `search(filter=...)` predicate), and a record contract on `MemtomemBaseStore`:
   `record_path`, `read_record` and `write_record`, the last taking an optional
   caller-owned `generation` integer that is persisted beside the value.
   `memtomem.integrations.langgraph` exports `resolve_target_scope` with
   `UnregisteredProjectTarget` and `TierWouldNotRoundTrip`. `memtomem.runtime.files`
-  re-exports `async_file_lock`, `atomic_write_text`, `memory_lock_path` and
-  `CRUD_SIDECAR_LOCK_BUDGET_S`. `Mem2MemConfig.without_environment(**data)`
+  re-exports `async_file_lock`, `atomic_write_text`, `memory_lock_path`,
+  `CRUD_SIDECAR_LOCK_BUDGET_S` and `norm_path`, the spelling memtomem stores a
+  source path in (resolved, one Unicode form where the filesystem folds them). `Mem2MemConfig.without_environment(**data)`
   builds a validated config from the given values with no `MEMTOMEM_*`
   variable layered on top. The underscore names keep working; nothing changes
   for existing callers.
@@ -29,8 +31,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   and the bundle ships the image at `plugins/memtomem/assets/icon.png`. It is
   the same image as the Claude plugin's listing icon. Codex `0.3.27`, which also
   carries the `update` item sizing below.
+- **A Cursor plugin (experimental).** `packages/memtomem-cursor-plugin` ships the
+  exact-pinned memtomem server and the nine memory skills, and a repo-root
+  `.cursor-plugin/marketplace.json` lists it. Cursor does not start a plugin's
+  server in the open workspace (on macOS with Cursor 3.27.22 it started in the home
+  directory), so the bundle carries the Antigravity skill set: search, recall,
+  remember, handoff, brief and update bind the server to the repository first,
+  and index, status and setup work at user scope. Remember, index, setup and the
+  three project workflows are marked `disable-model-invocation`, so Cursor runs
+  them only on an explicit `/skill-name`. Until it is listed in the Cursor
+  Marketplace, install it by copying the directory to
+  `~/.cursor/plugins/local/memtomem`. Handoff and update in every plugin now accept
+  `cursor` as a runtime label, so a handoff can be saved from Cursor and addressed to
+  it. Cursor `0.1.0`.
 
 ### Changed
+
+- **The user-scope `setup` and `index` skills no longer say the server runs in the
+  plugin directory.** Cursor started it in the home directory, so the reason a
+  relative path is refused now reads "outside the user's project". Hermes `0.1.15`,
+  Antigravity `0.2.6`.
 
 - **Each storage backend carries its own FTS tokenizer (#3018).** The
   tokenizer used to be one setting for the whole process: building a second
@@ -43,6 +63,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   switch, recreate the others with the new `search.tokenizer` in their config. `memtomem.storage.fts_tokenizer.set_tokenizer` and
   `get_tokenizer` are removed: pass `tokenizer=` to `tokenize_for_fts`, or call
   `set_fts_tokenizer` on the backend.
+- **Antigravity search, recall and remember bind to your repository first
+  (#3035).** agy starts the server outside the project, so these three skills
+  read and wrote user scope only, and an explicit `project_local` filter read
+  every project's memories. Their results also changed once handoff, brief or
+  update had bound the server. They now bind to the live Git root first, as
+  those three do, then read the repository's project tier alongside user scope
+  and save project facts to `project_local`. Outside a Git repository, or
+  without a registered tier, search and recall say so and pass `scope="user"`,
+  and remember saves only cross-project preferences and refuses a project
+  fact or a project-only destination. remember never passes `file`. Hermes
+  keeps its user-scope skills. Antigravity `0.2.6`.
 
 - **The Hermes plugin's server no longer loads a `.env` file at startup.**
   Its bundled server entry sets `PYTHON_DOTENV_DISABLED=1`, because Hermes's plugin
@@ -58,6 +89,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`MemtomemBaseStore` keeps names apart that differ only in case (#3034).**
+  Its record files were named in base64url, which is case-sensitive, so on
+  macOS (APFS as macOS formats it) and Windows two names whose encodings
+  differed only in case shared one path: `aaa` and `aaG` became `YWFh` and
+  `YWFH`. A second such key failed to `put`, and a second such namespace was
+  missing from `list_namespaces` and from `search` without a query, though
+  `get` still found it. Records are now named `s` + lowercase base32, under
+  `<root>/records.v2/`, and a name too long for a file becomes `h` + the
+  base32 SHA-256 of the value. Opening a store moves records of the old layout
+  there once, under a lock file (`<root>/.layout.lock`), byte for byte, and
+  brings back records the old layout had hidden. `record_path` returns the
+  new path. Under a `project_shared` root the move shows up in git as renames.
+  Stop processes running an older memtomem on the same store before you
+  upgrade: a record they write later in the old layout is moved on the next
+  open when its key is new, and when the key already has a record, the newer
+  layout's copy is kept and theirs goes to `<root>/quarantine.v2/` to be
+  resolved by hand. Files the migration cannot read, and symlinked legacy
+  records, stay where they are.
 - **The Web UI's health watchdog Run Now button keeps its translated label after
   a run.** It restored the English text `Run Now` when the run finished, so a
   Korean UI showed 지금 실행 until the first click and English afterwards.

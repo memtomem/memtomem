@@ -20,12 +20,16 @@ classifiers = [
 ]
 readme = "README.md"
 requires-python = ">=3.12"
-# The real floor is the first memtomem release that carries the ADR-0042 public
-# names (memtomem.runtime.files, MemtomemBaseStore.write_record, matches_filter,
-# instance-local FTS tokenizer). The workspace member is still 0.7.3, so the
-# floor is written at the workspace's version to keep the lock resolvable, and
-# ``langchain_memtomem/__init__.py`` refuses to import against a memtomem that
-# lacks the names. The release PR sets the floor to the release that has them.
+# The memtomem bound is a compatibility floor, not a version pin: a core version
+# bump must not move it unless the package starts needing a newer name. The true
+# floor is the first release carrying the ADR-0042 public names
+# (memtomem.runtime.files with norm_path, MemtomemBaseStore.write_record,
+# matches_filter, the instance-local FTS tokenizer), i.e. the release after
+# 0.7.3. It stays at 0.7.3 until the workspace core is that release, because CI
+# installs this wheel beside the checkout's own core wheel and a higher floor
+# would not resolve against it (the lock is unaffected: the workspace source
+# replaces the specifier). Until then ``langchain_memtomem/__init__.py`` refuses
+# to import against a memtomem that lacks the names.
 dependencies = [
     "langgraph>=1.0,<2",
     "memtomem>=0.7.3,<0.8",

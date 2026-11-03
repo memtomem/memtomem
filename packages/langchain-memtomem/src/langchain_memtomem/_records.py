@@ -1,13 +1,12 @@
 """The store's JSON records: the source of truth for every item.
 
-ADR-0042 §A4 had the store compose over ``MemtomemBaseStore`` for its records.
-That store lays its files out with base64url, which is case-sensitive, so on
-a filesystem that folds case (NTFS, APFS by default) two namespaces or keys
-whose encodings differ only in case share one path (measured: ``("aaa",)`` and
-``("aaG",)`` encode to ``YWFh`` and ``YWFH``). This module keeps the same
-record shape under a case-safe layout (``_protocol.encode_segment``) and
-reuses memtomem's public pieces for everything that must stay identical:
-the redaction guard, the atomic write and the ``filter`` predicate.
+The store keeps its own records rather than composing over
+``MemtomemBaseStore`` as ADR-0042 §A4 first planned (see the ADR's amendment
+and ``docs/protocol.md`` §Layout). Their paths are ``_protocol``'s case-safe
+layout, whose names this store decodes back into ``(namespace, key)``. This
+module keeps ``MemtomemBaseStore``'s record shape and reuses memtomem's public
+pieces for everything that must stay identical: the redaction guard, the
+atomic write and the ``filter`` predicate.
 """
 
 from __future__ import annotations

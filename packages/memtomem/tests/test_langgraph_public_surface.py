@@ -6,6 +6,7 @@ two cannot drift, and pins the contract the new name is documented with.
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from memtomem.integrations.langgraph_store import (
     render_projection,
 )
 from memtomem.runtime import files
+from memtomem.storage import sqlite_helpers
 
 
 @pytest.mark.parametrize(
@@ -31,26 +33,35 @@ from memtomem.runtime import files
         "한글 세그먼트",
         "with/slash",
         "trailing-dash-",
-        "x" * 300,
+        "x" * 146,  # the longest ASCII value that is not hashed
         "\xff\xfe",
     ],
 )
 def test_segment_codec_round_trips(value: str) -> None:
     token = encode_segment(value)
-    assert token and all(c.isalnum() or c in "_-" for c in token)
-    assert "=" not in token
+    assert token.startswith("s") and token == token.lower()
+    assert all(c.isascii() and c.isalnum() for c in token)
     assert decode_segment(token) == value
 
 
 @pytest.mark.parametrize(
     ("value", "token"),
-    [("\u083e", "4KC-"), ("\u083f", "4KC_"), ("\U0001f642", "8J-Zgg")],
+    [("f", "smy"), ("aaa", "smfqwc"), ("aaG", "smfquo"), ("\U0001f642", "s6cpztaq")],
 )
-def test_segment_codec_covers_trailing_dash_underscore_and_non_bmp(value: str, token: str) -> None:
-    # Tokens ending in the two non-alphanumeric alphabet characters, and a
-    # 4-byte UTF-8 sequence, all round-trip. Pairs measured, not derived.
+def test_segment_codec_tokens(value: str, token: str) -> None:
+    # Pairs measured, not derived. ``aaa``/``aaG`` were ``YWFh``/``YWFH`` in
+    # base64url, one path on a case-folding filesystem (#3034).
     assert encode_segment(value) == token
     assert decode_segment(token) == value
+
+
+def test_a_value_too_long_for_a_file_name_is_hashed_and_does_not_decode() -> None:
+    token = encode_segment("x" * 147)
+    assert token.startswith("h") and len(token) == 53 and token == token.lower()
+    assert encode_segment("x" * 147) == token
+    assert encode_segment("x" * 148) != token
+    with pytest.raises(ValueError):
+        decode_segment(token)
 
 
 def test_encode_segment_is_the_private_encoder() -> None:
@@ -68,26 +79,24 @@ def test_encode_segment_refuses_unsafe_values(bad: str) -> None:
     "token",
     [
         "",  # empty
-        "!!!!",  # not URL-safe; a naive decoder returns ""
-        "Zh",  # non-canonical padding bits; naive decoding gives "f"
-        "Lg",  # decodes to ".", which the encoder refuses
-        "AA",  # decodes to NUL
-        "Li4",  # decodes to ".."
-        "a=",  # padding is never emitted
-        "_w",  # 0xFF alone: not UTF-8
+        "s",  # marker without a body; decodes to ""
+        "!!!!",  # not in the alphabet
+        "Zg",  # the legacy base64url token for "f"
+        "SMY",  # upper case is never emitted
+        "smz",  # non-canonical trailing bits; naive decoding gives "f"
+        "sa",  # a base32 length no input produces
+        "sfy",  # decodes to ".", which the encoder refuses
+        "saa",  # decodes to NUL
+        "sfyxa",  # decodes to ".."
+        "s74",  # 0xFF alone: not UTF-8
+        "smy=",  # padding is never emitted
+        # The unhashed form of a value the encoder hashes.
+        "s" + base64.b32encode(b"x" * 147).decode("ascii").rstrip("=").lower(),
     ],
 )
 def test_decode_segment_refuses_tokens_the_encoder_never_emits(token: str) -> None:
     with pytest.raises(ValueError):
         decode_segment(token)
-
-
-def test_decode_segment_accepts_only_canonical_tokens() -> None:
-    # "f" encodes to "Zg"; "Zh" differs only in the unused low bits.
-    assert encode_segment("f") == "Zg"
-    assert decode_segment("Zg") == "f"
-    with pytest.raises(ValueError):
-        decode_segment("Zh")
 
 
 def test_render_projection_matches_put_semantics() -> None:
@@ -148,11 +157,13 @@ def test_runtime_files_reexports_the_same_objects() -> None:
     assert files.atomic_write_text is _atomic.atomic_write_text
     assert files.memory_lock_path is _atomic.memory_lock_path
     assert files.CRUD_SIDECAR_LOCK_BUDGET_S == _atomic._CRUD_SIDECAR_LOCK_BUDGET_S
+    assert files.norm_path is sqlite_helpers.norm_path
     assert set(files.__all__) == {
         "CRUD_SIDECAR_LOCK_BUDGET_S",
         "async_file_lock",
         "atomic_write_text",
         "memory_lock_path",
+        "norm_path",
     }
 
 

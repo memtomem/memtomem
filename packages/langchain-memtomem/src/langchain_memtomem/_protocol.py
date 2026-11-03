@@ -52,9 +52,11 @@ def encode_segment(value: str) -> str:
     """``s`` + lowercase RFC 4648 base32 of ``value``'s UTF-8, without padding.
 
     The alphabet is ``a-z2-7``: one case only, so two different segments never
-    share a path on a filesystem that folds case. base64url (the codec
-    ``MemtomemBaseStore`` uses) is case-sensitive and does (``aaa`` →
-    ``YWFh``, ``aaG`` → ``YWFH``).
+    share a path on a filesystem that folds case; base64url is case-sensitive
+    and does (``aaa`` → ``YWFh``, ``aaG`` → ``YWFH``). ``MemtomemBaseStore``
+    uses the same alphabet but replaces a token too long for a file name with
+    a hash of the value. This codec refuses such a value instead, because
+    :func:`item_from_path` reads identity back from the path.
     """
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValueError("a namespace segment or key is a non-empty string without NUL")

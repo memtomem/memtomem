@@ -15,7 +15,8 @@ opencode_version = "0.3.26"
 kimi_version = "0.2.24"
 hermes_version = "0.1.15"
 hermes_memory_version = "0.1.2"
-antigravity_version = "0.2.5"
+antigravity_version = "0.2.6"
+cursor_version = "0.1.0"
 
 [opencode]
 package = "opencode-memtomem"
@@ -37,6 +38,8 @@ codex_name = "memtomem-search"
 title = "Search memories"
 description = "Search indexed memtomem memories by topic. Use for past decisions, notes, findings, or project context that may exist in the memory index."
 tools = ["mem_search"]
+# Hermes ships the user render; Antigravity binds to the project first (the bound render).
+scopes = ["project", "user", "bound"]
 effect = "read"
 implicit = true
 argument_hint = "[query]"
@@ -52,6 +55,8 @@ codex_name = "memtomem-recall"
 title = "Recall memories"
 description = "Recall memtomem memories created in a date range. Use for recent memories or requests scoped by day, week, month, source, or namespace."
 tools = ["mem_recall"]
+# Hermes ships the user render; Antigravity binds to the project first (the bound render).
+scopes = ["project", "user", "bound"]
 effect = "read"
 implicit = true
 argument_hint = "[date range]"
@@ -79,6 +84,8 @@ codex_name = "memtomem-remember"
 title = "Remember information"
 description = "Save an explicit user-requested memory with memtomem. Use only when the user clearly asks to remember, record, or persist information for later."
 tools = ["mem_add", "mem_status"]
+# Hermes ships the user render; Antigravity binds to the project first (the bound render).
+scopes = ["project", "user", "bound"]
 effect = "write"
 implicit = false
 argument_hint = "[content to remember]"
@@ -123,7 +130,7 @@ description = "Explicitly save or resume a compact project handoff shared by Cla
 tools = ["mem_status", "mem_recall", "mem_add"]
 claude_host_tools = ["Bash(git rev-parse:*)", "Bash(git status:*)"]
 # Needs a project root, which a user-scope host does not have.
-scopes = ["project"]
+scopes = ["project", "bound"]
 effect = "write"
 implicit = false
 argument_hint = "[save|resume|s|r] [target runtime or handoff id]"
@@ -140,7 +147,7 @@ description = "Compile a read-only task briefing from project memories, recent u
 tools = ["mem_status", "mem_search", "mem_recall"]
 claude_host_tools = ["Bash(git rev-parse:*)", "Bash(git status:*)"]
 # Needs a project root, which a user-scope host does not have.
-scopes = ["project"]
+scopes = ["project", "bound"]
 effect = "read"
 implicit = false
 argument_hint = "[task or topic]"
@@ -164,7 +171,7 @@ claude_host_tools = [
   "Bash(git --no-pager --no-replace-objects log --no-ext-diff --no-show-signature --encoding=UTF-8 -n 10 --format=%H%n%B --)",
 ]
 # Needs a project root, which a user-scope host does not have.
-scopes = ["project"]
+scopes = ["project", "bound"]
 effect = "write"
 implicit = false
 argument_hint = "[full|topic|f|t] [focus]"

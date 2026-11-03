@@ -45,16 +45,21 @@ UTF-8, without padding. The record tree and the projection tree mirror each
 other. `records/` is outside the index's `memory_dirs`, so its `.json` files
 are never indexed; `projections/` is the index's only memory dir.
 
-**Why base32, not memtomem's base64url segment codec.** The paths have to be
-distinct on a filesystem that folds case — NTFS, and APFS as macOS formats it
-by default. base64url is case-sensitive: `aaa` and `aaG` encode to `YWFh`
-and `YWFH`, which name one directory there. Measured on macOS (APFS, case
-folding): with `MemtomemBaseStore`'s layout, two keys of one namespace whose
-encodings differ only in case cannot both be written (the second `put` raises
-`StoreRecordError`), and of two such namespaces the second drops out of
-`list_namespaces` and `search`. An earlier version of this store, which reused
-that layout, lost the second namespace's projection on reopen on macOS and,
-on Windows, returned one namespace's item from the other's query search. The
+**Why base32, and why a codec of its own.** The paths have to be distinct on
+a filesystem that folds case — NTFS, and APFS as macOS formats it by default.
+base64url is case-sensitive: `aaa` and `aaG` encode to `YWFh` and `YWFH`,
+which name one directory there. `MemtomemBaseStore` laid its records out in
+base64url until memtomem#3034; measured on macOS (APFS, case folding) with
+that layout, two keys of one namespace whose encodings differed only in case
+could not both be written (the second `put` raised `StoreRecordError`), and
+of two such namespaces the second dropped out of `list_namespaces` and
+`search`. An earlier version of this store, which reused that layout, lost
+the second namespace's projection on reopen on macOS and, on Windows,
+returned one namespace's item from the other's query search.
+`MemtomemBaseStore` now uses the same `s` + lowercase base32 alphabet, but
+replaces a token too long for a file name with a hash of the value. This
+store reads identity back from its paths (`item_from_path`), so every token
+must decode, and a value that would not fit is refused instead. The
 lowercase base32 alphabet (`a-z2-7`) has one case, so no fold can join two
 tokens. The marker `s` keeps a raw segment from equalling an encoded one and
 keeps a token off every Windows reserved device name (`CON`, `COM2`, `LPT3`,

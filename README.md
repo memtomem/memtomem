@@ -81,13 +81,13 @@ The last command should return the sentence you just added. `mm add` writes to y
 
 ### 4. Connect your coding agent
 
-Install the plugin for your tool — [Claude Code](packages/memtomem-claude-plugin/), [Codex CLI](plugins/memtomem/), [OpenCode](packages/opencode-memtomem/), [Kimi Code](packages/memtomem-kimi-skills/), or [Antigravity](packages/memtomem-antigravity-plugin/) — then, in the project you work on, register the memory tier the session loop writes to:
+Install the plugin for your tool — [Claude Code](packages/memtomem-claude-plugin/), [Codex CLI](plugins/memtomem/), [OpenCode](packages/opencode-memtomem/), [Kimi Code](packages/memtomem-kimi-skills/), [Antigravity](packages/memtomem-antigravity-plugin/), or [Cursor](packages/memtomem-cursor-plugin/) — then, in the project you work on, register the memory tier the session loop writes to:
 
 ```bash
 cd <your-project> && mm mem init --scope project_local
 ```
 
-Start a new session and run the brief workflow: `/memtomem:brief` in Claude Code, and the name each other host uses is in the [Project workflows](docs/guides/project-workflows.md) guide. The [Claude Code & Codex CLI plugin quickstart](docs/guides/plugin-quickstart.md) ([한국어](docs/guides/vibe-coding-getting-started-ko.md)) walks through plugin installation and a first memory save-and-search round trip in 10–15 minutes. For Cursor, Windsurf, Claude Desktop, Gemini CLI, and other MCP clients, see [MCP Client Setup](docs/guides/mcp-clients.md); from any client, asking it to call the `mem_status` tool confirms the connection.
+Start a new session and run the brief workflow: `/memtomem:brief` in Claude Code, and the name each other host uses is in the [Project workflows](docs/guides/project-workflows.md) guide. The [Claude Code & Codex CLI plugin quickstart](docs/guides/plugin-quickstart.md) ([한국어](docs/guides/vibe-coding-getting-started-ko.md)) walks through plugin installation and a first memory save-and-search round trip in 10–15 minutes. For Windsurf, Claude Desktop, Gemini CLI, other MCP clients, and registering Cursor by hand instead of through the plugin, see [MCP Client Setup](docs/guides/mcp-clients.md); from any client, asking it to call the `mem_status` tool confirms the connection.
 
 <a id="4-web-ui-optional"></a>
 ### 5. Open the Web UI (optional)
@@ -153,6 +153,7 @@ These are **experimental** — their behaviour, output, or format can still chan
 - **LLM-written output** — anything memtomem's configured LLM (`MEMTOMEM_LLM__ENABLED=true`) writes: LLM auto-tagging and entity extraction, `strategy="llm"` query expansion, LLM consolidation and policy summaries, session auto-summaries, source summaries (`indexing.auto_summarize`), and contextual chunk enrichment (`indexing.enrich_chunk_context`). The rule-based modes beside them are supported.
 - **Claude projects scan** in the Context Gateway (`MEMTOMEM_CONTEXT_GATEWAY__EXPERIMENTAL_CLAUDE_PROJECTS_SCAN`).
 - **Antigravity CLI plugin** ([`packages/memtomem-antigravity-plugin/`](packages/memtomem-antigravity-plugin/)).
+- **Cursor plugin** ([`packages/memtomem-cursor-plugin/`](packages/memtomem-cursor-plugin/)).
 
 ## Works with
 
@@ -165,6 +166,7 @@ These are **experimental** — their behaviour, output, or format can still chan
 | [**opencode-memtomem**](packages/opencode-memtomem/) | Exact-pinned MCP server, commands, and read skills for OpenCode | handoff · brief · update |
 | [**Kimi Code skills**](packages/memtomem-kimi-skills/) | Skill bundle for Kimi Code (not a plugin) | handoff · brief · update |
 | [**Antigravity CLI plugin**](packages/memtomem-antigravity-plugin/) | Exact-pinned MCP server and skills for `agy` — [experimental](#stability) | handoff · brief · update |
+| [**Cursor plugin**](packages/memtomem-cursor-plugin/) | Exact-pinned MCP server and skills for Cursor — [experimental](#stability) | handoff · brief · update |
 | [**Hermes Agent plugin**](packages/memtomem-hermes-plugin/) | Exact-pinned MCP server and the search, recall, status, remember, index, and setup skills | — (needs a project root) |
 | [**Hermes memory provider**](packages/memtomem-hermes-memory/) | Recall-only provider that adds relevant notes to each Hermes turn | — |
 | [**memtomem-stm**](https://github.com/memtomem/memtomem-stm) | STM proxy: proactive memory surfacing via tool interception | — |
