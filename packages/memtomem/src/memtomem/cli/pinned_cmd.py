@@ -62,7 +62,10 @@ async def _list_blocks(agent_id: str | None, as_json: bool) -> None:
             click.echo(json.dumps([block.as_dict() for block in blocks], ensure_ascii=False))
             return
         if not blocks:
-            click.echo("No Pinned Context blocks found.")
+            click.echo(
+                "No Pinned Context blocks found. "
+                'Use `mm pinned set <block_id> --content "..."` to create one.'
+            )
         for block in blocks:
             target = f" agent={block.agent_id}" if block.agent_id else ""
             click.echo(f"{block.block_id} [{block.scope}{target}] {block.description}")
