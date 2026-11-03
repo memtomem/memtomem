@@ -9,7 +9,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - **Public names for a package that stores beside memtomem (ADR-0042).**
   `memtomem.integrations.langgraph_store` exports `encode_segment`,
-  `decode_segment` (which refuses any token the encoder would not emit),
+  `decode_segment` (which refuses any token the encoder would not emit,
+  including a hashed one; see the #3034 entry under Fixed for the encoding),
   `render_projection`, `matches_filter` (the `search(filter=...)` predicate), and a record contract on `MemtomemBaseStore`:
   `record_path`, `read_record` and `write_record`, the last taking an optional
   caller-owned `generation` integer that is persisted beside the value.
@@ -58,6 +59,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`MemtomemBaseStore` keeps names apart that differ only in case (#3034).**
+  Its record files were named in base64url, which is case-sensitive, so on
+  macOS (APFS as macOS formats it) and Windows two names whose encodings
+  differed only in case shared one path: `aaa` and `aaG` became `YWFh` and
+  `YWFH`. A second such key failed to `put`, and a second such namespace was
+  missing from `list_namespaces` and from `search` without a query, though
+  `get` still found it. Records are now named `s` + lowercase base32, under
+  `<root>/records.v2/`, and a name too long for a file becomes `h` + the
+  base32 SHA-256 of the value. Opening a store moves records of the old layout
+  there once, under a lock file (`<root>/.layout.lock`), byte for byte, and
+  brings back records the old layout had hidden. `record_path` returns the
+  new path. Under a `project_shared` root the move shows up in git as renames.
+  Stop processes running an older memtomem on the same store before you
+  upgrade: a record they write later in the old layout is moved on the next
+  open when its key is new, and when the key already has a record, the newer
+  layout's copy is kept and theirs goes to `<root>/quarantine.v2/` to be
+  resolved by hand. Files the migration cannot read, and symlinked legacy
+  records, stay where they are.
 - **The Web UI's health watchdog Run Now button keeps its translated label after
   a run.** It restored the English text `Run Now` when the run finished, so a
   Korean UI showed 지금 실행 until the first click and English afterwards.
