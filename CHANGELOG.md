@@ -29,6 +29,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Release SBOMs no longer claim dependencies that only an inactive extra declares
+  (#3066).** uv's CycloneDX export writes `A -> T` whenever A lists T under some extra and T
+  is installed for another reason, even when nothing requests that extra: the core SBOM
+  said `memtomem -> uvicorn` and `uvicorn -> python-dotenv, pyyaml`. `tools/release_sbom.py`
+  now reads the tag's `uv.lock` (`--lock`), works out which extras the graph activates, drops
+  each edge declared only under an inactive one and prints it in the job log, and refuses an
+  edge the lock does not declare at all. The component list does not change, and the
+  all-extras SBOM keeps every edge. SBOMs already attached to a release keep the false edges,
+  and a backfill of such a tag now stops at "refusing to overwrite differing release asset".
 - **A rebuilt index dates each chunk by its entry, not by the rebuild
   (#3051, ADR-0043 §5).** Re-indexing after the database is gone set every
   chunk's `created_at` to the re-index time, although each entry's

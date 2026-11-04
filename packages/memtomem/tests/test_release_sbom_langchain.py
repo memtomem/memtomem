@@ -22,6 +22,7 @@ import pytest
 import yaml
 
 from .test_release_preflight import _single_command_argv
+from .test_release_sbom import _write_lock
 
 _ROOT = Path(__file__).resolve().parents[3]
 _WORKFLOW = "release-langchain-sbom.yml"
@@ -190,17 +191,50 @@ def test_output_is_reproducible_across_runs(tmp_path: Path) -> None:
     for index, payload in enumerate((first, second)):
         raw, out = tmp_path / f"raw-{index}.json", tmp_path / f"out-{index}.json"
         raw.write_text(json.dumps(payload), encoding="utf-8")
-        rs.normalize_validate_langchain(raw=raw, out=out, version="0.1.0", core_version="0.7.4")
+        rs.normalize_validate_langchain(
+            raw=raw,
+            out=out,
+            version="0.1.0",
+            core_version="0.7.4",
+            lock=_write_lock(tmp_path / "uv.lock", payload),
+        )
         outputs.append(out.read_bytes())
     assert outputs[0] == outputs[1]
     written = json.loads(outputs[0])
     assert "serialNumber" not in written and "timestamp" not in written["metadata"]
 
 
+def test_the_roots_required_edges_are_checked_after_the_drop(tmp_path: Path) -> None:
+    """A lock that puts langgraph under an inactive extra of the root loses the root's edge."""
+    payload = _payload()
+    payload["dependencies"].append({"ref": "memtomem-4@0.7.4", "dependsOn": ["langgraph-3@1.2.14"]})
+    lock = _write_lock(tmp_path / "uv.lock", payload)
+    text = lock.read_text(encoding="utf-8")
+    root = '[[package]]\nname = "langchain-memtomem"\nversion = "0.1.0"\n'
+    declared = 'dependencies = [{ name = "langgraph" }, { name = "memtomem" }, ]\n'
+    assert root + declared in text
+    lock.write_text(
+        text.replace(
+            root + declared,
+            root + 'dependencies = [{ name = "memtomem" }]\n'
+            '[package.optional-dependencies]\ngraph = [{ name = "langgraph" }]\n',
+        ),
+        encoding="utf-8",
+    )
+    raw = tmp_path / "raw.json"
+    raw.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(rs.SbomError, match="root must depend on memtomem and langgraph"):
+        rs.normalize_validate_langchain(
+            raw=raw, out=tmp_path / "out.json", version="0.1.0", core_version="0.7.4", lock=lock
+        )
+
+
 def test_the_cli_reports_a_refusal_without_writing(tmp_path: Path, capsys) -> None:
     raw, out = tmp_path / "raw.json", tmp_path / "out.json"
     raw.write_text(json.dumps(_payload(core="0.7.5")), encoding="utf-8")
+    lock = _write_lock(tmp_path / "uv.lock", _payload(core="0.7.5"))
     argv = ["langchain", "--raw", str(raw), "--out", str(out), "--version", "0.1.0"]
+    argv += ["--lock", str(lock)]
     assert rs.main([*argv, "--core-version", "0.7.4"]) == 1
     assert "SBOM validation failed" in capsys.readouterr().err
     assert not out.exists()
@@ -366,7 +400,8 @@ _EXPECTED = {
                     ' --raw "$RUNNER_TEMP/langchain-memtomem.raw.json"'
                     f' --out "$RUNNER_TEMP/langchain-memtomem-{_VERSION}.cdx.json"'
                     f' --version "{_VERSION}"'
-                    ' --core-version "${{ steps.contract.outputs.core }}"',
+                    ' --core-version "${{ steps.contract.outputs.core }}"'
+                    " --lock release/uv.lock",
                 },
                 {
                     "name": "Write the release notes",
@@ -427,6 +462,7 @@ def test_the_pinned_commands_parse_with_the_tools_own_parsers(
         ),
         "version": "${{ steps.contract.outputs.version }}",
         "core_version": "${{ steps.contract.outputs.core }}",
+        "lock": Path("release/uv.lock"),
     }
 
 
@@ -589,4 +625,5 @@ def test_the_workflow_export_of_this_checkout_passes_the_validator(tmp_path: Pat
         out=tmp_path / "out.json",
         version=package,
         core_version=rp.project_version(_ROOT),
+        lock=_ROOT / "uv.lock",
     )
