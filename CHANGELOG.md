@@ -18,6 +18,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   content opens with its own `## ` heading drops the header, and that entry is
   still dated by the edit (#3051, ADR-0043 §5).
 
+### Added
+
+- **`langchain-memtomem` releases get a GitHub Release with a CycloneDX SBOM** (#3057).
+  A production `langchain-v*` tag now creates its GitHub Release, never marked Latest, and
+  attaches `langchain-memtomem-<version>.cdx.json`: the graph `uv.lock` held at the tag,
+  with `memtomem` as the workspace version. Its release preflight also refuses a `uv.lock`
+  whose workspace `memtomem` differs from the manifest. `release-langchain-sbom.yml` can be
+  run from `main` to backfill a tag released before it existed.
+
 ### Fixed
 
 - **A rebuilt index dates each chunk by its entry, not by the rebuild

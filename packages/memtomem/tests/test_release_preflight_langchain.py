@@ -40,6 +40,10 @@ rp = _load_tool()
 _DEPS = '"langgraph>=1.0,<2",\n    "memtomem>=0.7.4,<0.8",'
 
 
+def _core_row(version: str, source: str = '{ editable = "packages/memtomem" }') -> str:
+    return f'[[package]]\nname = "memtomem"\nversion = "{version}"\nsource = {source}\n'
+
+
 def _repo(
     tmp_path: Path,
     *,
@@ -49,6 +53,7 @@ def _repo(
     lock: str | None = "0.1.0",
     changelog: str = "## [Unreleased]\n\n## [0.1.0] — 2026-11-04\n\n- first\n",
     deps: str = _DEPS,
+    core_rows: list[str] | None = None,
 ) -> Path:
     core_dir = tmp_path / "packages" / "memtomem"
     core_dir.mkdir(parents=True)
@@ -66,10 +71,11 @@ def _repo(
         f'"""doc"""\n\n{runtime}', encoding="utf-8"
     )
     (package / "CHANGELOG.md").write_text(f"# Changelog\n\n{changelog}", encoding="utf-8")
-    rows = [
-        '[[package]]\nname = "memtomem"\nversion = "' + core + '"\n'
-        'source = { editable = "packages/memtomem" }\n'
-    ]
+    rows = (
+        [_core_row(core)]
+        if core_rows is None
+        else [row.replace("{core}", core) for row in core_rows]
+    )
     if lock is not None:
         rows.append(
             '[[package]]\nname = "langchain-memtomem"\nversion = "' + lock + '"\n'
@@ -112,8 +118,34 @@ def test_other_tags_are_refused(tag: str) -> None:
 
 def test_contract_accepts_a_consistent_package(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    assert rp.validate_langchain_contract("langchain-v0.1.0", repo) == ("0.1.0", "0.7.4")
-    assert rp.validate_langchain_contract("test-langchain-v0.1.0a1", repo) == ("0.1.0", "0.7.4")
+    expected = ("0.1.0", "0.7.4", "0.8", "0.7.4")
+    assert rp.validate_langchain_contract("langchain-v0.1.0", repo) == expected
+    assert rp.validate_langchain_contract("test-langchain-v0.1.0a1", repo) == expected
+
+
+def test_contract_accepts_a_core_bumped_but_not_yet_tagged(tmp_path: Path) -> None:
+    """Only the floor has to be on PyPI; the workspace core may be ahead of it."""
+    repo = _repo(tmp_path, core="0.7.5")
+    contract = rp.validate_langchain_contract("langchain-v0.1.0", repo)
+    assert (contract.floor, contract.core) == ("0.7.4", "0.7.5")
+
+
+@pytest.mark.parametrize(
+    "core_rows",
+    [
+        [],
+        [_core_row("0.7.3")],
+        [_core_row("{core}"), _core_row("{core}")],
+        [_core_row("{core}", source='{ registry = "https://pypi.org/simple" }')],
+    ],
+    ids=["missing", "stale", "twice", "registry"],
+)
+def test_contract_refuses_a_lock_whose_core_is_not_the_workspace_manifest(
+    tmp_path: Path, core_rows: list[str]
+) -> None:
+    # The SBOM names memtomem at the contract's ``core``; the lock is what it is read from.
+    with pytest.raises(rp.ReleaseCheckError, match="uv.lock|editable memtomem"):
+        rp.validate_langchain_contract("langchain-v0.1.0", _repo(tmp_path, core_rows=core_rows))
 
 
 @pytest.mark.parametrize(
@@ -180,6 +212,74 @@ def test_the_checkout_keeps_a_floor_its_own_core_satisfies() -> None:
     floor, upper = rp.langchain_core_bounds(_ROOT)
     core = rp.project_version(_ROOT)
     assert rp._version_tuple(floor) <= rp._version_tuple(core) < rp._version_tuple(upper)
+
+
+# --- release notes -----------------------------------------------------------
+
+_TWO_RELEASES = (
+    "## [Unreleased]\n\n- not yet\n\n"
+    "## [0.1.1] — 2026-11-20\n\n### Fixed\n\n- a fix\n  over two lines\n\n"
+    "## [0.1.0] — 2026-11-04\n\n### Added\n\n- first\n"
+)
+
+
+def test_notes_carry_the_sbom_preamble_and_only_this_versions_entry(tmp_path: Path) -> None:
+    repo = _repo(
+        tmp_path,
+        version="0.1.1",
+        runtime='__version__ = "0.1.1"\n',
+        lock="0.1.1",
+        core="0.7.5",
+        changelog=_TWO_RELEASES,
+    )
+    notes = rp.langchain_release_notes("langchain-v0.1.1", repo)
+    preamble, entry = notes.split("\n\n### ", 1)
+    assert "https://pypi.org/project/langchain-memtomem/0.1.1/" in preamble
+    assert "`langchain-memtomem-0.1.1.cdx.json`" in preamble
+    assert "`memtomem>=0.7.4,<0.8`" in preamble
+    assert "version 0.7.5, with no PyPI purl" in preamble
+    assert "### " + entry == "### Fixed\n\n- a fix\n  over two lines\n"
+
+
+def test_notes_end_at_the_last_entry(tmp_path: Path) -> None:
+    notes = rp.langchain_release_notes("langchain-v0.1.0", _repo(tmp_path))
+    assert notes.endswith("PyPI purl.\n\n- first\n")
+
+
+@pytest.mark.parametrize(
+    ("tag", "changelog", "message"),
+    [
+        ("test-langchain-v0.1.0a1", None, "production tags only"),
+        ("langchain-v0.1.0", "## [0.1.0] — 2026-11-04\n\n## [0.0.9] — 2026-11-01\n", "empty"),
+        ("langchain-v0.1.0", "## [0.1.0] — 2026-11-04\n", "empty"),
+        ("langchain-v0.1.0", "## [0.1.0]\n\n- first\n", "YYYY-MM-DD"),
+    ],
+)
+def test_notes_are_refused_without_a_production_entry(
+    tmp_path: Path, tag: str, changelog: str | None, message: str
+) -> None:
+    repo = _repo(tmp_path) if changelog is None else _repo(tmp_path, changelog=changelog)
+    with pytest.raises(rp.ReleaseCheckError, match=message):
+        rp.langchain_release_notes(tag, repo)
+
+
+def test_notes_cli_writes_the_body(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    out = tmp_path / "notes.md"
+    argv = ["langchain-notes", "--tag", "langchain-v0.1.0", "--repo-root", str(repo)]
+    assert rp.main([*argv, "--out", str(out)]) == 0
+    assert out.read_text(encoding="utf-8") == rp.langchain_release_notes("langchain-v0.1.0", repo)
+
+
+def test_contract_cli_writes_the_core_it_validated(tmp_path: Path) -> None:
+    output = tmp_path / "github-output"
+    argv = ["langchain-contract", "--tag", "langchain-v0.1.0", "--repo-root"]
+    assert rp.main([*argv, str(_repo(tmp_path, core="0.7.6")), "--github-output", str(output)]) == 0
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "version=0.1.0",
+        "floor=0.7.4",
+        "core=0.7.6",
+    ]
 
 
 # --- PyPI --------------------------------------------------------------------
@@ -531,8 +631,17 @@ def _assert_langchain_workflow(document: dict) -> None:
     assert set(document) == {"name", True, "env", "jobs"}  # PyYAML reads ``on`` as True
     assert set(document["env"]) == {"UV_VERSION"}
     jobs = document["jobs"]
-    assert set(jobs) == {"preflight", "publish"}
+    assert set(jobs) == {"preflight", "publish", "sbom"}
     preflight, publish = jobs["preflight"], jobs["publish"]
+    # The only job with a write token, after the upload and never for a TestPyPI dry run.
+    assert jobs["sbom"] == {
+        "name": "Publish the production SBOM",
+        "needs": "publish",
+        "if": "${{ !startsWith(github.ref_name, 'test-') }}",
+        "permissions": {"contents": "write"},
+        "uses": "./.github/workflows/release-langchain-sbom.yml",
+        "with": {"release_tag": "${{ github.ref_name }}"},
+    }
     assert preflight.get("permissions") == {"actions": "read", "contents": "read"}
     assert publish.get("permissions") == {"id-token": "write"}
     assert publish.get("needs") == "preflight"
@@ -698,6 +807,26 @@ def _chained_gate(document: dict) -> None:
     step["run"] = step["run"] + " || true"
 
 
+def _sbom_for_dry_runs(document: dict) -> None:
+    del document["jobs"]["sbom"]["if"]
+
+
+def _sbom_before_the_upload(document: dict) -> None:
+    document["jobs"]["sbom"]["needs"] = "preflight"
+
+
+def _sbom_with_an_oidc_token(document: dict) -> None:
+    document["jobs"]["sbom"]["permissions"]["id-token"] = "write"
+
+
+def _sbom_from_the_core_workflow(document: dict) -> None:
+    document["jobs"]["sbom"]["uses"] = "./.github/workflows/release-sbom.yml"
+
+
+def _write_token_on_publish(document: dict) -> None:
+    document["jobs"]["publish"]["permissions"]["contents"] = "write"
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -714,6 +843,11 @@ def _chained_gate(document: dict) -> None:
         _rebuild_after_validation,
         _gate_in_another_directory,
         _job_level_shell_default,
+        _sbom_for_dry_runs,
+        _sbom_before_the_upload,
+        _sbom_with_an_oidc_token,
+        _sbom_from_the_core_workflow,
+        _write_token_on_publish,
     ],
 )
 def test_the_workflow_guard_refuses_a_disabled_gate(mutate) -> None:

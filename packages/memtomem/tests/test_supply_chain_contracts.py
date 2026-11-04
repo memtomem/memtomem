@@ -89,7 +89,13 @@ def test_every_external_workflow_action_is_immutable() -> None:
 
 def test_uv_toolchain_pin_matches_ci_release_and_sbom_workflows() -> None:
     versions: dict[str, str] = {}
-    for name in ("ci.yml", "release.yml", "release-langchain.yml", "release-sbom.yml"):
+    for name in (
+        "ci.yml",
+        "release.yml",
+        "release-langchain.yml",
+        "release-sbom.yml",
+        "release-langchain-sbom.yml",
+    ):
         text = (_ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
         matches = re.findall(r'^\s*UV_VERSION:\s*"([^"]+)"\s*$', text, re.MULTILINE)
         assert len(matches) == 1, f"{name} must declare one UV_VERSION"
