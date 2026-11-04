@@ -31,6 +31,7 @@ from memtomem.config import TargetScope, classify_scope
 from memtomem.constants import InvalidNameError, validate_writable_namespace
 from memtomem.errors import ConfigError
 from memtomem.models import stored_namespace
+from memtomem.storage.sqlite_helpers import resolve_path
 
 
 logger = logging.getLogger(__name__)
@@ -356,7 +357,7 @@ def day_file_declaration(path: Path) -> tuple[str | None, bool]:
     one namespace and index another.
     """
     try:
-        name = path.resolve().name
+        name = resolve_path(path).name
     except OSError:
         name = path.name
     return decode_day_file_namespace(name), _DAY_FILE_RE.fullmatch(name) is not None
