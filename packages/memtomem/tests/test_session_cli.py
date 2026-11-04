@@ -102,6 +102,32 @@ class TestSessionListJson:
         assert data == {"sessions": [], "count": 0}
 
 
+class TestSessionListEmptyText:
+    """The plain empty message names the filters that matched nothing (#2850)."""
+
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            ([], "No sessions found. Start one with `mm session start`."),
+            (["--agent-id", "planner"], "No sessions found for --agent-id 'planner'."),
+            (["--since", "2026-10-01"], "No sessions found since 2026-10-01."),
+            (
+                ["--agent-id", "planner", "--since", "2026-10-01"],
+                "No sessions found for --agent-id 'planner' since 2026-10-01.",
+            ),
+        ],
+        ids=["no-filter", "agent-id", "since", "both"],
+    )
+    def test_empty_message_names_filters(self, runner, monkeypatch, args, expected):
+        comp = _mock_components(sessions=[])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["session", "list", *args])
+
+        assert result.exit_code == 0, result.output
+        assert result.output == expected + "\n"
+
+
 class TestSessionEventsJson:
     def test_happy_path(self, runner, monkeypatch):
         comp = _mock_components(
