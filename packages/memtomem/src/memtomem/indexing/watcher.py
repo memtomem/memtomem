@@ -90,6 +90,46 @@ def _held_probe(path: Path) -> tuple[str, bool]:
     return source_state(path), is_link
 
 
+def _start_held_probe(path: Path) -> asyncio.Future[tuple[str, bool]]:
+    """Run :func:`_held_probe` on its own daemon thread; the future gets its outcome.
+
+    Not the default executor: a probe stalled on an unresponsive mount would
+    outlive its timeout there, and ``asyncio.run`` and interpreter exit both
+    join executor threads, so one held path could keep the process from
+    exiting (#2908). A daemon thread is abandoned at exit instead. Raises
+    ``RuntimeError`` when the thread cannot start.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[tuple[str, bool]] = loop.create_future()
+
+    def settle(setter: Callable[..., None], value: object) -> None:
+        if not future.done():
+            setter(value)
+
+    def deliver(setter: Callable[..., None], value: object) -> None:
+        try:
+            loop.call_soon_threadsafe(settle, setter, value)
+        except RuntimeError:
+            pass  # The loop that asked has closed.
+
+    def run() -> None:
+        try:
+            result = _held_probe(path)
+        except Exception as exc:
+            deliver(future.set_exception, exc)
+            return
+        deliver(future.set_result, result)
+
+    thread = threading.Thread(
+        target=contextvars.copy_context().run,
+        args=(run,),
+        name="memtomem-held-probe",
+        daemon=True,
+    )
+    thread.start()
+    return future
+
+
 def effective_watcher_backend(config: IndexingConfig) -> str:
     """Return the concrete watchdog backend selected for this runtime."""
     if config.watcher_backend == "auto":
@@ -232,7 +272,7 @@ class FileWatcher:
         # stalled on a mount outlives the task, and even the event loop, that
         # started it, and a new start must not add another behind it.
         self._relink_scan_thread: threading.Thread | None = None
-        self._stalled_probes: set[asyncio.Task[tuple[str, bool]]] = set()
+        self._stalled_probes: set[asyncio.Future[tuple[str, bool]]] = set()
         self._held_cursor = 0
         self._recheck_wakeup = asyncio.Event()
         self._journal_failures = 0
@@ -498,6 +538,15 @@ class FileWatcher:
             return
         self._relink_scan_thread = thread
 
+    def _forget_probe(self, probe: asyncio.Future[tuple[str, bool]]) -> None:
+        self._stalled_probes.discard(probe)
+        # A probe that fails after its wait timed out has no awaiter left:
+        # ``shield`` drops its own callback when the outer wait is cancelled
+        # while the probe is pending. Retrieve the exception here, or asyncio
+        # reports it as never retrieved when the future is collected.
+        if not probe.cancelled():
+            probe.exception()
+
     async def _recheck_held_loop(self) -> None:
         from memtomem.storage.orphan_detect import RetainRule
 
@@ -556,9 +605,9 @@ class FileWatcher:
                             stalled = True
                             break
                         processed += 1
-                        probe = asyncio.create_task(asyncio.to_thread(_held_probe, path))
+                        probe = _start_held_probe(path)
                         self._stalled_probes.add(probe)
-                        probe.add_done_callback(self._stalled_probes.discard)
+                        probe.add_done_callback(self._forget_probe)
                         try:
                             state, is_link = await asyncio.wait_for(
                                 asyncio.shield(probe), timeout=_HELD_PROBE_TIMEOUT_S
