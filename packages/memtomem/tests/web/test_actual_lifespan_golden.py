@@ -14,6 +14,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+import memtomem
+
 pytestmark = pytest.mark.browser
 
 
@@ -25,6 +27,12 @@ def _free_port() -> int:
 
 @pytest.fixture
 def actual_web_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    """Start ``mm init`` and ``mm web`` on the suite's interpreter from a temp project.
+
+    The package pytest imported goes first on the child's ``PYTHONPATH``, so a
+    relative entry inherited from the caller cannot resolve against the temp
+    project and pick up another checkout's ``memtomem``.
+    """
     home = tmp_path / "home"
     runtime = tmp_path / "runtime"
     temp_dir = tmp_path / "tmp"
@@ -46,6 +54,10 @@ def actual_web_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
             "MEMTOMEM_WEB__CSRF_ENFORCE": "1",
             "MEMTOMEM_STORAGE__SQLITE_PATH": str(home / ".memtomem" / "golden.db"),
         }
+    )
+    package_root = str(Path(memtomem.__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(
+        [package_root, *filter(None, [os.environ.get("PYTHONPATH")])]
     )
     cli = [sys.executable, "-c", "from memtomem.cli import cli; cli()"]
     subprocess.run(
