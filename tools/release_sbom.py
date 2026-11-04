@@ -178,9 +178,14 @@ def reconcile_edges(
         return {target for x in extras for target, _ in table.get(x, [])}
 
     dropped: list[tuple[str, str]] = []
+    rows_seen: set[str] = set()
     for row in dependencies:
         if not isinstance(row, dict) or row.get("ref") not in names:
             raise SbomError(f"SBOM dependency row names no component: {row!r}")
+        # One row per component: the root check reads the first, a reader may take any.
+        if row["ref"] in rows_seen:
+            raise SbomError(f"SBOM has more than one dependency row for {row['ref']}")
+        rows_seen.add(row["ref"])
         source = names[row["ref"]]
         targets = row.get("dependsOn", [])
         if not isinstance(targets, list):

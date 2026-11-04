@@ -247,6 +247,33 @@ def test_a_dangling_edge_is_refused() -> None:
         _reconcile(sbom, _lock(_pkg("app", ["lib"]), _pkg("lib")))
 
 
+@pytest.mark.parametrize("source", ["app", "lib"])
+def test_a_second_dependency_row_for_one_component_is_refused(source: str) -> None:
+    sbom = _sbom("app", {"app": ["lib"], "lib": ["idna"]})
+    sbom["dependencies"].append({"ref": f"{source}-ref@1", "dependsOn": []})
+    lock = _lock(_pkg("app", ["lib"]), _pkg("lib", ["idna"]), _pkg("idna"))
+    with pytest.raises(rs.SbomError, match=f"more than one dependency row for {source}-ref@1"):
+        _reconcile(sbom, lock)
+
+
+def test_a_root_row_repeated_without_its_required_edge_is_refused(tmp_path: Path) -> None:
+    """The root check reads the first row; a later one must not drop langgraph unseen."""
+    payload = json.loads((_FIXTURES / "langchain.raw.json").read_text(encoding="utf-8"))
+    root = payload["metadata"]["component"]["bom-ref"]
+    row = next(r for r in payload["dependencies"] if r["ref"] == root)
+    names = {c["bom-ref"]: c["name"] for c in payload["components"]}
+    without = [ref for ref in row["dependsOn"] if names[ref] != "langgraph"]
+    assert len(without) == len(row["dependsOn"]) - 1
+    payload["dependencies"].append({"ref": root, "dependsOn": without})
+    raw = tmp_path / "raw.json"
+    raw.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(rs.SbomError, match="more than one dependency row"):
+        rs.normalize_validate_langchain(
+            raw=raw, out=tmp_path / "out.json", version="0.1.0", core_version="0.7.4", lock=_LOCK
+        )
+    assert not (tmp_path / "out.json").exists()
+
+
 @pytest.mark.parametrize("argv_tail", [["langchain"], []])
 def test_both_invocations_require_the_lock(argv_tail: list[str]) -> None:
     langchain = ["--raw", "r", "--out", "o", "--version", "1", "--core-version", "1"]
