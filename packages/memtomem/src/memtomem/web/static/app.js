@@ -4015,6 +4015,10 @@ function clearDetail() {
 // ended when the selection changes, so a late response can never fill another
 // chunk's editor.
 let _sourceEditGen = 0;
+// The detail panel runs one save at a time. Its Save button is shared by every
+// selection, so a second save started while the first runs would leave the
+// first one's cleanup deciding the second one's controls.
+let _detailSaveInFlight = false;
 
 function _endSourceEdit() {
   _sourceEditGen += 1;
@@ -4022,7 +4026,7 @@ function _endSourceEdit() {
   const editor = qs('d-editor');
   if (editor) editor.readOnly = false;
   const saveBtn = qs('d-save-btn');
-  if (saveBtn) saveBtn.disabled = false;
+  if (saveBtn) saveBtn.disabled = _detailSaveInFlight;
 }
 
 async function _beginSourceEdit() {
@@ -4050,7 +4054,7 @@ async function _beginSourceEdit() {
   STATE.selectedOriginal = src.text;
   editor.value = src.text;
   editor.readOnly = false;
-  saveBtn.disabled = false;
+  saveBtn.disabled = _detailSaveInFlight;
   hide(qs('d-diff-btn'));
   _updateWordCount();
 }
@@ -4059,6 +4063,7 @@ async function _beginSourceEdit() {
 qs('d-save-btn').addEventListener('click', async () => {
   // Captured before the first await: the selection can change while the
   // save is in flight, and nothing after it may act on the new one.
+  if (_detailSaveInFlight) return;
   const chunkId = STATE.selectedChunkId;
   const session = STATE.sourceEdit;
   if (!chunkId || !session || session.chunkId !== chunkId || !session.hash) return;
@@ -4066,6 +4071,7 @@ qs('d-save-btn').addEventListener('click', async () => {
   const newContent = editor.value;
   const indexed = STATE.selectedIndexed;
   const btn = qs('d-save-btn');
+  _detailSaveInFlight = true;
   btnLoading(btn, true);
   // Read-only while the save is in flight: what is typed now would not be in
   // this save, and a successful save closes the panel it was typed into.
@@ -4099,6 +4105,7 @@ qs('d-save-btn').addEventListener('click', async () => {
       showToast(t('toast.save_failed', { error: err.message }), 'error');
     }
   } finally {
+    _detailSaveInFlight = false;
     btnLoading(btn, false);
     // Only this save's own session gets its editor back; another selection's
     // editor state belongs to that selection's session.

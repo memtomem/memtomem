@@ -261,5 +261,52 @@ describe('detail editor edits source text (#3071)', () => {
     expect(window.document.getElementById('d-save-btn').disabled).toBe(true);
     expect(window.document.getElementById('d-editor').readOnly).toBe(true);
   });
+
+  it('one detail save at a time: another chunk saves only after the first finishes', async () => {
+    let releaseA;
+    const gateA = new Promise((r) => { releaseA = r; });
+    let n = 0;
+    const { window, patches } = await boot({
+      sources: {
+        [A]: () => ok({ text: SOURCE_A, base_hash: HASH_A }),
+        [B]: () => ok({ text: 'B source', base_hash: 'b'.repeat(64) }),
+      },
+      patch: async () => {
+        n += 1;
+        if (n === 1) await gateA;
+        return { ok: false, status: 500, json: async () => ({ detail: 'boom' }) };
+      },
+    });
+    window.showDetail(result(A, 'A indexed'));
+    window._setDetailMode('edit');
+    await settle(window);
+    const save = window.document.getElementById('d-save-btn');
+    save.click();
+    await settle(window);
+
+    window.showDetail(result(B, 'B indexed'));
+    window._setDetailMode('edit');
+    await settle(window);
+    const editor = window.document.getElementById('d-editor');
+    expect(save.disabled).toBe(true);
+    // The handler refuses too, not just the disabled button: a disabled
+    // button never dispatches, so force one through.
+    save.disabled = false;
+    save.click();
+    await settle(window);
+    expect(patches).toHaveLength(1);  // B's save did not start
+    editor.value = 'B draft';
+
+    releaseA();
+    await settle(window);
+    // A's cleanup hands B its controls back without touching B's draft.
+    expect(save.disabled).toBe(false);
+    expect(editor.readOnly).toBe(false);
+    expect(editor.value).toBe('B draft');
+    save.click();
+    await settle(window);
+    expect(patches).toHaveLength(2);
+    expect(patches[1]).toEqual({ new_content: 'B draft', base_hash: 'b'.repeat(64) });
+  });
 });
 
