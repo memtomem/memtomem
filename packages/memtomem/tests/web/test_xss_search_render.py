@@ -129,6 +129,7 @@ def xss_dev_server() -> Iterator[str]:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait(timeout=5)
 
 
 XSS_PAYLOADS = [
