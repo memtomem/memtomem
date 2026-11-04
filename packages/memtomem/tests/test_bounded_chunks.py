@@ -1232,3 +1232,20 @@ def test_the_configuration_reserves_room_for_composing(tmp_path):
 
     # Accepted: past the reserve.
     build(body_plus_context + _COMPOSED_INPUT_RESERVE + 1)
+
+
+def test_every_bounded_piece_keeps_its_entry_time(bounded_config):
+    """ADR-0043 §5: a hard-budget split is still the entry it came from, so each
+    piece is dated by that entry's ``> created:`` line."""
+    from datetime import datetime, timezone
+
+    written = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    source = Chunk(
+        content="word " * 4000,
+        metadata=ChunkMetadata(source_file=Path("note.md"), entry_created_at=written),
+    )
+
+    chunks = bound_chunks([source], bounded_config)
+
+    assert len(chunks) > 1
+    assert {c.metadata.entry_created_at for c in chunks} == {written}

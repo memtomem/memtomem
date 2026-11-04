@@ -168,9 +168,15 @@ deployment's tenant and source authority; a file name cannot establish it.
 
 The chunker gives a chunk built from an entry with a parseable `> created:` line that time
 as `created_at`. A chunk that merges entries takes the earliest; chunks split from one
-entry inherit it; an entry without the line keeps the index time. The constructors that
-build fresh chunks today — `_merge_pair` and `_add_overlap` in `indexing/engine.py`, and
-hard-budget splitting in `chunking/bounded.py` — carry it through.
+entry inherit it; an entry without the line keeps the index time. An entry whose content
+opens with its own `## ` heading has its header written above that heading, where it leads
+no section of the entry; its tags already go unapplied (#2762), and its time survives only
+when chunk merging happens to join the header's preamble to the entry.
+Fixing that placement is #2762's, not this ADR's. The time travels as
+`ChunkMetadata.entry_created_at`, not on `Chunk`: `_add_overlap` and hard-budget splitting
+in `chunking/bounded.py` rebuild `Chunk` objects but carry metadata through
+`dataclasses.replace`, `_merge_pair` takes the earlier of its two, and `chunk_content`
+copies the value onto `Chunk.created_at` once, at the end.
 
 SQLite's update path does not write `created_at`, so a chunk whose id is reused keeps its
 stored value. But editing an entry's body changes its hash and gives it a new id, so this
