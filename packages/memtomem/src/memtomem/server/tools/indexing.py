@@ -165,6 +165,19 @@ async def mem_index(
             "kept their stored namespace; current path rules would assign differently. "
             "Apply the rules with `mm index --reassign-namespaces <path>`."
         )
+    if stats.namespaces_restored_from_name:
+        # Hand-built like the advisory above (ADR-0043).
+        result += (
+            f"\n- Namespaces from file names: {stats.namespaces_restored_from_name} file(s) "
+            "took their namespace from their day-file name."
+        )
+    if stats.day_file_names_undecoded:
+        result += (
+            f"\n- Namespaces not restored: {stats.day_file_names_undecoded} day file(s) are "
+            "named for a namespace that could not be read from the name, and were indexed "
+            "into the rules' or session's namespace. Put one back with "
+            "`mm index --force --namespace <namespace> <file>`."
+        )
     if stats.chunks_missing_vectors:
         # Hand-built for the same reason as the advisory above. The remedy
         # names the CLI because a re-embed of a whole tree is a long,

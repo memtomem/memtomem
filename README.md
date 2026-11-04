@@ -43,7 +43,7 @@ saved 2 items · commit-derived: 1 · session-derived: 1
 
 ## Why memtomem?
 
-- **Your files stay yours.** Memories are plain `.md` files you can read, edit, and version. The search index is rebuilt from them; namespaces, later tag edits and working state live only in the database ([what a rebuild restores](docs/guides/reference.md#what-a-rebuild-restores)).
+- **Your files stay yours.** Memories are plain `.md` files you can read, edit, and version. The search index is rebuilt from them, day-file namespaces included; tag edits and working state live only in the database ([what a rebuild restores](docs/guides/reference.md#what-a-rebuild-restores)).
 - **Explicit by default.** Memory operations run on your CLI or MCP calls (`mm add`, `mem_add`, `mem_index`). Optional client hooks are separate, removable integrations, not a hidden runtime default.
 - **One store, many tools.** Claude Code, Codex CLI, OpenCode, Kimi Code, and Antigravity share one local store, and any MCP client can search it. [memtomem-stm](https://github.com/memtomem/memtomem-stm) is a separate, optional proxy that surfaces memories proactively.
 
@@ -136,7 +136,7 @@ claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- u
 
 | Your memory, your files | Operate it | Plug it in |
 |---|---|---|
-| Markdown is the source of truth; the search index is rebuilt from it (namespaces and other database-only state are not) | [Web UI](docs/guides/reference/operations.md) for search, sources, tags, timeline, and dedup (`mm web`) | Nine core MCP tools, with `mem_do` routing every other action so agents load a small tool surface |
+| Markdown is the source of truth; the search index is rebuilt from it (database-only state such as tag edits is not) | [Web UI](docs/guides/reference/operations.md) for search, sources, tags, timeline, and dedup (`mm web`) | Nine core MCP tools, with `mem_do` routing every other action so agents load a small tool surface |
 | Hybrid search: BM25 keyword + dense vector + RRF fusion in one query | [Namespaces](docs/guides/reference/organization-maintenance.md), auto-derived from folder names and labelled from the Web UI | [Context Gateway](docs/guides/context-gateway.md): keep Skills, Commands, and Subagents in one Store and push them to your AI runtimes |
 | Semantic chunking: heading-aware Markdown, AST-based Python, tree-sitter JS/TS, structure-aware JSON/YAML/TOML | [Maintenance](docs/guides/reference/organization-maintenance.md): near-duplicate detection, time-based decay, TTL expiration, auto-tagging | [Pinned Context](docs/guides/pinned-context.md): small user/project/agent Markdown blocks composed ahead of retrieved results |
 | Incremental indexing: chunk-level SHA-256 diff, so only changed chunks are re-embedded | [Scheduled jobs](docs/guides/reference/automation.md) for compaction, decay, dead-link cleanup, and dedup scans | LangGraph `MemtomemBaseStore`, plus the [Hybrid Store](docs/guides/langgraph-hybrid-store.md) with SQLite persistence and BM25/dense/RRF retrieval |

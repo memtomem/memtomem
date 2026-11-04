@@ -7468,6 +7468,8 @@ function indexAdvisoryToast(result) {
   const preserved = Number(result && result.namespaces_preserved_against_rules) || 0;
   const reassigned = Number(result && result.namespaces_reassigned) || 0;
   const missingVectors = Number(result && result.chunks_missing_vectors) || 0;
+  const undecoded = Number(result && result.day_file_names_undecoded) || 0;
+  const restored = Number(result && result.namespaces_restored_from_name) || 0;
   if (preserved > 0) {
     showToast(t('index.result.namespace_preserved', { count: preserved }), 'warning');
   }
@@ -7480,7 +7482,16 @@ function indexAdvisoryToast(result) {
   if (missingVectors > 0) {
     showToast(t('index.result.missing_vectors', { count: missingVectors }), 'warning');
   }
-  return preserved > 0 || reassigned > 0 || missingVectors > 0;
+  // ADR-0043: namespaces a rebuild read back from day-file names, and the day
+  // files whose name did not give theirs back, so a rebuild indexed them into
+  // the rules' or session's namespace.
+  if (restored > 0) {
+    showToast(t('index.result.namespaces_restored_from_name', { count: restored }), 'info');
+  }
+  if (undecoded > 0) {
+    showToast(t('index.result.day_file_names_undecoded', { count: undecoded }), 'warning');
+  }
+  return preserved > 0 || reassigned > 0 || missingVectors > 0 || restored > 0 || undecoded > 0;
 }
 
 // The ``/api/reindex`` shape is per-root, so its consumers have to add the
@@ -7500,6 +7511,14 @@ function indexAdvisoryToastForRoots(results) {
     ),
     chunks_missing_vectors: roots.reduce(
       (sum, r) => sum + (Number(r.chunks_missing_vectors) || 0),
+      0,
+    ),
+    namespaces_restored_from_name: roots.reduce(
+      (sum, r) => sum + (Number(r.namespaces_restored_from_name) || 0),
+      0,
+    ),
+    day_file_names_undecoded: roots.reduce(
+      (sum, r) => sum + (Number(r.day_file_names_undecoded) || 0),
       0,
     ),
   });
@@ -7564,6 +7583,14 @@ function _renderIndexResult(result, { registerAsSource, path }) {
     const missingVectors = Number(result.chunks_missing_vectors) || 0;
     if (missingVectors > 0) {
       lines.push(t('index.result.missing_vectors', { count: missingVectors }));
+    }
+    const restored = Number(result.namespaces_restored_from_name) || 0;
+    if (restored > 0) {
+      lines.push(t('index.result.namespaces_restored_from_name', { count: restored }));
+    }
+    const undecoded = Number(result.day_file_names_undecoded) || 0;
+    if (undecoded > 0) {
+      lines.push(t('index.result.day_file_names_undecoded', { count: undecoded }));
     }
     qs('r-namespace-advisory').textContent = lines.join('\n');
     nsAdvisoryRow.hidden = lines.length === 0;

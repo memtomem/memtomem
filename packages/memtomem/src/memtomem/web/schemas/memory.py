@@ -190,6 +190,10 @@ class IndexResponse(BaseModel):
     namespaces_preserved_against_rules: int = 0
     namespaces_reassigned: int = 0
     namespace_moves: list[dict[str, object]] = []
+    # ADR-0043: files that took their namespace from their day-file name,
+    # and day-file-shaped names that did not decode. Zero on the common path.
+    namespaces_restored_from_name: int = 0
+    day_file_names_undecoded: int = 0
     # #2115: chunks the run skipped as unchanged that have no dense vector —
     # the state a plain re-index leaves after an embedding reset, where every
     # surviving content hash matches and nothing is re-embedded. Stays zero on

@@ -217,6 +217,8 @@ async def reindex_all(
             "chunks_missing_vectors": stats.chunks_missing_vectors,
             "namespaces_reassigned": stats.namespaces_reassigned,
             "namespace_moves": list(stats.namespace_moves),
+            "namespaces_restored_from_name": stats.namespaces_restored_from_name,
+            "day_file_names_undecoded": stats.day_file_names_undecoded,
         }
         if stats.blocked_files:
             entry["blocked_paths"] = list(stats.blocked_paths)
@@ -464,6 +466,8 @@ async def trigger_index(
         chunks_missing_vectors=stats.chunks_missing_vectors,
         namespaces_reassigned=stats.namespaces_reassigned,
         namespace_moves=list(stats.namespace_moves),
+        namespaces_restored_from_name=stats.namespaces_restored_from_name,
+        day_file_names_undecoded=stats.day_file_names_undecoded,
     )
 
 

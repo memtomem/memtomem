@@ -4,7 +4,7 @@
 
 > 🧪 **Beta** — the nine core MCP tools, the `mm` CLI, and the format of your memory files and config files change only with an `Upgrading` note in the [CHANGELOG](https://github.com/memtomem/memtomem/blob/main/CHANGELOG.md), and behind a deprecation window where one is possible. Features marked **experimental** can change or go away without either — see [Stability](https://github.com/memtomem/memtomem#stability). Feedback and issue reports are especially welcome at [github.com/memtomem/memtomem/issues](https://github.com/memtomem/memtomem/issues).
 
-Long-term memory for AI coding agents, kept as Markdown you own. Core usage is hook-free by default: your `.md` files are the source of truth, the search index is rebuilt from them (namespaces, later tag edits and working state live only in the database), and memory changes happen only when you or your agent explicitly call memtomem. Optional client hooks are separate, visible integrations.
+Long-term memory for AI coding agents, kept as Markdown you own. Core usage is hook-free by default: your `.md` files are the source of truth, the search index is rebuilt from them (tag edits and working state live only in the database), and memory changes happen only when you or your agent explicitly call memtomem. Optional client hooks are separate, visible integrations.
 
 ## The session loop
 
@@ -63,7 +63,7 @@ To run the session loop, install the plugin for your coding agent ([Claude Code]
 
 | Your memory, your files | Operate it | Plug it in |
 |---|---|---|
-| Markdown is the source of truth; the search index is rebuilt from it (namespaces and other database-only state are not) | Web UI for search, sources, tags, timeline, and dedup (`mm web`; `--dev` adds the maintainer pages) | Nine core MCP tools, with `mem_do` routing every other action so agents load a small tool surface |
+| Markdown is the source of truth; the search index is rebuilt from it (database-only state such as tag edits is not) | Web UI for search, sources, tags, timeline, and dedup (`mm web`; `--dev` adds the maintainer pages) | Nine core MCP tools, with `mem_do` routing every other action so agents load a small tool surface |
 | Hybrid search: BM25 (FTS5) + dense vectors (sqlite-vec) merged by Reciprocal Rank Fusion | Namespaces, auto-derived from folder names and labelled from the Web UI | [Context Gateway](https://github.com/memtomem/memtomem/blob/main/docs/guides/context-gateway.md): keep Skills, Commands, and Subagents in one Store and push them to your AI runtimes |
 | Semantic chunking: heading-aware Markdown, AST-based Python, tree-sitter JS/TS, structure-aware JSON/YAML/TOML | Maintenance: near-duplicate detection with merge, time-based decay, TTL expiration, auto-tagging | [Pinned Context](https://github.com/memtomem/memtomem/blob/main/docs/guides/pinned-context.md): small user/project/agent Markdown blocks composed ahead of retrieved memory |
 | Incremental indexing: chunk-level SHA-256 diff, so only changed chunks are re-embedded | Scheduled jobs for compaction, decay, dead-link cleanup, and dedup scans | LangGraph `MemtomemBaseStore`, plus the [Hybrid Store](https://github.com/memtomem/memtomem/blob/main/docs/guides/langgraph-hybrid-store.md) with SQLite persistence and BM25/dense/RRF retrieval |
