@@ -3995,6 +3995,13 @@ function _dropResult(chunkId) {
   STATE.lastResults = STATE.lastResults.filter(r => String(r.chunk.id) !== String(chunkId));
   const item = document.querySelector(`.result-item[data-id="${CSS.escape(String(chunkId))}"]`);
   if (item) item.remove();
+  // A dropped row must leave the bulk selection too: Select-all only visits
+  // visible checkboxes, so a hidden id would stay selected and a bulk delete
+  // would remove a chunk nobody can see. Ids are stored as given and as
+  // checkbox dataset strings, so drop both spellings.
+  STATE.selectedIds.delete(chunkId);
+  STATE.selectedIds.delete(String(chunkId));
+  updateBulkToolbar(document.querySelectorAll('.result-checkbox').length);
 }
 
 function clearDetail() {

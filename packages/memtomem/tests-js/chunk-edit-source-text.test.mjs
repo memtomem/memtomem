@@ -358,3 +358,39 @@ describe('source-browser card editor (#3071)', () => {
   });
 });
 
+describe('a dropped result leaves the bulk selection (#3071)', () => {
+  it('bulk delete never reaches a saved chunk that is no longer listed', async () => {
+    const { window } = await boot({
+      sources: { [A]: () => ok({ text: SOURCE_A, base_hash: HASH_A }) },
+    });
+    const deletes = [];
+    const upstream = window.fetch;
+    window.fetch = async (input, opts) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (opts && opts.method === 'DELETE') { deletes.push(url); return ok({ deleted: 1 }); }
+      return upstream(input, opts);
+    };
+    window.showConfirm = async () => true;
+    window.renderResults([result(A, 'A indexed'), result(B, 'B indexed')], {});
+    const doc = window.document;
+    doc.querySelector(`.result-checkbox[data-id="${A}"]`).click();
+    expect(window.STATE.selectedIds.has(A)).toBe(true);
+
+    // Save A unchanged from the detail panel: its row is dropped.
+    window.showDetail(result(A, 'A indexed'));
+    window._setDetailMode('edit');
+    await settle(window);
+    doc.getElementById('d-save-btn').click();
+    await settle(window);
+    expect(doc.querySelector(`.result-item[data-id="${A}"]`)).toBe(null);
+
+    expect([...window.STATE.selectedIds]).toEqual([]);
+    const allCb = doc.getElementById('bulk-select-all');
+    allCb.checked = false;
+    allCb.dispatchEvent(new window.Event('change'));
+    doc.getElementById('bulk-delete-btn').click();
+    await settle(window);
+    expect(deletes).toEqual([]);
+  });
+});
+
