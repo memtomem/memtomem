@@ -6673,6 +6673,11 @@ function _startChunkEdit(card, chunk, sourcePath) {
       // ``saveChunkBody`` already showed a held re-index's warning (#2923).
       if (!resp.warning) showToast(t('toast.chunk_updated'), 'success');
       _markDataStale();
+      // Search still holds this chunk's pre-edit text, under an id the
+      // re-index can retire: drop that result, and close the detail panel on
+      // it unless a source edit (and its draft) is open there.
+      _dropResult(chunk.id);
+      if (String(STATE.selectedChunkId) === String(chunk.id) && !STATE.sourceEdit) clearDetail();
       // Refresh the browser to show updated content
       browseSource(sourcePath, card.closest('#chunks-browser-content')?.querySelectorAll('.chunk-card').length > 100 ? 500 : 100);
     } catch (err) {

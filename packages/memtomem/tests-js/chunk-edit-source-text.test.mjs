@@ -310,3 +310,51 @@ describe('detail editor edits source text (#3071)', () => {
   });
 });
 
+describe('source-browser card editor (#3071)', () => {
+  async function saveCard(window, chunkId, text) {
+    const card = window.document.createElement('div');
+    window.document.body.appendChild(card);
+    window._startChunkEdit(card, { id: chunkId, content: 'indexed' }, '/m/note.md');
+    await settle(window);
+    card.querySelector('.chunk-card-edit-area textarea').value = text;
+    card.querySelector('.chunk-card-edit-actions .btn-primary').click();
+    await settle(window);
+  }
+
+  it('saves the source text with its hash and drops the stale search result', async () => {
+    const { window, patches } = await boot({
+      sources: {
+        [A]: () => ok({ text: SOURCE_A, base_hash: HASH_A }),
+        [B]: () => ok({ text: 'B source', base_hash: 'b'.repeat(64) }),
+      },
+    });
+    window.renderResults([result(A, 'A indexed'), result(B, 'B indexed')], {});
+    window.showDetail(result(B, 'B indexed'));
+    window._setDetailMode('edit');
+    await settle(window);
+    window.document.getElementById('d-editor').value = 'B draft';
+
+    await saveCard(window, A, 'A edited');
+
+    expect(patches).toEqual([{ new_content: 'A edited', base_hash: HASH_A }]);
+    // Search no longer offers A's pre-edit text.
+    expect(window.STATE.lastResults.map((r) => r.chunk.id)).toEqual([B]);
+    expect(window.document.querySelector(`.result-item[data-id="${A}"]`)).toBe(null);
+    // B, open with a draft in the detail panel, is left alone.
+    expect(window.STATE.selectedChunkId).toBe(B);
+    expect(window.document.getElementById('d-editor').value).toBe('B draft');
+  });
+
+  it('closes the detail panel showing the saved chunk unless an edit is open there', async () => {
+    const { window } = await boot({
+      sources: { [A]: () => ok({ text: SOURCE_A, base_hash: HASH_A }) },
+    });
+    window.renderResults([result(A, 'A indexed')], {});
+    expect(window.STATE.selectedChunkId).toBe(A);  // auto-selected, view mode
+
+    await saveCard(window, A, 'A edited');
+
+    expect(window.STATE.selectedChunkId).toBe(null);
+  });
+});
+
