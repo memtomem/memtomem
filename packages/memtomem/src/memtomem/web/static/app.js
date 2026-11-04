@@ -37,6 +37,8 @@ const STATE = {
   // The selected chunk's indexed content (what View renders before an edit
   // session loads, and what the history panel keeps).
   selectedIndexed: '',
+  // The result the detail panel shows (set by showDetail, cleared by clearDetail).
+  selectedResult: null,
   // ``{chunkId, hash}`` once the selected chunk's source text is in the
   // editor; ``hash: null`` while it loads or after the base went stale.
   sourceEdit: null,
@@ -3233,7 +3235,6 @@ function _markDataStale() {
   STATE.homeStale = true;
 }
 
-// Sync result content in STATE.lastResults cache and DOM after edit
 qs('search-btn').addEventListener('click', doSearch);
 qs('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 qs('search-input').addEventListener('focus', () => renderHistoryDropdown());
@@ -3759,7 +3760,11 @@ function _syncResultTags(chunkId, newTags) {
   if (body) _attachResultTagRow(chunkId, [...newTags], body);
 }
 
-function renderResults(results, retrievalStats) {
+// ``keepDetail``: re-render after rows were removed, not for a new result set.
+// The detail panel (and any draft in it) is left as it is, no row is selected
+// in its place, and the remaining bulk selection survives.
+function renderResults(results, retrievalStats, { keepDetail = false } = {}) {
+  const keptSelection = keepDetail ? new Set(STATE.selectedIds) : null;
   STATE.lastResults = results;
   STATE.resultScoreViews = _buildScoreViews(results);
   let display = [...results];
@@ -3776,6 +3781,9 @@ function renderResults(results, retrievalStats) {
   _renderActiveFilters();
 
   if (!filtered.length) {
+    // Emptied, not only hidden: keyboard navigation and Select-all walk the
+    // rows in the DOM, and a hidden stale row would still be reachable.
+    list.innerHTML = '';
     hide(list);
     hide(qs('bulk-toolbar'));
     hide(qs('load-more-row'));
@@ -3784,7 +3792,7 @@ function renderResults(results, retrievalStats) {
       ? emptyState('🔍', 'Enter a query to search', '<kbd>/</kbd> focus · <kbd>j</kbd>/<kbd>k</kbd> navigate · <kbd>p</kbd> pin · <kbd>c</kbd> copy')
       : emptyState('○', 'No results found', 'Try different keywords or filters');
     _syncWelcomeVisibility();
-    clearDetail();
+    if (!keepDetail) clearDetail();
     return;
   }
   hide(empty);
@@ -3895,13 +3903,27 @@ function renderResults(results, retrievalStats) {
       groupEl.appendChild(groupItems);
       list.appendChild(groupEl);
     });
-    if (firstItem) { firstItem.classList.add('selected'); showDetail(firstResult); }
+    if (firstItem && !keepDetail) { firstItem.classList.add('selected'); showDetail(firstResult); }
   } else {
     filtered.forEach((r, i) => {
       const item = _buildResultItem(r);
       list.appendChild(item);
-      if (i === 0) { item.classList.add('selected'); showDetail(r); }
+      if (i === 0 && !keepDetail) { item.classList.add('selected'); showDetail(r); }
     });
+  }
+  if (keepDetail) {
+    list.querySelectorAll('.result-item').forEach(item => {
+      item.classList.toggle('selected', String(item.dataset.id) === String(STATE.selectedChunkId));
+    });
+    const boxes = list.querySelectorAll('.result-checkbox');
+    boxes.forEach(cb => {
+      const result = filtered.find(x => String(x.chunk.id) === String(cb.dataset.id));
+      if (result && (keptSelection.has(result.chunk.id) || keptSelection.has(cb.dataset.id))) {
+        cb.checked = true;
+        STATE.selectedIds.add(result.chunk.id);
+      }
+    });
+    updateBulkToolbar(boxes.length);
   }
 }
 
@@ -3913,6 +3935,9 @@ function showDetail(r) {
   STATE.selectedChunkId = r.chunk.id;
   STATE.selectedOriginal = r.chunk.content;
   STATE.selectedIndexed = r.chunk.content;
+  // Kept apart from STATE.lastResults, which a save can drop this row from
+  // while the panel (and a draft) stays open.
+  STATE.selectedResult = r;
   _endSourceEdit();
 
   const scoreView = _scoreViewForResult(r);
@@ -3991,17 +4016,22 @@ function showDetail(r) {
   }
 }
 
-function _dropResult(chunkId) {
-  STATE.lastResults = STATE.lastResults.filter(r => String(r.chunk.id) !== String(chunkId));
-  const item = document.querySelector(`.result-item[data-id="${CSS.escape(String(chunkId))}"]`);
-  if (item) item.remove();
+// After a save: the re-index can retire the chunk's id, and what the caches
+// hold for it is its pre-edit text.
+function _forgetSavedChunk(chunkId) {
+  // Prev/next within a source reads this list; it holds pre-save ids and text.
+  _sourceChunksCache = { file: null, chunks: [] };
   // A dropped row must leave the bulk selection too: Select-all only visits
   // visible checkboxes, so a hidden id would stay selected and a bulk delete
   // would remove a chunk nobody can see. Ids are stored as given and as
   // checkbox dataset strings, so drop both spellings.
   STATE.selectedIds.delete(chunkId);
   STATE.selectedIds.delete(String(chunkId));
-  updateBulkToolbar(document.querySelectorAll('.result-checkbox').length);
+  const kept = STATE.lastResults.filter(r => String(r.chunk.id) !== String(chunkId));
+  if (kept.length === STATE.lastResults.length) return;
+  // Re-rendered rather than the row removed, so totals, groups and the empty
+  // state follow; ``keepDetail`` leaves the panel and its draft alone.
+  renderResults(kept, STATE.lastRetrievalStats, { keepDetail: true });
 }
 
 function clearDetail() {
@@ -4010,6 +4040,7 @@ function clearDetail() {
   _setI18nLabel(
     qs('detail-empty').querySelector('p'), 'search.detail_empty', 'Select a result to view details');
   STATE.selectedChunkId = null;
+  STATE.selectedResult = null;
   _endSourceEdit();
 }
 
@@ -4100,8 +4131,11 @@ qs('d-save-btn').addEventListener('click', async () => {
     // reopened) while the save ran keeps its session and draft.
     _markDataStale();
     loadStats();
-    _dropResult(chunkId);
+    _forgetSavedChunk(chunkId);
     if (STATE.sourceEdit === session) clearDetail();
+    // The same chunk reopened while the save ran keeps its session; its
+    // History button now has the entry this save pushed.
+    else if (String(STATE.selectedChunkId) === String(chunkId)) _updateHistoryBtn(chunkId);
   } catch (err) {
     if (err.status === 409 && err.message === 'edit_base_mismatch') {
       // The source changed since it was loaded. Keep the draft, but stop
@@ -4124,8 +4158,12 @@ qs('d-save-btn').addEventListener('click', async () => {
 });
 
 qs('d-delete-btn').addEventListener('click', async () => {
-  if (!STATE.selectedChunkId) return;
-  const r = STATE.lastResults.find(x => String(x.chunk.id) === String(STATE.selectedChunkId));
+  // Captured before the dialog: a save finishing while it is open can drop
+  // this chunk's result and close the panel, and the delete must not then
+  // fall through to whatever (or nothing) is selected afterwards.
+  const chunkId = STATE.selectedChunkId;
+  if (!chunkId) return;
+  const r = STATE.selectedResult;
   const src = r ? r.chunk.source_file.split('/').pop() : '';
   const lines = r ? `lines ${r.chunk.start_line}–${r.chunk.end_line}` : '';
   const ok = await showConfirm({
@@ -4134,8 +4172,9 @@ qs('d-delete-btn').addEventListener('click', async () => {
     confirmText: t('common.delete'),
   });
   if (!ok) return;
+  if (String(STATE.selectedChunkId) !== String(chunkId)) return;
   try {
-    const resp = await api('DELETE', `/api/chunks/${STATE.selectedChunkId}`);
+    const resp = await api('DELETE', `/api/chunks/${chunkId}`);
     // Set when the delete is on disk but its source was held instead of
     // re-indexed (#2923); it replaces the plain success toast.
     if (resp && resp.warning) showToast(resp.warning, 'warning');
@@ -4346,14 +4385,18 @@ qs('bulk-select-all').addEventListener('change', () => {
 });
 
 qs('bulk-delete-btn').addEventListener('click', async () => {
-  const ids = [...STATE.selectedIds];
-  if (!ids.length) return;
+  const asked = [...STATE.selectedIds];
+  if (!asked.length) return;
   const ok = await showConfirm({
-    title: t('confirm.bulk_delete_title', { count: ids.length }),
-    message: t('confirm.bulk_delete_msg', { count: ids.length }),
+    title: t('confirm.bulk_delete_title', { count: asked.length }),
+    message: t('confirm.bulk_delete_msg', { count: asked.length }),
     confirmText: t('common.delete'),
   });
   if (!ok) return;
+  // Only what is still selected once the dialog closes: a save that finished
+  // meanwhile drops its chunk from the list and from the selection.
+  const ids = asked.filter(id => STATE.selectedIds.has(id));
+  if (!ids.length) return;
   const btn = qs('bulk-delete-btn');
   btnLoading(btn, true);
   let deleted = 0, failed = 0;
@@ -6683,7 +6726,7 @@ function _startChunkEdit(card, chunk, sourcePath) {
       // Search still holds this chunk's pre-edit text, under an id the
       // re-index can retire: drop that result, and close the detail panel on
       // it unless a source edit (and its draft) is open there.
-      _dropResult(chunk.id);
+      _forgetSavedChunk(chunk.id);
       if (String(STATE.selectedChunkId) === String(chunk.id) && !STATE.sourceEdit) clearDetail();
       // Refresh the browser to show updated content
       browseSource(sourcePath, card.closest('#chunks-browser-content')?.querySelectorAll('.chunk-card').length > 100 ? 500 : 100);

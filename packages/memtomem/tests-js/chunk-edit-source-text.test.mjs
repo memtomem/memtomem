@@ -394,3 +394,150 @@ describe('a dropped result leaves the bulk selection (#3071)', () => {
   });
 });
 
+describe('consumers of search-result state after a save (#3071)', () => {
+  // A deferred save, with DELETE calls and confirm dialogs recorded.
+  async function bootSweep({ confirmGate = null } = {}) {
+    let releasePatch;
+    const patchGate = new Promise((r) => { releasePatch = r; });
+    const env = await boot({
+      sources: {
+        [A]: () => ok({ text: SOURCE_A, base_hash: HASH_A }),
+        [B]: () => ok({ text: 'B source', base_hash: 'b'.repeat(64) }),
+      },
+      patch: async () => { await patchGate; return ok({ id: A }); },
+    });
+    const { window } = env;
+    const deletes = [];
+    const confirms = [];
+    const upstream = window.fetch;
+    window.fetch = async (input, opts) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (opts && opts.method === 'DELETE') { deletes.push(url); return ok({ deleted: 1 }); }
+      return upstream(input, opts);
+    };
+    window.showConfirm = async (o) => { confirms.push(o); return confirmGate ? confirmGate : true; };
+    return { ...env, deletes, confirms, releasePatch };
+  }
+
+  async function startSaveOfA(window) {
+    window.showDetail(result(A, 'A indexed'));
+    window._setDetailMode('edit');
+    await settle(window);
+    window.document.getElementById('d-save-btn').click();
+    await settle(window);
+  }
+
+  it('a bulk delete confirmed after a save dropped its chunk does not delete it', async () => {
+    let answer;
+    const confirmGate = new Promise((r) => { answer = r; });
+    const { window, deletes, releasePatch } = await bootSweep({ confirmGate });
+    window.renderResults([result(A, 'A indexed'), result(B, 'B indexed')], {});
+    await startSaveOfA(window);
+    const doc = window.document;
+    doc.querySelector(`.result-checkbox[data-id="${A}"]`).click();
+    doc.querySelector(`.result-checkbox[data-id="${B}"]`).click();
+    doc.getElementById('bulk-delete-btn').click();  // dialog open, ids captured
+    await settle(window);
+
+    releasePatch();  // the save drops A
+    await settle(window);
+    answer(true);
+    await settle(window);
+
+    expect(deletes).toEqual([`/api/chunks/${B}`]);
+  });
+
+  it('a detail delete confirmed after the save closed the panel sends nothing', async () => {
+    let answer;
+    const confirmGate = new Promise((r) => { answer = r; });
+    const { window, deletes, releasePatch } = await bootSweep({ confirmGate });
+    window.renderResults([result(A, 'A indexed')], {});
+    await startSaveOfA(window);
+    window.document.getElementById('d-delete-btn').click();
+    await settle(window);
+
+    releasePatch();  // the save closes the panel
+    await settle(window);
+    answer(true);
+    await settle(window);
+
+    expect(window.STATE.selectedChunkId).toBe(null);
+    expect(deletes).toEqual([]);
+  });
+
+  it('totals and the empty state follow the dropped row', async () => {
+    const { window, releasePatch } = await bootSweep();
+    window.renderResults([result(A, 'A indexed'), result(B, 'B indexed')], {});
+    const doc = window.document;
+    const total = () => doc.querySelector('.results-summary-total').textContent;
+    const before = total();
+    await startSaveOfA(window);
+    releasePatch();
+    await settle(window);
+    expect(total()).not.toBe(before);
+    expect(total()).toBe(window.t('search.results_total', { count: 1 }));
+
+    // Saving the last row leaves the empty state, not an empty list.
+    window.showDetail(result(B, 'B indexed'));
+    window._setDetailMode('edit');
+    await settle(window);
+    doc.getElementById('d-save-btn').click();
+    await settle(window);
+    expect(window.STATE.lastResults).toEqual([]);
+    expect(doc.getElementById('results-empty').hidden).toBe(false);
+  });
+
+  it('delete keeps its labels for a chunk whose row a card save dropped', async () => {
+    const { window } = await boot({
+      sources: { [A]: () => ok({ text: SOURCE_A, base_hash: HASH_A }) },
+    });
+    const confirms = [];
+    window.showConfirm = async (o) => { confirms.push(o); return false; };
+    window.renderResults([result(A, 'A indexed')], {});
+    window._setDetailMode('edit');  // a source edit (draft) open on A
+    await settle(window);
+    window.document.getElementById('d-editor').value = 'A draft';
+    const card = window.document.createElement('div');
+    window.document.body.appendChild(card);
+    window._startChunkEdit(card, { id: A, content: 'indexed' }, '/m/note.md');
+    await settle(window);
+    card.querySelector('.chunk-card-edit-area textarea').value = 'card edit';
+    card.querySelector('.chunk-card-edit-actions .btn-primary').click();
+    await settle(window);
+    expect(window.STATE.lastResults).toEqual([]);  // the row is gone
+    expect(window.STATE.selectedChunkId).toBe(A);  // the draft's panel is not
+
+    window.document.getElementById('d-delete-btn').click();
+    await settle(window);
+    expect(confirms).toHaveLength(1);
+    expect(confirms[0].message).toContain('note.md');
+    expect(confirms[0].message).toContain('lines 1–7');
+  });
+
+  it('prev/next re-reads a source after a save instead of its pre-save list', async () => {
+    const { window, releasePatch } = await bootSweep();
+    window.renderResults([result(A, 'A indexed')], {});
+    window.eval("_sourceChunksCache = { file: '/m/note.md', chunks: [{ id: 'old' }] };");
+    await startSaveOfA(window);
+    releasePatch();
+    await settle(window);
+    expect(window.eval('_sourceChunksCache.file')).toBe(null);
+  });
+
+  it('the same chunk reopened during its save gets its History button', async () => {
+    const { window, releasePatch } = await bootSweep();
+    window.renderResults([result(A, 'A indexed')], {});
+    await startSaveOfA(window);
+    window.showDetail(result(A, 'A indexed'));  // reopened: a new session
+    window._setDetailMode('edit');
+    await settle(window);
+    const historyBtn = window.document.getElementById('d-history-btn');
+    expect(historyBtn.hidden).toBe(true);
+
+    releasePatch();
+    await settle(window);
+    expect(window.STATE.selectedChunkId).toBe(A);
+    expect(historyBtn.hidden).toBe(false);
+  });
+});
+
