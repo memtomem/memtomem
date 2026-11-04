@@ -2198,6 +2198,22 @@ class TestHelpEpilog:
         )
         assert scoped_example in lines
 
+    def test_recall_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["recall", "--help"])
+        assert result.exit_code == 0
+        lines = [line.strip() for line in result.output.splitlines()]
+        assert "Examples:" in lines
+        assert "mm recall --since 2026-10 --tag-filter onboarding --limit 5" in lines
+        assert "mm recall --since 2026-10-01 --until 2026-10-23" in lines
+
+    def test_index_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["index", "--help"])
+        assert result.exit_code == 0
+        lines = [line.strip() for line in result.output.splitlines()]
+        assert "Examples:" in lines
+        assert "mm index ./notes --recursive" in lines
+        assert "mm index ./notes --force --namespace shared" in lines
+
     def test_epilog_examples_fit_an_80_column_terminal(self, runner: CliRunner) -> None:
         """Raw paragraphs are exempt from Click's wrapping, so width is on us.
 
@@ -2205,7 +2221,7 @@ class TestHelpEpilog:
         left for the terminal to soft-wrap, which breaks it mid-flag on screen.
         Nothing else in the help output can regress this, so pin it here.
         """
-        for command in ("search", "add"):
+        for command in ("search", "add", "recall", "index"):
             result = runner.invoke(cli, [command, "--help"])
             assert result.exit_code == 0
             examples = [

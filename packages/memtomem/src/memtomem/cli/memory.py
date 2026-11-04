@@ -524,7 +524,19 @@ async def _add(
                 click.echo(f"  Namespace: {effective_ns}")
 
 
-@click.command()
+# See the note on ``SEARCH_EPILOG`` in ``cli/search.py`` for why ``\b`` is
+# required here. A date-only ``--until`` includes that whole day (UTC), so the
+# second example covers October 1-23.
+RECALL_EPILOG = """\
+Examples:
+
+\b
+  mm recall --since 2026-10 --tag-filter onboarding --limit 5
+  mm recall --since 2026-10-01 --until 2026-10-23
+"""
+
+
+@click.command(epilog=RECALL_EPILOG)
 @click.option(
     "--since", default=None, help="Start date (YYYY, YYYY-MM, YYYY-MM-DD, or ISO datetime)"
 )
