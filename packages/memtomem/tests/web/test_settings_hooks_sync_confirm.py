@@ -30,7 +30,7 @@ import json
 
 import pytest
 
-from .conftest import install_default_stubs
+from .conftest import goto_after_i18n_init, install_default_stubs
 
 pytestmark = pytest.mark.browser
 
@@ -181,7 +181,9 @@ def test_hooks_sync_cancel_fires_no_host_write_post(page, mm_web_url: str) -> No
     # cold-mount ``out_of_sync`` state.
     get_state = _stub_settings_sync(page, _OUT_OF_SYNC_GET, post_handler=_post)
 
-    page.goto(mm_web_url)
+    # The dialog title is ``t('confirm.hooks_sync_title')`` at click time, so
+    # a click before the locale loads renders the raw key (#2845).
+    goto_after_i18n_init(page, mm_web_url, probe_key="confirm.hooks_sync_title", lang="en")
     _open_hooks_sync(page)
     assert get_state["get_count"] >= 1, "cold-mount GET must have fired"
 
