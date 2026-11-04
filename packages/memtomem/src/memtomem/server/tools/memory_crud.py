@@ -39,11 +39,26 @@ from memtomem.source_provenance import (
     StaleSourceProvenanceError,
 )
 from memtomem.tools.memory_writer import (
+    EditBaseMismatchError,
     RestoreOutcome,
     SourceChangedError,
     read_pre_image,
     restore_pre_image_quietly,
+    valid_base_hash,
 )
+
+
+def edit_base_mismatch_message(exc: EditBaseMismatchError) -> str:
+    """The refusal ``mem_edit`` returns: the span's source text and its hash."""
+    return (
+        "Error: edit_base_mismatch. This chunk's text is not its source text "
+        "(resolved wikilinks, merged sections or frontmatter differ), or the "
+        "source changed since it was read; editing it would rewrite lines it "
+        "does not show. Edit the source text below and call mem_edit again with "
+        f"base_hash={exc.body_hash}; new_content then replaces it as given.\n"
+        f"\n--- source text ---\n{exc.text}"
+    )
+
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -529,6 +544,11 @@ async def _mutate_file_and_reindex(
         await flag_untracked_write(app, provenance_session_id)
         return stats, None
     except Exception as exc:
+        if isinstance(exc, EditBaseMismatchError) and not mutation_completed:
+            # Refused inside the rewrite, before a byte was written and after
+            # every gate in front of it: hand back what the span holds, so one
+            # retry against the source text can succeed.
+            return None, edit_base_mismatch_message(exc)
         if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:
             # No byte was written. In particular, do not reindex here: doing
             # so could erase the stale row and bless an unrelated replacement.
@@ -1390,15 +1410,21 @@ async def mem_edit(
     new_content: str,
     force_unsafe: bool = False,
     confirm_project_shared: bool = False,
+    base_hash: str | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Edit an existing memory entry in its source markdown file.
 
-    ``new_content`` is treated as body-only: the heading line and the
-    section-leading ``> created:`` / ``> tags:`` blockquote header are
-    preserved automatically. To override the heading explicitly,
-    prefix ``new_content`` with ``## `` and the call reverts to a
-    full replacement of the chunk's line range.
+    Without ``base_hash``, ``new_content`` is treated as body-only: the
+    heading line and the section-leading ``> created:`` / ``> tags:``
+    blockquote header are preserved automatically. To override the heading
+    explicitly, prefix ``new_content`` with ``## `` and the call reverts to
+    a full replacement of the chunk's line range. That applies only where
+    the chunk's text is its source body; for a chunk whose text differs
+    from its source (resolved wikilinks, merged sections, frontmatter) the
+    edit is refused with ``edit_base_mismatch``, the source text and its
+    hash. Edit that text and send it back with ``base_hash``: it then
+    replaces the source text verbatim.
 
     Editing an agent consolidation summary keeps its originals covered: the
     re-index moves their ``consolidated_into`` edges to the summary's new
@@ -1432,12 +1458,17 @@ async def mem_edit(
             ``scope='project_shared'``. Replacing its body is a
             git-tracked write, so it takes the same explicit consent
             ``mem_delete`` takes to remove the very same chunk.
+        base_hash: The hash an ``edit_base_mismatch`` refusal returned with
+            the chunk's source text; ``new_content`` is then the edited
+            source text, written as given.
     """
     if not new_content.strip():
         return "Error: new_content cannot be empty."
+    if base_hash is not None and not valid_base_hash(base_hash):
+        return "Error: base_hash must be the 64-character hex hash an edit_base_mismatch returned."
 
     from memtomem import privacy
-    from memtomem.tools.memory_writer import replace_chunk_body
+    from memtomem.tools.memory_writer import IndexedBase, SourceBase, replace_chunk_body
 
     app = await _get_app_initialized(ctx)
     mismatch_msg = _check_embedding_mismatch(app)
@@ -1533,11 +1564,10 @@ async def mem_edit(
                 "chunks (git history is forever). Move the chunk to a different "
                 "scope first, or hand-edit the canonical file with explicit review."
             )
-        # ``replace_chunk_body`` preserves the heading + section-leading
-        # blockquote header (``> created:`` / ``> tags:``) so that callers
-        # supplying body-only ``new_content`` don't accidentally erase the
-        # metadata. Pass a content prefixed with ``## `` to override the
-        # heading explicitly and bypass preservation.
+        # Without ``base_hash`` the edit is of the indexed content, which
+        # ``replace_chunk_body`` accepts only where that content is the span's
+        # body (heading + blockquote header kept; ``## `` overrides them). A
+        # projection is refused with the source text and hash to edit instead.
         stats, mutate_err = await _mutate_file_and_reindex(
             app,
             meta.source_file,
@@ -1549,6 +1579,7 @@ async def mem_edit(
                 meta.start_line,
                 meta.end_line,
                 new_content,
+                base=SourceBase(base_hash) if base_hash is not None else IndexedBase(chunk.content),
                 expected_source_span_hash=meta.source_span_hash,
                 expected_identity=pre.identity,
             ),

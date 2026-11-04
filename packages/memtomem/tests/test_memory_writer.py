@@ -11,6 +11,7 @@ from datetime import datetime
 
 from memtomem.source_provenance import source_span_hash
 from memtomem.tools.memory_writer import (
+    IndexedBase,
     RestoreOutcome,
     SourceRemovedError,
     SourceReplacedError,
@@ -454,6 +455,7 @@ _REWRITERS = (
             1,
             3,
             "NEW BODY",
+            base=IndexedBase("old body"),
             expected_source_span_hash=source_span_hash(_BEFORE.splitlines(), 1, 3),
             **kw,
         ),

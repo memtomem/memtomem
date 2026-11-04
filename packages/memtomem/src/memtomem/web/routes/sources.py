@@ -389,12 +389,16 @@ async def delete_source(
     return DeleteResponse(deleted=deleted).model_dump()
 
 
-@router.get("/content")
-async def source_content(
-    path: str = Query(..., description="Absolute path of the source file"),
-    storage=Depends(get_storage),
-):
-    """Return the raw text content of an indexed source file (max 1 MB)."""
+MAX_SOURCE_READ_BYTES = 1_048_576
+
+
+async def resolve_readable_source(storage, path: str) -> Path:
+    """The on-disk file behind indexed source *path*, if its raw text may be served.
+
+    The gates every route that hands out a source's raw text shares; each
+    refusal is an ``HTTPException``. *path* is the caller's spelling of a stored
+    source key (for a chunk, its stored ``source_file``).
+    """
     # The stored key the request names, matched as a string as the other
     # per-source routes do (#2898). The checks below and the read go through
     # the file that key resolves to on disk.
@@ -435,10 +439,19 @@ async def source_content(
     if any(c.metadata.redaction_count for c in chunks):
         raise HTTPException(status_code=409, detail="masked_projection_read_only")
 
-    size = request_path.stat().st_size
-    if size > 1_048_576:
+    if request_path.stat().st_size > MAX_SOURCE_READ_BYTES:
         raise HTTPException(status_code=413, detail="File too large (max 1 MB).")
+    return request_path
 
+
+@router.get("/content")
+async def source_content(
+    path: str = Query(..., description="Absolute path of the source file"),
+    storage=Depends(get_storage),
+):
+    """Return the raw text content of an indexed source file (max 1 MB)."""
+    request_path = await resolve_readable_source(storage, path)
+    size = request_path.stat().st_size
     try:
         text = request_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:

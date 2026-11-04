@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from memtomem.config import MemoryDirKind
 from memtomem.web.schemas.core import ChunkOut
@@ -120,8 +120,22 @@ class ChunksListResponse(BaseModel):
     total: int
 
 
+class ChunkSourceOut(BaseModel):
+    """A chunk's source text, as the editor edits it (``GET /api/chunks/{id}/source``)."""
+
+    text: str
+    # ``base_hash`` for the edit that replaces ``text``.
+    base_hash: str
+    start_line: int
+    end_line: int
+
+
 class EditRequest(BaseModel):
     new_content: str
+    # Hash of the source text the editor showed (``GET /api/chunks/{id}/source``).
+    # Set, ``new_content`` replaces that text verbatim; absent, it is an edit of
+    # the indexed content, accepted only where that content is the span's body.
+    base_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     # Bypass the trust-boundary redaction guard. Default False — the SPA
     # confirms the matched-pattern count with the user before retrying
     # with this flag set.

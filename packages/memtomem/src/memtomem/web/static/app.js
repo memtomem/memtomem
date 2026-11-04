@@ -34,6 +34,12 @@ const STATE = {
   lastSettingsSection: null,
   selectedChunkId: null,
   selectedOriginal: '',
+  // The selected chunk's indexed content (what View renders before an edit
+  // session loads, and what the history panel keeps).
+  selectedIndexed: '',
+  // ``{chunkId, hash}`` once the selected chunk's source text is in the
+  // editor; ``hash: null`` while it loads or after the base went stale.
+  sourceEdit: null,
   lastQuery: '',
   selectedIds: new Set(),
   lastResults: [],
@@ -3228,15 +3234,6 @@ function _markDataStale() {
 }
 
 // Sync result content in STATE.lastResults cache and DOM after edit
-function _syncResultContent(chunkId, newContent) {
-  const cached = STATE.lastResults.find(r => String(r.chunk.id) === String(chunkId));
-  if (cached) cached.chunk.content = newContent;
-  const item = document.querySelector(`.result-item[data-id="${CSS.escape(String(chunkId))}"]`);
-  if (!item) return;
-  const snippet = item.querySelector('.result-snippet');
-  if (snippet) snippet.innerHTML = highlightText(truncate(newContent, 200), STATE.lastQuery);
-}
-
 qs('search-btn').addEventListener('click', doSearch);
 qs('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 qs('search-input').addEventListener('focus', () => renderHistoryDropdown());
@@ -3915,6 +3912,8 @@ function showDetail(r) {
 
   STATE.selectedChunkId = r.chunk.id;
   STATE.selectedOriginal = r.chunk.content;
+  STATE.selectedIndexed = r.chunk.content;
+  _endSourceEdit();
 
   const scoreView = _scoreViewForResult(r);
   qs('d-score').textContent = scoreView.isReranked
@@ -3992,38 +3991,121 @@ function showDetail(r) {
   }
 }
 
+function _dropResult(chunkId) {
+  STATE.lastResults = STATE.lastResults.filter(r => String(r.chunk.id) !== String(chunkId));
+  const item = document.querySelector(`.result-item[data-id="${CSS.escape(String(chunkId))}"]`);
+  if (item) item.remove();
+}
+
 function clearDetail() {
   hide(qs('detail-view'));
   show(qs('detail-empty'));
   _setI18nLabel(
     qs('detail-empty').querySelector('p'), 'search.detail_empty', 'Select a result to view details');
   STATE.selectedChunkId = null;
+  _endSourceEdit();
+}
+
+// The detail editor edits the chunk's source text, not its indexed content
+// (#3071). Indexed content is a projection of the span: wikilinks resolved,
+// merged sections with rebuilt heading labels, a frontmatter preamble without
+// the heading it was merged into. Saving an edit of it rewrote the span from
+// text that did not hold all of its lines. One session per selection: fetched
+// on the first Edit, kept across View/Edit toggles (so a draft survives), and
+// ended when the selection changes, so a late response can never fill another
+// chunk's editor.
+let _sourceEditGen = 0;
+
+function _endSourceEdit() {
+  _sourceEditGen += 1;
+  STATE.sourceEdit = null;
+  const editor = qs('d-editor');
+  if (editor) editor.readOnly = false;
+  const saveBtn = qs('d-save-btn');
+  if (saveBtn) saveBtn.disabled = false;
+}
+
+async function _beginSourceEdit() {
+  const chunkId = STATE.selectedChunkId;
+  if (!chunkId) return;
+  if (STATE.sourceEdit && STATE.sourceEdit.chunkId === chunkId) return;
+  const gen = ++_sourceEditGen;
+  STATE.sourceEdit = { chunkId, hash: null };
+  const editor = qs('d-editor');
+  const saveBtn = qs('d-save-btn');
+  editor.readOnly = true;
+  saveBtn.disabled = true;
+  let src;
+  try {
+    src = await api('GET', `/api/chunks/${chunkId}/source`);
+  } catch (err) {
+    if (gen !== _sourceEditGen) return;
+    _endSourceEdit();
+    showToast(t('toast.chunk_source_load_failed', { error: err.message }), 'error');
+    _setDetailMode('view');
+    return;
+  }
+  if (gen !== _sourceEditGen) return;
+  STATE.sourceEdit = { chunkId, hash: src.base_hash };
+  STATE.selectedOriginal = src.text;
+  editor.value = src.text;
+  editor.readOnly = false;
+  saveBtn.disabled = false;
+  hide(qs('d-diff-btn'));
+  _updateWordCount();
 }
 
 // Edit / Delete / Reset
 qs('d-save-btn').addEventListener('click', async () => {
-  if (!STATE.selectedChunkId) return;
-  const newContent = qs('d-editor').value;
+  // Captured before the first await: the selection can change while the
+  // save is in flight, and nothing after it may act on the new one.
+  const chunkId = STATE.selectedChunkId;
+  const session = STATE.sourceEdit;
+  if (!chunkId || !session || session.chunkId !== chunkId || !session.hash) return;
+  const editor = qs('d-editor');
+  const newContent = editor.value;
+  const indexed = STATE.selectedIndexed;
   const btn = qs('d-save-btn');
   btnLoading(btn, true);
+  // Read-only while the save is in flight: what is typed now would not be in
+  // this save, and a successful save closes the panel it was typed into.
+  editor.readOnly = true;
   try {
-    const resp = await saveChunkBody(STATE.selectedChunkId, { new_content: newContent });
+    const resp = await saveChunkBody(chunkId, { new_content: newContent, base_hash: session.hash });
     if (resp === null) return;
     // History push must follow a confirmed write — pushing before the
     // request would pollute the undo stack with a no-op entry when the
-    // user cancels the redaction-blocked confirm dialog.
-    _pushHistory(STATE.selectedChunkId, STATE.selectedOriginal);
+    // user cancels the redaction-blocked confirm dialog. History keeps the
+    // indexed content it has always kept.
+    _pushHistory(chunkId, indexed);
     // ``saveChunkBody`` already showed a held re-index's warning (#2923).
     if (!resp.warning) showToast(t('toast.chunk_saved'), 'success');
-    STATE.selectedOriginal = newContent;
-    _syncResultContent(STATE.selectedChunkId, newContent);
-    _updateHistoryBtn(STATE.selectedChunkId);
+    // The save re-indexed the file, so the chunk's id and span can have
+    // changed and the response can describe the pre-edit row: drop the row
+    // rather than keep showing or selecting it. The panel closes only if this
+    // edit session is still the open one; a chunk opened (or this one
+    // reopened) while the save ran keeps its session and draft.
     _markDataStale();
     loadStats();
+    _dropResult(chunkId);
+    if (STATE.sourceEdit === session) clearDetail();
   } catch (err) {
-    showToast(t('toast.save_failed', { error: err.message }), 'error');
+    if (err.status === 409 && err.message === 'edit_base_mismatch') {
+      // The source changed since it was loaded. Keep the draft, but stop
+      // saving it over text the user has not seen.
+      session.hash = null;
+      showToast(t('toast.chunk_source_changed'), 'error');
+    } else {
+      showToast(t('toast.save_failed', { error: err.message }), 'error');
+    }
   } finally {
     btnLoading(btn, false);
+    // Only this save's own session gets its editor back; another selection's
+    // editor state belongs to that selection's session.
+    if (STATE.sourceEdit === session) editor.readOnly = false;
+    // ``btnLoading`` re-enabled the button; whichever session is open now
+    // decides whether it may save (one still loading, or gone stale, may not).
+    if (STATE.sourceEdit && !STATE.sourceEdit.hash) btn.disabled = true;
   }
 });
 
@@ -4104,6 +4186,7 @@ function _setDetailMode(mode) {
     btn.dataset.mode = 'edit';
     // Show edit-only actions
     show(qs('d-save-btn'));
+    _beginSourceEdit();
   } else {
     const content = editor.value;
     const lang = getLanguage(STATE.detailViewSource);
@@ -6523,7 +6606,9 @@ function _startChunkEdit(card, chunk, sourcePath) {
   const editArea = document.createElement('div');
   editArea.className = 'chunk-card-edit-area';
   const ta = document.createElement('textarea');
-  ta.value = chunk.content;
+  // Filled with the chunk's source text once it loads (#3071): the indexed
+  // content is a projection of the span, not the text a save replaces.
+  ta.readOnly = true;
   editArea.appendChild(ta);
 
   const actionsDiv = document.createElement('div');
@@ -6539,7 +6624,20 @@ function _startChunkEdit(card, chunk, sourcePath) {
   editArea.appendChild(actionsDiv);
   card.appendChild(editArea);
 
-  ta.focus();
+  let base = null;
+  saveBtn.disabled = true;
+  api('GET', `/api/chunks/${chunk.id}/source`).then(src => {
+    if (!editArea.isConnected) return;
+    base = src;
+    ta.value = src.text;
+    ta.readOnly = false;
+    saveBtn.disabled = false;
+    ta.focus();
+  }).catch(err => {
+    if (!editArea.isConnected) return;
+    editArea.remove();
+    showToast(t('toast.chunk_source_load_failed', { error: err.message }), 'error');
+  });
 
   cancelBtn.addEventListener('click', e => {
     e.stopPropagation();
@@ -6548,27 +6646,39 @@ function _startChunkEdit(card, chunk, sourcePath) {
 
   saveBtn.addEventListener('click', async e => {
     e.stopPropagation();
+    if (!base) return;
     const newContent = ta.value;
-    if (newContent === chunk.content) { editArea.remove(); return; }
+    if (newContent === base.text) { editArea.remove(); return; }
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
+    ta.readOnly = true;  // what is typed now would not be in this save
     try {
-      const resp = await saveChunkBody(chunk.id, { new_content: newContent });
+      const resp = await saveChunkBody(chunk.id, {
+        new_content: newContent,
+        base_hash: base.base_hash,
+      });
       if (resp === null) {
         saveBtn.disabled = false;
         saveBtn.textContent = 'Save';
+        ta.readOnly = false;
         return;
       }
       // ``saveChunkBody`` already showed a held re-index's warning (#2923).
       if (!resp.warning) showToast(t('toast.chunk_updated'), 'success');
-      _syncResultContent(chunk.id, newContent);
       _markDataStale();
       // Refresh the browser to show updated content
       browseSource(sourcePath, card.closest('#chunks-browser-content')?.querySelectorAll('.chunk-card').length > 100 ? 500 : 100);
     } catch (err) {
+      saveBtn.textContent = 'Save';
+      ta.readOnly = false;
+      if (err.status === 409 && err.message === 'edit_base_mismatch') {
+        // Keep the draft; the base it was written against is gone.
+        base = null;
+        showToast(t('toast.chunk_source_changed'), 'error');
+        return;
+      }
       showToast(t('toast.update_failed', { error: err.message }), 'error');
       saveBtn.disabled = false;
-      saveBtn.textContent = 'Save';
     }
   });
 }
