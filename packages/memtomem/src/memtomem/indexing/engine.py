@@ -2249,7 +2249,7 @@ class IndexEngine:
         # Adjudicate on the *canonical* path (#2076). ``classify_scope``
         # pattern-matches the path string and the two bulk paths disagree on
         # what they hand us — non-stream passes the discovered leaf as found
-        # (only the root was resolved), stream passes ``fp.resolve()``. That
+        # (only the root was resolved), stream passes ``resolve_path(fp)``. That
         # divergence was inert while every bypass needed an explicit
         # ``force_unsafe``; a file-declared exemption makes the scope decision
         # load-bearing on its own, so a user-dir symlink pointing at a
@@ -3083,13 +3083,16 @@ class IndexEngine:
             # Pre-compute per-file namespaces so the complete event surfaces
             # what was applied — single render across both stream and
             # non-stream paths (see ``_index_path_inner``). Resolved on the
-            # same ``fp.resolve()`` form the write below uses, so the
+            # same ``resolve_path(fp)`` form the write below uses, so the
             # preservation lookup and the write answer for the same path.
+            # ``resolve_path`` rather than ``Path.resolve()``: a non-recursive
+            # walk keeps a looping link, and 3.12's ``resolve()`` raises for
+            # it, which would abort the run before any file (#2906).
             # A store that cannot answer fails the run here, before any
             # write (issue #2018); the per-file runner still resolves inside
             # its own lock, and a failure there fails that file closed with
             # its type kept in ``retryable_errors``.
-            resolved_files = [fp.resolve() for fp in files]
+            resolved_files = [resolve_path(fp) for fp in files]
             prepass_namespaces = await self._resolve_namespaces_per_file(
                 resolved_files,
                 namespace,
@@ -3157,7 +3160,7 @@ class IndexEngine:
                         # below folds into this file's ``errors`` — the
                         # stream continues with the next file.
                         result, _ = await self._index_file_locked(
-                            fp.resolve(),
+                            resolve_path(fp),
                             force,
                             namespace=namespace,
                             on_chunk_progress=cb,
