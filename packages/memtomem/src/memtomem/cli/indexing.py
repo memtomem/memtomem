@@ -20,7 +20,18 @@ from memtomem.cli._errors import exit_json_failure, raise_cli_error
 from memtomem.constants import InvalidNameError, writable_namespace_arg
 
 
-@click.command()
+# See the note on ``SEARCH_EPILOG`` in ``cli/search.py`` for why ``\b`` is
+# required here.
+INDEX_EPILOG = """\
+Examples:
+
+\b
+  mm index ./notes --recursive
+  mm index ./notes --force --namespace shared
+"""
+
+
+@click.command(epilog=INDEX_EPILOG)
 @click.argument("path", default=".", required=False)
 @click.option("--recursive/--no-recursive", default=True, help="Recurse into subdirectories")
 @click.option(
