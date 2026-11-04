@@ -991,7 +991,15 @@ class IndexEngine:
             )
         # After the sweep: a copy dropped first would leave its twin owning
         # the shared lines alone, writable.
-        return _drop_storage_key_copies(chunks)
+        chunks = _drop_storage_key_copies(chunks)
+        # ADR-0043 §5: a chunk is dated by its entry's ``> created:`` line,
+        # carried here in metadata through merging and splitting. Only rows the
+        # store creates take it — the update path never writes ``created_at``,
+        # so a chunk whose id is reused keeps the time it was first stored.
+        for chunk in chunks:
+            if chunk.metadata.entry_created_at is not None:
+                chunk.created_at = chunk.metadata.entry_created_at
+        return chunks
 
     def _chunk_projected_content(self, file_path: Path, content: str) -> list[Chunk]:
         if self._config.hard_max_chunk_tokens and file_path.suffix.lower() in {
@@ -3777,11 +3785,16 @@ def _merge_pair(current: Chunk, nxt: Chunk) -> Chunk:
     """
     hierarchy = _merged_hierarchy(current, nxt)
     content = _build_merged_content(current, nxt, hierarchy)
+    entry_times = [
+        t for t in (current.metadata.entry_created_at, nxt.metadata.entry_created_at) if t
+    ]
     new_meta = dataclasses.replace(
         current.metadata,
         heading_hierarchy=hierarchy,
         end_line=nxt.metadata.end_line,
         tags=tuple(set(current.metadata.tags) | set(nxt.metadata.tags)),
+        # A merged chunk was written when its earliest entry was (ADR-0043 §5).
+        entry_created_at=min(entry_times) if entry_times else None,
     )
     # Mirrors ``_build_merged_content``: a restored heading block is its lines
     # plus one blank, and the two bodies are joined by one blank line. Count
