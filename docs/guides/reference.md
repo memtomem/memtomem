@@ -96,10 +96,11 @@ The rest of what the database recorded is in no file, and a rebuild starts it ov
 - **Tag changes made after writing.** Auto-tagging and renaming, merging, deleting or replacing
   tags change the database only, so a rebuild returns each chunk to the tags its file holds.
 - **Creation time, for text without a `> created:` line of its own.** A hand-written section
-  and an entry whose header a full-replacement edit removed are dated by the re-index. An entry
-  whose content opened with its own `## ` heading is not reliably dated by its entry either: the
-  header is written above that heading, where it leads no section of the entry (its tags are not
-  applied), and the entry keeps the header's time only when chunk merging happens to join them.
+  and an entry whose header a full-replacement edit removed are dated by the re-index. So is an
+  entry whose content opened with its own `## ` heading and that 0.7.4 or earlier wrote: its
+  header sits above that heading, where it leads no section of the entry (its tags are not
+  applied either), and the entry keeps the header's time only when chunk merging happens to
+  join them.
 - **Working state:** access and usage counts, importance scores, links made with `mem_link`,
   summaries made by consolidation policies, sessions, schedules, and memory policies.
 

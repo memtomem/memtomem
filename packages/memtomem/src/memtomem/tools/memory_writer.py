@@ -145,14 +145,33 @@ def format_entry_block(
     An untitled entry gets a heading that is unique per entry rather than a
     bare timestamp — see ``_default_heading`` for why two entries must never
     share one.
+
+    Content that opens with its own ``## `` heading (a template, say) keeps
+    that heading and gets no generated one; *title* is then unused. The header
+    still goes directly under the heading, because the chunker reads an entry's
+    header only where it leads the entry's section. Written above the heading,
+    it led no section of the entry: the entry's chunks were never tagged or
+    dated from it, and the header text became part of the previous entry's
+    chunk (#2762). Whether the first line is such a heading is the chunker's
+    call (``heading_level``), since a header under a line it does not read as
+    a heading leads nothing: ``## `` alone is not one, and gets a generated
+    heading like any other content. The heading line is split off at ``\\n``,
+    where the chunker ends lines, and only blank lines are dropped between it
+    and the body, so an indented first body line keeps its indentation.
     """
+    from memtomem.chunking.markdown import heading_level
+
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     tag_line = f"\n> tags: {json.dumps(list(tags), ensure_ascii=False)}" if tags else ""
 
-    # Skip heading if content already starts with one (e.g., from a template)
     stripped = content.strip()
-    if stripped.startswith("## "):
-        return f"\n> created: {now}{tag_line}\n\n{stripped}\n"
+    own_heading, _, rest = stripped.partition("\n")
+    if heading_level(own_heading.removesuffix("\r")) == 2:
+        body_lines = rest.split("\n")
+        while body_lines and not body_lines[0].strip():
+            body_lines.pop(0)
+        body = "\n".join(body_lines)
+        return f"\n{own_heading}\n\n> created: {now}{tag_line}\n\n{body}\n"
     heading = (
         f"## {title}"
         if title

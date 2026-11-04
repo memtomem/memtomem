@@ -48,18 +48,25 @@ class TestChunkerReadsTheEntryTime:
         (chunk,) = _chunks(f"## A\n\nbody\n\n> created: {T1.isoformat()}\n")
         assert chunk.metadata.entry_created_at is None
 
-    def test_an_entry_that_opens_with_its_own_heading_is_not_dated_yet(self) -> None:
-        """The documented limitation (#2762): the writer puts the header above
-        content's own ``## `` heading, where it leads no section of the entry.
-        When #2762 moves the header, this flips and the docs change with it."""
+    def test_an_entry_that_opens_with_its_own_heading_is_dated_and_tagged(self) -> None:
+        """The writer puts the header under content's own ``## `` heading, so
+        the entry and its sub-headings read it, and the previous entry's chunk
+        does not swallow it (#2762)."""
         from memtomem.tools.memory_writer import format_entry_block
 
-        block = format_entry_block("## Mine\n\nbody", tags=["t"])
-        (chunk,) = _chunks(block)
+        text = format_entry_block("alpha body", title="Alpha", tags=["alpha"])
+        text += format_entry_block("## Mine\n\nbody\n\n### Sub\n\nsub body", tags=["t"])
+        alpha, mine, sub = _chunks(text)
 
-        assert chunk.metadata.heading_hierarchy == ("## Mine",)
-        assert chunk.metadata.entry_created_at is None
-        assert chunk.metadata.tags == ()
+        assert alpha.metadata.heading_hierarchy == ("## Alpha",)
+        assert alpha.content == "alpha body"
+        assert alpha.metadata.tags == ("alpha",)
+        assert mine.metadata.heading_hierarchy == ("## Mine",)
+        assert mine.content == "body"
+        assert sub.metadata.heading_hierarchy == ("## Mine", "### Sub")
+        for chunk in (mine, sub):
+            assert chunk.metadata.tags == ("t",)
+            assert chunk.metadata.entry_created_at is not None
 
     def test_a_value_that_is_not_a_time_is_ignored(self) -> None:
         (chunk,) = _chunks("## A\n\n> created: yesterday\n\nbody\n")

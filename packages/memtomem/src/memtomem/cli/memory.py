@@ -198,7 +198,6 @@ async def _add(
     allow_namespace_mix: bool = False,
 ) -> None:
     from memtomem import privacy
-    from memtomem.chunking.base import split_source_lines
     from memtomem.cli._bootstrap import cli_components
     from memtomem.cli._session_state import resolve_session_write_namespace
     from memtomem.constants import InvalidNameError, validate_namespace
@@ -365,7 +364,7 @@ async def _add(
         )
 
         # #1587: hold the target file's cross-process sidecar (L2) across append
-        # + reindex + tag-merge so a concurrent MCP mem_edit/mem_delete rollback
+        # + reindex so a concurrent MCP mem_edit/mem_delete rollback
         # (this CLI runs in a separate process from the MCP server) cannot erase
         # this appended entry. ``lock_held=True`` skips the nested engine acquire.
         # Bounded re-target loop (issue #2005): the day file's name depends
@@ -433,15 +432,6 @@ async def _add(
                     if refusal is not None:
                         raise click.ClickException(refusal.removeprefix("Error: "))
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    # Counted the way chunk ``start_line`` is, not ``str.splitlines``,
-                    # which also breaks at U+0085, ``\x0c`` and friends.
-                    pre_lines = (
-                        len(
-                            split_source_lines(target.read_text(encoding="utf-8", errors="replace"))
-                        )
-                        if target.exists()
-                        else 0
-                    )
                     appended = await asyncio.to_thread(
                         append_entry, target, content, title=title, tags=tags
                     )
@@ -463,36 +453,6 @@ async def _add(
                                 "mm add", outcome="appended", surface="cli"
                             ).removeprefix("Error: ")
                         ) from exc
-
-                    # The chunker tags the entry from its ``> tags:`` header, except when
-                    # ``content`` opens with its own ``## `` heading: ``format_entry_block``
-                    # then writes the header above that heading, in the preamble or at the
-                    # end of the previous section, so the new entry's section never sees
-                    # it (#2762). Merge into this add's new chunks for that case. Inside the
-                    # lock — keyed to this file's new chunks.
-                    if tags and stats.indexed_chunks > 0:
-                        chunks = await comp.storage.list_chunks_by_source(target)
-                        updated = []
-                        for c in chunks:
-                            if (
-                                c.metadata.start_line is not None
-                                and c.metadata.start_line <= pre_lines
-                            ):
-                                continue
-                            merged = set(c.metadata.tags) | set(tags)
-                            if merged != set(c.metadata.tags):
-                                c.metadata = c.metadata.__class__(
-                                    **{
-                                        **{
-                                            f: getattr(c.metadata, f)
-                                            for f in c.metadata.__dataclass_fields__
-                                        },
-                                        "tags": tuple(sorted(merged)),
-                                    }
-                                )
-                                updated.append(c)
-                        if updated:
-                            await comp.storage.upsert_chunks(updated)
             except TimeoutError as exc:
                 raise click.ClickException(
                     f"{target} is locked by another process (another server or "

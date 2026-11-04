@@ -172,7 +172,10 @@ entry inherit it; an entry without the line keeps the index time. An entry whose
 opens with its own `## ` heading has its header written above that heading, where it leads
 no section of the entry; its tags already go unapplied (#2762), and its time survives only
 when chunk merging happens to join the header's preamble to the entry.
-Fixing that placement is #2762's, not this ADR's. The time travels as
+Fixing that placement is #2762's, not this ADR's. **Amended 2026-11-04 (#2762):** the
+writer now puts that header directly under the content's heading, so entries written from
+then on are dated and tagged like any other; entries already on disk keep the old layout.
+The time travels as
 `ChunkMetadata.entry_created_at`, not on `Chunk`: `_add_overlap` and hard-budget splitting
 in `chunking/bounded.py` rebuild `Chunk` objects but carry metadata through
 `dataclasses.replace`, `_merge_pair` takes the earlier of its two, and `chunk_content`

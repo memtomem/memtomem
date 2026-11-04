@@ -3,7 +3,9 @@
 ``index_file`` re-chunks the whole target file, and ``mm add`` used to merge
 ``--tags`` into every chunk ``list_chunks_by_source`` returned for it — so a
 second add into an existing day file stamped its tags onto every earlier
-entry there. These drive the real ``_add`` against real BM25-only storage and
+entry there. Tags now come only from the entry's ``> tags:`` header, read by
+the chunker, so what an add stores is what a re-index of the file stores
+(#2762). These drive the real ``_add`` against real BM25-only storage and
 read the stored tags back per entry.
 """
 
@@ -121,8 +123,8 @@ class TestCliAddTagIsolation:
     @pytest.mark.asyncio
     async def test_line_breaks_only_splitlines_sees_do_not_shift_the_boundary(self, cli_comp):
         """``str.splitlines`` also breaks at ``\\x0c``; chunk line numbers do
-        not. Counting the earlier entry that way placed the boundary 40 lines
-        late, past every chunk of the next entry, so none of them got tagged."""
+        not. A tag boundary counted that way once fell 40 lines late, past
+        every chunk of the next entry, so none of them got tagged."""
         comp, _ = cli_comp
         await _add(_ALPHA + "\x0c" * 40 + " end", "Alpha", ["alpha"], "shared.md")
         sections = "\n\n".join(
@@ -175,3 +177,65 @@ async def _part_tags(comp, target: Path) -> set[str]:
     tag_sets = {tuple(c.metadata.tags) for c in parts}
     assert len(tag_sets) == 1, [(c.metadata.start_line, c.metadata.tags) for c in parts]
     return set(next(iter(tag_sets)))
+
+
+_TEMPLATE = f"## Mine\n\n{_BETA}"
+
+
+class TestCliAddTemplateEntry:
+    """Content that opens with its own ``## `` heading (#2762)."""
+
+    @pytest.mark.asyncio
+    async def test_is_tagged_and_does_not_leak_into_the_previous_entry(self, cli_comp):
+        comp, _ = cli_comp
+        await _add(_ALPHA, "Alpha", ["alpha"], "shared.md")
+        await _add(_TEMPLATE, None, ["beta"], "shared.md")
+
+        target = await _only_source(comp)
+        assert await _tags_by_entry(comp, target, _ALPHA, _BETA) == {
+            _ALPHA: {"alpha"},
+            _BETA: {"beta"},
+        }
+        (alpha,) = [
+            c for c in await comp.storage.list_chunks_by_source(target) if _ALPHA in c.content
+        ]
+        assert alpha.content == _ALPHA
+
+    @pytest.mark.asyncio
+    async def test_tags_survive_a_forced_reindex(self, cli_comp):
+        """The add used to look right only because a post-index DB patch
+        tagged the entry; re-indexing the file dropped the tags."""
+        comp, _ = cli_comp
+        await _add(_ALPHA, "Alpha", ["alpha"], "shared.md")
+        await _add(_TEMPLATE, None, ["beta"], "shared.md")
+
+        target = await _only_source(comp)
+        assert not (await comp.index_engine.index_file(target, force=True)).errors
+        assert await _tags_by_entry(comp, target, _ALPHA, _BETA) == {
+            _ALPHA: {"alpha"},
+            _BETA: {"beta"},
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_second_top_level_section_is_not_the_entrys(self, cli_comp):
+        """A further ``## `` heading inside one add's content closes the entry,
+        so its section carries no tags: the same right after the add as after a
+        re-index, and the same as MCP ``mem_add``."""
+        comp, _ = cli_comp
+        other = "Other section: the staging cluster drains at 18:00 UTC"
+        await _add(f"{_TEMPLATE}\n\n## Other\n\n{other}", None, ["beta"], "shared.md")
+
+        target = await _only_source(comp)
+        assert await _tags_by_entry(comp, target, _BETA, other) == {_BETA: {"beta"}, other: set()}
+
+
+@pytest.mark.asyncio
+async def test_a_non_markdown_target_is_not_tagged(cli_comp):
+    """Only the markdown chunker reads the ``> tags:`` header, so an add into a
+    ``.rst`` file stores no tags — as MCP ``mem_add`` and a re-index do."""
+    comp, _ = cli_comp
+    await _add(_BETA, "Beta", ["beta"], "notes.rst")
+
+    target = await _only_source(comp)
+    assert target.suffix == ".rst"
+    assert await _tags_by_entry(comp, target, _BETA) == {_BETA: set()}

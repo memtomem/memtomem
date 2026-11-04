@@ -7,6 +7,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Upgrading
 
+- **`mm add` and the web add store only the tags an entry's header gives.**
+  Both used to merge the requested tags into the new chunks after indexing.
+  That merge reached two cases the header does not: a further `## ` section
+  inside one add's content (it starts a new entry, so its chunks are
+  untagged), and a target that is not markdown, such as `--file notes.rst`,
+  whose chunker does not read the header. Those tags lived only in the
+  database and the next re-index of the file dropped them; MCP `mem_add` never
+  set them. Both surfaces now store what a re-index of the file would (#2762).
 - **Editing an entry no longer makes it look newly written.** A chunk's
   `created_at` now comes from its entry's `> created:` line whenever the store
   creates the row, and editing an entry's body creates a new row. Before, the
@@ -20,6 +28,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **An entry whose content opens with its own `## ` heading is tagged and
+  dated by its header (#2762).** `mem_add`, `mem_batch_add`, `mm add` and the
+  web add wrote such an entry's `> created:` / `> tags:` header above that
+  heading, where it leads no section of the entry. Its chunks were not tagged
+  or dated from it, and the header text was indexed as part of the previous
+  entry's chunk. The header now goes directly under the content's heading, as
+  it does under a `title`, so the entry and its `###` sub-headings carry its
+  tags and time and the previous entry's chunk holds only its own text. Only
+  entries written from now on: one already on disk keeps the old layout, and
+  re-indexing it leaves it untagged as before.
 - **A rebuilt index dates each chunk by its entry, not by the rebuild
   (#3051, ADR-0043 §5).** Re-indexing after the database is gone set every
   chunk's `created_at` to the re-index time, although each entry's
@@ -29,9 +47,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   chunk's content), nested `###` parts take their entry's time, a chunk that
   merges entries takes the earliest, and every piece of a split entry keeps
   it. Rows the store already holds keep their stored `created_at`; text with no
-  `> created:` line is dated by the index run as before. An entry whose
-  content opened with its own `## ` heading is not reliably dated: its header
-  is written above that heading and is not read as the entry's (#2762).
+  `> created:` line is dated by the index run as before.
 - **A rebuilt index puts a day file back in the namespace it was written for
   (#3051, ADR-0043).** A namespace is stored only in the database, so deleting
   it and re-indexing, or indexing a synced memory directory on another machine,

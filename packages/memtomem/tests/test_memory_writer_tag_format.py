@@ -8,9 +8,13 @@ either drift fail loudly.
 """
 
 import json
+import re
 from pathlib import Path
 
-from memtomem.tools.memory_writer import append_entry
+import pytest
+
+from memtomem.chunking.markdown import MarkdownChunker
+from memtomem.tools.memory_writer import append_entry, format_entry_block
 
 
 class TestAppendEntryTagFormat:
@@ -79,3 +83,69 @@ class TestAppendEntryTagFormat:
         # And the line still parses as JSON back to the originals.
         line = next(line for line in text.splitlines() if line.startswith("> tags: "))
         assert json.loads(line.split("> tags: ", 1)[1]) == tags_in
+
+
+def _without_time(block: str) -> str:
+    return re.sub(r"> created: \S+", "> created: T", block)
+
+
+class TestContentWithItsOwnHeading:
+    """Content opening with its own ``## `` heading keeps it, and the header
+    goes directly under it — where the chunker reads an entry's header (#2762)."""
+
+    def test_header_sits_under_the_contents_heading(self):
+        block = format_entry_block("## Mine\n\nbody\n\n### Sub\n\nmore", tags=["t"])
+        assert _without_time(block) == (
+            '\n## Mine\n\n> created: T\n> tags: ["t"]\n\nbody\n\n### Sub\n\nmore\n'
+        )
+
+    def test_title_is_unused(self):
+        block = format_entry_block("## Mine\n\nbody", title="Ignored", tags=["t"])
+        assert "Ignored" not in block
+        assert block.startswith("\n## Mine\n\n> created: ")
+
+    def test_no_tags_writes_the_created_line_alone(self):
+        assert _without_time(format_entry_block("## Mine\n\nbody")) == (
+            "\n## Mine\n\n> created: T\n\nbody\n"
+        )
+
+    def test_an_indented_first_body_line_keeps_its_indentation(self):
+        """Only blank lines are dropped between heading and body: an indented
+        code block stays a code block."""
+        block = format_entry_block("## Mine\n\n\n    code line\nafter", tags=["t"])
+        assert block.endswith('> tags: ["t"]\n\n    code line\nafter\n')
+
+    def test_a_crlf_heading_line_is_kept_verbatim(self):
+        block = format_entry_block("## Mine\r\n\r\nbody\r\n", tags=["t"])
+        assert block.startswith("\n## Mine\r\n\n> created: ")
+        assert block.endswith('> tags: ["t"]\n\nbody\n')
+
+    def test_heading_only_content(self):
+        assert _without_time(format_entry_block("## Mine", tags=["t"])) == (
+            '\n## Mine\n\n> created: T\n> tags: ["t"]\n\n\n'
+        )
+
+    @pytest.mark.parametrize(
+        ("content", "generated"),
+        [
+            # The chunker does not read ``## `` alone as a heading, so a header
+            # under it would lead nothing.
+            ("## \n\nbody", True),
+            ("## \r\nbody", True),
+            # ``##`` and whitespace only is a heading to the chunker.
+            ("##   \nbody", False),
+            ("##\tTabbed\n\nbody", False),
+        ],
+    )
+    def test_the_chunker_decides_what_is_a_heading(self, content, generated):
+        block = format_entry_block(content, tags=["t"])
+        assert block.startswith("\n## Entry ") is generated
+        chunks = MarkdownChunker().chunk_file(Path("/tmp/notes.md"), block)
+        (holder,) = [c for c in chunks if "body" in c.content]
+        assert holder.metadata.tags == ("t",)
+        assert holder.metadata.entry_created_at is not None
+        assert "> created:" not in holder.content
+
+    @pytest.mark.parametrize("content", ["### Deeper\n\nbody", "#NoSpace\n\nbody"])
+    def test_other_first_lines_get_a_generated_heading(self, content):
+        assert format_entry_block(content, tags=["t"]).startswith("\n## Entry ")

@@ -86,6 +86,17 @@ _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 _BOLD_LABEL_RE = re.compile(r"^[ \t]*\*\*[^*\n]+\*\*", re.MULTILINE)
 
 
+def heading_level(line: str) -> int | None:
+    """The level :class:`MarkdownChunker` reads *line* as a heading at, or ``None``.
+
+    *line* is one line as :func:`split_source_lines` gives it, outside a code
+    fence. The chunker's rule, not CommonMark's: ``## `` alone is no heading,
+    but ``##`` followed by whitespace only is one.
+    """
+    match = _HEADING_RE.match(line)
+    return len(match.group(1)) if match else None
+
+
 def _fence_line_set(text: str) -> frozenset[int]:
     """Return 1-indexed line numbers covered by a code fence, opener and closer
     lines included.

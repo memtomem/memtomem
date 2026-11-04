@@ -920,7 +920,7 @@ async def add_memory(
     if index_engine.is_read_only_source(target):
         raise HTTPException(status_code=409, detail=READ_ONLY_TARGET_DETAIL)
     # #1587: hold the target file's cross-process sidecar (L2) across append +
-    # reindex + tag-merge so a concurrent MCP mem_edit/mem_delete rollback — in
+    # reindex so a concurrent MCP mem_edit/mem_delete rollback — in
     # this process or another — cannot erase this appended entry. ``mm web`` has
     # no AppContext L1 lock; L2's in-process guard serializes web handlers too.
     # ``lock_held=True`` skips the nested engine acquire.
@@ -1006,11 +1006,6 @@ async def add_memory(
             blocker = preflight.blocker("add", target.name, needs_valve=needs_valve)
             if blocker is not None:
                 raise index_blocked_http(blocker)
-            pre_lines = (
-                len(target.read_text(encoding="utf-8", errors="replace").splitlines())
-                if target.exists()
-                else 0
-            )
             appended = await _asyncio.to_thread(
                 _sys.append_entry, target, req.content, title=req.title, tags=tags
             )
@@ -1030,40 +1025,10 @@ async def add_memory(
                 search_pipeline.invalidate_cache()
                 exc.mutation_outcome = "appended"
                 raise privacy_index_blocked_http(exc, "add") from exc
-            # #2141, before the tag merge below: that merge can raise (or the
-            # lock can time out) *after* the chunk write committed, and the
-            # 500 the caller then sees must not leave a warmed query answering
-            # as if the entry had never been added. Invalidating twice is
-            # harmless; skipping it once is not.
+            # The re-index committed the entry's chunks, so a warmed query must
+            # not keep answering as if the entry had never been added (#2141).
             if stats.mutated:
                 search_pipeline.invalidate_cache()
-
-            # Apply tags only to newly appended chunks (so existing entries in
-            # the same file are not polluted with the new entry's tags).
-            if tags and stats.indexed_chunks > 0:
-                chunks = await storage.list_chunks_by_source(target, limit=None)
-                updated = []
-                for c in chunks:
-                    if c.metadata.start_line is not None and c.metadata.start_line <= pre_lines:
-                        continue
-                    merged = set(c.metadata.tags) | set(tags)
-                    if merged != set(c.metadata.tags):
-                        c.metadata = c.metadata.__class__(
-                            **{
-                                **{
-                                    f: getattr(c.metadata, f)
-                                    for f in c.metadata.__dataclass_fields__
-                                },
-                                "tags": tuple(sorted(merged)),
-                            }
-                        )
-                        updated.append(c)
-                if updated:
-                    await storage.upsert_chunks(updated)
-                    # Written outside the engine, so it carries no ``mutated``
-                    # flag of its own — and it rewrites exactly the tag column
-                    # search filters on (#2141).
-                    search_pipeline.invalidate_cache()
     except TimeoutError as exc:
         raise HTTPException(
             status_code=503, detail="Memory file is locked by another writer; try again."
