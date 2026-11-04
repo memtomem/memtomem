@@ -83,7 +83,8 @@ on:
       - "test-v[0-9]*"   # TestPyPI dry-run
 
 # Pin the uv toolchain for reproducible release builds. Keep in lockstep with
-# the same pin in ci.yml, release-langchain.yml and release-sbom.yml
+# the same pin in ci.yml, release-langchain.yml, release-sbom.yml and
+# release-langchain-sbom.yml
 # (Dependabot can't bump a `with:` input).
 env:
   UV_VERSION: "0.11.16"

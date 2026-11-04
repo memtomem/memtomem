@@ -1,0 +1,145 @@
+name: Release langchain-memtomem SBOM
+
+# Attaches langchain-memtomem-<version>.cdx.json to the GitHub Release of a
+# langchain-v* tag, creating that release when it does not exist. Called by
+# release-langchain.yml after a production publish; run by hand from main to
+# backfill a tag that predates this workflow.
+#
+# The SBOM is the graph uv.lock held at the tag, not what a resolver installs
+# from the package's ranges. memtomem appears in it as the workspace member at
+# the tag, without a PyPI purl (tools/release_sbom.py checks that it does).
+#
+# An asset that already exists is only ever compared, never replaced. A rerun
+# with the same tooling reproduces it byte for byte; a rerun after the uv pin
+# or the validator changed may not, and then the job refuses and the existing
+# asset stays.
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Immutable langchain-v* production tag to describe
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing langchain-v* production tag to backfill
+        required: true
+        type: string
+
+permissions: {}
+
+# Keep in lockstep with ci.yml, release.yml, release-langchain.yml and
+# release-sbom.yml (test_uv_toolchain_pin_matches_ci_release_and_sbom_workflows).
+env:
+  UV_VERSION: "0.11.16"
+
+jobs:
+  sbom:
+    name: Build and attach the CycloneDX SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      # The tooling checkout is the caller commit for a release and main for a
+      # backfill. The release checkout is the immutable tag whose lock graph
+      # the SBOM describes, named in full: actions/checkout resolves a bare
+      # name to a same-named branch before a tag.
+      - name: Check out trusted SBOM tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+      - name: Check out immutable release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          path: release
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Validate production tag contract
+        id: contract
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "manual SBOM backfills must run from the protected main branch" >&2
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^langchain-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "langchain SBOM requires an exact langchain-vX.Y.Z tag, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          uv run --no-project --python 3.12 python tooling/tools/release_preflight.py langchain-contract \
+            --tag "$RELEASE_TAG" \
+            --repo-root release \
+            --github-output "$GITHUB_OUTPUT"
+          echo "release_sha=$(git -C release rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Export the locked graph
+        id: export
+        working-directory: release
+        run: >-
+          uv export --quiet --frozen --preview-features sbom-export
+          --format cyclonedx1.5 --package langchain-memtomem --no-dev
+          -o "$RUNNER_TEMP/langchain-memtomem.raw.json"
+      - name: Normalize and validate the SBOM contract
+        id: validate
+        run: >-
+          uv run --no-project --python 3.12 python tooling/tools/release_sbom.py langchain
+          --raw "$RUNNER_TEMP/langchain-memtomem.raw.json"
+          --out "$RUNNER_TEMP/langchain-memtomem-${{ steps.contract.outputs.version }}.cdx.json"
+          --version "${{ steps.contract.outputs.version }}"
+          --core-version "${{ steps.contract.outputs.core }}"
+      - name: Write the release notes
+        id: notes
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: >-
+          uv run --no-project --python 3.12 python tooling/tools/release_preflight.py langchain-notes
+          --tag "$RELEASE_TAG"
+          --repo-root release
+          --out "$RUNNER_TEMP/langchain-release-notes.md"
+      # --latest=false: a package release must never displace the core
+      # release as the repository's Latest.
+      - name: Create release if needed and upload the missing asset
+        id: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION: ${{ steps.contract.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" \
+              --latest=false --notes-file "$RUNNER_TEMP/langchain-release-notes.md"
+          fi
+          name="langchain-memtomem-${VERSION}.cdx.json"
+          generated="$RUNNER_TEMP/$name"
+          if gh release view "$RELEASE_TAG" --json assets \
+            --jq '.assets[].name' | grep -Fxq "$name"
+          then
+            existing_dir="$RUNNER_TEMP/existing"
+            mkdir -p "$existing_dir"
+            gh release download "$RELEASE_TAG" --pattern "$name" --dir "$existing_dir"
+            if ! cmp -s "$generated" "$existing_dir/$name"; then
+              echo "refusing to overwrite differing release asset: $name" >&2
+              exit 1
+            fi
+            echo "$name already exists with identical bytes"
+          else
+            gh release upload "$RELEASE_TAG" "$generated"
+          fi
+          sha256sum "$generated" | tee -a "$GITHUB_STEP_SUMMARY"
+          {
+            echo "Release tag: $RELEASE_TAG"
+            echo "Release commit: ${{ steps.contract.outputs.release_sha }}"
+            echo "Tooling commit: $GITHUB_SHA"
+            echo "Toolchain: $(uv --version)"
+          } >> "$GITHUB_STEP_SUMMARY"

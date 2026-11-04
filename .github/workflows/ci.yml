@@ -24,7 +24,8 @@ on:
 # Single source of truth for the uv toolchain setup-uv installs. Pinning (vs
 # "latest") keeps CI reproducible; Dependabot's github-actions updater can't
 # touch a `with:` input, so bump this by hand — in lockstep with the same pin
-# in release.yml, release-langchain.yml and release-sbom.yml.
+# in release.yml, release-langchain.yml, release-sbom.yml and
+# release-langchain-sbom.yml.
 env:
   UV_VERSION: "0.11.16"
   # A CI runner has no owner for ~/.claude/settings.json and its siblings

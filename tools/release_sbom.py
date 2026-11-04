@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Normalize and validate memtomem's core and all-extras CycloneDX SBOMs."""
+"""Normalize and validate the CycloneDX SBOMs attached to GitHub Releases.
+
+Two shapes: memtomem's core and all-extras pair (the flat invocation), and
+langchain-memtomem's single SBOM (``release_sbom.py langchain ...``).
+"""
 
 from __future__ import annotations
 
@@ -19,6 +23,9 @@ _ALL_ANCHORS = {
     "tree-sitter",
     "urllib3",
 }
+_LANGCHAIN_ANCHORS = {"langchain-core", "langgraph", "memtomem"}
+# How uv marks a workspace member that has no registry source.
+_WORKSPACE_PATH = {"name": "uv:workspace:path", "value": "packages/memtomem"}
 
 
 class SbomError(RuntimeError):
@@ -60,26 +67,31 @@ def _components(payload: dict[str, Any], label: str) -> set[tuple[str, str, str]
     return result
 
 
-def _validate_one(
-    payload: dict[str, Any], *, label: str, version: str
-) -> set[tuple[str, str, str]]:
+def _root_row(payload: dict[str, Any], *, label: str, name: str, version: str) -> dict[str, Any]:
+    """The dependency row of the root component, after checking the format and the root."""
     if payload.get("bomFormat") != "CycloneDX" or payload.get("specVersion") != "1.5":
         raise SbomError(f"{label} SBOM must be CycloneDX 1.5")
     metadata = payload.get("metadata")
     component = metadata.get("component") if isinstance(metadata, dict) else None
-    expected_root = {"name": "memtomem", "version": version, "type": "library"}
+    expected_root = {"name": name, "version": version, "type": "library"}
     if not isinstance(component, dict) or any(
         component.get(k) != v for k, v in expected_root.items()
     ):
-        raise SbomError(f"{label} SBOM root component must be memtomem {version} library")
+        raise SbomError(f"{label} SBOM root component must be {name} {version} library")
     dependencies = payload.get("dependencies")
     if not isinstance(dependencies, list):
         raise SbomError(f"{label} SBOM dependencies must be a list")
     root_ref = component.get("bom-ref")
-    if not isinstance(root_ref, str) or not any(
-        isinstance(row, dict) and row.get("ref") == root_ref for row in dependencies
-    ):
+    rows = [row for row in dependencies if isinstance(row, dict) and row.get("ref") == root_ref]
+    if not isinstance(root_ref, str) or not rows:
         raise SbomError(f"{label} SBOM has no dependency row for its root component")
+    return rows[0]
+
+
+def _validate_one(
+    payload: dict[str, Any], *, label: str, version: str
+) -> set[tuple[str, str, str]]:
+    _root_row(payload, label=label, name="memtomem", version=version)
     return _components(payload, label)
 
 
@@ -103,7 +115,74 @@ def normalize_validate_pair(
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def validate_langchain(payload: dict[str, Any], *, version: str, core_version: str) -> None:
+    """langchain-memtomem *version*, with memtomem as the workspace member at *core_version*.
+
+    The lock resolves memtomem from the workspace, so uv writes it without a
+    purl and with its workspace path. A memtomem from a registry at the same
+    version would describe another artifact, so version equality alone is not
+    enough: the workspace marker is required and a purl refused.
+    """
+    label = "langchain-memtomem"
+    root = _root_row(payload, label=label, name="langchain-memtomem", version=version)
+    names = {name for name, _, _ in _components(payload, label)}
+    if missing := _LANGCHAIN_ANCHORS - names:
+        raise SbomError(f"{label} SBOM misses required components: {sorted(missing)}")
+    # Rows, not the de-duplicated set: two identical memtomem rows must not pass as one.
+    rows = [row for row in payload["components"] if row["name"] == "memtomem"]
+    if len(rows) != 1:
+        raise SbomError(f"{label} SBOM must list memtomem once, found {len(rows)}")
+    core = rows[0]
+    if core["version"] != core_version:
+        raise SbomError(
+            f"{label} SBOM names memtomem {core['version']}, the checkout {core_version}"
+        )
+    if "purl" in core or core.get("properties") != [_WORKSPACE_PATH]:
+        raise SbomError(
+            f"{label} SBOM memtomem must be the workspace member: no purl and "
+            f"properties {[_WORKSPACE_PATH]}"
+        )
+    direct = root.get("dependsOn")
+    expected = {
+        row.get("bom-ref")
+        for row in payload["components"]
+        if row["name"] in {"memtomem", "langgraph"}
+    }
+    if not isinstance(direct, list) or None in expected or not expected <= set(direct):
+        raise SbomError(f"{label} SBOM root must depend on memtomem and langgraph")
+
+
+def normalize_validate_langchain(*, raw: Path, out: Path, version: str, core_version: str) -> None:
+    payload = normalize(_load(raw))
+    validate_langchain(payload, version=version, core_version=core_version)
+    out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _main_langchain(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="release_sbom.py langchain",
+        description="Normalize and validate langchain-memtomem's SBOM.",
+        allow_abbrev=False,
+    )
+    parser.add_argument("--raw", type=Path, required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--core-version", required=True)
+    args = parser.parse_args(argv)
+    try:
+        normalize_validate_langchain(
+            raw=args.raw, out=args.out, version=args.version, core_version=args.core_version
+        )
+    except (OSError, UnicodeError, SbomError) as exc:
+        print(f"SBOM validation failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["langchain"]:
+        return _main_langchain(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--core-raw", type=Path, required=True)
     parser.add_argument("--all-raw", type=Path, required=True)

@@ -19,6 +19,8 @@ name: Publish langchain-memtomem
 #      a dated `## [X.Y.Z] — YYYY-MM-DD` heading in the package CHANGELOG
 #   3. the main-push CI run on that commit is green
 #   4. test-langchain-v<X>a1 → TestPyPI → smoke;  langchain-v<X> → PyPI
+#   5. a production tag then gets its GitHub Release (never marked Latest) and
+#      its SBOM from release-langchain-sbom.yml
 #
 # The dry run is ONE SHOT PER VERSION: the attempt suffix is dropped, so
 # `a2` names the same version, and the preflight refuses a version the target
@@ -36,8 +38,8 @@ on:
       - "langchain-v[0-9]*"        # production
       - "test-langchain-v[0-9]*"   # TestPyPI dry run
 
-# Keep in lockstep with ci.yml, release.yml and release-sbom.yml
-# (test_uv_toolchain_pin_matches_ci_release_and_sbom_workflows).
+# Keep in lockstep with ci.yml, release.yml, release-sbom.yml and
+# release-langchain-sbom.yml (test_uv_toolchain_pin_matches_ci_release_and_sbom_workflows).
 env:
   UV_VERSION: "0.11.16"
 
@@ -171,3 +173,13 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
           skip-existing: true
+
+  sbom:
+    name: Publish the production SBOM
+    needs: publish
+    if: ${{ !startsWith(github.ref_name, 'test-') }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-langchain-sbom.yml
+    with:
+      release_tag: ${{ github.ref_name }}

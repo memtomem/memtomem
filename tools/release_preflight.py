@@ -982,8 +982,20 @@ def langchain_core_bounds(repo_root: Path) -> tuple[str, str]:
     return floors[0], uppers[0]
 
 
-def validate_langchain_contract(tag: str, repo_root: Path) -> tuple[str, str]:
-    """Refuse a tag whose version the package does not carry everywhere; return (version, floor)."""
+class LangchainContract(NamedTuple):
+    version: str
+    floor: str
+    upper: str
+    core: str
+
+
+def validate_langchain_contract(tag: str, repo_root: Path) -> LangchainContract:
+    """Refuse a tag whose version the package does not carry everywhere.
+
+    ``core`` is the workspace memtomem the checkout's manifest and ``uv.lock``
+    both carry. The SBOM names memtomem at that version, as the workspace
+    member the lock graph was resolved against, so the two must agree.
+    """
     version, _ = langchain_version_from_tag(tag)
     declared = _langchain_project(repo_root).get("version")
     if declared != version:
@@ -1013,13 +1025,50 @@ def validate_langchain_contract(tag: str, repo_root: Path) -> tuple[str, str]:
         )
     floor, upper = langchain_core_bounds(repo_root)
     core = project_version(repo_root)
+    locked_core = lock_version(repo_root)
+    if locked_core != core:
+        raise ReleaseCheckError(
+            f"uv.lock holds the workspace memtomem at {locked_core}, the manifest at {core}; "
+            "run `uv lock`"
+        )
     # CI installs this wheel beside the checkout's own core wheel, so a floor
     # above that version, or an upper bound at or below it, was never tested.
     if not _version_tuple(floor) <= _version_tuple(core) < _version_tuple(upper):
         raise ReleaseCheckError(
             f"memtomem>={floor},<{upper} does not admit the checkout's memtomem {core}"
         )
-    return version, floor
+    return LangchainContract(version, floor, upper, core)
+
+
+def langchain_release_notes(tag: str, repo_root: Path) -> str:
+    """The GitHub Release body for a production tag: what the SBOM is, then the CHANGELOG entry."""
+    if not _LANGCHAIN_PROD_TAG_RE.fullmatch(tag):
+        raise ReleaseCheckError(f"release notes are for production tags only, got {tag!r}")
+    contract = validate_langchain_contract(tag, repo_root)
+    version = contract.version
+    lines = (repo_root / _LANGCHAIN / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+    heading = re.compile(rf"^## \[{re.escape(version)}\] — \d{{4}}-\d{{2}}-\d{{2}}$")
+    # The contract has already required exactly one such heading.
+    start = next(index for index, line in enumerate(lines) if heading.fullmatch(line)) + 1
+    end = next(
+        (index for index in range(start, len(lines)) if lines[index].startswith("## ")),
+        len(lines),
+    )
+    entry = "\n".join(lines[start:end]).strip()
+    if not entry:
+        raise ReleaseCheckError(f"{_LANGCHAIN}/CHANGELOG.md has an empty [{version}] entry")
+    asset = f"{_LANGCHAIN_NAME}-{version}.cdx.json"
+    return (
+        f"`{_LANGCHAIN_NAME}` {version} on PyPI: "
+        f"https://pypi.org/project/{_LANGCHAIN_NAME}/{version}/\n\n"
+        f"`{asset}` is a CycloneDX 1.5 SBOM of the dependency graph `uv.lock` held at this "
+        "tag, without dev dependencies. It is not what a resolver installs from the "
+        f"package's version ranges, such as `memtomem>={contract.floor},<{contract.upper}`. "
+        "`memtomem` "
+        f"appears as the workspace member at this tag, version {contract.core}, with no "
+        "PyPI purl.\n\n"
+        f"{entry}\n"
+    )
 
 
 def _require_unpublished(name: str, version: str, *, test: bool, fetch_json: _FetchJSON) -> None:
@@ -1245,6 +1294,11 @@ def _build_parser() -> argparse.ArgumentParser:
     langchain_contract.add_argument("--repo-root", type=Path, default=Path.cwd())
     langchain_contract.add_argument("--github-output")
 
+    langchain_notes = subparsers.add_parser("langchain-notes", allow_abbrev=False)
+    langchain_notes.add_argument("--tag", required=True)
+    langchain_notes.add_argument("--repo-root", type=Path, default=Path.cwd())
+    langchain_notes.add_argument("--out", type=Path, required=True)
+
     langchain_pypi = subparsers.add_parser("langchain-pypi", allow_abbrev=False)
     langchain_pypi.add_argument("--tag", required=True)
     langchain_pypi.add_argument("--repo-root", type=Path, default=Path.cwd())
@@ -1294,10 +1348,15 @@ def main(argv: list[str] | None = None) -> int:
             version = validate_opencode_pypi(args.repo_root.resolve())
             print(f"OpenCode core pin memtomem=={version} is available on PyPI")
         elif args.command == "langchain-contract":
-            version, floor = validate_langchain_contract(args.tag, args.repo_root.resolve())
-            _write_github_output(args.github_output, "version", version)
-            _write_github_output(args.github_output, "floor", floor)
-            print(version)
+            contract = validate_langchain_contract(args.tag, args.repo_root.resolve())
+            _write_github_output(args.github_output, "version", contract.version)
+            _write_github_output(args.github_output, "floor", contract.floor)
+            _write_github_output(args.github_output, "core", contract.core)
+            print(contract.version)
+        elif args.command == "langchain-notes":
+            notes = langchain_release_notes(args.tag, args.repo_root.resolve())
+            args.out.write_text(notes, encoding="utf-8")
+            print(f"wrote release notes for {args.tag} to {args.out}")
         elif args.command == "langchain-pypi":
             floor = validate_langchain_pypi(args.tag, args.repo_root.resolve())
             print(f"memtomem=={floor} is on PyPI and the tag's version is unpublished")
