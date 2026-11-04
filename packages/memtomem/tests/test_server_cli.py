@@ -565,3 +565,36 @@ def test_disable_dns_rebinding_protection_pins_empty_allow_lists(
     assert kwargs["enable_dns_rebinding_protection"] is False
     assert kwargs["allowed_hosts"] == []
     assert kwargs["allowed_origins"] == []
+
+
+class TestHostPatternsAndSsePathHelpers:
+    """Direct coverage for the helpers that shape SSE/HTTP Host allow-lists (#2993)."""
+
+    @pytest.mark.parametrize(
+        ("host", "expected"),
+        [
+            ("0.0.0.0", []),
+            ("::", []),
+            (None, []),
+            ("::1", ["[::1]", "[::1]:*"]),
+            ("[::1]", ["[::1]", "[::1]:*"]),
+            ("example.com", ["example.com", "example.com:*"]),
+        ],
+    )
+    def test_host_patterns(self, host: str | None, expected: list[str]) -> None:
+        from memtomem import server as server_mod
+
+        assert server_mod._host_patterns(host) == expected
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("/mcp/sse", ("/mcp", "/sse")),
+            ("/a/b/sse/", ("/a/b", "/sse")),
+            ("/sse", (None, "/sse")),
+        ],
+    )
+    def test_split_sse_url_path(self, path: str, expected: tuple[str | None, str]) -> None:
+        from memtomem import server as server_mod
+
+        assert server_mod._split_sse_url_path(path) == expected
