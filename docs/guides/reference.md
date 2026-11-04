@@ -67,8 +67,9 @@ Your `.md` files are the source of truth for what you wrote. The search index is
 
 Re-indexing after the database is gone rebuilds each chunk from its file: the text, its heading,
 the tags written in the file (the `> tags:` line or a frontmatter `tags:` key), and a frontmatter
-validity window. Chunk ids are new, so a Web UI pinned chunk saved before the rebuild points at a
-chunk that no longer exists.
+validity window, and the entry's creation time from its `> created:` line, so date-ranged recall
+and newest-first ordering are where they were. Chunk ids are new, so a Web UI pinned chunk saved
+before the rebuild points at a chunk that no longer exists.
 
 A memory saved outside the default namespace without naming a `file` goes to a day file of its
 own, `{date}--{slug}-{digest}.md`, and a rebuild reads the namespace back from that name:
@@ -94,9 +95,11 @@ The rest of what the database recorded is in no file, and a rebuild starts it ov
   `shared:old` again.
 - **Tag changes made after writing.** Auto-tagging and renaming, merging, deleting or replacing
   tags change the database only, so a rebuild returns each chunk to the tags its file holds.
-- **Creation time.** A rebuilt chunk's `created_at` is the time of the re-index, not the
-  `> created:` line in the file, so date-ranged recall and newest-first ordering follow the
-  rebuild.
+- **Creation time, for text without a `> created:` line of its own.** A hand-written section
+  and an entry whose header a full-replacement edit removed are dated by the re-index. An entry
+  whose content opened with its own `## ` heading is not reliably dated by its entry either: the
+  header is written above that heading, where it leads no section of the entry (its tags are not
+  applied), and the entry keeps the header's time only when chunk merging happens to join them.
 - **Working state:** access and usage counts, importance scores, links made with `mem_link`,
   summaries made by consolidation policies, sessions, schedules, and memory policies.
 

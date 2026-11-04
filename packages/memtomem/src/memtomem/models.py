@@ -93,6 +93,12 @@ class ChunkMetadata:
     retrieval_context: str = ""  # bounded description; never part of body identity
     redaction_count: int = 0  # source-level count; indexed projection is read-only
     source_read_only: bool = False  # no safe whole-line source rewrite for this chunk
+    # The entry's ``> created:`` time, parsed from the file (ADR-0043 §5). Not a
+    # stored column: ``chunk_content`` copies it onto ``Chunk.created_at`` so a
+    # chunk the store has never seen is dated by its entry, not by the index
+    # run. Lives here rather than on ``Chunk`` because merging and splitting
+    # rebuild ``Chunk`` objects but carry metadata through ``dataclasses.replace``.
+    entry_created_at: datetime | None = None
 
 
 def _like_glob_matches(pattern: str, value: str) -> bool:
