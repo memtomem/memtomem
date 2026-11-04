@@ -59,3 +59,26 @@ def test_run_now_label_stays_translated_after_a_run(page, mm_web_url: str) -> No
     )
 
     assert (btn.text_content() or "").strip() == expected
+
+
+def test_run_now_success_message_stays_visible_after_the_reload(page, mm_web_url: str) -> None:
+    """The run reloads the report, and that reload hides the status bar as it
+    starts; the success message has to be shown after it, not before (#2988)."""
+    _open_health_with_watchdog(page, mm_web_url)
+
+    with page.expect_response("**/api/watchdog/run"):
+        page.locator("#health-watchdog-run-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('health-watchdog-run-btn').disabled",
+        timeout=5_000,
+    )
+
+    bar = page.evaluate(
+        """() => {
+            const el = document.getElementById('health-watchdog-status-bar');
+            return {display: el.style.display, cls: el.className, text: el.textContent};
+        }"""
+    )
+    assert bar["display"] == "block", bar
+    assert bar["cls"] == "status-msg ok", bar
+    assert bar["text"].strip(), bar
