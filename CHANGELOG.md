@@ -5,8 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Editing an entry no longer makes it look newly written.** A chunk's
+  `created_at` now comes from its entry's `> created:` line whenever the store
+  creates the row, and editing an entry's body creates a new row. Before, the
+  edited chunk took the edit time. Date-ranged recall (`created_from` /
+  `created_before`, "written this week"), newest-first ordering, dedup's
+  keep-the-oldest choice and age-based policies whose `age_field` is
+  `created_at` (the default) now see the time the entry was written. Time decay
+  reads `updated_at` and is unchanged. A full-replacement edit whose new
+  content opens with its own `## ` heading drops the header, and that entry is
+  still dated by the edit (#3051, ADR-0043 §5).
+
 ### Fixed
 
+- **A rebuilt index dates each chunk by its entry, not by the rebuild
+  (#3051, ADR-0043 §5).** Re-indexing after the database is gone set every
+  chunk's `created_at` to the re-index time, although each entry's
+  `> created:` line holds its write time, so date-ranged recall and
+  newest-first ordering followed the rebuild. The chunker now reads that line
+  (whether or not the header also holds tags, and without changing any
+  chunk's content), nested `###` parts take their entry's time, a chunk that
+  merges entries takes the earliest, and every piece of a split entry keeps
+  it. Rows the store already holds keep their stored `created_at`; text with no
+  `> created:` line is dated by the index run as before. An entry whose
+  content opened with its own `## ` heading is not reliably dated: its header
+  is written above that heading and is not read as the entry's (#2762).
 - **A rebuilt index puts a day file back in the namespace it was written for
   (#3051, ADR-0043).** A namespace is stored only in the database, so deleting
   it and re-indexing, or indexing a synced memory directory on another machine,
