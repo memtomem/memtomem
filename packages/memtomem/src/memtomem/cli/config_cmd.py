@@ -45,7 +45,20 @@ def _one_line(value: object) -> str:
     return scrub_text(str(value))
 
 
-@click.group()
+# ``\b`` is Click's raw-paragraph marker: without it Click rewraps the epilog as
+# prose and the examples collapse into one run-on paragraph, which is exactly
+# what makes them useless to copy-paste (#1667).
+CONFIG_EPILOG = """\
+Examples:
+
+\b
+  mm config show --json
+  mm config set search.default_top_k 20
+  mm config unset search.default_top_k
+"""
+
+
+@click.group(epilog=CONFIG_EPILOG)
 def config() -> None:
     """View or modify memtomem configuration."""
 
