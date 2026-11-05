@@ -25,19 +25,21 @@ def test_subprocess_env_default_has_package_src_first():
 
 
 def test_subprocess_env_empty_inherited_pythonpath():
-    base = {"HOME": "/test/home", "PYTHONPATH": ""}
+    base = {"HOME": "/test/home", "USERPROFILE": "/test/home", "PYTHONPATH": ""}
     env = subprocess_env(base=base)
     src_str = str(package_src_dir())
     assert env["PYTHONPATH"] == src_str
     assert env["HOME"] == "/test/home"
+    assert env["USERPROFILE"] == "/test/home"
 
 
 def test_subprocess_env_unset_inherited_pythonpath():
-    base = {"HOME": "/test/home"}
+    base = {"HOME": "/test/home", "USERPROFILE": "/test/home"}
     env = subprocess_env(base=base)
     src_str = str(package_src_dir())
     assert env["PYTHONPATH"] == src_str
     assert env["HOME"] == "/test/home"
+    assert env["USERPROFILE"] == "/test/home"
 
 
 def test_subprocess_env_preserves_inherited_pythonpath():
