@@ -326,17 +326,22 @@ you configure it:
 
 | Setting | Text sent | When |
 |---------|-----------|------|
-| `embedding.provider=openai` | Each chunk's text with its heading path, when it is indexed; every search query; the text checked by `mem_conflict_check` | Indexing (`mem_add`, `mm index`, the file watcher, Web UI uploads, imports) and every dense search |
-| `embedding.provider=ollama` with a non-local `base_url` | Same as the OpenAI row | Same |
-| `llm.enabled=true` with `openai`, `anthropic`, or a non-local `base_url` | The query (`strategy="llm"` expansion); chunk text (`mem_auto_tag`, `mem_entity_scan`, consolidation including scheduled policy runs, source summaries, chunk context); a session's written chunks (session summaries) | Per feature, see [LLM Providers](llm-providers.md#what-llm-powers). Session summaries are on by default once an LLM is enabled |
+| `embedding.provider=openai` | Each chunk's text with its heading path, when it is indexed; search queries that use dense retrieval; the text checked by `mem_conflict_check`; a pending candidate's text when `mem_candidate_evidence` gathers evidence; LangGraph store queries and record text | Indexing (`mem_add`, `mm index`, the file watcher, Web UI uploads, imports), dense searches, and those tool calls. Sent to `api.openai.com`, or to `embedding.base_url` when set |
+| `embedding.provider=ollama` with a non-local `base_url` | The same text as the OpenAI row | The same events as the OpenAI row. Sent to `embedding.base_url` |
+| `llm.enabled=true` with `openai`, `anthropic`, or a non-local `base_url` | The query (`strategy="llm"` expansion); chunk text (`mem_auto_tag`, `mem_entity_scan`, consolidation including scheduled policy runs, source summaries, chunk context); a session's written chunks (session summaries; when a session's write provenance is missing or cannot be used completely, the summary falls back to the chunks of its namespace and time window, which can include another session's writes) | Per feature, see [LLM Providers](llm-providers.md#what-llm-powers). Session summaries are on by default once an LLM is enabled |
 | `rerank.enabled=true` with `rerank.provider=cohere` | The query and the full text of every candidate chunk in the rerank pool (sized as described in [Rerank](#rerank-cross-encoder)) | Every reranked search |
-| `session_trace.langfuse_enabled=true` | Session command traces; payloads only when `payload_mode` is `redacted` or `full` | Each traced `mm session` command. With no host configured, the Langfuse SDK sends to its default, `https://cloud.langfuse.com` |
+| `session_trace.langfuse_enabled=true` | Session command traces. In every `payload_mode`, the trace metadata carries the command line of `mm session wrap` and the summary text given to `mm session end`; full inputs and outputs are added in `redacted` and `full` mode. `redacted` masks secret-looking fields, not ordinary prose | Each traced `mm session` command. With no host configured, the Langfuse SDK sends to its default, `https://cloud.langfuse.com` |
 | `webhook` URLs | The query for search events, the question for ask events, the file path for add events | Each matching event |
 
-A `base_url` that points at `localhost`, `127.0.0.1`, or `::1` keeps that
-provider's traffic on your machine. The `openai` LLM provider with no
-`base_url` set uses the LLM default, `http://localhost:11434`; the `anthropic`
-provider replaces that default with `https://api.anthropic.com`.
+What decides the destination is the endpoint each provider actually calls,
+not the provider's name: an `openai` provider pointed at a local vLLM or LM
+Studio server stays local, and an `ollama` provider pointed at another host
+does not. A `base_url` on `localhost`, `127.0.0.1`, or `::1` keeps the request
+on your machine, unless your environment routes HTTP through a proxy
+(memtomem's HTTP clients honor the standard proxy environment variables) or
+the local server itself forwards requests to a hosted model. The `openai` LLM provider with no `base_url` set uses the LLM
+default, `http://localhost:11434`. The `anthropic` provider replaces that exact
+value with `https://api.anthropic.com`, even when you set it explicitly.
 
 Separately from all of the above, the MCP tools return note text to the AI
 client that called them, such as Claude Code, Codex, or Claude Desktop. That
@@ -355,7 +360,7 @@ that client's terms; memtomem does not control that step.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_EMBEDDING__PROVIDER` | `none` | `none` (BM25 only), `onnx` (local), `ollama` (local server), or `openai` (cloud; sends note text and queries to OpenAI, see [What leaves your machine](#what-leaves-your-machine)) |
+| `MEMTOMEM_EMBEDDING__PROVIDER` | `none` | `none` (BM25 only), `onnx` (local), `ollama` (local server), or `openai` (cloud; sends note text and queries to the configured endpoint, OpenAI by default, see [What leaves your machine](#what-leaves-your-machine)) |
 | `MEMTOMEM_EMBEDDING__MODEL` | _(empty)_ | Embedding model name (depends on provider) |
 | `MEMTOMEM_EMBEDDING__DIMENSION` | `0` | Vector dimension (must match the model; 0 = BM25 only) |
 | `MEMTOMEM_EMBEDDING__BASE_URL` | _(empty)_ | API endpoint URL (Ollama defaults to `http://localhost:11434` when unset) |

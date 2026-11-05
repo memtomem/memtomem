@@ -2,10 +2,13 @@
 
 memtomem can optionally use an LLM to enhance several features. LLM is **disabled by default** — all core functionality (search, indexing, tagging) works without it.
 
-> **A cloud LLM receives your note text.** With `openai`, `anthropic`, or any `base_url` that is
-> not on your machine, the features below send queries and chunk text to that provider.
-> Session summaries are on by default, so once an LLM is enabled, `mem_session_end` without a
-> `summary` sends the session's written chunks. Ollama on `localhost` keeps this local. See
+> **A hosted LLM receives your note text.** When the configured endpoint is a hosted service
+> (Anthropic, OpenAI, OpenRouter, or any server not on your machine), the features below send
+> queries and chunk text to it. Session summaries are on by default, so once an LLM is enabled,
+> `mem_session_end` without a `summary` sends the session's chunks; when its write provenance is
+> missing or incomplete, that means its namespace and time window. An endpoint on `localhost`
+> (Ollama, vLLM, LM Studio) keeps this on your machine unless a proxy or the local server
+> forwards it. See
 > [What leaves your machine](configuration.md#what-leaves-your-machine).
 
 ## Quick Start
