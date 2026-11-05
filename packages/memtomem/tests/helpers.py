@@ -15,6 +15,7 @@ from memtomem.context.migrate import _NON_SKILL_FANOUT_SUFFIX
 from memtomem.context.scope_resolver import ArtifactKind
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.context import AppContext
+from _subprocess_env import package_src_dir, subprocess_env  # noqa: F401
 
 # Slack allowed for assertions that pin a *remaining* share of a lock budget against
 # its nominal ceiling. The shared-deadline pattern computes

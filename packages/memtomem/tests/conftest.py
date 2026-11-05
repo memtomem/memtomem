@@ -24,6 +24,7 @@ from memtomem.server.component_factory import Components, create_components, clo
 # per-file imports. Keeping the definitions in ``_wiki_fixtures.py`` avoids
 # bloating this already-heavy conftest with unrelated git-env plumbing.
 from _wiki_fixtures import git_identity, unborn_wiki, wiki_root  # noqa: F401
+from _subprocess_env import package_src_dir, subprocess_env  # noqa: F401
 from helpers import ambient_memtomem_config_env
 import _home_guard as _home_guard
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 import sys
 import warnings
@@ -17,6 +16,7 @@ from memtomem import config as config_module
 from memtomem.config import Mem2MemConfig, build_comparand, load_config_d, load_config_overrides
 from memtomem.config_signature import build_fresh_config
 from memtomem.errors import ConfigFragmentError
+from _subprocess_env import subprocess_env
 
 from .test_config_profile_persistence import BGE, E5, home as home, write_config
 
@@ -206,13 +206,11 @@ def test_projection_stays_silent_after_server_logging_setup(home: Path, quiet: b
     write_config(home, {"embedding": E5})
     # dictConfig changes process-global handlers; exercise the actual setup
     # in a child so it cannot disturb pytest or another test's logging state.
-    env = {
-        **os.environ,
-        "HOME": str(home),
-        "USERPROFILE": str(home),
-        "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
-        "MEMTOMEM_LOG_FORMAT": "json",
-    }
+    env = subprocess_env(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        MEMTOMEM_LOG_FORMAT="json",
+    )
     code = f"""
 from memtomem import config
 config._load_dotenv = lambda: None
