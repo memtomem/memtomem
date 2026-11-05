@@ -1,4 +1,4 @@
-"""memtomem: Markdown-first memory infrastructure for AI agents."""
+"""memtomem: long-term memory for AI coding agents, kept as Markdown you own."""
 
 import os as _os
 from importlib.metadata import version as _pkg_version
