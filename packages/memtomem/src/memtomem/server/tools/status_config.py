@@ -197,6 +197,30 @@ def _web_ui_identity() -> tuple[int, str] | None:
         return None
 
 
+def _watcher_unavailable_fix() -> str:
+    """How to move this server off the failing watcher backend (#3080).
+
+    Names the environment variables that set the backend when there are any:
+    either shape outranks ``config.json``, so advising a file edit over one
+    would change nothing. Names only, never values.
+    """
+    from memtomem.config import env_bindings_for
+
+    tail = "or close other memtomem-server sessions, then restart the server."
+    bindings = env_bindings_for("indexing", "watcher_backend")
+    if not bindings:
+        return (
+            f'Set "indexing": {{"watcher_backend": "polling"}} in ~/.memtomem/config.json, {tail}'
+        )
+    names = " and ".join(
+        f'{b.name} (its "watcher_backend" key)' if b.whole_section else b.name for b in bindings
+    )
+    return (
+        f"The environment sets the watcher backend through {names}, which overrides "
+        f'~/.memtomem/config.json: set it to "polling" there, {tail}'
+    )
+
+
 def _collect_concurrent_writers(db_path: Path) -> dict | None:
     """Build the ``concurrent_server_writers`` warning, or ``None``.
 
@@ -556,10 +580,7 @@ async def collect_status_report(app: AppContext) -> dict:
                 "kind": "watcher_unavailable",
                 "detail": f"The file watcher could not start ({observer_error}): file "
                 "edits are not picked up live; source checks keep running.",
-                "fix": 'Set "indexing": {"watcher_backend": "polling"} in '
-                "~/.memtomem/config.json (an MEMTOMEM_INDEXING__WATCHER_BACKEND "
-                "environment variable overrides it), or close other memtomem-server "
-                "sessions, then restart the server.",
+                "fix": _watcher_unavailable_fix(),
             }
         )
 

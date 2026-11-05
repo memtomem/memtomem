@@ -59,6 +59,7 @@ class _RaisingObserver:
     def __init__(self, exc: BaseException) -> None:
         self.exc = exc
         self.stop_fails = False
+        self.stop_exc: BaseException | None = None
         self.stop_calls = 0
 
     def schedule(self, handler, path, recursive=True):
@@ -69,6 +70,8 @@ class _RaisingObserver:
 
     def stop(self) -> None:
         self.stop_calls += 1
+        if self.stop_exc is not None:
+            raise self.stop_exc
         if self.stop_fails:
             raise RuntimeError("emitter would not stop")
 
@@ -257,6 +260,25 @@ class _Abort(BaseException):
     pass
 
 
+async def test_a_cleanup_cut_short_by_a_base_exception_keeps_the_handle(env):
+    """The handle is held before the cleanup runs, not after it fails."""
+    comp, _first, _second = env
+    observer = _RaisingObserver(SystemError(FSEVENTS_MESSAGE))
+    observer.stop_exc = _Abort()
+    watcher = _watcher(comp)
+    with patch.object(watcher_mod, "_create_observer", lambda _c: observer):
+        with pytest.raises(_Abort):
+            await watcher.start()
+    assert watcher._failed_observer is observer
+    assert watcher._observer is None
+    with pytest.raises(RuntimeError, match="could not be stopped"):
+        await watcher.start()
+    observer.stop_exc = None
+    await watcher.stop()
+    assert watcher._failed_observer is None
+    assert observer.stop_calls == 2
+
+
 async def test_a_base_exception_from_the_observer_still_propagates(env):
     comp, _first, _second = env
     observer = _RaisingObserver(_Abort())
@@ -334,10 +356,8 @@ async def test_the_server_initializes_and_status_warns(env):
                 "not picked up live; source checks keep running."
             )
             assert warnings[0]["fix"] == (
-                'Set "indexing": {"watcher_backend": "polling"} in '
-                "~/.memtomem/config.json (an MEMTOMEM_INDEXING__WATCHER_BACKEND "
-                "environment variable overrides it), or close other memtomem-server "
-                "sessions, then restart the server."
+                'Set "indexing": {"watcher_backend": "polling"} in ~/.memtomem/config.json, '
+                "or close other memtomem-server sessions, then restart the server."
             )
     finally:
         await _closed(ctx)
@@ -353,6 +373,31 @@ async def test_a_healthy_server_and_the_cli_do_not_warn(env):
         await _closed(ctx)
     # ``mm status`` builds a context that runs no watcher.
     assert _unavailable(await collect_status_report(AppContext.from_components(comp))) == []
+
+
+@pytest.mark.parametrize(
+    ("variables", "named"),
+    [
+        ({"MEMTOMEM_INDEXING__WATCHER_BACKEND": "native"}, "MEMTOMEM_INDEXING__WATCHER_BACKEND"),
+        (
+            {"MEMTOMEM_INDEXING": '{"watcher_backend": "native"}'},
+            'MEMTOMEM_INDEXING (its "watcher_backend" key)',
+        ),
+    ],
+)
+def test_the_fix_text_names_an_environment_override(monkeypatch, variables, named):
+    from helpers import isolate_memtomem_env
+
+    from memtomem.server.tools.status_config import _watcher_unavailable_fix
+
+    isolate_memtomem_env(monkeypatch)
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    assert _watcher_unavailable_fix() == (
+        f"The environment sets the watcher backend through {named}, which overrides "
+        '~/.memtomem/config.json: set it to "polling" there, or close other '
+        "memtomem-server sessions, then restart the server."
+    )
 
 
 async def test_the_fix_text_backend_is_read_from_config_json(tmp_path, monkeypatch):

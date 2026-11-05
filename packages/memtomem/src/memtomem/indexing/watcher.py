@@ -505,10 +505,14 @@ class FileWatcher:
                 exc_info=True,
             )
             if observer is not None:
+                # Held *before* the cleanup and released only after it, so a
+                # cleanup cut short by a ``BaseException`` still leaves the
+                # handle where ``stop`` retries it and ``start`` refuses.
+                self._failed_observer = observer
                 try:
                     _stop_observer(observer)
+                    self._failed_observer = None
                 except Exception:
-                    self._failed_observer = observer
                     logger.warning(
                         "Could not stop the file watcher's observer after its start "
                         "failed; file watching cannot start again until the server restarts",
