@@ -1,7 +1,7 @@
 [project]
 name = "memtomem-workspace"
 version = "0.1.0"
-description = "memtomem — Markdown-first memory infrastructure for AI agents"
+description = "memtomem — long-term memory for AI coding agents, kept as Markdown you own"
 requires-python = ">=3.12"
 dependencies = []
 
