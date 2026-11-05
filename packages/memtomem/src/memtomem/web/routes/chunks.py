@@ -27,6 +27,9 @@ from memtomem.source_provenance import (
     StaleSourceProvenanceError,
 )
 from memtomem.tools.memory_writer import (
+    EditBaseMismatchError,
+    IndexedBase,
+    SourceBase,
     SourceChangedError,
     SourceRemovedError,
     SourceReplacedError,
@@ -60,6 +63,7 @@ from memtomem.web.schemas.core import (
 from memtomem.web.schemas.search import SimilarChunksResponse
 from memtomem.web.schemas.sources import (
     ChunkEditNeedsConfirmation,
+    ChunkSourceOut,
     ChunksListResponse,
     EditRequest,
 )
@@ -142,6 +146,66 @@ async def get_chunk(
     if not chunks:
         raise HTTPException(status_code=404, detail="Chunk not found")
     return chunk_to_out(chunks[0])
+
+
+@router.get("/{chunk_id}/source", response_model=ChunkSourceOut)
+async def get_chunk_source(
+    chunk_id: UUID,
+    storage=Depends(get_storage),
+    index_engine=Depends(get_index_engine),
+    config=Depends(get_config),
+) -> ChunkSourceOut:
+    """The span's source text an edit replaces, with the hash the edit must carry.
+
+    The text the editor shows is the file's, not the indexed content: indexed
+    content is a projection of the span (#3071), and saving an edit of it
+    rewrote the span from text that did not hold all of its lines.
+    """
+    import asyncio
+
+    from memtomem.source_provenance import source_span_hash
+    from memtomem.tools.memory_writer import chunk_source_text, source_text_hash
+    from memtomem.web.routes.sources import resolve_readable_source
+
+    # Screened like ``GET /{id}`` (ADR-0036) before anything about the source
+    # is answered.
+    chunks = await storage.recall_chunks(
+        chunk_ids=(chunk_id,),
+        limit=1,
+        project_context_root=_boundary(config),
+    )
+    if not chunks:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    meta = chunks[0].metadata
+    if meta.redaction_count:
+        raise HTTPException(status_code=409, detail="masked_projection_read_only")
+    if meta.source_read_only or index_engine.is_read_only_source(meta.source_file):
+        raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+    if index_engine.is_excluded(meta.source_file):
+        raise HTTPException(status_code=409, detail=EXCLUDED_SOURCE_DETAIL)
+    # The raw-text gates ``GET /api/sources/content`` applies, on the stored
+    # spelling: this serves a slice of the same text that route serves whole.
+    path = await resolve_readable_source(storage, str(meta.source_file))
+    try:
+        text = await asyncio.to_thread(path.read_text, encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=409, detail=STALE_SOURCE_PROVENANCE_DETAIL) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Cannot read file.") from exc
+    lines = text.splitlines()
+    # The span must still be the one indexed; the edit re-checks this under the
+    # source lock, so this only keeps a stale span's lines from being offered.
+    if meta.source_span_hash is None or (
+        source_span_hash(lines, meta.start_line, meta.end_line) != meta.source_span_hash
+    ):
+        raise HTTPException(status_code=409, detail=STALE_SOURCE_PROVENANCE_DETAIL)
+    source = chunk_source_text(lines, meta.start_line, meta.end_line)
+    return ChunkSourceOut(
+        text=source,
+        base_hash=source_text_hash(source),
+        start_line=meta.start_line,
+        end_line=meta.end_line,
+    )
 
 
 @router.patch("/{chunk_id}", response_model=ChunkOut | ChunkEditNeedsConfirmation)
@@ -314,14 +378,19 @@ async def edit_chunk(
             )
 
         try:
-            # ``replace_chunk_body`` keeps the heading + section-leading
-            # blockquote header (``> created:`` / ``> tags:``) intact when the
-            # caller passes body-only ``new_content``. The Web UI editor
-            # surfaces ``chunk.content`` (already header-stripped by the
-            # chunker), so saving without preservation would silently erase
-            # the metadata header on disk. Prefix ``new_content`` with ``## ``
-            # to override the heading explicitly. The helper asks the engine about
-            # the file before writing and rolls it back on a reindex failure.
+            # The SPA edits the span's source text (``GET /{id}/source``) and
+            # sends its hash, so the edit replaces exactly the text it showed.
+            # Without a hash the request edits the indexed content, which
+            # ``replace_chunk_body`` accepts only where that content is the
+            # span's body (heading + blockquote header kept, ``## `` overrides
+            # them); a projection of the span is refused with its source text.
+            # The helper asks the engine about the file before writing and
+            # rolls it back on a reindex failure.
+            edit_base = (
+                SourceBase(body.base_hash)
+                if body.base_hash is not None
+                else IndexedBase(fresh.content)
+            )
             stats = await mutate_source_and_reindex(
                 index_engine,
                 meta.source_file,
@@ -333,6 +402,7 @@ async def edit_chunk(
                     meta.start_line,
                     meta.end_line,
                     body.new_content,
+                    base=edit_base,
                     expected_source_span_hash=meta.source_span_hash,
                     expected_identity=pre.identity,
                 ),
@@ -358,6 +428,18 @@ async def edit_chunk(
             # web runtime hot-reloads it, ``web/hot_reload.py``). Also a pure
             # refusal — nothing read, nothing written, nothing to invalidate.
             raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL) from exc
+        except EditBaseMismatchError as exc:
+            # Raised inside the rewrite before a byte was written, after every
+            # gate above passed: the edit was based on text the span no longer
+            # (or never) held. Return what it holds so the editor can rebase.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "detail": "edit_base_mismatch",
+                    "text": exc.text,
+                    "base_hash": exc.body_hash,
+                },
+            ) from exc
         except StaleSourceProvenanceError as exc:
             # Normally a pure refusal. Invalidate conservatively: if this type
             # came from a later stage, the helper still ran its normal rollback.

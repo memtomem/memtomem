@@ -1471,6 +1471,8 @@
   "toast.unpinned": "고정 해제됨",
   "toast.pinned_chunk_missing": "고정된 청크가 더 이상 없습니다. 오래된 고정을 제거하세요.",
   "toast.chunk_saved": "청크가 저장되었습니다.",
+  "toast.chunk_source_changed": "노트를 연 뒤 디스크의 내용이 바뀌었습니다. 작성한 내용은 편집기에 그대로 있습니다. 노트를 다시 열어 현재 버전을 편집하세요.",
+  "toast.chunk_source_load_failed": "편집할 원문을 열지 못했습니다: {error}",
   "toast.chunk_deleted": "청크가 삭제되었습니다.",
   "toast.chunk_updated": "청크가 업데이트되었습니다.",
   "toast.content_restored": "내용이 복원되었습니다.",

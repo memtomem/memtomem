@@ -77,6 +77,8 @@ describe('chunk save — held re-index warning (#2923)', () => {
     await window.I18N.init();
     window.STATE.selectedChunkId = CHUNK_ID;
     window.STATE.selectedOriginal = 'before';
+    // A loaded source-edit session: the detail Save edits source text (#3071).
+    window.STATE.sourceEdit = { chunkId: CHUNK_ID, hash: 'a'.repeat(64) };
     window.document.getElementById('d-editor').value = 'after';
 
     window.document.getElementById('d-save-btn').click();

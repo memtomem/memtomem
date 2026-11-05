@@ -1471,6 +1471,8 @@
   "toast.unpinned": "Unpinned",
   "toast.pinned_chunk_missing": "Pinned chunk no longer exists. Remove the stale pin.",
   "toast.chunk_saved": "Chunk saved.",
+  "toast.chunk_source_changed": "The note changed on disk after it was opened. Your text is still in the editor; reopen the note to edit the current version.",
+  "toast.chunk_source_load_failed": "Could not open the source text for editing: {error}",
   "toast.chunk_deleted": "Chunk deleted.",
   "toast.chunk_updated": "Chunk updated.",
   "toast.content_restored": "Content restored.",

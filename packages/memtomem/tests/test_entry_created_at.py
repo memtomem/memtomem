@@ -183,7 +183,7 @@ class TestTheStoreDatesNewRowsByTheEntry:
         header by contract (``test_mem_edit_header_preservation.py``), so the
         edited entry has no ``> created:`` line left to be dated by."""
         from memtomem.source_provenance import source_span_hash
-        from memtomem.tools.memory_writer import replace_chunk_body
+        from memtomem.tools.memory_writer import IndexedBase, replace_chunk_body
 
         fp = memory_dir / "notes.md"
         fp.write_text(_entry(T1, "old body"), "utf-8")
@@ -195,6 +195,7 @@ class TestTheStoreDatesNewRowsByTheEntry:
             start_line=1,
             end_line=len(lines),
             new_content="## New\n\nreplaced body",
+            base=IndexedBase("old body"),
             expected_source_span_hash=source_span_hash(lines, 1, len(lines)),
         )
         assert "> created:" not in fp.read_text(encoding="utf-8")
