@@ -1639,6 +1639,11 @@ _PRIOR_RELEASE_MENTIONS: tuple[tuple[str, str | None, str], ...] = (
         "`0.7.3` and later (the entry below",
         "first release whose mm init writes MEMTOMEM_EXTRA_TOOLS (#2970)",
     ),
+    (
+        "packages/langchain-memtomem/README.md",
+        "`memtomem>=0.7.4,<0.8`",
+        "langchain-memtomem's floor: first release with the ADR-0042 public names",
+    ),
     # The update workflow's tool-absent stop, in its source and every rendered skill.
     *(
         (path, "memtomem 0.7.2 or later", "floor for mem_update_coverage")
