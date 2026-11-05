@@ -86,7 +86,8 @@ jobs:
             --all-raw "$RUNNER_TEMP/memtomem-all.raw.json" \
             --core-out "$RUNNER_TEMP/memtomem-${VERSION}-core.cdx.json" \
             --all-out "$RUNNER_TEMP/memtomem-${VERSION}-all.cdx.json" \
-            --version "$VERSION"
+            --version "$VERSION" \
+            --lock release/uv.lock
       - name: Create release if needed and upload missing assets
         env:
           GH_TOKEN: ${{ github.token }}

@@ -17,7 +17,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   before; for an entry written without tags, whose indexed text shows its
   `> created:` line, an edit that changes or moves that line, or whose new body
   starts with `>`, is refused the same way.
-
 - **Editing an entry no longer makes it look newly written.** A chunk's
   `created_at` now comes from its entry's `> created:` line whenever the store
   creates the row, and editing an entry's body creates a new row. Before, the
@@ -50,7 +49,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   chunk's source text (`GET /api/chunks/{id}/source`), `mem_edit` refuses an edit
   of text that is not the source and returns the source to edit instead, and a
   body edit keeps the blank lines that end the chunk's range.
-
+- **Release SBOMs no longer claim dependencies that only an inactive extra declares
+  (#3066).** uv's CycloneDX export writes `A -> T` whenever A lists T under some extra and T
+  is installed for another reason, even when nothing requests that extra: the core SBOM
+  said `memtomem -> uvicorn` and `uvicorn -> python-dotenv, pyyaml`. `tools/release_sbom.py`
+  now reads the tag's `uv.lock` (`--lock`), works out which extras the graph activates, drops
+  each edge declared only under an inactive one and prints it in the job log, and refuses an
+  edge the lock does not declare at all. The component list does not change, and the
+  all-extras SBOM keeps every edge. SBOMs already attached to a release keep the false edges,
+  and a backfill of such a tag now stops at "refusing to overwrite differing release asset".
 - **A rebuilt index dates each chunk by its entry, not by the rebuild
   (#3051, ADR-0043 §5).** Re-indexing after the database is gone set every
   chunk's `created_at` to the re-index time, although each entry's
