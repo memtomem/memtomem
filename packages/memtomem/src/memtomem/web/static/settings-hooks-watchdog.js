@@ -1076,10 +1076,12 @@ async function runWatchdogNow() {
   bar.style.display = 'none';
   try {
     await api('POST', '/api/watchdog/run');
+    // Reload first: ``loadWatchdogStatus`` hides the bar as it starts, so a
+    // message shown before the reload would vanish as soon as it appeared.
+    await loadWatchdogStatus();
     bar.className = 'status-msg ok';
     bar.textContent = 'Health checks completed.';
     bar.style.display = 'block';
-    await loadWatchdogStatus();
   } catch (e) {
     bar.className = 'status-msg err';
     bar.textContent = 'Run failed: ' + e.message;
