@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Upgrading
 
+- **`mem_edit` and `PATCH /api/chunks/{id}` refuse an edit of indexed text that is
+  not the chunk's source (#3071).** An edit without `base_hash` is of the chunk's
+  indexed text, and it is now accepted only where saving that text unchanged would
+  leave the file as it is. Otherwise the call writes nothing and answers
+  `edit_base_mismatch` with the chunk's source text and a `base_hash`; send the
+  edited source text back with that `base_hash`. A body-only edit of an entry
+  written by `mem_add` keeps its heading and `> created:` / `> tags:` header as
+  before; for an entry written without tags, whose indexed text shows its
+  `> created:` line, an edit that changes or moves that line, or whose new body
+  starts with `>`, is refused the same way.
 - **Editing an entry no longer makes it look newly written.** A chunk's
   `created_at` now comes from its entry's `> created:` line whenever the store
   creates the row, and editing an entry's body creates a new row. Before, the
@@ -29,6 +39,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Editing a chunk no longer deletes the lines its text does not show (#3071).**
+  An edit was written over the chunk's line range from its indexed text, which is
+  not always the file's text: wikilinks were resolved, so a save without changes
+  removed the brackets; a frontmatter-led file's first chunk holds the frontmatter
+  but not the next heading, so saving it deleted that heading (and a body-only
+  edit deleted the frontmatter too); merged sections lost heading-only sections and
+  gained repeated parent headings. The Web UI's editors now load and save the
+  chunk's source text (`GET /api/chunks/{id}/source`), `mem_edit` refuses an edit
+  of text that is not the source and returns the source to edit instead, and a
+  body edit keeps the blank lines that end the chunk's range.
 - **Release SBOMs no longer claim dependencies that only an inactive extra declares
   (#3066).** uv's CycloneDX export writes `A -> T` whenever A lists T under some extra and T
   is installed for another reason, even when nothing requests that extra: the core SBOM

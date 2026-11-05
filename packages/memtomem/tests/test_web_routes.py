@@ -65,6 +65,21 @@ def _fixture_span_hash(source: Path, start: int, end: int) -> str | None:
     return source_span_hash(text.splitlines(), start, end)
 
 
+def _indexed_body(source: Path, start: int, end: int) -> str:
+    """The content a faithful chunk of this fixture span holds: its body.
+
+    Edits without a ``base_hash`` are of the indexed content, accepted only
+    where that content is the span's body (#3071), so a fixture chunk standing
+    in for an indexed one carries the body of the span it claims.
+    """
+    from memtomem.tools.memory_writer import _find_body_start_index
+
+    span = source.read_text(encoding="utf-8").splitlines()[start - 1 : end]
+    while span and not span[-1].strip():
+        span.pop()
+    return "\n".join(span[_find_body_start_index(span) :])
+
+
 def _make_test_chunk(
     chunk_id: uuid.UUID | None = None,
     content: str = "test chunk content",
@@ -2638,7 +2653,7 @@ class TestEditChunkNamespaceLookupFailure:
         source.write_text("## Cache strategy\n\nOld body line.\n", encoding="utf-8")
         chunk = _make_test_chunk(source=str(source))
         chunk = chunk.__class__(
-            content=chunk.content,
+            content=_indexed_body(source, 1, 3),
             metadata=chunk.metadata.__class__(
                 source_file=source,
                 heading_hierarchy=("## Cache strategy",),
@@ -2677,7 +2692,7 @@ class TestEditChunkNamespaceLookupFailure:
         source.write_text("## Cache strategy\n\nOld body line.\n", encoding="utf-8")
         chunk = _make_test_chunk(source=str(source))
         chunk = chunk.__class__(
-            content=chunk.content,
+            content=_indexed_body(source, 1, 3),
             metadata=chunk.metadata.__class__(
                 source_file=source,
                 heading_hierarchy=("## Cache strategy",),
@@ -3066,7 +3081,7 @@ class TestEditChunk:
         chunk = _make_test_chunk(source=str(source))
         # Chunk range covers the entire entry on disk.
         chunk = chunk.__class__(
-            content=chunk.content,
+            content=_indexed_body(source, 1, 6),
             metadata=chunk.metadata.__class__(
                 source_file=source,
                 heading_hierarchy=("## Cache strategy",),
@@ -3143,7 +3158,7 @@ class TestEditChunkRedaction:
         source.write_text("## H\n\nbody\n", encoding="utf-8")
         chunk = _make_test_chunk(source=str(source))
         chunk = chunk.__class__(
-            content=chunk.content,
+            content=_indexed_body(source, 1, 3),
             metadata=chunk.metadata.__class__(
                 source_file=source,
                 heading_hierarchy=("## H",),
@@ -3304,7 +3319,7 @@ class TestEditChunkProjectSharedGateB:
 
         def _chunk(chunk_scope: str):
             return base.__class__(
-                content=base.content,
+                content=_indexed_body(source, 1, 3),
                 metadata=base.metadata.__class__(
                     source_file=source,
                     heading_hierarchy=("## H",),
@@ -7679,7 +7694,7 @@ class TestChunkCrudCrossProcessLock:
     def _chunk_on(self, source: Path, cid: uuid.uuid4 | None = None) -> Chunk:
         c = _make_test_chunk(chunk_id=cid, source=str(source))
         return c.__class__(
-            content=c.content,
+            content=_indexed_body(source, 1, 3) if source.exists() else c.content,
             metadata=c.metadata.__class__(
                 source_file=source,
                 heading_hierarchy=("## H",),
@@ -8403,7 +8418,7 @@ class TestIndexRoutesInvalidateSearchCache:
 
         source = tmp_path / "edit.md"
         source.write_text("# Heading\n\nBody one.\nBody two.\nBody three.\n", encoding="utf-8")
-        chunk = _make_test_chunk(source=str(source))
+        chunk = _make_test_chunk(content=_indexed_body(source, 1, 5), source=str(source))
         app.state.storage.get_chunk = AsyncMock(return_value=chunk)
         app.state.index_engine.index_file = AsyncMock(
             side_effect=NamespaceResolutionError("store down")

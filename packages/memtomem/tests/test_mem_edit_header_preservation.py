@@ -10,7 +10,7 @@ header. ``replace_chunk_body`` is the helper that handles this.
 from pathlib import Path
 
 from memtomem.source_provenance import source_span_hash
-from memtomem.tools.memory_writer import replace_chunk_body
+from memtomem.tools.memory_writer import IndexedBase, replace_chunk_body
 
 
 class TestReplaceChunkBody:
@@ -32,6 +32,7 @@ class TestReplaceChunkBody:
             start_line=1,
             end_line=6,
             new_content="New body.",
+            base=IndexedBase("Old body."),
             expected_source_span_hash=source_span_hash(
                 f.read_text(encoding="utf-8").splitlines(), 1, 6
             ),
@@ -55,6 +56,7 @@ class TestReplaceChunkBody:
             start_line=1,
             end_line=6,
             new_content="Replaced body.",
+            base=IndexedBase("Old body line."),
             expected_source_span_hash=source_span_hash(
                 f.read_text(encoding="utf-8").splitlines(), 1, 6
             ),
@@ -77,6 +79,7 @@ class TestReplaceChunkBody:
             start_line=1,
             end_line=3,
             new_content="New body content.",
+            base=IndexedBase("Old body content."),
             expected_source_span_hash=source_span_hash(
                 f.read_text(encoding="utf-8").splitlines(), 1, 3
             ),
@@ -100,6 +103,7 @@ class TestReplaceChunkBody:
             start_line=1,
             end_line=6,
             new_content="## New\n\nFresh body without metadata.",
+            base=IndexedBase("Old body."),
             expected_source_span_hash=source_span_hash(
                 f.read_text(encoding="utf-8").splitlines(), 1, 6
             ),
@@ -131,6 +135,7 @@ class TestReplaceChunkBody:
             start_line=7,
             end_line=7,
             new_content="Replaced second half.",
+            base=IndexedBase("Second half of body."),
             expected_source_span_hash=source_span_hash(
                 f.read_text(encoding="utf-8").splitlines(), 7, 7
             ),
@@ -152,6 +157,7 @@ class TestReplaceChunkBody:
             1,
             3,
             "New.",
+            base=IndexedBase("Body."),
             expected_source_span_hash=source_span_hash(
                 f1.read_text(encoding="utf-8").splitlines(), 1, 3
             ),
@@ -165,6 +171,7 @@ class TestReplaceChunkBody:
             1,
             3,
             "New.",
+            base=IndexedBase("Body."),
             expected_source_span_hash=source_span_hash(
                 f2.read_text(encoding="utf-8").splitlines(), 1, 3
             ),

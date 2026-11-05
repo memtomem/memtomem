@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -343,27 +344,173 @@ def _rewrite_in_place(
     return Rewrite(base=text, result=result)
 
 
+@dataclass(frozen=True, slots=True)
+class SourceBase:
+    """The caller edited the span's source text, as :func:`chunk_source_text` gave it.
+
+    ``body_hash`` is that text's :func:`source_text_hash`. The edit replaces
+    exactly that text; nothing in the span is detected, preserved or dropped
+    on the caller's behalf, because the caller saw every line it replaces.
+    """
+
+    body_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class IndexedBase:
+    """The caller edited the chunk's indexed ``content``, not its source text.
+
+    Indexed content is a projection of the span (wikilinks resolved, merge
+    labels rebuilt, frontmatter carried over from a merged preamble), so it is
+    a safe base only where it *is* the span's body: the edit is accepted only
+    when saving ``content`` itself unchanged would leave the span as it is.
+    """
+
+    content: str
+
+
+EditBase = SourceBase | IndexedBase
+
+_BASE_HASH_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def valid_base_hash(value: object) -> bool:
+    """Whether *value* has the shape :func:`source_text_hash` produces."""
+    return isinstance(value, str) and _BASE_HASH_RE.fullmatch(value) is not None
+
+
+class EditBaseMismatchError(StaleSourceProvenanceError):
+    """The edit's base is not the span's current source text; nothing was written.
+
+    Raised from inside the rewrite, after every gate in front of it passed and
+    before a byte is written. Carries the span's current source text and its
+    hash so the caller can redo the edit against what the file holds.
+    """
+
+    def __init__(self, text: str, body_hash: str) -> None:
+        super().__init__("edit_base_mismatch")
+        self.text = text
+        self.body_hash = body_hash
+
+
+def _source_region_end(span: list[str]) -> int:
+    """Index after the span's last non-blank line: its trailing blanks stay put."""
+    end = len(span)
+    while end and not span[end - 1].strip():
+        end -= 1
+    return end
+
+
+def source_text_hash(text: str) -> str:
+    """Hash of a span's source text exactly as given (no normalization)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def chunk_source_text(lines: list[str], start_line: int, end_line: int) -> str:
+    """The span's source text a :class:`SourceBase` edit replaces.
+
+    Every line of the span except its trailing blank lines, which separate it
+    from the next section and are kept by the edit. *lines* is the file split
+    with ``splitlines()``, as the writer splits it.
+    """
+    span = lines[start_line - 1 : end_line]
+    return "\n".join(span[: _source_region_end(span)])
+
+
+def _quote_group_start(span: list[str]) -> int | None:
+    """Index of a section-leading ``>`` group after the heading line, if any."""
+    i = 1 if span and span[0].lstrip().startswith("#") else 0
+    while i < len(span) and not span[i].strip():
+        i += 1
+    return i if i < len(span) and span[i].lstrip().startswith(">") else None
+
+
+def _certified_region(span: list[str], content: str, new_content: str) -> int | None:
+    """Where an edit of indexed *content* starts replacing *span*, or ``None``.
+
+    The edit replaces from that line to the span's last non-blank line, and is
+    accepted only where *content* is exactly the span's text from some point on:
+
+    - the body after the heading line and blockquote header. The header was
+      hidden from *content*, so it is kept and *new_content* is the body.
+    - the text from a blockquote group on, where the chunker left the group in
+      *content* (a group without ``tags:``, such as an untagged ``mem_add``
+      entry's ``> created:`` line). The caller was shown the group, so the
+      edit says what to do with it: opening with the group verbatim replaces
+      from the group; holding none of its lines and not opening with ``>`` is
+      body-only, and keeps it (the body-only contract ``mem_edit`` documents).
+      Anything else -- the group moved, changed, or partly kept -- is
+      ambiguous between deleting and keeping it, and is refused, not guessed.
+
+    Content held only through the ``## `` full-replacement rule is refused too:
+    a base certified that way would switch rules as soon as an edit stopped
+    starting with ``## `` and keep the heading the content already held.
+    """
+    if _is_header_override(content):
+        return None
+    region = span[: _source_region_end(span)]
+    shown = content.lstrip("\n").splitlines()
+    body_start = _find_body_start_index(region)
+    if region[body_start:] == shown:
+        return body_start
+    quote_start = _quote_group_start(region)
+    if quote_start is None or region[quote_start:] != shown:
+        return None
+    group = [line for line in region[quote_start:body_start] if line.strip()]
+    edited = new_content.lstrip("\n").splitlines()
+    if edited[: len(group)] == group:
+        return quote_start
+    opens_with_quote = bool(edited) and edited[0].lstrip().startswith(">")
+    if not opens_with_quote and not set(group) & set(edited):
+        return body_start
+    return None
+
+
+def _indexed_replacement(span: list[str], new_content: str, start: int) -> list[str]:
+    """The span with lines ``start`` up to its trailing blanks replaced.
+
+    *start* comes from :func:`_certified_region` for the content the caller
+    edited, never from what the edit happens to begin with. Content starting
+    with ``## `` replaces the heading and header too (the documented override).
+    The span's trailing blank lines are kept.
+    """
+    end = _source_region_end(span)
+    if _is_header_override(new_content):
+        return new_content.splitlines() + span[end:]
+    return span[:start] + new_content.lstrip("\n").splitlines() + span[end:]
+
+
+def _is_header_override(content: str) -> bool:
+    return content.lstrip("\n").lstrip().startswith("## ")
+
+
 def replace_chunk_body(
     file_path: Path,
     start_line: int,
     end_line: int,
     new_content: str,
     *,
+    base: EditBase,
     expected_source_span_hash: str | None,
     expected_identity: tuple[int, int] | None = None,
 ) -> Rewrite:
-    """Replace a chunk's body in *file_path* while preserving its header.
+    """Replace a chunk's text in *file_path*, refusing when *base* is not the source.
 
-    "Header" means the heading line and any section-leading blockquote
-    group (``> created: ...`` / ``> tags: ...``). The chunker strips the
-    blockquote header from chunk content, so callers of ``mem_edit``
-    typically supply body-only ``new_content`` and would otherwise
-    accidentally erase the metadata header.
+    With a :class:`SourceBase`, *new_content* replaces the span's source text
+    (every line but its trailing blanks) verbatim, once the text's hash still
+    matches the one the caller edited.
 
-    If ``new_content`` itself starts with ``## ``, the call is treated
-    as a full replacement (preserving the pre-RFC ``mem_edit`` semantic
-    where the user supplied the entire entry including heading); no
-    header preservation is applied.
+    With an :class:`IndexedBase`, *new_content* is body-only: the heading line
+    and the section-leading blockquote header (``> created: ...`` /
+    ``> tags: ...``) are kept, unless *new_content* starts with ``## ``, which
+    replaces them too. That rule is applied only when the indexed content is
+    the span's body: saving it unchanged must reproduce the span, and through
+    the body rule, not the ``## `` override. Otherwise the content is a
+    projection of the span (resolved wikilinks, merged sections, frontmatter),
+    and writing an edit of it would remove what the projection does not show.
+
+    A refused base raises :class:`EditBaseMismatchError` carrying the span's
+    current source text and hash, having written nothing.
 
     Never creates: a source removed under this call raises
     :class:`SourceRemovedError` and one swapped for another file (or an
@@ -376,20 +523,19 @@ def replace_chunk_body(
         trailing_newline = text.endswith("\n")
         lines = text.splitlines()
         _validate_source_span(lines, start_line, end_line, expected_source_span_hash)
+        span = lines[start_line - 1 : end_line]
+        source = chunk_source_text(lines, start_line, end_line)
+        source_hash = source_text_hash(source)
 
-        stripped_new = new_content.lstrip("\n")
-        # ``append_entry`` always emits H2 for entry headings; other heading
-        # levels in user input are treated as body content rather than a
-        # header override, so only ``## `` triggers full-replacement.
-        if stripped_new.lstrip().startswith("## "):
-            # Full replacement — caller is overriding heading + header explicitly.
-            replacement = new_content.splitlines()
+        if isinstance(base, SourceBase):
+            if base.body_hash != source_hash:
+                raise EditBaseMismatchError(source, source_hash)
+            replacement = new_content.splitlines() + span[_source_region_end(span) :]
         else:
-            chunk_lines = lines[start_line - 1 : end_line]
-            body_start = _find_body_start_index(chunk_lines)
-            preserved = chunk_lines[:body_start]
-            new_body_lines = stripped_new.splitlines()
-            replacement = preserved + new_body_lines
+            start = _certified_region(span, base.content, new_content)
+            if start is None:
+                raise EditBaseMismatchError(source, source_hash)
+            replacement = _indexed_replacement(span, new_content, start)
 
         new_lines = lines[: start_line - 1] + replacement + lines[end_line:]
         result = "\n".join(new_lines)

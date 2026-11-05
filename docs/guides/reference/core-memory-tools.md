@@ -571,6 +571,31 @@ mem_edit(chunk_id="abc123-...", new_content="Updated content")
 
 Modifies the source `.md` file and re-indexes it.
 
+`new_content` is the entry's new body: the heading line and the entry's
+`> created:` / `> tags:` header are kept. A value that starts with `## `
+replaces the heading and header too. An entry written without tags shows its
+`> created:` line in the chunk's text; send that line back unchanged at the top
+to keep it as shown, or leave it out to edit the body only. An edit that keeps
+part of that header, changes it, or moves it below other text is refused as
+below rather than guessed at.
+
+That rule needs the chunk's text to be its body in the file, and a chunk's
+indexed text is not always that: wikilinks are resolved (`[[x|y]]` reads `y`),
+merged sections carry heading labels rebuilt from the outline, and a file's
+frontmatter is merged into its first section without that section's heading.
+Such a chunk is refused with `edit_base_mismatch`, followed by the chunk's
+source text and a `base_hash`. Edit that text and send it back:
+
+```
+mem_edit(chunk_id="abc123-...", new_content="<the edited source text>", base_hash="<hash>")
+```
+
+With `base_hash`, `new_content` replaces the source text as given, heading and
+frontmatter lines included. A `base_hash` that is not the hash of the chunk's
+current source text is refused the same way. If the file itself changed since it
+was indexed, the edit is refused as stale provenance instead (below): re-index
+the source and take the chunk ID and source text again.
+
 Editing a chunk that lives in the `project_shared` tier takes an explicit
 confirmation, because the file it rewrites is one the repository tracks:
 
@@ -586,8 +611,13 @@ Without it the call is refused and the file is left alone. The scope is read
 from the chunk itself, not from an argument — you do not say which tier it is
 in, and passing the flag for a `user` or `project_local` chunk changes nothing.
 
-Four other refusals write nothing. The Web UI's chunk edit and delete answer
+Five other refusals write nothing. The Web UI's chunk edit and delete answer
 them with HTTP 409:
+
+- `edit_base_mismatch` (edit only) — the edit was of text that is not the
+  chunk's source text, as above. The Web UI's editor loads the source text
+  (`GET /api/chunks/{id}/source`) and sends its `base_hash`; a file changed
+  after the editor opened is refused as stale provenance.
 
 - `source_read_only` — the chunk's file is under
   `indexing.read_only_memory_dirs`, or the chunk is a source fragment with no
