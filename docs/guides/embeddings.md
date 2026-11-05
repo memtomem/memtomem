@@ -164,6 +164,10 @@ export MEMTOMEM_EMBEDDING__DIMENSION=1024
 
 ## OpenAI (cloud)
 
+> **Your note text is sent to OpenAI.** Every chunk is embedded by OpenAI's API when it is
+> indexed, and every search query is sent too. Use ONNX or a local Ollama server to keep
+> embedding on your machine. See [What leaves your machine](configuration.md#what-leaves-your-machine).
+
 ```bash
 export MEMTOMEM_EMBEDDING__PROVIDER=openai
 export MEMTOMEM_EMBEDDING__MODEL=text-embedding-3-small

@@ -66,7 +66,7 @@ mm init                               # preset picker, then memory_dir + MCP
 
 The interactive picker starts with three presets — **Minimal** (BM25, no downloads), **English (Recommended)** (ONNX `multilingual-e5-small` + auto-discover providers), **Korean-optimized** (ONNX `multilingual-e5-small` + `kiwipiepy` tokenizer); no preset turns on a reranker — plus an **Advanced** entry that opens the full 10-step wizard. Preset paths only ask about the memory directory and MCP registration; everything else is set from the preset.
 
-Choose **Minimal** for the fastest no-download first proof and rerun `mm init` later to add semantic search. For automation, `mm init --non-interactive` picks the minimal preset without prompts. See [Embeddings](docs/guides/embeddings.md) for the model and provider matrix.
+Choose **Minimal** for the fastest no-download first proof and rerun `mm init` later to add semantic search. For automation, `mm init --non-interactive` picks the minimal preset without prompts. See [Embeddings](docs/guides/embeddings.md) for the model and provider matrix. The presets keep embedding on your machine; choosing OpenAI embeddings, a cloud LLM, or the Cohere reranker sends note text to that service ([What leaves your machine](docs/guides/configuration.md#what-leaves-your-machine)).
 
 <a id="3-use"></a>
 ### 3. Verify a complete memory round trip
