@@ -137,6 +137,18 @@ def effective_watcher_backend(config: IndexingConfig) -> str:
     return config.watcher_backend
 
 
+def _stop_observer(observer: BaseObserver) -> None:
+    """Stop *observer* and join its dispatcher thread if it ever started.
+
+    An observer whose ``start`` failed part-way has stopped emitters but no
+    dispatcher thread, and joining that raises ``RuntimeError: cannot join
+    thread before it is started``.
+    """
+    observer.stop()
+    if observer.is_alive():
+        observer.join()
+
+
 def _create_observer(config: IndexingConfig) -> BaseObserver:
     if effective_watcher_backend(config) == "polling":
         return PollingObserver()
@@ -262,6 +274,16 @@ class FileWatcher:
         # ``_config``: callers may replace or mutate the config before asking
         # us to reconfigure, while the observer itself keeps its old backend.
         self._observer_backend: str | None = None
+        # Why the last ``start`` ran without an observer, as "Type: message";
+        # ``None`` when it started one or never ran. Diagnostic only — whether
+        # live events flow is ``live_events``.
+        self._observer_error: str | None = None
+        # An observer whose start failed and whose cleanup failed too. Held
+        # apart from ``_observer`` so ``reconfigure`` never swaps over it, and
+        # kept until a ``stop`` manages to stop it: until then ``start``
+        # refuses, because a new observer would run beside emitters nothing
+        # could stop any more.
+        self._failed_observer: BaseObserver | None = None
         self._queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=_WATCHER_QUEUE_MAXSIZE)
         self._task: asyncio.Task[None] | None = None
         self._backfill_task: asyncio.Task[None] | None = None
@@ -385,9 +407,30 @@ class FileWatcher:
         else:
             logger.debug("File watcher queue full, dropping event for %s", path)
 
+    @property
+    def live_events(self) -> bool:
+        """Whether file events reach this watcher: it runs and holds an observer."""
+        return self._task is not None and self._observer is not None
+
+    @property
+    def observer_error(self) -> str | None:
+        """Why the last ``start`` ran without an observer, or ``None``."""
+        return self._observer_error
+
     async def start(self) -> None:
-        """Schedule the watched roots and start the observer and processor task."""
+        """Schedule the watched roots and start the observer and processor task.
+
+        An observer that cannot be built, scheduled or started does not fail
+        the start (#3080): the watcher runs on without live events, recording
+        why in ``observer_error``, and its source checks and backfill still
+        run — they guard the index whether or not events arrive.
+        """
         async with self._lifecycle_lock:
+            if self._failed_observer is not None:
+                raise RuntimeError(
+                    "the observer of an earlier failed start could not be stopped; "
+                    "restart the server to resume file watching"
+                )
             loop = asyncio.get_running_loop()
             # A fresh queue per lifecycle. ``stop`` signals the processor by
             # enqueueing a sentinel, and a processor that misses it — the five
@@ -409,30 +452,82 @@ class FileWatcher:
             handler = self._make_handler(loop)
             self._handler = handler
             backend = effective_watcher_backend(self._config)
-            self._observer = _create_observer(self._config)
-            self._observer_backend = backend
             logger.info("File watcher backend: %s", backend)
 
             watched: list[Path] = []
             # ADR-0011: watch every index root (user-tier ``memory_dirs`` and
             # project-tier ``project_memory_dirs``) so files dropped into a
             # registered project_shared / project_local dir trigger reindex
-            # the same way user-tier files do.
+            # the same way user-tier files do. Collected before the observer
+            # exists, so the backfill below covers every root even when the
+            # observer fails part-way through scheduling them.
             for watch_dir in self._config.all_index_roots():
                 expanded = Path(watch_dir).expanduser().resolve()
                 if expanded.exists():
-                    watch = self._observer.schedule(handler, str(expanded), recursive=True)
-                    self._watches[expanded] = watch
-                    logger.info("Watching %s for changes", expanded)
                     watched.append(expanded)
 
-            self._observer.start()
+            self._observer_error = None
+            self._start_observer(handler, backend, watched)
             self._task = asyncio.create_task(self._process_events())
             self._pending_replay_task = asyncio.create_task(self._replay_pending_checks())
             self._held_recheck_task = asyncio.create_task(self._recheck_held_loop())
             self._relink_scan_task = asyncio.create_task(self._journal_relinked_keys())
             if watched and self._config.startup_backfill:
                 self._backfill_task = asyncio.create_task(self._backfill_existing(watched))
+
+    def _start_observer(
+        self, handler: _MarkdownEventHandler, backend: str, roots: list[Path]
+    ) -> None:
+        """Build, schedule and start an observer on *roots*; publish it on success.
+
+        Only the observer's own operations are guarded. watchdog 7.0 re-raises
+        a native stream that failed to start out of ``Observer.start`` (6.0
+        logged it in the emitter thread), and an unguarded raise here failed
+        the whole server start, every tool call with it (#3080). A
+        ``BaseException`` still propagates, with the observer published so the
+        caller's ``stop`` can clean up after it, as before.
+        """
+        observer: BaseObserver | None = None
+        watches: dict[Path, ObservedWatch] = {}
+        try:
+            observer = _create_observer(self._config)
+            for root in roots:
+                watches[root] = observer.schedule(handler, str(root), recursive=True)
+                logger.info("Watching %s for changes", root)
+            observer.start()
+        except Exception as exc:
+            self._observer_error = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "The %s file watcher could not start (%s): file edits are not picked "
+                "up live until the server restarts; source checks keep running",
+                backend,
+                self._observer_error,
+                exc_info=True,
+            )
+            if observer is not None:
+                # Held *before* the cleanup and released only after it, so a
+                # cleanup cut short by a ``BaseException`` still leaves the
+                # handle where ``stop`` retries it and ``start`` refuses.
+                self._failed_observer = observer
+                try:
+                    _stop_observer(observer)
+                    self._failed_observer = None
+                except Exception:
+                    logger.warning(
+                        "Could not stop the file watcher's observer after its start "
+                        "failed; file watching cannot start again until the server restarts",
+                        exc_info=True,
+                    )
+            return
+        except BaseException:
+            if observer is not None:
+                self._observer = observer
+                self._observer_backend = backend
+                self._watches.update(watches)
+            raise
+        self._observer = observer
+        self._observer_backend = backend
+        self._watches.update(watches)
 
     async def _replay_pending_checks(self) -> None:
         storage = getattr(self._engine, "_storage", None)
@@ -899,6 +994,12 @@ class FileWatcher:
             self._watches.clear()
             self._task = None
             self._backfill_task = None
+            if self._failed_observer is not None:
+                # Last, so everything above is already released when this
+                # raises. Cleared only once it stops: on a raise the handle
+                # stays, and ``start`` keeps refusing.
+                _stop_observer(self._failed_observer)
+                self._failed_observer = None
 
     async def _backfill_existing(self, dirs: list[Path]) -> None:
         """Index pre-existing files the observer can't see.

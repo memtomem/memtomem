@@ -197,6 +197,30 @@ def _web_ui_identity() -> tuple[int, str] | None:
         return None
 
 
+def _watcher_unavailable_fix() -> str:
+    """How to move this server off the failing watcher backend (#3080).
+
+    Names the environment variables that set the backend when there are any:
+    either shape outranks ``config.json``, so advising a file edit over one
+    would change nothing. Names only, never values.
+    """
+    from memtomem.config import env_bindings_for
+
+    tail = "or close other memtomem-server sessions, then restart the server."
+    bindings = env_bindings_for("indexing", "watcher_backend")
+    if not bindings:
+        return (
+            f'Set "indexing": {{"watcher_backend": "polling"}} in ~/.memtomem/config.json, {tail}'
+        )
+    names = " and ".join(
+        f'{b.name} (its "watcher_backend" key)' if b.whole_section else b.name for b in bindings
+    )
+    return (
+        f"The environment sets the watcher backend through {names}, which overrides "
+        f'~/.memtomem/config.json: set it to "polling" there, {tail}'
+    )
+
+
 def _collect_concurrent_writers(db_path: Path) -> dict | None:
     """Build the ``concurrent_server_writers`` warning, or ``None``.
 
@@ -544,6 +568,21 @@ async def collect_status_report(app: AppContext) -> dict:
                     "indexing.extract_entities on, the default)",
                 }
             )
+
+    # #3080: the server runs, but its file watcher has no observer. Read off
+    # the watcher instance, which a ``from_runtime_owner`` facade shares with
+    # its owner; a context that runs no watcher (``mm status``) has none.
+    watcher = getattr(app, "_watcher", None)
+    observer_error = getattr(watcher, "observer_error", None)
+    if isinstance(observer_error, str):
+        warnings.append(
+            {
+                "kind": "watcher_unavailable",
+                "detail": f"The file watcher could not start ({observer_error}): file "
+                "edits are not picked up live; source checks keep running.",
+                "fix": _watcher_unavailable_fix(),
+            }
+        )
 
     # #1935: two live memtomem-server processes with this store open. The
     # registry probe is filesystem work behind a bounded cross-process
