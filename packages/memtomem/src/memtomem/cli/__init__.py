@@ -98,7 +98,7 @@ class _LazyCommands(MutableMapping[str, click.Command]):
     message="%(prog)s %(version)s",
 )
 def cli() -> None:
-    """memtomem — markdown-first memory infrastructure for AI agents."""
+    """memtomem — long-term memory for AI coding agents, kept as Markdown you own."""
     # Windows console default codepage (cp1252/cp437) can't encode the
     # box-drawing and em-dash glyphs the wizard uses. Reconfigure to UTF-8
     # with `replace` errors so a missing glyph degrades to `?` instead of
