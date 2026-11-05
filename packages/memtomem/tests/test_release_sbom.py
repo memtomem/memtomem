@@ -67,6 +67,22 @@ def _write(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_lock(path: Path, payload: dict) -> Path:
+    """A uv.lock that declares exactly the payload's edges as base dependencies."""
+    names = {row["bom-ref"]: row for row in payload["components"]}
+    names[payload["metadata"]["component"]["bom-ref"]] = payload["metadata"]["component"]
+    edges = {row["ref"]: row.get("dependsOn", []) for row in payload["dependencies"]}
+    blocks = []
+    for ref, row in names.items():
+        deps = "".join(f'{{ name = "{names[t]["name"]}" }}, ' for t in edges.get(ref, []))
+        blocks.append(
+            f'[[package]]\nname = "{row["name"]}"\nversion = "{row["version"]}"\n'
+            f"dependencies = [{deps}]\n"
+        )
+    path.write_text("version = 1\n\n" + "\n".join(blocks), encoding="utf-8")
+    return path
+
+
 def test_normalize_removes_only_optional_nondeterminism() -> None:
     payload = _payload(_CORE)
     normalized = rs.normalize(payload)
@@ -91,6 +107,7 @@ def test_pair_is_validated_and_written_reproducibly(tmp_path: Path) -> None:
         core_out=first_core,
         all_out=first_all,
         version="0.3.6",
+        lock=_write_lock(tmp_path / "uv.lock", _payload(_CORE | _EXTRAS)),
     )
     rs.normalize_validate_pair(
         core_raw=core_b,
@@ -98,6 +115,7 @@ def test_pair_is_validated_and_written_reproducibly(tmp_path: Path) -> None:
         core_out=second_core,
         all_out=second_all,
         version="0.3.6",
+        lock=_write_lock(tmp_path / "uv.lock", _payload(_CORE | _EXTRAS)),
     )
 
     assert first_core.read_bytes() == second_core.read_bytes()
@@ -115,6 +133,7 @@ def test_pair_rejects_all_graph_that_is_not_core_superset(tmp_path: Path) -> Non
             core_out=tmp_path / "out-core.json",
             all_out=tmp_path / "out-all.json",
             version="0.3.6",
+            lock=_write_lock(tmp_path / "uv.lock", _payload(_CORE | _EXTRAS)),
         )
 
 
@@ -129,6 +148,7 @@ def test_pair_rejects_wrong_root_version(tmp_path: Path) -> None:
             core_out=tmp_path / "out-core.json",
             all_out=tmp_path / "out-all.json",
             version="0.3.6",
+            lock=_write_lock(tmp_path / "uv.lock", _payload(_CORE | _EXTRAS)),
         )
 
 

@@ -96,6 +96,7 @@ jobs:
           --out "$RUNNER_TEMP/langchain-memtomem-${{ steps.contract.outputs.version }}.cdx.json"
           --version "${{ steps.contract.outputs.version }}"
           --core-version "${{ steps.contract.outputs.core }}"
+          --lock release/uv.lock
       - name: Write the release notes
         id: notes
         env:
