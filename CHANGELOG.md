@@ -57,6 +57,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   events: the watcher's source checks and the opt-in startup backfill still run,
   `mem_status` shows a `watcher_unavailable` warning with the error, and the `mm web`
   embedding reset no longer says new edits are auto-indexed while they are not.
+- **A permission-only change to an indexed file reaches the indexer again (#3082).** On the
+  native Linux backend, watchdog 7.0 reports metadata changes (permissions, ownership,
+  timestamps) as an event of their own, which the file watcher ignored; 6.0 reported them as
+  modifications. `chmod 000` on an indexed note no longer held it out of search, and its
+  chunks stayed searchable until its content changed. The watcher now indexes on that event
+  too. With the polling backend (the macOS default), watchdog 7.0 reports a change of mode,
+  ownership or file flags the same way, so a permission change is now seen there at all:
+  6.0's polling compared only modification time and size. `uv.lock` now pins watchdog 7.0.0, the version a
+  fresh install resolves, so CI tests what users run.
 - **Release SBOMs no longer claim dependencies that only an inactive extra declares
   (#3066).** uv's CycloneDX export writes `A -> T` whenever A lists T under some extra and T
   is installed for another reason, even when nothing requests that extra: the core SBOM
