@@ -197,7 +197,7 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     # consumer asks for it.
     app = FastAPI(
         title="memtomem Web UI",
-        description="Web UI for memtomem memory infrastructure",
+        description="Web UI for memtomem, long-term memory for AI coding agents",
         version=__version__,
         lifespan=lifespan,
         docs_url=None,

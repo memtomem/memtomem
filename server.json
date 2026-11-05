@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.memtomem/memtomem",
-  "description": "Markdown-first long-term memory for AI agents. Hybrid BM25 + vector search, runs locally.",
+  "description": "Long-term memory for AI coding agents, kept as Markdown you own. Runs locally.",
   "version": "0.7.5",
   "repository": {
     "url": "https://github.com/memtomem/memtomem",
