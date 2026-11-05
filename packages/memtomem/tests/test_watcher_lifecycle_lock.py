@@ -150,11 +150,19 @@ async def test_a_stop_after_a_failed_observer_start_does_not_raise(tmp_path, mon
     watcher = FileWatcher(engine, IndexingConfig(memory_dirs=[str(root)]))
 
     resumer = WatcherResumer(watcher)
-    assert await resumer.resume() is False
-    assert observer.stopped is True
-    # The instance is clean, so a later reset may try again.
-    assert resumer.can_retry is True
-    assert watcher._observer is None
+    # The observer's failure no longer fails the start (#3080): the watcher
+    # runs on without live events, so the resume succeeds.
+    assert await resumer.resume() is True
+    try:
+        assert watcher.observer_error == "OSError: inotify instance limit reached"
+        assert watcher.live_events is False
+        assert observer.stopped is True
+        # The instance is clean, so nothing bars a later start.
+        assert resumer.can_retry is True
+        assert watcher._observer is None
+        assert watcher._failed_observer is None
+    finally:
+        await watcher.stop()
 
 
 @pytest.mark.asyncio

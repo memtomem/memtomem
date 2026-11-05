@@ -1518,13 +1518,29 @@ async def _resume_watching(state) -> str:
         return await _resume_watching_locked(state, WatcherResumer)
 
 
+def _no_live_events_note(watcher) -> str:
+    """The reset-message clause for a running watcher whose observer failed (#3080).
+
+    Such a watcher counts as started — its source checks run, and a second
+    start would duplicate them — but no file event reaches it, so saying
+    edits are auto-indexed would be false.
+    """
+    error = getattr(watcher, "observer_error", None)
+    if not isinstance(error, str):
+        return ""
+    return (
+        f" The file watcher could not start ({error}), so new edits are not"
+        " auto-indexed: restart `mm web` to try again."
+    )
+
+
 async def _resume_watching_locked(state, resumer_cls) -> str:
     watcher = getattr(state, "file_watcher", None)
     # Read inside the lock: the reset that went first may have just started it.
     started = getattr(state, "file_watcher_started", watcher is not None)
     blocked = getattr(state, "file_watcher_resume_blocked", False)
     if started:
-        return ""
+        return _no_live_events_note(watcher)
     if watcher is None or blocked:
         # No instance to start, or an earlier attempt failed in a way that
         # cannot be retried in this process.
@@ -1544,7 +1560,9 @@ async def _resume_watching_locked(state, resumer_cls) -> str:
         state.file_watcher_started = resumer.started
         state.file_watcher_resume_blocked = not resumer.can_retry
     if resumer.started:
-        return " File watching is on again, so new edits are auto-indexed."
+        return _no_live_events_note(watcher) or (
+            " File watching is on again, so new edits are auto-indexed."
+        )
     if resumer.can_retry:
         return (
             " Starting the file watcher failed, so auto-indexing is still off:"

@@ -545,6 +545,24 @@ async def collect_status_report(app: AppContext) -> dict:
                 }
             )
 
+    # #3080: the server runs, but its file watcher has no observer. Read off
+    # the watcher instance, which a ``from_runtime_owner`` facade shares with
+    # its owner; a context that runs no watcher (``mm status``) has none.
+    watcher = getattr(app, "_watcher", None)
+    observer_error = getattr(watcher, "observer_error", None)
+    if isinstance(observer_error, str):
+        warnings.append(
+            {
+                "kind": "watcher_unavailable",
+                "detail": f"The file watcher could not start ({observer_error}): file "
+                "edits are not picked up live; source checks keep running.",
+                "fix": 'Set "indexing": {"watcher_backend": "polling"} in '
+                "~/.memtomem/config.json (an MEMTOMEM_INDEXING__WATCHER_BACKEND "
+                "environment variable overrides it), or close other memtomem-server "
+                "sessions, then restart the server.",
+            }
+        )
+
     # #1935: two live memtomem-server processes with this store open. The
     # registry probe is filesystem work behind a bounded cross-process
     # lock, so it runs off the event loop; any failure or incomplete pass

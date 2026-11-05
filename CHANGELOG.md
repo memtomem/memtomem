@@ -29,6 +29,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A file watcher that cannot start no longer makes every tool call fail (#3080).** With
+  watchdog 7.0, which `uvx --from memtomem` installs, a native (FSEvents) stream that cannot
+  start raises out of the observer's start; 6.0 only logged it. The server and `mm web` then
+  failed to initialize, so every MCP tool call, `mem_status` included, returned
+  `SystemError: Cannot start fsevents stream`. The server now runs on without live file
+  events: the watcher's source checks and the opt-in startup backfill still run,
+  `mem_status` shows a `watcher_unavailable` warning with the error, and the `mm web`
+  embedding reset no longer says new edits are auto-indexed while they are not.
 - **Release SBOMs no longer claim dependencies that only an inactive extra declares
   (#3066).** uv's CycloneDX export writes `A -> T` whenever A lists T under some extra and T
   is installed for another reason, even when nothing requests that extra: the core SBOM
