@@ -87,10 +87,40 @@ class InferenceEndpoint:
 # ---------------------------------------------------------------------------
 
 
+def _strip_trailing_v1(url: str) -> str:
+    """Drop one trailing ``/v1`` path segment from an OpenAI-compatible base URL.
+
+    The OpenAI-compatible clients post to ``/v1/embeddings`` and
+    ``/v1/chat/completions`` themselves, but OpenAI, vLLM, LM Studio and
+    OpenRouter all print their base URL with ``/v1``; used as given, that
+    dials ``/v1/v1/...`` and every request gets 404.
+
+    Works on the encoded path only (``raw_path``; the decoded ``path`` would
+    turn ``%2F`` into a separator), so scheme, authority, query and fragment
+    are untouched, and a URL that does not end in ``/v1`` is returned as the
+    same string. Only one segment goes: a server that really serves under
+    ``/prefix/v1/v1/...`` is configured as ``/prefix/v1/v1``.
+    """
+    import httpx
+
+    try:
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, TypeError):
+        return url
+    path, sep, query = parsed.raw_path.decode("ascii").partition("?")
+    trimmed = path.rstrip("/")
+    if not trimmed.endswith("/v1"):
+        return url
+    return str(parsed.copy_with(raw_path=(trimmed[: -len("/v1")] + sep + query).encode("ascii")))
+
+
 def embedding_base_url(provider: str, base_url: str) -> str:
-    """Base URL the embedding client for *provider* dials."""
+    """Base URL the embedding client for *provider* dials.
+
+    For ``openai`` a trailing ``/v1`` is dropped (see :func:`_strip_trailing_v1`).
+    """
     if provider.lower() == "openai":
-        return (base_url or OPENAI_DEFAULT_BASE_URL).rstrip("/")
+        return _strip_trailing_v1((base_url or OPENAI_DEFAULT_BASE_URL).rstrip("/"))
     return base_url or OLLAMA_DEFAULT_BASE_URL
 
 
@@ -98,11 +128,15 @@ def llm_base_url(provider: str, base_url: str) -> str:
     """Base URL the LLM client for *provider* dials.
 
     ``LLMConfig.base_url`` defaults to Ollama's address for every provider;
-    the Anthropic client swaps that default for Anthropic's API. The OpenAI
-    and Ollama clients use the value as given.
+    the Anthropic client swaps that default for Anthropic's API. For
+    ``openai`` a trailing ``/v1`` is dropped (see :func:`_strip_trailing_v1`);
+    the Ollama client uses the value as given.
     """
-    if provider.lower() == "anthropic" and base_url == OLLAMA_DEFAULT_BASE_URL:
+    provider = provider.lower()
+    if provider == "anthropic" and base_url == OLLAMA_DEFAULT_BASE_URL:
         return ANTHROPIC_DEFAULT_BASE_URL
+    if provider == "openai":
+        return _strip_trailing_v1(base_url)
     return base_url
 
 

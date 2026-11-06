@@ -79,6 +79,9 @@ export MEMTOMEM_LLM__API_KEY=sk-ant-...
 ## OpenAI-Compatible Endpoints
 
 The `openai` provider works with **any server** that implements `/v1/chat/completions` — not just OpenAI's cloud API. Set `MEMTOMEM_LLM__PROVIDER=openai` and point `MEMTOMEM_LLM__BASE_URL` at your server.
+memtomem adds the `/v1/chat/completions` path itself, so give the server's root; an address
+ending in `/v1`, as these servers print it, also works, because memtomem drops that one
+trailing `/v1` before adding its own path.
 
 ### LM Studio
 
