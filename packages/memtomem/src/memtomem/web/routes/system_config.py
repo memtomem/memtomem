@@ -27,7 +27,7 @@ from memtomem.config import (
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.errors import RetryableError
-from memtomem.search.reranker.factory import create_reranker
+from memtomem.search.reranker.factory import create_reranker, load_reranker
 from memtomem.storage.sqlite_helpers import fold_path_form, norm_path
 from memtomem.web import hot_reload as _hot_reload
 from memtomem.web.deps import (
@@ -170,12 +170,7 @@ async def _validate_reranker_ready(reranker: object | None) -> None:
     installed) surfaces as a clean rejection rather than a 500 at first
     search.
     """
-    if reranker is None:
-        return
-
-    load_model = getattr(reranker, "_get_model", None)
-    if callable(load_model):
-        await _asyncio.to_thread(load_model)
+    await load_reranker(reranker)
 
 
 # Mounted only through ``system.router``, which carries the ``system`` tag.

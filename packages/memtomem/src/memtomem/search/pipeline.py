@@ -928,7 +928,14 @@ class SearchPipeline:
         if old.reranker is None or old.reranker is reranker:
             return
         if old.leases == 0:
-            await close_reranker_safely(old.reranker)
+            # The swap is committed once published, so cancelling the caller
+            # must not abandon the retirement: the close runs as a tracked
+            # task, which ``close()`` gathers if it is still running.
+            t = asyncio.create_task(close_reranker_safely(old.reranker))
+            t.add_done_callback(_bg_task_error_cb)
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+            await asyncio.shield(t)
         else:
             self._retired_rerank_entries.add(old)
 

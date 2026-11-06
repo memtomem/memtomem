@@ -224,6 +224,11 @@ class AppContext:
     # do not spam the same notice. Writes go through ``_config_lock``.
     _dim_mismatch_announced: bool = False
     _config_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Serializes ``mem_config(rerank.enabled)`` end to end, including the
+    # model load, so the last toggle wins. Separate from ``_config_lock``,
+    # which mem_search / mem_add take for the dim-mismatch hint and must not
+    # wait on a model load.
+    _rerank_toggle_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _init_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Guards mutations of ``current_session_id`` + ``current_agent_id`` and
     # ``_ending_session_ids``.
@@ -1234,6 +1239,7 @@ class AppContext:
         # These guards protect process-wide mutable state and therefore must
         # be shared even though session-transition locks remain per context.
         ctx._config_lock = owner._config_lock
+        ctx._rerank_toggle_lock = owner._rerank_toggle_lock
         ctx._watch_roots_lock = owner._watch_roots_lock
         ctx._memory_file_locks = owner._memory_file_locks
         ctx._components = owner._components
