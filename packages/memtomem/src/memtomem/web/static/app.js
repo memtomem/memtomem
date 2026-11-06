@@ -2602,6 +2602,10 @@ function _renderHomeDashboardError(err) {
 
 async function loadDashboard() {
   _setHomeDashboardLoading();
+  // Not awaited and independent of the dashboard fetches below: the remote
+  // inference notice must follow config changed outside this page even when
+  // the rest of the dashboard fails to load.
+  _loadHomeInference();
   try {
     // /api/sessions and /api/scratch are dev-only — gated below. The
     // namespaces list endpoint is prod-mounted via namespaces_read so

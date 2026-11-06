@@ -8554,3 +8554,37 @@ class TestIndexRoutesInvalidateSearchCache:
 
         assert committed["files"] == 1
         assert pipeline.invalidate_cache.call_count == 1
+
+
+class TestInferenceEndpointsRoute:
+    """``GET /api/inference-endpoints`` reports the running config's endpoints."""
+
+    async def test_default_config_has_none(self, app, client: AsyncClient):
+        from memtomem.config import Mem2MemConfig
+
+        app.state.config = Mem2MemConfig()
+        resp = await client.get("/api/inference-endpoints")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["endpoints"] == []
+        assert body["not_covered"].startswith("Not covered: Langfuse session tracing")
+
+    async def test_remote_and_local_endpoints(self, app, client: AsyncClient):
+        from memtomem.config import Mem2MemConfig
+
+        app.state.config = Mem2MemConfig(
+            embedding={"provider": "openai", "model": "text-embedding-3-small"},
+            llm={"enabled": True, "provider": "ollama"},
+            rerank={"enabled": True, "provider": "cohere"},
+        )
+
+        resp = await client.get("/api/inference-endpoints")
+        assert resp.status_code == 200
+        assert [
+            (e["component"], e["provider"], e["host"], e["remote"])
+            for e in resp.json()["endpoints"]
+        ] == [
+            ("embedding", "openai", "api.openai.com", True),
+            ("llm", "ollama", "localhost:11434", False),
+            ("rerank", "cohere", "api.cohere.ai", True),
+        ]

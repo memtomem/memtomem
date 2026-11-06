@@ -3038,3 +3038,17 @@ class TestManualRegistrationsExposeTheUpdateTool:
         broken_json = '{"mcpServers": {"memtomem": {"command": "x",}}}'
         assert _block_registrations(broken_json, "V") == [("json", None)]
         assert _block_registrations("[mcp_servers.memtomem]\ncommand = ", "V") == [("toml", None)]
+
+
+def test_remote_inference_docs_name_every_classified_provider() -> None:
+    """The "What leaves your machine" section names every network provider id
+    the endpoint classifier knows, and points at the status block it feeds."""
+    from memtomem.inference_endpoints import _KNOWN_NETWORK_PROVIDERS
+
+    text = _read(_REPO_ROOT / "docs" / "guides" / "configuration.md")
+    start = text.index("## What leaves your machine")
+    section = text[start : text.index("\n## ", start + 1)]
+    providers = set().union(*_KNOWN_NETWORK_PROVIDERS.values())
+    missing = sorted(p for p in providers if f"`{p}`" not in section and f"={p}`" not in section)
+    assert missing == []
+    assert "Remote inference endpoints" in section

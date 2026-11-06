@@ -277,6 +277,7 @@ window.addEventListener('langchange', () => {
   // The Home embedding/storage line is likewise t()-rendered (S2.3); relocalize
   // it on toggle. Harmless no-op until serverConfig has loaded.
   _syncHomeConfig();
+  _renderHomeInference();
   // The Config-tab decay / namespace status lines are t()-rendered (S2.4) and
   // draft-free, so they follow the toggle in place like the siblings above.
   // (The editable config CARDS are NOT re-synced here on purpose: a full
@@ -395,6 +396,40 @@ function _syncHomeConfig() {
   } else { hide(el); }
 }
 
+// ── Home: configured remote inference endpoints ──
+// Re-fetched on every _syncConfigToUI (load, save) and every Home dashboard
+// load (app.js loadDashboard), so a change made elsewhere — `mm config set`,
+// a config.json edit picked up by hot reload — shows up on the next visit to
+// Home; a language toggle only re-renders. Hidden when nothing is remote.
+let _homeInference = null;
+
+async function _loadHomeInference() {
+  try {
+    _homeInference = await api('GET', '/api/inference-endpoints');
+  } catch (_err) {
+    _homeInference = null;
+  }
+  _renderHomeInference();
+}
+
+function _renderHomeInference() {
+  const el = qs('home-inference-info');
+  if (!el) return;
+  const remote = (_homeInference?.endpoints || []).filter(ep => ep.remote);
+  if (!remote.length) { el.innerHTML = ''; hide(el); return; }
+  const items = remote.map(ep => `<li>${escapeHtml(t('home.inference.endpoint', {
+    component: ep.component,
+    provider: ep.provider,
+    host: ep.host,
+    sends: t(`home.inference.sends.${ep.component}`),
+  }))}</li>`).join('');
+  el.innerHTML =
+    `<div class="home-section-title">${escapeHtml(t('home.inference.title'))}</div>` +
+    `<ul>${items}</ul>` +
+    `<p class="muted-sm">${escapeHtml(t('home.inference.not_covered'))}</p>`;
+  show(el);
+}
+
 // ── Search: config defaults banner (merged with pipeline badges) ──
 function _syncSearchConfig() {
   const el = qs('search-config-info');
@@ -485,6 +520,7 @@ function _syncConfigToUI() {
   _syncHeaderConfig();
   _syncSearchDefaults();
   _syncHomeConfig();
+  _loadHomeInference();
   _syncSearchConfig();
   _updateContextWindowLabel();
   _syncIndexHints();
@@ -745,6 +781,23 @@ const _CONFIG_GUIDES = {
       ],
     },
   },
+  rerank: {
+    // The provider decides whether search text leaves the machine (cohere),
+    // so the guide says so next to the toggle.
+    items: ['enabled', 'provider'],
+    envs: [
+      'MEMTOMEM_RERANK__ENABLED=true',
+      'MEMTOMEM_RERANK__PROVIDER=fastembed',
+    ],
+    howto: {
+      restart: false,
+      steps: [
+        'Provider and API Key are not editable here: set rerank.provider (and rerank.api_key for cohere) in ~/.memtomem/config.json or the MEMTOMEM_RERANK__* variables; fastembed (local) is the default',
+        'Check "Enabled" and click Save — applies to the next search',
+        'With provider cohere, every search sends the query and candidate text to Cohere',
+      ],
+    },
+  },
   mmr: {
     items: ['enabled', 'lambda'],
     envs: [
@@ -784,7 +837,7 @@ function _showConfigGuide(section) {
   if (!guide) return;
   const info = _CONFIG_GUIDES[section];
   if (!info) {
-    // No guide for this section (e.g. rerank): show the localized section
+    // No guide for this section: show the localized section
     // name as the heading and a "no guide" note.
     const secKey = `settings.config.section.${section}`;
     const secName = t(secKey);

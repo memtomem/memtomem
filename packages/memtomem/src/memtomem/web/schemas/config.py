@@ -244,3 +244,25 @@ class ModelComponent(BaseModel):
 class ModelReadinessResponse(BaseModel):
     embedder: ModelComponent
     reranker: ModelComponent
+
+
+class InferenceEndpointOut(BaseModel):
+    """One configured inference endpoint of an active component."""
+
+    component: Literal["embedding", "llm", "rerank"]
+    provider: str
+    host: str
+    remote: bool
+    sends: str
+
+
+class InferenceEndpointsResponse(BaseModel):
+    """``GET /api/inference-endpoints``: what the running config sends where.
+
+    Lists the active embedding / LLM / reranker endpoints, local ones included
+    (``remote`` tells them apart). ``not_covered`` names what this list does
+    not describe.
+    """
+
+    endpoints: list[InferenceEndpointOut]
+    not_covered: str

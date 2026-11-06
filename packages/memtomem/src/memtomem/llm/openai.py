@@ -9,6 +9,7 @@ import httpx
 from memtomem.config import LLMConfig
 from memtomem.embedding.retry import RateLimitError, parse_retry_after, with_retry
 from memtomem.errors import LLMError
+from memtomem.inference_endpoints import announce_url, llm_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,10 @@ class OpenAILLM:
             headers: dict[str, str] = {}
             if self._config.api_key:
                 headers["Authorization"] = f"Bearer {self._config.api_key}"
+            base = llm_base_url("openai", self._config.base_url)
+            announce_url("llm", "openai", base)
             self._client = httpx.AsyncClient(
-                base_url=self._config.base_url,
+                base_url=base,
                 headers=headers,
                 timeout=self._config.timeout,
             )

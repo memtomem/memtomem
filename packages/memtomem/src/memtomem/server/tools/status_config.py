@@ -598,6 +598,7 @@ async def collect_status_report(app: AppContext) -> dict:
     from memtomem.indexing.watcher import effective_watcher_backend
 
     return {
+        "inference": _inference_status(config),
         "config": {
             "storage_backend": config.storage.backend,
             "db_path": str(db_path_resolved),
@@ -643,6 +644,55 @@ async def collect_status_report(app: AppContext) -> dict:
         },
         "warnings": warnings,
     }
+
+
+def _inference_status(config: Mem2MemConfig) -> dict:
+    """LLM / reranker providers and the configured remote inference endpoints."""
+    from memtomem.inference_endpoints import remote_endpoints
+
+    return {
+        "llm": {"enabled": config.llm.enabled, "provider": config.llm.provider},
+        "rerank": {"enabled": config.rerank.enabled, "provider": config.rerank.provider},
+        "remote_endpoints": [
+            {
+                "component": ep.component,
+                "provider": ep.provider,
+                "host": ep.host,
+                "sends": ep.sends,
+            }
+            for ep in remote_endpoints(config.embedding, config.llm, config.rerank)
+        ],
+    }
+
+
+def _inference_status_lines(inference: dict) -> list[StatusLine]:
+    """``LLM`` / ``Reranker`` rows and the ``Remote inference endpoints`` block."""
+    from memtomem.inference_endpoints import NOT_COVERED
+
+    def provider(section: dict) -> str:
+        return section["provider"] if section["enabled"] else "off"
+
+    lines = [
+        StatusLine("kv", key="LLM:".ljust(11), value=provider(inference["llm"])),
+        StatusLine("kv", key="Reranker:".ljust(11), value=provider(inference["rerank"])),
+        StatusLine("blank"),
+        StatusLine("section", value="Remote inference endpoints", meta={"tone": "plain"}),
+        StatusLine("rule", value="--------------------------", meta={"tone": "plain"}),
+    ]
+    endpoints = inference["remote_endpoints"]
+    if not endpoints:
+        lines.append(StatusLine("source_item", value="  none configured"))
+    for ep in endpoints:
+        lines.append(
+            StatusLine(
+                "source_item",
+                value=(
+                    f"  - {ep['component']} ({ep['provider']}) -> {ep['host']}: sends {ep['sends']}"
+                ),
+            )
+        )
+    lines.append(StatusLine("source_hint", value=f"  {NOT_COVERED}"))
+    return lines
 
 
 # Dense-coverage hints, keyed by ``dense_coverage["state"]``.
@@ -925,6 +975,11 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
             "kv", key="Dense candidates: ", value=str(cfg.get("dense_candidates", "(unavailable)"))
         ),
         StatusLine("kv", key="Watcher:".ljust(11), value=str(cfg["watcher_backend"])),
+    ]
+    # Absent from dicts built before the key existed (tests, older callers).
+    if "inference" in data:
+        lines.extend(_inference_status_lines(data["inference"]))
+    lines += [
         StatusLine("blank"),
         StatusLine("section", value="Runtime context", meta={"tone": "plain"}),
         StatusLine("rule", value="---------------", meta={"tone": "plain"}),

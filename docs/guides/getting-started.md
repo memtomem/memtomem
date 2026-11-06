@@ -185,8 +185,8 @@ mm init --non-interactive --preset korean --mcp skip
 not an automation entry point.
 
 `-y` was a deprecated alias for `--non-interactive` through 0.4.x. Since
-v0.5.0 it is accepted and ignored — `mm init` has no confirmation prompt to
-skip — so scripts must pass `--non-interactive`. `mm init --advanced` and
+v0.5.0 it is accepted and ignored — it does not answer `mm init`'s prompts —
+so scripts must pass `--non-interactive`. `mm init --advanced` and
 `mm init --preset <name>` are interactive: without a terminal they refuse
 rather than run their prompts against EOF.
 

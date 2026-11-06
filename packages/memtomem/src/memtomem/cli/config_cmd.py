@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 
 import click
 
@@ -16,6 +17,7 @@ from memtomem.config import (
     _EXTRA_MUTATION_FIELDS,
     coerce_and_validate,
 )
+from memtomem.inference_endpoints import InferenceEndpoint, remote_endpoints
 from memtomem.secret_masking import is_secret_key, mask_secrets
 
 
@@ -144,6 +146,7 @@ def config_set(key: str, value: str) -> None:
         cfg = build_fresh_config(
             migrate=False, strict_overrides=False, quiet=True, validate_profile=False
         )
+        egress_before = _EgressSnapshot.of(cfg)
         proposal = cfg.model_copy(deep=True)
         assign_section_fields(getattr(proposal, section_name), {field_name: coerced})
         apply_e5_defaults(proposal)
@@ -180,11 +183,14 @@ def config_set(key: str, value: str) -> None:
     # separate loads could disagree if another process writes in between, and
     # then the index would be built for a tokenizer the user was never told
     # about.
-    effective = _effective_value(section_name, field_name)
+    fresh = _fresh_effective_config()
+    effective = getattr(getattr(fresh, section_name), field_name)
 
     click.echo(f"{key}: {_masked(field_name, old_val)} -> {_masked(field_name, coerced)}")
     for line in _effect_lines(key, section_name, field_name, coerced, receipt, effective):
         click.echo(line)
+    for line in egress_before.new_egress_lines(_EgressSnapshot.of(fresh)):
+        click.echo(click.style(line, fg="yellow"))
 
     # Rebuild the FTS index on every ``search.tokenizer`` set — including one
     # that changes nothing, which is what makes re-running the command a
@@ -278,8 +284,8 @@ def _rebuild_fts(cfg: Mem2MemConfig, *, requested: str, effective: str) -> None:
         click.echo(f"FTS index rebuilt with {effective} ({count} chunks).")
 
 
-def _effective_value(section_name: str, field_name: str) -> object:
-    """The value a fresh load would put in effect for SECTION.FIELD.
+def _fresh_effective_config() -> Mem2MemConfig:
+    """The config a fresh load would put in effect (file + env).
 
     ``migrate=False``: this is a read-only inspection pass, and the legacy
     ``auto_discover`` migration writes to disk — a reporting call must not
@@ -287,10 +293,53 @@ def _effective_value(section_name: str, field_name: str) -> object:
     """
     from memtomem.config_signature import build_fresh_config
 
-    cfg = build_fresh_config(
+    return build_fresh_config(
         migrate=False, strict_overrides=False, quiet=True, validate_profile=False
     )
-    return getattr(getattr(cfg, section_name), field_name)
+
+
+def _effective_value(section_name: str, field_name: str) -> object:
+    """The value a fresh load would put in effect for SECTION.FIELD."""
+    return getattr(getattr(_fresh_effective_config(), section_name), field_name)
+
+
+@dataclass(frozen=True)
+class _EgressSnapshot:
+    """Remote inference in effect: endpoints, plus features that feed them.
+
+    ``rerank.enabled`` and ``indexing.auto_summarize`` are the settable keys
+    that can start sending text off the machine: the first adds the Cohere
+    endpoint, the second sends note text to an already configured remote LLM.
+    Both are compared on the *effective* config, so a value saved but shadowed
+    by an environment variable reports nothing new here (``_effect_lines``
+    already says it is shadowed).
+    """
+
+    endpoints: tuple[InferenceEndpoint, ...]
+    auto_summarize: bool
+
+    @classmethod
+    def of(cls, cfg: Mem2MemConfig) -> _EgressSnapshot:
+        return cls(
+            endpoints=tuple(remote_endpoints(cfg.embedding, cfg.llm, cfg.rerank)),
+            auto_summarize=bool(cfg.indexing.auto_summarize),
+        )
+
+    def new_egress_lines(self, after: _EgressSnapshot) -> list[str]:
+        """Lines for remote inference that *after* has and this snapshot did not."""
+        lines = [
+            f"Remote inference: {ep.describe()}."
+            for ep in after.endpoints
+            if ep not in self.endpoints
+        ]
+        if after.auto_summarize and not self.auto_summarize:
+            lines += [
+                f"Remote inference: indexing.auto_summarize sends note text to "
+                f"llm provider {ep.provider} at {ep.host}."
+                for ep in after.endpoints
+                if ep.component == "llm"
+            ]
+        return lines
 
 
 def _effect_lines(

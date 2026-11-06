@@ -101,6 +101,8 @@ from memtomem.web.schemas.config import (
     ConfigPatchRequest,
     ConfigPatchResponse,
     ConfigResponse,
+    InferenceEndpointOut,
+    InferenceEndpointsResponse,
 )
 from memtomem.web.schemas.memory import (
     AddMemoryRequest,
@@ -322,6 +324,27 @@ async def get_bootstrap_state(request: Request) -> dict[str, Any]:
         "project_context_root": project_context_root,
         "embedding_mismatch": mismatch,
     }
+
+
+@router.get("/inference-endpoints", response_model=InferenceEndpointsResponse)
+async def get_inference_endpoints(config=Depends(get_config)) -> InferenceEndpointsResponse:
+    """Configured inference endpoints and whether each sends text off the machine."""
+    from memtomem.inference_endpoints import NOT_COVERED, describe_inference_endpoints
+
+    endpoints = describe_inference_endpoints(config.embedding, config.llm, config.rerank)
+    return InferenceEndpointsResponse(
+        endpoints=[
+            InferenceEndpointOut(
+                component=ep.component,
+                provider=ep.provider,
+                host=ep.host,
+                remote=ep.remote,
+                sends=ep.sends,
+            )
+            for ep in endpoints
+        ],
+        not_covered=NOT_COVERED,
+    )
 
 
 @router.get("/health")
