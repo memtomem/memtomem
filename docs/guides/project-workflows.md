@@ -32,9 +32,9 @@ behaviour is the same everywhere and only the invocation differs.
 | Hermes Agent plugin | — | — | — | not shipped: these need a project root, and Hermes starts the server outside one |
 | Gemini CLI | — | — | — | not shipped: this repository ships no workflows for it |
 
-This guide describes the workflows as shipped with memtomem `0.7.5` and these
+This guide describes the workflows as shipped with memtomem `0.7.6` and these
 plugin versions:
-`claude` 0.5.31 · `codex` 0.3.29 · `opencode` 0.3.27 · `kimi` 0.2.24 · `antigravity` 0.2.8 · `cursor` 0.1.0.
+`claude` 0.5.32 · `codex` 0.3.30 · `opencode` 0.3.28 · `kimi` 0.2.24 · `antigravity` 0.2.9 · `cursor` 0.1.0.
 `update` runs its `incremental` mode by default from `claude` 0.5.26,
 `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
 older plugin releases ask for a mode instead (see the CHANGELOG).

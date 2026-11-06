@@ -5,6 +5,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.6] — 2026-11-06
+
+### Upgrading
+
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.20 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.6;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.6`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.6`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.6.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.5" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.5` to
+  `==0.7.6` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.6 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.6`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
+- **An OpenAI-compatible base URL ending in `/v1` now has that segment dropped
+  once (#3099).** A server that really serves under a doubled prefix
+  (`/prefix/v1/v1/embeddings`) used to work with base `/prefix/v1` and now
+  needs base `/prefix/v1/v1`. Every other base ending in `/v1` was failing with
+  404 and now works.
+- **Notes already indexed keep their old chunks until they are indexed again
+  (#3096).** The frontmatter fix below reaches a note only when an indexing pass
+  runs on it; restarting the server does not re-index (`startup_backfill` is off
+  by default). Run `mm index <dir>` once with 0.7.6 — no `--force` needed: a new
+  release re-chunks every source on its next pass, and only notes with a
+  heading-shaped line in their frontmatter get different chunks. If such a
+  note's old frontmatter chunk carries a link, that pass refuses with "Reindex
+  would remove linked chunk identities": remove the link with `mem_unlink`,
+  index the note again, then link the new chunk with `mem_link`.
+
 ### Added
 
 - **memtomem says when an optional provider sends note text off the machine.** The
@@ -37,11 +82,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   failure is reported with nothing changed. The reply says when reranking
   starts or stops for new searches.
 
+- **An OpenAI-compatible base URL ending in `/v1` no longer sends requests to
+  `/v1/v1/...` (#3099).** The OpenAI embedding and LLM clients add
+  `/v1/embeddings` and `/v1/chat/completions` themselves, so a base URL of
+  `https://api.openai.com/v1` — the value the Web UI Config guide recommended,
+  and the form OpenAI, vLLM, LM Studio and OpenRouter print — dialled
+  `https://api.openai.com/v1/v1/embeddings`, and every request failed with 404.
+  One trailing `/v1` path segment is now dropped before those clients use the
+  URL; Ollama and Anthropic base URLs are used as given. The Web UI Config guide
+  and the embedding and LLM guides now show `https://api.openai.com`.
+
+- **A base URL with a query string keeps the endpoint in the request path
+  (#3101).** The inference clients joined their endpoint path after the base
+  URL's query, so `https://gw.example.com/openai?api-version=2024-10-21` posted
+  to `https://gw.example.com/openai?api-version=2024-10-21/v1/embeddings`: the
+  server saw a request to `/openai` with a mangled parameter. The query is now
+  split off and sent with every request, in the OpenAI and Ollama embedding
+  clients and the OpenAI, Ollama and Anthropic LLM clients.
+
 - **A heading-shaped line inside YAML frontmatter (such as a `# comment`) no
   longer splits the block or enters the document outline (#3096).** The
   Markdown chunker treats lines inside leading frontmatter like code fences
-  when scanning for headings, keeping the frontmatter block atomic at the start
-  of the note.
+  when scanning for headings, so the block is no longer cut at such a line. A
+  frontmatter block longer than the chunk size limit is still divided by
+  size, as before.
 
 - **A note's YAML frontmatter no longer renders as a heading in the Web UI's
   detail view (#3030).** Chunk content keeps a Markdown file's leading
