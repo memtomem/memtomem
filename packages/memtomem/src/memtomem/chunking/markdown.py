@@ -277,6 +277,34 @@ def _split_oversized_part(text: str, max_chars: int) -> list[_TextSpan]:
     return result or [whole]
 
 
+MARKDOWN_EXTENSIONS = frozenset({".md", ".markdown"})
+
+
+def resolve_wikilinks(text: str) -> str:
+    """The text ``chunk_file`` splits: ``[[target|alias]]`` → alias, ``[[target]]`` → target."""
+    return _WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)
+
+
+def leading_frontmatter(text: str) -> str | None:
+    """The frontmatter span at the head of the text ``chunk_file`` stores, or None.
+
+    *text* is a whole file as the engine reads it. The span is the one
+    ``_FRONT_MATTER_RE`` consumes on the wikilink-resolved text, including the
+    newline after the closing ``---`` when there is one. A span that ends
+    mid-line (a closing ``----`` or ``--- x`` line) is None: the regex stops
+    after three hyphens, so no line holds just the block, and a reader that
+    showed it as a block would invent a boundary the producer did not use.
+    """
+    resolved = resolve_wikilinks(text)
+    match = _FRONT_MATTER_RE.match(resolved)
+    if match is None:
+        return None
+    span = match.group(0)
+    if span.endswith("\n") or len(span) == len(resolved):
+        return span
+    return None
+
+
 class MarkdownChunker:
     def __init__(self, indexing_config=None):
         self._max_tokens = 512
@@ -288,7 +316,7 @@ class MarkdownChunker:
             self._para_threshold = getattr(indexing_config, "paragraph_split_threshold", 800)
 
     def supported_extensions(self) -> frozenset[str]:
-        return frozenset({".md", ".markdown"})
+        return MARKDOWN_EXTENSIONS
 
     def chunk_file(self, file_path: Path, content: str) -> list[Chunk]:
         if not content.strip():
@@ -302,8 +330,7 @@ class MarkdownChunker:
         # carries the same (valid_from_unix, valid_to_unix) pair.
         valid_from_unix, valid_to_unix = self._extract_validity_window(content)
 
-        # Resolve wikilinks: [[target|alias]] → alias, [[target]] → target
-        content = _WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), content)
+        content = resolve_wikilinks(content)
 
         sections = self._split_by_headings(content)
         chunks: list[Chunk] = []
