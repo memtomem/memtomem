@@ -5,6 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **memtomem says when an optional provider sends note text off the machine.** The
+  server runs locally, but OpenAI embeddings, an Ollama server on another host, an
+  OpenAI-compatible or Anthropic LLM (`llm.enabled`) and the Cohere reranker send note
+  text and queries to that service. Each of these now logs a warning the first time it
+  connects to a non-loopback endpoint. `mem_status` and `mm status` list the configured
+  remote inference endpoints (and the LLM and reranker providers; `mm status --json`
+  gains an `inference` key). `mm init` describes what OpenAI embeddings send and asks
+  before using them (default No), and after writing the config lists every remote
+  endpoint the merged config puts in effect, including ones kept from an earlier config
+  or set by environment variables. `mm config set rerank.enabled` and
+  `indexing.auto_summarize` say when the change starts sending text to a remote service.
+  The Web UI shows the same list on Home (`GET /api/inference-endpoints`), and the Config
+  guides for the embedding provider, base URL, API key and the new Reranker guide say
+  what is sent. The lists cover inference endpoints only, not Langfuse tracing, webhooks
+  or what the MCP client does with results; see
+  [What leaves your machine](docs/guides/configuration.md#what-leaves-your-machine).
+
 ### Fixed
 
 - **A note's YAML frontmatter no longer renders as a heading in the Web UI's

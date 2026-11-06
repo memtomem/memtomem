@@ -1,0 +1,491 @@
+"""Classifying configured inference endpoints and announcing remote ones."""
+
+from __future__ import annotations
+
+import ast
+import logging
+from pathlib import Path
+
+import pytest
+
+from memtomem import inference_endpoints as ie
+from memtomem.config import EmbeddingConfig, LLMConfig, RerankConfig
+
+SRC = Path(ie.__file__).parent
+LOGGER = "memtomem.inference_endpoints"
+
+
+def _endpoints(
+    embedding: EmbeddingConfig | None = None,
+    llm: LLMConfig | None = None,
+    rerank: RerankConfig | None = None,
+) -> list[ie.InferenceEndpoint]:
+    return ie.describe_inference_endpoints(
+        embedding or EmbeddingConfig(), llm or LLMConfig(), rerank or RerankConfig()
+    )
+
+
+def _announced(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == LOGGER and r.getMessage().startswith("Remote inference:")
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Classifier
+# ---------------------------------------------------------------------------
+
+
+class TestDefaults:
+    def test_default_config_has_no_endpoints(self):
+        assert _endpoints() == []
+
+    @pytest.mark.parametrize("provider", ["none", "onnx", "NONE", "Onnx"])
+    def test_local_embedding_providers_have_no_endpoint(self, provider):
+        assert _endpoints(EmbeddingConfig(provider=provider)) == []
+
+    def test_disabled_llm_has_no_endpoint_even_when_remote(self):
+        llm = LLMConfig(enabled=False, provider="openai", base_url="https://api.openai.com")
+        assert _endpoints(llm=llm) == []
+
+    def test_disabled_cohere_rerank_has_no_endpoint(self):
+        assert _endpoints(rerank=RerankConfig(enabled=False, provider="cohere")) == []
+
+    @pytest.mark.parametrize("provider", ["fastembed", "local"])
+    def test_local_rerankers_have_no_endpoint(self, provider):
+        assert _endpoints(rerank=RerankConfig(enabled=True, provider=provider)) == []
+
+
+@pytest.mark.parametrize(
+    ("embedding", "host", "remote"),
+    [
+        (EmbeddingConfig(provider="openai"), "api.openai.com", True),
+        (EmbeddingConfig(provider="openai", base_url=""), "api.openai.com", True),
+        (EmbeddingConfig(provider="OpenAI"), "api.openai.com", True),
+        (
+            EmbeddingConfig(provider="openai", base_url="http://localhost:8000"),
+            "localhost:8000",
+            False,
+        ),
+        (
+            EmbeddingConfig(provider="openai", base_url="https://gw.example.com/"),
+            "gw.example.com",
+            True,
+        ),
+        (EmbeddingConfig(provider="ollama"), "localhost:11434", False),
+        (EmbeddingConfig(provider="ollama", base_url=""), "localhost:11434", False),
+        (
+            EmbeddingConfig(provider="ollama", base_url="http://gpu-box.lan:11434"),
+            "gpu-box.lan:11434",
+            True,
+        ),
+        (
+            EmbeddingConfig(provider="ollama", base_url="http://[::1]:11434"),
+            "[::1]:11434",
+            False,
+        ),
+        (
+            EmbeddingConfig(provider="ollama", base_url="http://127.0.0.2:11434"),
+            "127.0.0.2:11434",
+            False,
+        ),
+        (
+            EmbeddingConfig(provider="ollama", base_url="http://[::ffff:127.0.0.1]:11434"),
+            "[::ffff:127.0.0.1]:11434",
+            False,
+        ),
+        (
+            EmbeddingConfig(provider="ollama", base_url="http://10.0.0.5:11434"),
+            "10.0.0.5:11434",
+            True,
+        ),
+    ],
+)
+def test_embedding_classification(embedding, host, remote):
+    [ep] = _endpoints(embedding)
+    assert (ep.component, ep.host, ep.remote) == ("embedding", host, remote)
+    assert ep.sends == ie.SENDS["embedding"]
+
+
+@pytest.mark.parametrize(
+    ("llm", "host", "remote"),
+    [
+        # LLMConfig.base_url defaults to Ollama's address for every provider.
+        (LLMConfig(enabled=True, provider="ollama"), "localhost:11434", False),
+        (LLMConfig(enabled=True, provider="openai"), "localhost:11434", False),
+        (LLMConfig(enabled=True, provider="anthropic"), "api.anthropic.com", True),
+        (
+            LLMConfig(enabled=True, provider="openai", base_url="https://api.openai.com"),
+            "api.openai.com",
+            True,
+        ),
+        (
+            LLMConfig(enabled=True, provider="openai", base_url="http://127.0.0.1:8000"),
+            "127.0.0.1:8000",
+            False,
+        ),
+        (
+            LLMConfig(enabled=True, provider="anthropic", base_url="https://proxy.example.com"),
+            "proxy.example.com",
+            True,
+        ),
+        (
+            LLMConfig(enabled=True, provider="ollama", base_url="http://ollama.example.com"),
+            "ollama.example.com",
+            True,
+        ),
+        # An empty base_url cannot be dialled by these clients: nothing is sent.
+        (LLMConfig(enabled=True, provider="openai", base_url=""), "", False),
+        (LLMConfig(enabled=True, provider="anthropic", base_url=""), "", False),
+    ],
+)
+def test_llm_classification(llm, host, remote):
+    [ep] = _endpoints(llm=llm)
+    assert (ep.component, ep.host, ep.remote) == ("llm", host, remote)
+
+
+def test_cohere_rerank_is_remote():
+    [ep] = _endpoints(rerank=RerankConfig(enabled=True, provider="cohere"))
+    assert (ep.component, ep.provider, ep.host, ep.remote) == (
+        "rerank",
+        "cohere",
+        "api.cohere.ai",
+        True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("component", "url"),
+    [
+        ("embedding", "http://localhost:11434"),
+        ("llm", "http://localhost:11434"),
+        ("rerank", "http://localhost:9000"),
+    ],
+)
+def test_unknown_provider_is_remote_even_on_loopback(component, url):
+    ep = ie.classify_url(component, "brand-new", url)
+    assert ep.remote is True
+
+
+def test_all_three_components_listed_in_order():
+    eps = _endpoints(
+        EmbeddingConfig(provider="openai"),
+        LLMConfig(enabled=True, provider="anthropic"),
+        RerankConfig(enabled=True, provider="cohere"),
+    )
+    assert [(e.component, e.host) for e in eps] == [
+        ("embedding", "api.openai.com"),
+        ("llm", "api.anthropic.com"),
+        ("rerank", "api.cohere.ai"),
+    ]
+    assert eps == ie.remote_endpoints(
+        EmbeddingConfig(provider="openai"),
+        LLMConfig(enabled=True, provider="anthropic"),
+        RerankConfig(enabled=True, provider="cohere"),
+    )
+
+
+@pytest.mark.parametrize(
+    "hostname",
+    ["localhost", "LOCALHOST", "localhost.", "api.localhost", "127.0.0.1", "127.9.9.9", "::1"],
+)
+def test_loopback_literals(hostname):
+    assert ie.is_loopback_host(hostname)
+
+
+@pytest.mark.parametrize(
+    "hostname", ["0.0.0.0", "10.0.0.1", "192.168.1.2", "api.openai.com", "localhost.example.com"]
+)
+def test_not_loopback(hostname):
+    assert not ie.is_loopback_host(hostname)
+
+
+# ---------------------------------------------------------------------------
+# Registry parity: every provider id the factories accept is classified.
+# ---------------------------------------------------------------------------
+
+
+def _provider_literals(factory: Path) -> set[str]:
+    """String literals compared against ``provider`` in a factory module."""
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(factory.read_text())):
+        if (
+            isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Name)
+            and node.left.id == "provider"
+        ):
+            for comp in node.comparators:
+                if isinstance(comp, ast.Constant) and isinstance(comp.value, str):
+                    found.add(comp.value)
+    return found
+
+
+@pytest.mark.parametrize(
+    ("component", "factory", "local"),
+    [
+        ("embedding", "embedding/factory.py", ie._LOCAL_EMBEDDING_PROVIDERS),
+        ("llm", "llm/factory.py", frozenset()),
+        ("rerank", "search/reranker/factory.py", ie._LOCAL_RERANK_PROVIDERS),
+    ],
+)
+def test_every_factory_provider_is_classified(component, factory, local):
+    accepted = _provider_literals(SRC / factory)
+    assert accepted, f"no provider literals found in {factory}"
+    classified = local | ie._KNOWN_NETWORK_PROVIDERS[component]
+    assert accepted == classified
+
+
+# ---------------------------------------------------------------------------
+# Clients: the resolver is what they dial, and they announce at connect time.
+# ---------------------------------------------------------------------------
+
+
+def _embedder(provider: str, base_url: str):
+    from memtomem.embedding.factory import create_embedder
+
+    return create_embedder(EmbeddingConfig(provider=provider, base_url=base_url, model="m"))
+
+
+def _llm(provider: str, base_url: str):
+    from memtomem.llm.factory import create_llm
+
+    return create_llm(LLMConfig(enabled=True, provider=provider, base_url=base_url))
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("", "https://api.openai.com/v1/embeddings"),
+        ("https://gw.example.com", "https://gw.example.com/v1/embeddings"),
+        ("https://gw.example.com/", "https://gw.example.com/v1/embeddings"),
+        ("https://gw.example.com///", "https://gw.example.com/v1/embeddings"),
+        ("https://gw.example.com/prefix/", "https://gw.example.com/prefix/v1/embeddings"),
+    ],
+)
+async def test_openai_embedder_request_url(configured, expected):
+    # (``base_url`` would collide with the pytest-base-url plugin's fixture.)
+    emb = _embedder("openai", configured)
+    client = emb._get_client()
+    try:
+        assert str(client.build_request("POST", "/v1/embeddings").url) == expected
+    finally:
+        await emb.close()
+
+
+@pytest.mark.parametrize(
+    ("kind", "provider", "configured"),
+    [
+        ("embedding", "openai", ""),
+        ("embedding", "openai", "https://gw.example.com//"),
+        ("embedding", "ollama", ""),
+        ("embedding", "ollama", "http://gpu-box.lan:11434"),
+        ("llm", "openai", "https://api.openai.com"),
+        ("llm", "ollama", "http://localhost:11434"),
+        ("llm", "anthropic", "http://localhost:11434"),
+        ("llm", "anthropic", "https://proxy.example.com"),
+    ],
+)
+async def test_client_base_url_matches_resolver(kind, provider, configured):
+    if kind == "embedding":
+        obj = _embedder(provider, configured)
+        resolved = ie.embedding_base_url(provider, configured)
+    else:
+        obj = _llm(provider, configured)
+        resolved = ie.llm_base_url(provider, configured)
+    client = obj._get_client()
+    try:
+        assert str(client.base_url).rstrip("/") == resolved.rstrip("/")
+    finally:
+        await obj.close()
+
+
+async def test_cohere_posts_to_resolver_host(monkeypatch):
+    from memtomem.search.reranker.cohere import CohereReranker
+
+    from .test_reranker import _make_result
+
+    reranker = CohereReranker(RerankConfig(enabled=True, provider="cohere", api_key="k"))
+    seen: list[str] = []
+
+    async def fake_post(url, **kwargs):
+        seen.append(url)
+        raise RuntimeError("stop")
+
+    client = reranker._get_client()
+    monkeypatch.setattr(client, "post", fake_post)
+    try:
+        await reranker.rerank("q", [_make_result("a", 1.0)], top_k=1)
+    finally:
+        await reranker.close()
+    assert seen == [f"{ie.rerank_base_url('cohere')}/v1/rerank"]
+
+
+@pytest.mark.parametrize(
+    ("make", "expected"),
+    [
+        (
+            lambda: _embedder("openai", ""),
+            "Remote inference: embedding provider openai sends note text and search "
+            "queries to api.openai.com",
+        ),
+        (
+            lambda: _embedder("ollama", "http://gpu-box.lan:11434"),
+            "Remote inference: embedding provider ollama sends note text and search "
+            "queries to gpu-box.lan:11434",
+        ),
+        (
+            lambda: _llm("anthropic", "http://localhost:11434"),
+            f"Remote inference: llm provider anthropic sends {ie.SENDS['llm']} "
+            "to api.anthropic.com",
+        ),
+        (
+            lambda: _llm("openai", "https://api.openai.com"),
+            f"Remote inference: llm provider openai sends {ie.SENDS['llm']} to api.openai.com",
+        ),
+        (
+            lambda: _llm("ollama", "http://ollama.example.com"),
+            f"Remote inference: llm provider ollama sends {ie.SENDS['llm']} to ollama.example.com",
+        ),
+        (
+            lambda: __import__(
+                "memtomem.search.reranker.cohere", fromlist=["CohereReranker"]
+            ).CohereReranker(RerankConfig(enabled=True, provider="cohere", api_key="k")),
+            f"Remote inference: rerank provider cohere sends {ie.SENDS['rerank']} to api.cohere.ai",
+        ),
+    ],
+)
+async def test_remote_client_announces_on_first_connect_only(caplog, make, expected):
+    caplog.set_level(logging.WARNING, logger=LOGGER)
+    obj = make()
+    assert _announced(caplog) == [], "construction alone must not announce"
+    obj._get_client()
+    obj._get_client()
+    try:
+        assert _announced(caplog) == [expected]
+        assert all(r.levelno == logging.WARNING for r in caplog.records if r.name == LOGGER)
+    finally:
+        await obj.close()
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: _embedder("ollama", ""),
+        lambda: _embedder("openai", "http://localhost:8000"),
+        lambda: _llm("ollama", "http://localhost:11434"),
+        lambda: _llm("openai", "http://127.0.0.1:8000"),
+    ],
+)
+async def test_local_client_announces_nothing(caplog, make):
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    obj = make()
+    obj._get_client()
+    try:
+        assert _announced(caplog) == []
+    finally:
+        await obj.close()
+
+
+async def test_dedup_across_instances_and_new_host_announces_again(caplog):
+    caplog.set_level(logging.WARNING, logger=LOGGER)
+    first = _embedder("openai", "")
+    second = _embedder("openai", "https://api.openai.com/")
+    other = _embedder("openai", "https://gw.example.com")
+    try:
+        first._get_client()
+        second._get_client()
+        assert len(_announced(caplog)) == 1
+        other._get_client()
+        assert _announced(caplog)[-1].endswith("to gw.example.com")
+        assert len(_announced(caplog)) == 2
+    finally:
+        for obj in (first, second, other):
+            await obj.close()
+
+
+async def test_discarded_provider_does_not_spend_the_announcement(caplog):
+    """A provider built and discarded (rejected settings change) never connects,
+    so the later real activation still announces — exactly once."""
+    from memtomem.search.reranker.cohere import CohereReranker
+
+    caplog.set_level(logging.WARNING, logger=LOGGER)
+    cfg = RerankConfig(enabled=True, provider="cohere", api_key="k")
+    candidate = CohereReranker(cfg)
+    await candidate.close()
+    assert _announced(caplog) == []
+
+    live = CohereReranker(cfg)
+    live._get_client()
+    live._get_client()
+    try:
+        assert len(_announced(caplog)) == 1
+    finally:
+        await live.close()
+
+
+def test_announce_is_thread_safe(caplog):
+    import threading
+
+    caplog.set_level(logging.WARNING, logger=LOGGER)
+    ep = ie.classify_url("embedding", "openai", "https://api.openai.com")
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        ie.announce_remote_endpoint(ep)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(_announced(caplog)) == 1
+
+
+@pytest.mark.parametrize(
+    "configured", ["https://api.openai.com:+443", "https://api.openai.com:０443"]
+)
+async def test_port_spelling_only_httpx_accepts_is_still_remote(caplog, configured):
+    """``urllib`` rejects these ports; httpx normalizes them and dials OpenAI."""
+    caplog.set_level(logging.WARNING, logger=LOGGER)
+    [ep] = _endpoints(EmbeddingConfig(provider="openai", base_url=configured))
+    assert (ep.host, ep.remote) == ("api.openai.com", True)
+
+    emb = _embedder("openai", configured)
+    client = emb._get_client()
+    try:
+        assert client.build_request("POST", "/v1/embeddings").url.host == "api.openai.com"
+        assert _announced(caplog) == [
+            "Remote inference: embedding provider openai sends note text and search "
+            "queries to api.openai.com"
+        ]
+    finally:
+        await emb.close()
+
+
+def test_url_httpx_rejects_is_not_remote():
+    """httpx refuses it at client construction, so nothing can be sent."""
+    import httpx
+
+    url = "https://[zz]/"
+    with pytest.raises(httpx.InvalidURL):
+        httpx.AsyncClient(base_url=url)
+    ep = ie.classify_url("embedding", "openai", url)
+    assert (ep.host, ep.remote) == ("", False)
+
+
+@pytest.mark.parametrize(
+    ("configured", "host"),
+    [
+        # httpx accepts this URL, but decoding the label raises; the classifier
+        # must not (the status report and the Web route call it).
+        ("https://xn--a.example", "xn--a.example"),
+        ("https://bücher.example", "xn--bcher-kva.example"),
+        ("https://API.OpenAI.com", "api.openai.com"),
+    ],
+)
+def test_host_is_the_ascii_form_httpx_sends(configured, host):
+    [ep] = _endpoints(EmbeddingConfig(provider="openai", base_url=configured))
+    assert (ep.host, ep.remote) == (host, True)

@@ -343,6 +343,14 @@ the local server itself forwards requests to a hosted model. The `openai` LLM pr
 default, `http://localhost:11434`. The `anthropic` provider replaces that exact
 value with `https://api.anthropic.com`, even when you set it explicitly.
 
+To see which endpoints your configuration sends text to, run `mm status` (or
+call `mem_status`): its "Remote inference endpoints" block lists each configured
+embedding, LLM, and reranker endpoint that is not on a loopback address. The
+server also logs a warning the first time it connects to one, and `mm init`
+lists them after writing the config. That list covers these inference
+endpoints only, not Langfuse, webhooks, or what the MCP client does with the
+results it receives.
+
 Separately from all of the above, the MCP tools return note text to the AI
 client that called them, such as Claude Code, Codex, or Claude Desktop. That
 client sends it to its own model provider as part of the conversation, under

@@ -456,6 +456,17 @@ def _y_refuse_hint(flag: str, extra: str) -> str:
     )
 
 
+def _echo_openai_embedding_notice() -> None:
+    """What choosing OpenAI embeddings sends, and to whom."""
+    from memtomem.inference_endpoints import OPENAI_DEFAULT_BASE_URL, classify_url
+
+    host = classify_url("embedding", "openai", OPENAI_DEFAULT_BASE_URL).host
+    click.secho(f"  OpenAI embeddings send your note text to {host}:", fg="yellow")
+    click.echo("    - the text of every chunk when it is indexed")
+    click.echo("    - every search query")
+    click.echo("  Keyword search [1] and Local ONNX [2] keep embedding on this machine.")
+
+
 # ── Step functions ────────────────────────────────────────────────────
 
 
@@ -628,6 +639,15 @@ def _step_embedding(state: dict) -> None:
         # dependency); the ``openai`` PyPI client is NOT imported, so it is not
         # required. The real precondition is an API key, collected below /
         # via ``--api-key``.
+
+        # Disclose before asking for anything: this is the choice that makes
+        # note text leave the machine. Declining re-runs the step from the
+        # provider picker (``run_steps`` re-invokes on ``StepRetry``).
+        _echo_openai_embedding_notice()
+        if not nav_confirm("  Send note text to OpenAI for embedding?", default=False):
+            click.echo("  Choose another provider.")
+            raise StepRetry()
+        click.echo()
 
         click.echo("  Available models:")
         click.echo("    [1] text-embedding-3-small — balanced (1536d)")
@@ -2253,6 +2273,49 @@ def _emit_missing_extras_warning(missing: list[str], state: dict) -> None:
     click.echo(f"      → {_extra_install_hint(missing, state)}")
 
 
+def _emit_remote_inference_summary(config_path: Path, *, to_stderr: bool) -> None:
+    """List the remote inference endpoints the written config puts in effect.
+
+    Uses the loader the server uses (defaults, env, ``config.d``,
+    ``config.json``). Silent when there are none, and when *config_path* is not
+    the file that loader reads (a caller writing elsewhere), since the loader's
+    view would then describe a different config.
+    """
+    from memtomem.config import _override_path
+    from memtomem.config_signature import build_fresh_config
+    from memtomem.inference_endpoints import NOT_COVERED, remote_endpoints
+
+    try:
+        if config_path.resolve() != _override_path().resolve():
+            return
+        cfg = build_fresh_config(
+            migrate=False, strict_overrides=False, quiet=True, validate_profile=False
+        )
+    except (OSError, ValueError) as exc:
+        click.secho(
+            f"  Could not check for remote inference endpoints: {exc}",
+            fg="yellow",
+            err=to_stderr,
+        )
+        return
+    endpoints = remote_endpoints(cfg.embedding, cfg.llm, cfg.rerank)
+    if not endpoints:
+        return
+    click.echo(err=to_stderr)
+    click.secho(
+        "  Remote inference endpoints — note text leaves this machine:",
+        fg="yellow",
+        bold=True,
+        err=to_stderr,
+    )
+    for ep in endpoints:
+        click.echo(
+            f"    - {ep.component} ({ep.provider}) -> {ep.host}: sends {ep.sends}",
+            err=to_stderr,
+        )
+    click.secho(f"  {NOT_COVERED}", dim=True, err=to_stderr)
+
+
 def _write_config_and_summary(
     state: dict, base_dir: Path | None = None, fresh: bool = False
 ) -> None:
@@ -2660,6 +2723,12 @@ def _write_config_and_summary(
                 )
             else:
                 _emit_missing_extras_warning(missing, state)
+
+    # Before anything is indexed: which configured endpoints will receive note
+    # text. Read from the merged effective config, not the wizard's choices,
+    # so a preserved remote LLM, a kept custom base_url or an env override
+    # shows up too.
+    _emit_remote_inference_summary(config_path, to_stderr=bool(state.get("non_interactive")))
 
     # Offer to seed the initial index inline. Both small and large cases
     # now prompt (TTY-only, default No), with a visible progress bar and
@@ -3130,8 +3199,8 @@ def _model_dimension(provider: str | None, model: str, fallback: int) -> int:
     "legacy_yes",
     is_flag=True,
     help=(
-        "Accepted and ignored; `mm init` has no confirmation prompt to "
-        "skip. It was a deprecated alias for --non-interactive through "
+        "Accepted and ignored; it does not answer `mm init`'s prompts. "
+        "It was a deprecated alias for --non-interactive through "
         "0.4.x; use --non-interactive in scripts."
     ),
 )
@@ -3246,15 +3315,16 @@ def init(
 
     if legacy_yes:
         # #1616/#1631 stage 3 (v0.5.0): `-y` no longer implies
-        # --non-interactive. It is accepted and ignored, matching every other
-        # `mm` command where -y skips a confirmation prompt — init has none.
+        # --non-interactive. It is accepted and ignored: unlike other `mm`
+        # commands, init does not let -y answer its prompts (the OpenAI
+        # egress confirmation must be answered by a person).
         # The notice stays (rather than going silent) because the flip is
         # breaking for `-y`-only scripts: they now get the wizard, and a
         # script that reached here in 0.4.x needs to be told why.
         click.secho(
             "  Note: `-y` is accepted but ignored on `mm init` — it no longer "
             "implies --non-interactive (deprecated through 0.4.x, changed in "
-            "0.5.0). `mm init` has no confirmation prompt to skip; use "
+            "0.5.0) and does not answer `mm init`'s prompts; use "
             "--non-interactive in scripts. (#1631)",
             fg="yellow",
             err=True,
@@ -3425,5 +3495,6 @@ def init(
                 mcp_mode=mcp_mode,
             )
 
+    state["non_interactive"] = non_interactive
     _write_config_and_summary(state, fresh=fresh)
     _maybe_offer_embedding_reset(state, interactive=not non_interactive)

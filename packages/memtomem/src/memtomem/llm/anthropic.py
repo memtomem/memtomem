@@ -9,12 +9,12 @@ import httpx
 from memtomem.config import LLMConfig
 from memtomem.embedding.retry import RateLimitError, parse_retry_after, with_retry
 from memtomem.errors import LLMError
+from memtomem.inference_endpoints import announce_url, llm_base_url
 
 logger = logging.getLogger(__name__)
 
 # Hardcoded — users should never change this; incorrect values break the API.
 _ANTHROPIC_VERSION = "2023-06-01"
-_DEFAULT_BASE_URL = "https://api.anthropic.com"
 
 
 class AnthropicLLM:
@@ -24,10 +24,10 @@ class AnthropicLLM:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            base_url = self._config.base_url
-            # Use Anthropic's default when base_url points at Ollama's default
-            if base_url == "http://localhost:11434":
-                base_url = _DEFAULT_BASE_URL
+            # LLMConfig's default base_url is Ollama's; the resolver swaps it
+            # for Anthropic's API.
+            base_url = llm_base_url("anthropic", self._config.base_url)
+            announce_url("llm", "anthropic", base_url)
             self._client = httpx.AsyncClient(
                 base_url=base_url,
                 headers={
