@@ -9,7 +9,7 @@ import httpx
 from memtomem.config import LLMConfig
 from memtomem.embedding.retry import RateLimitError, parse_retry_after, with_retry
 from memtomem.errors import LLMError
-from memtomem.inference_endpoints import announce_url, llm_base_url
+from memtomem.inference_endpoints import announce_url, llm_base_url, split_query
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +26,12 @@ class AnthropicLLM:
         if self._client is None:
             # LLMConfig's default base_url is Ollama's; the resolver swaps it
             # for Anthropic's API.
-            base_url = llm_base_url("anthropic", self._config.base_url)
-            announce_url("llm", "anthropic", base_url)
+            resolved = llm_base_url("anthropic", self._config.base_url)
+            announce_url("llm", "anthropic", resolved)
+            base, params = split_query(resolved)
             self._client = httpx.AsyncClient(
-                base_url=base_url,
+                base_url=base,
+                params=params,
                 headers={
                     "x-api-key": self._config.api_key,
                     "anthropic-version": _ANTHROPIC_VERSION,

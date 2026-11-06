@@ -11,7 +11,7 @@ import httpx
 from memtomem.config import EmbeddingConfig
 from memtomem.embedding.retry import RateLimitError, parse_retry_after, with_retry
 from memtomem.errors import EmbeddingError, RetryableEmbeddingError
-from memtomem.inference_endpoints import announce_url, embedding_base_url
+from memtomem.inference_endpoints import announce_url, embedding_base_url, split_query
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +29,12 @@ class OllamaEmbedder:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            base = embedding_base_url("ollama", self._config.base_url)
-            announce_url("embedding", "ollama", base)
+            resolved = embedding_base_url("ollama", self._config.base_url)
+            announce_url("embedding", "ollama", resolved)
+            base, params = split_query(resolved)
             self._client = httpx.AsyncClient(
                 base_url=base,
+                params=params,
                 timeout=60.0,
             )
         return self._client
