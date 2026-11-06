@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
+    import httpx
+
     from memtomem.config import EmbeddingConfig, LLMConfig, RerankConfig
 
 logger = logging.getLogger(__name__)
@@ -114,13 +116,33 @@ def _strip_trailing_v1(url: str) -> str:
     return str(parsed.copy_with(raw_path=(trimmed[: -len("/v1")] + sep + query).encode("ascii")))
 
 
+def _trim_path_slashes(url: str) -> str:
+    """Drop trailing slashes from the encoded path of *url*, nothing else.
+
+    A whole-string ``rstrip("/")`` would also eat a slash that ends a query
+    value (``?key=abc/``). The query and fragment are kept verbatim, and a URL
+    whose path does not end in ``/`` (or is just ``/``) comes back unchanged.
+    """
+    import httpx
+
+    try:
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, TypeError):
+        return url
+    path, sep, query = parsed.raw_path.decode("ascii").partition("?")
+    if len(path) <= 1 or not path.endswith("/"):
+        return url
+    return str(parsed.copy_with(raw_path=(path.rstrip("/") + sep + query).encode("ascii")))
+
+
 def embedding_base_url(provider: str, base_url: str) -> str:
     """Base URL the embedding client for *provider* dials.
 
-    For ``openai`` a trailing ``/v1`` is dropped (see :func:`_strip_trailing_v1`).
+    For ``openai`` trailing path slashes and then a trailing ``/v1`` are
+    dropped (see :func:`_strip_trailing_v1`).
     """
     if provider.lower() == "openai":
-        return _strip_trailing_v1((base_url or OPENAI_DEFAULT_BASE_URL).rstrip("/"))
+        return _strip_trailing_v1(_trim_path_slashes(base_url or OPENAI_DEFAULT_BASE_URL))
     return base_url or OLLAMA_DEFAULT_BASE_URL
 
 
@@ -138,6 +160,33 @@ def llm_base_url(provider: str, base_url: str) -> str:
     if provider == "openai":
         return _strip_trailing_v1(base_url)
     return base_url
+
+
+def split_query(url: str) -> tuple[str, httpx.QueryParams | None]:
+    """Split a resolved base URL into the client's ``base_url`` and default params.
+
+    httpx joins a request path *after* a base URL's query
+    (``https://gw/openai?v=1`` + ``/v1/embeddings`` ->
+    ``https://gw/openai?v=1/v1/embeddings``), so a query in the base URL would
+    swallow the endpoint. The clients instead pass the query as default
+    ``params``, which httpx adds to every request. A bare trailing ``?`` is
+    removed too: httpx joins after it just the same.
+
+    A URL with no ``?`` (or one httpx rejects) is returned as given with no
+    params. httpx re-serialises the params with form encoding: ``flag``
+    becomes ``flag=``, ``%20`` becomes ``+``, and repeated keys are grouped
+    (multiplicity and per-key order kept).
+    """
+    import httpx
+
+    try:
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, TypeError):
+        return url, None
+    if b"?" not in parsed.raw_path:
+        return url, None
+    query = parsed.query.decode("ascii")
+    return str(parsed.copy_with(query=None)), (httpx.QueryParams(query) if query else None)
 
 
 def rerank_base_url(provider: str) -> str:
