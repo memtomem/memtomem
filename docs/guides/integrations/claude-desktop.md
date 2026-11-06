@@ -177,7 +177,7 @@ No. memtomem operates as separate MCP tools and does not affect Claude Desktop's
 No. The default is keyword-only search (BM25, `MEMTOMEM_EMBEDDING__PROVIDER=none`) — no embedding model or server required. Semantic search is opt-in via one of three providers: ONNX (`provider=onnx`, local, no server), Ollama (`provider=ollama`, local and free, must be installed locally), or OpenAI (`provider=openai`, cloud, needs an API key).
 
 **Q: Are indexed notes sent to Anthropic's servers?**
-No. memtomem runs locally, and data is stored only in the local SQLite DB. Ollama runs locally, so no data is sent externally.
+Two separate things to know. First, what a memtomem tool returns to Claude Desktop (search results, excerpts, file contents) becomes part of the conversation, and Claude Desktop sends the conversation to Anthropic. Second, memtomem itself stores and indexes your notes locally and, with the default settings, sends no note text anywhere; it does so only for the providers you configure. OpenAI embeddings receive every indexed note, a cloud LLM receives the text of the features you use, and the Cohere reranker receives every search candidate, including notes that never appear in the results. ONNX or a local Ollama server keep indexing and search local. See [What leaves your machine](../configuration.md#what-leaves-your-machine).
 
 **Q: Does it work on Windows?**
 Yes. It works on Windows as long as the `memtomem-server` command can be executed. Just change the configuration file path to `%APPDATA%\Claude\claude_desktop_config.json`.
