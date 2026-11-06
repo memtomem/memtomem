@@ -305,6 +305,21 @@ def leading_frontmatter(text: str) -> str | None:
     return None
 
 
+def _frontmatter_line_set(text: str) -> frozenset[int]:
+    """Return 1-indexed line numbers covered by leading YAML frontmatter,
+    opener and closer lines included.
+
+    Treating frontmatter lines as non-headings prevents a ``# comment`` or
+    other heading-shaped line inside frontmatter from splitting the block
+    and entering the document outline (#3096).
+    """
+    span = leading_frontmatter(text)
+    if not span:
+        return frozenset()
+    count = len(split_source_lines(span))
+    return frozenset(range(1, count + 1))
+
+
 class MarkdownChunker:
     def __init__(self, indexing_config=None):
         self._max_tokens = 512
@@ -849,6 +864,8 @@ class MarkdownChunker:
     def _split_by_headings(self, content: str) -> list[dict]:
         lines = split_source_lines(content)
         fence_lines = _fence_line_set(content)
+        frontmatter_lines = _frontmatter_line_set(content)
+        ignored_lines = fence_lines | frontmatter_lines
         sections: list[dict] = []
         current_hierarchy: list[str] = []
         current_lines: list[str] = []
@@ -861,7 +878,7 @@ class MarkdownChunker:
         pending_levels: list[int] = []
 
         for i, line in enumerate(lines, 1):
-            match = _HEADING_RE.match(line) if i not in fence_lines else None
+            match = _HEADING_RE.match(line) if i not in ignored_lines else None
             if match:
                 # Flush previous section
                 if current_lines:

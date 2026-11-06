@@ -37,6 +37,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   failure is reported with nothing changed. The reply says when reranking
   starts or stops for new searches.
 
+- **A heading-shaped line inside YAML frontmatter (such as a `# comment`) no
+  longer splits the block or enters the document outline (#3096).** The
+  Markdown chunker treats lines inside leading frontmatter like code fences
+  when scanning for headings, keeping the frontmatter block atomic at the start
+  of the note.
+
 - **A note's YAML frontmatter no longer renders as a heading in the Web UI's
   detail view (#3030).** Chunk content keeps a Markdown file's leading
   frontmatter, and the detail view handed it to the Markdown renderer, which
