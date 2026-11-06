@@ -1,0 +1,100 @@
+[
+  {
+    "name": "basic",
+    "file": "---\ntags: [alpha]\nowner: zqxvteam\n---\n\n# Cache policy\n\nRedis LRU eviction.\n",
+    "content": "---\ntags: [alpha]\nowner: zqxvteam\n---\n\nRedis LRU eviction.",
+    "leading": true,
+    "block": "---\ntags: [alpha]\nowner: zqxvteam\n---"
+  },
+  {
+    "name": "topic_prose",
+    "file": "# Topic\n---\nThis is prose\n---\nBody.\n",
+    "content": "---\nThis is prose\n---\nBody.",
+    "leading": false,
+    "block": null
+  },
+  {
+    "name": "topic_kv",
+    "file": "# Topic\n---\nStatus: draft\n---\nBody.\n",
+    "content": "---\nStatus: draft\n---\nBody.",
+    "leading": false,
+    "block": null
+  },
+  {
+    "name": "nonascii_key",
+    "file": "---\ntags: [alpha]\nownér: team\n소유자: 팀\n---\n\n# H\n\nBody text here.\n",
+    "content": "---\ntags: [alpha]\nownér: team\n소유자: 팀\n---\n\nBody text here.",
+    "leading": true,
+    "block": "---\ntags: [alpha]\nownér: team\n소유자: 팀\n---"
+  },
+  {
+    "name": "flow_list",
+    "file": "---\ntags: [\nalpha,\nbeta\n]\n---\n\n# H\n\nBody text here.\n",
+    "content": "---\ntags: [\nalpha,\nbeta\n]\n---\n\nBody text here.",
+    "leading": true,
+    "block": "---\ntags: [\nalpha,\nbeta\n]\n---"
+  },
+  {
+    "name": "bare_dash",
+    "file": "---\ntags:\n-\n  alpha\n---\n\n# H\n\nBody text here.\n",
+    "content": "---\ntags:\n-\n  alpha\n---\n\nBody text here.",
+    "leading": true,
+    "block": "---\ntags:\n-\n  alpha\n---"
+  },
+  {
+    "name": "emoji",
+    "file": "---\ntags: [alpha]\nname: 😀😀😀😀😀😀\n---\n\n# H\n\nBody text.\n",
+    "content": "---\ntags: [alpha]\nname: 😀😀😀😀😀😀\n---\n\nBody text.",
+    "leading": true,
+    "block": "---\ntags: [alpha]\nname: 😀😀😀😀😀😀\n---"
+  },
+  {
+    "name": "wikilink",
+    "file": "---\ntags: [alpha]\nowner: \"[[Team|Alias]]\"\n---\n\n# H\n\nBody text.\n",
+    "content": "---\ntags: [alpha]\nowner: \"Alias\"\n---\n\nBody text.",
+    "leading": true,
+    "block": "---\ntags: [alpha]\nowner: \"Alias\"\n---"
+  },
+  {
+    "name": "eof_lf",
+    "file": "---\ntags: [alpha]\n---\n",
+    "content": "---\ntags: [alpha]\n---",
+    "leading": true,
+    "block": "---\ntags: [alpha]\n---"
+  },
+  {
+    "name": "eof_nolf",
+    "file": "---\ntags: [alpha]\n---",
+    "content": "---\ntags: [alpha]\n---",
+    "leading": true,
+    "block": "---\ntags: [alpha]\n---"
+  },
+  {
+    "name": "close_4dash",
+    "file": "---\ntags: x\n----\nBody\n---\n",
+    "content": "---\ntags: x\n----\nBody\n---",
+    "leading": false,
+    "block": null
+  },
+  {
+    "name": "close_trail",
+    "file": "---\ntags: x\n--- x\nBody\n---\n",
+    "content": "---\ntags: x\n--- x\nBody\n---",
+    "leading": false,
+    "block": null
+  },
+  {
+    "name": "bom",
+    "file": "﻿---\ntags: [alpha]\n---\n\n# H\n\nBody.\n",
+    "content": "﻿---\ntags: [alpha]\n---\n\nBody.",
+    "leading": false,
+    "block": null
+  },
+  {
+    "name": "markup",
+    "file": "---\nname: <img src=x onerror=\"window.pwned=1\">\n---\n\n# H\n\nBody.\n",
+    "content": "---\nname: <img src=x onerror=\"window.pwned=1\">\n---\n\nBody.",
+    "leading": true,
+    "block": "---\nname: <img src=x onerror=\"window.pwned=1\">\n---"
+  }
+]

@@ -10,43 +10,34 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from memtomem.chunking.markdown import leading_frontmatter
+from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
 from memtomem.web.app import create_app
 from memtomem.web.deps import require_configured
 from memtomem.web.routes import sources as sources_routes
 
 BASIC = "---\ntags: [alpha]\nowner: zqxvteam\n---\n\n# Cache policy\n\nRedis LRU eviction.\n"
 
-# name -> (file text, leading)
-CASES = {
-    "basic": (BASIC, True),
-    # The shapes a content-only judge cannot tell from frontmatter.
-    "topic_prose": ("# Topic\n---\nThis is prose\n---\nBody.\n", False),
-    "topic_kv": ("# Topic\n---\nStatus: draft\n---\nBody.\n", False),
-    # YAML the chunker reads tags from, which a shape check had rejected.
-    "nonascii_key": (
-        "---\ntags: [alpha]\nownér: team\n소유자: 팀\n---\n\n# H\n\nBody text here.\n",
-        True,
-    ),
-    "flow_list": ("---\ntags: [\nalpha,\nbeta\n]\n---\n\n# H\n\nBody text here.\n", True),
-    "bare_dash": ("---\ntags:\n-\n  alpha\n---\n\n# H\n\nBody text here.\n", True),
-    "emoji": ("---\ntags: [alpha]\nname: 😀😀😀😀😀😀\n---\n\n# H\n\nBody text.\n", True),
-    # Stored with the link resolved, so the raw file block never prefixes it.
-    "wikilink": ('---\ntags: [alpha]\nowner: "[[Team|Alias]]"\n---\n\n# H\n\nBody text.\n', True),
-    "eof_lf": ("---\ntags: [alpha]\n---\n", True),
-    "eof_nolf": ("---\ntags: [alpha]\n---", True),
-    # The producer's regex stops after three hyphens: no line holds the block.
-    "close_4dash": ("---\ntags: x\n----\nBody\n---\n", False),
-    "close_trail": ("---\ntags: x\n--- x\nBody\n---\n", False),
-    "bom": ("﻿---\ntags: [alpha]\n---\n\n# H\n\nBody.\n", False),
-}
+# Shared with ``tests-js/detail-frontmatter-render.test.mjs``, which runs the
+# client's ``_leadingFrontmatter`` over the same stored contents. Each entry
+# holds a file, what the indexer stores as its first chunk, the route's answer
+# and the block. The first test below re-indexes every file, so an entry that
+# drifts from the indexer fails here rather than passing in JS.
+FIXTURE = json.loads(
+    (Path(__file__).parents[1] / "tests-js/fixtures/frontmatter-indexed.json").read_text(
+        encoding="utf-8"
+    )
+)
+CASES = {entry["name"]: entry for entry in FIXTURE}
 
 
 async def _index(comp, directory, data: bytes, name="note.md"):
@@ -81,11 +72,15 @@ async def _leading(comp, chunk_id):
 @pytest.mark.parametrize("name", sorted(CASES))
 async def test_answer_matches_the_file(bm25_only_components, name):
     comp, directory = bm25_only_components
-    text, expected = CASES[name]
-    _, chunk = await _index(comp, directory, text.encode("utf-8"))
+    entry = CASES[name]
+    _, chunk = await _index(comp, directory, entry["file"].encode("utf-8"))
     assert chunk.metadata.start_line == 1
+    # The shared fixture is what the indexer stores today.
+    assert chunk.content == entry["content"]
 
-    assert await _leading(comp, chunk.id) is expected
+    assert await _leading(comp, chunk.id) is entry["leading"]
+    if entry["leading"]:
+        assert leading_frontmatter(entry["file"]).rstrip("\n") == entry["block"]
 
 
 async def test_crlf_file_is_read_as_the_indexer_reads_it(bm25_only_components):
@@ -93,22 +88,6 @@ async def test_crlf_file_is_read_as_the_indexer_reads_it(bm25_only_components):
     _, chunk = await _index(comp, directory, BASIC.replace("\n", "\r\n").encode("utf-8"))
 
     assert await _leading(comp, chunk.id) is True
-
-
-@pytest.mark.parametrize("name", sorted(n for n, (_, leading) in CASES.items() if leading))
-async def test_the_block_is_a_prefix_of_the_stored_content(bm25_only_components, name):
-    """What the client's regex finds on content is what the producer found on the file."""
-    import re
-
-    comp, directory = bm25_only_components
-    text, _ = CASES[name]
-    _, chunk = await _index(comp, directory, text.encode("utf-8"))
-    span = leading_frontmatter(text)
-    assert span is not None
-    # The client runs the same regex on the content and keeps a line-bounded span.
-    client = re.match(r"^---\n([\s\S]*?)\n---\n?", chunk.content)
-    assert client is not None
-    assert client.group(0).rstrip("\n") == span.rstrip("\n")
 
 
 async def test_a_later_file_edit_is_answered_from_the_file(bm25_only_components):
@@ -185,6 +164,71 @@ async def test_a_symlinked_or_deleted_source_is_false(bm25_only_components, tmp_
     assert await _leading(comp, chunk.id) is False
 
     source.unlink()
+    assert await _leading(comp, chunk.id) is False
+
+
+async def test_a_resolver_filesystem_error_is_the_same_false(bm25_only_components, monkeypatch):
+    """A source removed between the resolver's ``exists()`` and ``stat()`` raises ``OSError``."""
+    comp, directory = bm25_only_components
+    _, chunk = await _index(comp, directory, BASIC.encode("utf-8"))
+
+    async def _vanished(_storage, path):
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(sources_routes, "resolve_readable_source", _vanished)
+
+    resp = await _get(comp, chunk.id)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"leading": False}
+
+
+@pytest.mark.parametrize("kind", ["scan_missing", "pending"])
+async def test_a_held_or_pending_source_is_false(bm25_only_components, kind):
+    comp, directory = bm25_only_components
+    source, chunk = await _index(comp, directory, BASIC.encode("utf-8"))
+    if kind == "pending":
+        assert comp.storage.queue_source_check_sync(source)
+    else:
+        assert await comp.storage.hold_source(source, kind)
+
+    assert await _leading(comp, chunk.id) is False
+
+
+async def test_a_redaction_held_source_is_the_screened_404(bm25_only_components):
+    comp, directory = bm25_only_components
+    source, chunk = await _index(comp, directory, BASIC.encode("utf-8"))
+    assert await comp.storage.hold_source(source, REDACTION_BLOCKED_HOLD)
+
+    resp = await _get(comp, chunk.id)
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Chunk not found"
+
+
+async def test_a_parent_retargeted_into_a_held_source_is_false(bm25_only_components):
+    """Visibility is judged on the file the read reaches, not on the stored key.
+
+    ``visible/note.md`` is indexed; ``held/note.md`` has the same text and is
+    held. Once ``visible`` points at ``held``, answering ``true`` would say what
+    the held file begins with.
+    """
+    comp, directory = bm25_only_components
+    visible, held = directory / "visible", directory / "held"
+    visible.mkdir()
+    held.mkdir()
+    _, chunk = await _index(comp, visible, BASIC.encode("utf-8"))
+    held_source, _ = await _index(comp, held, BASIC.encode("utf-8"))
+    visible.rename(directory / "visible-old")
+    try:
+        visible.symlink_to(held, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    # Control: through the retargeted parent, an unheld target is answered.
+    assert await _leading(comp, chunk.id) is True
+
+    assert await comp.storage.hold_source(held_source, "scan_missing")
+
     assert await _leading(comp, chunk.id) is False
 
 

@@ -244,7 +244,9 @@ async def get_chunk_frontmatter(
     # reaches, which a parent directory retargeted since indexing can move.
     try:
         path = await resolve_readable_source(storage, str(meta.source_file))
-    except HTTPException:
+    except (HTTPException, OSError):
+        # ``OSError``: the resolver's own filesystem checks, e.g. a source
+        # removed between its ``exists()`` and ``stat()``.
         return ChunkFrontmatterOut(leading=False)
 
     def _read() -> str:

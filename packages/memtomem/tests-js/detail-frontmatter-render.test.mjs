@@ -11,8 +11,19 @@
  * named files (see ``tests/test_chunk_frontmatter_route.py``).
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import { bootApp } from './setup/jsdom-app.mjs';
+
+// What ``IndexEngine.index_file`` stores for each file, and the route's answer:
+// ``tests/test_chunk_frontmatter_route.py`` re-indexes every entry, so these are
+// the producer's contents, not hand-written ones.
+const FIXTURE = JSON.parse(fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures/frontmatter-indexed.json'),
+  'utf8',
+));
 
 const A = 'a1b2c3d4-0000-4000-8000-00000000000a';
 const B = 'a1b2c3d4-0000-4000-8000-00000000000b';
@@ -75,6 +86,39 @@ function gated() {
   const gate = new Promise((r) => { release = r; });
   return { gate, release };
 }
+
+describe('client and producer agree on every indexed fixture (#3030)', () => {
+  it('finds the producer\'s block in each certified content, and in no file it rejects', async () => {
+    const { window } = await boot();
+    for (const entry of FIXTURE) {
+      if (entry.leading) {
+        const span = window._leadingFrontmatter(entry.content);
+        expect(span, entry.name).not.toBe(null);
+        expect(span.replace(/\n$/, ''), entry.name).toBe(entry.block);
+        // The remainder is the content after the block, at the consumed length.
+        expect(entry.content.slice(span.length), entry.name)
+          .toBe(entry.content.slice(entry.block.length).replace(/^\n/, ''));
+      } else {
+        // Source text of a span at line 1 is the file's head, judged directly:
+        // every rejected fixture is one ``leading_frontmatter`` rejects too.
+        expect(window._leadingFrontmatter(entry.file), entry.name).toBe(null);
+      }
+    }
+  });
+
+  it('renders each certified block in the box and nothing of it as a heading', async () => {
+    const leading = FIXTURE.filter((e) => e.leading);
+    const fm = Object.fromEntries(leading.map((e, i) => [`id-${i}`, true]));
+    const { window } = await boot({ fm });
+    for (const [i, entry] of leading.entries()) {
+      window.showDetail(result(`id-${i}`, entry.content));
+      await settle(window);
+      expect(box(window).textContent, entry.name).toBe(entry.block);
+      expect(view(window).querySelector('hr'), entry.name).toBe(null);
+      expect(view(window).querySelector('img'), entry.name).toBe(null);
+    }
+  });
+});
 
 describe('detail view frontmatter (#3030)', () => {
   it('boxes the block the server certifies, and renders no heading from it', async () => {
