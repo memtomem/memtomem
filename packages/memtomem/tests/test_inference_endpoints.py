@@ -262,6 +262,13 @@ def _llm(provider: str, base_url: str):
         ("https://gw.example.com/", "https://gw.example.com/v1/embeddings"),
         ("https://gw.example.com///", "https://gw.example.com/v1/embeddings"),
         ("https://gw.example.com/prefix/", "https://gw.example.com/prefix/v1/embeddings"),
+        # The base URL as OpenAI, vLLM, LM Studio and OpenRouter print it.
+        ("https://api.openai.com/v1", "https://api.openai.com/v1/embeddings"),
+        ("https://api.openai.com/v1/", "https://api.openai.com/v1/embeddings"),
+        ("http://localhost:1234/v1", "http://localhost:1234/v1/embeddings"),
+        ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/embeddings"),
+        # Only one segment goes, so a server under /prefix/v1/v1 stays reachable.
+        ("https://gw.example.com/p/v1/v1", "https://gw.example.com/p/v1/v1/embeddings"),
     ],
 )
 async def test_openai_embedder_request_url(configured, expected):
@@ -275,13 +282,97 @@ async def test_openai_embedder_request_url(configured, expected):
 
 
 @pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("https://api.openai.com", "https://api.openai.com/v1/chat/completions"),
+        ("https://api.openai.com/v1", "https://api.openai.com/v1/chat/completions"),
+        ("https://api.openai.com/v1/", "https://api.openai.com/v1/chat/completions"),
+        ("http://localhost:8000/v1", "http://localhost:8000/v1/chat/completions"),
+        ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/chat/completions"),
+        ("https://openrouter.ai/api", "https://openrouter.ai/api/v1/chat/completions"),
+    ],
+)
+async def test_openai_llm_request_url(configured, expected):
+    llm = _llm("openai", configured)
+    client = llm._get_client()
+    try:
+        assert str(client.build_request("POST", "/v1/chat/completions").url) == expected
+    finally:
+        await llm.close()
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("https://h.example/v1", "https://h.example"),
+        ("https://h.example/v1//", "https://h.example"),
+        ("https://h.example/api/v1", "https://h.example/api"),
+        ("https://[::1]:8000/v1", "https://[::1]:8000"),
+        ("https://u:p%40@h.example/v1", "https://u:p%40@h.example"),
+        # The encoded path is kept as written: a decoded rebuild would turn
+        # %2F into a separator and raise on %3F / %23.
+        ("https://h.example/a%2Fb/v1", "https://h.example/a%2Fb"),
+        ("https://h.example/a%3Fb/v1", "https://h.example/a%3Fb"),
+        ("https://h.example/a%23b/v1", "https://h.example/a%23b"),
+        ("https://h.example/v1?x=1", "https://h.example?x=1"),
+    ],
+)
+def test_strip_trailing_v1_drops_one_path_segment(configured, expected):
+    assert ie._strip_trailing_v1(configured) == expected
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        "",
+        "not a url",
+        "http://v1",  # host, not path
+        "http://v1/",
+        "https://h.example",
+        "https://h.example/",
+        "https://h.example/V1",
+        "https://h.example/v1beta",
+        "https://h.example/xv1",
+        "https://h.example/v1/x",
+        "https://h.example/api%2Fv1",  # encoded slash is not a segment boundary
+        "https://h.example/api?route=/v1",  # query, not path
+        "http://[::1",  # httpx rejects it
+    ],
+)
+def test_strip_trailing_v1_leaves_other_urls_byte_identical(configured):
+    assert ie._strip_trailing_v1(configured) == configured
+
+
+@pytest.mark.parametrize("provider", ["ollama", "anthropic"])
+def test_trailing_v1_kept_for_non_openai_llm(provider):
+    assert ie.llm_base_url(provider, "https://gw.example.com/v1") == "https://gw.example.com/v1"
+
+
+def test_trailing_v1_kept_for_ollama_embedding():
+    url = "http://gpu-box.lan:11434/v1"
+    assert ie.embedding_base_url("ollama", url) == url
+
+
+@pytest.mark.parametrize("lang", ["en", "ko"])
+def test_web_guide_base_url_example_has_no_v1(lang):
+    import json
+
+    locale = json.loads((SRC / "web" / "static" / "locales" / f"{lang}.json").read_text("utf-8"))
+    text = locale["settings.config.guide.embedding.item.base_url.text"]
+    assert "https://api.openai.com" in text
+    assert "api.openai.com/v1" not in text
+
+
+@pytest.mark.parametrize(
     ("kind", "provider", "configured"),
     [
         ("embedding", "openai", ""),
         ("embedding", "openai", "https://gw.example.com//"),
         ("embedding", "ollama", ""),
         ("embedding", "ollama", "http://gpu-box.lan:11434"),
+        ("embedding", "openai", "https://api.openai.com/v1"),
         ("llm", "openai", "https://api.openai.com"),
+        ("llm", "openai", "http://localhost:1234/v1/"),
         ("llm", "ollama", "http://localhost:11434"),
         ("llm", "anthropic", "http://localhost:11434"),
         ("llm", "anthropic", "https://proxy.example.com"),
