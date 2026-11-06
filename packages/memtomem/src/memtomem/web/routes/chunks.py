@@ -63,6 +63,7 @@ from memtomem.web.schemas.core import (
 from memtomem.web.schemas.search import SimilarChunksResponse
 from memtomem.web.schemas.sources import (
     ChunkEditNeedsConfirmation,
+    ChunkFrontmatterOut,
     ChunkSourceOut,
     ChunksListResponse,
     EditRequest,
@@ -206,6 +207,64 @@ async def get_chunk_source(
         start_line=meta.start_line,
         end_line=meta.end_line,
     )
+
+
+@router.get("/{chunk_id}/frontmatter", response_model=ChunkFrontmatterOut)
+async def get_chunk_frontmatter(
+    chunk_id: UUID,
+    storage=Depends(get_storage),
+    config=Depends(get_config),
+) -> ChunkFrontmatterOut:
+    """Whether the chunk's content opens with its file's YAML frontmatter.
+
+    The detail view shows that block as metadata instead of handing it to the
+    Markdown renderer, which reads ``---`` as a rule and ``key: value`` above
+    the closing ``---`` as a heading (#3030). Indexed content cannot tell a
+    frontmatter-led chunk from a file that opens ``# Topic``, ``---``, a line,
+    ``---``; the file can. Only one bit about content the caller already holds
+    is answered, so read-only sources are answered too, and every refusal past
+    screening is the same ``False`` as "no frontmatter".
+    """
+    import asyncio
+
+    from memtomem.chunking.markdown import MARKDOWN_EXTENSIONS, leading_frontmatter
+    from memtomem.web.routes.sources import resolve_readable_source
+
+    chunk = await _screened_chunk(storage, chunk_id, config)
+    meta = chunk.metadata
+    content = chunk.content
+    if (
+        meta.start_line != 1
+        or Path(meta.source_file).suffix not in MARKDOWN_EXTENSIONS
+        or meta.redaction_count
+        or not content.startswith("---\n")
+    ):
+        return ChunkFrontmatterOut(leading=False)
+    # The raw-text gates, unchanged: they judge visibility on the file a read
+    # reaches, which a parent directory retargeted since indexing can move.
+    try:
+        path = await resolve_readable_source(storage, str(meta.source_file))
+    except (HTTPException, OSError):
+        # ``OSError``: the resolver's own filesystem checks, e.g. a source
+        # removed between its ``exists()`` and ``stat()``.
+        return ChunkFrontmatterOut(leading=False)
+
+    def _read() -> str:
+        # As the indexer reads (``IndexEngine`` file read), so the span below is
+        # the one the chunker saw.
+        try:
+            return path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return path.read_text(encoding="utf-8", errors="replace")
+
+    try:
+        text = await asyncio.to_thread(_read)
+    except OSError:
+        return ChunkFrontmatterOut(leading=False)
+    span = leading_frontmatter(text)
+    if span is None:
+        return ChunkFrontmatterOut(leading=False)
+    return ChunkFrontmatterOut(leading=content == span.rstrip("\n") or content.startswith(span))
 
 
 @router.patch("/{chunk_id}", response_model=ChunkOut | ChunkEditNeedsConfirmation)

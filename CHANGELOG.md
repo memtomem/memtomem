@@ -24,6 +24,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   or what the MCP client does with results; see
   [What leaves your machine](docs/guides/configuration.md#what-leaves-your-machine).
 
+### Fixed
+
+- **A note's YAML frontmatter no longer renders as a heading in the Web UI's
+  detail view (#3030).** Chunk content keeps a Markdown file's leading
+  frontmatter, and the detail view handed it to the Markdown renderer, which
+  drew the opening `---` as a rule and `tags: …` above the closing `---` as a
+  large heading. The view now shows that block as plain metadata above the
+  note's text. Whether a chunk opens with its file's frontmatter is answered from
+  the file (`GET /api/chunks/{id}/frontmatter`), because the content alone looks
+  the same as a file that opens with a heading followed by a `---` block. Search
+  result snippets still show the raw block.
+
 ## [0.7.5] — 2026-11-05
 
 ### Upgrading

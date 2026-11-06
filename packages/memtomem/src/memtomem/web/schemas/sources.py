@@ -130,6 +130,15 @@ class ChunkSourceOut(BaseModel):
     end_line: int
 
 
+class ChunkFrontmatterOut(BaseModel):
+    """Whether a chunk's content opens with its file's frontmatter (``GET /api/chunks/{id}/frontmatter``)."""
+
+    # True only when the indexed content is the file's frontmatter block, or
+    # starts with it: the content alone cannot say, since a file that opens
+    # ``# Topic`` / ``---`` / ``text`` / ``---`` stores the same shape.
+    leading: bool
+
+
 class EditRequest(BaseModel):
     new_content: str
     # Hash of the source text the editor showed (``GET /api/chunks/{id}/source``).
