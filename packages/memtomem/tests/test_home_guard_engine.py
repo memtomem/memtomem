@@ -17,6 +17,7 @@ from typing import Callable, Iterator
 
 import pytest
 
+from _subprocess_env import subprocess_env
 from . import _home_guard as hg
 
 
@@ -312,11 +313,10 @@ def _run_nested_pytest(
     test_file.write_text(body, encoding="utf-8")
 
     package_root = Path(__file__).parents[1]
-    env = os.environ.copy()
-    env["HOME"] = str(synthetic_home)
-    env["USERPROFILE"] = str(synthetic_home)
-    env["PYTHONPATH"] = os.pathsep.join([str(package_root), env.get("PYTHONPATH", "")]).rstrip(
-        os.pathsep
+    env = subprocess_env(
+        extra_paths=[package_root],
+        HOME=str(synthetic_home),
+        USERPROFILE=str(synthetic_home),
     )
     if disabled:
         env[hg.DISABLE_ENV] = "off"

@@ -17,6 +17,7 @@ from unittest.mock import Mock
 import pytest
 
 import memtomem
+from _subprocess_env import subprocess_env
 from memtomem.indexing import source_receipt
 
 
@@ -164,8 +165,7 @@ def test_engine_takes_the_fingerprint_once_at_import(setup, expected):
 
     A fresh interpreter, because this process has already imported the engine.
     """
-    src = str(Path(memtomem.__file__).parents[1])
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join([src, os.environ.get("PYTHONPATH", "")])}
+    env = subprocess_env()
     result = subprocess.run(
         [sys.executable, "-c", _SNAPSHOT_PROBE.format(setup=setup)],
         capture_output=True,

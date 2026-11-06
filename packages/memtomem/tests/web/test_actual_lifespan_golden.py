@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import socket
 import subprocess
 import sys
@@ -14,7 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-import memtomem
+from _subprocess_env import subprocess_env
 
 pytestmark = pytest.mark.browser
 
@@ -44,20 +43,13 @@ def actual_web_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
         "# Golden\n\nactual-lifespan-unique-marker\n", encoding="utf-8"
     )
 
-    env = os.environ.copy()
-    env.update(
-        {
-            "HOME": str(home),
-            "USERPROFILE": str(home),
-            "TMPDIR": str(temp_dir),
-            "XDG_RUNTIME_DIR": str(runtime),
-            "MEMTOMEM_WEB__CSRF_ENFORCE": "1",
-            "MEMTOMEM_STORAGE__SQLITE_PATH": str(home / ".memtomem" / "golden.db"),
-        }
-    )
-    package_root = str(Path(memtomem.__file__).resolve().parents[1])
-    env["PYTHONPATH"] = os.pathsep.join(
-        [package_root, *filter(None, [os.environ.get("PYTHONPATH")])]
+    env = subprocess_env(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        TMPDIR=str(temp_dir),
+        XDG_RUNTIME_DIR=str(runtime),
+        MEMTOMEM_WEB__CSRF_ENFORCE="1",
+        MEMTOMEM_STORAGE__SQLITE_PATH=str(home / ".memtomem" / "golden.db"),
     )
     cli = [sys.executable, "-c", "from memtomem.cli import cli; cli()"]
     subprocess.run(

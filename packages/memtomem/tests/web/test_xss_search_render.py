@@ -27,7 +27,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-import memtomem
+from _subprocess_env import subprocess_env
 
 pytestmark = pytest.mark.browser
 
@@ -70,14 +70,11 @@ def xss_dev_server() -> Iterator[str]:
     new working directory and pick up another checkout.
     """
     with tempfile.TemporaryDirectory(prefix="memtomem-xss-") as home:
-        env = os.environ.copy()
-        env["HOME"] = home
-        env["USERPROFILE"] = home
-        env["TMPDIR"] = str(Path(home) / "tmp")
-        env["MEMTOMEM_WEB__CSRF_ENFORCE"] = "0"
-        package_root = str(Path(memtomem.__file__).resolve().parents[1])
-        env["PYTHONPATH"] = os.pathsep.join(
-            [package_root, *filter(None, [os.environ.get("PYTHONPATH")])]
+        env = subprocess_env(
+            HOME=home,
+            USERPROFILE=home,
+            TMPDIR=str(Path(home) / "tmp"),
+            MEMTOMEM_WEB__CSRF_ENFORCE="0",
         )
         (Path(home) / "tmp").mkdir(parents=True, exist_ok=True)
         os.chmod(Path(home) / "tmp", 0o700)
