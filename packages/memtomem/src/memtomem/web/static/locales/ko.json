@@ -1795,7 +1795,7 @@
   "settings.config.guide.embedding.item.dimension.label": "차원",
   "settings.config.guide.embedding.item.dimension.text": "벡터 차원. 모델 출력과 일치해야 합니다. 변경하면 전체 데이터를 다시 인덱싱해야 합니다.",
   "settings.config.guide.embedding.item.base_url.label": "기본 URL",
-  "settings.config.guide.embedding.item.base_url.text": "API 엔드포인트. Ollama: http://localhost:11434. OpenAI: https://api.openai.com/v1 (또는 호환 엔드포인트). 노트 텍스트와 검색 쿼리가 이 주소로 전송되며, 루프백 주소(localhost, 127.0.0.1, ::1)가 아니면 이 컴퓨터 밖으로 나갑니다.",
+  "settings.config.guide.embedding.item.base_url.text": "API 엔드포인트. Ollama: http://localhost:11434. OpenAI: https://api.openai.com (또는 호환 서버 주소). /v1/... 경로는 memtomem 이 직접 붙이므로 /v1 로 끝나는 주소도 그대로 동작합니다. 노트 텍스트와 검색 쿼리가 이 주소로 전송되며, 루프백 주소(localhost, 127.0.0.1, ::1)가 아니면 이 컴퓨터 밖으로 나갑니다.",
   "settings.config.guide.embedding.item.batch_size.label": "배치 크기",
   "settings.config.guide.embedding.item.batch_size.text": "API 호출당 임베딩하는 텍스트 수. 클수록 인덱싱이 빠르지만 메모리를 더 씁니다. 기본값 64.",
   "settings.config.guide.embedding.item.onnx_batch_size.label": "ONNX 배치 크기",
