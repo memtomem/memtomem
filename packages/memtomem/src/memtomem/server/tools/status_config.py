@@ -26,6 +26,7 @@ from memtomem.generation import ComponentGeneration
 from memtomem.runtime.components import prune_settled_generations
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
+from memtomem.server.background import track_task
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 from memtomem.server.helpers import _set_config_key
@@ -1336,6 +1337,9 @@ async def mem_config(
     """
     app = await _get_app_initialized(ctx)
 
+    if key == "rerank.enabled" and value is not None:
+        return await _set_rerank_enabled(app, value, persist)
+
     if key and value is not None:
         snapshot = _ConfigSectionSnapshot.capture(app.config, key) if persist else None
         result = _set_config_key(app.config, key, value)
@@ -1351,21 +1355,10 @@ async def mem_config(
             # ``mm config set`` ordering (persist, then fanout).
             receipt = None
             if persist:
-                from memtomem.config import save_config_overrides
-
                 try:
-                    receipt = save_config_overrides(app.config)
-                except Exception as e:
-                    if snapshot is not None:
-                        snapshot.restore()
-                    if isinstance(e, TimeoutError):
-                        return (
-                            "Could not persist config: another process is writing "
-                            "config.json. Runtime change rolled back; retry in a moment."
-                        )
-                    if isinstance(e, ValueError):
-                        return f"Failed to persist config: {e}. Runtime change rolled back."
-                    raise
+                    receipt = _save_or_restore(app.config, snapshot)
+                except _PersistRefused as refused:
+                    return str(refused)
 
             # Invalidate search cache so changes take effect immediately.
             app.search_pipeline.invalidate_cache()
@@ -1405,6 +1398,109 @@ async def mem_config(
         return obj
 
     return json.dumps(config_dict, indent=2, default=_serialize)
+
+
+#: Closes of rerankers ``_set_rerank_enabled`` built but never installed.
+_UNPUBLISHED_RERANKER_CLOSES: set[asyncio.Task] = set()
+
+
+class _PersistRefused(Exception):
+    """A ``persist=True`` save failed in a way the caller reports, not raises."""
+
+
+def _save_or_restore(config: Mem2MemConfig, snapshot: _ConfigSectionSnapshot | None) -> SaveReceipt:
+    """Save the runtime config, restoring *snapshot* if the save fails.
+
+    Timeouts and validation failures become :class:`_PersistRefused` with the
+    message ``mem_config`` returns; anything else propagates after the restore.
+    """
+    from memtomem.config import save_config_overrides
+
+    try:
+        return save_config_overrides(config)
+    except Exception as e:
+        if snapshot is not None:
+            snapshot.restore()
+        if isinstance(e, TimeoutError):
+            raise _PersistRefused(
+                "Could not persist config: another process is writing "
+                "config.json. Runtime change rolled back; retry in a moment."
+            ) from e
+        if isinstance(e, ValueError):
+            raise _PersistRefused(
+                f"Failed to persist config: {e}. Runtime change rolled back."
+            ) from e
+        raise
+
+
+async def _set_rerank_enabled(app: AppContext, value: str, persist: bool) -> str:
+    """Set ``rerank.enabled`` and make the running pipeline match it (#3098).
+
+    The pipeline reranks iff it holds a reranker instance, so changing the
+    config flag alone left it reranking after "off" (sending queries to a
+    remote reranker) or never reranking after "on".
+
+    Toggles are serialized on ``_rerank_toggle_lock``, which spans the model
+    load, so the last call wins. Live config is not touched until the load
+    has finished: other keys are edited without a lock, and an uncommitted
+    ``enabled`` could be saved by their ``persist=True`` or erased by their
+    rollback. From the pipeline re-read to ``swap_reranker``'s publication
+    the commit has no await, and neither has ``_revert_to_stored``'s read of
+    ``rerank.enabled`` through its publication, so the two cannot interleave.
+    The decision compares the requested state with what the pipeline does,
+    not with the old config value, so asking for the state you want also
+    repairs a divergence.
+    """
+    from memtomem.search.reranker.base import close_reranker_safely
+    from memtomem.search.reranker.factory import create_reranker, load_reranker
+
+    key = "rerank.enabled"
+    async with app._rerank_toggle_lock:
+        probe = app.config.model_copy(update={"rerank": app.config.rerank.model_copy(deep=True)})
+        checked = _set_config_key(probe, key, value)
+        if not checked.startswith("Set "):
+            return checked
+        want = probe.rerank.enabled
+        candidate = None
+        try:
+            if want and not app.search_pipeline.rerank_active:
+                try:
+                    candidate = create_reranker(probe.rerank)
+                    await load_reranker(candidate)
+                except Exception as exc:
+                    return f"Cannot enable reranking: {exc}. Nothing was changed."
+
+            # No await from here until swap_reranker has published.
+            pipeline = app.search_pipeline
+            active = pipeline.rerank_active
+            snapshot = _ConfigSectionSnapshot(app.config.rerank)
+            result = _set_config_key(app.config, key, value)
+            if not result.startswith("Set "):
+                return result
+            receipt = None
+            if persist:
+                try:
+                    receipt = _save_or_restore(app.config, snapshot)
+                except _PersistRefused as refused:
+                    return str(refused)
+            result += _persistence_suffix(key, receipt)
+            if want != active:
+                install, candidate = (candidate if want else None), None
+                await pipeline.swap_reranker(install, app.config.rerank if want else None)
+                state = "on" if want else "off"
+                result += f"\nReranking is now {state} for new searches on this server."
+            pipeline.invalidate_cache()
+            return result
+        finally:
+            if candidate is not None:
+                # Unused, refused, or cancelled during the load. Shielded so a
+                # second cancellation cannot skip the close, and tracked so the
+                # task outlives a caller that stops awaiting it.
+                closing = track_task(
+                    asyncio.create_task(close_reranker_safely(candidate)),
+                    _UNPUBLISHED_RERANKER_CLOSES,
+                )
+                await asyncio.shield(closing)
 
 
 def _persistence_suffix(key: str, receipt: "SaveReceipt | None") -> str:
