@@ -26,6 +26,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Turning reranking on or off with `mem_config` now changes what the running
+  server does (#3098).** `mem_config(key="rerank.enabled", ...)` updated the
+  setting and reported success, but the server kept the reranker it started
+  with until restart: turning it off kept reranking every search, which with
+  `rerank.provider = cohere` kept sending queries and candidate texts to Cohere
+  while `mem_status` said the reranker was off; turning it on did nothing. The
+  change now loads or retires the reranker in the running server, as the Web UI
+  Settings panel already did. Turning it on loads the model first, and a load
+  failure is reported with nothing changed. The reply says when reranking
+  starts or stops for new searches.
+
 - **A note's YAML frontmatter no longer renders as a heading in the Web UI's
   detail view (#3030).** Chunk content keeps a Markdown file's leading
   frontmatter, and the detail view handed it to the Markdown renderer, which
