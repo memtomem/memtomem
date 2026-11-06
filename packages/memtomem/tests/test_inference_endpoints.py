@@ -6,6 +6,7 @@ import ast
 import logging
 from pathlib import Path
 
+import httpx
 import pytest
 
 from memtomem import inference_endpoints as ie
@@ -343,6 +344,118 @@ def test_strip_trailing_v1_leaves_other_urls_byte_identical(configured):
     assert ie._strip_trailing_v1(configured) == configured
 
 
+_GW_QUERY = "https://gw.example.com/openai?api-version=2024-10-21"
+
+
+@pytest.mark.parametrize(
+    ("kind", "provider", "endpoint"),
+    [
+        ("embedding", "openai", "/v1/embeddings"),
+        ("embedding", "ollama", "/api/embed"),
+        ("llm", "openai", "/v1/chat/completions"),
+        ("llm", "ollama", "/api/generate"),
+        ("llm", "anthropic", "/v1/messages"),
+    ],
+)
+async def test_query_in_base_url_stays_after_the_endpoint(kind, provider, endpoint):
+    obj = _embedder(provider, _GW_QUERY) if kind == "embedding" else _llm(provider, _GW_QUERY)
+    client = obj._get_client()
+    try:
+        url = str(client.build_request("POST", endpoint).url)
+        assert url == f"https://gw.example.com/openai{endpoint}?api-version=2024-10-21"
+    finally:
+        await obj.close()
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        # Composes with the trailing-/v1 strip.
+        ("https://gw.example.com/v1?x=1", "https://gw.example.com/v1/embeddings?x=1"),
+        ("https://gw.example.com/v1/?x=1", "https://gw.example.com/v1/embeddings?x=1"),
+        # A slash that ends a query value is not a path slash.
+        ("https://gw.example.com/v1?key=abc/", "https://gw.example.com/v1/embeddings?key=abc%2F"),
+        ("https://gw.example.com?key=abc%2F", "https://gw.example.com/v1/embeddings?key=abc%2F"),
+        ("https://gw.example.com/p/?key=abc/", "https://gw.example.com/p/v1/embeddings?key=abc%2F"),
+        # A bare trailing "?" would otherwise swallow the endpoint too.
+        ("https://gw.example.com/p?", "https://gw.example.com/p/v1/embeddings"),
+    ],
+)
+async def test_openai_embedder_query_request_url(configured, expected):
+    emb = _embedder("openai", configured)
+    client = emb._get_client()
+    try:
+        assert str(client.build_request("POST", "/v1/embeddings").url) == expected
+    finally:
+        await emb.close()
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("https://gw.example.com/v1?x=1", "https://gw.example.com/v1/chat/completions?x=1"),
+        (
+            "https://gw.example.com/v1?key=abc/",
+            "https://gw.example.com/v1/chat/completions?key=abc%2F",
+        ),
+        ("https://gw.example.com/p?", "https://gw.example.com/p/v1/chat/completions"),
+    ],
+)
+async def test_openai_llm_query_request_url(configured, expected):
+    llm = _llm("openai", configured)
+    client = llm._get_client()
+    try:
+        assert str(client.build_request("POST", "/v1/chat/completions").url) == expected
+    finally:
+        await llm.close()
+
+
+@pytest.mark.parametrize(
+    "configured",
+    ["", "not a url", "https://h.example", "https://h.example/p/", "http://[::1"],
+)
+def test_split_query_leaves_urls_without_a_query_alone(configured):
+    assert ie.split_query(configured) == (configured, None)
+
+
+def test_split_query_bare_question_mark_has_no_params():
+    assert ie.split_query("https://h.example/p?") == ("https://h.example/p", None)
+
+
+def test_split_query_keeps_repeated_keys_and_their_order():
+    base, params = ie.split_query("https://h.example/p?a=1&b=2&a=3")
+    assert base == "https://h.example/p"
+    assert params is not None
+    assert params.get_list("a") == ["1", "3"]
+    assert params.get_list("b") == ["2"]
+
+
+def test_split_query_reencodes_the_query_as_form_params():
+    # Characterises httpx's re-serialisation, so a change to it is visible.
+    _, params = ie.split_query("https://h.example/p?flag&c=x%20y")
+    assert str(params) == "flag=&c=x+y"
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("https://h.example///", "https://h.example"),
+        ("https://h.example/p/?k=a/", "https://h.example/p?k=a/"),
+        ("https://h.example/p//#f", "https://h.example/p#f"),
+    ],
+)
+def test_trim_path_slashes_touches_only_the_path(configured, expected):
+    assert ie._trim_path_slashes(configured) == expected
+
+
+@pytest.mark.parametrize(
+    "configured",
+    ["", "not a url", "https://h.example", "https://h.example/", "https://h.example/p?k=a/"],
+)
+def test_trim_path_slashes_leaves_other_urls_alone(configured):
+    assert ie._trim_path_slashes(configured) == configured
+
+
 @pytest.mark.parametrize("provider", ["ollama", "anthropic"])
 def test_trailing_v1_kept_for_non_openai_llm(provider):
     assert ie.llm_base_url(provider, "https://gw.example.com/v1") == "https://gw.example.com/v1"
@@ -376,6 +489,11 @@ def test_web_guide_base_url_example_has_no_v1(lang):
         ("llm", "ollama", "http://localhost:11434"),
         ("llm", "anthropic", "http://localhost:11434"),
         ("llm", "anthropic", "https://proxy.example.com"),
+        ("embedding", "openai", _GW_QUERY),
+        ("embedding", "ollama", _GW_QUERY),
+        ("llm", "openai", "https://gw.example.com/v1?x=1"),
+        ("llm", "ollama", _GW_QUERY),
+        ("llm", "anthropic", _GW_QUERY),
     ],
 )
 async def test_client_base_url_matches_resolver(kind, provider, configured):
@@ -385,9 +503,11 @@ async def test_client_base_url_matches_resolver(kind, provider, configured):
     else:
         obj = _llm(provider, configured)
         resolved = ie.llm_base_url(provider, configured)
+    base, params = ie.split_query(resolved)
     client = obj._get_client()
     try:
-        assert str(client.base_url).rstrip("/") == resolved.rstrip("/")
+        assert str(client.base_url).rstrip("/") == base.rstrip("/")
+        assert client.params == (params or httpx.QueryParams())
     finally:
         await obj.close()
 
