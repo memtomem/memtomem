@@ -112,7 +112,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   frontmatter, and the detail view handed it to the Markdown renderer, which
   drew the opening `---` as a rule and `tags: …` above the closing `---` as a
   large heading. The view now shows that block as plain metadata above the
-  note's text. Whether a chunk opens with its file's frontmatter is answered from
+  note's text when the chunk holds the whole block; a block longer than the
+  chunk size limit, divided across chunks, still renders as Markdown. Whether a
+  chunk opens with its file's frontmatter is answered from
   the file (`GET /api/chunks/{id}/frontmatter`), because the content alone looks
   the same as a file that opens with a heading followed by a `---` block. Search
   result snippets still show the raw block.
