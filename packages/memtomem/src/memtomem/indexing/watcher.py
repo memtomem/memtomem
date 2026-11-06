@@ -203,6 +203,15 @@ class _MarkdownEventHandler(FileSystemEventHandler):
         if not event.is_directory:
             self._enqueue(str(event.src_path))
 
+    def on_attrib(self, event: FileSystemEvent) -> None:
+        # watchdog 7.0 reports some metadata-only changes as their own event:
+        # every inotify IN_ATTRIB (6.0 reported it as a modification) and, when
+        # polling, a mode, ownership or flags change. 6.0 never calls this. A
+        # file made unreadable must still reach the indexer, whose failed read
+        # holds the source out of search (#3082).
+        if not event.is_directory:
+            self._enqueue(str(event.src_path))
+
     def on_created(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
             self._enqueue(str(event.src_path))

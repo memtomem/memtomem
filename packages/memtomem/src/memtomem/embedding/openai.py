@@ -11,6 +11,7 @@ import httpx
 from memtomem.config import EmbeddingConfig
 from memtomem.embedding.retry import RateLimitError, parse_retry_after, with_retry
 from memtomem.errors import EmbeddingError, RetryableEmbeddingError
+from memtomem.inference_endpoints import announce_url, embedding_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,8 @@ class OpenAIEmbedder:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            base = (self._config.base_url or "https://api.openai.com").rstrip("/")
+            base = embedding_base_url("openai", self._config.base_url)
+            announce_url("embedding", "openai", base)
             headers: dict[str, str] = {}
             if self._config.api_key:
                 headers["Authorization"] = f"Bearer {self._config.api_key}"

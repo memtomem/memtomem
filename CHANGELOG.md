@@ -5,8 +5,84 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **memtomem says when an optional provider sends note text off the machine.** The
+  server runs locally, but OpenAI embeddings, an Ollama server on another host, an
+  OpenAI-compatible or Anthropic LLM (`llm.enabled`) and the Cohere reranker send note
+  text and queries to that service. Each of these now logs a warning the first time it
+  connects to a non-loopback endpoint. `mem_status` and `mm status` list the configured
+  remote inference endpoints (and the LLM and reranker providers; `mm status --json`
+  gains an `inference` key). `mm init` describes what OpenAI embeddings send and asks
+  before using them (default No), and after writing the config lists every remote
+  endpoint the merged config puts in effect, including ones kept from an earlier config
+  or set by environment variables. `mm config set rerank.enabled` and
+  `indexing.auto_summarize` say when the change starts sending text to a remote service.
+  The Web UI shows the same list on Home (`GET /api/inference-endpoints`), and the Config
+  guides for the embedding provider, base URL, API key and the new Reranker guide say
+  what is sent. The lists cover inference endpoints only, not Langfuse tracing, webhooks
+  or what the MCP client does with results; see
+  [What leaves your machine](docs/guides/configuration.md#what-leaves-your-machine).
+
+### Fixed
+
+- **A note's YAML frontmatter no longer renders as a heading in the Web UI's
+  detail view (#3030).** Chunk content keeps a Markdown file's leading
+  frontmatter, and the detail view handed it to the Markdown renderer, which
+  drew the opening `---` as a rule and `tags: …` above the closing `---` as a
+  large heading. The view now shows that block as plain metadata above the
+  note's text. Whether a chunk opens with its file's frontmatter is answered from
+  the file (`GET /api/chunks/{id}/frontmatter`), because the content alone looks
+  the same as a file that opens with a heading followed by a `---` block. Search
+  result snippets still show the raw block.
+
+## [0.7.5] — 2026-11-05
+
 ### Upgrading
 
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.19 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.5;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.5`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.5`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.5.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.4" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.4` to
+  `==0.7.5` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.5 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.5`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
+- **A file named like a day file now declares its namespace, and a write under
+  another namespace into it is refused (#3051, ADR-0043 §3).** A
+  `{date}--{slug}-{digest}.md` file whose name decodes belongs to the namespace
+  that name encodes, whoever wrote it and whether or not it is empty (names that
+  do not decode, such as a truncated slug, route as before). An append into such
+  a file under a different namespace (`mem_add(file=...)`, `mm add`, the Web UI's
+  add) now fails like any other namespace mix, and the error names the override
+  (`allow_namespace_mix=true`, `--allow-namespace-mix`). The LangGraph adapter's
+  `MemtomemStore.add()` refuses it too, with `namespace_mix_refused`, and has no
+  override: write to another file or under the file's own namespace. An unbound
+  write into such a file with no stored rows lands in the namespace of its name.
+  When the file is re-indexed with no stored rows, its name decides the namespace
+  ahead of a session binding; stored rows, an explicit `namespace` and
+  `--reassign-namespaces` still win. Namespace moves made after writing
+  (`mem_ns_rename`, `mem_ns_assign`, archive and promote policies) are still kept
+  only in the database, so a rebuild puts those files back in the namespace their
+  name encodes: keep the database, or reapply the moves after a rebuild.
 - **`mem_edit` and `PATCH /api/chunks/{id}` refuse an edit of indexed text that is
   not the chunk's source (#3071).** An edit without `base_hash` is of the chunk's
   indexed text, and it is now accepted only where saving that text unchanged would
@@ -20,8 +96,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **Editing an entry no longer makes it look newly written.** A chunk's
   `created_at` now comes from its entry's `> created:` line whenever the store
   creates the row, and editing an entry's body creates a new row. Before, the
-  edited chunk took the edit time. Date-ranged recall (`created_from` /
-  `created_before`, "written this week"), newest-first ordering, dedup's
+  edited chunk took the edit time. Date-ranged recall (`mem_recall`'s `since` /
+  `until`, `mm recall --since` / `--until`), newest-first ordering, dedup's
   keep-the-oldest choice and age-based policies whose `age_field` is
   `created_at` (the default) now see the time the entry was written. Time decay
   reads `updated_at` and is unchanged. A full-replacement edit whose new
@@ -57,6 +133,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   events: the watcher's source checks and the opt-in startup backfill still run,
   `mem_status` shows a `watcher_unavailable` warning with the error, and the `mm web`
   embedding reset no longer says new edits are auto-indexed while they are not.
+- **A permission-only change to an indexed file reaches the indexer again (#3082).** On the
+  native Linux backend, watchdog 7.0 reports metadata changes (permissions, ownership,
+  timestamps) as an event of their own, which the file watcher ignored; 6.0 reported them as
+  modifications. `chmod 000` on an indexed note no longer held it out of search, and its
+  chunks stayed searchable until its content changed. The watcher now indexes on that event
+  too. With the polling backend (the macOS default), watchdog 7.0 reports a change of mode,
+  ownership or file flags the same way, so a permission change is now seen there at all:
+  6.0's polling compared only modification time and size. `uv.lock` now pins watchdog
+  7.0.0, the version a fresh install resolves, so CI tests what users run.
+- **A held source on a stalled mount no longer keeps the server from exiting (#2908).**
+  The watcher re-checks each held source with a 2 s timeout, but the timeout only stopped
+  the wait: the probe's thread kept running, and both `asyncio.run` and interpreter exit
+  wait for it. One held file behind an unresponsive network mount kept the MCP server or
+  `mm web` running after it was told to stop. The probe now runs on its own daemon thread;
+  the timeout and the pause after two stalled probes are unchanged.
+- **A non-recursive index no longer stops on a looping link (#2906).** On Python 3.12,
+  `mm index --no-recursive` and the Web UI's index with recursion off raised
+  `RuntimeError` when the directory held a link such as `loop.md -> loop.md`, and indexed
+  nothing. The loop is now indexed as nothing, and a file that was indexed and has since
+  become a loop is held with its chunks kept. A path argument that is itself a loop still
+  raises.
+- **The Web UI's watchdog Run Now keeps its success message on screen (#2988).** In
+  Settings → Health, "Health checks completed." disappeared as soon as it appeared,
+  because reloading the report hid the status bar. The report now reloads first.
+- **`mm session list` says which filters matched nothing (#2850).** An empty result
+  printed "No sessions found." whether the store was empty or `--agent-id` / `--since`
+  filtered every session out. The message now names the applied filters, and suggests
+  `mm session start` when none were. JSON output is unchanged.
 - **Release SBOMs no longer claim dependencies that only an inactive extra declares
   (#3066).** uv's CycloneDX export writes `A -> T` whenever A lists T under some extra and T
   is installed for another reason, even when nothing requests that extra: the core SBOM
@@ -79,8 +183,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   content opened with its own `## ` heading is not reliably dated: its header
   is written above that heading and is not read as the entry's (#2762).
 - **A rebuilt index puts a day file back in the namespace it was written for
-  (#3051, ADR-0043).** A namespace is stored only in the database, so deleting
-  it and re-indexing, or indexing a synced memory directory on another machine,
+  (#3051, ADR-0043).** Re-indexing ignored the namespace a day file's name
+  encodes, so deleting the database and re-indexing, or indexing a synced memory
+  directory on another machine,
   put every file in the namespace its path rules give it — `default` with the
   stock configuration, or the session's namespace for `mem_index` in a bound
   MCP session — and a handoff saved under `shared:<project-slug>` was no longer
@@ -102,6 +207,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (`mem_ns_rename`, `mem_ns_assign`, archive and promote policies) are still
   database-only, so a rebuild returns those files to the namespace in their
   name.
+
+### Documentation
+
+- **`mm recall --help` and `mm index --help` end with usage examples (#2849)**, like
+  `mm search` and `mm add`: the `--since` / `--until` date formats, `--namespace` and
+  `--force`.
 
 ## [0.7.4] — 2026-11-04
 

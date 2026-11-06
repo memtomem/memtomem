@@ -477,6 +477,21 @@ def pytest_fixture_setup(fixturedef, request):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_remote_inference_announcements():
+    """Each test starts with no remote endpoint announced yet.
+
+    ``announce_remote_endpoint`` warns once per endpoint per process; without
+    this, whichever test first builds a remote client would silence the
+    warning for every later test that asserts on it.
+    """
+    from memtomem import inference_endpoints
+
+    previous = inference_endpoints._reset_announced_for_tests()
+    yield
+    inference_endpoints._restore_announced_for_tests(previous)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_runtime_dir(
     tmp_path,
     _real_home_write_guard: None,

@@ -2602,6 +2602,11 @@ function _renderHomeDashboardError(err) {
 
 async function loadDashboard() {
   _setHomeDashboardLoading();
+  // Not awaited and independent of the dashboard fetches below: the remote
+  // inference notice must follow config changed outside this page even when
+  // the rest of the dashboard fails to load. Defined in settings-config.js,
+  // which the tests-js harness does not load alongside app.js.
+  if (typeof _loadHomeInference === 'function') _loadHomeInference();
   try {
     // /api/sessions and /api/scratch are dev-only — gated below. The
     // namespaces list endpoint is prod-mounted via namespaces_read so
@@ -3939,6 +3944,8 @@ function showDetail(r) {
   // while the panel (and a draft) stays open.
   STATE.selectedResult = r;
   _endSourceEdit();
+  _frontmatterGen += 1;
+  STATE.detailFrontmatter = { chunkId: r.chunk.id, leading: false };
 
   const scoreView = _scoreViewForResult(r);
   qs('d-score').textContent = scoreView.isReranked
@@ -4003,6 +4010,7 @@ function showDetail(r) {
   hide(qs('d-preview'));
   hide(qs('d-preview-btn'));  // Preview merged into View
   _setDetailMode(STATE.detailViewMode || 'view');
+  _requestFrontmatter(r.chunk);
 
   // Reset diff state
   hide(qs('d-diff'));
@@ -4042,6 +4050,60 @@ function clearDetail() {
   STATE.selectedChunkId = null;
   STATE.selectedResult = null;
   _endSourceEdit();
+  _frontmatterGen += 1;
+  STATE.detailFrontmatter = null;
+}
+
+// A Markdown note's YAML frontmatter is shown as metadata, not handed to
+// ``marked``, which reads ``---`` as a rule and ``key: value`` above the
+// closing ``---`` as a heading (#3030). The regex is
+// ``chunking/markdown.py:_FRONT_MATTER_RE`` verbatim, and a span counts only
+// where ``leading_frontmatter`` counts it: ending at a line boundary.
+const _FRONT_MATTER_RE = /^---\n([\s\S]*?)\n---\n?/;
+
+function _leadingFrontmatter(text) {
+  const m = _FRONT_MATTER_RE.exec(text);
+  if (!m) return null;
+  const span = m[0];
+  return (span.endsWith('\n') || span.length === text.length) ? span : null;
+}
+
+function _isMarkdownSource(path) {
+  const p = path || '';
+  return p.endsWith('.md') || p.endsWith('.markdown');
+}
+
+// Indexed content alone cannot say whether it opens with the file's
+// frontmatter (a file opening ``# Topic`` / ``---`` / text / ``---`` stores the
+// same shape), so the server answers from the file. Source text needs no
+// answer: a span starting at line 1 is the file's head.
+let _frontmatterGen = 0;
+
+async function _requestFrontmatter(chunk) {
+  if (!_isMarkdownSource(chunk.source_file) || chunk.start_line !== 1) return;
+  if (!(chunk.content || '').startsWith('---\n')) return;
+  const gen = _frontmatterGen;
+  let resp;
+  try {
+    resp = await api('GET', `/api/chunks/${chunk.id}/frontmatter`);
+  } catch (_err) {
+    return;  // A display hint: the note renders as it always has.
+  }
+  if (gen !== _frontmatterGen) return;
+  STATE.detailFrontmatter = { chunkId: chunk.id, leading: !!(resp && resp.leading) };
+  if (STATE.detailViewMode === 'view') _setDetailMode('view');
+}
+
+// The frontmatter span of the text the detail editor holds, or null.
+function _detailFrontmatterSpan(text) {
+  const r = STATE.selectedResult;
+  const id = STATE.selectedChunkId;
+  if (!r || id == null || r.chunk.start_line !== 1) return null;
+  const session = STATE.sourceEdit;
+  if (session && session.chunkId === id && session.loaded) return _leadingFrontmatter(text);
+  const fm = STATE.detailFrontmatter;
+  if (fm && fm.chunkId === id && fm.leading) return _leadingFrontmatter(text);
+  return null;
 }
 
 // The detail editor edits the chunk's source text, not its indexed content
@@ -4088,13 +4150,17 @@ async function _beginSourceEdit() {
     return;
   }
   if (gen !== _sourceEditGen) return;
-  STATE.sourceEdit = { chunkId, hash: src.base_hash };
+  // ``loaded``: the editor now holds source text (or a draft of it), whatever
+  // its value is equal to; a stale save clears ``hash`` and keeps this.
+  STATE.sourceEdit = { chunkId, hash: src.base_hash, loaded: true };
   STATE.selectedOriginal = src.text;
   editor.value = src.text;
   editor.readOnly = false;
   saveBtn.disabled = _detailSaveInFlight;
   hide(qs('d-diff-btn'));
   _updateWordCount();
+  // Edit → View while this was loading rendered the indexed text.
+  if (STATE.detailViewMode === 'view') _setDetailMode('view');
 }
 
 // Edit / Delete / Reset
@@ -4243,10 +4309,15 @@ function _setDetailMode(mode) {
   } else {
     const content = editor.value;
     const lang = getLanguage(STATE.detailViewSource);
-    const isMarkdown = (lang === 'markdown' || (STATE.detailViewSource || '').endsWith('.md'));
+    const isMarkdown = (lang === 'markdown' || _isMarkdownSource(STATE.detailViewSource));
     if (isMarkdown && typeof marked !== 'undefined') {
       codeView.className = 'detail-code-view md-preview';
-      codeView.innerHTML = DOMPurify.sanitize(marked.parse(content));
+      const span = _detailFrontmatterSpan(content);
+      const html = span === null
+        ? marked.parse(content)
+        : `<pre class="md-frontmatter"><code>${escapeHtml(span.replace(/\n$/, ''))}</code></pre>`
+          + marked.parse(content.slice(span.length));
+      codeView.innerHTML = DOMPurify.sanitize(html);
     } else if (lang && lang !== 'markdown' && window.Prism && Prism.languages[lang]) {
       codeView.className = 'detail-code-view';
       codeView.innerHTML = `<pre><code class="language-${lang}">${Prism.highlight(content, Prism.languages[lang], lang)}</code></pre>`;

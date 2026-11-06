@@ -9,6 +9,7 @@ import httpx
 from memtomem.config import LLMConfig
 from memtomem.embedding.retry import with_retry
 from memtomem.errors import LLMError
+from memtomem.inference_endpoints import announce_url, llm_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +21,10 @@ class OllamaLLM:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
+            base = llm_base_url("ollama", self._config.base_url)
+            announce_url("llm", "ollama", base)
             self._client = httpx.AsyncClient(
-                base_url=self._config.base_url,
+                base_url=base,
                 timeout=self._config.timeout,
             )
         return self._client

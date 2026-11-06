@@ -66,7 +66,7 @@ mm init                               # preset picker, then memory_dir + MCP
 
 The interactive picker starts with three presets — **Minimal** (BM25, no downloads), **English (Recommended)** (ONNX `multilingual-e5-small` + auto-discover providers), **Korean-optimized** (ONNX `multilingual-e5-small` + `kiwipiepy` tokenizer); no preset turns on a reranker — plus an **Advanced** entry that opens the full 10-step wizard. Preset paths only ask about the memory directory and MCP registration; everything else is set from the preset.
 
-Choose **Minimal** for the fastest no-download first proof and rerun `mm init` later to add semantic search. For automation, `mm init --non-interactive` picks the minimal preset without prompts. See [Embeddings](docs/guides/embeddings.md) for the model and provider matrix.
+Choose **Minimal** for the fastest no-download first proof and rerun `mm init` later to add semantic search. For automation, `mm init --non-interactive` picks the minimal preset without prompts. See [Embeddings](docs/guides/embeddings.md) for the model and provider matrix. The presets keep embedding on your machine; choosing OpenAI embeddings, a cloud LLM, or the Cohere reranker sends note text to that service ([What leaves your machine](docs/guides/configuration.md#what-leaves-your-machine)).
 
 <a id="3-use"></a>
 ### 3. Verify a complete memory round trip
@@ -117,7 +117,7 @@ uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 
 **No install** (uvx on demand):
 ```bash
-claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- uvx --isolated --from "memtomem[all]==0.7.4" memtomem-server
+claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- uvx --isolated --from "memtomem[all]==0.7.5" memtomem-server
 ```
 
 </details>
@@ -127,7 +127,7 @@ claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- u
 
 - **`mm --version` shows an older version than the [latest release](https://github.com/memtomem/memtomem/releases)** right after installing: `uv` is likely serving cached PyPI metadata. Re-run with `uv tool install 'memtomem[all]' --refresh`, or clear the cache first with `uv cache clean memtomem`. To upgrade an existing uv tool install, use `mm upgrade` rather than re-running `uv tool install`; see the [CLI reference](docs/guides/reference/data-config-cli.md#cli-reference) for what it preserves and stops.
 - **`mm: command not found`**: `uv tool install` drops the shim into `~/.local/bin`, which is not on `$PATH` in fresh shells on macOS/Linux. Run `uv tool update-shell`, then open a new shell and re-run `mm --version`.
-- **Duplicate tools after upgrading the Claude plugin**: re-check `/mcp` after reloading. The plugin launches `memtomem[onnx]==0.7.4`. A manual registration whose launch differs — base-only `memtomem`, or the ONNX launch pinned to an earlier release — no longer matches for deduplication. Confirm the manual entry's name and scope, then align its launch command with the plugin or remove the redundant registration.
+- **Duplicate tools after upgrading the Claude plugin**: re-check `/mcp` after reloading. The plugin launches `memtomem[onnx]==0.7.5`. A manual registration whose launch differs — base-only `memtomem`, or the ONNX launch pinned to an earlier release — no longer matches for deduplication. Confirm the manual entry's name and scope, then align its launch command with the plugin or remove the redundant registration.
 - **Indexing vs. discovery (Claude Code)**: provider memory folders that setup auto-discovers (such as `~/.claude/projects/*/memory/`) are added to the search *index*. That is separate from the Web UI's opt-in Context Gateway scan of `~/.claude/projects/`, which discovers project *roots* for Skills, Commands, and Subagents; see [Configuration → Context Gateway](docs/guides/configuration.md#context-gateway).
 
 </details>

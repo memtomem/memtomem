@@ -1,13 +1,29 @@
 [project]
 name = "memtomem"
-version = "0.7.4"
-description = "Markdown-first memory infrastructure for AI agents with hybrid search"
+version = "0.7.5"
+description = "Long-term memory for AI coding agents, kept as Markdown you own. Hybrid BM25 + vector search via MCP."
 authors = [
     {name = "DAPADA Inc.", email = "contact@dapada.co.kr"},
     {name = "memtomem contributors"},
 ]
 license = {text = "Apache-2.0"}
-keywords = ["memory", "ai", "mcp", "agent", "rag", "embedding", "search", "markdown"]
+keywords = [
+    "memory",
+    "long-term-memory",
+    "agent-memory",
+    "ai-agents",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "rag",
+    "bm25",
+    "hybrid-search",
+    "semantic-search",
+    "vector-search",
+    "markdown",
+    "local-first",
+    "claude-code",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

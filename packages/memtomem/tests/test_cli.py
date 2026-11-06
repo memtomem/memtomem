@@ -67,12 +67,12 @@ class TestCLIGroup:
 
     def test_help_shows_description(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["--help"])
-        assert "markdown-first memory infrastructure" in result.output
+        assert "long-term memory for AI coding agents" in result.output
 
     def test_short_help_flag(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["-h"])
         assert result.exit_code == 0
-        assert "markdown-first memory infrastructure" in result.output
+        assert "long-term memory for AI coding agents" in result.output
 
     def test_version_flag_prints_package_version(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["--version"])

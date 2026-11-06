@@ -185,8 +185,8 @@ mm init --non-interactive --preset korean --mcp skip
 not an automation entry point.
 
 `-y` was a deprecated alias for `--non-interactive` through 0.4.x. Since
-v0.5.0 it is accepted and ignored — `mm init` has no confirmation prompt to
-skip — so scripts must pass `--non-interactive`. `mm init --advanced` and
+v0.5.0 it is accepted and ignored — it does not answer `mm init`'s prompts —
+so scripts must pass `--non-interactive`. `mm init --advanced` and
 `mm init --preset <name>` are interactive: without a terminal they refuse
 rather than run their prompts against EOF.
 
@@ -279,7 +279,7 @@ which the plugins' `update` workflow needs outside `topic` mode (see
 
 This reuses the persistent `memtomem[all]` environment installed above. For a
 one-off setup without a persistent install, use `uvx --isolated --from
-"memtomem[all]==0.7.4" memtomem-server`. Claude Code users can instead
+"memtomem[all]==0.7.5" memtomem-server`. Claude Code users can instead
 install the [memtomem plugin](integrations/claude-code.md#mcp-server-setup),
 which provides an exact-pinned MCP server and nine focused workflows. Automatic
 indexing hooks are supplied only by the separate `memtomem-automation` plugin.

@@ -188,6 +188,7 @@ docs, and the bind-time banner to keep the misconfiguration probability low.
 - Never commit API keys or credentials
 - Use MCP client `env` blocks for configuration
 - Default storage is local SQLite — no network exposure
+- Remote providers (OpenAI embeddings, a cloud LLM, the Cohere reranker, Langfuse, webhooks) receive note text or queries when you enable them; see [What leaves your machine](docs/guides/configuration.md#what-leaves-your-machine)
 - Web UI binds to `127.0.0.1` by default — not publicly accessible
 - Keep the default `MEMTOMEM_TOOL_MODE=core` (9 tools) for the smallest tool
   surface an AI agent sees; `standard` (38) and `full` (100) expose more tools

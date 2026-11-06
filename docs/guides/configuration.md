@@ -41,6 +41,7 @@ For interactive setup, run `mm init` instead of editing env vars by hand.
 **On this page**
 
 - [Precedence and merge behaviour](#precedence-and-merge-behaviour)
+- [What leaves your machine](#what-leaves-your-machine)
 - [Storage](#storage)
 - [Embedding](#embedding)
 - [Reset Flow](#reset-flow)
@@ -313,6 +314,48 @@ previous state is recoverable.
 If the web UI is running, restart it after `--fresh` so its
 in-memory cache doesn't re-pin the dropped values on the next save.
 
+## What leaves your machine
+
+The memtomem server runs on your machine, and its database and Markdown files
+stay there. With the defaults (BM25-only search, no LLM, no reranker) the
+server sends none of your note text anywhere. The local ONNX and fastembed
+models download their weights once and then run in-process.
+
+Some optional providers send text to an outside service. Each one is off until
+you configure it:
+
+| Setting | Text sent | When |
+|---------|-----------|------|
+| `embedding.provider=openai` | Each chunk's text with its heading path, when it is indexed; search queries that use dense retrieval; the text checked by `mem_conflict_check`; a pending candidate's text when `mem_candidate_evidence` gathers evidence; LangGraph store queries and record text | Indexing (`mem_add`, `mm index`, the file watcher, Web UI uploads, imports), dense searches, and those tool calls. Sent to `api.openai.com`, or to `embedding.base_url` when set |
+| `embedding.provider=ollama` with a non-local `base_url` | The same text as the OpenAI row | The same events as the OpenAI row. Sent to `embedding.base_url` |
+| `llm.enabled=true` with `openai`, `anthropic`, or a non-local `base_url` | The query (`strategy="llm"` expansion); chunk text (`mem_auto_tag`, `mem_entity_scan`, consolidation including scheduled policy runs, source summaries, chunk context); a session's written chunks (session summaries; when a session's write provenance is missing or cannot be used completely, the summary falls back to the chunks of its namespace and time window, which can include another session's writes) | Per feature, see [LLM Providers](llm-providers.md#what-llm-powers). Session summaries are on by default once an LLM is enabled |
+| `rerank.enabled=true` with `rerank.provider=cohere` | The query and the full text of every candidate chunk in the rerank pool (sized as described in [Rerank](#rerank-cross-encoder)) | Every reranked search |
+| `session_trace.langfuse_enabled=true` | Session command traces. In every `payload_mode`, the trace metadata carries the command line of `mm session wrap` and the summary text given to `mm session end`; full inputs and outputs are added in `redacted` and `full` mode. `redacted` masks secret-looking fields, not ordinary prose | Each traced `mm session` command. With no host configured, the Langfuse SDK sends to its default, `https://cloud.langfuse.com` |
+| `webhook` URLs | The query for search events, the question for ask events, the file path for add events | Each matching event |
+
+What decides the destination is the endpoint each provider actually calls,
+not the provider's name: an `openai` provider pointed at a local vLLM or LM
+Studio server stays local, and an `ollama` provider pointed at another host
+does not. A `base_url` on `localhost`, `127.0.0.1`, or `::1` keeps the request
+on your machine, unless your environment routes HTTP through a proxy
+(memtomem's HTTP clients honor the standard proxy environment variables) or
+the local server itself forwards requests to a hosted model. The `openai` LLM provider with no `base_url` set uses the LLM
+default, `http://localhost:11434`. The `anthropic` provider replaces that exact
+value with `https://api.anthropic.com`, even when you set it explicitly.
+
+To see which endpoints your configuration sends text to, run `mm status` (or
+call `mem_status`): its "Remote inference endpoints" block lists each configured
+embedding, LLM, and reranker endpoint that is not on a loopback address. The
+server also logs a warning the first time it connects to one, and `mm init`
+lists them after writing the config. That list covers these inference
+endpoints only, not Langfuse, webhooks, or what the MCP client does with the
+results it receives.
+
+Separately from all of the above, the MCP tools return note text to the AI
+client that called them, such as Claude Code, Codex, or Claude Desktop. That
+client sends it to its own model provider as part of the conversation, under
+that client's terms; memtomem does not control that step.
+
 ## Storage
 
 | Variable | Default | Description |
@@ -325,7 +368,7 @@ in-memory cache doesn't re-pin the dropped values on the next save.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_EMBEDDING__PROVIDER` | `none` | `none` (BM25 only), `onnx` (local), `ollama` (local server), or `openai` (cloud) |
+| `MEMTOMEM_EMBEDDING__PROVIDER` | `none` | `none` (BM25 only), `onnx` (local), `ollama` (local server), or `openai` (cloud; sends note text and queries to the configured endpoint, OpenAI by default, see [What leaves your machine](#what-leaves-your-machine)) |
 | `MEMTOMEM_EMBEDDING__MODEL` | _(empty)_ | Embedding model name (depends on provider) |
 | `MEMTOMEM_EMBEDDING__DIMENSION` | `0` | Vector dimension (must match the model; 0 = BM25 only) |
 | `MEMTOMEM_EMBEDDING__BASE_URL` | _(empty)_ | API endpoint URL (Ollama defaults to `http://localhost:11434` when unset) |
@@ -1096,7 +1139,7 @@ any leftover source the exclude rules don't cover, remove it directly with
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_RERANK__ENABLED` | `false` | Enable cross-encoder reranking after fusion |
-| `MEMTOMEM_RERANK__PROVIDER` | `fastembed` | `fastembed` (local ONNX), `cohere` (cloud), or `local` (sentence-transformers) |
+| `MEMTOMEM_RERANK__PROVIDER` | `fastembed` | `fastembed` (local ONNX), `cohere` (cloud; sends the query and candidate chunk text to Cohere), or `local` (sentence-transformers) |
 | `MEMTOMEM_RERANK__MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | Reranker model name (provider-specific — see below) |
 | `MEMTOMEM_RERANK__OVERSAMPLE` | `2.0` | Candidate-pool multiplier applied to response `top_k` |
 | `MEMTOMEM_RERANK__MIN_POOL` | `20` | Lower bound on the candidate pool (floor for small queries) |
@@ -1525,7 +1568,7 @@ gate wins.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_LLM__ENABLED` | `false` | Enable LLM provider (required for LLM-powered features) |
-| `MEMTOMEM_LLM__PROVIDER` | `ollama` | `ollama` (local), `openai` (cloud/compatible), or `anthropic` |
+| `MEMTOMEM_LLM__PROVIDER` | `ollama` | `ollama` (local), `openai` (cloud/compatible), or `anthropic` (cloud). A cloud provider receives note text, see [What leaves your machine](#what-leaves-your-machine) |
 | `MEMTOMEM_LLM__MODEL` | _(empty)_ | Model name (empty uses provider default: ollama→gemma4:e2b, openai→gpt-4.1-mini, anthropic→claude-haiku-4-5-20251001) |
 | `MEMTOMEM_LLM__BASE_URL` | `http://localhost:11434` | API endpoint URL |
 | `MEMTOMEM_LLM__API_KEY` | _(empty)_ | API key (required for OpenAI/Anthropic/OpenRouter) |
