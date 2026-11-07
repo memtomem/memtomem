@@ -5,6 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Web UI's Working Memory panel shows a scratch entry's key, value and
+  session as text, and reports its actions (#3109).** Settings → Harness →
+  Working Memory wrote those fields into the page as markup, so an entry
+  written through `POST /api/scratch` or `mem_scratch_set` that contained HTML
+  broke the table or inserted elements. Adding, deleting or promoting an entry
+  also failed silently on an error, with a script error in the browser console
+  instead of a message; it now shows one.
+
+- **A namespace color is stored only as `#` followed by 3-8 hex digits
+  (#3109).** The Web UI writes the color into the page's markup, and
+  `mem_ns_update`, `mem_agent_register` and `mm agent register --color` stored
+  any string, so a value with quotes or angle brackets could insert elements
+  into the Home and Settings → Namespaces pages. Those three now return an error
+  for any other value (such as `"blue"`) and store nothing; `""` still clears
+  the color. The Web UI already refused such values. A color stored earlier
+  that is not of that form now shows as the default color.
+
+- **The Home dashboard no longer lists held or pending sources (#3109).** The
+  source list, recent sources, file-type chart and total size counted sources
+  the Sources tab hides — ones held because the file went missing or could not
+  be read, held by redaction, or still pending a check. They now follow the
+  Sources tab. The header's source and chunk totals and the chunk-size chart
+  still count them (#3115).
+
 ## [0.7.6] — 2026-11-06
 
 ### Upgrading
