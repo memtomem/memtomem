@@ -14,13 +14,21 @@ absence of a forbidden term alone would prove nothing.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from memtomem.config import QueryExpansionConfig, RerankConfig, SearchConfig
-from memtomem.models import Chunk, ChunkMetadata, ScopeFilter, SearchResult
+from memtomem.models import (
+    CONSOLIDATED_SUFFIX,
+    ORIGIN_CONSOLIDATION_POLICY,
+    Chunk,
+    ChunkMetadata,
+    ScopeFilter,
+    SearchResult,
+)
 from memtomem.search.pipeline import SearchPipeline
 
 pytestmark = pytest.mark.asyncio
@@ -259,6 +267,66 @@ async def test_search_reports_hidden_rows_of_its_own_boundary(hidden_rows):
 
     assert stats.hidden_system_ns == 2
     assert stats.hidden_by_prefix == {"archive:": 1, "agent-runtime:": 1}
+
+
+async def _hide(storage, source: Path, how: str) -> None:
+    if how == "pending":
+        assert storage.queue_source_check_sync(source)
+    else:
+        assert await storage.hold_source(source, how)
+
+
+@pytest.mark.parametrize("how", ["redaction_blocked", "scan_missing", "pending"])
+async def test_hidden_count_leaves_out_rows_search_hides_by_source(
+    bm25_only_components, tmp_path, how
+):
+    """#3108: a held or pending source's rows are not returned by a search that
+    names their namespace, so the hint must not advertise them. The raw count
+    (no boundary) still sees them."""
+    comp, _ = bm25_only_components
+    kept = _chunk("user", namespace="archive:x")
+    hidden = _chunk("user", namespace="archive:x")
+    # A real directory: indexing stores the resolved path, while the pending
+    # journal deliberately does not resolve, so a path through a symlink (macOS
+    # ``/home``) never matches its row and nothing is queued.
+    hidden.metadata = replace(hidden.metadata, source_file=tmp_path / "hidden.md")
+    await comp.storage.upsert_chunks([kept, hidden])
+    await _hide(comp.storage, hidden.metadata.source_file, how)
+
+    assert await comp.storage.count_chunks_by_ns_prefix_detail(PREFIXES, boundary=(None, None)) == (
+        1,
+        {"archive:": 1},
+    )
+    assert await comp.storage.count_chunks_by_ns_prefix_detail(PREFIXES) == (2, {"archive:": 2})
+
+    pipeline = SearchPipeline(
+        storage=comp.storage,
+        embedder=_RecordingEmbedder(),
+        config=SearchConfig(enable_bm25=True, enable_dense=False),
+    )
+    named, _ = await pipeline.search("zephyr", namespace="archive:*")
+    assert {r.chunk.id for r in named} == {kept.id}
+
+
+async def test_hidden_count_leaves_out_policy_rows_of_a_held_parent(bm25_only_components):
+    """A consolidation-policy summary is hidden with its parent's hold; the
+    hand-written row in the same consolidated file is not."""
+    comp, _ = bm25_only_components
+    parent = _chunk("user", namespace="default")
+    derived = Path(f"{parent.metadata.source_file}{CONSOLIDATED_SUFFIX}")
+    policy = _chunk("user", namespace="archive:x")
+    policy.metadata = replace(
+        policy.metadata, source_file=derived, origin=ORIGIN_CONSOLIDATION_POLICY
+    )
+    manual = _chunk("user", namespace="archive:x")
+    manual.metadata = replace(manual.metadata, source_file=derived)
+    await comp.storage.upsert_chunks([parent, policy, manual])
+    assert await comp.storage.hold_source(parent.metadata.source_file, "scan_missing")
+
+    assert await comp.storage.count_chunks_by_ns_prefix_detail(PREFIXES, boundary=(None, None)) == (
+        1,
+        {"archive:": 1},
+    )
 
 
 # ---------------------------------------------------------------------------

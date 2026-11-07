@@ -15,7 +15,9 @@ chunk-links walk builds a boost-source set and a retrieval restricted
 to those sources joins RRF as a third input list weighted by
 ``expansion_rescue_weight`` (#2184: the BM25 leg pushes the restriction
 into storage SQL via ``SearchMetadataFilter.source_exact``; the dense
-leg post-filters in Python — see ``_rescue_retrieval``). Failures
+leg post-filters in Python — see ``_rescue_retrieval``). Rescue widens
+ranking, never visibility: both its legs and the summary-target read
+carry the caller's namespace filter and scope context (#3108). Failures
 degrade to two-leg fusion (loud once — see ``_log_rescue_failure``).
 
 The scope-context filter is applied **at the BM25 + dense storage
@@ -1020,6 +1022,7 @@ class SearchPipeline:
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         report_failure: Callable[[], None] | None = None,
+        namespace_filter: NamespaceFilter | None = None,
     ) -> set[str]:
         """Stage-1 enrichment lookup against ``archive:session:*``.
 
@@ -1038,6 +1041,16 @@ class SearchPipeline:
         user only") would silently exclude project_shared /
         project_local summaries from the rescue path even when the
         outer search is pinned to a project.
+
+        A ``summarizes`` target only contributes its path when the search
+        could have returned that target itself, judged in the statement that
+        reads it: the caller's ``namespace_filter`` (the system-namespace
+        exclusion on an unpinned search), the scope context, and source
+        visibility (held or pending sources). The rescue legs already drop
+        such a target, but its path would still pull in a visible chunk that
+        shares it, flag that chunk ``via_session_summary`` and turn
+        two-leg passthrough into three-list fusion — ranking driven by a
+        link into rows the caller cannot see (#3108).
 
         Returns an empty set when the feature is disabled, the lookup
         fails, no summary scores above threshold, or no surviving
@@ -1087,20 +1100,28 @@ class SearchPipeline:
             if report_failure is not None:
                 report_failure()
             return set()
-        target_chunk_ids = [link.target_id for links in links_by_source.values() for link in links]
+        target_chunk_ids = list(
+            dict.fromkeys(link.target_id for links in links_by_source.values() for link in links)
+        )
 
         if not target_chunk_ids:
             return set()
 
         try:
-            chunks_map = await self._storage.get_chunks_batch(target_chunk_ids)
+            targets = await self._storage.recall_chunks(
+                chunk_ids=target_chunk_ids,
+                limit=len(target_chunk_ids),
+                namespace_filter=namespace_filter,
+                scope_filter=scope_filter,
+                project_context_root=project_context_root,
+            )
         except Exception:
-            _log_rescue_failure("chunks_batch", "get_chunks_batch failed for rescue targets")
+            _log_rescue_failure("chunks_batch", "target hydration failed for rescue targets")
             if report_failure is not None:
                 report_failure()
             return set()
 
-        return {str(c.metadata.source_file) for c in chunks_map.values()}
+        return {str(c.metadata.source_file) for c in targets}
 
     async def _rescue_retrieval(
         self,
@@ -1116,6 +1137,7 @@ class SearchPipeline:
         source_filter: str | None = None,
         exhaustive: bool = False,
         report_failure: Callable[[], None] | None = None,
+        namespace_filter: NamespaceFilter | None = None,
     ) -> list[SearchResult]:
         """Parallel BM25+dense retrieval restricted to boost_sources.
 
@@ -1148,6 +1170,14 @@ class SearchPipeline:
         retrieval uses. The default ("no project context → user only")
         would otherwise drop project_shared / project_local rescue
         candidates whenever the outer search was pinned to a project.
+
+        ``namespace_filter`` is the caller's, carried by both legs exactly as
+        the organic legs carry it (#3108). Rescue only runs unpinned, so it is
+        the system-namespace exclusion or ``None``; without it, a boost source
+        whose rows sit in ``archive:*`` or ``agent-runtime:*`` surfaced them in
+        a search that hides those namespaces. On the dense leg the exclusion is
+        SQL inside the KNN pass, so a pool dominated by system rows can take
+        the adaptive over-fetch's escalation, bounded as on the organic leg.
         """
         if not boost_sources:
             return []
@@ -1177,7 +1207,7 @@ class SearchPipeline:
                 return await self._storage.bm25_search(
                     query,
                     top_k=oversample,
-                    namespace_filter=None,
+                    namespace_filter=namespace_filter,
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
                     metadata_filter=bm25_filter,
@@ -1196,7 +1226,7 @@ class SearchPipeline:
                 hits = await self._storage.dense_search(
                     query_embedding,
                     top_k=oversample,
-                    namespace_filter=None,
+                    namespace_filter=namespace_filter,
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
                     source_filter=source_filter,
@@ -1970,6 +2000,7 @@ class SearchPipeline:
                         scope_filter=scope_filter,
                         project_context_root=project_context_root,
                         report_failure=_mark_rescue_failed,
+                        namespace_filter=ns_filter,
                     )
                     if boost_sources:
                         rescue_results = await self._rescue_retrieval(
@@ -1985,6 +2016,7 @@ class SearchPipeline:
                             source_filter=source_filter,
                             exhaustive=exhaustive,
                             report_failure=_mark_rescue_failed,
+                            namespace_filter=ns_filter,
                         )
                         rescue_chunk_ids = {r.chunk.id for r in rescue_results}
                 except Exception:
