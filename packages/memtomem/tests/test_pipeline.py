@@ -1951,6 +1951,116 @@ class TestPipelineEntityBoost:
         assert kwargs["min_confidence"] == pytest.approx(0.6)
 
 
+class TestMmrAfterBoosts:
+    """MMR is the last ranking stage: no boost re-sorts its diversified order.
+
+    Fixture: A=1.0, B=0.9, C=0.8 from a dense-only search (fixture scores reach
+    the ranking stages unfused), A and B near-duplicates (identical vectors), C
+    orthogonal, lambda 0.7. MMR keeps A, then prefers C (0.7*0.8 = 0.56) over B
+    (0.7*0.9 - 0.3*1.0 = 0.33): ``[A, C, B]``. A boost that ran after MMR sorted
+    by score again and returned ``[A, B, C]``.
+    """
+
+    _make_result = staticmethod(TestRerankCandidatePool._make_result)
+
+    def _make_pipeline(
+        self,
+        *,
+        access_config=None,
+        importance_config=None,
+        entity_boost_config=None,
+    ):
+        from unittest.mock import AsyncMock
+
+        from memtomem.config import MMRConfig, SearchConfig
+        from memtomem.search.pipeline import SearchPipeline
+
+        a = self._make_result("a", rank=1, score=1.0)
+        b = self._make_result("b", rank=2, score=0.9)
+        c = self._make_result("c", rank=3, score=0.8)
+        self.ids = {"a": a.chunk.id, "b": b.chunk.id, "c": c.chunk.id}
+
+        storage = AsyncMock()
+        storage.bm25_search = AsyncMock(return_value=[])
+        storage.dense_search = AsyncMock(return_value=[a, b, c])
+        storage.increment_access = AsyncMock()
+        storage.save_query_history = AsyncMock()
+        storage.get_access_counts = AsyncMock(return_value={})
+        storage.get_importance_scores = AsyncMock(return_value={})
+        storage.get_matching_entities = AsyncMock(return_value={})
+        storage.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
+        storage.get_embeddings_for_chunks = AsyncMock(
+            return_value={
+                str(a.chunk.id): [1.0, 0.0],
+                str(b.chunk.id): [1.0, 0.0],
+                str(c.chunk.id): [0.0, 1.0],
+            }
+        )
+
+        embedder = AsyncMock()
+        embedder.embed_query = AsyncMock(return_value=[1.0, 0.0])
+
+        return SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=False, enable_dense=True),
+            mmr_config=MMRConfig(enabled=True, lambda_param=0.7),
+            access_config=access_config,
+            importance_config=importance_config,
+            entity_boost_config=entity_boost_config,
+        )
+
+    def _order(self, results):
+        names = {cid: name for name, cid in self.ids.items()}
+        return [names[r.chunk.id] for r in results]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("boost", ["access", "importance", "entity"])
+    async def test_uniform_boost_keeps_mmr_order(self, boost):
+        from memtomem.config import AccessConfig, EntityBoostConfig, ImportanceConfig
+
+        if boost == "access":
+            pipeline = self._make_pipeline(access_config=AccessConfig(enabled=True))
+            getter = pipeline._storage.get_access_counts
+            expected_top = 1.0
+        elif boost == "importance":
+            pipeline = self._make_pipeline(importance_config=ImportanceConfig(enabled=True))
+            getter = pipeline._storage.get_importance_scores
+            expected_top = 1.0
+        else:
+            pipeline = self._make_pipeline(entity_boost_config=EntityBoostConfig(enabled=True))
+            # Every chunk carries the query's one entity: a uniform 1.5x factor.
+            pipeline._storage.get_matching_entities.return_value = {
+                str(cid): {("technology", "sqlite")} for cid in self.ids.values()
+            }
+            getter = pipeline._storage.get_matching_entities
+            expected_top = 1.5
+
+        results, _ = await pipeline.search("sqlite migration", top_k=3)
+
+        getter.assert_awaited()
+        assert self._order(results) == ["a", "c", "b"]
+        # The boost stage ran: its factor is in the returned score.
+        assert results[0].score == pytest.approx(expected_top)
+
+    @pytest.mark.asyncio
+    async def test_mmr_diversifies_over_boosted_scores(self):
+        """B's 1.5x importance boost makes it the most relevant (1.35), so MMR
+        starts from B. A is B's duplicate (0.7*(1.0/1.35) - 0.3 = 0.22) and loses
+        to C (0.7*(0.8/1.35) = 0.41): ``[B, C, A]``. Diversifying before the
+        boost picked ``[A, C, B]``, which the boost re-sorted to ``[B, A, C]``.
+        """
+        from memtomem.config import ImportanceConfig
+
+        pipeline = self._make_pipeline(importance_config=ImportanceConfig(enabled=True))
+        pipeline._storage.get_importance_scores.return_value = {str(self.ids["b"]): 1.0}
+
+        results, _ = await pipeline.search("sqlite migration", top_k=3)
+
+        assert self._order(results) == ["b", "c", "a"]
+        assert results[0].score == pytest.approx(1.35)
+
+
 def _pipeline_chunk(content: str, source: str, tags: tuple[str, ...] = ()) -> Chunk:
     return Chunk(
         content=content,
