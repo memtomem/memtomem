@@ -476,7 +476,11 @@ async def apply_consolidation(
             virtual path is replaced.
         group: Dict with at minimum ``source`` (str path) and ``chunk_ids``
             (list of UUID strings). ``namespace`` / ``chunk_count`` are
-            accepted but not required.
+            accepted but not required. ``coverage_ids`` (list of UUID
+            strings), when present, are the originals the coverage recheck
+            reads instead of ``chunk_ids``: the policy links only the chunks
+            its summary read but defers to a summary over any of the source's
+            chunks.
         summary: The markdown summary text. The policy handler supplies
             ``make_heuristic_summary`` output; custom callers may pass any
             string with the expected Metadata block format.
@@ -510,6 +514,7 @@ async def apply_consolidation(
     summary_chunk = _make_summary_chunk(group, summary, summary_namespace)
     virtual_path = summary_chunk.metadata.source_file
     source_ids = [str(cid) for cid in group.get("chunk_ids", [])]
+    coverage_ids = [str(cid) for cid in group.get("coverage_ids", source_ids)]
     # One transaction for the whole group's work. The summary is
     # idempotency-keyed by its source hash (``execute_auto_consolidate`` skips a
     # group whose summary already exists), so a summary that committed while its
@@ -539,8 +544,8 @@ async def apply_consolidation(
         # take an LLM call; an agent apply can link these originals meanwhile.
         # Read again under the write lock, before the clear drops the edges
         # that tell the replaced summary's coverage from anyone else's.
-        if source_ids and covered_elsewhere(
-            await storage.get_consolidation_targets([UUID(cid) for cid in source_ids]),
+        if coverage_ids and covered_elsewhere(
+            await storage.get_consolidation_targets([UUID(cid) for cid in coverage_ids]),
             {c.id for c in existing},
         ):
             raise CoveredElsewhere(group["source"])
