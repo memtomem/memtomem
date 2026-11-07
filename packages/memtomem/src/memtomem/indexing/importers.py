@@ -226,10 +226,16 @@ async def import_notion(
                 and total / total_compressed > _ZIP_MAX_RATIO
             ):
                 raise UnsafeArchiveError("archive compression ratio exceeds cap")
+            actual_total = 0
             for info in infos:
                 if info.file_size > _ZIP_MAX_MEMBER_BYTES:
                     raise UnsafeArchiveError(f"member {info.filename!r} exceeds size cap")
                 raw = zf.open(info).read(_ZIP_MAX_MEMBER_BYTES + 1)
+                if len(raw) > _ZIP_MAX_MEMBER_BYTES:
+                    raise UnsafeArchiveError(f"member {info.filename!r} exceeds size cap")
+                actual_total += len(raw)
+                if actual_total > _ZIP_MAX_TOTAL_BYTES:
+                    raise UnsafeArchiveError("archive exceeds aggregate size cap")
                 sources.append(
                     (
                         Path(info.filename),
@@ -247,15 +253,29 @@ async def import_notion(
                 continue
             sources.append((rel, p.name, p.read_text(encoding="utf-8", errors="replace")))
 
+    allocated_targets: set[Path] = set()
     for rel, original_name, content in sources:
         # Clean Notion-specific artifacts
         content = _clean_notion_markdown(content)
 
         # Clean filename (remove Notion UUID suffix)
-        clean_name = _clean_notion_filename(Path(original_name).stem) + ".md"
+        clean_stem = _clean_notion_filename(Path(original_name).stem)
+        clean_name = clean_stem + ".md"
 
         # Preserve directory structure
-        target = output_dir / rel.parent / clean_name
+        parent_dir = output_dir / rel.parent
+        target = parent_dir / clean_name
+
+        if target in allocated_targets or target.exists():
+            counter = 2
+            while True:
+                candidate = parent_dir / f"{clean_stem} ({counter}).md"
+                if candidate not in allocated_targets and not candidate.exists():
+                    target = candidate
+                    break
+                counter += 1
+
+        allocated_targets.add(target)
 
         final = _with_import_header(content, "notion", original_name)
         guard = enforce_write_guard(

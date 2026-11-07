@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **Notion sibling pages sharing a title no longer overwrite each other during import (#3113).**
+  When Notion exports multiple pages in the same folder with duplicate titles
+  (disambiguated in Notion by trailing 32-hex UUIDs), stripping the UUIDs
+  previously resulted in identical target filenames, causing earlier siblings to be
+  silently overwritten on disk and duplicate paths in the returned list.
+  `import_notion` now tracks allocated paths and disambiguates collisions with a
+  numeric suffix (e.g. `Page (2).md`). In addition, uncompressed byte counts from
+  ZIP members are verified post-read against `_ZIP_MAX_MEMBER_BYTES` and
+  accumulated against `_ZIP_MAX_TOTAL_BYTES` to prevent spoofed header bypass.
+
 ## [0.7.6] — 2026-11-06
 
 ### Upgrading
