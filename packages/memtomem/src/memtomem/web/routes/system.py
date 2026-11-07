@@ -25,10 +25,8 @@ from memtomem.config import (
     RerankConfig,
     assign_section_fields,
     build_comparand,
-    classify_scope,
     coerce_and_validate,
     memory_dir_kind,
-    resolve_project_memory_dirs,
     save_config_overrides,
     saved_embedding_identity,
 )
@@ -120,6 +118,7 @@ from memtomem.web.schemas.sources import (
     SourceOut,
     StatsResponse,
 )
+from memtomem.web.source_visibility import load_source_visibility
 
 __all__ = [
     "AddMemoryRequest",
@@ -472,8 +471,6 @@ async def get_stats(
             chunk_size_distribution=distribution,
         )
 
-    pmdirs = config.indexing.project_memory_dirs
-    resolved_roots = resolve_project_memory_dirs(pmdirs)
     # Every index root owns its sources, matching ``GET /api/sources`` —
     # a read-only or project root's files are not orphans. (#2522)
     indexed_dirs = sorted(
@@ -486,9 +483,12 @@ async def get_stats(
 
     all_sources: list[SourceOut] = []
     rows = await storage.get_source_files_with_counts()
+    # The Sources tree's rule (held/pending and the ``project_local`` tier), so
+    # the Home dashboard lists no source the Sources tab hides (#3109).
+    visibility = await load_source_visibility(storage, config)
     for p, cnt, last_indexed_iso, ns_csv, avg_tok, min_tok, max_tok in rows:
-        source_scope, _src_project_root = classify_scope(p, pmdirs, resolved_roots=resolved_roots)
-        if source_scope == "project_local":
+        hidden_reasons, source_scope = visibility.check(p)
+        if hidden_reasons:
             continue
 
         namespaces = ns_csv.split(",") if ns_csv else ["default"]

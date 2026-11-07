@@ -142,7 +142,7 @@ function _buildNsCard(ns, defaultNs) {
 
   const dot = document.createElement('span');
   dot.className = 'ns-color-dot';
-  dot.style.backgroundColor = ns.color || 'var(--muted)';
+  dot.style.backgroundColor = safeCssColor(ns.color, 'var(--muted)');
 
   const name = document.createElement('span');
   name.className = 'ns-name';
@@ -279,7 +279,7 @@ function editNamespaceMeta(ns, card) {
     </div>
     <div class="ns-edit-row">
       <label>Color</label>
-      <input type="color" class="ns-edit-color" value="${ns.color || '#808080'}" />
+      <input type="color" class="ns-edit-color" value="${safeCssColor(ns.color, '#808080')}" />
       <button class="btn-ghost btn-xs ns-edit-reset-color">Reset</button>
     </div>
     <div class="ns-edit-actions">
@@ -550,7 +550,7 @@ _renderNsChart = function(namespaces) {
 
   g.selectAll('path').data(pie(sorted)).join('path')
     .attr('d', arc)
-    .attr('fill', (d, i) => d.data.color || palette[i % palette.length])
+    .attr('fill', (d, i) => safeCssColor(d.data.color, palette[i % palette.length]))
     .attr('stroke', 'var(--surface)')
     .attr('stroke-width', 2)
     .attr('tabindex', 0)
@@ -583,7 +583,7 @@ _renderNsChart = function(namespaces) {
   const legend = document.createElement('div');
   legend.className = 'ns-legend-row';
   legend.innerHTML = sorted.map((ns, i) => {
-    const c = ns.color || palette[i % palette.length];
+    const c = safeCssColor(ns.color, palette[i % palette.length]);
     const nsName = String(ns.namespace || '');
     const nsAttr = escapeAttr(nsName);
     const label = escapeHtml(formatNsLabel(nsName));

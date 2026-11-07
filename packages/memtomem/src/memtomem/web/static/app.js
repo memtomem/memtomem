@@ -3029,7 +3029,7 @@ function _renderNsChart(namespaces) {
 
   chart.innerHTML = sorted.map((ns, i) => {
     const pct = Math.round((ns.chunk_count / max) * 100);
-    const color = ns.color || palette[i % palette.length];
+    const color = safeCssColor(ns.color, palette[i % palette.length]);
     const nsName = String(ns.namespace || '');
     const fullNs = escapeHtml(nsName);
     const shortNs = escapeHtml(formatNsLabel(nsName));
@@ -8087,6 +8087,12 @@ function escapeHtml(str) {
 // also safe — past redundant ``.replace(/"/g, ...)`` was a no-op once the
 // quote handling moved into escapeHtml.
 function escapeAttr(str) { return escapeHtml(str); }
+// Namespace colors are interpolated into ``style``/``value`` attributes. The
+// server only stores ``#`` + 3-8 hex digits (``NAMESPACE_COLOR_PATTERN``), but a
+// row written before that check may hold anything, so render it as the fallback.
+function safeCssColor(color, fallback) {
+  return typeof color === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(color) ? color : fallback;
+}
 
 // ---------------------------------------------------------------------------
 // Search History (A)

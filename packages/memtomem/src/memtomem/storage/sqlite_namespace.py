@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, AsyncContextManager, AsyncIterator, Callable, Sequence
 from uuid import UUID
 
+from memtomem.constants import validate_namespace_color
 from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError, StorageError
 from memtomem.storage.base import (
     NamespaceAssignResult,
@@ -920,6 +921,9 @@ class NamespaceOps:
         color: str | None = None,
     ) -> None:
         _ensure_valid_namespace(namespace)
+        # Every color writer (Web PATCH, ``mem_ns_update``, ``mem_agent_register``,
+        # ``mm agent register``) lands here; refuse before any DB work.
+        validate_namespace_color(color)
         db = self._get_db()
         now = now_iso()
         updates = []
