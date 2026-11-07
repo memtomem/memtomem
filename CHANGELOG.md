@@ -7,6 +7,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The Web UI's Working Memory panel shows a scratch entry's key, value and
+  session as text, and reports its actions (#3109).** Settings → Harness →
+  Working Memory wrote those fields into the page as markup, so an entry
+  written through `POST /api/scratch` or `mem_scratch_set` that contained HTML
+  broke the table or inserted elements. Adding, deleting or promoting an entry
+  also failed silently on an error, with a script error in the browser console
+  instead of a message; it now shows one.
+
+- **A namespace color is stored only as `#` followed by 3-8 hex digits
+  (#3109).** The Web UI writes the color into the page's markup, and
+  `mem_ns_update`, `mem_agent_register` and `mm agent register --color` stored
+  any string, so a value with quotes or angle brackets could insert elements
+  into the Home and Settings → Namespaces pages. Those three now return an error
+  for any other value (such as `"blue"`) and store nothing; `""` still clears
+  the color. The Web UI already refused such values. A color stored earlier
+  that is not of that form now shows as the default color.
+
+- **The Home dashboard no longer lists held or pending sources (#3109).** The
+  source list, recent sources, file-type chart and total size counted sources
+  the Sources tab hides — ones held because the file went missing or could not
+  be read, held by redaction, or still pending a check. They now follow the
+  Sources tab. The header's source and chunk totals and the chunk-size chart
+  still count them (#3115).
+
+- **A search that names no namespace no longer returns `archive:*` or
+  `agent-runtime:*` notes through the session-summary rescue (#3108).** When
+  such a search matched a stored session summary, it pulled in the notes that
+  summary covered from every namespace, including the ones default search
+  hides; for an agent-bound session those are its `agent-runtime:<id>` writes.
+  The rescue now searches the same namespaces, scope and visible sources as the
+  search itself, and a summary link to a note the search cannot see no longer
+  lifts a visible note stored in the same file. The "N result(s) hidden in
+  system namespaces" hint in `mem_search` and `mem_recall` also stops counting
+  notes whose source is held or awaiting a recheck, which a search naming that
+  namespace does not return either.
+
 - **Lifecycle policies and decay expiry no longer delete or move held sources
   (#3110).** `auto_expire`, `auto_archive`, `auto_promote`, and
   `mem_decay_expire` / `POST /api/decay/expire` treated a held source (missing,
@@ -17,6 +53,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   write lock, so a hold that lands mid-run cannot lose rows either.
   `mem_decay_scan` / `GET /api/decay/scan` totals now count only the chunks
   expiry can reach.
+
 - **`auto_archive` and `auto_promote` move whole files and no longer crash on a
   duplicate in the target (#3110).** A move onto a namespace that already held
   the same chunk at the same line raised `UNIQUE constraint failed` and left the
@@ -28,6 +65,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   whose tags route one file to several targets skips that file
   (`split_targets`). A file an earlier run left split is moved the rest of the
   way when it qualifies.
+
 - **`auto_consolidate` reads every chunk of a source, not the first 20
   (#3110).** The mixed-namespace check and the source hash now see the whole
   file, so a change past the 20th chunk regenerates the summary. The summary

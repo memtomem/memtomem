@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, AsyncContextManager, AsyncIterator, Callable, Sequence
 from uuid import UUID
 
+from memtomem.constants import validate_namespace_color
 from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError, StorageError
 from memtomem.storage.base import (
     NamespaceAssignResult,
@@ -19,6 +20,7 @@ from memtomem.storage.base import (
 )
 from memtomem.storage.sqlite_helpers import escape_like, now_iso, placeholders, quote_ident
 from memtomem.storage.sqlite_scope import scope_context_sql
+from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_CHUNKS
 
 if TYPE_CHECKING:
     from memtomem.models import ScopeFilter
@@ -196,9 +198,13 @@ class NamespaceOps:
         ``boundary`` is the searching caller's ``(scope_filter,
         project_context_root)``: the count then covers only rows that search
         could return once it named the namespace, so another project's or
-        another scope's archive is not counted. ``(None, None)`` is a real
-        boundary (user rows only, as for an out-of-project default search);
-        omitting it counts every row.
+        another scope's archive is not counted, nor are rows of a held or
+        pending source, which retrieval hides with the same fragment
+        (#3108). It is the scope- and source-visible inventory of the hidden
+        namespaces, not the size of a particular query's result: matching,
+        tags, dates and temporal validity are not applied. ``(None, None)``
+        is a real boundary (user rows only, as for an out-of-project default
+        search); omitting it counts every row.
 
         ``count_chunks_by_ns_prefix`` answers "how many are hidden"; a caller
         that wants to tell the user *which* namespace to search needs the
@@ -230,7 +236,7 @@ class NamespaceOps:
             # Grouped: the prefix predicates are OR-joined, so an ungrouped AND
             # would bind to the last prefix only.
             scope_frag, scope_params = scope_context_sql(boundary[0], boundary[1])
-            where = f"{where} AND ({scope_frag})"
+            where = f"{where} AND ({scope_frag}) AND {VISIBLE_SOURCE_CHUNKS}"
             params += scope_params
         async with self._lease_txn_read_db() as db:
             row = db.execute(
@@ -915,6 +921,9 @@ class NamespaceOps:
         color: str | None = None,
     ) -> None:
         _ensure_valid_namespace(namespace)
+        # Every color writer (Web PATCH, ``mem_ns_update``, ``mem_agent_register``,
+        # ``mm agent register``) lands here; refuse before any DB work.
+        validate_namespace_color(color)
         db = self._get_db()
         now = now_iso()
         updates = []
