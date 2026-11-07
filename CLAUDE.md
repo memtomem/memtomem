@@ -55,8 +55,8 @@ for `memtomem` and both resolve to `memtomem.cli:cli`.
 - **Search pipeline order is fixed**: query expansion → BM25 + dense (parallel,
   both carrying the scope-context, tag and source filters) → RRF fusion →
   cross-encoder rerank (optional) → source filter (defensive recheck) →
-  validity filter → time-decay → MMR → access-freq boost → importance boost →
-  entity-match boost → context-window expansion. Don't reorder stages in
+  validity filter → time-decay → access-freq boost → importance boost →
+  entity-match boost → MMR → context-window expansion. Don't reorder stages in
   `packages/memtomem/src/memtomem/search/pipeline.py` without updating the
   Stage comments in that file. Filters that select at retrieval belong on
   `SearchMetadataFilter`; before pushing a new one into a leg's SQL, check

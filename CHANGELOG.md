@@ -31,6 +31,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Sources tab. The header's source and chunk totals and the chunk-size chart
   still count them (#3115).
 
+- **MMR diversification now survives the access, importance and entity-match
+  boosts (#3111).** With `mmr.enabled` on, MMR ran before those boosts, and each
+  boost that ran re-sorted the results by score, putting MMR's diversified order
+  back into plain score order — near-duplicates it had pushed down came back up.
+  This happened even when the boost changed no score (no chunk accessed, no
+  importance recorded); the entity-match boost re-sorted only when the query
+  named entities that candidates carried. MMR now runs after time decay and the
+  boosts, so it diversifies over the boosted scores and its order is the order
+  returned. Rankings change for configurations that enable MMR together with any
+  of the boosts, Quality Lab replays included; with the default configuration
+  (all off) nothing changes.
+
 ## [0.7.6] — 2026-11-06
 
 ### Upgrading
