@@ -568,16 +568,17 @@ async function loadHarnessScratch() {
       data.entries.map(e => {
         const ttl = e.expires_at ? relativeTime(e.expires_at) : '—';
         const promoted = e.promoted ? '<span class="badge badge-promoted">yes</span>' : '—';
-        const sess = e.session_id ? e.session_id.slice(0, 8) : '—';
+        const sess = e.session_id ? escapeHtml(String(e.session_id).slice(0, 8)) : '—';
+        const keyAttr = escapeAttr(e.key);
         return `<tr>
-          <td class="mono">${e.key}</td>
-          <td>${truncate(e.value, 80)}</td>
+          <td class="mono">${escapeHtml(e.key)}</td>
+          <td>${escapeHtml(truncate(String(e.value ?? ''), 80))}</td>
           <td class="mono">${sess}</td>
           <td>${ttl}</td>
           <td>${promoted}</td>
           <td>
-            <button class="btn-ghost btn-xs btn-danger-text" data-action="scratch-delete" data-key="${e.key}">Delete</button>
-            ${!e.promoted ? `<button class="btn-ghost btn-xs" data-action="scratch-promote" data-key="${e.key}">Promote</button>` : ''}
+            <button class="btn-ghost btn-xs btn-danger-text" data-action="scratch-delete" data-key="${keyAttr}">Delete</button>
+            ${!e.promoted ? `<button class="btn-ghost btn-xs" data-action="scratch-promote" data-key="${keyAttr}">Promote</button>` : ''}
           </td>
         </tr>`;
       }).join('') +
@@ -599,7 +600,7 @@ async function addScratchEntry() {
     qs('scratch-ttl').value = '';
     loadHarnessScratch();
   } catch (e) {
-    toast('Error: ' + e.message, 'error');
+    showToast('Error: ' + e.message, 'error');
   }
 }
 
@@ -608,7 +609,7 @@ async function deleteScratchEntry(key) {
     await api('DELETE', `/api/scratch/${encodeURIComponent(key)}`);
     loadHarnessScratch();
   } catch (e) {
-    toast('Error: ' + e.message, 'error');
+    showToast('Error: ' + e.message, 'error');
   }
 }
 
@@ -620,10 +621,10 @@ async function promoteScratchEntry(key) {
       {},
     );
     if (resp === null) return;
-    toast('Promoted to long-term memory', 'success');
+    showToast('Promoted to long-term memory', 'success');
     loadHarnessScratch();
   } catch (e) {
-    toast('Error: ' + e.message, 'error');
+    showToast('Error: ' + e.message, 'error');
     // 409 ``index_blocked``: the server may have appended the entry and marked
     // it promoted although the result could not be indexed. Reload so the
     // Promote button reflects that instead of inviting a second append.

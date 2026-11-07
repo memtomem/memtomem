@@ -579,6 +579,30 @@ class TestStats:
         }
         assert data["home_total_source_size"] == 6
 
+    async def test_stats_home_lists_skip_held_and_pending_sources(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """The Home lists apply the Sources tree's rule (#3109): a held or
+        pending source is in neither list, the file-type split nor the size."""
+        visible = tmp_path / "visible.md"
+        held = tmp_path / "held.txt"
+        pending = tmp_path / "pending.rst"
+        for path, body in ((visible, "a"), (held, "bb"), (pending, "ccc")):
+            path.write_text(body)
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (path, 1, f"2026-01-0{i}T00:00:00", "default", 1, 1, 1)
+            for i, path in enumerate((visible, held, pending), start=1)
+        ]
+        app.state.storage.get_held_sources.return_value = [held]
+        app.state.storage.get_pending_source_checks.return_value = [pending]
+
+        data = (await client.get("/api/stats")).json()
+
+        assert [s["path"] for s in data["home_sources"]] == [str(visible)]
+        assert [s["path"] for s in data["home_recent_sources"]] == [str(visible)]
+        assert data["home_file_type_distribution"] == [{"file_type": "md", "count": 1}]
+        assert data["home_total_source_size"] == 1
+
     async def test_stats_home_aggregates_handle_many_sources(
         self, app, client: AsyncClient, tmp_path
     ):
