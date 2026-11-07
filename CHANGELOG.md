@@ -36,7 +36,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   unescaped, so `foo_bar` also matched `fooXbar` and `50%` matched any value
   containing `50`. And with no `namespace`, the search listed entities from
   `archive:*` and `agent-runtime:*` chunks, which `mem_search` and `mem_recall`
-  hide. `namespace` now resolves the way it does for those two tools: omitted,
+  hide when called without a namespace under the default
+  `search.system_namespace_prefixes`. `namespace` now resolves the way it does for those two tools: omitted,
   the session namespace applies, and with neither, the configured
   `search.system_namespace_prefixes` are hidden; `!system`, a comma list
   (`work,personal`) and a glob (`proj:*`) work, where the last two used to match
