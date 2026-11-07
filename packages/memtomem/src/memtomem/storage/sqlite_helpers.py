@@ -455,20 +455,24 @@ def escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def namespace_sql(ns: NamespaceFilter) -> tuple[str, list]:
+def namespace_sql(ns: NamespaceFilter, column_alias: str = "") -> tuple[str, list]:
     """Build SQL WHERE fragment + params for a NamespaceFilter.
 
     Explicit forms (``namespaces``, ``pattern``) take priority over the
     default-search ``exclude_prefixes`` fallback — the parse layer is
     responsible for never sending both at once, so this ordering is just
     defensive.
+
+    ``column_alias`` prefixes the ``namespace`` column (pass ``"c."`` when the
+    query aliases ``chunks``), mirroring :func:`scope_context_sql`.
     """
+    col = f"{column_alias}namespace"
     if ns.namespaces:
         ph = ",".join("?" * len(ns.namespaces))
-        return f"namespace IN ({ph})", list(ns.namespaces)
+        return f"{col} IN ({ph})", list(ns.namespaces)
     if ns.pattern:
         escaped = ns.pattern.replace("_", r"\_").replace("*", "%")
-        return "namespace LIKE ? ESCAPE '\\'", [escaped]
+        return f"{col} LIKE ? ESCAPE '\\'", [escaped]
     if ns.exclude_prefixes:
         # Belt-and-suspenders cap: the config validator already rejects
         # >10, but if a caller constructs NamespaceFilter directly we still
@@ -476,7 +480,7 @@ def namespace_sql(ns: NamespaceFilter) -> tuple[str, list]:
         assert len(ns.exclude_prefixes) <= 10, (
             f"namespace_sql: exclude_prefixes has {len(ns.exclude_prefixes)} entries, cap is 10"
         )
-        clauses = " AND ".join("namespace NOT LIKE ? ESCAPE '\\'" for _ in ns.exclude_prefixes)
+        clauses = " AND ".join(f"{col} NOT LIKE ? ESCAPE '\\'" for _ in ns.exclude_prefixes)
         params = [f"{escape_like(p)}%" for p in ns.exclude_prefixes]
         return clauses, params
     return "", []

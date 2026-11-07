@@ -13,7 +13,7 @@ from uuid import uuid4
 import pytest
 
 from helpers import make_chunk
-from memtomem.models import Chunk, ChunkMetadata
+from memtomem.models import Chunk, ChunkMetadata, NamespaceFilter
 from memtomem.tools.auto_tag import AutoTagStats, auto_tag_storage, extract_tags_keyword
 from memtomem.tools.export_import import ExportBundle, _chunk_to_dict, export_chunks
 
@@ -253,7 +253,9 @@ class TestEntities:
             ],
         )
 
-        results = await storage.search_entities(namespace="ns1")
+        results = await storage.search_entities(
+            namespace_filter=NamespaceFilter(namespaces=("ns1",))
+        )
         assert len(results) == 1
         assert results[0]["entity_value"] == "concept-1"
 
