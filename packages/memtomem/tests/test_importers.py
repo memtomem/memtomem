@@ -1,5 +1,6 @@
 """Tests for Notion and Obsidian importers."""
 
+import io
 import zipfile
 
 import pytest
@@ -131,6 +132,120 @@ class TestImportNotion:
         output = tmp_path / "output"
         imported = await import_notion(zip_path, output)
         assert len(imported) == 1
+
+    @pytest.mark.asyncio
+    async def test_notion_sibling_pages_collision_directory(self, tmp_path):
+        """Notion sibling pages sharing a title do not overwrite each other (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        (export_dir / "Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md").write_text(
+            "# Meeting Notes 1\nContent 1",
+            encoding="utf-8",
+        )
+        (export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md").write_text(
+            "# Meeting Notes 2\nContent 2",
+            encoding="utf-8",
+        )
+
+        output = tmp_path / "out"
+        imported = await import_notion(export_dir, output)
+
+        assert len(imported) == 2
+        assert len(set(imported)) == 2
+        assert all(p.exists() for p in imported)
+
+        f1 = output / "Meeting Notes.md"
+        f2 = output / "Meeting Notes (2).md"
+        assert f1.exists()
+        assert f2.exists()
+        assert "Content 1" in f1.read_text(encoding="utf-8")
+        assert "Content 2" in f2.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_notion_sibling_pages_collision_zip(self, tmp_path):
+        """Notion sibling pages in a ZIP archive disambiguate unique filenames (#3113)."""
+        zip_path = tmp_path / "export.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md", "# First")
+            zf.writestr("Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md", "# Second")
+
+        output = tmp_path / "out"
+        imported = await import_notion(zip_path, output)
+
+        assert len(imported) == 2
+        assert len(set(imported)) == 2
+        f1 = output / "Meeting Notes.md"
+        f2 = output / "Meeting Notes (2).md"
+        assert f1.exists()
+        assert f2.exists()
+        assert "# First" in f1.read_text(encoding="utf-8")
+        assert "# Second" in f2.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_notion_collision_with_existing_output_file(self, tmp_path):
+        """Notion import avoids overwriting a pre-existing file in output_dir (#3113)."""
+        output = tmp_path / "out"
+        output.mkdir()
+        (output / "Meeting Notes.md").write_text("# Pre-existing", encoding="utf-8")
+
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        (export_dir / "Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md").write_text(
+            "# Imported",
+            encoding="utf-8",
+        )
+
+        imported = await import_notion(export_dir, output)
+        assert len(imported) == 1
+        assert (output / "Meeting Notes.md").read_text(encoding="utf-8") == "# Pre-existing"
+        assert (output / "Meeting Notes (2).md").exists()
+        assert "# Imported" in (output / "Meeting Notes (2).md").read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_notion_zip_spoofed_member_size_raises_unsafe_archive(
+        self, tmp_path, monkeypatch
+    ):
+        """Actual decompressed bytes exceeding _ZIP_MAX_MEMBER_BYTES raise UnsafeArchiveError (#3113)."""
+        monkeypatch.setattr(importers, "_ZIP_MAX_MEMBER_BYTES", 50)
+        zip_path = tmp_path / "spoofed_member.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("page.md", "small")
+
+        class OversizeStream(io.BytesIO):
+            def read(self, n=-1):
+                return b"X" * 60
+
+        def mock_open(self, name, mode="r", *args, **kwargs):
+            return OversizeStream()
+
+        monkeypatch.setattr(zipfile.ZipFile, "open", mock_open)
+
+        with pytest.raises(UnsafeArchiveError, match="exceeds size cap"):
+            await import_notion(zip_path, tmp_path / "out")
+
+    @pytest.mark.asyncio
+    async def test_notion_zip_spoofed_aggregate_size_raises_unsafe_archive(
+        self, tmp_path, monkeypatch
+    ):
+        """Accumulated decompressed bytes exceeding _ZIP_MAX_TOTAL_BYTES raise UnsafeArchiveError (#3113)."""
+        monkeypatch.setattr(importers, "_ZIP_MAX_MEMBER_BYTES", 100)
+        monkeypatch.setattr(importers, "_ZIP_MAX_TOTAL_BYTES", 70)
+        zip_path = tmp_path / "spoofed_total.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("page1.md", "a")
+            zf.writestr("page2.md", "b")
+
+        call_count = 0
+
+        def mock_open(self, name, mode="r", *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return io.BytesIO(b"Y" * 45)
+
+        monkeypatch.setattr(zipfile.ZipFile, "open", mock_open)
+
+        with pytest.raises(UnsafeArchiveError, match="aggregate size cap"):
+            await import_notion(zip_path, tmp_path / "out")
 
 
 class TestImportObsidian:
