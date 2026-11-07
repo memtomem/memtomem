@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -92,6 +93,8 @@ async def expire_chunks(
 
     Age is measured from ``chunk.updated_at``. If *dry_run* is True no
     deletions are performed; the counts still reflect what would be expired.
+    A held or pending source is neither counted nor expired: its rows are
+    retained for recovery, and expiring them would lose what the hold keeps.
 
     Args:
         storage: StorageBackend instance.
@@ -104,34 +107,49 @@ async def expire_chunks(
     """
     from uuid import UUID
 
+    from memtomem.storage.base import WRITER_WAIT_S
+    from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_PATH
+
     now = datetime.now(timezone.utc)
     cutoff_seconds = max_age_days * 86400
+    # The hold is judged in the statement, and on a live run under the write
+    # lock that also covers the delete, so a hold committed after the scan
+    # cannot lose its rows.
+    query = f"SELECT id, source_file, updated_at FROM chunks WHERE {VISIBLE_SOURCE_PATH}"  # nosec B608
 
-    sources = await storage.get_all_source_files()
-    if source_filter:
-        from memtomem.search.pipeline import match_source_filter_substring
+    def scan(rows: list[tuple]) -> tuple[int, list[UUID]]:
+        if source_filter:
+            from memtomem.search.pipeline import match_source_filter_substring
 
-        # Substring-only contract — see ``match_source_filter_substring``
-        # for the separator-fold rule (#720) and rationale for not
-        # sharing the glob-aware ``match_source_filter``.
-        sources = {s for s in sources if match_source_filter_substring(source_filter, str(s))}
-
-    total = 0
-    to_delete: list[UUID] = []
-
-    for source in sorted(sources):
-        chunks = await storage.list_chunks_by_source(source, limit=10_000)
-        for chunk in chunks:
-            total += 1
-            updated_at = chunk.updated_at
+            # Substring-only contract — see ``match_source_filter_substring``
+            # for the separator-fold rule (#720) and rationale for not
+            # sharing the glob-aware ``match_source_filter``.
+            rows = [
+                r for r in rows if match_source_filter_substring(source_filter, str(Path(r[1])))
+            ]
+        expired: list[UUID] = []
+        for chunk_id, _source, updated_raw in rows:
+            try:
+                updated_at = datetime.fromisoformat(updated_raw)
+            except (ValueError, TypeError):
+                # ``_row_to_chunk`` reads a corrupted value as "now", so it
+                # was never old enough to expire.
+                continue
             if updated_at.tzinfo is None:
                 updated_at = updated_at.replace(tzinfo=timezone.utc)
             if (now - updated_at).total_seconds() >= cutoff_seconds:
-                to_delete.append(chunk.id)
+                expired.append(UUID(chunk_id))
+        return len(rows), expired
 
     deleted = 0
-    if not dry_run and to_delete:
-        deleted = await storage.delete_chunks(to_delete)
+    if dry_run:
+        async with storage._lease_read_db() as db:
+            total, to_delete = scan(db.execute(query).fetchall())
+    else:
+        async with storage.transaction(wait=WRITER_WAIT_S):
+            total, to_delete = scan(storage._get_db().execute(query).fetchall())
+            if to_delete:
+                deleted = await storage.delete_chunks(to_delete, finalize_emptied=True)
 
     return ExpireStats(
         total_chunks=total,

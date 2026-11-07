@@ -5,6 +5,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **Lifecycle policies and decay expiry no longer delete or move held sources
+  (#3110).** `auto_expire`, `auto_archive`, `auto_promote`, and
+  `mem_decay_expire` / `POST /api/decay/expire` treated a held source (missing,
+  unreadable or redaction-blocked, retained for recovery) or one with a pending
+  check like any other, so expiry deleted rows a hold keeps until an explicit
+  `mm gc orphan-sources --apply`. They now skip those sources, judged in the
+  statement that reads the candidates, and a live run scans and writes under one
+  write lock, so a hold that lands mid-run cannot lose rows either.
+  `mem_decay_scan` / `GET /api/decay/scan` totals now count only the chunks
+  expiry can reach.
+- **`auto_archive` and `auto_promote` move whole files and no longer crash on a
+  duplicate in the target (#3110).** A move onto a namespace that already held
+  the same chunk at the same line raised `UNIQUE constraint failed` and left the
+  database connection inside an open transaction; moving only some of a file's
+  chunks left the file in two namespaces, which `mm index <file> --force` then
+  refuses. A file is now archived once every chunk matches and promoted as soon
+  as one does, always whole; a file whose move would collide stays put and is
+  listed under `conflicts` with the run marked as an error; and a template
+  whose tags route one file to several targets skips that file
+  (`split_targets`). A file an earlier run left split is moved the rest of the
+  way when it qualifies.
+- **`auto_consolidate` reads every chunk of a source, not the first 20
+  (#3110).** The mixed-namespace check and the source hash now see the whole
+  file, so a change past the 20th chunk regenerates the summary. The summary
+  still reads the first `max_bullets` chunks (default 20), and now only those
+  are linked to it and, with `keep_originals: false`, decayed; the rest stay
+  available to agent consolidation. A summary linked to more chunks than it read
+  is regenerated once. `max_bullets` must be a positive integer.
+
 ## [0.7.6] — 2026-11-06
 
 ### Upgrading

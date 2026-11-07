@@ -488,8 +488,8 @@ class TestPolicyEngine:
     async def test_auto_archive_namespace_filter(self, storage):
         """Only chunks in the specified namespace should be considered."""
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
-        c1 = make_chunk("work stuff", namespace="work")
-        c2 = make_chunk("personal stuff", namespace="personal")
+        c1 = make_chunk("work stuff", namespace="work", source="c1.md")
+        c2 = make_chunk("personal stuff", namespace="personal", source="c2.md")
         await storage.upsert_chunks([c1, c2])
         db = storage._get_db()
         db.execute("UPDATE chunks SET created_at = ?", [old_time])
@@ -505,9 +505,9 @@ class TestPolicyEngine:
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
         recent_time = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
 
-        c_null = make_chunk("null last_access")
-        c_recent = make_chunk("recent last_access")
-        c_old = make_chunk("old last_access")
+        c_null = make_chunk("null last_access", source="c_null.md")
+        c_recent = make_chunk("recent last_access", source="c_recent.md")
+        c_old = make_chunk("old last_access", source="c_old.md")
         await storage.upsert_chunks([c_null, c_recent, c_old])
 
         db = storage._get_db()
@@ -538,8 +538,8 @@ class TestPolicyEngine:
         """min_access_count excludes chunks accessed more than the threshold."""
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
 
-        c_cold = make_chunk("never accessed")
-        c_hot = make_chunk("accessed a lot")
+        c_cold = make_chunk("never accessed", source="c_cold.md")
+        c_hot = make_chunk("accessed a lot", source="c_hot.md")
         await storage.upsert_chunks([c_cold, c_hot])
 
         db = storage._get_db()
@@ -560,8 +560,8 @@ class TestPolicyEngine:
         """max_importance_score excludes chunks above the threshold."""
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
 
-        c_low = make_chunk("low priority")
-        c_high = make_chunk("high priority")
+        c_low = make_chunk("low priority", source="c_low.md")
+        c_high = make_chunk("high priority", source="c_high.md")
         await storage.upsert_chunks([c_low, c_high])
 
         db = storage._get_db()
@@ -582,8 +582,8 @@ class TestPolicyEngine:
         """archive_namespace_template expands {first_tag} per chunk."""
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
 
-        c_dec = make_chunk("a decision", tags=("decisions", "important"))
-        c_tech = make_chunk("a tech note", tags=("tech",))
+        c_dec = make_chunk("a decision", tags=("decisions", "important"), source="c_dec.md")
+        c_tech = make_chunk("a tech note", tags=("tech",), source="c_tech.md")
         await storage.upsert_chunks([c_dec, c_tech])
 
         db = storage._get_db()
@@ -664,9 +664,9 @@ class TestPolicyEngine:
         """All new rule fields combine with AND semantics."""
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
 
-        c_match = make_chunk("matches everything", tags=("misc",))
-        c_hot = make_chunk("access count too high", tags=("misc",))
-        c_important = make_chunk("importance too high", tags=("misc",))
+        c_match = make_chunk("matches everything", tags=("misc",), source="c_match.md")
+        c_hot = make_chunk("access count too high", tags=("misc",), source="c_hot.md")
+        c_important = make_chunk("importance too high", tags=("misc",), source="c_important.md")
         await storage.upsert_chunks([c_match, c_hot, c_important])
 
         db = storage._get_db()
@@ -741,10 +741,6 @@ class TestPolicyEngine:
             [old_time, str(chunk.id)],
         )
         db.commit()
-        await storage.hold_source(chunk.metadata.source_file, "source_missing")
-        # The hold checks compare the path as stored; ``/tmp`` is stored resolved.
-        stored = Path(norm_path(chunk.metadata.source_file))
-        assert await storage.is_source_held(stored)
 
         result = await execute_auto_expire(
             storage, {"max_age_days": 90}, namespace=None, dry_run=False
@@ -754,7 +750,31 @@ class TestPolicyEngine:
 
         row = db.execute("SELECT id FROM chunks WHERE id = ?", [str(chunk.id)]).fetchone()
         assert row is None  # deleted
-        assert not await storage.is_source_held(stored)
+
+    async def test_auto_expire_keeps_held_sources(self, storage):
+        """A held source's rows are retained for recovery, however old (#3110)."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+        chunk = make_chunk("retained content")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute(
+            "UPDATE chunks SET created_at = ?, access_count = 0 WHERE id = ?",
+            [old_time, str(chunk.id)],
+        )
+        db.commit()
+        await storage.hold_source(chunk.metadata.source_file, "source_missing")
+        # The hold checks compare the path as stored; ``/tmp`` is stored resolved.
+        stored = Path(norm_path(chunk.metadata.source_file))
+        assert await storage.is_source_held(stored)
+
+        result = await execute_auto_expire(
+            storage, {"max_age_days": 90}, namespace=None, dry_run=False
+        )
+        assert result.affected_count == 0
+
+        row = db.execute("SELECT id FROM chunks WHERE id = ?", [str(chunk.id)]).fetchone()
+        assert row is not None
+        assert await storage.is_source_held(stored)
 
     async def test_auto_expire_keeps_accessed(self, storage):
         """Chunks with access_count > 0 should not be expired even if old."""
@@ -847,9 +867,9 @@ class TestPolicyEngine:
 
     async def test_auto_promote_prefix_matches_subnamespaces(self, storage):
         """source_prefix should match archive:* subnamespaces."""
-        c1 = make_chunk("decisions", namespace="archive:decisions")
-        c2 = make_chunk("tech", namespace="archive:tech")
-        c3 = make_chunk("notes", namespace="notes")
+        c1 = make_chunk("decisions", namespace="archive:decisions", source="c1.md")
+        c2 = make_chunk("tech", namespace="archive:tech", source="c2.md")
+        c3 = make_chunk("notes", namespace="notes", source="c3.md")
         await storage.upsert_chunks([c1, c2, c3])
         db = storage._get_db()
         db.execute("UPDATE chunks SET access_count = 5")
@@ -865,8 +885,8 @@ class TestPolicyEngine:
 
     async def test_auto_promote_namespace_filter_override(self, storage):
         """namespace param should override source_prefix with exact match."""
-        c1 = make_chunk("in archive", namespace="archive")
-        c2 = make_chunk("in archive:tech", namespace="archive:tech")
+        c1 = make_chunk("in archive", namespace="archive", source="c1.md")
+        c2 = make_chunk("in archive:tech", namespace="archive:tech", source="c2.md")
         await storage.upsert_chunks([c1, c2])
         db = storage._get_db()
         db.execute("UPDATE chunks SET access_count = 5")
@@ -882,8 +902,8 @@ class TestPolicyEngine:
 
     async def test_auto_promote_min_importance_score(self, storage):
         """min_importance_score filters via AND with min_access_count."""
-        c_high = make_chunk("high importance", namespace="archive")
-        c_low = make_chunk("low importance", namespace="archive")
+        c_high = make_chunk("high importance", namespace="archive", source="c_high.md")
+        c_low = make_chunk("low importance", namespace="archive", source="c_low.md")
         await storage.upsert_chunks([c_high, c_low])
         db = storage._get_db()
         db.execute("UPDATE chunks SET access_count = 5")
@@ -904,9 +924,9 @@ class TestPolicyEngine:
         recent_time = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
 
-        c_recent = make_chunk("recent access", namespace="archive")
-        c_old = make_chunk("old access", namespace="archive")
-        c_null = make_chunk("null access", namespace="archive")
+        c_recent = make_chunk("recent access", namespace="archive", source="c_recent.md")
+        c_old = make_chunk("old access", namespace="archive", source="c_old.md")
+        c_null = make_chunk("null access", namespace="archive", source="c_null.md")
         await storage.upsert_chunks([c_recent, c_old, c_null])
 
         db = storage._get_db()
