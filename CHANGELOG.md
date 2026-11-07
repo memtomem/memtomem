@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **A search that names no namespace no longer returns `archive:*` or
+  `agent-runtime:*` notes through the session-summary rescue (#3108).** When
+  such a search matched a stored session summary, it pulled in the notes that
+  summary covered from every namespace, including the ones default search
+  hides; for an agent-bound session those are its `agent-runtime:<id>` writes.
+  The rescue now searches the same namespaces, scope and visible sources as the
+  search itself, and a summary link to a note the search cannot see no longer
+  lifts a visible note stored in the same file. The "N result(s) hidden in
+  system namespaces" hint in `mem_search` and `mem_recall` also stops counting
+  notes whose source is held or awaiting a recheck, which a search naming that
+  namespace does not return either.
+
 ## [0.7.6] — 2026-11-06
 
 ### Upgrading
