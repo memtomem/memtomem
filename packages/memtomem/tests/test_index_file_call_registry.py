@@ -46,6 +46,7 @@ REGISTRY = {
     "web/routes/chunks.py::delete_chunk": "modify",
     "web/routes/scratch.py::promote_scratch": "modify",
     "web/routes/system_indexing.py::add_memory": "modify",
+    "server/tools/hermes_mirror.py::_render": "replace",
     "server/tools/importers.py::mem_import_notion": "replace",
     "server/tools/importers.py::mem_import_obsidian": "replace",
     "server/tools/session.py::_write_summary_archive": "replace",

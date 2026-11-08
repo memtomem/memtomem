@@ -67,7 +67,7 @@ from functools import lru_cache
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from dataclasses import dataclass, field
 
@@ -90,6 +90,7 @@ from memtomem.errors import (
     ExhaustiveDenseSearchLimitError,
     Mem2MemError,
     RetryableError,
+    SearchDeadlineExceeded,
     TransactionOwnedError,
 )
 from memtomem.generation import ComponentGeneration
@@ -100,6 +101,8 @@ from memtomem.models import (
     ScopeFilter,
     SearchResult,
 )
+from memtomem.search.deadline import SearchDeadline
+from memtomem.search.deadline import check as check_deadline
 from memtomem.search.fusion import reciprocal_rank_fusion
 from memtomem.search.visibility import chunk_valid_at, neighbor_visible
 from memtomem.search.reranker.base import close_reranker_safely
@@ -107,6 +110,12 @@ from memtomem.storage.base import ContextWindowRows, SearchMetadataFilter, parse
 from memtomem.storage.sqlite_helpers import match_source_filter_value, norm_path
 
 logger = logging.getLogger(__name__)
+
+
+class _DeadlineKwargs(TypedDict, total=False):
+    """``deadline`` for storage reads, present only when the search has a budget."""
+
+    deadline: float
 
 
 class _MetadataKwargs(TypedDict, total=False):
@@ -236,6 +245,26 @@ def _signature_accepts_effective_scope(func: Callable) -> bool:
 def _saver_takes_effective_scope(saver: Callable) -> bool:
     """Whether a duck-typed saver accepts the resolved search scope."""
     return _signature_accepts_effective_scope(getattr(saver, "__func__", saver))
+
+
+async def _settle_task(task: asyncio.Task[Any]) -> None:
+    """Cancel ``task`` and wait until it has finished, whatever cancels this wait.
+
+    A storage read in flight finishes its worker thread before the task ends
+    (``_run_read_in_thread``), so this can wait for that read. A cancel that
+    arrives meanwhile is held until the task is done, then re-raised.
+    """
+    task.cancel()
+    interrupted = False
+    while not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError:
+            interrupted = True
+    if not task.cancelled():
+        task.exception()  # retrieved: a failure here is superseded, never logged as lost
+    if interrupted:
+        raise asyncio.CancelledError
 
 
 def _bg_task_error_cb(task: asyncio.Task) -> None:
@@ -1138,8 +1167,12 @@ class SearchPipeline:
         exhaustive: bool = False,
         report_failure: Callable[[], None] | None = None,
         namespace_filter: NamespaceFilter | None = None,
+        deadline: float | None = None,
     ) -> list[SearchResult]:
         """Parallel BM25+dense retrieval restricted to boost_sources.
+
+        ``deadline`` bounds both legs' read-connection waits; an expiry is raised
+        after both legs have finished, never left running.
 
         The BM25 leg pushes the source restriction into storage SQL via
         the existing ``SearchMetadataFilter.source_exact`` field (#2184):
@@ -1199,6 +1232,7 @@ class SearchPipeline:
         dense_metadata_kwargs: _MetadataKwargs = (
             {"metadata_filter": metadata_filter} if metadata_filter is not None else {}
         )
+        rescue_deadline: _DeadlineKwargs = {"deadline": deadline} if deadline is not None else {}
 
         async def _bm25_leg() -> list[SearchResult]:
             if not use_bm25:
@@ -1212,7 +1246,10 @@ class SearchPipeline:
                     project_context_root=project_context_root,
                     metadata_filter=bm25_filter,
                     source_filter=source_filter,
+                    **rescue_deadline,
                 )
+            except SearchDeadlineExceeded:
+                raise
             except Exception:
                 _log_rescue_failure("bm25_leg", "rescue bm25 leg failed")
                 if report_failure is not None:
@@ -1232,7 +1269,10 @@ class SearchPipeline:
                     source_filter=source_filter,
                     exhaustive=exhaustive,
                     **dense_metadata_kwargs,
+                    **rescue_deadline,
                 )
+            except SearchDeadlineExceeded:
+                raise
             except Exception:
                 _log_rescue_failure("dense_leg", "rescue dense leg failed")
                 if report_failure is not None:
@@ -1240,7 +1280,15 @@ class SearchPipeline:
                 return []
             return [r for r in hits if str(r.chunk.metadata.source_file) in boost_sources]
 
-        bm25_rescue, dense_rescue = await asyncio.gather(_bm25_leg(), _dense_leg())
+        if deadline is None:
+            bm25_rescue, dense_rescue = await asyncio.gather(_bm25_leg(), _dense_leg())
+        else:
+            # Both legs finish before an expiry propagates, so neither outlives the search.
+            legs = await asyncio.gather(_bm25_leg(), _dense_leg(), return_exceptions=True)
+            for leg in legs:
+                if isinstance(leg, BaseException):
+                    raise leg
+            bm25_rescue, dense_rescue = legs  # type: ignore[assignment]
 
         # Merge the rescue leg's BM25 + dense candidates into a single
         # ranked list (keep best rank across the two legs) so we feed
@@ -1254,6 +1302,22 @@ class SearchPipeline:
                 seen[r.chunk.id] = r
         return sorted(seen.values(), key=lambda r: r.score, reverse=True)[:oversample]
 
+    async def _embed_query(self, query: str, deadline: SearchDeadline | None) -> list[float]:
+        """The dense leg's query vector, under the search's budget when it has one.
+
+        An embedder that declares ``supports_query_deadline`` (ONNX) checks the
+        budget when its slice starts, so a slice still queued past it never runs;
+        any other embedder is called exactly as without a budget, after a check.
+        """
+        if deadline is None:
+            return await self._embedder.embed_query(query)
+        if getattr(self._embedder, "supports_query_deadline", False) is True:
+            # Only an embedder that says so takes the keyword; the protocol stays one-argument.
+            embed_query = cast(Any, self._embedder).embed_query
+            return await embed_query(query, deadline=deadline.at)
+        deadline.check("embedding")
+        return await self._embedder.embed_query(query)
+
     async def _expand_context(
         self,
         results: list[SearchResult],
@@ -1263,6 +1327,7 @@ class SearchPipeline:
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         as_of_unix: int | None = None,
+        deadline: float | None = None,
     ) -> list[SearchResult]:
         """Attach ±window adjacent chunks to each result (one query group per file).
 
@@ -1313,6 +1378,7 @@ class SearchPipeline:
                     project_context_root=project_context_root,
                     as_of_unix=as_of_unix,
                     hide_unavailable=True,
+                    **({"deadline": deadline} if deadline is not None else {}),
                 )
             )
 
@@ -1519,7 +1585,14 @@ class SearchPipeline:
         record: bool = True,
         *,
         exhaustive: bool = False,
+        deadline_ms: int | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
+        # ``deadline_ms``: a processing budget for the ranked search (see
+        # ``search/deadline.py``). It bounds the waits for a read connection and
+        # a still-queued query embedding, and is checked at stage boundaries;
+        # on expiry the search raises ``SearchDeadlineExceeded`` and records
+        # nothing. ``None`` runs exactly the search without it.
+        #
         # Two independent axes (#1802, split by #2671).
         #
         # ``record``: the default (True) is the ordinary search. False is a
@@ -1555,6 +1628,10 @@ class SearchPipeline:
 
         if exhaustive and record:
             raise ValueError("exhaustive=True requires record=False")
+        deadline = SearchDeadline.from_ms(deadline_ms)
+        # Passed to storage reads and the embedder only when there is a budget,
+        # so a search without one makes exactly the calls it made before.
+        deadline_kwargs: _DeadlineKwargs = {"deadline": deadline.at} if deadline else {}
         scope_filter = ScopeFilter.parse(scope)
         metadata_candidate = SearchMetadataFilter(
             source_exact=tuple(sorted(set(source_exact or ()))),
@@ -1631,6 +1708,7 @@ class SearchPipeline:
         # and ``revert_to_stored`` retires that embedder mid-search.
         with self._generation.hold(), self._lease_reranker() as (reranker, rerank_cfg):
             apply_rerank = reranker is not None and rerank_cfg is not None and rerank is not False
+            check_deadline(deadline, "start")
 
             # Check TTL cache for identical queries
             # ``as_of_unix`` is intentionally excluded from ``cache_key`` and
@@ -1707,6 +1785,7 @@ class SearchPipeline:
                         hidden_by_prefix=dict(cached_stats.hidden_by_prefix),
                         mismatch_detail=deepcopy(cached_stats.mismatch_detail),
                     )
+                    check_deadline(deadline, "record")
                     run_stats.query_run_id = await self._record_ranked_search(
                         query=original_query,
                         query_embedding=[],
@@ -1818,6 +1897,7 @@ class SearchPipeline:
             any_leg_active = use_bm25 or use_dense
 
             # Stage 0: Query expansion
+            check_deadline(deadline, "expansion")
             expansion_failed = False
             if (
                 any_leg_active
@@ -1868,6 +1948,7 @@ class SearchPipeline:
                         namespace_filter=ns_filter,
                         exhaustive=exhaustive,
                         report_failure=_mark_expansion_failed,
+                        **deadline_kwargs,
                     )
                 if strategy == "llm":
                     # ``record=False`` neither reads nor fills the expansion
@@ -1901,46 +1982,65 @@ class SearchPipeline:
             query_embedding: list[float] = []
             bm25_error: str | None = None
 
-            if use_bm25:
-                bm25_task = asyncio.create_task(
-                    self._storage.bm25_search(
-                        query,
-                        top_k=bm25_k,
-                        namespace_filter=ns_filter,
-                        scope_filter=scope_filter,
-                        project_context_root=project_context_root,
-                        source_filter=source_filter,
-                        **metadata_kwargs,
-                    )
-                )
+            check_deadline(deadline, "retrieval")
             dense_error: str | None = None
             dense_error_code: str | None = None
-            if use_dense:
-                try:
-                    query_embedding = await self._embedder.embed_query(query)
-                    dense_results = await self._storage.dense_search(
-                        query_embedding,
-                        top_k=dense_k,
-                        namespace_filter=ns_filter,
-                        scope_filter=scope_filter,
-                        project_context_root=project_context_root,
-                        source_filter=source_filter,
-                        exhaustive=exhaustive,
-                        **metadata_kwargs,
+            bm25_task: asyncio.Task[list[SearchResult]] | None = None
+            try:
+                if use_bm25:
+                    bm25_task = asyncio.create_task(
+                        self._storage.bm25_search(
+                            query,
+                            top_k=bm25_k,
+                            namespace_filter=ns_filter,
+                            scope_filter=scope_filter,
+                            project_context_root=project_context_root,
+                            source_filter=source_filter,
+                            **metadata_kwargs,
+                            **deadline_kwargs,
+                        )
                     )
-                except Exception as exc:
-                    logger.warning("Dense search unavailable: %s", exc)
-                    dense_results = []
-                    dense_error = _leg_error_text(exc)
-                    if isinstance(exc, ExhaustiveDenseSearchLimitError):
-                        dense_error_code = "dense_exhaustive_limit"
-            if use_bm25:
-                try:
-                    bm25_results = await bm25_task
-                except Exception as exc:
-                    logger.warning("BM25 search failed: %s", exc)
-                    bm25_results = []
-                    bm25_error = _leg_error_text(exc)
+                if use_dense:
+                    try:
+                        query_embedding = await self._embed_query(query, deadline)
+                        check_deadline(deadline, "dense retrieval")
+                        dense_results = await self._storage.dense_search(
+                            query_embedding,
+                            top_k=dense_k,
+                            namespace_filter=ns_filter,
+                            scope_filter=scope_filter,
+                            project_context_root=project_context_root,
+                            source_filter=source_filter,
+                            exhaustive=exhaustive,
+                            **metadata_kwargs,
+                            **deadline_kwargs,
+                        )
+                    except SearchDeadlineExceeded:
+                        raise
+                    except Exception as exc:
+                        logger.warning("Dense search unavailable: %s", exc)
+                        dense_results = []
+                        dense_error = _leg_error_text(exc)
+                        if isinstance(exc, ExhaustiveDenseSearchLimitError):
+                            dense_error_code = "dense_exhaustive_limit"
+                if bm25_task is not None:
+                    try:
+                        bm25_results = await bm25_task
+                    except SearchDeadlineExceeded:
+                        raise
+                    except Exception as exc:
+                        logger.warning("BM25 search failed: %s", exc)
+                        bm25_results = []
+                        bm25_error = _leg_error_text(exc)
+            finally:
+                # Done on every ordinary run. Left pending only when the dense
+                # leg raised past its handler (an expiry) or this search was
+                # cancelled: the task is cancelled and awaited so it never
+                # outlives the generation hold it was started under.
+                if bm25_task is not None and not bm25_task.done():
+                    await _settle_task(bm25_task)
+                elif bm25_task is not None and not bm25_task.cancelled():
+                    bm25_task.exception()  # retrieved, so a failure here is never "lost"
 
             bm25_results = _exclude_source_roots(bm25_results, normalized_exclusion_roots)
             dense_results = _exclude_source_roots(dense_results, normalized_exclusion_roots)
@@ -1995,6 +2095,7 @@ class SearchPipeline:
                 def _mark_rescue_failed() -> None:
                     stats.rescue_failed = True
 
+                check_deadline(deadline, "rescue")
                 try:
                     boost_sources = await self._session_summary_boost_sources(
                         query,
@@ -2018,13 +2119,17 @@ class SearchPipeline:
                             exhaustive=exhaustive,
                             report_failure=_mark_rescue_failed,
                             namespace_filter=ns_filter,
+                            **deadline_kwargs,
                         )
                         rescue_chunk_ids = {r.chunk.id for r in rescue_results}
+                except SearchDeadlineExceeded:
+                    raise
                 except Exception:
                     _log_rescue_failure("rescue_wiring", "session-summary rescue leg failed")
                     stats.rescue_failed = True
 
             # Stage 3: fusion (or single-retriever passthrough)
+            check_deadline(deadline, "fusion")
             # When reranking is active, widen the candidate pool so the
             # cross-encoder can rescue items RRF ranked just outside top_k.
             # pool = clamp(oversample * top_k, [min_pool, max_pool]), never
@@ -2114,6 +2219,16 @@ class SearchPipeline:
             # reranker pair is non-None; restating both here is for type
             # narrowing, mirroring the cache-key and pool-widening sites.
             if apply_rerank and reranker is not None and rerank_cfg is not None and fused:
+                check_deadline(deadline, "rerank")
+                # A budget shorter than the reranker's own timeout bounds the
+                # wait instead; its expiry is the budget's, not a reranker
+                # timeout, so it raises rather than degrading to fused order.
+                rerank_timeout = rerank_cfg.timeout_s
+                budget_bounds_rerank = (
+                    deadline is not None and deadline.remaining() < rerank_timeout
+                )
+                if deadline is not None and budget_bounds_rerank:
+                    rerank_timeout = max(0.0, deadline.remaining())
                 try:
                     # The only wall-clock bound on this await: a hung provider
                     # (wedged ONNX session, stuck connection) otherwise hangs
@@ -2121,14 +2236,18 @@ class SearchPipeline:
                     # through the same except arm as a provider error.
                     fused = await asyncio.wait_for(
                         reranker.rerank(query, fused, top_k=top_k),
-                        timeout=rerank_cfg.timeout_s,
+                        timeout=rerank_timeout,
                     )
                 except TimeoutError:
+                    if deadline is not None and budget_bounds_rerank:
+                        raise deadline.exceeded("rerank") from None
                     logger.warning(
                         "Reranking timed out after %.1fs, using original order",
                         rerank_cfg.timeout_s,
                     )
                     fused = fused[:top_k]
+                except SearchDeadlineExceeded:
+                    raise
                 except Exception as exc:
                     logger.warning("Reranking failed, using original order: %s", exc)
                     # Fallback must still honor the caller's response size —
@@ -2195,6 +2314,7 @@ class SearchPipeline:
                 )
 
             # Stage 6: Access-frequency boost
+            check_deadline(deadline, "boosts")
             if self._access_config.enabled and fused:
                 from memtomem.search.access import apply_access_boost
 
@@ -2288,6 +2408,7 @@ class SearchPipeline:
             # they may see. See ``_neighbor_visible``.
             ctx_win = self._resolve_context_window(context_window)
             if ctx_win > 0 and fused:
+                check_deadline(deadline, "context")
                 fused = await self._expand_context(
                     fused,
                     ctx_win,
@@ -2295,6 +2416,7 @@ class SearchPipeline:
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
                     as_of_unix=effective_as_of,
+                    **deadline_kwargs,
                 )
                 fused = _exclude_source_roots(fused, normalized_exclusion_roots)
                 if metadata_filter is not None and metadata_filter.source_exact:
@@ -2326,6 +2448,8 @@ class SearchPipeline:
                 ]
 
             stats.final_total = len(fused)
+            # Nothing is recorded for a search that ran out of budget.
+            check_deadline(deadline, "record")
 
             # Increment access counts for returned results (fire-and-forget).
             # Skipped under ``record=False`` (#1802): replay must not mutate the

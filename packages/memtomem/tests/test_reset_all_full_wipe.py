@@ -41,6 +41,8 @@ EXPECTED_USER_TABLES = frozenset(
         "eval_case_labels",
         "eval_cases",
         "health_snapshots",
+        "hermes_mirror_entries",
+        "hermes_mirror_targets",
         "idempotency_ledger",
         "maintenance_runs",
         "memory_assertions",

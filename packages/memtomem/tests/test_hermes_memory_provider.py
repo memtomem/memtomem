@@ -1001,7 +1001,8 @@ def test_register_uses_a_collector_that_forwards_call_mcp(mod: Any, hermes: Any,
     mod.register(collector)
     collector.provider.initialize("s", hermes_home="/tmp/h", platform="cli")
     assert collector.provider.prefetch(_QUERY) != ""
-    assert seen == [("memtomem", "mem_search")]
+    # The instance's first call asks what the server supports, then recalls.
+    assert seen == [("memtomem", "mem_do"), ("memtomem", "mem_search")]
     assert hermes.contexts_built == 0
 
 
@@ -1198,3 +1199,478 @@ async def test_the_real_mem_search_output_reaches_the_turn(
         )
     else:
         assert text == ""
+
+
+# --- capability negotiation: nothing new reaches a server that did not advertise it -------------
+
+
+def test_an_older_server_gets_exactly_the_legacy_recall_call(mod: Any, hermes: Any) -> None:
+    provider = make(mod, hermes)
+    assert provider.prefetch(_QUERY).startswith(mod._HEADER)
+    assert [p.arguments for p in hermes.probes] == [{"action": "version"}]
+    assert "namespace" not in hermes.calls[-1].arguments
+    assert "deadline_ms" not in hermes.calls[-1].arguments
+
+
+def test_a_current_server_gets_the_non_system_selector_and_a_budget(mod: Any, hermes: Any) -> None:
+    hermes.advertise()
+    provider = make(mod, hermes)
+    assert provider.prefetch(_QUERY).startswith(mod._HEADER)
+    args = hermes.calls[-1].arguments
+    assert args["namespace"] == "!system"
+    assert args["deadline_ms"] == 9000  # rpc_timeout_seconds 10 less one second
+
+
+@pytest.mark.parametrize(
+    ("timeout", "expected"), [(1, None), (1.4, None), (1.5, 500), (2.25, 1250)]
+)
+def test_the_budget_is_omitted_when_it_leaves_no_room(
+    mod: Any, hermes: Any, timeout: float, expected: Any
+) -> None:
+    hermes.advertise()
+    provider = make(mod, hermes, rpc_timeout_seconds=timeout)
+    provider.prefetch(_QUERY)
+    drain(mod)
+    assert hermes.calls[-1].arguments.get("deadline_ms") == expected
+
+
+def test_capabilities_are_asked_once_and_again_after_the_ttl(
+    mod: Any, hermes: Any, clock: Clock
+) -> None:
+    hermes.advertise()
+    provider = make(mod, hermes)
+    provider.prefetch(_QUERY)
+    provider.prefetch(_QUERY)
+    assert len(hermes.probes) == 1
+    assert hermes.calls[-1].arguments["namespace"] == "!system"
+    # The entry is swapped to an older server without a single failed call.
+    hermes.advertise({})
+    clock.advance(mod._CAPS_TTL_S + 1)
+    provider.prefetch(_QUERY)
+    assert len(hermes.probes) == 2
+    assert "namespace" not in hermes.calls[-1].arguments
+
+
+def test_a_successful_probe_never_resets_the_failure_history(
+    mod: Any, hermes: Any, clock: Clock
+) -> None:
+    hermes.respond(RuntimeError("down"), RuntimeError("down"))
+    provider = make(mod, hermes)
+    provider.prefetch(_QUERY)
+    drain(mod)
+    assert admission(mod).failures == 1
+    clock.advance(16)
+    provider.prefetch(_QUERY)  # the failure dropped the capabilities: probe ok, recall fails
+    drain(mod)
+    assert len(hermes.probes) == 2
+    assert admission(mod).failures == 2
+
+
+def test_a_probe_that_fails_in_transport_ends_the_cycle(mod: Any, hermes: Any, events: Any) -> None:
+    def down(call: Any) -> Any:
+        raise TimeoutError("no answer")
+
+    hermes.version = down
+    provider = make(mod, hermes)
+    assert provider.prefetch(_QUERY) == ""
+    drain(mod)
+    assert hermes.calls == []
+    assert admission(mod).failures == 1
+
+
+# --- W3: the failure ladder stays shared by entry name (disclosed in the README) ---------------
+
+
+def test_a_healthy_profile_keeps_a_failing_one_at_the_first_wait(
+    mod: Any, load: Any, hermes: Any, fakes: Any, clock: Clock
+) -> None:
+    def by_profile(call: Any) -> Any:
+        if fakes.PROFILE.get() == "failing":
+            raise RuntimeError("down")
+        return fakes.ok_envelope([fakes.chunk(1)])
+
+    hermes.default = by_profile
+    failing = make(mod, hermes)
+    healthy = make(load(), hermes)
+    for _ in range(2):
+        token = fakes.PROFILE.set("failing")
+        try:
+            failing.prefetch(_QUERY)
+        finally:
+            fakes.PROFILE.reset(token)
+        drain(mod)
+        assert admission(mod).cooldown_until - clock.now == 15
+        clock.advance(15)
+        healthy.prefetch(_QUERY)
+        drain(mod)
+        assert admission(mod).failures == 0
+
+
+# --- mirroring built-in memory writes ---------------------------------------------------------
+
+
+def mirroring(mod: Any, hermes: Any, **settings: Any) -> Any:
+    hermes.advertise()
+    return make(mod, hermes, mirror_writes=True, **settings)
+
+
+def test_mirroring_is_off_by_default(mod: Any, hermes: Any) -> None:
+    hermes.advertise()
+    provider = make(mod, hermes)
+    provider.on_memory_write("add", "memory", "User prefers tabs.")
+    time.sleep(0.1)
+    assert hermes.mirror_calls == []
+
+
+@pytest.mark.parametrize("value", [1, "maybe", ["true"]])
+def test_a_non_boolean_mirror_setting_stays_off_and_warns(
+    mod: Any, hermes: Any, caplog: pytest.LogCaptureFixture, value: Any
+) -> None:
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    hermes.advertise()
+    provider = make(mod, hermes, mirror_writes=value)
+    provider.on_memory_write("add", "memory", "x")
+    time.sleep(0.1)
+    assert hermes.mirror_calls == []
+    assert any("mirror_writes" in w for w in warnings(caplog))
+
+
+def test_an_add_is_sent_as_one_mirror_operation(mod: Any, hermes: Any) -> None:
+    provider = mirroring(mod, hermes)
+    provider.on_memory_write("add", "memory", "User prefers tabs.", metadata={"x": 1})
+    assert hermes.wait_mirror_calls(1)
+    call = hermes.mirror_calls[0]
+    assert call.tool == "mem_do" and call.arguments["action"] == "hermes_mirror_apply"
+    params = call.arguments["params"]
+    assert set(params) == {"owner", "target", "op", "ts", "content", "deadline_ms"}
+    assert len(params["owner"]) == 32 and int(params["owner"], 16) >= 0
+    assert (params["target"], params["op"], params["content"]) == (
+        "memory",
+        "add",
+        "User prefers tabs.",
+    )
+    assert isinstance(params["ts"], int) and params["deadline_ms"] == 9000
+
+
+def test_operations_keep_their_order_and_timestamps_increase(mod: Any, hermes: Any) -> None:
+    provider = mirroring(mod, hermes)
+    provider.on_memory_write("add", "memory", "A")
+    provider.on_memory_write("replace", "memory", "B", metadata={"previous_content": "A"})
+    provider.on_memory_write("remove", "user", "", metadata={"previous_content": "B"})
+    assert hermes.wait_mirror_calls(3)
+    params = [c.arguments["params"] for c in hermes.mirror_calls]
+    assert [(p["op"], p["target"]) for p in params] == [
+        ("add", "memory"),
+        ("replace", "memory"),
+        ("remove", "user"),
+    ]
+    assert params[1]["previous_content"] == "A" and params[1]["content"] == "B"
+    assert "content" not in params[2]
+    assert params[0]["ts"] < params[1]["ts"] < params[2]["ts"]
+
+
+def test_two_profiles_mirror_under_different_owners(mod: Any, load: Any, hermes: Any) -> None:
+    hermes.advertise()
+    hermes.config.setdefault("memory", {})["memtomem-memory"] = {"mirror_writes": True}
+    a = mod.MemtomemMemoryProvider()
+    a.initialize("s", hermes_home="/tmp/profile-a", platform="cli")
+    b = load().MemtomemMemoryProvider()
+    b.initialize("s", hermes_home="/tmp/profile-b", platform="cli")
+    a.on_memory_write("add", "memory", "A")
+    b.on_memory_write("add", "memory", "B")
+    assert hermes.wait_mirror_calls(2)
+    owners = {c.arguments["params"]["owner"] for c in hermes.mirror_calls}
+    assert len(owners) == 2
+
+
+def test_a_replace_without_previous_content_is_skipped(
+    mod: Any, hermes: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    provider = mirroring(mod, hermes)
+    provider.on_memory_write("replace", "memory", "B", metadata={"old_text": "A"})
+    provider.on_memory_write("add", "memory", "C")
+    assert hermes.wait_mirror_calls(1)
+    time.sleep(0.05)
+    assert [c.arguments["params"]["op"] for c in hermes.mirror_calls] == ["add"]
+    assert any("previous_content" in w for w in warnings(caplog))
+
+
+def test_an_older_server_turns_mirroring_off_and_recall_continues(
+    mod: Any, hermes: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+    provider = make(mod, hermes, mirror_writes=True)  # the probe answers as an older server
+    provider.on_memory_write("add", "memory", "A")
+    deadline = time.monotonic() + 5
+    while not provider._mirror.disabled and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert provider._mirror.disabled
+    provider.on_memory_write("add", "memory", "B")
+    assert hermes.mirror_calls == []
+    while not provider._mirror.counts and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert provider._mirror.counts["disabled_old_server"] == 1
+    assert any("hermes_mirror_apply" in w for w in warnings(caplog))
+    assert provider.prefetch(_QUERY).startswith(mod._HEADER)
+
+
+def test_a_refusal_drops_that_operation_and_the_next_still_goes(mod: Any, hermes: Any) -> None:
+    hermes.respond_mirror({"ok": True, "result": "Error: content matches 1 privacy pattern(s)"})
+    provider = mirroring(mod, hermes)
+    provider.on_memory_write("add", "memory", "refused")
+    provider.on_memory_write("add", "memory", "accepted")
+    assert hermes.wait_mirror_calls(2)
+    assert [c.arguments["params"]["content"] for c in hermes.mirror_calls] == [
+        "refused",
+        "accepted",
+    ]
+    assert provider._mirror.counts["dropped_privacy_refused"] == 1
+    assert admission(mod).failures == 0
+
+
+def test_a_retryable_reply_retries_the_same_operation_without_a_strike(
+    mod: Any, hermes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(mod, "_RETRY_BACKOFF_S", (0.01, 0.01, 0.01))
+    busy = {"ok": True, "result": "Error (retryable): the store's writer is busy"}
+    hermes.respond_mirror(busy, busy)
+    provider = mirroring(mod, hermes)
+    provider.on_memory_write("add", "memory", "A")
+    assert hermes.wait_mirror_calls(3)
+    params = [c.arguments["params"] for c in hermes.mirror_calls]
+    assert params[0] == params[1] == params[2]
+    assert admission(mod).failures == 0
+
+
+def test_a_retryable_reply_is_dropped_after_three_attempts(
+    mod: Any, hermes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(mod, "_RETRY_BACKOFF_S", (0.01, 0.01, 0.01))
+    busy = {"ok": True, "result": "Error (retryable): busy"}
+    hermes.respond_mirror(busy, busy, busy)
+    provider = mirroring(mod, hermes)
+    provider.on_memory_write("add", "memory", "A")
+    provider.on_memory_write("add", "memory", "B")
+    assert hermes.wait_mirror_calls(4)
+    assert hermes.mirror_calls[-1].arguments["params"]["content"] == "B"
+    assert provider._mirror.counts["dropped_retries"] == 1
+
+
+def test_a_transport_failure_strikes_and_retries_after_the_cooldown(
+    mod: Any, hermes: Any, clock: Clock
+) -> None:
+    hermes.respond_mirror(RuntimeError("connection lost"))
+    provider = mirroring(mod, hermes)
+    provider.on_memory_write("add", "memory", "A")
+    assert hermes.wait_mirror_calls(1)
+    deadline = time.monotonic() + 5
+    while admission(mod).failures == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert admission(mod).failures == 1
+    time.sleep(0.1)
+    assert len(hermes.mirror_calls) == 1  # waiting out the cooldown
+    clock.advance(16)
+    assert hermes.wait_mirror_calls(2)
+    assert hermes.mirror_calls[1].arguments["params"] == hermes.mirror_calls[0].arguments["params"]
+    drain(mod)
+    assert admission(mod).failures == 0
+
+
+def test_an_unrendered_reply_schedules_one_reconcile(mod: Any, hermes: Any, fakes: Any) -> None:
+    unrendered = fakes.mirror_reply(rendered=False, render_error="OSError: disk")
+    hermes.respond_mirror(unrendered, unrendered)
+    provider = mirroring(mod, hermes, cooldown_seconds=1)
+    provider.on_memory_write("add", "memory", "A")
+    provider.on_memory_write("add", "memory", "B")
+    assert hermes.wait_mirror_calls(3, timeout=10)
+    ops = [c.arguments["params"]["op"] for c in hermes.mirror_calls]
+    assert ops == ["add", "add", "reconcile"]
+    assert "deadline_ms" not in hermes.mirror_calls[2].arguments["params"]
+
+
+def test_a_revoked_grant_stops_queued_writes(mod: Any, hermes: Any) -> None:
+    provider = mirroring(mod, hermes)
+    hermes.config["plugins"]["entries"]["memtomem-memory"]["mcp_allowlist"] = []
+    provider.on_memory_write("add", "memory", "A")
+    deadline = time.monotonic() + 5
+    while not provider._mirror.counts and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert provider._mirror.counts["dropped_skipped_not_allowlisted"] == 1
+    assert hermes.mirror_calls == []
+
+
+def test_writes_after_shutdown_are_ignored(mod: Any, hermes: Any) -> None:
+    provider = mirroring(mod, hermes)
+    provider.shutdown()
+    provider.on_memory_write("add", "memory", "A")
+    time.sleep(0.1)
+    assert hermes.mirror_calls == []
+
+
+# --- setup ---------------------------------------------------------------------------------------
+
+
+class _Tty:
+    def isatty(self) -> bool:
+        return True
+
+
+def test_setup_without_a_terminal_writes_nothing(
+    mod: Any, hermes: Any, capsys: pytest.CaptureFixture
+) -> None:
+    provider = mod.MemtomemMemoryProvider()
+    provider.post_setup("/tmp/hermes", {"memory": {}})
+    assert hermes.saved_configs == []
+    out = capsys.readouterr().out
+    assert "nothing was written" in out
+    assert "mcp_allowlist '[memtomem]'" in out
+
+
+def test_setup_at_a_terminal_saves_the_answer_and_merges(
+    mod: Any, hermes: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    hermes.setup_answers.append(True)
+    config = {
+        "memory": {"memtomem-memory": {"server": "mm"}},
+        "plugins": {"entries": {"memtomem-memory": {"mcp_allowlist": ["other"]}}},
+    }
+    mod.MemtomemMemoryProvider().post_setup("/tmp/hermes", config)
+    [saved] = hermes.saved_configs
+    assert saved["merge_existing"] is True
+    memory = saved["config"]["memory"]
+    assert memory["provider"] == "memtomem-memory"
+    assert memory["memtomem-memory"] == {"server": "mm", "mirror_writes": True}
+    assert "mcp_allowlist '[other, mm]'" in capsys.readouterr().out
+    # Never a self-grant.
+    assert saved["config"]["plugins"]["entries"]["memtomem-memory"]["mcp_allowlist"] == ["other"]
+
+
+@pytest.mark.parametrize(("stored", "expected"), [(None, False), (True, True), ("off", False)])
+def test_setup_defaults_to_no_or_to_the_stored_choice(
+    mod: Any, hermes: Any, monkeypatch: pytest.MonkeyPatch, stored: Any, expected: bool
+) -> None:
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    section = {} if stored is None else {"mirror_writes": stored}
+    mod.MemtomemMemoryProvider().post_setup("/tmp/hermes", {"memory": {"memtomem-memory": section}})
+    assert (
+        hermes.saved_configs[-1]["config"]["memory"]["memtomem-memory"]["mirror_writes"] is expected
+    )
+
+
+def test_setup_interrupted_writes_nothing(
+    mod: Any, hermes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Hermes's prompt exits on Ctrl+C; nothing is saved before the answer.
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    hermes.setup_answers.append(SystemExit(1))
+    with pytest.raises(SystemExit):
+        mod.MemtomemMemoryProvider().post_setup("/tmp/hermes", {"memory": {}})
+    assert hermes.saved_configs == []
+
+
+def test_setup_end_of_input_takes_the_default_which_is_no(
+    mod: Any, hermes: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    hermes.setup_answers.append("EOF")
+    mod.MemtomemMemoryProvider().post_setup("/tmp/hermes", {"memory": {}})
+    assert hermes.saved_configs[-1]["config"]["memory"]["memtomem-memory"]["mirror_writes"] is False
+
+
+def test_setup_under_hermes_noninteractive_writes_nothing(
+    mod: Any, hermes: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    # Hermes's dashboard runs setup with a terminal-less HERMES_NONINTERACTIVE=1, where its
+    # prompt answers the default by itself: that is not consent.
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    monkeypatch.setenv("HERMES_NONINTERACTIVE", "1")
+    hermes.setup_answers.append(True)
+    mod.MemtomemMemoryProvider().post_setup("/tmp/hermes", {"memory": {}})
+    assert hermes.saved_configs == []
+    assert "nothing was written" in capsys.readouterr().out
+
+
+def test_reinitializing_with_mirroring_off_stops_writes(mod: Any, hermes: Any) -> None:
+    provider = mirroring(mod, hermes)
+    hermes.config["memory"]["memtomem-memory"]["mirror_writes"] = False
+    provider.initialize("session-2", hermes_home="/tmp/hermes", platform="cli")
+    provider.on_memory_write("add", "memory", "A")
+    time.sleep(0.1)
+    assert hermes.mirror_calls == []
+
+
+def test_reinitializing_asks_the_server_again(mod: Any, hermes: Any) -> None:
+    hermes.advertise()
+    provider = make(mod, hermes)
+    provider.prefetch(_QUERY)
+    hermes.advertise({})  # the entry now runs an older server
+    provider.initialize("session-2", hermes_home="/tmp/hermes", platform="cli")
+    provider.prefetch(_QUERY)
+    drain(mod)
+    assert len(hermes.probes) == 2
+    assert "namespace" not in hermes.calls[-1].arguments
+
+
+def test_an_expired_shutdown_flush_drops_instead_of_calling(mod: Any, hermes: Any) -> None:
+    provider = mirroring(mod, hermes)
+    mirror = provider._mirror
+    entered = threading.Event()
+    gate = threading.Event()
+
+    def held(call: Any) -> dict:
+        entered.set()
+        gate.wait(10)
+        return mod_reply(hermes)
+
+    hermes.respond_mirror(held)
+    provider.on_memory_write("add", "memory", "A")
+    provider.on_memory_write("add", "memory", "B")
+    assert entered.wait(5), "the first write never started"
+    provider.shutdown()
+    with mirror.cond:
+        mirror.flush_until = time.monotonic() - 1  # the flush budget is already spent
+    gate.set()
+    mirror.thread.join(5)
+    assert not mirror.thread.is_alive()
+    assert [c.arguments["params"]["content"] for c in hermes.mirror_calls] == ["A"]
+    assert mirror.counts["dropped_shutdown"] == 1
+
+
+def mod_reply(hermes: Any) -> dict:
+    return hermes.mirror_default(None)
+
+
+def test_mirror_logs_never_carry_server_text(
+    mod: Any, hermes: Any, fakes: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=_LOGGER)
+    sentinel = "zq-sentinel-entry-7731"
+    hermes.respond_mirror(
+        {"ok": True, "result": f"Error: something about {sentinel}"},
+        fakes.mirror_reply(rendered=False, render_error=f"OSError: {sentinel}"),
+    )
+    provider = mirroring(mod, hermes)
+    provider.on_memory_write("add", "memory", "first")
+    provider.on_memory_write("add", "memory", "second")
+    assert hermes.wait_mirror_calls(2)
+    time.sleep(0.05)
+    assert provider._mirror.counts["dropped_refused"] == 1
+    logged = "\n".join(r.getMessage() for r in caplog.records if r.name == _LOGGER)
+    assert sentinel not in logged
+    assert '"error": "OSError"' in logged
+
+
+def test_a_flush_remainder_below_hermes_minimum_timeout_starts_nothing(
+    mod: Any, hermes: Any
+) -> None:
+    provider = mirroring(mod, hermes)
+    mirror = provider._mirror
+    with mirror.cond:
+        mirror.closing = True
+        mirror.flush_until = time.monotonic() + 0.5  # Hermes would stretch a call to 1 s
+    assert mod._rpc_timeout(mirror) is None
+    with mirror.cond:
+        mirror.flush_until = time.monotonic() + 3
+    assert 1.0 <= mod._rpc_timeout(mirror) <= 3

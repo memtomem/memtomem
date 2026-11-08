@@ -284,6 +284,8 @@ class StorageBackend(Protocol):
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
         source_filter: str | None = None,
+        *,
+        deadline: float | None = None,
     ) -> list[SearchResult]: ...
     async def dense_search(
         self,
@@ -297,6 +299,7 @@ class StorageBackend(Protocol):
         *,
         exhaustive: bool = False,
         escalate: bool = True,
+        deadline: float | None = None,
     ) -> list[SearchResult]: ...
 
     # Metadata
@@ -375,6 +378,7 @@ class StorageBackend(Protocol):
         project_context_root: Path | None,
         as_of_unix: int | None,
         hide_unavailable: bool,
+        deadline: float | None = None,
     ) -> dict[UUID, ContextWindowRows | None]: ...
     # ``recall_chunks``'s ``chunk_ids`` restricts the recall to an explicit id
     # set while keeping every other filter this method applies — notably the

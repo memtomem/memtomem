@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from memtomem import __version__
 from memtomem._runtime_paths import scrub_text
+from memtomem.constants import NON_SYSTEM_NAMESPACES
 from memtomem._instance_registry import (
     enumerate_live_instances as _enumerate_live_instances,
     store_digest_for as _store_digest_for,
@@ -2016,6 +2017,9 @@ async def mem_version(
                 "context_compose": {"schema_version": 4},
                 "candidate_propose": {"schema_version": 1},
                 "runtime_profile": {"schema_version": 1},
+                "hermes_mirror": {"schema_version": 1},
+                "search_deadline_ms": True,
+                "namespace_selectors": [NON_SYSTEM_NAMESPACES],
             },
             "runtime_profile": runtime_profile,
         },
