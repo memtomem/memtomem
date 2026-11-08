@@ -73,6 +73,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   A page with a unique title keeps its plain name. Re-importing into an output directory
   where siblings previously collided leaves the old plain-named file behind as stale.
 
+- **Notion pages whose titles differ only by case or Unicode normalization no
+  longer overwrite each other on macOS and Windows (#3141).** `Meeting notes` and
+  `Meeting Notes` in one folder kept their plain names. On a filesystem that
+  ignores case, or (APFS) normalization, those names are one file, so the second
+  page replaced the first. `mem_import_notion` then indexed that one file under
+  two source keys, one per spelling. Such titles now collide like
+  identical ones: each page gets its own spelling plus the UUID prefix
+  (`Meeting notes (a1b2c3d4).md`, `Meeting Notes (f0e1d2c3).md`), and links follow.
+  The comparison folds case and normalization on every platform, so an export
+  gets the same filenames everywhere. On Linux, pages that used to import side by
+  side under their plain names move to prefixed names, and the next import
+  leaves the old plain-named files behind, still indexed. An export that would
+  still put two pages in one file is refused before anything is written, with an
+  error naming them, instead of overwriting one of them. That happens with titles
+  spelled like generated names (a page titled `X (a1b2c3d4)` next to two `X`
+  pages) or with a ZIP that carries the same member twice. A link to such a page whose spelling differs
+  from the file name (an export unpacked onto HFS+, which decomposes file names)
+  still falls back to the plain name.
+
 ## [0.7.7] — 2026-11-08
 
 ### Upgrading
