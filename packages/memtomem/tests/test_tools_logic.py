@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from helpers import make_chunk
 
-from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
+from memtomem.models import CONSOLIDATED_SUFFIX, ORIGIN_CONSOLIDATION_POLICY
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.tools.consolidation_engine import (
     DEFAULT_SUMMARY_NAMESPACE,
@@ -2157,7 +2157,9 @@ class TestAutoConsolidate:
             # The policy's own hold check runs after the summary is generated and
             # before apply_consolidation opens its transaction: commit the agent's
             # edge there, once, outside any transaction.
-            if not raced:
+            # The summary path's own hold check runs earlier (#3120); fire on the
+            # source's check after generation, the phase this test is about.
+            if not raced and not str(path).endswith(CONSOLIDATED_SUFFIX):
                 raced.append(True)
                 await storage.add_relation(late.id, racing.id, "consolidated_into")
             return await real_held(path)
@@ -2191,7 +2193,9 @@ class TestAutoConsolidate:
         raced: list[bool] = []
 
         async def both_land_meanwhile(path):
-            if not raced:
+            # The summary path's own hold check runs earlier (#3120); fire on the
+            # source's check after generation, the phase this test is about.
+            if not raced and not str(path).endswith(CONSOLIDATED_SUFFIX):
                 raced.append(True)
                 await storage.upsert_chunks([squatter])
                 await storage.add_relation(chunks[0].id, racing.id, "consolidated_into")

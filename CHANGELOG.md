@@ -17,6 +17,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   where such rows stay readable for recovery, as its anchor does. A redaction
   hold still hides them from both.
 
+- **A policy summary held in its own right is kept when its source's chunks
+  expire, and is not regenerated over (#3120).** An orphan scan holds a
+  `.consolidated.md` summary that has no source at the time. When the source
+  came back and its last chunk was then removed by an expiry (`auto_expire`,
+  `mem_decay_expire`) or a dedup merge, the summary was deleted with it and its
+  hold or pending check dropped; and while the source was there,
+  `auto_consolidate` replaced the held summary with a new one that the hold
+  then hid. The summary and its hold are now kept for recovery, and
+  `auto_consolidate` skips that source, reporting `summary held`. Deleting the
+  source (`mem_delete` by source file, `mm purge`,
+  `mm gc orphan-sources --apply`, the Web UI's Sources tab) or re-indexing it as
+  an empty file still removes the summary.
+
 - **The Web UI's Working Memory panel shows a scratch entry's key, value and
   session as text, and reports its actions (#3109).** Settings → Harness →
   Working Memory wrote those fields into the page as markup, so an entry

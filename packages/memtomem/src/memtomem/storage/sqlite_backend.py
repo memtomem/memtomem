@@ -2416,11 +2416,20 @@ class SqliteBackend(
         return len(rows)
 
     def _delete_policy_summaries_for_source(self, db: sqlite3.Connection, source: str) -> int:
-        """Remove policy-owned derived chunks after their last source chunk goes."""
+        """Remove policy-owned derived chunks after their last source chunk goes.
+
+        A summary path that is held or pending in its own right is kept, with
+        its hold, for recovery like any other held source (#3120);
+        ``delete_by_source`` on its parent still removes it. The check is in the
+        statement that selects the rows, under the writer lock the caller's
+        delete already holds.
+        """
         summary_source = source + CONSOLIDATED_SUFFIX
         rows = db.execute(
-            "SELECT id, rowid FROM chunks WHERE source_file=? AND origin=?",
-            (summary_source, ORIGIN_CONSOLIDATION_POLICY),
+            "SELECT id, rowid FROM chunks WHERE source_file=? AND origin=? "
+            "AND NOT EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file=?) "
+            "AND NOT EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file=?)",
+            (summary_source, ORIGIN_CONSOLIDATION_POLICY, summary_source, summary_source),
         ).fetchall()
         for batch in _param_batches(rows):
             ids = [row[0] for row in batch]
