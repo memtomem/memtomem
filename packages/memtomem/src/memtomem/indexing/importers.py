@@ -531,27 +531,27 @@ def _build_notion_output_mapping(
 ) -> dict[tuple[Path, str], str]:
     """Build a mapping of (canonical_parent, original_filename) -> output_filename.
 
-    - Unique in directory after cleaning: keep cleaned name ('Page.md').
+    - Unique in directory after cleaning (case-folded): keep cleaned name ('Page.md').
     - Colliding siblings in directory: every member of that colliding group with
       a UUID gets '<stem> (<first 8 hex of UUID>).md'. If two siblings share an
       8-hex prefix, use full 32 hex for those two. A member without a UUID suffix
       keeps the plain name.
     """
-    groups: dict[tuple[Path, str], list[tuple[str, str | None]]] = defaultdict(list)
+    groups: dict[tuple[Path, str], list[tuple[str, str, str | None]]] = defaultdict(list)
     for rel, original_name, _ in sources:
         canonical_parent = Path(os.path.normpath(rel.parent))
         clean_stem, uuid = _split_notion_uuid(Path(original_name).stem)
-        groups[(canonical_parent, clean_stem)].append((original_name, uuid))
+        groups[(canonical_parent, clean_stem.casefold())].append((original_name, clean_stem, uuid))
 
     mapping: dict[tuple[Path, str], str] = {}
-    for (canonical_parent, clean_stem), members in groups.items():
+    for (canonical_parent, _casefolded_stem), members in groups.items():
         if len(members) == 1:
-            orig_name, _ = members[0]
+            orig_name, clean_stem, _ = members[0]
             mapping[(canonical_parent, orig_name)] = f"{clean_stem}.md"
             continue
 
-        prefix_counts = Counter(uuid[:8] for _, uuid in members if uuid is not None)
-        for orig_name, uuid in members:
+        prefix_counts = Counter(uuid[:8] for _, _, uuid in members if uuid is not None)
+        for orig_name, clean_stem, uuid in members:
             if uuid is None:
                 mapping[(canonical_parent, orig_name)] = f"{clean_stem}.md"
             else:

@@ -37,6 +37,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   is, as before, when another note shares its path, when that path is held or
   pending, or when the new path already has rows or a hold.
 
+- **Notion sibling pages whose titles differ only by case no longer overwrite
+  each other on case-insensitive filesystems (#3141).**
+  `_build_notion_output_mapping` now groups pages by case-folded stem,
+  ensuring pages such as `Meeting notes` and `Meeting Notes` disambiguate
+  with UUID prefixes rather than colliding on case-insensitive filesystems
+  like Windows and macOS.
+
 - **Notion sibling pages sharing a title in the same directory no longer overwrite each other during import (#3113).**
   When Notion exports multiple pages in the same folder with duplicate titles
   (disambiguated in Notion by trailing 32-hex UUIDs), stripping the UUIDs

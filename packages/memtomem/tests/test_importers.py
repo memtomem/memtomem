@@ -163,6 +163,46 @@ class TestImportNotion:
         assert "Content 2" in f2.read_text(encoding="utf-8")
 
     @pytest.mark.asyncio
+    async def test_notion_sibling_pages_differ_only_by_case_collision(self, tmp_path):
+        """Notion sibling pages whose titles differ only by case disambiguate with UUID prefixes (#3141)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        (export_dir / "Meeting notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md").write_text(
+            "# Meeting notes\nLower content",
+            encoding="utf-8",
+        )
+        (export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md").write_text(
+            "# Meeting Notes\nTitle content",
+            encoding="utf-8",
+        )
+        (export_dir / "Index abcdef01234567890123456789abcdef.md").write_text(
+            "# Index\n[a](Meeting%20notes%20a1b2c3d4e5f60718293a4b5c6d7e8f90.md) [b](Meeting%20Notes%20f0e1d2c3b4a5968778695a4b3c2d1e0f.md)",
+            encoding="utf-8",
+        )
+
+        output = tmp_path / "out"
+        imported = await import_notion(export_dir, output)
+
+        assert len(imported) == 3
+        assert len(set(imported)) == 3
+        assert all(p.exists() for p in imported)
+
+        f_lower = output / "Meeting notes (a1b2c3d4).md"
+        f_title = output / "Meeting Notes (f0e1d2c3).md"
+        f_index = output / "Index.md"
+
+        assert f_lower.exists()
+        assert f_title.exists()
+        assert f_index.exists()
+
+        assert "Lower content" in f_lower.read_text(encoding="utf-8")
+        assert "Title content" in f_title.read_text(encoding="utf-8")
+
+        index_text = f_index.read_text(encoding="utf-8")
+        assert "[a](Meeting notes (a1b2c3d4).md)" in index_text
+        assert "[b](Meeting Notes (f0e1d2c3).md)" in index_text
+
+    @pytest.mark.asyncio
     async def test_notion_sibling_pages_collision_zip(self, tmp_path):
         """Notion sibling pages in a ZIP archive disambiguate with UUID prefixes (#3113)."""
         zip_path = tmp_path / "export.zip"
