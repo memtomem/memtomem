@@ -34,6 +34,10 @@ class TestNotionFilename:
         result = _clean_notion_filename("abcdef01234567890123456789012345")
         assert result == "abcdef01234567890123456789012345"
 
+    def test_uppercase_hex_not_stripped(self):
+        name = "My Page ABC123DEF4567890123456789ABCDEF0"
+        assert _clean_notion_filename(name) == name
+
 
 class TestNotionMarkdown:
     def test_removes_property_table(self):
@@ -52,6 +56,23 @@ class TestNotionMarkdown:
         cleaned = _clean_notion_markdown(content)
         assert "Heading" in cleaned
         assert "paragraph" in cleaned
+
+    def test_link_with_fragment_and_mapping(self):
+        content = "[Section](Page%20a1b2c3d4e5f607182930415263748596.md#heading)"
+        mapping = {(Path("."), "Page a1b2c3d4e5f607182930415263748596.md"): "Page (a1b2c3d4).md"}
+        cleaned = _clean_notion_markdown(content, rel_parent=Path("."), link_mapping=mapping)
+        assert cleaned == "[Section](Page (a1b2c3d4).md#heading)"
+
+    def test_link_with_query_and_mapping(self):
+        content = "[Section](Page%20a1b2c3d4e5f607182930415263748596.md?ref=docs#heading)"
+        mapping = {(Path("."), "Page a1b2c3d4e5f607182930415263748596.md"): "Page (a1b2c3d4).md"}
+        cleaned = _clean_notion_markdown(content, rel_parent=Path("."), link_mapping=mapping)
+        assert cleaned == "[Section](Page (a1b2c3d4).md?ref=docs#heading)"
+
+    def test_external_link_ending_in_md_unchanged(self):
+        content = "[Doc](https://example.com/Page a1b2c3d4e5f607182930415263748596.md)"
+        cleaned = _clean_notion_markdown(content)
+        assert cleaned == "[Doc](https://example.com/Page a1b2c3d4e5f607182930415263748596.md)"
 
 
 class TestObsidianSyntax:
