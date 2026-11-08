@@ -232,6 +232,103 @@ async def test_policy_summary_tracks_source_hold_and_explicit_purge(components, 
     assert (await scan_orphans(components.storage, recheck_delay_seconds=0)).total_sources == 0
 
 
+async def _stamp_policy_summary(components, summary: Path) -> None:
+    """Index ``summary`` as a policy summary: origin-stamped, with no file on disk."""
+    await _indexed(components, summary, "summaryword")
+    db = components.storage._get_db()
+    db.execute(
+        "UPDATE chunks SET origin=? WHERE source_file=?",
+        (ORIGIN_CONSOLIDATION_POLICY, str(summary)),
+    )
+    db.commit()
+    summary.unlink()
+
+
+def _row_ids(components, path: Path) -> list[str]:
+    db = components.storage._get_db()
+    rows = db.execute("SELECT id FROM chunks WHERE source_file=?", (str(path),)).fetchall()
+    return sorted(row[0] for row in rows)
+
+
+def _hold_reasons(components, path: Path) -> list[str]:
+    db = components.storage._get_db()
+    rows = db.execute("SELECT reason FROM held_sources WHERE source_file=?", (str(path),))
+    return [row[0] for row in rows.fetchall()]
+
+
+def _pending_count(components, path: Path) -> int:
+    db = components.storage._get_db()
+    return db.execute(
+        "SELECT COUNT(*) FROM pending_source_checks WHERE source_file=?", (str(path),)
+    ).fetchone()[0]
+
+
+async def test_expiring_parent_keeps_summary_held_by_orphan_scan(components, memory_dir):
+    from memtomem.search.decay import expire_chunks
+    from memtomem.storage.orphan_detect import hold_orphans
+
+    parent = memory_dir / "late.md"
+    summary = memory_dir / "late.md.consolidated.md"
+    # The summary is detached while the scan runs, so it is held on its own.
+    await _stamp_policy_summary(components, summary)
+    scan = await scan_orphans(components.storage, recheck_delay_seconds=0)
+    assert scan.confirmed_orphans == [summary]
+    assert (await hold_orphans(components.storage, scan, components.config.indexing)).changed
+    await _indexed(components, parent, "parentword")
+    summary_ids = _row_ids(components, summary)
+    assert len(summary_ids) == 1
+    assert len(_row_ids(components, parent)) == 1
+    assert _hold_reasons(components, summary) == ["scan_missing"]
+
+    stats = await expire_chunks(components.storage, max_age_days=0, source_filter="/late.md")
+
+    assert stats.deleted_chunks == 1
+    assert _row_ids(components, parent) == []
+    assert _row_ids(components, summary) == summary_ids
+    assert _hold_reasons(components, summary) == ["scan_missing"]
+
+
+@pytest.mark.parametrize("mark", ["held", "pending", "none"])
+async def test_last_parent_chunk_delete_keeps_only_a_marked_summary(components, memory_dir, mark):
+    parent = memory_dir / "marked.md"
+    summary = memory_dir / "marked.md.consolidated.md"
+    await _indexed(components, parent, "parentword")
+    await _stamp_policy_summary(components, summary)
+    summary_ids = _row_ids(components, summary)
+    assert len(summary_ids) == 1
+    if mark == "held":
+        assert await components.storage.hold_source(summary, "source_missing")
+    elif mark == "pending":
+        assert components.storage.queue_source_check_sync(summary)
+    parent_ids = await components.storage.get_chunk_hashes(parent)
+    assert len(parent_ids) == 1
+
+    deleted = await components.storage.delete_chunks([UUID(cid) for cid in parent_ids])
+
+    assert deleted == 1
+    assert _row_ids(components, parent) == []
+    if mark == "none":
+        assert _row_ids(components, summary) == []
+        return
+    assert _row_ids(components, summary) == summary_ids
+    assert _hold_reasons(components, summary) == (["source_missing"] if mark == "held" else [])
+    assert _pending_count(components, summary) == (1 if mark == "pending" else 0)
+
+
+async def test_explicit_purge_still_removes_a_held_summary(components, memory_dir):
+    parent = memory_dir / "purged.md"
+    summary = memory_dir / "purged.md.consolidated.md"
+    await _indexed(components, parent, "parentword")
+    await _stamp_policy_summary(components, summary)
+    assert await components.storage.hold_source(summary, "source_missing")
+
+    assert await components.storage.delete_by_source(parent) == 2
+
+    assert _row_ids(components, parent) == []
+    assert _row_ids(components, summary) == []
+    assert _hold_reasons(components, summary) == []
+
+
 async def test_held_source_recovers_after_successful_reindex(components, memory_dir):
     path = memory_dir / "return.md"
     await _indexed(components, path)

@@ -533,7 +533,9 @@ class TestConsolidationCoverage:
         real = storage.is_source_held
 
         async def link_then_check(path, *args, **kwargs):
-            if not linked:
+            # The summary path's own hold check runs earlier (#3120); fire on the
+            # source's check after generation, the phase this test is about.
+            if not linked and not str(path).endswith(CONSOLIDATED_SUFFIX):
                 linked.append(True)
                 await storage.add_relation(chunks[2].id, agent.id, "consolidated_into")
             return await real(path, *args, **kwargs)
@@ -558,3 +560,111 @@ class TestConsolidationCoverage:
     async def test_max_bullets_must_be_a_positive_integer(self, storage, bad):
         result = await execute_auto_consolidate(storage, {"max_bullets": bad}, None, dry_run=True)
         assert result.error == "max_bullets must be a positive integer"
+
+
+# ---------------------------------------------------------------------------
+# A summary path held in its own right is not regenerated (#3120)
+# ---------------------------------------------------------------------------
+
+
+def _summary_path(src: Path) -> Path:
+    return Path(norm_path(src) + CONSOLIDATED_SUFFIX)
+
+
+def _policy_summary_ids(storage, src: Path) -> list[str]:
+    rows = storage._get_db().execute(
+        "SELECT id FROM chunks WHERE source_file=? AND origin=?",
+        (str(_summary_path(src)), ORIGIN_CONSOLIDATION_POLICY),
+    )
+    return sorted(r[0] for r in rows.fetchall())
+
+
+class TestHeldSummaryPath:
+    @pytest.mark.parametrize("dry_run", [True, False])
+    @pytest.mark.parametrize("mark", ["held", "pending"])
+    async def test_a_marked_summary_path_is_skipped(self, storage, tmp_path, mark, dry_run):
+        src, _ = await _big_source(storage, tmp_path)
+        await execute_auto_consolidate(storage, {}, None, dry_run=False, extract_entities=False)
+        before = _policy_summary_ids(storage, src)
+        assert len(before) == 1
+        if mark == "held":
+            assert await storage.hold_source(_summary_path(src), "scan_missing", as_stored=True)
+        else:
+            _pend(storage, _summary_path(src))
+        # A changed source would otherwise regenerate the summary.
+        await storage.upsert_chunks([_chunk("chunk 26 new fact", src, 999)])
+
+        result = await execute_auto_consolidate(
+            storage, {}, None, dry_run=dry_run, extract_entities=False
+        )
+
+        assert result.affected_count == 0
+        assert result.outcome["skipped"] == ["big.md (summary held)"]
+        assert _policy_summary_ids(storage, src) == before
+
+    async def test_a_summary_path_linked_to_a_held_one_is_skipped(self, storage, tmp_path):
+        # The read and the write resolve the link, so its hold is the target's.
+        held, _ = await _big_source(storage, tmp_path)
+        await execute_auto_consolidate(storage, {}, None, dry_run=False, extract_entities=False)
+        before = _policy_summary_ids(storage, held)
+        assert len(before) == 1
+        assert await storage.hold_source(_summary_path(held), "scan_missing", as_stored=True)
+        other = tmp_path / "other.md"
+        await storage.upsert_chunks([_chunk(f"other fact {i}", other, i + 1) for i in range(3)])
+        (tmp_path / f"other.md{CONSOLIDATED_SUFFIX}").symlink_to(_summary_path(held))
+
+        result = await execute_auto_consolidate(
+            storage, {}, None, dry_run=False, extract_entities=False
+        )
+
+        assert result.affected_count == 0
+        assert sorted(result.outcome["skipped"]) == [
+            "big.md (summary held)",
+            "other.md (summary held)",
+        ]
+        assert _policy_summary_ids(storage, held) == before
+
+    @pytest.mark.parametrize("linked", [False, True])
+    async def test_a_hold_landing_during_generation_keeps_the_old_summary(
+        self, components, tmp_path, monkeypatch, linked
+    ):
+        from memtomem.tools import consolidation_engine
+
+        storage = components.storage
+        held, _ = await _big_source(storage, tmp_path)
+        await execute_auto_consolidate(storage, {}, None, dry_run=False, extract_entities=False)
+        before = _policy_summary_ids(storage, held)
+        assert len(before) == 1
+        if linked:
+            # Consolidating ``other.md`` writes through a link to big.md's summary.
+            src = tmp_path / "other.md"
+            await storage.upsert_chunks([_chunk(f"other fact {i}", src, i + 1) for i in range(3)])
+            (tmp_path / f"other.md{CONSOLIDATED_SUFFIX}").symlink_to(_summary_path(held))
+            config = {"min_group_size": 3}
+            name = "other.md"
+        else:
+            src = held
+            await storage.upsert_chunks([_chunk("chunk 26 new fact", src, 999)])
+            config = {}
+            name = "big.md"
+        outcomes: list[str | None] = []
+        real = consolidation_engine.make_heuristic_summary
+
+        def hold_then_summarize(chunks, source_path, *args, **kwargs):
+            if Path(source_path) == Path(norm_path(src)):
+                outcomes.append(
+                    _hold_from_another_connection(
+                        components.config.storage.sqlite_path, _summary_path(held)
+                    )
+                )
+            return real(chunks, source_path, *args, **kwargs)
+
+        monkeypatch.setattr(consolidation_engine, "make_heuristic_summary", hold_then_summarize)
+
+        result = await execute_auto_consolidate(
+            storage, config, None, dry_run=False, extract_entities=False
+        )
+
+        assert outcomes == [None], "the hold was not committed before the write"
+        assert result.outcome["failed"] == [name]
+        assert _policy_summary_ids(storage, held) == before

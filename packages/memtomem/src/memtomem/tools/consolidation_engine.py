@@ -26,6 +26,7 @@ from uuid import UUID
 
 from memtomem.errors import StorageError
 from memtomem.storage.base import WRITER_WAIT_S
+from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.models import (
     CONSOLIDATED_SUFFIX,
     ORIGIN_CONSOLIDATION_POLICY,
@@ -527,6 +528,10 @@ async def apply_consolidation(
         # summary derived from chunks that are now hidden.
         if await storage.is_source_held(Path(group["source"])):
             raise StorageError("consolidation source became unavailable")
+        # Its own hold keeps the old summary for recovery (#3120), judged on
+        # the normalised key the clear and the upsert below act on.
+        if await storage.is_source_held(Path(norm_path(virtual_path))):
+            raise StorageError("consolidation summary path is held")
         if source_ids:
             originals = await storage.get_chunks_batch([UUID(cid) for cid in source_ids])
             boundaries = {(c.metadata.scope, c.metadata.project_root) for c in originals.values()}

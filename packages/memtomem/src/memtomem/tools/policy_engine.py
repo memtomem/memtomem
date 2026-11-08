@@ -14,7 +14,7 @@ from uuid import UUID
 
 from memtomem.constants import InvalidNameError, validate_writable_namespace
 from memtomem.storage.base import WRITER_WAIT_S
-from memtomem.storage.sqlite_helpers import escape_like
+from memtomem.storage.sqlite_helpers import escape_like, norm_path
 from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_PATH
 
 if TYPE_CHECKING:
@@ -764,6 +764,15 @@ async def execute_auto_consolidate(
             )
             detail_parts.append(f"{source_path.name} (COLLISION: summary path occupied)")
             failed.append(f"{source_path.name} (collision)")
+            continue
+        # A summary path held or pending in its own right keeps its rows for
+        # recovery (#3120): regenerating would replace them with a summary the
+        # hold then hides. Before ``dry_run`` and the LLM call, as above. The
+        # key is normalised the way the read above and the write resolve it,
+        # so a link at the path is judged by the rows it would replace.
+        if await storage.is_source_held(Path(norm_path(virtual_path))):
+            detail_parts.append(f"{source_path.name} (SKIP: summary held)")
+            skipped.append(f"{source_path.name} (summary held)")
             continue
         # Read before the idempotency check below, which compares what the
         # existing summary covers with what a summary made now would cover.
