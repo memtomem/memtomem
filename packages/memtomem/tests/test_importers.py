@@ -1,11 +1,15 @@
 """Tests for Notion and Obsidian importers."""
 
+import unicodedata
 import zipfile
+from pathlib import Path
 
 import pytest
 from memtomem.indexing import importers
 from memtomem.indexing.importers import (
+    NotionImportCollisionError,
     UnsafeArchiveError,
+    _build_notion_output_mapping,
     _clean_notion_filename,
     _clean_notion_markdown,
     _convert_obsidian_syntax,
@@ -328,6 +332,196 @@ class TestImportNotion:
         assert (output / "Meeting Notes (a1b2c3d4111111111111111111111111).md").exists()
         assert (output / "Meeting Notes (a1b2c3d4222222222222222222222222).md").exists()
         assert (output / "Meeting Notes (f0e1d2c3).md").exists()
+
+
+_UA = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+_UB = "f0e1d2c3b4a5968778695a4b3c2d1e0f"
+_UC = "0123456789abcdef0123456789abcdef"
+
+
+def _fold(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _sources(*names: str) -> list:
+    """Mapping-input tuples for files in the export root, or under 'dir/'."""
+    out = []
+    for name in names:
+        rel = Path(name)
+        out.append((rel, rel.name, ""))
+    return out
+
+
+class TestNotionCollisionKey:
+    """#3141 — titles that differ only by case or normalization collide too.
+
+    These call the mapping directly, so they hold on every platform regardless
+    of whether the test machine's filesystem folds case.
+    """
+
+    def test_case_only_siblings_get_prefixes_in_their_own_spelling(self):
+        mapping = _build_notion_output_mapping(
+            _sources(f"Meeting notes {_UA}.md", f"Meeting Notes {_UB}.md")
+        )
+        assert mapping[(Path("."), f"Meeting notes {_UA}.md")] == "Meeting notes (a1b2c3d4).md"
+        assert mapping[(Path("."), f"Meeting Notes {_UB}.md")] == "Meeting Notes (f0e1d2c3).md"
+
+    def test_nfc_and_nfd_titles_collide(self):
+        nfc = unicodedata.normalize("NFC", "Café notes")
+        nfd = unicodedata.normalize("NFD", "Café notes")
+        assert nfc != nfd
+        mapping = _build_notion_output_mapping(_sources(f"{nfc} {_UA}.md", f"{nfd} {_UB}.md"))
+        names = set(mapping.values())
+        assert names == {f"{nfc} (a1b2c3d4).md", f"{nfd} (f0e1d2c3).md"}
+
+    def test_uuidless_case_only_pair_gets_stable_hash_suffixes(self):
+        sources = _sources("notes.md", "Notes.md")
+        first = _build_notion_output_mapping(sources)
+        again = _build_notion_output_mapping(list(reversed(sources)))
+        assert first == again
+        lower, upper = first[(Path("."), "notes.md")], first[(Path("."), "Notes.md")]
+        assert lower.startswith("notes (") and upper.startswith("Notes (")
+        assert _fold(lower) != _fold(upper)
+
+    def test_single_uuidless_page_in_a_colliding_group_keeps_plain_name(self):
+        mapping = _build_notion_output_mapping(_sources("notes.md", f"Notes {_UA}.md"))
+        assert mapping[(Path("."), "notes.md")] == "notes.md"
+        assert mapping[(Path("."), f"Notes {_UA}.md")] == "Notes (a1b2c3d4).md"
+
+    def test_case_only_pair_sharing_a_prefix_gets_full_uuids(self):
+        ua, ub = "a1b2c3d4" + "1" * 24, "a1b2c3d4" + "2" * 24
+        mapping = _build_notion_output_mapping(_sources(f"X {ua}.md", f"x {ub}.md"))
+        assert set(mapping.values()) == {f"X ({ua}).md", f"x ({ub}).md"}
+
+    def test_folders_differing_only_by_case_group_together(self):
+        # Only a crafted ZIP has two folders with one UUID; a genuine export's
+        # folder UUIDs are its page UUIDs.
+        mapping = _build_notion_output_mapping(
+            _sources(f"Folder {_UC}/X {_UA}.md", f"folder {_UC}/x {_UB}.md")
+        )
+        assert mapping[(Path(f"Folder {_UC}"), f"X {_UA}.md")] == "X (a1b2c3d4).md"
+        assert mapping[(Path(f"folder {_UC}"), f"x {_UB}.md")] == "x (f0e1d2c3).md"
+
+    def test_same_folded_name_in_different_folders_is_not_a_collision(self):
+        mapping = _build_notion_output_mapping(_sources(f"one/Page {_UA}.md", f"two/page {_UB}.md"))
+        assert set(mapping.values()) == {"Page.md", "page.md"}
+
+    def test_title_spelled_like_a_generated_name_is_refused(self):
+        sources = _sources(f"X {_UA}.md", f"x {_UB}.md", f"X (a1b2c3d4) {_UC}.md")
+        with pytest.raises(NotionImportCollisionError, match=r"X \(a1b2c3d4\)\.md"):
+            _build_notion_output_mapping(sources)
+
+    def test_duplicated_source_is_refused_not_collapsed(self):
+        # A ZIP may carry one member name twice. Both entries share a mapping
+        # key, so the check must see each source before any dict collapses them.
+        with pytest.raises(NotionImportCollisionError):
+            _build_notion_output_mapping(_sources(f"X {_UA}.md", f"X {_UA}.md"))
+
+    def test_same_uuid_folders_differing_by_case_are_refused(self):
+        # On Windows these parents are one Path key; on every platform they
+        # are one folder to a case-insensitive filesystem.
+        with pytest.raises(NotionImportCollisionError):
+            _build_notion_output_mapping(_sources(f"Folder/X {_UA}.md", f"folder/X {_UA}.md"))
+
+    def test_exact_title_siblings_are_named_as_before(self):
+        mapping = _build_notion_output_mapping(
+            _sources(f"Meeting Notes {_UA}.md", f"Meeting Notes {_UB}.md", f"Plan {_UC}.md")
+        )
+        assert set(mapping.values()) == {
+            "Meeting Notes (a1b2c3d4).md",
+            "Meeting Notes (f0e1d2c3).md",
+            "Plan.md",
+        }
+
+
+class TestImportNotionCaseCollision:
+    """#3141 through ``import_notion``: one file per page, each with its own text."""
+
+    @staticmethod
+    def _assert_one_file_per_page(imported, output):
+        folded = {_fold(p.relative_to(output).as_posix()) for p in imported}
+        assert len(folded) == len(imported)
+
+    @pytest.mark.asyncio
+    async def test_directory_export(self, tmp_path):
+        export = tmp_path / "export"
+        export.mkdir()
+        (export / f"Meeting notes {_UA}.md").write_text("# lower body", encoding="utf-8")
+        (export / f"Meeting Notes {_UB}.md").write_text("# Upper body", encoding="utf-8")
+        (export / f"Index {_UC}.md").write_text(
+            f"[a](Meeting%20notes%20{_UA}.md) [b](Meeting%20Notes%20{_UB}.md)",
+            encoding="utf-8",
+        )
+        output = tmp_path / "out"
+
+        imported = await import_notion(export, output)
+
+        assert len(imported) == 3
+        self._assert_one_file_per_page(imported, output)
+        lower = output / "Meeting notes (a1b2c3d4).md"
+        upper = output / "Meeting Notes (f0e1d2c3).md"
+        assert "lower body" in lower.read_text(encoding="utf-8")
+        assert "Upper body" in upper.read_text(encoding="utf-8")
+        index = (output / "Index.md").read_text(encoding="utf-8")
+        assert "[a](Meeting notes (a1b2c3d4).md)" in index
+        assert "[b](Meeting Notes (f0e1d2c3).md)" in index
+
+    @pytest.mark.asyncio
+    async def test_zip_export(self, tmp_path):
+        zip_path = tmp_path / "export.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(f"Meeting notes {_UA}.md", "# lower body")
+            zf.writestr(f"Meeting Notes {_UB}.md", "# Upper body")
+            zf.writestr("notes.md", "# uuidless lower")
+            zf.writestr("Notes.md", "# uuidless upper")
+        output = tmp_path / "out"
+
+        imported = await import_notion(zip_path, output)
+
+        assert len(imported) == 4
+        self._assert_one_file_per_page(imported, output)
+        texts = sorted(p.read_text(encoding="utf-8").splitlines()[-1] for p in imported)
+        assert texts == ["# Upper body", "# lower body", "# uuidless lower", "# uuidless upper"]
+
+    @pytest.mark.asyncio
+    async def test_refused_export_writes_nothing(self, tmp_path):
+        export = tmp_path / "export"
+        export.mkdir()
+        for name in (f"X {_UA}.md", f"x {_UB}.md", f"X (a1b2c3d4) {_UC}.md"):
+            (export / name).write_text(f"# {name}", encoding="utf-8")
+        output = tmp_path / "out"
+
+        with pytest.raises(NotionImportCollisionError):
+            await import_notion(export, output)
+
+        assert not output.exists()
+
+    @pytest.mark.asyncio
+    async def test_tool_indexes_each_page_once(self, bm25_only_components, tmp_path):
+        """Measured on main before the fix: one file on disk, two source keys."""
+        from helpers import StubCtx
+        from memtomem.server.context import AppContext
+        from memtomem.server.tools import importers as importer_tools
+
+        comp, _ = bm25_only_components
+        export = tmp_path / "export"
+        export.mkdir()
+        (export / f"Meeting notes {_UA}.md").write_text(
+            "# lower\n\nlower page body text\n", encoding="utf-8"
+        )
+        (export / f"Meeting Notes {_UB}.md").write_text(
+            "# Upper\n\nupper page body text\n", encoding="utf-8"
+        )
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        out = await importer_tools.mem_import_notion(str(export), ctx=ctx)
+
+        assert "Files imported: 2" in out, out
+        sources = await comp.storage.get_all_source_files()
+        assert len(sources) == 2
+        assert len({_fold(p.name) for p in sources}) == 2
+        bodies = sorted(p.read_text(encoding="utf-8").splitlines()[-1] for p in sources)
+        assert bodies == ["lower page body text", "upper page body text"]
 
 
 class TestImportObsidian:
