@@ -1548,3 +1548,224 @@ def test_memory_migrate_double_failure_surfaces_batch_state(monkeypatch, fake_pr
     assert (proj_local / "rule_one.md").exists()
     assert (proj_local / "rule_two.md").exists()
     assert not f2.exists()
+
+
+# ---------------------------------------------------------------------------
+# 8) The policy summary moves with its source (#3128)
+# ---------------------------------------------------------------------------
+
+
+def _summary_rows(storage, path: Path) -> list[tuple]:
+    return (
+        storage._get_db()
+        .execute(
+            "SELECT id, origin, scope, project_root FROM chunks WHERE source_file=? ORDER BY id",
+            (str(path),),
+        )
+        .fetchall()
+    )
+
+
+async def _source_with_policy_summary(storage, src: Path) -> str:
+    """Three chunks at ``src`` and the summary ``auto_consolidate`` writes over them."""
+    from memtomem.tools.policy_engine import execute_auto_consolidate
+
+    src.write_text("## Rule\n\nfact one.\n\nfact two.\n\nfact three.\n", encoding="utf-8")
+    await storage.upsert_chunks(
+        [
+            Chunk(
+                content=f"fact {n}.",
+                metadata=ChunkMetadata(
+                    source_file=src, scope="user", project_root=None, start_line=i, end_line=i
+                ),
+                embedding=[0.1] * 1024,
+            )
+            for i, n in enumerate(["one", "two", "three"], start=3)
+        ]
+    )
+    result = await execute_auto_consolidate(
+        storage, {"min_group_size": 3}, None, dry_run=False, extract_entities=False
+    )
+    assert result.affected_count == 1
+    return result.outcome["groups"][0]["summary_id"]
+
+
+def _summary_path(path: Path) -> Path:
+    from memtomem.models import CONSOLIDATED_SUFFIX
+    from memtomem.storage.sqlite_helpers import norm_path
+
+    return Path(norm_path(path) + CONSOLIDATED_SUFFIX)
+
+
+async def test_memory_migrate_moves_the_policy_summary_with_its_source(
+    bm25_only_components, monkeypatch, tmp_path
+):
+    from memtomem.cli.context_cmd import _memory_migrate_run
+    from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
+    from memtomem.storage.orphan_detect import scan_orphans
+    from memtomem.tools.policy_engine import execute_auto_consolidate
+
+    comp, mem_dir = bm25_only_components
+    project_root = tmp_path / "proj_x"
+    proj_shared = project_root / ".memtomem" / "memories"
+    proj_shared.mkdir(parents=True)
+    (project_root / ".git").mkdir()
+    comp.config.indexing.project_memory_dirs = [proj_shared]
+    src = mem_dir / "rule.md"
+    summary_id = await _source_with_policy_summary(comp.storage, src)
+    old_summary = _summary_path(src)
+    assert [r[0] for r in _summary_rows(comp.storage, old_summary)] == [summary_id]
+
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(project_root)
+    await _memory_migrate_run(
+        [src.resolve()],
+        from_scope="user",
+        to_scope="project_shared",
+        apply_=True,
+        yes=True,
+        confirm_project_shared=True,
+    )
+
+    new_summary = _summary_path(proj_shared / "rule.md")
+    assert _summary_rows(comp.storage, old_summary) == []
+    assert _summary_rows(comp.storage, new_summary) == [
+        (summary_id, ORIGIN_CONSOLIDATION_POLICY, "project_shared", str(project_root))
+    ]
+    fts = (
+        comp.storage._get_db()
+        .execute("SELECT source_file FROM chunks_fts WHERE source_file=?", (str(new_summary),))
+        .fetchall()
+    )
+    assert len(fts) == 1
+    assert (await scan_orphans(comp.storage, recheck_delay_seconds=0)).confirmed_orphans == []
+    again = await execute_auto_consolidate(
+        comp.storage, {"min_group_size": 3}, None, dry_run=False, extract_entities=False
+    )
+    assert again.affected_count == 0
+    assert "skipped" not in again.outcome and "failed" not in again.outcome
+    assert [r[0] for r in _summary_rows(comp.storage, new_summary)] == [summary_id]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "foreign_row_at_old",
+        "old_held",
+        "old_pending",
+        "new_has_rows",
+        "new_held",
+        "new_pending",
+    ],
+)
+async def test_the_policy_summary_stays_when_moving_it_is_unsafe(
+    bm25_only_components, tmp_path, case
+):
+    comp, mem_dir = bm25_only_components
+    storage = comp.storage
+    db = storage._get_db()
+    src = mem_dir / "rule.md"
+    summary_id = await _source_with_policy_summary(storage, src)
+    tgt = mem_dir / "moved" / "rule.md"
+    tgt.parent.mkdir()
+    old_summary, new_summary = _summary_path(src), _summary_path(tgt)
+    now = "2026-11-08T00:00:00+00:00"
+    if case == "foreign_row_at_old":
+        await storage.upsert_chunks(
+            [
+                Chunk(
+                    content="a user note sharing the name",
+                    metadata=ChunkMetadata(source_file=old_summary, start_line=1, end_line=1),
+                    embedding=[0.1] * 1024,
+                )
+            ]
+        )
+    elif case == "new_has_rows":
+        await storage.upsert_chunks(
+            [
+                Chunk(
+                    content="already at the destination",
+                    metadata=ChunkMetadata(source_file=new_summary, start_line=1, end_line=1),
+                    embedding=[0.1] * 1024,
+                )
+            ]
+        )
+    elif case == "old_held":
+        assert await storage.hold_source(old_summary, "scan_missing", as_stored=True)
+    elif case == "new_held":
+        # ``hold_source`` holds only a path with rows; the row is written as a
+        # hold from another process would leave it.
+        db.execute(
+            "INSERT INTO held_sources (source_file, first_seen_at, last_checked_at, reason) "
+            "VALUES (?, ?, ?, 'missing')",
+            (str(new_summary), now, now),
+        )
+        db.commit()
+    else:
+        path = old_summary if case.startswith("old") else new_summary
+        db.execute(
+            "INSERT INTO pending_source_checks(source_file, queued_at) VALUES (?, ?)",
+            (str(path), now),
+        )
+        db.commit()
+    before_old = _summary_rows(storage, old_summary)
+    before_new = _summary_rows(storage, new_summary)
+    assert summary_id in [r[0] for r in before_old]
+
+    assert await storage.update_chunks_scope_for_source(src, tgt, "user", None) == 3
+
+    assert _summary_rows(storage, old_summary) == before_old
+    assert _summary_rows(storage, new_summary) == before_new
+
+
+async def test_the_summary_cache_moves_with_the_policy_summary(bm25_only_components):
+    from memtomem.storage.sqlite_backend import _AI_SUMMARY_KEY_PREFIX
+
+    comp, mem_dir = bm25_only_components
+    storage = comp.storage
+    db = storage._get_db()
+    src = mem_dir / "rule.md"
+    await _source_with_policy_summary(storage, src)
+    tgt = mem_dir / "moved" / "rule.md"
+    tgt.parent.mkdir()
+    old_key = f"{_AI_SUMMARY_KEY_PREFIX}{_summary_path(src)}"
+    new_key = f"{_AI_SUMMARY_KEY_PREFIX}{_summary_path(tgt)}"
+    db.execute("INSERT INTO _memtomem_meta(key, value) VALUES (?, ?)", (old_key, "cached"))
+    db.commit()
+
+    assert await storage.update_chunks_scope_for_source(src, tgt, "user", None) == 3
+
+    meta = dict(db.execute("SELECT key, value FROM _memtomem_meta").fetchall())
+    assert old_key not in meta
+    assert meta[new_key] == "cached"
+
+
+async def test_a_failed_summary_move_rolls_the_source_move_back(bm25_only_components, monkeypatch):
+    from memtomem.errors import StorageError
+
+    comp, mem_dir = bm25_only_components
+    storage = comp.storage
+    src = mem_dir / "rule.md"
+    summary_id = await _source_with_policy_summary(storage, src)
+    tgt = mem_dir / "moved" / "rule.md"
+    tgt.parent.mkdir()
+    calls: list[str] = []
+    real = storage._move_ai_summary_cache
+
+    def fail_on_the_summary(db, old_norm, new_norm):
+        # The source's cache moves first; fail once the summary's rows have moved.
+        calls.append(old_norm)
+        if old_norm.endswith(".consolidated.md"):
+            raise RuntimeError("summary move failed")
+        return real(db, old_norm, new_norm)
+
+    monkeypatch.setattr(storage, "_move_ai_summary_cache", fail_on_the_summary)
+
+    with pytest.raises(StorageError):
+        await storage.update_chunks_scope_for_source(src, tgt, "user", None)
+
+    assert [c.endswith(".consolidated.md") for c in calls] == [False, True]
+    assert len(_summary_rows(storage, src)) == 3
+    assert _summary_rows(storage, tgt) == []
+    assert [r[0] for r in _summary_rows(storage, _summary_path(src))] == [summary_id]
+    assert not storage._get_db().in_transaction
