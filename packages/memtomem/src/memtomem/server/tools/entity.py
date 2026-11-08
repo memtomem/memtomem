@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from memtomem.models import InvalidFilterSyntaxError, ScopeFilter
+from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter, ScopeFilter
 from memtomem.runtime.project_context import _resolve_project_context_root
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
@@ -189,8 +189,10 @@ async def mem_entity_search(
 
     Args:
         entity_type: Filter by type (person, date, decision, action_item, technology, concept)
-        value: Search for entities matching this value (substring match)
-        namespace: Namespace scope
+        value: Search for entities matching this value (literal substring match)
+        namespace: Exact name, comma list, glob (``proj:*``) or ``!system``.
+            Omitted, the session namespace applies; with neither, system
+            namespaces (``archive:*`` by default) are hidden.
         limit: Maximum results (default 20)
         scope: ADR-0011 tier filter — value, comma list (``user,project_local``)
             or glob (``project_*``), not both. Omitted, the default merge
@@ -206,16 +208,24 @@ async def mem_entity_search(
     # caller mistake, and an empty result set would read as "no such
     # entities" instead of "that filter never ran".
     try:
+        NamespaceFilter.parse(namespace)
         scope = validate_scope_vocabulary(scope)
         scope_filter = ScopeFilter.parse(scope)
     except InvalidFilterSyntaxError as e:
         return f"Error: {e}"
 
     app = await _get_app_initialized(ctx)
+    # Resolved the way mem_search and mem_recall resolve it: the session
+    # namespace stands in for an omitted one, and system namespaces are hidden
+    # unless the caller named them.
+    ns_filter = NamespaceFilter.parse(
+        namespace or app.current_namespace,
+        system_prefixes=tuple(app.config.search.system_namespace_prefixes),
+    )
     results = await app.storage.search_entities(
         entity_type=entity_type,
         value=value,
-        namespace=namespace,
+        namespace_filter=ns_filter,
         limit=limit,
         scope_filter=scope_filter,
         project_context_root=_resolve_project_context_root(app),
