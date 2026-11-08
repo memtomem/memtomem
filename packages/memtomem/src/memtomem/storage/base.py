@@ -351,6 +351,13 @@ class StorageBackend(Protocol):
     # neighbours are a seek, and the counts are aggregates, so neither grows
     # with the file. Returns one entry per requested anchor; ``None`` means
     # that id is not a row of ``source_file`` (deleted, or re-indexed away).
+    #
+    # ``hide_unavailable`` has no default because it names the surface. Search
+    # passes true: a neighbour under an availability hold or a pending source
+    # check, including a policy summary whose parent is, is neither returned
+    # nor counted, as ranked search hides it (#3114). ``mem_expand`` passes
+    # false: it reads by id, where those rows stay readable for recovery. A row
+    # withheld by a redaction hold is left out either way.
     async def get_context_windows(
         self,
         source_file: Path,
@@ -362,6 +369,7 @@ class StorageBackend(Protocol):
         scope_filter: ScopeFilter | None,
         project_context_root: Path | None,
         as_of_unix: int | None,
+        hide_unavailable: bool,
     ) -> dict[UUID, ContextWindowRows | None]: ...
     # ``recall_chunks``'s ``chunk_ids`` restricts the recall to an explicit id
     # set while keeping every other filter this method applies — notably the

@@ -1312,6 +1312,7 @@ class SearchPipeline:
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
                     as_of_unix=as_of_unix,
+                    hide_unavailable=True,
                 )
             )
 

@@ -30,6 +30,16 @@ a hold can be committed, or released together with the row's deletion,
 between two statements, and either way a separate check judges a row other
 than the one being returned.
 
+The two adjacency surfaces part on availability holds. A search's context
+window hides a neighbour that ranked search would hide for an availability
+hold or a pending source check, including a policy summary whose parent is
+held, because the defaults that shaped the search apply to what surrounds
+its hits (#3114). ``mem_expand`` starts from an id, so its neighbours keep the
+namespace, scope, validity and redaction screens but not that one, the same
+recovery read an availability-held anchor gets. Storage applies the hold
+screen in the reading statement (``get_context_windows(...,
+hide_unavailable=...)``); this module has no copy of it.
+
 Within adjacency the split is between *visibility* and *selection*. Visibility
 filters say what the caller may see and apply to neighbours; selection filters
 (chunk types, tags, created-date bounds) say what the caller searched for, and
