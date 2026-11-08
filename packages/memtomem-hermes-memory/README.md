@@ -196,9 +196,9 @@ turn mirroring off, end the Hermes sessions, then call
 "op": "purge", "ts": <now>})` on the memtomem server. The hash is the folder name under
 `hermes-mirror/`; `<now>` is the current time in nanoseconds **on the machine Hermes runs on**
 (`python3 -c 'import time; print(time.time_ns())'`), because memtomem compares it with the times
-the provider stamped on its writes. That deletes the rows, empties the file and its search
-entries, and refuses any write stamped earlier that is still on its way; the next write after it
-starts the target again. `"op": "reconcile"` (no `ts`) re-renders a target's file, for example
+the provider stamped on its writes. That deletes every row stamped at or before `<now>`, rewrites
+the file and its search entries without them, and refuses any write stamped earlier that is still
+on its way; a write stamped later is kept, and the next write after it starts the target again. `"op": "reconcile"` (no `ts`) re-renders a target's file, for example
 after it was edited or deleted by hand.
 
 ## Sharing the connection with the model

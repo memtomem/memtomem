@@ -1690,3 +1690,20 @@ def test_a_flush_remainder_below_hermes_minimum_timeout_starts_nothing(
     with mirror.cond:
         mirror.flush_until = time.monotonic() + 3
     assert 1.0 <= mod._rpc_timeout(mirror) <= 3
+
+
+def test_shutdown_returns_after_the_queued_writes_are_sent(mod: Any, hermes: Any) -> None:
+    # Hermes's process may exit right after shutdown(): the daemon worker must not be
+    # left to flush on its own.
+    provider = mirroring(mod, hermes)
+    gate = threading.Event()
+
+    def slow(call: Any) -> dict:
+        gate.wait(0.3)
+        return mod_reply(hermes)
+
+    hermes.respond_mirror(slow, slow)
+    provider.on_memory_write("add", "memory", "A")
+    provider.on_memory_write("add", "memory", "B")
+    provider.shutdown()
+    assert [c.arguments["params"]["content"] for c in hermes.mirror_calls] == ["A", "B"]

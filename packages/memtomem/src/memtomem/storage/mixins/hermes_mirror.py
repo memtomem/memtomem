@@ -127,12 +127,14 @@ class HermesMirrorMixin:
         }
 
     async def hermes_mirror_purge(self, owner: str, target: str, ts: int) -> dict[str, Any]:
-        """Delete every row of the target and fence out operations at or before ``ts``.
+        """Delete the target's rows written at or before ``ts``, and fence those out.
 
-        A purge older than the current fence changes nothing (``fenced``). The
-        purge always moves ``revision`` and sets ``render_pending`` otherwise,
-        so the renderer writes the now-empty document and the index drops the
-        old chunks through its ordinary diff.
+        A row newer than the purge survives it (live or tombstone), so a purge and a
+        later write converge whatever order they arrive in, as every other operation
+        does. A purge older than the current fence changes nothing (``fenced``).
+        Otherwise it moves ``revision`` and sets ``render_pending``, so the renderer
+        rewrites the document and the index drops the purged chunks through its
+        ordinary diff.
         """
         db = self._get_db()  # type: ignore[attr-defined]
         with self._rolls_back_if_standalone(db):  # type: ignore[attr-defined]
@@ -147,8 +149,8 @@ class HermesMirrorMixin:
             removed = 0
             if not fenced:
                 cur = db.execute(
-                    "DELETE FROM hermes_mirror_entries WHERE owner = ? AND target = ?",
-                    (owner, target),
+                    "DELETE FROM hermes_mirror_entries WHERE owner = ? AND target = ? AND ts <= ?",
+                    (owner, target, ts),
                 )
                 removed = cur.rowcount
                 revision += 1

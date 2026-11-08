@@ -1188,6 +1188,11 @@ class MemtomemMemoryProvider(MemoryProvider):
             mirror = self._mirror
         if mirror is not None:
             _retire(mirror)
+            # The worker is a daemon thread: once Hermes's process exits it is gone, so the
+            # flush happens here, bounded by its budget, outside every provider lock.
+            thread = mirror.thread
+            if thread is not None and thread.is_alive():
+                thread.join(max(0.0, mirror.flush_until - time.monotonic()) + 0.5)
         _event("shutdown", **self._base())
 
     def on_session_switch(

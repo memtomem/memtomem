@@ -168,3 +168,41 @@ async def test_writes_compose_inside_an_owner_transaction(storage):
 
 async def test_snapshot_of_an_unknown_target_is_empty(storage):
     assert await storage.hermes_mirror_snapshot(OWNER, "user") == (0, [])
+
+
+async def test_a_purge_keeps_rows_newer_than_itself_in_either_order(storage):
+    await storage.hermes_mirror_apply(OWNER, TARGET, [add("A", 60)])
+    await storage.hermes_mirror_purge(OWNER, TARGET, 50)
+    first = await live(storage)
+    other = "c" * 32
+    await storage.hermes_mirror_purge(other, TARGET, 50)
+    await storage.hermes_mirror_apply(other, TARGET, [add("A", 60)])
+    second = await live(storage, other)
+    assert first == second == [("A", "text-A", 60)]
+
+
+async def test_a_purge_keeps_a_newer_tombstone_so_an_older_add_stays_dead(storage):
+    await storage.hermes_mirror_apply(OWNER, TARGET, [tomb("A", 60)])
+    await storage.hermes_mirror_purge(OWNER, TARGET, 50)
+    out = await storage.hermes_mirror_apply(OWNER, TARGET, [add("A", 55)])
+    assert out["fenced"] is False and out["changed"] is False
+    assert await live(storage) == []
+
+
+async def test_every_order_of_writes_and_a_purge_converges(storage):
+    ops = [
+        ("apply", [add("A", 10)]),
+        ("apply", [add("B", 70)]),
+        ("purge", 50),
+        ("apply", [tomb("B", 80)]),
+    ]
+    results = set()
+    for i, order in enumerate(itertools.permutations(ops)):
+        owner = f"{i + 1000:032x}"
+        for kind, arg in order:
+            if kind == "purge":
+                await storage.hermes_mirror_purge(owner, TARGET, arg)
+            else:
+                await storage.hermes_mirror_apply(owner, TARGET, list(arg))
+        results.add(tuple(await live(storage, owner)))
+    assert results == {()}

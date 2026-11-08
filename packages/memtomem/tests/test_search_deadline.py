@@ -363,3 +363,44 @@ class TestTool:
 
         out = await mem_search(query="anything", deadline_ms=bad)  # type: ignore[arg-type]
         assert out.startswith("Error: deadline_ms must be a positive integer")
+
+
+class TestEveryLeaseOfTheSearchTask:
+    async def test_a_real_search_with_the_pool_exhausted_expires_promptly(
+        self, bm25_only_components
+    ):
+        comp, _ = bm25_only_components
+        storage = comp.storage
+        if not storage._read_pool:
+            pytest.skip("no read pool configured")
+        with storage._read_pool_lock:
+            busy = {id(c) for c in storage._read_pool}
+            storage._in_use_readers |= busy
+        try:
+            started = time.monotonic()
+            with pytest.raises(SearchDeadlineExceeded):
+                await comp.search_pipeline.search("anything", top_k=3, deadline_ms=100)
+            assert time.monotonic() - started < 3
+        finally:
+            with storage._read_pool_lock:
+                storage._in_use_readers -= busy
+            storage._notify_reader_waiters(all_waiters=True)
+
+    async def test_the_ambient_budget_applies_to_the_search_task_only(self):
+        from memtomem.search.deadline import ambient_read_deadline, bound_to_current_task
+
+        deadline = SearchDeadline.from_ms(60_000)
+        with bound_to_current_task(deadline):
+            assert ambient_read_deadline() == deadline.at
+
+            async def background():
+                return ambient_read_deadline()
+
+            assert await asyncio.create_task(background()) is None
+        assert ambient_read_deadline() is None
+
+    async def test_without_a_budget_nothing_is_bound(self):
+        from memtomem.search.deadline import ambient_read_deadline, bound_to_current_task
+
+        with bound_to_current_task(None):
+            assert ambient_read_deadline() is None

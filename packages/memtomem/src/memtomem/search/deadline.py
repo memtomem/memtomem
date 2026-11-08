@@ -9,10 +9,47 @@ runs: callers hold ``None`` and every helper is skipped.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import contextvars
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from memtomem.errors import SearchDeadlineExceeded
+
+# ``(task, deadline)`` of the budgeted search running in that task. ``_lease_read_db`` applies it
+# only when the lease is opened by that same task: a background task started from the search
+# (an access-count increment, a persisted observation) copies this context but is another task,
+# so its reads are never cut short by a budget that is not theirs.
+_SEARCH_READ_DEADLINE: contextvars.ContextVar[tuple[object, float] | None] = contextvars.ContextVar(
+    "memtomem_search_read_deadline", default=None
+)
+
+
+def ambient_read_deadline() -> float | None:
+    """The budget of the search running in the current task, if it has one."""
+    bound = _SEARCH_READ_DEADLINE.get()
+    if bound is None:
+        return None
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return None
+    return bound[1] if task is not None and task is bound[0] else None
+
+
+@contextlib.contextmanager
+def bound_to_current_task(deadline: SearchDeadline | None) -> Iterator[None]:
+    """Make ``deadline`` the ambient read budget of the current task for the block."""
+    if deadline is None:
+        yield
+        return
+    token = _SEARCH_READ_DEADLINE.set((asyncio.current_task(), deadline.at))
+    try:
+        yield
+    finally:
+        _SEARCH_READ_DEADLINE.reset(token)
 
 
 @dataclass(frozen=True, slots=True)

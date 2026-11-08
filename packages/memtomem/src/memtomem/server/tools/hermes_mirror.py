@@ -369,13 +369,17 @@ async def mem_hermes_mirror_apply(
         return mismatch
     deadline = None if deadline_ms is None else started + deadline_ms / 1000
 
+    # ``_validate`` guaranteed these for the ops that use them; the ``or`` defaults only
+    # give the type checker non-optional values.
+    new_text = content or ""
+    old_text = previous_content or ""
+    write_ts = ts or 0
     content_refused = False
     writes: list[MirrorWrite] = []
     previous_key: str | None = None
     if op in ("add", "replace"):
-        assert content is not None
         guard = privacy.enforce_write_guard(
-            content,
+            new_text,
             surface="mem_hermes_mirror_apply",
             scope="user",
             audit_context={"owner": owner, "target": target, "op": op},
@@ -390,12 +394,10 @@ async def mem_hermes_mirror_apply(
             # lands, so a refused replacement never leaves it searchable.
             content_refused = True
     if op in ("remove", "replace"):
-        assert previous_content is not None and ts is not None
-        previous_key = entry_key(previous_content)
-        writes.append(MirrorWrite(previous_key, "", ts, True))
+        previous_key = entry_key(old_text)
+        writes.append(MirrorWrite(previous_key, "", write_ts, True))
     if op in ("add", "replace") and not content_refused:
-        assert content is not None and ts is not None
-        writes.append(MirrorWrite(entry_key(content), content, ts, False))
+        writes.append(MirrorWrite(entry_key(new_text), new_text, write_ts, False))
     commit_ts = ts if ts is not None else 0
 
     try:

@@ -767,6 +767,12 @@ class SqliteBackend(
         """
         if getattr(self, "_closing", False):
             raise StorageError("Database is closing")
+        if deadline is None:
+            # The budget of a search running in this task, for the reads it makes itself
+            # (visibility epoch, hidden counts, summary lookup, boosts) — see search/deadline.py.
+            from memtomem.search.deadline import ambient_read_deadline
+
+            deadline = ambient_read_deadline()
         if deadline is not None and time.monotonic() >= deadline:
             raise SearchDeadlineExceeded(
                 "search deadline exceeded before a read connection was taken; "

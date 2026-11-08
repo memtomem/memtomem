@@ -102,6 +102,7 @@ from memtomem.models import (
     SearchResult,
 )
 from memtomem.search.deadline import SearchDeadline
+from memtomem.search.deadline import bound_to_current_task
 from memtomem.search.deadline import check as check_deadline
 from memtomem.search.fusion import reciprocal_rank_fusion
 from memtomem.search.visibility import chunk_valid_at, neighbor_visible
@@ -1099,6 +1100,8 @@ class SearchPipeline:
                 scope_filter=scope_filter,
                 project_context_root=project_context_root,
             )
+        except SearchDeadlineExceeded:
+            raise
         except Exception:
             _log_rescue_failure("summary_lookup", "session-summary lookup failed; skipping rescue")
             if report_failure is not None:
@@ -1706,7 +1709,11 @@ class SearchPipeline:
         # The component generation is held over the same span (#2180) for the
         # same reason one level up: the dense leg awaits ``self._embedder``,
         # and ``revert_to_stored`` retires that embedder mid-search.
-        with self._generation.hold(), self._lease_reranker() as (reranker, rerank_cfg):
+        with (
+            self._generation.hold(),
+            self._lease_reranker() as (reranker, rerank_cfg),
+            bound_to_current_task(deadline),
+        ):
             apply_rerank = reranker is not None and rerank_cfg is not None and rerank is not False
             check_deadline(deadline, "start")
 
@@ -1832,6 +1839,8 @@ class SearchPipeline:
                         list(ns_filter.exclude_prefixes),
                         boundary=(scope_filter, project_context_root),
                     )
+                except SearchDeadlineExceeded:
+                    raise
                 except Exception:
                     logger.debug("count_chunks_by_ns_prefix failed; skipping hint", exc_info=True)
                     hidden_by_prefix = {}
