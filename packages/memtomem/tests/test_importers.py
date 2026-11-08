@@ -132,6 +132,203 @@ class TestImportNotion:
         imported = await import_notion(zip_path, output)
         assert len(imported) == 1
 
+    @pytest.mark.asyncio
+    async def test_notion_sibling_pages_collision_directory(self, tmp_path):
+        """Notion sibling pages sharing a title disambiguate with UUID prefixes (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        (export_dir / "Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md").write_text(
+            "# Meeting Notes 1\nContent 1",
+            encoding="utf-8",
+        )
+        (export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md").write_text(
+            "# Meeting Notes 2\nContent 2",
+            encoding="utf-8",
+        )
+
+        output = tmp_path / "out"
+        imported = await import_notion(export_dir, output)
+
+        assert len(imported) == 2
+        assert len(set(imported)) == 2
+        assert all(p.exists() for p in imported)
+
+        f1 = output / "Meeting Notes (a1b2c3d4).md"
+        f2 = output / "Meeting Notes (f0e1d2c3).md"
+        plain = output / "Meeting Notes.md"
+        assert f1.exists()
+        assert f2.exists()
+        assert not plain.exists()
+        assert "Content 1" in f1.read_text(encoding="utf-8")
+        assert "Content 2" in f2.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_notion_sibling_pages_collision_zip(self, tmp_path):
+        """Notion sibling pages in a ZIP archive disambiguate with UUID prefixes (#3113)."""
+        zip_path = tmp_path / "export.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md", "# First")
+            zf.writestr("Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md", "# Second")
+
+        output = tmp_path / "out"
+        imported = await import_notion(zip_path, output)
+
+        assert len(imported) == 2
+        assert len(set(imported)) == 2
+        f1 = output / "Meeting Notes (a1b2c3d4).md"
+        f2 = output / "Meeting Notes (f0e1d2c3).md"
+        plain = output / "Meeting Notes.md"
+        assert f1.exists()
+        assert f2.exists()
+        assert not plain.exists()
+        assert "# First" in f1.read_text(encoding="utf-8")
+        assert "# Second" in f2.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_notion_sibling_pages_unique_page_plain_name(self, tmp_path):
+        """A non-colliding page next to colliding siblings keeps its plain name (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        (export_dir / "Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md").write_text(
+            "# Meeting Notes 1", encoding="utf-8"
+        )
+        (export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md").write_text(
+            "# Meeting Notes 2", encoding="utf-8"
+        )
+        (export_dir / "Project Plan 11223344556677889900aabbccddeeff.md").write_text(
+            "# Project Plan", encoding="utf-8"
+        )
+
+        output = tmp_path / "out"
+        imported = await import_notion(export_dir, output)
+
+        assert len(imported) == 3
+        assert (output / "Meeting Notes (a1b2c3d4).md").exists()
+        assert (output / "Meeting Notes (f0e1d2c3).md").exists()
+        assert (output / "Project Plan.md").exists()
+        assert not (output / "Project Plan (11223344).md").exists()
+
+    @pytest.mark.asyncio
+    async def test_notion_reimport_updates_in_place_no_duplicate(self, tmp_path):
+        """Re-importing the same export updates existing files in place (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        file1 = export_dir / "Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md"
+        file2 = export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md"
+        file1.write_text("# Initial 1", encoding="utf-8")
+        file2.write_text("# Initial 2", encoding="utf-8")
+
+        output = tmp_path / "out"
+        imported_run1 = await import_notion(export_dir, output)
+        assert len(imported_run1) == 2
+
+        # Edit content in export
+        file1.write_text("# Updated 1", encoding="utf-8")
+
+        imported_run2 = await import_notion(export_dir, output)
+        assert len(imported_run2) == 2
+        assert set(imported_run1) == set(imported_run2)
+
+        f1 = output / "Meeting Notes (a1b2c3d4).md"
+        assert "Updated 1" in f1.read_text(encoding="utf-8")
+        assert len(list(output.glob("*.md"))) == 2
+
+    @pytest.mark.asyncio
+    async def test_notion_links_resolve_colliding_siblings_and_nested(self, tmp_path):
+        """Relative links to colliding siblings, plain pages, and nested folders resolve correctly (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        sub_dir = export_dir / "Subfolder"
+        sub_dir.mkdir()
+
+        (export_dir / "Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md").write_text(
+            "# Sibling 1", encoding="utf-8"
+        )
+        (export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md").write_text(
+            "# Sibling 2", encoding="utf-8"
+        )
+        (export_dir / "Project Plan 11223344556677889900aabbccddeeff.md").write_text(
+            "# Plan", encoding="utf-8"
+        )
+        (sub_dir / "Nested Note 22334455667788990011223344556677.md").write_text(
+            "# Nested 1", encoding="utf-8"
+        )
+        (sub_dir / "Nested Note 8899aabbccddeeff0011223344556677.md").write_text(
+            "# Nested 2", encoding="utf-8"
+        )
+
+        index_content = (
+            "# Index\n\n"
+            "- [First](Meeting%20Notes%20a1b2c3d4e5f60718293a4b5c6d7e8f90.md)\n"
+            "- [Second](Meeting%20Notes%20f0e1d2c3b4a5968778695a4b3c2d1e0f.md)\n"
+            "- [Plan](Project%20Plan%2011223344556677889900aabbccddeeff.md)\n"
+            "- [Nested](Subfolder/Nested%20Note%2022334455667788990011223344556677.md)\n"
+        )
+        (export_dir / "Index 99999999999999999999999999999999.md").write_text(
+            index_content, encoding="utf-8"
+        )
+
+        output = tmp_path / "out"
+        await import_notion(export_dir, output)
+
+        index_text = (output / "Index.md").read_text(encoding="utf-8")
+        assert "[First](Meeting Notes (a1b2c3d4).md)" in index_text
+        assert "[Second](Meeting Notes (f0e1d2c3).md)" in index_text
+        assert "[Plan](Project Plan.md)" in index_text
+        assert "[Nested](Subfolder/Nested Note (22334455).md)" in index_text
+
+    @pytest.mark.asyncio
+    async def test_notion_add_third_sibling_preserves_existing_names(self, tmp_path):
+        """Adding a third sibling later does not rename existing disambiguated siblings (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        (export_dir / "Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md").write_text(
+            "# Sibling 1", encoding="utf-8"
+        )
+        (export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md").write_text(
+            "# Sibling 2", encoding="utf-8"
+        )
+
+        output = tmp_path / "out"
+        await import_notion(export_dir, output)
+
+        assert (output / "Meeting Notes (a1b2c3d4).md").exists()
+        assert (output / "Meeting Notes (f0e1d2c3).md").exists()
+
+        # Add third sibling
+        (export_dir / "Meeting Notes 1234567890abcdef1234567890abcdef.md").write_text(
+            "# Sibling 3", encoding="utf-8"
+        )
+
+        await import_notion(export_dir, output)
+
+        assert (output / "Meeting Notes (a1b2c3d4).md").exists()
+        assert (output / "Meeting Notes (f0e1d2c3).md").exists()
+        assert (output / "Meeting Notes (12345678).md").exists()
+
+    @pytest.mark.asyncio
+    async def test_notion_siblings_prefix_collision_uses_full_uuid(self, tmp_path):
+        """Siblings sharing the same 8-hex prefix fall back to full 32-hex UUIDs (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        (export_dir / "Meeting Notes a1b2c3d4111111111111111111111111.md").write_text(
+            "# Sibling A", encoding="utf-8"
+        )
+        (export_dir / "Meeting Notes a1b2c3d4222222222222222222222222.md").write_text(
+            "# Sibling B", encoding="utf-8"
+        )
+        (export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md").write_text(
+            "# Sibling C", encoding="utf-8"
+        )
+
+        output = tmp_path / "out"
+        imported = await import_notion(export_dir, output)
+
+        assert len(imported) == 3
+        assert (output / "Meeting Notes (a1b2c3d4111111111111111111111111).md").exists()
+        assert (output / "Meeting Notes (a1b2c3d4222222222222222222222222).md").exists()
+        assert (output / "Meeting Notes (f0e1d2c3).md").exists()
+
 
 class TestImportObsidian:
     @pytest.mark.asyncio
