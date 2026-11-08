@@ -98,10 +98,11 @@ def _report(
     as_of: int = 1000,
     deterministic: bool = True,
     decay: bool = False,
+    memtomem_version: str | None = None,
 ) -> dict:
     cases = sorted(cases, key=lambda c: c["case_id"])
     case_set = case_set_fingerprint([report_case_to_fingerprint_input(c) for c in cases])
-    return {
+    rep = {
         "schema_version": REPLAY_REPORT_SCHEMA_VERSION,
         "kind": REPLAY_REPORT_KIND,
         "as_of_unix": as_of,
@@ -118,6 +119,9 @@ def _report(
         "aggregate": {},
         "cases": cases,
     }
+    if memtomem_version is not None:
+        rep["memtomem_version"] = memtomem_version
+    return rep
 
 
 class TestClassification:
@@ -260,7 +264,7 @@ class TestAggregateCohort:
 
 class TestCompatibility:
     def test_identical_profile_note(self):
-        base = _report([_case("c1", retrieved=["r"], relevant=["r"])])
+        base = _report([_case("c1", retrieved=["r"], relevant=["r"])], memtomem_version="0.7.7")
         result = compare_reports(base, copy.deepcopy(base))
         assert result["compatibility"]["profile_match"] is True
         assert any("identical" in n for n in result["compatibility"]["notes"])
@@ -284,6 +288,62 @@ class TestCompatibility:
         result = compare_reports(base, cand)
         assert result["compatibility"]["deterministic_inputs"] is False
         assert any("nondeterministic" in n for n in result["compatibility"]["notes"])
+
+    def test_different_memtomem_versions_suppresses_zero_deltas_note_and_adds_reason(self):
+        base = _report([_case("c1", retrieved=["r"], relevant=["r"])], memtomem_version="0.7.6")
+        cand = _report([_case("c1", retrieved=["r"], relevant=["r"])], memtomem_version="0.7.7")
+        result = compare_reports(base, cand)
+        assert result["compatibility"]["profile_match"] is True
+        notes = result["compatibility"]["notes"]
+        assert not any("should be zero" in n for n in notes)
+        assert any("reports were produced by different memtomem versions" in n for n in notes)
+        assert any("deltas may include ranking changes" in n for n in notes)
+
+    def test_equal_memtomem_versions_with_identical_profile_emits_zero_deltas_note(self):
+        base = _report([_case("c1", retrieved=["r"], relevant=["r"])], memtomem_version="0.7.7")
+        cand = _report([_case("c1", retrieved=["r"], relevant=["r"])], memtomem_version="0.7.7")
+        result = compare_reports(base, cand)
+        assert result["compatibility"]["profile_match"] is True
+        notes = result["compatibility"]["notes"]
+        assert any("should be zero" in n for n in notes)
+        assert not any("different memtomem versions" in n for n in notes)
+
+    def test_one_report_missing_version_treated_as_unknown_producer(self):
+        base = _report([_case("c1", retrieved=["r"], relevant=["r"])], memtomem_version="0.7.7")
+        cand = _report([_case("c1", retrieved=["r"], relevant=["r"])])  # missing version
+        result = compare_reports(base, cand)
+        assert result["compatibility"]["profile_match"] is True
+        notes = result["compatibility"]["notes"]
+        assert not any("should be zero" in n for n in notes)
+        assert any(
+            "a report does not record the memtomem version that produced it; deltas may include ranking changes"
+            in n
+            for n in notes
+        )
+
+        # reverse order also accepted and notes unknown producer
+        rev = compare_reports(cand, base)
+        rev_notes = rev["compatibility"]["notes"]
+        assert not any("should be zero" in n for n in rev_notes)
+        assert any(
+            "a report does not record the memtomem version that produced it; deltas may include ranking changes"
+            in n
+            for n in rev_notes
+        )
+
+    def test_both_reports_missing_version_accepted_legacy(self):
+        base = _report([_case("c1", retrieved=["r"], relevant=["r"])])
+        cand = _report([_case("c1", retrieved=["r"], relevant=["r"])])
+        result = compare_reports(base, cand)
+        assert result["compatibility"]["profile_match"] is True
+        notes = result["compatibility"]["notes"]
+        assert not any("should be zero" in n for n in notes)
+        assert any(
+            "a report does not record the memtomem version that produced it; deltas may include ranking changes"
+            in n
+            for n in notes
+        )
+        assert not any("different memtomem versions" in n for n in notes)
 
 
 class TestValidation:
@@ -353,6 +413,16 @@ class TestValidation:
         case["included_in_aggregate"] = True
         with pytest.raises(EvalCaseError):
             compare_reports(base, tampered)
+
+    def test_invalid_memtomem_version_type_rejected(self):
+        base = _report([_case("c1", retrieved=["r"], relevant=["r"])])
+        bad = copy.deepcopy(base)
+        bad["memtomem_version"] = 123
+        with pytest.raises(EvalCaseError):
+            compare_reports(bad, base)
+        bad["memtomem_version"] = ""
+        with pytest.raises(EvalCaseError):
+            compare_reports(bad, base)
 
 
 def test_additive_evaluation_metadata_preserves_v1_comparison():

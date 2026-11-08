@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Quality Lab replay compare no longer claims metric deltas should be zero when
+  reports come from different memtomem versions (#3125).** Replay reports now
+  record `memtomem_version`. When comparing reports produced by different
+  versions, or when either report lacks the version (older releases), compare
+  suppresses the "profiles are identical — metric deltas should be zero" note and
+  instead notes why deltas may differ. Replay reports from intra-release commits
+  share the release's package version, so this comparison covers cross-release
+  changes. Reports missing the field remain fully supported, treated as unknown
+  producers.
+
 - **Notion sibling pages sharing a title in the same directory no longer overwrite each other during import (#3113).**
   When Notion exports multiple pages in the same folder with duplicate titles
   (disambiguated in Notion by trailing 32-hex UUIDs), stripping the UUIDs

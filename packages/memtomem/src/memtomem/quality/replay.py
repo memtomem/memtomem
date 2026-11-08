@@ -22,6 +22,7 @@ import time
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
+from memtomem import __version__
 from memtomem.errors import EvalCaseError
 from memtomem.privacy import has_emit_risk as _has_emit_risk
 from memtomem.quality import metrics
@@ -430,6 +431,7 @@ async def replay_cases(
 
     return {
         "schema_version": REPLAY_REPORT_SCHEMA_VERSION,
+        "memtomem_version": __version__,
         "kind": REPLAY_REPORT_KIND,
         "as_of_unix": pinned_as_of,
         "deterministic": not nd_stages,
