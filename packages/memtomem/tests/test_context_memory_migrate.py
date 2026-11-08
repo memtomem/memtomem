@@ -1740,6 +1740,23 @@ async def test_the_summary_cache_moves_with_the_policy_summary(bm25_only_compone
     assert meta[new_key] == "cached"
 
 
+async def test_chunk_descriptions_move_with_migrated_source(bm25_only_components):
+    comp, mem_dir = bm25_only_components
+    storage = comp.storage
+    src = mem_dir / "rule.md"
+    await _source_with_policy_summary(storage, src)
+    descriptions = {"h1": "A description of chunk 1"}
+    await storage.set_chunk_descriptions(src, descriptions)
+    assert await storage.get_chunk_descriptions(src) == descriptions
+
+    tgt = mem_dir / "moved" / "rule.md"
+    tgt.parent.mkdir()
+    assert await storage.update_chunks_scope_for_source(src, tgt, "user", None) == 3
+
+    assert await storage.get_chunk_descriptions(src) == {}
+    assert await storage.get_chunk_descriptions(tgt) == descriptions
+
+
 async def test_a_failed_summary_move_rolls_the_source_move_back(bm25_only_components, monkeypatch):
     from memtomem.errors import StorageError
 
