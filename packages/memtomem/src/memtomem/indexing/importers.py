@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import zipfile
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from pathlib import Path
 
@@ -247,15 +249,20 @@ async def import_notion(
                 continue
             sources.append((rel, p.name, p.read_text(encoding="utf-8", errors="replace")))
 
-    for rel, original_name, content in sources:
-        # Clean Notion-specific artifacts
-        content = _clean_notion_markdown(content)
+    # Pass 1: Group by (rel.parent, clean_stem) and build output mapping
+    mapping = _build_notion_output_mapping(sources)
 
-        # Clean filename (remove Notion UUID suffix)
-        clean_name = _clean_notion_filename(Path(original_name).stem) + ".md"
+    # Pass 2: Write files under the mapped name
+    for rel, original_name, content in sources:
+        canonical_parent = Path(os.path.normpath(rel.parent))
+        output_name = mapping[(canonical_parent, original_name)]
+
+        # Clean Notion-specific artifacts and fix links
+        content = _clean_notion_markdown(content, rel_parent=canonical_parent, link_mapping=mapping)
 
         # Preserve directory structure
-        target = output_dir / rel.parent / clean_name
+        parent_dir = output_dir / rel.parent
+        target = parent_dir / output_name
 
         final = _with_import_header(content, "notion", original_name)
         guard = enforce_write_guard(
@@ -499,30 +506,107 @@ def _with_import_header(content: str, source: str, original_file: str) -> str:
 
 # ── Notion helpers ───────────────────────────────────────────────────────
 
+_UUID_RE = re.compile(r"\s+([0-9a-f]{32})$", re.IGNORECASE)
+
+
+def _split_notion_uuid(stem: str) -> tuple[str, str | None]:
+    """Split trailing Notion 32-hex UUID suffix if present."""
+    m = _UUID_RE.search(stem)
+    if m is None:
+        return stem, None
+    clean = stem[: m.start()]
+    if not clean:
+        return stem, None
+    return clean, m.group(1).lower()
+
 
 def _clean_notion_filename(stem: str) -> str:
     """Remove Notion's UUID suffix from filenames. 'Page Name abc123def456' → 'Page Name'."""
-    # Notion appends a 32-char hex UUID at the end
-    cleaned = re.sub(r"\s+[0-9a-f]{32}$", "", stem)
-    return cleaned or stem
+    clean, _ = _split_notion_uuid(stem)
+    return clean
 
 
-def _clean_notion_markdown(content: str) -> str:
+def _build_notion_output_mapping(
+    sources: list[tuple[Path, str, str]],
+) -> dict[tuple[Path, str], str]:
+    """Build a mapping of (canonical_parent, original_filename) -> output_filename.
+
+    - Unique in directory after cleaning: keep cleaned name ('Page.md').
+    - Colliding siblings in directory: every member of that colliding group with
+      a UUID gets '<stem> (<first 8 hex of UUID>).md'. If two siblings share an
+      8-hex prefix, use full 32 hex for those two. A member without a UUID suffix
+      keeps the plain name.
+    """
+    groups: dict[tuple[Path, str], list[tuple[str, str | None]]] = defaultdict(list)
+    for rel, original_name, _ in sources:
+        canonical_parent = Path(os.path.normpath(rel.parent))
+        clean_stem, uuid = _split_notion_uuid(Path(original_name).stem)
+        groups[(canonical_parent, clean_stem)].append((original_name, uuid))
+
+    mapping: dict[tuple[Path, str], str] = {}
+    for (canonical_parent, clean_stem), members in groups.items():
+        if len(members) == 1:
+            orig_name, _ = members[0]
+            mapping[(canonical_parent, orig_name)] = f"{clean_stem}.md"
+            continue
+
+        prefix_counts = Counter(uuid[:8] for _, uuid in members if uuid is not None)
+        for orig_name, uuid in members:
+            if uuid is None:
+                mapping[(canonical_parent, orig_name)] = f"{clean_stem}.md"
+            else:
+                prefix = uuid[:8]
+                if prefix_counts[prefix] > 1:
+                    mapping[(canonical_parent, orig_name)] = f"{clean_stem} ({uuid}).md"
+                else:
+                    mapping[(canonical_parent, orig_name)] = f"{clean_stem} ({prefix}).md"
+
+    return mapping
+
+
+def _clean_notion_markdown(
+    content: str,
+    *,
+    rel_parent: Path | None = None,
+    link_mapping: dict[tuple[Path, str], str] | None = None,
+) -> str:
     """Clean Notion-specific markdown artifacts."""
     # Remove Notion's property tables at the top
     content = re.sub(r"^(\|[^\n]+\|\n)+\n", "", content)
 
     # Fix Notion's broken link format: [text](Page%20Name%20uuid.md) → [text](Page Name.md)
-    def _fix_link(m):
+    def _fix_link(m: re.Match[str]) -> str:
         text = m.group(1)
         href = m.group(2)
         # URL-decode and strip UUID
         from urllib.parse import unquote
 
         decoded = unquote(href)
+        fragment = ""
+        if "#" in decoded:
+            decoded, fragment = decoded.split("#", 1)
+            fragment = "#" + fragment
+        query = ""
+        if "?" in decoded:
+            decoded, query = decoded.split("?", 1)
+            query = "?" + query
+
         if decoded.endswith(".md"):
-            decoded = _clean_notion_filename(decoded[:-3]) + ".md"
-        return f"[{text}]({decoded})"
+            if "://" in decoded or decoded.startswith(("//", "mailto:")):
+                return f"[{text}]({decoded}{query}{fragment})"
+            decoded_path = Path(decoded)
+            parent = Path(".") if rel_parent is None else rel_parent
+            resolved_parent = Path(os.path.normpath(parent / decoded_path.parent))
+            target_key = (resolved_parent, decoded_path.name)
+            if link_mapping is not None and target_key in link_mapping:
+                mapped_name = link_mapping[target_key]
+                if str(decoded_path.parent) in ("", "."):
+                    decoded = mapped_name
+                else:
+                    decoded = f"{decoded_path.parent.as_posix()}/{mapped_name}"
+            else:
+                decoded = _clean_notion_filename(decoded[:-3]) + ".md"
+        return f"[{text}]({decoded}{query}{fragment})"
 
     content = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", _fix_link, content)
 
