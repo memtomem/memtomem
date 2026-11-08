@@ -664,7 +664,7 @@ class SearchOpsMixin:
         returned as a neighbour, and each statement judges that in its own
         snapshot, so no neighbour is returned that was withheld when read.
         With ``hide_unavailable`` the same goes for a row ranked search hides
-        for an availability hold or a pending check (#3114), with the same
+        for any other source hold or a pending check (#3114), with the same
         per-statement judgement; see the protocol for which caller passes it.
         """
         if not anchor_ids:

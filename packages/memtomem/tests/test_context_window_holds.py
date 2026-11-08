@@ -1,15 +1,15 @@
 """Source holds on the two context-window surfaces (#3114).
 
-Ranked search hides a row under an availability hold or a pending source
-check, and a consolidation-policy summary whose *parent* is. A search's
-context window has to hide the same rows, and leave them out of the position
-it reports, or a row search refused to return comes back as the context of
-the row next to it.
+Ranked search hides a row under any source hold or a pending source check,
+and a consolidation-policy summary whose *parent* is. A search's context
+window has to hide the same rows, and leave them out of the position it
+reports, or a row search refused to return comes back as the context of the
+row next to it.
 
-``mem_expand`` is the deliberate contrast: it starts from an id, and
-availability-held rows stay readable by id for recovery (ADR-0036). Its
-neighbours keep showing such rows, as its anchor does; only a redaction hold
-hides them there (``test_redaction_held_id_access.py``).
+``mem_expand`` is the deliberate contrast: it starts from an id, and a row
+held for anything but its content stays readable by id for recovery
+(ADR-0036). Its neighbours keep showing such rows, as its anchor does; only a
+redaction hold hides them there (``test_redaction_held_id_access.py``).
 
 The derived case is the one that reaches a caller organically: the anchor is
 an ordinary row of a ``.consolidated.md`` file, so nothing hides it, while the
@@ -26,14 +26,21 @@ from helpers import StubCtx
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
 from memtomem.server.context import AppContext
 from memtomem.server.tools import search
-from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
+from memtomem.storage.source_holds import (
+    REDACTION_BLOCKED_HOLD,
+    RELINKED_HOLD,
+    SCOPE_LOST_HOLD,
+)
 
 pytestmark = pytest.mark.asyncio
 
 PENDING = "pending"
-# Every way ranked search hides a row by its source; the redaction hold is
-# the control, hidden on both surfaces before this fix.
-HIDES = ["scan_missing", PENDING, REDACTION_BLOCKED_HOLD]
+# Every way ranked search hides a row by its source except the redaction
+# hold: an absence hold, the two presence-kept holds that are not about the
+# content, and a pending check. Search hides all of them; ``mem_expand`` none.
+NOT_WITHHELD = ["scan_missing", RELINKED_HOLD, SCOPE_LOST_HOLD, PENDING]
+# The redaction hold is the control, hidden on both surfaces before this fix.
+HIDES = [*NOT_WITHHELD, REDACTION_BLOCKED_HOLD]
 AVAILABILITY = ["scan_missing", PENDING]
 
 
@@ -149,8 +156,8 @@ class TestSearchSurface:
 
 
 class TestIdSurface:
-    @pytest.mark.parametrize("how", AVAILABILITY)
-    async def test_mem_expand_still_shows_an_availability_held_neighbour(
+    @pytest.mark.parametrize("how", NOT_WITHHELD)
+    async def test_mem_expand_still_shows_a_neighbour_not_held_for_its_content(
         self, bm25_only_components, how
     ):
         """Pinned on purpose: the id surface keeps the recovery read (ADR-0036)."""

@@ -6,8 +6,10 @@ reach a caller two other ways, and this module is the one place the rules are
 re-stated for both, so the surfaces cannot drift apart:
 
 - **By adjacency** — the context-window neighbours of a hit, and
-  ``mem_expand``'s window. Read in bulk by source file, so no filtered query
-  ever touches them. :func:`neighbor_visible` (#2192, #2233).
+  ``mem_expand``'s window. Read in bulk by source file, not by the search's
+  query, so storage screens only source holds there (see below) and the
+  namespace, scope and validity rules are re-stated here.
+  :func:`neighbor_visible` (#2192, #2233).
 - **By id** — ``mem_read`` and every other surface that takes a chunk id.
   :func:`resolve_visible_chunk` (ADR-0036, #2238).
 
@@ -30,14 +32,14 @@ a hold can be committed, or released together with the row's deletion,
 between two statements, and either way a separate check judges a row other
 than the one being returned.
 
-The two adjacency surfaces part on availability holds. A search's context
-window hides a neighbour that ranked search would hide for an availability
-hold or a pending source check, including a policy summary whose parent is
-held, because the defaults that shaped the search apply to what surrounds
-its hits (#3114). ``mem_expand`` starts from an id, so its neighbours keep the
-namespace, scope, validity and redaction screens but not that one, the same
-recovery read an availability-held anchor gets. Storage applies the hold
-screen in the reading statement (``get_context_windows(...,
+The two adjacency surfaces part on the other source holds. A search's
+context window hides a neighbour that ranked search would hide for any
+source hold or a pending source check, including a policy summary whose
+parent is held, because the defaults that shaped the search apply to what
+surrounds its hits (#3114). ``mem_expand`` starts from an id, so its
+neighbours keep the namespace, scope, validity and redaction screens but
+not the rest, the same recovery read such a held anchor gets. Storage
+applies the hold screen in the reading statement (``get_context_windows(...,
 hide_unavailable=...)``); this module has no copy of it.
 
 Within adjacency the split is between *visibility* and *selection*. Visibility

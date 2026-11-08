@@ -354,8 +354,8 @@ async def mem_expand(
     rather than surfacing. The chunk id does not widen that — expanding a
     chunk in a hidden namespace returns the chunk with little or no context.
     Use mem_search(namespace=..., context_window=N) to read around one.
-    Unlike mem_search, a neighbour whose source is only missing or
-    unavailable is shown, as such an anchor is; a redaction hold hides it.
+    Unlike mem_search, a neighbour whose source is held for anything but a
+    redaction hold, or pending a check, is shown; a redaction hold hides it.
 
     The addressed chunk must itself be inside the caller's project boundary
     (ADR-0011); an id from another project reads as not-found, and so does a
@@ -385,7 +385,7 @@ async def mem_expand(
     # redaction hold withholds at that read, so one committed in between stops
     # at the anchor already read while it was readable (#2777). The flag stays
     # out of ``spec``, which ``neighbor_visible`` also takes: this is the id
-    # surface, where availability-held rows stay readable (#3114).
+    # surface, where only a redaction hold makes a row unreadable (#3114).
     windows = await app.storage.get_context_windows(
         source_file, [uid], window, **spec, hide_unavailable=False
     )

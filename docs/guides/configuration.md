@@ -597,6 +597,15 @@ namespace returns that chunk with little or no context — reach for
 `mem_search(namespace=...)` instead. Selection filters — `tag_filter`, chunk types, created-date
 bounds — apply only to the matched result, not to what surrounds it.
 
+A search also leaves out the context rows it would not return as results
+because of their source: rows of a file it holds back (for example because the
+file went missing or could not be read) or that is waiting for a check, and
+consolidation summaries whose original note is in that state.
+`mem_do(action="expand", ...)` still shows those rows, because it reads by chunk
+id and they stay readable that way for recovery. The one exception is a file
+held because its content was refused for a secret: its rows are hidden from
+both.
+
 ## Indexing
 
 For exact limits, code context, generic exclusions and migration previews, see
