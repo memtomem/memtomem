@@ -118,6 +118,17 @@ _SQL_MAX_PARAMS = 900
 _T = TypeVar("_T")
 
 
+def _path_held_or_pending(db: sqlite3.Connection, source: str) -> bool:
+    return (
+        db.execute(
+            "SELECT 1 FROM held_sources WHERE source_file=? "
+            "UNION ALL SELECT 1 FROM pending_source_checks WHERE source_file=? LIMIT 1",
+            (source, source),
+        ).fetchone()
+        is not None
+    )
+
+
 def _param_batches(values: Sequence[_T]) -> Iterator[Sequence[_T]]:
     """Slice *values* into runs that fit one ``IN (...)`` clause.
 
@@ -2775,16 +2786,11 @@ class SqliteBackend(
             # A bound parameter, not CURRENT_TIMESTAMP: SQLite renders that as
             # a space-separated, offset-less string, which sorts before every
             # canonical ISO row and skews lexical MAX(updated_at) orderings.
+            stamp = utc_stamp(datetime.now(timezone.utc))
             db.execute(
                 "UPDATE chunks SET source_file=?, scope=?, project_root=?, "
                 "updated_at=? WHERE source_file=?",
-                (
-                    new_norm,
-                    new_scope,
-                    project_root,
-                    utc_stamp(datetime.now(timezone.utc)),
-                    old_norm,
-                ),
+                (new_norm, new_scope, project_root, stamp, old_norm),
             )
             # Batched (#2265): ``rowids`` is the file's whole row set. The
             # extra ``new_norm`` parameter rides along in each batch, so the
@@ -2816,21 +2822,8 @@ class SqliteBackend(
             # by ``old`` because that's the one whose signature matched
             # the chunk hashes we just rewrote. After the swap, delete
             # the old key so the orphan can't drift back in.
-            old_summary_key = f"{_AI_SUMMARY_KEY_PREFIX}{old_norm}"
-            new_summary_key = f"{_AI_SUMMARY_KEY_PREFIX}{new_norm}"
-            old_summary = db.execute(
-                "SELECT value FROM _memtomem_meta WHERE key=?",
-                (old_summary_key,),
-            ).fetchone()
-            if old_summary is not None:
-                db.execute(
-                    "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
-                    (new_summary_key, old_summary[0]),
-                )
-                db.execute(
-                    "DELETE FROM _memtomem_meta WHERE key=?",
-                    (old_summary_key,),
-                )
+            self._move_ai_summary_cache(db, old_norm, new_norm)
+            self._carry_policy_summary(db, old_norm, new_norm, new_scope, project_root, stamp)
             if owns_txn:
                 db.commit()
         except Exception as exc:
@@ -2840,6 +2833,68 @@ class SqliteBackend(
                 f"update_chunks_scope_for_source failed, transaction rolled back: {exc}"
             ) from exc
         return len(rowids)
+
+    @staticmethod
+    def _move_ai_summary_cache(db: sqlite3.Connection, old_norm: str, new_norm: str) -> None:
+        old_key = f"{_AI_SUMMARY_KEY_PREFIX}{old_norm}"
+        row = db.execute("SELECT value FROM _memtomem_meta WHERE key=?", (old_key,)).fetchone()
+        if row is not None:
+            db.execute(
+                "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+                (f"{_AI_SUMMARY_KEY_PREFIX}{new_norm}", row[0]),
+            )
+            db.execute("DELETE FROM _memtomem_meta WHERE key=?", (old_key,))
+
+    def _carry_policy_summary(
+        self,
+        db: sqlite3.Connection,
+        old_norm: str,
+        new_norm: str,
+        new_scope: str,
+        project_root: str | None,
+        stamp: str,
+    ) -> None:
+        """Move a source's policy summary with it, inside the caller's transaction (#3128).
+
+        Left behind, the summary is detached: an orphan scan holds it, and the
+        originals' ``consolidated_into`` edges point at a summary that is not at
+        the source's summary path, so the policy reads them as another
+        summary's coverage and never consolidates the source again. Ids are
+        kept, so those edges follow. The summary stays where it is when the
+        old path also holds rows the policy does not own, when it is held or
+        pending in its own right (#3120), or when the new path is occupied.
+        """
+        old_summary = old_norm + CONSOLIDATED_SUFFIX
+        new_summary = new_norm + CONSOLIDATED_SUFFIX
+        rows = db.execute(
+            "SELECT rowid, origin FROM chunks WHERE source_file=?", (old_summary,)
+        ).fetchall()
+        if not rows:
+            return
+        reason = None
+        if any(row[1] != ORIGIN_CONSOLIDATION_POLICY for row in rows):
+            reason = "the path also holds rows the policy does not own"
+        elif _path_held_or_pending(db, old_summary):
+            reason = "its path is held or pending"
+        elif db.execute(
+            "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (new_summary,)
+        ).fetchone() is not None or _path_held_or_pending(db, new_summary):
+            reason = "the destination path is occupied"
+        if reason is not None:
+            logger.info("Not moving the policy summary of %s with it: %s", old_norm, reason)
+            return
+        db.execute(
+            "UPDATE chunks SET source_file=?, scope=?, project_root=?, updated_at=? "
+            "WHERE source_file=?",
+            (new_summary, new_scope, project_root, stamp, old_summary),
+        )
+        for rowid_batch in _param_batches([row[0] for row in rows]):
+            db.execute(
+                f"UPDATE chunks_fts SET source_file=? "
+                f"WHERE rowid IN ({placeholders(len(rowid_batch))})",
+                [new_summary, *rowid_batch],
+            )
+        self._move_ai_summary_cache(db, old_summary, new_summary)
 
     async def rebuild_fts(self) -> int:
         """Rebuild the FTS5 index from the chunks table with this backend's tokenizer.
