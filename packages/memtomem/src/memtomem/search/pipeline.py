@@ -4,8 +4,8 @@ Stage order (keyword path, fixed — see ``CLAUDE.md`` invariants):
 expansion → BM25 + dense (parallel, with always-on scope-context filter
 per ADR-0011 §6 and the tag filter per #2191) → RRF fusion →
 cross-encoder rerank (optional) → source filter → validity filter →
-time-decay → MMR → access-freq boost → importance boost → entity-match
-boost → context-window expansion.
+time-decay → access-freq boost → importance boost → entity-match boost →
+MMR → context-window expansion.
 
 Stage 1 enrichment (session-summary rescue, RFC P1 Phase C): between
 retrieval and fusion, when the caller named no namespace and a
@@ -2193,29 +2193,6 @@ class SearchPipeline:
                     now=datetime.fromtimestamp(effective_as_of, tz=UTC),
                 )
 
-            # Stage 5: MMR diversity re-ranking
-            if self._mmr_config.enabled and not self._config.enable_dense:
-                # #1619: without dense retrieval there are no vectors to
-                # diversify over, so an explicitly enabled MMR silently did
-                # nothing. Say so once per process (INFO — it's a config
-                # mismatch, not a runtime failure); mem_status carries the
-                # same fact as a persistent `mmr_disabled_no_dense` warning.
-                # Gated on the *config*, not ``use_dense``: a per-call zero
-                # dense weight (#2092) or a mismatch suppression also skips
-                # MMR below, but the message's claims (enable_dense=False,
-                # matching mem_status warning) are only true config-side.
-                _log_mmr_no_dense_once()
-            if self._mmr_config.enabled and fused and use_dense:
-                from memtomem.search.mmr import apply_mmr
-
-                chunk_ids = [str(r.chunk.id) for r in fused]
-                emb_dict_raw = await self._storage.get_embeddings_for_chunks(chunk_ids)
-                if emb_dict_raw:
-                    from uuid import UUID
-
-                    emb_dict = {UUID(k): v for k, v in emb_dict_raw.items()}
-                    fused = apply_mmr(fused, emb_dict, lambda_param=self._mmr_config.lambda_param)
-
             # Stage 6: Access-frequency boost
             if self._access_config.enabled and fused:
                 from memtomem.search.access import apply_access_boost
@@ -2274,6 +2251,33 @@ class SearchPipeline:
                             len(entity_keys),
                             max_boost=getattr(self._entity_boost_config, "max_boost", 1.5),
                         )
+
+            # Stage 7c: MMR diversity re-ranking. Last of the ranking stages:
+            # decay and every boost re-sort by score, so a boost running after
+            # MMR would put its diversified order back into score order. Here
+            # MMR's relevance term sees the final boosted scores and nothing
+            # downstream re-sorts.
+            if self._mmr_config.enabled and not self._config.enable_dense:
+                # #1619: without dense retrieval there are no vectors to
+                # diversify over, so an explicitly enabled MMR silently did
+                # nothing. Say so once per process (INFO — it's a config
+                # mismatch, not a runtime failure); mem_status carries the
+                # same fact as a persistent `mmr_disabled_no_dense` warning.
+                # Gated on the *config*, not ``use_dense``: a per-call zero
+                # dense weight (#2092) or a mismatch suppression also skips
+                # MMR below, but the message's claims (enable_dense=False,
+                # matching mem_status warning) are only true config-side.
+                _log_mmr_no_dense_once()
+            if self._mmr_config.enabled and fused and use_dense:
+                from memtomem.search.mmr import apply_mmr
+
+                chunk_ids = [str(r.chunk.id) for r in fused]
+                emb_dict_raw = await self._storage.get_embeddings_for_chunks(chunk_ids)
+                if emb_dict_raw:
+                    from uuid import UUID
+
+                    emb_dict = {UUID(k): v for k, v in emb_dict_raw.items()}
+                    fused = apply_mmr(fused, emb_dict, lambda_param=self._mmr_config.lambda_param)
 
             # Stage 8: Context window expansion (post-scoring, does not affect
             # ranking). Neighbours inherit the visibility filters — system

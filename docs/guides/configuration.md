@@ -1218,7 +1218,7 @@ factor = 1.0 + (max_boost - 1.0) × (matched entities / query entities)
 So a query mentioning `sqlite` and `@alice` boosts a chunk carrying both by the
 full `max_boost`, one carrying only `sqlite` by half of it, and leaves a chunk
 carrying neither untouched. Runs as Stage 7b in the search pipeline (after the
-importance boost, before context-window expansion).
+importance boost, before MMR).
 
 **Populated at index time.** The indexer extracts entities for every chunk it
 writes (`indexing.extract_entities`, on by default), and rewrites them whenever
@@ -1281,6 +1281,10 @@ PascalCase technology guesses (0.5) while keeping known-term matches (0.9).
 > drops obvious duplicates, with negligible cost. memtomem does not dedup
 > at index time — see also `mem_dedup_scan` / `mem_dedup_merge`
 > ([Reference](reference.md)) for a manual pass on accumulated overlap.
+
+MMR runs after time decay and the access, importance and entity-match boosts,
+so it diversifies over the boosted scores and the order it picks is the order
+returned.
 
 ## Namespace
 
