@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from memtomem.constants import InvalidNameError, validate_writable_namespace
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_helpers import escape_like
 from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_PATH
 
@@ -193,33 +195,127 @@ def _refused_target_result(policy_type: str, dry_run: bool, errors: list[str]) -
     )
 
 
+# Columns read for every row of a file a move policy considers.
+_MOVE_ROW_COLS = "c.id, c.source_file, c.namespace, c.tags, c.content_hash, c.start_line"
+
+
+def _rows_of_eligible_files(
+    db: sqlite3.Connection, having: str, params: list
+) -> dict[str, list[tuple]]:
+    """Every row of each visible source whose rows together pass ``having``.
+
+    A move policy decides per file, not per chunk: moving part of a file
+    leaves it in two namespaces, which a forced re-index then refuses (and a
+    plain one resolves only for the rows it rewrites). ``having`` aggregates
+    over all of a file's rows, in every namespace. The hold is judged here,
+    in the statement that reads the rows; a live run reads under the write
+    lock it then writes with.
+    """
+    rows = db.execute(
+        "WITH files AS (SELECT source_file FROM chunks "  # nosec B608
+        f"WHERE {VISIBLE_SOURCE_PATH} GROUP BY source_file HAVING {having}) "
+        f"SELECT {_MOVE_ROW_COLS} FROM chunks c JOIN files f ON c.source_file = f.source_file "
+        "ORDER BY c.source_file, c.start_line, c.rowid",
+        params,
+    ).fetchall()
+    by_file: dict[str, list[tuple]] = {}
+    for row in rows:
+        by_file.setdefault(row[1], []).append(row)
+    return by_file
+
+
+def _colliding_rows(rows: list[tuple]) -> int:
+    """How many rows of one file would break the uniqueness index in one namespace.
+
+    ``chunks`` is ``UNIQUE(namespace, source_file, content_hash, start_line)``.
+    A planned move puts every row of the file in one namespace, so it fails
+    exactly when two rows share ``(content_hash, start_line)``, wherever they
+    are now: one already in the target, or two moving from different
+    namespaces. SQLite never treats NULLs as equal in a unique index, so a
+    NULL key part cannot collide.
+    """
+    seen: set[tuple] = set()
+    dupes = 0
+    for row in rows:
+        key = (row[4], row[5])
+        if None in key:
+            continue
+        if key in seen:
+            dupes += 1
+        seen.add(key)
+    return dupes
+
+
+def _move_outcome(
+    ids_by_target: dict[str, list[str]],
+    conflicts: list[dict],
+    split: list[str],
+    refused_counts: dict[str, int],
+) -> dict:
+    # A list of fixed-key records, not ``{namespace: ids}``: a namespace is
+    # user-supplied text and would collide with the omission bookkeeping.
+    moved: list[dict] = []
+    for target, ids in sorted(ids_by_target.items()):
+        record: dict = {"target": target}
+        _record_ids(record, "ids", ids)
+        record["omitted"] = record.pop("ids_omitted", 0)
+        moved.append(record)
+    outcome: dict = {"moved": moved} if moved else {}
+    if refused_counts:
+        outcome["refused"] = [
+            {"target": target, "count": n} for target, n in sorted(refused_counts.items())
+        ]
+    if conflicts:
+        outcome["conflicts"] = conflicts
+    if split:
+        outcome["skipped"] = [{"source": source, "reason": "split_targets"} for source in split]
+    return outcome
+
+
+def _conflict_error(conflicts: list[dict]) -> str:
+    return (
+        f"{len(conflicts)} file(s) not moved: rows with the same content at the same line "
+        "would collide in one namespace"
+    )
+
+
 async def execute_auto_archive(
     storage: SqliteBackend,
     config: dict,
     namespace: str | None,
     dry_run: bool,
 ) -> PolicyRunResult:
-    """Move chunks matching an aging rule to an archive namespace.
+    """Move source files matching an aging rule to an archive namespace.
+
+    A file moves whole, and only when every one of its chunks matches the
+    rule: archiving part of a file would leave it in two namespaces. Held and
+    pending sources are not candidates.
 
     Config fields (all but ``max_age_days`` are optional):
 
     - ``max_age_days`` (int, default 30): chunks older than this many days
-      are candidates for archival.
+      match the age rule.
     - ``archive_namespace`` (str, default ``"archive"``): single target
       namespace when ``archive_namespace_template`` is not set. Also acts as
       the fallback if the template is empty.
     - ``age_field`` (str, default ``"created_at"``): ``"created_at"`` or
       ``"last_accessed_at"``. For ``"last_accessed_at"``, null values fall
       back to ``created_at`` via ``COALESCE``.
-    - ``min_access_count`` (int | None, default None): only archive chunks
-      whose ``access_count`` is at most this value. None disables the filter.
-    - ``max_importance_score`` (float | None, default None): only archive
-      chunks whose ``importance_score`` is strictly below this value. None
+    - ``min_access_count`` (int | None, default None): a chunk matches only
+      when its ``access_count`` is at most this value. None disables the filter.
+    - ``max_importance_score`` (float | None, default None): a chunk matches
+      only when its ``importance_score`` is strictly below this value. None
       disables the filter.
-    - ``archive_namespace_template`` (str | None, default None): per-chunk
-      target namespace template. Supports the ``{first_tag}`` placeholder,
-      which expands to the chunk's first tag (or ``"misc"`` when tags are
-      empty). Chunks already in their resolved target namespace are skipped.
+    - ``archive_namespace_template`` (str | None, default None): target
+      namespace template. Supports the ``{first_tag}`` placeholder, which
+      expands to each chunk's first tag (or ``"misc"`` when tags are empty).
+      A file whose chunks resolve to different targets is skipped and
+      reported (``split_targets``). Chunks already in the target stay.
+
+    With a policy ``namespace`` filter, a file is a candidate only when each
+    of its chunks is in that namespace or already in the target. A file whose
+    move would put two rows with the same content at the same line in one
+    namespace is not moved and is reported as a conflict.
     """
     max_age = config.get("max_age_days", 30)
     archive_ns = config.get("archive_namespace", "archive")
@@ -246,96 +342,88 @@ async def execute_auto_archive(
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age)).isoformat()
 
-    db = storage._get_db()
-
-    # Template mode needs current namespace + tags per chunk to route and
-    # skip self-moves. Flat mode can fetch only ids.
-    # ``namespace`` is selected in both modes: template mode routes on it, flat
-    # mode records it as the run's source namespaces.
-    select_cols = "id, namespace, tags" if ns_template is not None else "id, namespace"
-
-    where_parts: list[str] = []
+    # The per-chunk rule; a file is eligible when all of its rows match.
+    matches: list[str] = []
     params: list = []
-
     if age_field == "last_accessed_at":
-        where_parts.append("COALESCE(last_accessed_at, created_at) < ?")
+        matches.append("COALESCE(last_accessed_at, created_at) < ?")
     else:
-        where_parts.append("created_at < ?")
+        matches.append("created_at < ?")
     params.append(cutoff)
-
-    # Flat mode: exclude chunks already in the single target namespace. Template
-    # mode handles self-move exclusion per-chunk after resolution, because the
-    # target depends on each chunk's tag.
-    if ns_template is None:
-        where_parts.append("namespace != ?")
-        params.append(archive_ns)
-
     if min_access_count is not None:
-        where_parts.append("access_count <= ?")
+        matches.append("access_count <= ?")
         params.append(min_access_count)
-
     if max_importance_score is not None:
-        where_parts.append("importance_score < ?")
+        matches.append("importance_score < ?")
         params.append(max_importance_score)
-
+    having = f"SUM(CASE WHEN {' AND '.join(matches)} THEN 1 ELSE 0 END) = COUNT(*)"
     if namespace:
-        where_parts.append("namespace = ?")
+        # In the filter's namespace or already archived. Template targets are
+        # per chunk, so that case is judged per file below.
+        if ns_template is None:
+            having += " AND SUM(CASE WHEN namespace IN (?, ?) THEN 1 ELSE 0 END) = COUNT(*)"
+            params.extend([namespace, archive_ns])
+        having += " AND SUM(CASE WHEN namespace = ? THEN 1 ELSE 0 END) > 0"
         params.append(namespace)
 
-    query = f"SELECT {select_cols} FROM chunks WHERE " + " AND ".join(where_parts)
-    rows = db.execute(query, params).fetchall()
-
-    ids_by_target: dict[str, list[str]] = {}
-    source_namespaces: set[str] = set()
     # Template targets come from tag data, so a template that passed the check
     # above can still resolve to a refused name (tag ``agent-runtime`` under
-    # ``{first_tag}``). Those chunks stay where they are (#2949).
-    refused_counts: dict[str, int] = {}
+    # ``{first_tag}``). Those files stay where they are (#2949).
     refusal_by_target: dict[str, str | None] = {}
-    if ns_template is None:
-        if rows:
-            ids_by_target[archive_ns] = [r[0] for r in rows]
-            source_namespaces.update(r[1] for r in rows if r[1])
-    else:
-        for chunk_id, current_ns, tags_json in rows:
-            target = _resolve_archive_ns(ns_template, tags_json, fallback=archive_ns)
-            if target == current_ns:
-                continue  # already in target bucket
+
+    def plan(db: sqlite3.Connection) -> tuple[dict, set, dict, list, list]:
+        ids_by_target: dict[str, list[str]] = {}
+        source_namespaces: set[str] = set()
+        refused_counts: dict[str, int] = {}
+        conflicts: list[dict] = []
+        split: list[str] = []
+        for source, rows in _rows_of_eligible_files(db, having, params).items():
+            if ns_template is None:
+                target = archive_ns
+            else:
+                targets = {
+                    _resolve_archive_ns(ns_template, r[3], fallback=archive_ns) for r in rows
+                }
+                if len(targets) > 1:
+                    split.append(source)
+                    continue
+                (target,) = targets
+                if namespace and any(r[2] not in (namespace, target) for r in rows):
+                    continue
+            moving = [r for r in rows if r[2] != target]
+            if not moving:
+                continue  # already in its target
             if target not in refusal_by_target:
                 refusal_by_target[target] = _target_refusal("archive target", target)
                 # Once per target per run; the run row is the durable record.
                 if refusal_by_target[target]:
                     logger.warning("auto_archive skipped: %s", refusal_by_target[target])
             if refusal_by_target[target]:
-                refused_counts[target] = refused_counts.get(target, 0) + 1
+                refused_counts[target] = refused_counts.get(target, 0) + len(moving)
                 continue
-            ids_by_target.setdefault(target, []).append(chunk_id)
-            if current_ns:
-                source_namespaces.add(current_ns)
+            collisions = _colliding_rows(rows)
+            if collisions:
+                conflicts.append({"source": source, "target": target, "count": collisions})
+                continue
+            ids_by_target.setdefault(target, []).extend(r[0] for r in moving)
+            source_namespaces.update(r[2] for r in moving if r[2])
+        return ids_by_target, source_namespaces, refused_counts, conflicts, split
+
+    if dry_run:
+        async with storage._lease_read_db() as db:
+            ids_by_target, source_namespaces, refused_counts, conflicts, split = plan(db)
+    else:
+        async with storage.transaction(wait=WRITER_WAIT_S):
+            db = storage._get_db()
+            ids_by_target, source_namespaces, refused_counts, conflicts, split = plan(db)
+            for target, ids in ids_by_target.items():
+                db.executemany(
+                    "UPDATE chunks SET namespace = ? WHERE id = ?",
+                    [(target, cid) for cid in ids],
+                )
 
     count = sum(len(ids) for ids in ids_by_target.values())
-
-    # A list of fixed-key records, not ``{namespace: ids}``: a namespace is
-    # user-supplied text and would collide with the omission bookkeeping.
-    moved: list[dict] = []
-    for target, ids in sorted(ids_by_target.items()):
-        record: dict = {"target": target}
-        _record_ids(record, "ids", ids)
-        record["omitted"] = record.pop("ids_omitted", 0)
-        moved.append(record)
-    outcome: dict = {"moved": moved} if moved else {}
-    if refused_counts:
-        outcome["refused"] = [
-            {"target": target, "count": n} for target, n in sorted(refused_counts.items())
-        ]
-
-    if not dry_run and count > 0:
-        for target, ids in ids_by_target.items():
-            db.executemany(
-                "UPDATE chunks SET namespace = ? WHERE id = ?",
-                [(target, cid) for cid in ids],
-            )
-        db.commit()
+    outcome = _move_outcome(ids_by_target, conflicts, split, refused_counts)
 
     verb = "Would archive" if dry_run else "Archived"
     if ns_template is not None and ids_by_target:
@@ -346,17 +434,24 @@ async def execute_auto_archive(
     else:
         details = f"{verb} {count} chunks older than {max_age} days → '{archive_ns}'"
 
-    # Any refusal reads as an error even when other chunks moved, as a partly
-    # failed auto_consolidate does: the chunks the policy set out to archive
-    # were not all archived. ``affected_count`` still counts what moved.
-    error = None
+    # Any refusal or conflict reads as an error even when other chunks moved,
+    # as a partly failed auto_consolidate does: the files the policy set out
+    # to archive were not all archived. ``affected_count`` still counts what
+    # moved. A split-target file is reported, not an error: the template, not
+    # the store, decides it has no single bucket.
+    errors: list[str] = []
     if refused_counts:
         skipped = sum(refused_counts.values())
         details += f"; {skipped} skipped (target a search could not find)"
-        error = (
+        errors.append(
             f"{skipped} chunk(s) not archived: target namespace a search could not find "
             f"({', '.join(repr(t) for t in sorted(refused_counts))})"
         )
+    if conflicts:
+        details += f"; {len(conflicts)} file(s) skipped (conflict in target)"
+        errors.append(_conflict_error(conflicts))
+    if split:
+        details += f"; {len(split)} file(s) skipped (tags route to several targets)"
 
     return PolicyRunResult(
         policy_name="",
@@ -366,7 +461,7 @@ async def execute_auto_archive(
         details=details,
         namespaces=tuple(sorted(source_namespaces | set(ids_by_target))),
         outcome=outcome,
-        error=error,
+        error="; ".join(errors) or None,
     )
 
 
@@ -376,29 +471,45 @@ async def execute_auto_expire(
     namespace: str | None,
     dry_run: bool,
 ) -> PolicyRunResult:
-    """Delete chunks older than max_age_days."""
+    """Delete unaccessed chunks older than max_age_days.
+
+    A held or pending source is not a candidate: its rows are retained for
+    recovery, and deleting them would lose what the hold keeps.
+    """
     max_age = config.get("max_age_days", 90)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age)).isoformat()
 
-    db = storage._get_db()
-    query = "SELECT id, namespace FROM chunks WHERE created_at < ? AND access_count = 0"
+    query = (
+        "SELECT id, namespace FROM chunks WHERE created_at < ? AND access_count = 0 "
+        f"AND {VISIBLE_SOURCE_PATH}"  # nosec B608
+    )
     params: list = [cutoff]
     if namespace:
         query += " AND namespace = ?"
         params.append(namespace)
 
-    rows = db.execute(query, params).fetchall()
+    if dry_run:
+        async with storage._lease_read_db() as db:
+            rows = db.execute(query, params).fetchall()
+    else:
+        # The read and the delete under one write lock: a hold committed after
+        # a read outside it would still lose its rows to the delete.
+        async with storage.transaction(wait=WRITER_WAIT_S):
+            rows = storage._get_db().execute(query, params).fetchall()
+            if rows:
+                await storage.delete_chunks(
+                    [UUID(r[0]) for r in rows],
+                    # Final, so a source it empties is cleaned up now, as it
+                    # was when this delete ran outside a transaction.
+                    finalize_emptied=True,
+                )
     count = len(rows)
 
-    # Built before the delete: this is the only surviving record of what the
-    # rows were once ``DELETE FROM chunks`` has run.
+    # The only surviving record of what the rows were once the delete has run.
     ids = [r[0] for r in rows]
     outcome: dict = {}
     if ids:
         _record_ids(outcome, "deleted_ids", ids)
-
-    if not dry_run and count > 0:
-        await storage.delete_chunks([UUID(chunk_id) for chunk_id in ids])
 
     return PolicyRunResult(
         policy_name="",
@@ -510,7 +621,11 @@ async def execute_auto_consolidate(
     - ``min_group_size`` (int, default 3): minimum chunks per source file
       to qualify as a consolidation candidate.
     - ``max_groups`` (int, default 10): cap on groups processed per run.
-    - ``max_bullets`` (int, default 20): cap on bullets in the summary.
+    - ``max_bullets`` (int, default 20): cap on bullets in the summary. It
+      is also the coverage: the summary reads a source's first
+      ``max_bullets`` chunks, and only those are linked to it and, with
+      ``keep_originals: false``, demoted. Chunks past it stay uncovered, so
+      agent consolidation can still group them.
     - ``keep_originals`` (bool, default True): if False, halve importance
       scores of originals (floor 0.3) so decay can evict them later; an
       original that is itself a summary keeps its score.
@@ -553,6 +668,17 @@ async def execute_auto_consolidate(
             details="Error: min_group_size must be at least 2",
             error="min_group_size must be at least 2",
         )
+    # ``max_bullets`` decides which originals a summary covers, so a summary
+    # of no bullets would be linked to nothing.
+    if isinstance(max_bullets, bool) or not isinstance(max_bullets, int) or max_bullets < 1:
+        return PolicyRunResult(
+            policy_name="",
+            policy_type="auto_consolidate",
+            affected_count=0,
+            dry_run=dry_run,
+            details="Error: max_bullets must be a positive integer",
+            error="max_bullets must be a positive integer",
+        )
 
     target_errors = policy_target_errors("auto_consolidate", config)
     if target_errors:
@@ -582,12 +708,19 @@ async def execute_auto_consolidate(
     for g in raw_groups:
         source_path = Path(g["source"])
         # The hold is judged in the read; the recheck before the write below
-        # covers a hold that lands while the summary is generated.
+        # covers a hold that lands while the summary is generated. The whole
+        # source is read: the mixed-namespace check and the source hash must
+        # see every row, or a change past a cap would never regenerate.
         chunks = await storage.list_chunks_by_source(
-            source_path, limit=20, exclude_hidden=True, as_stored=True
+            source_path, limit=None, exclude_hidden=True, as_stored=True
         )
         if len(chunks) < min_group_size:
             continue
+        # What the summary is made from: both summary builders read only
+        # ``chunks[:max_bullets]``. These alone are linked and demoted; linking
+        # the rest would mark content consolidated that no summary contains.
+        summarized = chunks[:max_bullets]
+        summarized_ids = {c.id for c in summarized}
 
         # Mixed-namespace sources → skip + warn. See plan for rationale.
         ns_set = {c.metadata.namespace for c in chunks}
@@ -632,14 +765,39 @@ async def execute_auto_consolidate(
             detail_parts.append(f"{source_path.name} (COLLISION: summary path occupied)")
             failed.append(f"{source_path.name} (collision)")
             continue
+        # Read before the idempotency check below, which compares what the
+        # existing summary covers with what a summary made now would cover.
+        try:
+            targets = await storage.get_consolidation_targets([c.id for c in chunks])
+        except Exception:
+            # Unknown coverage is not "uncovered": a heuristic summary
+            # here could sit over the agent's, and decay its originals.
+            logger.warning(
+                "auto_consolidate: could not read consolidation coverage for %s",
+                source_path,
+                exc_info=True,
+            )
+            detail_parts.append(f"{source_path.name} (FAILED)")
+            failed.append(f"{source_path.name} (coverage unreadable)")
+            continue
+        existing_ids = {c.id for c in existing}
+
         stale = False
         if existing:
             # Idempotent only when the path holds exactly the one summary the
             # last run left. Several owned rows mean a previous replacement
             # went wrong, so a matching hash on one of them is not evidence the
             # path is current — regenerate and let ``_clear_policy_summaries``
-            # collapse them back to one.
-            if len(existing) == 1 and parse_source_hash(existing[0].content) == current_hash:
+            # collapse them back to one. The summary must also cover exactly
+            # the chunks it was made from: one written while the read stopped
+            # at 20 rows can be linked to chunks past ``max_bullets`` under the
+            # same hash, and only a regeneration removes those links.
+            linked = {cid for cid, found in targets.items() if existing_ids.intersection(found)}
+            if (
+                len(existing) == 1
+                and parse_source_hash(existing[0].content) == current_hash
+                and linked == summarized_ids
+            ):
                 continue  # idempotent — same inputs, same output
             stale = True  # regenerate below
 
@@ -660,21 +818,10 @@ async def execute_auto_consolidate(
         # left as it is: a skip writes nothing, and that summary still describes
         # the chunks it was made from. A migrated source whose old-path policy
         # summary still covers it is reported under the same label
-        # (``covered_elsewhere``).
-        try:
-            covered = await storage.get_consolidation_targets([c.id for c in chunks])
-        except Exception:
-            # Unknown coverage is not "uncovered": a heuristic summary
-            # here could sit over the agent's, and decay its originals.
-            logger.warning(
-                "auto_consolidate: could not read consolidation coverage for %s",
-                source_path,
-                exc_info=True,
-            )
-            detail_parts.append(f"{source_path.name} (FAILED)")
-            failed.append(f"{source_path.name} (coverage unreadable)")
-            continue
-        if covered_elsewhere(covered, {c.id for c in existing}):
+        # (``covered_elsewhere``). Every chunk of the source counts here, not
+        # only the summarized ones, so an agent summary of the tail still
+        # defers the policy.
+        if covered_elsewhere(targets, existing_ids):
             detail_parts.append(f"{source_path.name} (SKIP: agent-consolidated)")
             skipped.append(f"{source_path.name} (agent-consolidated)")
             continue
@@ -706,9 +853,12 @@ async def execute_auto_consolidate(
                 continue
             group_dict = {
                 "source": str(source_path),
-                "chunk_ids": [str(c.id) for c in chunks],
+                "chunk_ids": [str(c.id) for c in summarized],
+                # The recheck under the write lock defers to a summary over any
+                # chunk of the source, as the check above does.
+                "coverage_ids": [str(c.id) for c in chunks],
                 "namespace": chunk_ns,
-                "chunk_count": len(chunks),
+                "chunk_count": len(summarized),
             }
             mutation_attempted = True
             summary_id = await apply_consolidation(
@@ -804,36 +954,43 @@ async def execute_auto_promote(
     namespace: str | None,
     dry_run: bool,
 ) -> PolicyRunResult:
-    """Move archived chunks back to an active namespace based on access patterns.
+    """Move archived source files back to an active namespace based on access patterns.
 
-    This is the inverse of ``auto_archive``: chunks that were archived but
+    This is the inverse of ``auto_archive``: files that were archived but
     continue to be accessed (high access_count, recent last_accessed_at, or
-    high importance_score) are promoted back to an active namespace.
+    high importance_score) are promoted back to an active namespace. A file
+    moves whole as soon as one of its chunks qualifies, since promoting part
+    of it would leave it in two namespaces. Held and pending sources are not
+    candidates.
 
     To prevent ping-pong with ``auto_archive``, promotion resets
-    ``last_accessed_at`` to the current time, so the chunk won't immediately
-    re-qualify for archival on the next policy run.
+    ``last_accessed_at`` to the current time on every chunk it moves, so the
+    file won't immediately re-qualify for archival on the next policy run.
 
     Config fields (all optional):
 
-    - ``source_prefix`` (str, default ``"archive"``): chunks whose namespace
-      starts with this prefix are candidates. Matches both ``"archive"``
-      (flat mode) and ``"archive:work"``, ``"archive:misc"`` etc.
+    - ``source_prefix`` (str, default ``"archive"``): files whose chunks are
+      in a namespace starting with this prefix are candidates. Matches both
+      ``"archive"`` (flat mode) and ``"archive:work"``, ``"archive:misc"`` etc.
     - ``target_namespace`` (str, default ``"default"``): destination namespace
       for promoted chunks.
-    - ``min_access_count`` (int, default 3): minimum ``access_count`` to
-      qualify for promotion.
-    - ``min_importance_score`` (float | None, default None): if set, only
-      promote chunks whose ``importance_score`` is at least this value.
+    - ``min_access_count`` (int, default 3): minimum ``access_count`` for a
+      chunk to qualify its file for promotion.
+    - ``min_importance_score`` (float | None, default None): if set, a chunk
+      qualifies only when its ``importance_score`` is at least this value.
       Combined with ``min_access_count`` via AND.
-    - ``recency_days`` (int | None, default None): if set, only promote
-      chunks whose ``last_accessed_at`` is within this many days. Chunks
-      with null ``last_accessed_at`` are excluded. Note: this is the
+    - ``recency_days`` (int | None, default None): if set, a chunk qualifies
+      only when its ``last_accessed_at`` is within this many days. Chunks
+      with null ``last_accessed_at`` do not qualify. Note: this is the
       opposite of ``auto_archive``'s age-based cutoff — here, *recent*
-      access qualifies a chunk for promotion.
+      access qualifies a file for promotion.
 
     The ``namespace`` arg (from ``namespace_filter`` on the policy row)
-    overrides ``source_prefix`` with an exact-match filter when set.
+    overrides ``source_prefix`` with an exact-match filter when set. Either
+    way, a file is a candidate only when each of its chunks is in a source
+    namespace or already in the target. A file whose move would put two rows
+    with the same content at the same line in one namespace is not moved and
+    is reported as a conflict.
     """
     source_prefix = config.get("source_prefix", "archive")
     target_ns = config.get("target_namespace", "default")
@@ -845,59 +1002,74 @@ async def execute_auto_promote(
     if target_errors:
         return _refused_target_result("auto_promote", dry_run, target_errors)
 
-    db = storage._get_db()
-
-    where_parts: list[str] = []
-    params: list = []
-
     # Source filtering: namespace param (exact) overrides prefix.
     if namespace:
-        where_parts.append("namespace = ?")
-        params.append(namespace)
+        in_source = "namespace = ?"
+        source_params: list = [namespace]
     else:
-        where_parts.append("namespace LIKE ? ESCAPE '\\'")
-        params.append(f"{escape_like(source_prefix)}%")
+        in_source = "namespace LIKE ? ESCAPE '\\'"
+        source_params = [f"{escape_like(source_prefix)}%"]
 
-    # Exclude chunks already in target namespace (prevent no-op moves).
-    where_parts.append("namespace != ?")
-    params.append(target_ns)
-
-    # Access count gate (always active).
-    where_parts.append("access_count >= ?")
-    params.append(min_access_count)
-
-    # Optional importance gate.
+    # The per-chunk rule. The target is excluded from it, so a qualifying
+    # chunk is always one that would move.
+    qualifies = [in_source, "namespace != ?", "access_count >= ?"]
+    qualify_params: list = [*source_params, target_ns, min_access_count]
     if min_importance_score is not None:
-        where_parts.append("importance_score >= ?")
-        params.append(min_importance_score)
-
+        qualifies.append("importance_score >= ?")
+        qualify_params.append(min_importance_score)
     # Optional recency gate — opposite of auto_archive: here, *recent*
     # access qualifies a chunk. Null last_accessed_at disqualifies.
     if recency_days is not None:
         recency_cutoff = (datetime.now(timezone.utc) - timedelta(days=recency_days)).isoformat()
-        where_parts.append("last_accessed_at IS NOT NULL")
-        where_parts.append("last_accessed_at >= ?")
-        params.append(recency_cutoff)
+        qualifies.append("last_accessed_at IS NOT NULL")
+        qualifies.append("last_accessed_at >= ?")
+        qualify_params.append(recency_cutoff)
 
-    query = "SELECT id, namespace FROM chunks WHERE " + " AND ".join(where_parts)
-    rows = db.execute(query, params).fetchall()
+    having = (
+        f"SUM(CASE WHEN {' AND '.join(qualifies)} THEN 1 ELSE 0 END) > 0 "
+        f"AND SUM(CASE WHEN {in_source} OR namespace = ? THEN 1 ELSE 0 END) = COUNT(*)"
+    )
+    params = [*qualify_params, *source_params, target_ns]
+
+    def plan(db: sqlite3.Connection) -> tuple[list[tuple], list[dict]]:
+        moving: list[tuple] = []
+        conflicts: list[dict] = []
+        for source, rows in _rows_of_eligible_files(db, having, params).items():
+            collisions = _colliding_rows(rows)
+            if collisions:
+                conflicts.append({"source": source, "target": target_ns, "count": collisions})
+                continue
+            moving.extend(r for r in rows if r[2] != target_ns)
+        return moving, conflicts
+
+    if dry_run:
+        async with storage._lease_read_db() as db:
+            rows, conflicts = plan(db)
+    else:
+        async with storage.transaction(wait=WRITER_WAIT_S):
+            db = storage._get_db()
+            rows, conflicts = plan(db)
+            if rows:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                db.executemany(
+                    "UPDATE chunks SET namespace = ?, last_accessed_at = ? WHERE id = ?",
+                    [(target_ns, now_iso, r[0]) for r in rows],
+                )
     count = len(rows)
 
     outcome: dict = {}
     if rows:
         _record_ids(outcome, "promoted_ids", [r[0] for r in rows])
         outcome["target_namespace"] = target_ns
-
-    if not dry_run and count > 0:
-        now_iso = datetime.now(timezone.utc).isoformat()
-        db.executemany(
-            "UPDATE chunks SET namespace = ?, last_accessed_at = ? WHERE id = ?",
-            [(target_ns, now_iso, r[0]) for r in rows],
-        )
-        db.commit()
+    if conflicts:
+        outcome["conflicts"] = conflicts
 
     verb = "Would promote" if dry_run else "Promoted"
     details = f"{verb} {count} chunks → '{target_ns}'"
+    error = None
+    if conflicts:
+        details += f"; {len(conflicts)} file(s) skipped (conflict in target)"
+        error = _conflict_error(conflicts)
 
     return PolicyRunResult(
         policy_name="",
@@ -905,8 +1077,9 @@ async def execute_auto_promote(
         affected_count=count,
         dry_run=dry_run,
         details=details,
-        namespaces=tuple(sorted({r[1] for r in rows if r[1]} | {target_ns})),
+        namespaces=tuple(sorted({r[2] for r in rows if r[2]} | {target_ns})),
         outcome=outcome,
+        error=error,
     )
 
 

@@ -23,8 +23,8 @@ automatically in the background with the built-in scheduler.
 
 | Type | What it does | Example config |
 |------|-------------|----------------|
-| `auto_archive` | Move old/unused chunks to an archive namespace | `{"max_age_days": 30}` |
-| `auto_promote` | Move frequently accessed archived chunks back to active namespace | `{"min_access_count": 5}` |
+| `auto_archive` | Move old/unused source files to an archive namespace | `{"max_age_days": 30}` |
+| `auto_promote` | Move frequently accessed archived source files back to active namespace | `{"min_access_count": 5}` |
 | `auto_expire` | Delete very old chunks with zero access | `{"max_age_days": 90}` |
 | `auto_consolidate` | Group chunks by source file into heuristic summaries | `{"min_group_size": 3}` |
 | `auto_tag` | Auto-tag untagged chunks | `{"max_tags": 5}` |
@@ -49,9 +49,16 @@ mem_policy_add(name="archive-categorized", policy_type="auto_archive",
 ```
 
 - `age_field`: `"created_at"` (default) or `"last_accessed_at"` (null-safe via COALESCE).
-- `min_access_count`: only archive chunks with access_count at most this value.
-- `max_importance_score`: only archive chunks with importance_score below this value.
-- `archive_namespace_template`: per-chunk target using the `{first_tag}` placeholder (empty tags fall back to `"misc"`).
+- `min_access_count`: a chunk matches only with access_count at most this value.
+- `max_importance_score`: a chunk matches only with importance_score below this value.
+- `archive_namespace_template`: target from each chunk's first tag via the `{first_tag}` placeholder (empty tags fall back to `"misc"`).
+
+A source file is archived whole, and only once every one of its chunks matches:
+archiving part of a file would leave it in two namespaces, which a forced
+re-index refuses. A file whose chunks' tags route to different template targets
+is skipped and reported as `split_targets` in the run's outcome. With a
+`namespace_filter`, every chunk of the file must be in that namespace or
+already in the target.
 
 **auto_promote** — bring back frequently accessed archives:
 
@@ -75,7 +82,16 @@ mem_policy_add(name="promote-recent", policy_type="auto_promote",
 - `min_importance_score`: optional importance floor (AND with access count).
 - `recency_days`: only promote if accessed within this many days. Note: this is the *opposite* of auto_archive's age cutoff — here, *recent* access qualifies a chunk.
 
-> **Tip**: auto_promote resets `last_accessed_at` to the current time on promotion, preventing immediate re-archival by auto_archive (ping-pong prevention).
+One qualifying chunk brings its whole source file back, so the file never ends
+up split across namespaces. Every chunk of the file must be in a source
+namespace or already in the target; a file with chunks elsewhere stays put.
+
+> **Tip**: auto_promote resets `last_accessed_at` to the current time on every chunk it moves, preventing immediate re-archival by auto_archive (ping-pong prevention).
+
+Neither policy merges or deletes to make room. A file whose move would put two
+chunks with the same content at the same line into one namespace is left where
+it is and listed under `conflicts` in the run's outcome, and the run reports an
+error.
 
 **auto_expire** — delete old unaccessed chunks:
 
@@ -86,6 +102,11 @@ mem_policy_add(name="expire-cold", policy_type="auto_expire",
 
 Only chunks with `access_count = 0` are expired.
 
+All three policies above skip held sources (missing, unreadable or
+redaction-blocked files kept for recovery) and sources with a pending check, as
+do `mem_decay_scan` / `mem_decay_expire`. Purge a source you have confirmed gone
+with `mm gc orphan-sources --apply`.
+
 **auto_consolidate** — summarize related chunks:
 
 ```
@@ -95,6 +116,7 @@ mem_policy_add(name="consolidate-sources", policy_type="auto_consolidate",
 
 - `min_group_size`: minimum chunks per source file to qualify (default 3).
 - `max_groups`: cap on groups processed per run (default 10).
+- `max_bullets`: how many of a source's chunks the summary reads (default 20). Only those are linked to the summary and, with `keep_originals: false`, decayed; the rest stay uncovered, so agent consolidation can still group them.
 - `keep_originals`: if `false`, soft-decays originals (importance *= 0.5, floor 0.3) instead of deleting. An original that is itself a summary (the target of a `consolidated_into` edge) keeps its importance.
 - `summary_namespace`: target namespace for summaries (default `"archive:summary"`) — excluded from default search.
 
