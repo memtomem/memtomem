@@ -774,6 +774,14 @@ _PARTICIPANT_HELPERS: dict[tuple[str, str], str] = {
     ("sqlite_backend.py", "SqliteBackend._bump_source_visibility"): (
         "Updates the source visibility epoch within its caller's transaction."
     ),
+    ("sqlite_backend.py", "SqliteBackend._move_ai_summary_cache"): (
+        "Renames a source's AI-summary cache row inside "
+        "update_chunks_scope_for_source's transaction."
+    ),
+    ("sqlite_backend.py", "SqliteBackend._carry_policy_summary"): (
+        "Moves a source's policy summary rows inside "
+        "update_chunks_scope_for_source's transaction (#3128)."
+    ),
     ("sqlite_backend.py", "SqliteBackend._clear_source_visibility"): (
         "Deletes source holds and pending checks within its caller's transaction."
     ),
