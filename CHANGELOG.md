@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **Plugin workflows: `brief` keeps handoff records out of its project search, and `handoff resume`
+  points to `brief`.** The project step of `brief` now searches only `update` items, so a task query
+  no longer returns handoff bodies that the briefing does not read. A memory saved in the project's
+  shared namespace without the `memory-update-item` tag is not found by that step. `handoff resume`
+  ends by telling you that `brief` lists related memories; it still selects its record by tag and
+  runs no search. Shipped asset content changed, so the delivery versions moved with it, except
+  Cursor, whose first marketplace review is still open and whose version stays 0.1.0.
+
 ### Fixed
 
 - **Quality Lab replay compare no longer claims metric deltas should be zero when
