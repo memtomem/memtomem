@@ -9,7 +9,7 @@ bundle is not a Kimi plugin and does not install hooks or slash commands.
 
 Kimi reads `~/.kimi-code/mcp.json`, or `$KIMI_CODE_HOME/mcp.json` when that
 environment variable is set. memtomem `0.4.0` and later write that path, so
-`uvx --from 'memtomem==0.7.6' mm init --mcp kimi` is the shortest route.
+`uvx --from 'memtomem==0.7.7' mm init --mcp kimi` is the shortest route.
 Releases up to and including `0.3.14` wrote the legacy `~/.kimi/mcp.json`
 layout, which current Kimi Code does not read — move the entry if you
 registered with one of those. To write the file by hand instead, it needs
@@ -29,7 +29,7 @@ block, so add the `MEMTOMEM_EXTRA_TOOLS` line by hand to an entry it wrote:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--isolated", "--from", "memtomem[all]==0.7.6", "memtomem-server"],
+      "args": ["--isolated", "--from", "memtomem[all]==0.7.7", "memtomem-server"],
       "env": {"MEMTOMEM_TOOL_MODE": "core", "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
     }
   }
@@ -70,7 +70,7 @@ From a Git worktree, initialize the private project tier once:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem==0.7.6' mm mem init --scope project_local
+uvx --from 'memtomem==0.7.7' mm mem init --scope project_local
 ```
 
 Then use the handoff skill explicitly:

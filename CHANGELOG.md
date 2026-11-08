@@ -5,6 +5,87 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.7] — 2026-11-08
+
+### Upgrading
+
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.21 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.7;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.7`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.7`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.7.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.6" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.6` to
+  `==0.7.7` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.7 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.7`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
+- **`auto_consolidate` rewrites some existing summaries once, and a policy
+  that never consolidated may start (#3110).** 0.7.6 read at most 20 chunks of
+  a source, so a summary's source hash covered only those. A summary of a
+  source with more than 20 chunks therefore no longer matches, and is rewritten
+  the next time a run picks that source (each run takes the `max_groups`
+  largest sources, 10 by default); so is a summary whose links reach past its
+  first `max_bullets` chunks. The checks now see past chunk 20 too: a source
+  whose later chunks sit in another namespace is skipped as `mixed ns`, and
+  one whose later chunks an agent consolidation already covers is skipped as
+  `agent-consolidated`. And a source whose `.consolidated.md` summary is itself
+  held or pending a check is skipped as `summary held` (#3120), before any LLM
+  call, dry runs included. Each such source keeps its existing summary and is
+  not consolidated by the policy. A policy with `min_group_size` above 20
+  never consolidated anything in 0.7.6 and now does. With `llm.enabled` on, each
+  rewritten or new summary calls the LLM once (a remote provider receives the
+  text), now with up to `max_bullets` chunks where 0.7.6 sent at most 20; with
+  it off (the default), the summary is built locally. Either way, with
+  `keep_originals: false`, halves the summarized notes' importance again
+  (floor 0.3). Preview a run with `mem_policy_run(name=...)`, which is a dry
+  run unless you pass `dry_run=False`; it marks a rewrite `(stale)`.
+- **`auto_archive` and `auto_promote` finish moves an earlier run left half
+  done (#3110).** A file that an earlier run left in two namespaces is moved
+  the rest of the way when it next qualifies, and promotion moves a whole file
+  once one of its chunks qualifies, setting `last_accessed_at` to now on every
+  chunk it moves. A move that would collide leaves the file where it is and
+  lists it under `conflicts`. Preview with `mem_policy_run(name=...)`.
+- **A policy whose `max_bullets` is not a positive integer now stops with an
+  error (#3110).** A stored `0` or `true` used to run, summarizing no chunk
+  or one; a string or fractional value failed during the run. Both are now
+  refused before the run starts, dry runs included; set a positive integer
+  (the default is 20).
+- **Decay expiry now reaches every chunk of a source (#3110).** 0.7.6 read at
+  most 10,000 chunks per source, so expiry never considered the rest of a
+  larger source; the next `mem_decay_expire` (or `POST /api/decay/expire`) can
+  delete those rows when they are old enough. Run `mem_decay_scan` first to
+  see the count.
+- **`mem_entity_search` callers: `_` and `%` are literal, and an omitted
+  `namespace` resolves the way `mem_search` does (#3111).** A `value` that
+  relied on them as wildcards now matches only the literal text. With no
+  `namespace`, the current namespace set with `mem_ns_set` applies; with none
+  set, the namespaces under `search.system_namespace_prefixes` (`archive:` and
+  `agent-runtime:` by default) are hidden — name them, for example
+  `namespace="archive:*"`, to include them. If you set a current namespace,
+  an omitted `namespace` now lists only that namespace, where 0.7.6 listed
+  every namespace; pass `namespace="!system"` for every non-system namespace.
+- **Namespace colors must be `#` and 3-8 hex digits (#3109).** A script that
+  passes a color name such as `"blue"` to `mem_ns_update`,
+  `mem_agent_register` or `mm agent register --color` now gets an error and
+  nothing is stored. A color stored earlier in another form shows as the
+  default color until you set a hex value.
+
 ### Fixed
 
 - **A search's context window no longer shows a consolidation summary that
@@ -90,7 +171,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   statement that reads the candidates, and a live run scans and writes under one
   write lock, so a hold that lands mid-run cannot lose rows either.
   `mem_decay_scan` / `GET /api/decay/scan` totals now count only the chunks
-  expiry can reach.
+  expiry can reach. Expiry also reads every chunk of a source; it used to stop
+  at 10,000 per source.
 
 - **`auto_archive` and `auto_promote` move whole files and no longer crash on a
   duplicate in the target (#3110).** A move onto a namespace that already held
@@ -106,11 +188,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - **`auto_consolidate` reads every chunk of a source, not the first 20
   (#3110).** The mixed-namespace check and the source hash now see the whole
-  file, so a change past the 20th chunk regenerates the summary. The summary
-  still reads the first `max_bullets` chunks (default 20), and now only those
-  are linked to it and, with `keep_originals: false`, decayed; the rest stay
-  available to agent consolidation. A summary linked to more chunks than it read
-  is regenerated once. `max_bullets` must be a positive integer.
+  file, so a change past the 20th chunk regenerates the summary, and a
+  `min_group_size` above 20, which no source could reach before, works. The
+  summary still reads the first `max_bullets` chunks (default 20), and now
+  only those are linked to it and, with `keep_originals: false`, decayed; the
+  rest stay available to agent consolidation. A summary linked to more chunks
+  than it read is regenerated once. Neither regeneration replaces a summary that is itself
+  held or pending a check (#3120). `max_bullets` must be a positive integer.
 
 - **`mem_entity_search` treats `_` and `%` in `value` literally, and hides
   system namespaces by default (#3111).** The value was passed to SQL `LIKE`
