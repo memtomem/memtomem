@@ -37,34 +37,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   is, as before, when another note shares its path, when that path is held or
   pending, or when the new path already has rows or a hold.
 
-- **Notion sibling pages sharing a title in the same directory no longer overwrite each other during import (#3113).**
-  When Notion exports multiple pages in the same folder with duplicate titles
-  (disambiguated in Notion by trailing 32-hex UUIDs), stripping the UUIDs
-  previously caused siblings to map to the same filename, silently overwriting earlier
-  siblings on disk. `import_notion` now disambiguates colliding siblings in the import
-  by appending their first 8 hex characters (e.g. `Meeting Notes (a1b2c3d4).md`, falling
-  back to 32 hex on prefix collision), and rewrites relative markdown links to match.
-  A page with a unique title keeps its plain name. Re-importing into an output directory
-  where siblings previously collided leaves the old plain-named file behind as stale.
+- **Notion sibling pages sharing a title in the same directory no longer
+  overwrite each other during import (#3113).** Notion tells same-title pages in
+  one folder apart with a trailing 32-hex UUID. Stripping it mapped them to one
+  filename, so every earlier sibling was silently overwritten. `import_notion` now
+  gives each colliding sibling its first 8 UUID hex characters
+  (`Meeting Notes (a1b2c3d4).md`, or all 32 when two share a prefix) and rewrites
+  relative Markdown links to match. A page with a unique title keeps its plain
+  name. A plain-named file stays behind, still indexed, in two cases: siblings
+  that collided in an earlier import, and a page that was unique and later gains
+  a same-title sibling, which moves it to a prefixed name.
 
 - **Notion pages whose titles differ only by case or Unicode normalization no
   longer overwrite each other on macOS and Windows (#3141).** `Meeting notes` and
   `Meeting Notes` in one folder kept their plain names. On a filesystem that
   ignores case, or (APFS) normalization, those names are one file, so the second
   page replaced the first. `mem_import_notion` then indexed that one file under
-  two source keys, one per spelling. Such titles now collide like
-  identical ones: each page gets its own spelling plus the UUID prefix
-  (`Meeting notes (a1b2c3d4).md`, `Meeting Notes (f0e1d2c3).md`), and links follow.
-  The comparison folds case and normalization on every platform, so an export
-  gets the same filenames everywhere. On Linux, pages that used to import side by
-  side under their plain names move to prefixed names, and the next import
-  leaves the old plain-named files behind, still indexed. An export that would
-  still put two pages in one file is refused before anything is written, with an
-  error naming them, instead of overwriting one of them. That happens with titles
-  spelled like generated names (a page titled `X (a1b2c3d4)` next to two `X`
-  pages) or with a ZIP that carries the same member twice. A link to such a page whose spelling differs
-  from the file name (an export unpacked onto HFS+, which decomposes file names)
-  still falls back to the plain name.
+  two source keys, one per spelling. Such titles now collide like identical
+  ones: each page gets its own spelling plus the UUID prefix
+  (`Meeting notes (a1b2c3d4).md`, `Meeting Notes (f0e1d2c3).md`), and links
+  follow. The comparison folds case and normalization on every platform, so an
+  export gets the same filenames everywhere. On Linux, pages that used to import
+  side by side under their plain names move to prefixed names, and the next
+  import leaves the old plain-named files behind, still indexed. An export that
+  would still put two pages in one file is refused before anything is written,
+  with an error naming them, instead of overwriting one of them. That happens
+  with titles spelled like generated names (a page titled `X (a1b2c3d4)` next to
+  two `X` pages) or with a ZIP that carries the same member twice. A link to such
+  a page whose spelling differs from the file name (an export unpacked onto
+  HFS+, which decomposes file names) still falls back to the plain name.
 
 ## [0.7.7] — 2026-11-08
 

@@ -509,7 +509,9 @@ def _with_import_header(content: str, source: str, original_file: str) -> str:
 
 # ── Notion helpers ───────────────────────────────────────────────────────
 
-_UUID_RE = re.compile(r"\s+([0-9a-f]{32})$", re.IGNORECASE)
+# Lowercase only: Notion writes its page UUIDs in lowercase hex, and a title
+# that merely ends in uppercase hex is part of the name, not an export suffix.
+_UUID_RE = re.compile(r"\s+([0-9a-f]{32})$")
 
 
 def _split_notion_uuid(stem: str) -> tuple[str, str | None]:
@@ -520,7 +522,7 @@ def _split_notion_uuid(stem: str) -> tuple[str, str | None]:
     clean = stem[: m.start()]
     if not clean:
         return stem, None
-    return clean, m.group(1).lower()
+    return clean, m.group(1)
 
 
 def _clean_notion_filename(stem: str) -> str:

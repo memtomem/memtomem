@@ -34,6 +34,51 @@ class TestNotionFilename:
         result = _clean_notion_filename("abcdef01234567890123456789012345")
         assert result == "abcdef01234567890123456789012345"
 
+    @pytest.mark.parametrize(
+        "stem",
+        ["Report ABCDEF0123456789ABCDEF0123456789", "Report AbCdEf0123456789abcdef0123456789"],
+    )
+    def test_upper_or_mixed_case_hex_is_part_of_the_title(self, stem):
+        # Notion writes page UUIDs in lowercase; anything else is the title (#3140).
+        assert _clean_notion_filename(stem) == stem
+
+
+class TestNotionLinkTail:
+    """#3140 — the fragment, query and external-URL handling #3119 added to ``_fix_link``."""
+
+    @pytest.mark.asyncio
+    async def test_fragment_and_query_survive_on_a_mapped_sibling_link(self, tmp_path):
+        export = tmp_path / "export"
+        export.mkdir()
+        ua, ub = "a1b2c3d4e5f60718293a4b5c6d7e8f90", "f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        (export / f"Meeting Notes {ua}.md").write_text("# one", encoding="utf-8")
+        (export / f"Meeting Notes {ub}.md").write_text("# two", encoding="utf-8")
+        (export / "Index 0123456789abcdef0123456789abcdef.md").write_text(
+            f"[s](Meeting%20Notes%20{ua}.md#section) [q](Meeting%20Notes%20{ub}.md?v=1#top)",
+            encoding="utf-8",
+        )
+        output = tmp_path / "out"
+
+        await import_notion(export, output)
+
+        index = (output / "Index.md").read_text(encoding="utf-8")
+        assert "[s](Meeting Notes (a1b2c3d4).md#section)" in index
+        assert "[q](Meeting Notes (f0e1d2c3).md?v=1#top)" in index
+
+    @pytest.mark.parametrize(
+        "href",
+        [
+            "https://example.com/Page%20a1b2c3d4e5f60718293a4b5c6d7e8f90.md",
+            "//example.com/Page%20a1b2c3d4e5f60718293a4b5c6d7e8f90.md",
+            "mailto:Page%20a1b2c3d4e5f60718293a4b5c6d7e8f90.md",
+        ],
+    )
+    def test_external_md_link_keeps_its_uuid(self, href):
+        from urllib.parse import unquote
+
+        cleaned = _clean_notion_markdown(f"[x]({href})")
+        assert cleaned == f"[x]({unquote(href)})"
+
 
 class TestNotionMarkdown:
     def test_removes_property_table(self):
