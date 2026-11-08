@@ -798,10 +798,33 @@ def _refusal_kind(text: str) -> str:
     return "refused"
 
 
+_KNOWN_ERROR_TYPES = frozenset(
+    {
+        "OSError",
+        "PermissionError",
+        "FileNotFoundError",
+        "IsADirectoryError",
+        "TimeoutError",
+        "RuntimeError",
+        "ValueError",
+        "StorageError",
+        "TransactionOwnedError",
+        "RetryableError",
+        "EmbeddingError",
+        "MemoryScopeError",
+        "ConfigError",
+    }
+)
+
+
 def _error_type(text: Any) -> str:
-    """The leading exception name of a ``render_error`` (``OSError: …`` → ``OSError``)."""
+    """A ``render_error``'s exception name if it is one of a fixed set, else ``"other"``.
+
+    Server text can quote entry text or paths, and an identifier-shaped prefix is not proof
+    of an exception name, so only names on this list are logged.
+    """
     head = str(text or "").split(":", 1)[0].strip()
-    return head if head.isidentifier() else "other"
+    return head if head in _KNOWN_ERROR_TYPES else "other"
 
 
 def _send_mirror_op(registry: types.ModuleType, mirror: _Mirror, op: _MirrorOp) -> str:

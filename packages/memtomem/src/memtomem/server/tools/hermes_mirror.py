@@ -291,6 +291,16 @@ async def _render(
     if stats.errors or stats.retryable_errors or stats.scope_held:
         return failed("; ".join(stats.errors) or "the file's index update did not complete")
     try:
+        # Indexing can succeed while the file stays held from search: the engine defers a
+        # hold release it could not take under contention and reports no error for it.
+        from memtomem.storage.sqlite_helpers import norm_path
+
+        still_hidden = await storage.is_source_held(Path(norm_path(dest)))
+    except Exception as exc:
+        return failed(f"{type(exc).__name__}: cannot confirm the file is searchable")
+    if still_hidden:
+        return failed("the file is indexed but still held from search; reconcile again later")
+    try:
         async with storage.transaction(wait=WRITER_WAIT_S):
             await storage.hermes_mirror_mark_rendered(owner, mirror_target, revision)
     except Exception as exc:

@@ -1662,6 +1662,22 @@ def test_mirror_logs_never_carry_server_text(
     assert '"error": "OSError"' in logged
 
 
+@pytest.mark.parametrize(
+    ("render_error", "logged"),
+    [
+        ("OSError: disk full", "OSError"),
+        ("private_entry_7731", "other"),
+        ("private_entry_7731: failed", "other"),
+        ("Error: the file is held", "other"),
+        (None, "other"),
+    ],
+)
+def test_render_errors_are_logged_by_known_type_only(
+    mod: Any, render_error: Any, logged: str
+) -> None:
+    assert mod._error_type(render_error) == logged
+
+
 def test_a_flush_remainder_below_hermes_minimum_timeout_starts_nothing(
     mod: Any, hermes: Any
 ) -> None:

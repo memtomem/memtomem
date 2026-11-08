@@ -345,6 +345,20 @@ async def test_a_held_file_is_accepted_but_not_rendered(mirror, monkeypatch):
     assert not _file(mirror).exists()
 
 
+async def test_an_index_that_leaves_the_file_held_keeps_it_pending(mirror, monkeypatch):
+    storage = mirror.comp.storage
+
+    async def still_held(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(storage, "is_source_held", still_held)
+    reply = json.loads(await mirror(op="add", content="Hidden for now.", ts=1))
+    assert reply["applied"] is True and reply["rendered"] is False
+    assert "still held" in reply["render_error"]
+    state = await storage.hermes_mirror_target_state(OWNER, "memory")
+    assert state["render_pending"] is True
+
+
 async def test_another_process_holding_the_writer_is_retryable(mirror, monkeypatch):
     import sqlite3
     from contextlib import asynccontextmanager
@@ -379,15 +393,36 @@ async def test_other_storage_errors_are_not_called_busy(mirror, monkeypatch):
     assert out.startswith("Error:") and "retryable" not in out
 
 
-async def test_a_reconcile_whose_budget_ran_out_changes_nothing(mirror, monkeypatch):
+async def test_a_reconcile_whose_budget_runs_out_at_the_writer_changes_nothing(mirror, monkeypatch):
+    from contextlib import asynccontextmanager
+
     import memtomem.server.tools.hermes_mirror as mod
 
     await mirror(op="add", content="Keep.", ts=1)
     _file(mirror).unlink()
-    clock = iter([100.0] + [200.0] * 50)
-    monkeypatch.setattr(mod.time, "monotonic", lambda: next(clock))
+    storage = mirror.comp.storage
+    now = {"t": 100.0}
+    monkeypatch.setattr(mod.time, "monotonic", lambda: now["t"])
+    real_transaction = storage.transaction
+
+    @asynccontextmanager
+    async def slow_writer(*args, **kwargs):
+        now["t"] = 200.0  # the budget runs out while waiting for the writer
+        async with real_transaction(*args, **kwargs):
+            yield
+
+    marked: list[bool] = []
+    real_mark = storage.hermes_mirror_mark_pending
+
+    async def spy_mark(*args, **kwargs):
+        marked.append(True)
+        return await real_mark(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "transaction", slow_writer)
+    monkeypatch.setattr(storage, "hermes_mirror_mark_pending", spy_mark)
     out = await mirror(op="reconcile", deadline_ms=5)
     assert out.startswith("Error (retryable): deadline exceeded")
+    assert marked == []
     assert not _file(mirror).exists()
 
 
