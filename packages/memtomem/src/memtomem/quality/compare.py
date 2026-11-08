@@ -117,6 +117,12 @@ def _validate_report(report: Any, side: str) -> None:
         isinstance(report.get("deterministic"), bool),
         f"{side} report 'deterministic' must be a boolean",
     )
+    if "memtomem_version" in report:
+        mv = report.get("memtomem_version")
+        _require(
+            isinstance(mv, str) and bool(mv),
+            f"{side} report 'memtomem_version' must be a non-empty string",
+        )
     cases = report.get("cases")
     _require(isinstance(cases, list), f"{side} report 'cases' must be a list")
 
@@ -472,8 +478,23 @@ def _compatibility(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[
         if _decay_enabled(baseline) or _decay_enabled(candidate):
             note += "; decay is enabled, so score deltas also include decay drift"
         notes.append(note)
-    if profile_match:
-        notes.append("profiles are identical — metric deltas should be zero")
+    base_ver = baseline.get("memtomem_version")
+    cand_ver = candidate.get("memtomem_version")
+    if base_ver is not None and cand_ver is not None:
+        if base_ver != cand_ver:
+            notes.append(
+                "reports were produced by different memtomem versions; deltas may include ranking changes"
+            )
+        elif profile_match:
+            # Package versions only advance at releases; intra-release commits
+            # share the same version string.
+            notes.append("profiles are identical — metric deltas should be zero")
+    else:
+        # Either or both reports lack memtomem_version (e.g. legacy reports from
+        # older releases). An unknown producer provides no basis for claiming zero deltas.
+        notes.append(
+            "a report does not record the memtomem version that produced it; deltas may include ranking changes"
+        )
     if not corpus_match:
         notes.append("corpus differs; deltas conflate profile and data changes")
     if not index_match:
