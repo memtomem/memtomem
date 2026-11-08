@@ -1402,6 +1402,30 @@ def test_update_git_log_prints_sha_and_message_despite_output_config(tmp_path: P
     assert "\x00" not in out
 
 
+def test_brief_project_search_leaves_out_handoff_records() -> None:
+    """Pinned on the step itself: the recent-updates step carries the same filter."""
+    flat = " ".join(_project_body("brief").split())
+    step = flat.split("1. **Project memories**:", 1)[1].split("2. **Host-native", 1)[0]
+    assert 'namespace="shared:<project-slug>"' in step
+    assert 'tag_filter="memory-update-item"' in step
+
+
+def test_handoff_resume_points_to_brief_without_searching() -> None:
+    contract = tomllib.loads(
+        (_ROOT / "packages/memtomem-plugin-assets/contract.toml").read_text(encoding="utf-8")
+    )
+    handoff = next(row for row in contract["workflows"] if row["id"] == "handoff")
+    assert "mem_search" not in handoff["tools"]
+
+    body = _project_body("handoff")
+    assert "mem_search(" not in body
+    assert "`mem_search`" not in body
+    flat = " ".join(body.split())
+    resume = flat.split("## Resume", 1)[1]
+    assert "the brief workflow, run with this objective as its task" in resume
+    assert "Do not run it and do not search from this workflow" in resume
+
+
 def test_brief_and_update_user_preference_reads_select_every_namespace() -> None:
     """Drive the namespace the workflows pass on user-scope reads through the real search core.
 

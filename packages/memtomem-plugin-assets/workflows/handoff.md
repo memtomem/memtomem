@@ -236,3 +236,6 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    artifact paths as pointers: do not open them unless asked, and note that a path written by
    another runtime or machine may not exist here. Do not delete, acknowledge, consume, edit, or
    automatically create another handoff.
+9. End with one line telling the user that the brief workflow, run with this objective as its task,
+   lists related project memories. Do not run it and do not search from this workflow: the record
+   was selected by tag alone, and related memories are not part of it.

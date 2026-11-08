@@ -65,8 +65,11 @@ In topic mode, run steps 1, 2, 3, 4, and 6. In minimal mode, run steps 2, 3, 4, 
 the open-items query from step 5 as the query in step 2.
 
 1. **Project memories**: Call `mem_search` with `query=<task>`,
-   `namespace="shared:<project-slug>"`, `scope="project_local"`, `top_k=8`, and
-   `output_format="structured"`.
+   `namespace="shared:<project-slug>"`, `scope="project_local"`,
+   `tag_filter="memory-update-item"`, `top_k=8`, and `output_format="structured"`. The tag keeps
+   handoff records out of these results, because a task query can match their bodies closely and
+   this briefing does not read them. A memory saved in this namespace without that tag is not
+   found by this step.
 2. **Host-native repo memories**: Call `mem_search` with `query=<task>`, `scope="user"`,
    `namespace="claude*:*-<host-slug>"`, `top_k=5`, and `output_format="structured"`. The pattern
    matches by directory name, so it can also return notes from a same-named repository

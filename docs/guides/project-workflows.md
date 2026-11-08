@@ -34,7 +34,7 @@ behaviour is the same everywhere and only the invocation differs.
 
 This guide describes the workflows as shipped with memtomem `0.7.7` and these
 plugin versions:
-`claude` 0.5.33 · `codex` 0.3.31 · `opencode` 0.3.29 · `kimi` 0.2.24 · `antigravity` 0.2.10 · `cursor` 0.1.0.
+`claude` 0.5.34 · `codex` 0.3.32 · `opencode` 0.3.30 · `kimi` 0.2.25 · `antigravity` 0.2.11 · `cursor` 0.1.0.
 `update` runs its `incremental` mode by default from `claude` 0.5.26,
 `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
 older plugin releases ask for a mode instead (see the CHANGELOG).
@@ -94,16 +94,19 @@ compares the branch with its upstream using `git ls-remote` only, so it never
 fetches, pulls, or merges on the record's behalf. If `next_action` names a
 GitHub issue or pull request as `owner/repo#N` or a full URL, resume reports
 its state when the host can query GitHub. Resume never deletes, edits, or
-replaces a handoff.
+replaces a handoff. It runs no memory search; it ends by telling you that `brief`,
+run with the record's objective as its task, lists related project memories.
 
 ## brief
 
 `brief` is read-only. It runs in one of two modes:
 
-- **Topic mode** when you name a task or topic. It searches project memories
-  and the host's own notes for this repository with that topic, recalls the
-  five newest `update` items, lists active handoff IDs, and searches user-scope
-  preferences across every namespace.
+- **Topic mode** when you name a task or topic. It searches the project's
+  `update` items and the host's own notes for this repository with that topic,
+  recalls the five newest `update` items, lists active handoff IDs, and searches
+  user-scope preferences across every namespace. The project search carries the
+  `memory-update-item` tag, so handoff bodies stay out of it, and so does any
+  other memory saved in that namespace without the tag.
 - **Minimal mode** when you name nothing. It skips the topic searches and
   reports only recent updates, active handoff IDs, and open items (a search
   for `in-flight hold wip todo blocked` in the project namespace).
