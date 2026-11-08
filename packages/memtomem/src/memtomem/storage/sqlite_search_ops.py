@@ -49,6 +49,18 @@ from memtomem.storage.sqlite_visibility import (
 
 logger = logging.getLogger(__name__)
 
+
+def _row_screen(hide_unavailable: bool) -> str:
+    """The source-hold screen a context window's count and seek both apply.
+
+    One fragment for both statements, so the ordinal can only count the rows
+    the seek is allowed to return. Both are fixed SQL with no parameters.
+    """
+    if hide_unavailable:
+        return f"{NOT_WITHHELD_CHUNKS} AND {VISIBLE_SOURCE_CHUNKS}"
+    return NOT_WITHHELD_CHUNKS
+
+
 # Hard ceiling on the ``k`` of a sqlite-vec KNN query (``embedding MATCH ?``
 # with an inner ``LIMIT``). sqlite-vec 0.1.9 rejects anything larger with
 # ``k value in knn query too large, provided <k> and the limit is 4096``; it is
@@ -631,6 +643,7 @@ class SearchOpsMixin:
         scope_filter: ScopeFilter | None,
         project_context_root: Path | None,
         as_of_unix: int | None,
+        hide_unavailable: bool,
     ) -> dict[UUID, ContextWindowRows | None]:
         """Physical neighbours plus visible ordinal/total, without listing the file.
 
@@ -650,6 +663,9 @@ class SearchOpsMixin:
         A row withheld by a redaction hold (#2777) is neither counted nor
         returned as a neighbour, and each statement judges that in its own
         snapshot, so no neighbour is returned that was withheld when read.
+        With ``hide_unavailable`` the same goes for a row ranked search hides
+        for any other source hold or a pending check (#3114), with the same
+        per-statement judgement; see the protocol for which caller passes it.
         """
         if not anchor_ids:
             return {}
@@ -664,6 +680,7 @@ class SearchOpsMixin:
             project_context_root=project_context_root,
             as_of_unix=as_of_unix,
         )
+        screen = _row_screen(hide_unavailable)
         # One pass per file. ``ROWS BETWEEN UNBOUNDED PRECEDING AND 1
         # PRECEDING`` is the "strictly before" the ordinal is defined on, and
         # ``SUM(vis) OVER ()`` the file's visible total; subtracting the
@@ -690,7 +707,7 @@ class SearchOpsMixin:
                            SUM(vis) OVER () AS visible_all
                     FROM (
                         SELECT id, start_line, rowid AS rid,
-                               CASE WHEN ({vis_sql}) AND {NOT_WITHHELD_CHUNKS}
+                               CASE WHEN ({vis_sql}) AND {screen}
                                     THEN 1 ELSE 0 END AS vis
                         FROM chunks WHERE source_file=?
                     )
@@ -713,8 +730,12 @@ class SearchOpsMixin:
                 _, start_line, rid, vis, visible_before, visible_all = row
                 key = (start_line, rid, str(anchor_id))
                 result[anchor_id] = ContextWindowRows(
-                    before=self._neighbor_rows(db, norm_source, key, window, before=True),
-                    after=self._neighbor_rows(db, norm_source, key, window, before=False),
+                    before=self._neighbor_rows(
+                        db, norm_source, key, window, before=True, screen=screen
+                    ),
+                    after=self._neighbor_rows(
+                        db, norm_source, key, window, before=False, screen=screen
+                    ),
                     visible_before=int(visible_before),
                     visible_total_excluding_anchor=int(visible_all or 0) - int(vis),
                 )
@@ -728,6 +749,7 @@ class SearchOpsMixin:
         window: int,
         *,
         before: bool,
+        screen: str,
     ) -> list[Chunk]:
         """The ``window`` rows physically adjacent to the anchor.
 
@@ -743,10 +765,10 @@ class SearchOpsMixin:
         between would move the anchor past its own key and hand it back as one
         of its neighbours — the match rendered as its own context.
 
-        The physical window is chosen first and withheld rows are dropped
-        from it after, in the same statement: filtering before the ``LIMIT``
-        would reach past a withheld row for a more distant one and present it
-        as adjacent (#2777).
+        The physical window is chosen first and the rows ``screen`` rejects
+        are dropped from it after, in the same statement: filtering before the
+        ``LIMIT`` would reach past a withheld row for a more distant one and
+        present it as adjacent (#2777).
         """
         if window <= 0:
             return []
@@ -756,7 +778,7 @@ class SearchOpsMixin:
             "SELECT * FROM chunks WHERE rowid IN ("
             f"SELECT rowid FROM chunks WHERE source_file=? AND (start_line, rowid) {op} (?, ?) "
             f"AND id <> ? ORDER BY start_line {direction}, rowid {direction} LIMIT ?"
-            f") AND {NOT_WITHHELD_CHUNKS} "  # nosec B608
+            f") AND {screen} "  # nosec B608
             f"ORDER BY start_line {direction}, rowid {direction}",
             (norm_source, start_line, rid, anchor_id, window),
         ).fetchall()

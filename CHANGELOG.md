@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A search's context window no longer shows a consolidation summary that
+  search itself hides (#3114).** When a note's file was held back from search
+  (for example because it had gone missing or could not be read) or was waiting
+  for a check, search stopped returning the policy summaries in its
+  `.consolidated.md` file, but a hit on another row of that file still showed
+  them as `context_window` neighbours and counted them in its position. They are
+  now left out of both. `mem_expand` still shows them: it reads by chunk id,
+  where such rows stay readable for recovery, as its anchor does. A redaction
+  hold still hides them from both.
+
 - **The Web UI's Working Memory panel shows a scratch entry's key, value and
   session as text, and reports its actions (#3109).** Settings → Harness →
   Working Memory wrote those fields into the page as markup, so an entry

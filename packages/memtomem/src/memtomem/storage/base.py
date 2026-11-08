@@ -37,15 +37,20 @@ class ContextWindowRows:
     """One anchor's context window, from :meth:`StorageBackend.get_context_windows`.
 
     ``before`` / ``after`` are the anchor's *physical* neighbours in
-    ``(start_line, rowid)`` order, unfiltered: adjacency is physical, and the
-    caller screens them with
-    :func:`memtomem.search.visibility.neighbor_visible` so a hidden neighbour
-    shrinks the window rather than being replaced by a distant one.
+    ``(start_line, rowid)`` order. Storage drops only the source-hold rows
+    from them: a row withheld by a redaction hold always, and with
+    ``hide_unavailable`` a row under any other source hold or a pending check
+    (#3114). It drops them after choosing the physical window, so a dropped
+    row shrinks the window rather than being replaced by a distant one. The
+    other visibility rules (namespace, scope, validity) are left to the
+    caller, which screens the rows with
+    :func:`memtomem.search.visibility.neighbor_visible` to the same effect.
 
     The two counts are the visibility-screened accounting the caller reports,
-    and both **exclude the anchor itself** — the caller adds it back
-    unconditionally, because a chunk that is being returned is part of the set
-    the position describes even when the neighbour rules would hide it (#2236).
+    source-hold screen included, and both **exclude the anchor itself** — the
+    caller adds it back unconditionally, because a chunk that is being returned
+    is part of the set the position describes even when the neighbour rules
+    would hide it (#2236).
     Keeping the anchor out of the SQL count is what makes that carve-out
     arithmetic rather than a second opinion: nothing can double-count it, and
     the Python predicate never has to agree with the SQL about the anchor.
@@ -351,6 +356,13 @@ class StorageBackend(Protocol):
     # neighbours are a seek, and the counts are aggregates, so neither grows
     # with the file. Returns one entry per requested anchor; ``None`` means
     # that id is not a row of ``source_file`` (deleted, or re-indexed away).
+    #
+    # ``hide_unavailable`` has no default because it names the surface. Search
+    # passes true: a neighbour under any source hold or a pending source check,
+    # including a policy summary whose parent is, is neither returned nor
+    # counted, as ranked search hides it (#3114). ``mem_expand`` passes false:
+    # it reads by id, where only a redaction hold makes a row unreadable. A
+    # row withheld by a redaction hold is left out either way.
     async def get_context_windows(
         self,
         source_file: Path,
@@ -362,6 +374,7 @@ class StorageBackend(Protocol):
         scope_filter: ScopeFilter | None,
         project_context_root: Path | None,
         as_of_unix: int | None,
+        hide_unavailable: bool,
     ) -> dict[UUID, ContextWindowRows | None]: ...
     # ``recall_chunks``'s ``chunk_ids`` restricts the recall to an explicit id
     # set while keeping every other filter this method applies — notably the

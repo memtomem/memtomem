@@ -395,6 +395,11 @@ def fake_context_windows(chunks: dict[Path, list[Chunk]] | list[Chunk]):
     Mirrors the contract exactly: neighbours come back **unfiltered** (the
     caller screens them), and both counts **exclude the anchor**, which the
     caller adds back (#2236).
+
+    It models no source holds, so ``hide_unavailable`` (#3114) changes nothing
+    here. It is still required, as on the real method, so a caller that drops
+    it fails against the fake too; it is not forwarded to ``neighbor_visible``,
+    which does not take it.
     """
     from memtomem.search.visibility import neighbor_visible
     from memtomem.storage.base import ContextWindowRows
@@ -406,7 +411,8 @@ def fake_context_windows(chunks: dict[Path, list[Chunk]] | list[Chunk]):
         for chunk in chunks:
             chunks_by_source.setdefault(Path(chunk.metadata.source_file), []).append(chunk)
 
-    async def _get_context_windows(source_file, anchor_ids, window, **spec):
+    async def _get_context_windows(source_file, anchor_ids, window, *, hide_unavailable, **spec):
+        assert isinstance(hide_unavailable, bool)
         chunks = chunks_by_source.get(Path(source_file), [])
         positions = {c.id: i for i, c in enumerate(chunks)}
         visible = [neighbor_visible(c, **spec) for c in chunks]

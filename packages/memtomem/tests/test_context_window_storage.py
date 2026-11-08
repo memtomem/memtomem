@@ -76,6 +76,17 @@ async def backend(tmp_path):
         await storage.close()
 
 
+@pytest.fixture(params=[False, True], ids=["id-surface", "search-surface"])
+def hide_unavailable(request):
+    """Both statements, search's and ``mem_expand``'s, on every test (#3114).
+
+    No row here sits under a source hold, so the two must return the same
+    rows; the hold cases themselves are pinned in
+    ``test_context_window_holds.py``.
+    """
+    return request.param
+
+
 def _spec(**overrides):
     """The default visibility axes, as both surfaces pass them."""
     spec = {
@@ -90,13 +101,15 @@ def _spec(**overrides):
 
 
 class TestWindowRows:
-    async def test_middle_anchor_gets_both_sides(self, backend):
+    async def test_middle_anchor_gets_both_sides(self, backend, hide_unavailable):
         chunks = [_chunk(i) for i in range(7)]
         await backend.upsert_chunks(chunks)
 
-        rows = (await backend.get_context_windows(SOURCE, [chunks[3].id], 2, **_spec()))[
-            chunks[3].id
-        ]
+        rows = (
+            await backend.get_context_windows(
+                SOURCE, [chunks[3].id], 2, **_spec(), hide_unavailable=hide_unavailable
+            )
+        )[chunks[3].id]
 
         assert [c.content for c in rows.before] == ["chunk 1", "chunk 2"]
         assert [c.content for c in rows.after] == ["chunk 4", "chunk 5"]
@@ -104,12 +117,12 @@ class TestWindowRows:
         # Anchor-free by contract: 7 rows, minus the anchor.
         assert rows.visible_total_excluding_anchor == 6
 
-    async def test_first_and_last_anchors_run_out_of_neighbours(self, backend):
+    async def test_first_and_last_anchors_run_out_of_neighbours(self, backend, hide_unavailable):
         chunks = [_chunk(i) for i in range(5)]
         await backend.upsert_chunks(chunks)
 
         windows = await backend.get_context_windows(
-            SOURCE, [chunks[0].id, chunks[4].id], 2, **_spec()
+            SOURCE, [chunks[0].id, chunks[4].id], 2, **_spec(), hide_unavailable=hide_unavailable
         )
 
         assert windows[chunks[0].id].before == []
@@ -119,20 +132,22 @@ class TestWindowRows:
         assert windows[chunks[4].id].after == []
         assert windows[chunks[4].id].visible_before == 4
 
-    async def test_zero_window_still_counts(self, backend):
+    async def test_zero_window_still_counts(self, backend, hide_unavailable):
         """``window=0`` is a legal request: the position without the context."""
         chunks = [_chunk(i) for i in range(4)]
         await backend.upsert_chunks(chunks)
 
-        rows = (await backend.get_context_windows(SOURCE, [chunks[2].id], 0, **_spec()))[
-            chunks[2].id
-        ]
+        rows = (
+            await backend.get_context_windows(
+                SOURCE, [chunks[2].id], 0, **_spec(), hide_unavailable=hide_unavailable
+            )
+        )[chunks[2].id]
 
         assert rows.before == [] and rows.after == []
         assert rows.visible_before == 2
         assert rows.visible_total_excluding_anchor == 3
 
-    async def test_unknown_and_foreign_anchors_are_absent(self, backend):
+    async def test_unknown_and_foreign_anchors_are_absent(self, backend, hide_unavailable):
         """The one remaining "no context" answer: the id is not a row here."""
         chunks = [_chunk(i) for i in range(3)]
         other = _chunk(0, source=Path("/tmp/other.md"))
@@ -140,14 +155,18 @@ class TestWindowRows:
 
         stranger = uuid4()
         windows = await backend.get_context_windows(
-            SOURCE, [stranger, other.id, chunks[1].id], 1, **_spec()
+            SOURCE,
+            [stranger, other.id, chunks[1].id],
+            1,
+            **_spec(),
+            hide_unavailable=hide_unavailable,
         )
 
         assert windows[stranger] is None
         assert windows[other.id] is None
         assert windows[chunks[1].id] is not None
 
-    async def test_shared_start_line_orders_by_rowid(self, backend):
+    async def test_shared_start_line_orders_by_rowid(self, backend, hide_unavailable):
         """Chunks of a virtual source share a ``start_line``.
 
         The ordinal has to agree with ``list_chunks_by_source``, which breaks
@@ -159,13 +178,17 @@ class TestWindowRows:
 
         listed = await backend.list_chunks_by_source(SOURCE, limit=None)
         anchor = listed[3]
-        rows = (await backend.get_context_windows(SOURCE, [anchor.id], 1, **_spec()))[anchor.id]
+        rows = (
+            await backend.get_context_windows(
+                SOURCE, [anchor.id], 1, **_spec(), hide_unavailable=hide_unavailable
+            )
+        )[anchor.id]
 
         assert rows.visible_before == 3
         assert [c.id for c in rows.before] == [listed[2].id]
         assert [c.id for c in rows.after] == [listed[4].id]
 
-    async def test_neighbours_come_back_unscreened(self, backend):
+    async def test_neighbours_come_back_unscreened(self, backend, hide_unavailable):
         """Storage returns physical neighbours; the caller screens them.
 
         The split is deliberate — the leak-sensitive decision stays on the one
@@ -174,9 +197,11 @@ class TestWindowRows:
         chunks = [_chunk(0), _chunk(1, namespace="archive:old"), _chunk(2)]
         await backend.upsert_chunks(chunks)
 
-        rows = (await backend.get_context_windows(SOURCE, [chunks[2].id], 2, **_spec()))[
-            chunks[2].id
-        ]
+        rows = (
+            await backend.get_context_windows(
+                SOURCE, [chunks[2].id], 2, **_spec(), hide_unavailable=hide_unavailable
+            )
+        )[chunks[2].id]
 
         assert [c.id for c in rows.before] == [chunks[0].id, chunks[1].id]
         # ...but it is not counted: one visible row precedes the anchor.
@@ -185,7 +210,7 @@ class TestWindowRows:
 
 class TestConcurrentReindex:
     async def test_an_anchor_that_moves_mid_read_is_not_its_own_neighbour(
-        self, backend, monkeypatch
+        self, backend, hide_unavailable, monkeypatch
     ):
         """A re-index between the counts and the seeks must not duplicate the match.
 
@@ -219,7 +244,11 @@ class TestConcurrentReindex:
 
         monkeypatch.setattr(backend, "_neighbor_rows", _move_then_read)
 
-        rows = (await backend.get_context_windows(SOURCE, [anchor.id], 2, **_spec()))[anchor.id]
+        rows = (
+            await backend.get_context_windows(
+                SOURCE, [anchor.id], 2, **_spec(), hide_unavailable=hide_unavailable
+            )
+        )[anchor.id]
 
         assert anchor.id not in {c.id for c in rows.before}
         assert anchor.id not in {c.id for c in rows.after}
@@ -250,10 +279,14 @@ class TestPastTheOldCap:
         assert len(listed) == total
         return listed
 
-    async def test_anchor_past_the_cap_still_expands(self, backend, big_file):
+    async def test_anchor_past_the_cap_still_expands(self, backend, hide_unavailable, big_file):
         anchor = big_file[10_020]
 
-        rows = (await backend.get_context_windows(SOURCE, [anchor.id], 2, **_spec()))[anchor.id]
+        rows = (
+            await backend.get_context_windows(
+                SOURCE, [anchor.id], 2, **_spec(), hide_unavailable=hide_unavailable
+            )
+        )[anchor.id]
 
         assert rows is not None, "an anchor past the old cap read as 'not in the listing'"
         assert [c.content for c in rows.before] == ["chunk 10018", "chunk 10019"]
@@ -261,11 +294,17 @@ class TestPastTheOldCap:
         assert rows.visible_before == 10_020
         assert rows.visible_total_excluding_anchor == 10_049
 
-    async def test_anchor_inside_the_cap_reports_the_whole_file(self, backend, big_file):
+    async def test_anchor_inside_the_cap_reports_the_whole_file(
+        self, backend, hide_unavailable, big_file
+    ):
         """The other half: the total used to stop at the cap, not the file."""
         anchor = big_file[5]
 
-        rows = (await backend.get_context_windows(SOURCE, [anchor.id], 1, **_spec()))[anchor.id]
+        rows = (
+            await backend.get_context_windows(
+                SOURCE, [anchor.id], 1, **_spec(), hide_unavailable=hide_unavailable
+            )
+        )[anchor.id]
 
         assert rows.visible_before == 5
         assert rows.visible_total_excluding_anchor == 10_049
@@ -336,13 +375,15 @@ class TestVisibilityParity:
             ),
         ],
     )
-    async def test_counts_match_the_python_predicate(self, backend, overrides):
+    async def test_counts_match_the_python_predicate(self, backend, hide_unavailable, overrides):
         chunks = self._matrix()
         await backend.upsert_chunks(chunks)
         spec = _spec(**overrides)
 
         listed = await backend.list_chunks_by_source(SOURCE, limit=None)
-        windows = await backend.get_context_windows(SOURCE, [c.id for c in listed], 0, **spec)
+        windows = await backend.get_context_windows(
+            SOURCE, [c.id for c in listed], 0, **spec, hide_unavailable=hide_unavailable
+        )
 
         expected = [neighbor_visible(c, **spec) for c in listed]
         # Every row is used as an anchor, so the anchor's own visibility is
@@ -354,7 +395,9 @@ class TestVisibilityParity:
                 sum(expected) - (1 if expected[pos] else 0)
             ), f"row {pos} total"
 
-    async def test_the_scope_boundary_survives_every_axis_being_off(self, backend):
+    async def test_the_scope_boundary_survives_every_axis_being_off(
+        self, backend, hide_unavailable
+    ):
         """Switching off the *filters* does not switch off the boundary.
 
         With no namespace prefixes, no filters and no temporal bound, the only
@@ -377,6 +420,7 @@ class TestVisibilityParity:
                 scope_filter=None,
                 project_context_root=None,
                 as_of_unix=None,
+                hide_unavailable=hide_unavailable,
             )
         )[chunks[0].id]
 
@@ -414,7 +458,7 @@ class TestExpansionSurfaces:
         assert "chunk 1" not in out  # outside the window
 
 
-async def test_expired_neighbour_shrinks_the_window_not_the_total(backend):
+async def test_expired_neighbour_shrinks_the_window_not_the_total(backend, hide_unavailable):
     """The two counts stay on the visible set while ``as_of`` moves."""
     chunks = [
         _chunk(0),
@@ -423,7 +467,11 @@ async def test_expired_neighbour_shrinks_the_window_not_the_total(backend):
     ]
     await backend.upsert_chunks(chunks)
 
-    rows = (await backend.get_context_windows(SOURCE, [chunks[2].id], 2, **_spec()))[chunks[2].id]
+    rows = (
+        await backend.get_context_windows(
+            SOURCE, [chunks[2].id], 2, **_spec(), hide_unavailable=hide_unavailable
+        )
+    )[chunks[2].id]
 
     assert rows.visible_before == 1
     assert rows.visible_total_excluding_anchor == 1
