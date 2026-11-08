@@ -17,6 +17,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   changes. Reports missing the field remain fully supported, treated as unknown
   producers.
 
+- **Migrating a memory moves its consolidation summary with it (#3128).**
+  `mm context memory-migrate` and `mem_context_memory_migrate` moved a file's
+  chunks to the new path but left the summary `auto_consolidate` had written
+  for it at the old one. An orphan scan then held that summary, hiding it, and
+  `auto_consolidate` skipped the moved file as `agent-consolidated` from then on,
+  so it was never summarized again. The summary now moves in the same
+  transaction, keeping its id and taking the file's new scope. It stays where it
+  is, as before, when another note shares its path, when that path is held or
+  pending, or when the new path already has rows or a hold.
+
 ## [0.7.7] — 2026-11-08
 
 ### Upgrading
