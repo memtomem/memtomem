@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
+import unicodedata
 import zipfile
 from collections import Counter, defaultdict
 from collections.abc import Callable
@@ -249,7 +251,8 @@ async def import_notion(
                 continue
             sources.append((rel, p.name, p.read_text(encoding="utf-8", errors="replace")))
 
-    # Pass 1: Group by (rel.parent, clean_stem) and build output mapping
+    # Pass 1: group by folded (rel.parent, clean_stem) and build the output
+    # mapping; raises before anything is written if two pages would share a file.
     mapping = _build_notion_output_mapping(sources)
 
     # Pass 2: Write files under the mapped name
@@ -526,42 +529,92 @@ def _clean_notion_filename(stem: str) -> str:
     return clean
 
 
+class NotionImportCollisionError(ValueError):
+    """Two pages of a Notion export would be written to the same file."""
+
+
+def _collision_key(name: str) -> str:
+    """Fold a path component the way the importer decides two names collide.
+
+    NFC plus casefold, on every platform, so one export gets the same filenames
+    on Linux, macOS and Windows. This is a naming policy that covers the case-
+    and normalization-insensitive filesystems (APFS, NTFS) for the ordinary
+    cases; it is not an exact model of either (NTFS's upcase table, Turkish
+    dotless i), and it also merges spellings such as 'Straße' and 'STRASSE'.
+    """
+    return unicodedata.normalize("NFC", name).casefold()
+
+
 def _build_notion_output_mapping(
     sources: list[tuple[Path, str, str]],
 ) -> dict[tuple[Path, str], str]:
     """Build a mapping of (canonical_parent, original_filename) -> output_filename.
 
-    - Unique in directory after cleaning: keep cleaned name ('Page.md').
-    - Colliding siblings in directory: every member of that colliding group with
-      a UUID gets '<stem> (<first 8 hex of UUID>).md'. If two siblings share an
-      8-hex prefix, use full 32 hex for those two. A member without a UUID suffix
-      keeps the plain name.
+    Pages are grouped by their folded directory and folded cleaned title
+    (``_collision_key``), so titles that differ only by case or Unicode
+    normalization collide like identical ones:
+
+    - A page alone in its group keeps its cleaned name ('Page.md').
+    - In a colliding group, every page with a UUID gets
+      '<its own stem> (<first 8 hex of UUID>).md', or the full 32 hex when two of
+      them share an 8-hex prefix. A page without a UUID keeps its plain name,
+      unless another UUID-less page shares the group; then each of those gets
+      '<stem> (<first 8 hex of sha256(original filename)>).md'.
+
+    Raises ``NotionImportCollisionError`` before anything is written if two
+    sources still get output paths that fold to the same name, and refuses the
+    export as a whole rather than resolving it. For example, a page titled
+    'X (a1b2c3d4)' next to two 'X' pages, two pages carrying the same UUID (a
+    duplicated ZIP member), or folders that differ only by case.
     """
-    groups: dict[tuple[Path, str], list[tuple[str, str | None]]] = defaultdict(list)
+    groups: dict[tuple[str, str], list[tuple[Path, str, str, str | None]]] = defaultdict(list)
     for rel, original_name, _ in sources:
         canonical_parent = Path(os.path.normpath(rel.parent))
         clean_stem, uuid = _split_notion_uuid(Path(original_name).stem)
-        groups[(canonical_parent, clean_stem)].append((original_name, uuid))
+        group_key = (_collision_key(canonical_parent.as_posix()), _collision_key(clean_stem))
+        groups[group_key].append((canonical_parent, original_name, clean_stem, uuid))
 
-    mapping: dict[tuple[Path, str], str] = {}
-    for (canonical_parent, clean_stem), members in groups.items():
+    # One entry per source, checked before anything is keyed by Path: equal
+    # ``(parent, name)`` keys (a duplicated ZIP member, or parents that a
+    # Windows Path compares case-insensitively) must not collapse before the
+    # collision check sees both.
+    assigned: list[tuple[Path, str, str]] = []
+    for members in groups.values():
         if len(members) == 1:
-            orig_name, _ = members[0]
-            mapping[(canonical_parent, orig_name)] = f"{clean_stem}.md"
+            canonical_parent, orig_name, clean_stem, _ = members[0]
+            assigned.append((canonical_parent, orig_name, f"{clean_stem}.md"))
             continue
 
-        prefix_counts = Counter(uuid[:8] for _, uuid in members if uuid is not None)
-        for orig_name, uuid in members:
+        prefix_counts = Counter(uuid[:8] for *_, uuid in members if uuid is not None)
+        uuidless = sum(1 for *_, uuid in members if uuid is None)
+        for canonical_parent, orig_name, clean_stem, uuid in members:
             if uuid is None:
-                mapping[(canonical_parent, orig_name)] = f"{clean_stem}.md"
-            else:
-                prefix = uuid[:8]
-                if prefix_counts[prefix] > 1:
-                    mapping[(canonical_parent, orig_name)] = f"{clean_stem} ({uuid}).md"
+                if uuidless > 1:
+                    digest = hashlib.sha256(orig_name.encode("utf-8")).hexdigest()[:8]
+                    output_name = f"{clean_stem} ({digest}).md"
                 else:
-                    mapping[(canonical_parent, orig_name)] = f"{clean_stem} ({prefix}).md"
+                    output_name = f"{clean_stem}.md"
+            elif prefix_counts[uuid[:8]] > 1:
+                output_name = f"{clean_stem} ({uuid}).md"
+            else:
+                output_name = f"{clean_stem} ({uuid[:8]}).md"
+            assigned.append((canonical_parent, orig_name, output_name))
 
-    return mapping
+    claimed: dict[tuple[str, str], str] = {}
+    for canonical_parent, orig_name, output_name in sorted(
+        assigned, key=lambda item: (item[0].as_posix(), item[1])
+    ):
+        source = (canonical_parent / orig_name).as_posix()
+        dest_key = (_collision_key(canonical_parent.as_posix()), _collision_key(output_name))
+        if dest_key in claimed:
+            raise NotionImportCollisionError(
+                f"Notion pages {claimed[dest_key]!r} and {source!r} would both be "
+                f"written to {(canonical_parent / output_name).as_posix()!r}; "
+                "rename one of them in Notion and export again"
+            )
+        claimed[dest_key] = source
+
+    return {(parent, orig): output for parent, orig, output in assigned}
 
 
 def _clean_notion_markdown(
