@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mm init` no longer defaults to a choice this machine cannot finish (#3149, #3150).**
+  Pressing Enter at the preset prompt now selects Minimal unless the `onnx` extra is known to be
+  importable where memtomem will run, and a workspace that cannot be probed counts as missing.
+  Before this, a minimal install reached `Setup complete!` and then `mm add` and `mm search`
+  failed. Pressing Enter at the connect prompt now selects Skip when the `claude` CLI is not on
+  `PATH`; before this, init exited 2 and wrote no configuration. Choosing a preset or Claude Code
+  explicitly works as it did, including the exit when the Claude inventory is incomplete. The
+  missing-extra warning now names `mm add` and `mm search`, and says only reranking is affected
+  when the extra is wanted for the reranker alone. Workspace detection also finds
+  `.venv/Scripts/python.exe` on Windows.
+
 ### Changed
 
 - **Plugin workflows: `brief` keeps handoff records out of its project search, and `handoff resume`

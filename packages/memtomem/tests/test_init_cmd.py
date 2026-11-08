@@ -771,7 +771,7 @@ class TestMissingExtrasWarning:
 
         from memtomem.cli.init_cmd import _emit_missing_extras_warning
 
-        _emit_missing_extras_warning(["onnx", "web"], {})
+        _emit_missing_extras_warning(["onnx", "web"], {"provider": "onnx"})
         out = unstyle(capsys.readouterr().out)
         assert "Missing extras: onnx, web" in out
         assert "mm index" in out
@@ -7469,6 +7469,7 @@ class TestStepHeaderPosition:
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
         )
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr("memtomem.cli.init_cmd._claude_cli_found", lambda: True)
 
         runner = CliRunner()
         memory_dir = tmp_path / "memories"
