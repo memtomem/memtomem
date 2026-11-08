@@ -99,6 +99,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   available to agent consolidation. A summary linked to more chunks than it read
   is regenerated once. `max_bullets` must be a positive integer.
 
+- **`mem_entity_search` treats `_` and `%` in `value` literally, and hides
+  system namespaces by default (#3111).** The value was passed to SQL `LIKE`
+  unescaped, so `foo_bar` also matched `fooXbar` and `50%` matched any value
+  containing `50`. And with no `namespace`, the search listed entities from
+  every namespace, `archive:*` and `agent-runtime:*` included. `namespace` now
+  resolves the way it does for `mem_search` and `mem_recall`: omitted, the
+  session namespace applies, and with neither, the configured
+  `search.system_namespace_prefixes` are hidden; `!system`, a comma list
+  (`work,personal`) and a glob (`proj:*`) work, where the last two used to match
+  nothing. A malformed filter is reported as an error.
+
 ## [0.7.6] — 2026-11-06
 
 ### Upgrading
