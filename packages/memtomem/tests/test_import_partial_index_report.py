@@ -49,14 +49,18 @@ def _source(tmp_path: Path, kind: str, bodies: dict[str, str], tag: str = "1") -
 
 
 def _rows(comp, name: str) -> list[tuple[str, str]]:
-    return (
+    """Chunk rows of the file named *name*, matched by leaf, not by a path separator."""
+    rows = (
         comp.storage._get_db()
-        .execute(
-            "SELECT content, tags FROM chunks WHERE source_file LIKE ? ORDER BY id",
-            (f"%/{name}",),
-        )
+        .execute("SELECT source_file, content, tags FROM chunks ORDER BY id")
         .fetchall()
     )
+    return [(content, tags) for source, content, tags in rows if Path(source).name == name]
+
+
+def _hold_reasons(comp, name: str) -> list[str]:
+    rows = comp.storage._get_db().execute("SELECT source_file, reason FROM held_sources").fetchall()
+    return [reason for source, reason in rows if Path(source).name == name]
 
 
 def _lines(result: str) -> list[str]:
@@ -220,12 +224,7 @@ async def test_a_redaction_hold_committed_before_the_refusal_flags_the_session(
 
     assert [exc.held for exc in raised] == [True]
     assert "- Blocked (redaction): 1" in _lines(result)
-    reasons = (
-        comp.storage._get_db()
-        .execute("SELECT reason FROM held_sources WHERE source_file LIKE ?", ("%/Alpha.md",))
-        .fetchall()
-    )
-    assert reasons == [(REDACTION_BLOCKED_HOLD,)]
+    assert _hold_reasons(comp, "Alpha.md") == [REDACTION_BLOCKED_HOLD]
     assert flags == [_SESSION]
 
 
