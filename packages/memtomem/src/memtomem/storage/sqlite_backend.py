@@ -2882,14 +2882,15 @@ class SqliteBackend(
 
     @staticmethod
     def _move_ai_summary_cache(db: sqlite3.Connection, old_norm: str, new_norm: str) -> None:
-        old_key = f"{_AI_SUMMARY_KEY_PREFIX}{old_norm}"
-        row = db.execute("SELECT value FROM _memtomem_meta WHERE key=?", (old_key,)).fetchone()
-        if row is not None:
-            db.execute(
-                "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
-                (f"{_AI_SUMMARY_KEY_PREFIX}{new_norm}", row[0]),
-            )
-            db.execute("DELETE FROM _memtomem_meta WHERE key=?", (old_key,))
+        for prefix in (_AI_SUMMARY_KEY_PREFIX, f"chunk_descriptions:{_AI_SUMMARY_KEY_PREFIX}"):
+            old_key = f"{prefix}{old_norm}"
+            row = db.execute("SELECT value FROM _memtomem_meta WHERE key=?", (old_key,)).fetchone()
+            if row is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+                    (f"{prefix}{new_norm}", row[0]),
+                )
+                db.execute("DELETE FROM _memtomem_meta WHERE key=?", (old_key,))
 
     def _carry_policy_summary(
         self,

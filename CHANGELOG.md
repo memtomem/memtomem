@@ -63,15 +63,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   is, as before, when another note shares its path, when that path is held or
   pending, or when the new path already has rows or a hold.
 
-- **Notion sibling pages sharing a title in the same directory no longer overwrite each other during import (#3113).**
+- **Notion sibling pages sharing a title in the same directory no longer
+  overwrite each other during import (#3113).**
   When Notion exports multiple pages in the same folder with duplicate titles
   (disambiguated in Notion by trailing 32-hex UUIDs), stripping the UUIDs
-  previously caused siblings to map to the same filename, silently overwriting earlier
-  siblings on disk. `import_notion` now disambiguates colliding siblings in the import
-  by appending their first 8 hex characters (e.g. `Meeting Notes (a1b2c3d4).md`, falling
-  back to 32 hex on prefix collision), and rewrites relative markdown links to match.
-  A page with a unique title keeps its plain name. Re-importing into an output directory
-  where siblings previously collided leaves the old plain-named file behind as stale.
+  previously caused siblings to map to the same filename, silently overwriting
+  earlier siblings on disk. `import_notion` now disambiguates colliding siblings
+  in the import by appending their first 8 hex characters (e.g. `Meeting Notes
+  (a1b2c3d4).md`, falling back to 32 hex on prefix collision), and rewrites
+  relative markdown links to match. A page with a unique title keeps its plain
+  name. Re-importing into an output directory where siblings previously collided
+  — or where a previously unique page gains a same-title sibling, moving it to
+  `<stem> (<prefix>).md` — leaves the old plain-named file behind as stale on disk
+  and indexed.
 
 - **Notion pages whose titles differ only by case or Unicode normalization no
   longer overwrite each other on macOS and Windows (#3141).** `Meeting notes` and
