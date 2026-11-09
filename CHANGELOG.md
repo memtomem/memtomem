@@ -99,11 +99,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   memory directory, which is indexed like any other note. The provider README
   lists what is stored, sent and dropped, and how to purge a mirror.
 - **`mem_search` takes `deadline_ms`, a budget for the server's own
-  processing.** It bounds the wait for a read connection and for a query
-  embedding that has not started, and is checked between search stages; past it
-  the call returns `Error (retryable): deadline … exceeded` and records nothing.
-  Work already running — a SQLite read, an embedding slice — finishes first, so
-  this is not a response deadline. Without it, search runs exactly as before.
+  processing.** It bounds the wait for a read connection, and is checked between
+  search stages and when a queued query embedding reaches the model, which then
+  does not run; past it the call returns `Error (retryable): … deadline …
+  exceeded …` and records nothing. Work already running — a SQLite read, an
+  embedding slice — finishes first, and a query embedding queued behind other
+  inference waits for it before failing, so this is not a response deadline.
+  Without it, search runs exactly as before.
 - **`mem_do(action="version")` advertises `hermes_mirror`, `search_deadline_ms`
   and `namespace_selectors`.** The Hermes provider asks before its first call
   and every 10 minutes, and sends `namespace="!system"`, `deadline_ms` and
