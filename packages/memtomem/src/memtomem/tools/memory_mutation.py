@@ -36,6 +36,7 @@ from memtomem.tools.memory_writer import (
     RestoreOutcome,
     SourceChangedError,
     read_pre_image,
+    read_with_source_key,
     restore_pre_image_quietly,
 )
 
@@ -212,12 +213,14 @@ async def mutate_source_and_reindex(
     if refusal is not None:
         raise MutationBlockedError(refusal)
     try:
-        pre_image = await asyncio.to_thread(read_pre_image, source_file)
+        pre_image, source_key = await asyncio.to_thread(
+            read_with_source_key, read_pre_image, source_file
+        )
     except FileNotFoundError as exc:
         # Nothing read, nothing written (#2833).
         raise SourceMissingError(str(source_file)) from exc
     preflight = await asyncio.to_thread(
-        index_engine.preflight_mutation, source_file, pre_image.data
+        index_engine.preflight_mutation, source_file, pre_image.data, source_key=source_key
     )
     if preflight.rejection is not None:
         rejection = await index_engine.refuse_mutation(source_file, preflight)
@@ -311,8 +314,10 @@ async def preflight_refusal(
     """
     from memtomem.tools.memory_writer import read_pre_image_or_empty
 
-    pre = await asyncio.to_thread(read_pre_image_or_empty, path)
-    preflight = await asyncio.to_thread(index_engine.preflight_mutation, path, pre)
+    pre, source_key = await asyncio.to_thread(read_with_source_key, read_pre_image_or_empty, path)
+    preflight = await asyncio.to_thread(
+        index_engine.preflight_mutation, path, pre, source_key=source_key
+    )
     if preflight.rejection is not None:
         rejection = await index_engine.refuse_mutation(path, preflight)
         return rejection.mutation_detail(op, outcome="not_written", surface=surface), pre

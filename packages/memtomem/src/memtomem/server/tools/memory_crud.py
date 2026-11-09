@@ -46,6 +46,7 @@ from memtomem.tools.memory_writer import (
     RestoreOutcome,
     SourceChangedError,
     read_pre_image,
+    read_with_source_key,
     restore_pre_image_quietly,
     valid_base_hash,
 )
@@ -533,13 +534,15 @@ async def _mutate_file_and_reindex(
     # inherit a mutation that happened in its predecessor.
     provenance_session_id = await capture_session_for_untracked_write(app)
     try:
-        pre_image = await asyncio.to_thread(read_pre_image, source_file)
+        pre_image, source_key = await asyncio.to_thread(
+            read_with_source_key, read_pre_image, source_file
+        )
     except FileNotFoundError:
         # A missing source stays visible under ``retain_missing_dirs`` (#2833);
         # nothing has been read or written yet.
         return None, f"Error: {SOURCE_MISSING_DETAIL}"
     preflight = await asyncio.to_thread(
-        app.index_engine.preflight_mutation, source_file, pre_image.data
+        app.index_engine.preflight_mutation, source_file, pre_image.data, source_key=source_key
     )
     if preflight.rejection is not None:
         rejection = await app.index_engine.refuse_mutation(source_file, preflight)
