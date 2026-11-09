@@ -201,11 +201,15 @@ async def promote_scratch(
             # entry stays in scratch, unpromoted.
             from memtomem.indexing.engine import PrivacyRejection
             from memtomem.tools.memory_mutation import appended_valve_text
-            from memtomem.tools.memory_writer import read_pre_image_or_empty
+            from memtomem.tools.memory_writer import read_pre_image_or_empty, read_with_source_key
 
             needs_valve = guard.decision == "bypassed"
-            pre = await _asyncio.to_thread(read_pre_image_or_empty, target)
-            preflight = await _asyncio.to_thread(index_engine.preflight_mutation, target, pre)
+            pre, source_key = await _asyncio.to_thread(
+                read_with_source_key, read_pre_image_or_empty, target
+            )
+            preflight = await _asyncio.to_thread(
+                index_engine.preflight_mutation, target, pre, source_key=source_key
+            )
             if preflight.rejection is not None:
                 rejection = await index_engine.refuse_mutation(target, preflight)
                 search_pipeline.invalidate_cache()

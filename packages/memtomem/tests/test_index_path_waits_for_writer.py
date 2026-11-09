@@ -279,7 +279,9 @@ async def test_a_redaction_blocked_reindex_holds_once_the_owner_finishes(
 async def test_a_refused_mutation_holds_once_the_owner_finishes(components, engine, memory_dir):
     path = memory_dir / "note.md"
     await _indexed(engine, path)
-    preflight = engine.preflight_mutation(path, (_NOTE + f"\naws key {_SECRET}\n").encode("utf-8"))
+    preflight = engine.preflight_mutation(
+        path, (_NOTE + f"\naws key {_SECRET}\n").encode("utf-8"), source_key=norm_path(path)
+    )
     assert preflight.rejection is not None
     owner = _Owner(components.storage)
     await owner.start()

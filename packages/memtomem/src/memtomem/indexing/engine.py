@@ -3796,7 +3796,9 @@ class IndexEngine:
         _, _, guard, _ = self._judge_as_it_stands(file_path, content, surface="memory_doctor")
         return guard.decision
 
-    def preflight_mutation(self, file_path: Path, pre_image: bytes) -> MutationPreflight:
+    def preflight_mutation(
+        self, file_path: Path, pre_image: bytes, *, source_key: str
+    ) -> MutationPreflight:
         """May a memory tool modify ``file_path``, whose bytes are ``pre_image``?
 
         Called under the caller's sidecar lock, before it writes. Judges the
@@ -3810,6 +3812,12 @@ class IndexEngine:
         re-index after the write would refuse the whole result anyway, and the
         write itself would already be on disk. See :class:`MutationPreflight`
         for the other two answers.
+
+        ``source_key`` is the stored key of the source ``pre_image`` was read
+        from, resolved with the read (``memory_writer.read_with_source_key``). A
+        refusal holds that key: resolved here or later, a path replaced by a
+        symlink after the read would hold the link's target and leave the
+        refused source's chunks searchable (#3183).
         """
         if not pre_image or self._registry.get(file_path.suffix) is None:
             return MutationPreflight(None, False, True)
@@ -3824,6 +3832,7 @@ class IndexEngine:
                 hit_count=len(guard.hits),
                 scope=scope_val,
                 decision=guard.decision,
+                source_key=source_key,
             )
         masking_locked = bool(self._config.index_masking_manifest_path) and bool(
             projection.redaction_count

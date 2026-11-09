@@ -36,6 +36,7 @@ from memtomem.tools.memory_writer import (
     SourceRemovedError,
     SourceReplacedError,
     read_pre_image,
+    read_with_source_key,
     remove_lines,
     replace_chunk_body,
     restore_pre_image_quietly,
@@ -901,9 +902,14 @@ async def delete_chunk(
                 from memtomem.indexing.engine import PrivacyRejection
                 from memtomem.tools.memory_mutation import outcome_after_restore
 
-                pre_image = await asyncio.to_thread(read_pre_image, source)
+                pre_image, source_key = await asyncio.to_thread(
+                    read_with_source_key, read_pre_image, source
+                )
                 preflight = await asyncio.to_thread(
-                    index_engine.preflight_mutation, source, pre_image.data
+                    index_engine.preflight_mutation,
+                    source,
+                    pre_image.data,
+                    source_key=source_key,
                 )
                 if preflight.rejection is not None:
                     mutation_attempted = True  # the hold changes what search may serve
