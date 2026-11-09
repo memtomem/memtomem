@@ -246,18 +246,30 @@ def _own_leaf_key(file_path: Path) -> str:
     return fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
 
 
-def _require_same_source(file_path: Path, source_key: str) -> None:
-    """Stop a pass whose path names another source than it did before a writer wait (#3173).
+class SourceRelinkedError(RetryableError):
+    """The path being indexed names another source than the one its content was read from (#3180).
 
-    The wait leaves time for the path to be replaced by a link to another
-    indexed source. Writes that resolve the path afterwards would reach that
-    source with this file's content. A relink during the embedding await
-    predates the waits and is not checked here (#3180).
+    Raised between the read and a write, never for a path that was already a
+    link when it was read: that one is indexed through the link, as before.
+    """
+
+
+def _require_same_source(file_path: Path, source_key: str) -> None:
+    """Stop a pass whose path names another source than the one it read (#3173, #3180).
+
+    ``source_key`` is taken with the content read. Every ``await`` after it
+    (namespace resolution, the writer waits, enrichment, the embedding) leaves
+    time for the path to be replaced by a link to another indexed source, and
+    the writes resolve the path again, so they would file this content under
+    that source's key. Called after the last ``await`` before an access that
+    resolves the path: a commit, whose writes then either used this key or roll
+    back with the raise, or a read that has no transaction to roll back.
+
+    Not seen: a swap and swap back between the read and the check, and a swap
+    between ``read_text`` and the resolution taken right after it.
     """
     if norm_path(file_path) != source_key:
-        raise RetryableError(
-            "Source path now names another file after waiting for the writer; retry"
-        )
+        raise SourceRelinkedError("Source path now names another file than the one read; retry")
 
 
 def _sqlite_busy(exc: BaseException) -> bool:
@@ -408,6 +420,10 @@ class IndexFileResult(_IndexFileBase, total=False):
     # True when the source was held instead of re-indexed because its project
     # rows would have changed scope or project root (#2923).
     scope_held: bool
+    # The stored key the content was read and committed under, on a receipt
+    # hit or a completed write. The hold release compares it to the key it
+    # snapshotted (#3180).
+    source_key: str
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1189,7 +1205,13 @@ class IndexEngine:
             start = time.monotonic()
             # A new watcher delete may arrive while this file is being read.
             # Release only visibility rows that preceded this indexing pass.
-            hold_generation = await self._storage.source_hold_snapshot(path)
+            # Keyed here, before the pass, and released only if the pass read
+            # and committed this same key: a pass that read another source
+            # through a link validated that source, not this one (#3180).
+            hold_key = norm_path(path)
+            hold_generation = await self._storage.source_hold_snapshot(
+                Path(hold_key), as_stored=True
+            )
             try:
                 result = await self._index_file(
                     path,
@@ -1214,6 +1236,23 @@ class IndexEngine:
             except PrivacyRejection as exc:
                 await self._hold_blocked_source(path, exc)
                 raise
+            except SourceRelinkedError:
+                # The pass rolled back its writes. A caller that wrote the
+                # regular file at ``relink_key`` gets the hold it would have
+                # got had the swap come before the pass (#3164, #3180).
+                if relink_key is None or not _leaf_relinked(relink_key, path):
+                    raise
+                held = await self._hold_relinked_key(relink_key)
+                relinked: IndexFileResult = {
+                    "total": 0,
+                    "indexed": 0,
+                    "skipped": 0,
+                    "deleted": 0,
+                    "errors": [],
+                    "mutated": held,
+                    "relinked": True,
+                }
+                return relinked, (time.monotonic() - start) * 1000
             # A held source is visible again only after the current contents
             # have been validated/indexed. Receipt hits take this path without
             # embedding; failed, excluded and unreadable paths keep the hold.
@@ -1221,15 +1260,16 @@ class IndexEngine:
                 hold_generation is not None
                 and not result.get("errors")
                 and (result["total"] or result["skipped"])
+                and result.get("source_key") == hold_key
             ):
-                # Keyed before the wait, where the release without one keyed it:
-                # resolved after it, a path relinked meanwhile would release
-                # another source's hold (#3173).
-                release_key = norm_path(path)
+                # By the key the pass read and committed, never the path: the
+                # pass awaits past its commit (the AI summary), and so does
+                # this transaction, so the path may name another source by now
+                # (#3173, #3180).
                 try:
                     async with self._storage.transaction(wait=WRITER_WAIT_S):
                         released = await self._storage.release_source_hold(
-                            Path(release_key), expected_generation=hold_generation, as_stored=True
+                            Path(hold_key), expected_generation=hold_generation, as_stored=True
                         )
                 except TransactionOwnedError as exc:
                     # Ahead of ``StorageError``, its base class.
@@ -1509,9 +1549,11 @@ class IndexEngine:
         checked before the locks, so a link into a directory whose sidecar
         cannot be taken is still held, and again under them, for a swap while
         the call waits; it precedes the exclude guard, so such a file is held
-        rather than purged. Not covered: a swap after the check under the locks
-        reads the target and writes its rows under the target's key, the way
-        any caller's index follows a link; and a swap while the call waits for
+        rather than purged. A swap after the file was read is seen before the
+        write commits: the write rolls back and the key is held the same way
+        (#3180). Not covered: a swap between the check under the locks and the
+        read reads the target and writes its rows under the target's key, the
+        way any caller's index follows a link; and a swap while the call waits for
         a pipeline slot, into a directory whose sidecar cannot be taken, raises
         that ``OSError`` before the check under the locks. The watcher's relink
         hold catches the leaf afterwards. A parent directory moved and linked
@@ -2141,7 +2183,7 @@ class IndexEngine:
         for the caller to retry rather than raised.
         """
         try:
-            held = await self._hold_waiting(path, REDACTION_BLOCKED_HOLD)
+            held = await self._hold_waiting(path, REDACTION_BLOCKED_HOLD, key=exc.source_key)
         except Exception as hold_exc:
             exc.mark_unheld()
             logger.error(
@@ -2503,6 +2545,11 @@ class IndexEngine:
                 "mutated": held,
             }
 
+        # The stored key of the source just read, taken before any ``await``.
+        # Every write below either uses it as stored or is checked against it
+        # by ``_require_same_source``: resolved again after an ``await``, a path
+        # relinked meanwhile names another source (#3173, #3180).
+        source_key = norm_path(file_path)
         read_ms = (time.monotonic() - read_started) * 1000
         # Skip binary files (null bytes indicate non-text content)
         if "\x00" in content[:8192]:
@@ -2601,6 +2648,7 @@ class IndexEngine:
                 hit_count=len(guard.hits),
                 scope=scope_val,
                 decision=guard.decision,
+                source_key=source_key,
             )
         if guard.decision not in ("pass", "bypassed", "exempted"):
             raise RuntimeError(f"unexpected enforce_write_guard decision: {guard.decision!r}")
@@ -2644,20 +2692,16 @@ class IndexEngine:
         # and the diff state when enrichment is off) are covered by the same
         # wait. A writer access after an ``await`` needs a wait of its own.
         #
-        # ``source_key`` is taken before the wait, with the content read above:
-        # resolved after it, a path relinked meanwhile names another source.
         # The reads and writes below that would otherwise resolve the path
         # again (scope rows, a receipt hit's chunk ids, the empty-file delete,
-        # the scope-loss hold) use it as stored.
-        source_key = norm_path(file_path)
+        # the scope-loss hold) use ``source_key`` as stored.
         scope_db = (
             await self._storage._get_db_when_idle(wait=WRITER_WAIT_S)
             if isinstance(self._storage, SqliteBackend)
             else None
         )
-        # The diff and chunk write below resolve ``file_path`` again. A path
-        # relinked during the wait would have them write this file's content
-        # into the link target's rows, so the pass stops and is retried.
+        # The receipt lookup below resolves ``file_path`` again, with no
+        # ``await`` before it (#3173).
         _require_same_source(file_path, source_key)
         stored_scopes = self._stored_scope_rows(key_spellings(source_key), db=scope_db)
         held_scope_lost = any(r[3] == SCOPE_LOST_HOLD for r in stored_scopes)
@@ -2749,7 +2793,16 @@ class IndexEngine:
                     else []
                 )
                 await self._validate_source_commit(file_path)
-                if not await self._source_unchanged(file_path, content):
+                # Identity before the content verdict, so a relink to another
+                # source reads as a relink however its bytes compare, or
+                # whether they can be read at all.
+                try:
+                    unchanged = await self._source_unchanged(file_path, content)
+                except OSError:
+                    _require_same_source(file_path, source_key)
+                    raise
+                _require_same_source(file_path, source_key)
+                if not unchanged:
                     raise RetryableError(
                         "Source changed during receipt validation; retry latest generation"
                     )
@@ -2772,6 +2825,7 @@ class IndexEngine:
                     "namespace_decision": ns_decision,
                     "namespace_written": False,
                     "unchanged_chunk_ids": unchanged_chunk_ids,
+                    "source_key": source_key,
                 }
         index_started = time.monotonic()
         new_chunks = self.chunk_content(file_path, content, exempt=masking_exempt)
@@ -2851,10 +2905,12 @@ class IndexEngine:
             from memtomem.indexing.chunk_context import enrich_context
 
             await enrich_context(
-                new_chunks, self._config, self._llm, cast("SqliteBackend", self._storage)
+                new_chunks,
+                self._config,
+                self._llm,
+                cast("SqliteBackend", self._storage),
+                check_source=lambda: _require_same_source(file_path, source_key),
             )
-            # Its cache write waits for the writer, like the scope read above.
-            _require_same_source(file_path, source_key)
         existing_state = await self._storage.get_chunk_index_state(file_path)
         diff_result = compute_diff(existing_state, new_chunks)
         chunk_positions = {id(chunk): index + 1 for index, chunk in enumerate(new_chunks)}
@@ -3059,6 +3115,9 @@ class IndexEngine:
         # Wrap delete+upsert in a single transaction for atomicity. A busy
         # writer is waited out briefly rather than throwing away the embedding.
         async with self._storage.transaction(wait=WRITER_WAIT_S):
+            # Ahead of the guards below, which would otherwise report a relink
+            # during the embedding or the writer wait as their own refusal.
+            _require_same_source(file_path, source_key)
             await self._validate_source_commit(file_path)
             carried_sources = await self._summary_coverage_to_carry(
                 file_path, decision_path, existing_state, diff_result
@@ -3138,6 +3197,12 @@ class IndexEngine:
                     file_path, new_chunks, hash_matched, persisted_upserts, carried_sources
                 )
             await self._record_source_commit(file_path)
+            # After the transaction's last ``await``. The diff state, the
+            # upsert and the receipt resolve ``file_path``; if it now names
+            # another source, they wrote into that source's rows, and raising
+            # here rolls them back. Ahead of the content check below, so a
+            # relink reads as one whatever the target's bytes are (#3180).
+            _require_same_source(file_path, source_key)
             if receipt_policy and receipt_storage is not None:
                 from memtomem.indexing.source_receipt import record
 
@@ -3207,6 +3272,7 @@ class IndexEngine:
             ],
             "namespace_decision": ns_decision,
             "namespace_written": bool(persisted_upserts),
+            "source_key": source_key,
         }
         if unchanged_ids:
             result["unchanged_chunk_ids"] = unchanged_ids
