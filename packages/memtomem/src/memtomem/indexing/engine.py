@@ -52,6 +52,7 @@ from memtomem.indexing.source_receipt import chunker_versions, code_fingerprint,
 from memtomem.models import Chunk, IndexingStats, stored_namespace
 from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
+from memtomem.storage.sqlite_helpers import fold_path_form
 from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.storage.sqlite_helpers import resolve_path
@@ -317,6 +318,10 @@ class IndexFileResult(_IndexFileBase, total=False):
     # bypassable with force_unsafe) — aggregated into
     # ``IndexingStats.blocked_project_shared_files``.
     blocked_project_shared: int
+    # True when the exclude guard skipped the file. Aggregated into
+    # ``IndexingStats.excluded_files``; ``deleted`` counts the rows the opt-in
+    # ``purge_key`` delete removed (#3158).
+    excluded: bool
     # 1 when the file carried a frontmatter ``redaction: documents-patterns``
     # declaration the guard honoured (#2076). Set only on the success return,
     # after the chunk transaction commits: an exempted file whose embedding or
@@ -767,6 +772,7 @@ class IndexEngine:
             blocked_project_shared_files=blocked_project_shared,
             exempted_files=len(exempted_paths),
             exempted_paths=tuple(exempted_paths),
+            excluded_files=sum(1 for r in file_results if r.get("excluded")),
             namespaces_preserved_against_rules=tally.preserved_against_rules,
             namespaces_reassigned=tally.reassigned,
             namespace_moves=tally.summary(),
@@ -1056,6 +1062,7 @@ class IndexEngine:
         engine_serialized: bool = True,
         walk_root: Path | None = None,
         index_roots: IndexRoots | None = None,
+        purge_key: str | None = None,
     ) -> tuple[IndexFileResult, float]:
         """Run ``_index_file`` under the L2 sidecar → L3 ``_index_lock`` pair.
 
@@ -1122,6 +1129,7 @@ class IndexEngine:
                     new_source_namespace=new_source_namespace,
                     walk_root=walk_root,
                     index_roots=index_roots,
+                    purge_key=purge_key,
                 )
             except PrivacyRejection as exc:
                 await self._hold_blocked_source(path, exc)
@@ -1308,6 +1316,7 @@ class IndexEngine:
         path_scope: PathScope = "configured",
         reassign_namespaces: bool = False,
         new_source_namespace: str | None = None,
+        purge_if_excluded: bool = False,
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers.
 
@@ -1368,6 +1377,17 @@ class IndexEngine:
         the same pair, so a preview cannot describe an operation the write
         would reject).
 
+        ``purge_if_excluded=True`` is for a caller that has just replaced the
+        whole file itself (the importers): if the exclude guard skips the file,
+        the chunks stored under ``file_path``'s own key are deleted, because
+        they describe bytes the caller has already overwritten. The guard is
+        judged once, under the file's locks. The key is the one the store wrote
+        while the path was the caller's regular file, taken before the locks, so
+        a path that has become a symbolic link loses its own rows and never its
+        target's. Every other caller keeps the
+        default, where an excluded file's chunks stay until
+        ``mm purge --matching-excluded`` (#3158).
+
         If ``file_path`` is missing or inaccessible, its existing chunks are
         held outside search until recovery or explicit cleanup (#2498). A
         present nonregular replacement is positively known to be no longer an
@@ -1385,7 +1405,21 @@ class IndexEngine:
         # but is not indexable, and its old chunks must still be cleaned. (#1566)
         _reject_reassign_with_explicit_ns(namespace, reassign_namespaces, new_source_namespace)
         force = force or reassign_namespaces
-        if self.is_excluded(file_path) and file_path.is_file():
+        # A purge decides inside the locks instead, from the same exclusion read
+        # that skips the file. Its key is taken now and never resolved again: a
+        # leaf that becomes a symlink while this call waits for the locks must
+        # not redirect the delete (#2835). A regular file's key is the one the
+        # store wrote for it (``norm_path``, which on Windows also takes the
+        # leaf's on-disk case); a leaf that is already a link keeps its own
+        # name, the key it was stored under while it was a file (#2878).
+        purge_key: str | None = None
+        if purge_if_excluded:
+            purge_key = (
+                fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
+                if file_path.is_symlink()
+                else norm_path(file_path)
+            )
+        if purge_key is None and self.is_excluded(file_path) and file_path.is_file():
             logger.debug("Skipping excluded file %s", file_path)
             return IndexingStats(
                 total_files=0,
@@ -1395,6 +1429,7 @@ class IndexEngine:
                 deleted_chunks=0,
                 duration_ms=0.0,
                 new_chunk_ids=(),
+                excluded_files=1,
             )
         with self._active_run():
             result, duration = await self._index_file_locked(
@@ -1408,6 +1443,7 @@ class IndexEngine:
                 path_scope=path_scope,
                 reassign_namespaces=reassign_namespaces,
                 new_source_namespace=new_source_namespace,
+                purge_key=purge_key,
             )
         tally = _NamespaceTally()
         decision = result.get("namespace_decision")
@@ -1443,6 +1479,7 @@ class IndexEngine:
             chunks_missing_vectors=await self._count_missing_vectors(self._unchanged_ids([result])),
             mutated=result.get("mutated", False),
             scope_held=result.get("scope_held", False),
+            excluded_files=1 if result.get("excluded") else 0,
         )
 
     async def is_duplicate(
@@ -2099,6 +2136,7 @@ class IndexEngine:
         new_source_namespace: str | None = None,
         walk_root: Path | None = None,
         index_roots: IndexRoots | None = None,
+        purge_key: str | None = None,
     ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]), and resolved_namespace (str | None) when
@@ -2181,7 +2219,29 @@ class IndexEngine:
         )
         if _path_is_excluded(file_path, guard_roots, user_spec, walk_root=walk_root):
             logger.debug("Skipping excluded file %s", file_path)
-            return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
+            if purge_key is None:
+                return {
+                    "total": 0,
+                    "indexed": 0,
+                    "skipped": 0,
+                    "deleted": 0,
+                    "errors": [],
+                    "excluded": True,
+                }
+            # The caller replaced this file, so its stored chunks describe bytes
+            # that are gone (#3158). Delete by the key captured before the locks:
+            # ``file_path`` may have become a link since, and a delete without
+            # ``as_stored`` would resolve it to the link's target.
+            deleted = await self._storage.delete_by_source(Path(purge_key), as_stored=True)
+            return {
+                "total": 0,
+                "indexed": 0,
+                "skipped": 0,
+                "deleted": deleted,
+                "errors": [],
+                "mutated": deleted > 0,
+                "excluded": True,
+            }
 
         file_size = stat_result.st_size
         if file_size > _MAX_INDEX_FILE_BYTES:

@@ -43,6 +43,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A re-import no longer leaves the previous import's chunks searchable when its
+  targets become excluded mid-import (#3158).** `mem_import_notion` and
+  `mem_import_obsidian` write every target before indexing any of them. If an
+  exclude pattern covering a target was added in between (for example through
+  `mem_config`), the file was overwritten but not indexed, and its old chunks
+  stayed in search. The importers now remove those chunks and report the file
+  as `Written but excluded from indexing (previous chunks removed)`. Only the
+  chunks stored under the target's own path are removed: a target replaced by a
+  symbolic link in that window never costs the link's target its chunks. Other
+  indexing paths are unchanged: an excluded file's chunks stay until
+  `mm purge --matching-excluded`.
 - **`mm init` no longer defaults to a choice this machine cannot finish (#3149, #3150).**
   Pressing Enter at the preset prompt now selects Minimal unless the `onnx` extra is known to be
   importable where memtomem will run, and a workspace that cannot be probed counts as missing.

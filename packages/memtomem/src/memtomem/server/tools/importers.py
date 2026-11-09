@@ -111,13 +111,17 @@ async def mem_import_notion(
     # Index all imported files. The import guarded each file's exact text; the
     # engine judges it again under its own scope, and ``valve_text`` keeps a
     # forced import's valve to those bytes. Refused files are skipped and
-    # counted rather than aborting the whole import.
+    # counted rather than aborting the whole import. An exclusion installed
+    # after a file was written makes the engine skip it; ``purge_if_excluded``
+    # then removes the chunks of the bytes this import overwrote (#3158).
     from memtomem.indexing.engine import PrivacyRejection
 
     effective_ns = namespace or "notion"
     total_chunks = 0
     blocked = len(blocked_paths)
     indexed_files: list[Path] = []
+    excluded_purged = 0
+    purged_chunks = 0
     for f in imported:
         try:
             stats = await app.index_engine.index_file(
@@ -126,9 +130,14 @@ async def mem_import_notion(
                 ingress_guarded=True,
                 force_unsafe=force_unsafe,
                 valve_text=written_text.get(f),
+                purge_if_excluded=True,
             )
         except PrivacyRejection:
             blocked += 1
+            continue
+        if stats.excluded_files:
+            excluded_purged += 1
+            purged_chunks += stats.deleted_chunks
             continue
         indexed_files.append(f)
         total_chunks += stats.indexed_chunks
@@ -154,7 +163,8 @@ async def mem_import_notion(
 
     app.search_pipeline.invalidate_cache()
 
-    if total_chunks:
+    # A purge changes the session's chunk set as much as an index does.
+    if total_chunks or purged_chunks:
         await flag_untracked_write(app, provenance_session_id)
 
     return (
@@ -165,6 +175,7 @@ async def mem_import_notion(
         f"- Skipped (target excluded from indexing): {len(excluded_paths)}\n"
         f"- Skipped (target is a symlink): {len(symlink_paths)}\n"
         f"- Skipped (target under a read-only index root): {len(read_only_paths)}\n"
+        f"- Written but excluded from indexing (previous chunks removed): {excluded_purged}\n"
         f"- Skipped (source is a symlink or outside the export): {len(source_symlink_paths)}\n"
         f"- Namespace: {effective_ns}\n"
         f"- Output: {output_dir}"
@@ -265,13 +276,17 @@ async def mem_import_obsidian(
     # Index all imported files. The import guarded each file's exact text; the
     # engine judges it again under its own scope, and ``valve_text`` keeps a
     # forced import's valve to those bytes. Refused files are skipped and
-    # counted rather than aborting the whole import.
+    # counted rather than aborting the whole import. An exclusion installed
+    # after a file was written makes the engine skip it; ``purge_if_excluded``
+    # then removes the chunks of the bytes this import overwrote (#3158).
     from memtomem.indexing.engine import PrivacyRejection
 
     effective_ns = namespace or "obsidian"
     total_chunks = 0
     blocked = len(blocked_paths)
     indexed_files: list[Path] = []
+    excluded_purged = 0
+    purged_chunks = 0
     for f in imported:
         try:
             stats = await app.index_engine.index_file(
@@ -280,9 +295,14 @@ async def mem_import_obsidian(
                 ingress_guarded=True,
                 force_unsafe=force_unsafe,
                 valve_text=written_text.get(f),
+                purge_if_excluded=True,
             )
         except PrivacyRejection:
             blocked += 1
+            continue
+        if stats.excluded_files:
+            excluded_purged += 1
+            purged_chunks += stats.deleted_chunks
             continue
         indexed_files.append(f)
         total_chunks += stats.indexed_chunks
@@ -308,7 +328,8 @@ async def mem_import_obsidian(
 
     app.search_pipeline.invalidate_cache()
 
-    if total_chunks:
+    # A purge changes the session's chunk set as much as an index does.
+    if total_chunks or purged_chunks:
         await flag_untracked_write(app, provenance_session_id)
 
     return (
@@ -319,6 +340,7 @@ async def mem_import_obsidian(
         f"- Skipped (target excluded from indexing): {len(excluded_paths)}\n"
         f"- Skipped (target is a symlink): {len(symlink_paths)}\n"
         f"- Skipped (target under a read-only index root): {len(read_only_paths)}\n"
+        f"- Written but excluded from indexing (previous chunks removed): {excluded_purged}\n"
         f"- Skipped (source is a symlink or outside the vault): {len(source_symlink_paths)}\n"
         f"- Namespace: {effective_ns}\n"
         f"- Output: {output_dir}"
