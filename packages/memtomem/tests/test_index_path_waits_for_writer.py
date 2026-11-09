@@ -64,12 +64,13 @@ def _queued(storage) -> bool:
     return any(not w.cancelled() for w in (storage._writer_lock._waiters or ()))
 
 
-async def _overlap(storage, owner: _Owner, call):
+async def _overlap(storage, owner: _Owner, call, *, while_queued=None):
     """Run ``call`` while ``owner`` holds (or will take) the writer; return its result.
 
     The call must end up queued on the writer lock while the owner holds it.
-    The owner is released before the call is awaited, so a call refused at
-    once fails the test with its own error and no transaction stays open.
+    ``while_queued`` then runs, before the owner is released. The owner is
+    released before the call is awaited, so a call refused at once fails the
+    test with its own error and no transaction stays open.
     """
     task = asyncio.ensure_future(call)
     loop = asyncio.get_running_loop()
@@ -79,6 +80,8 @@ async def _overlap(storage, owner: _Owner, call):
             break
         await asyncio.sleep(0.005)
     queued = owner.entered.is_set() and _queued(storage) and not task.done()
+    if queued and while_queued is not None:
+        while_queued()
     await owner.finish()
     result = await asyncio.wait_for(task, 10)
     assert queued, "the call never queued on the writer while the owner held it"
@@ -328,51 +331,6 @@ async def test_a_receipt_hit_needs_no_writer_after_its_source_check(
     assert sorted(str(i) for i in results[0]["unchanged_chunk_ids"]) == stored_ids
 
 
-async def test_a_scope_loss_hold_waits_after_its_key_is_resolved(
-    bm25_only_components, tmp_path, monkeypatch
-):
-    """The hold resolves its key on a thread first; the owner arrives there."""
-    from memtomem.indexing import scope_guard
-
-    comp, _ = bm25_only_components
-    root = tmp_path / "proj"
-    (root / ".git").mkdir(parents=True)
-    local = (root / ".memtomem" / "memories.local").resolve()
-    local.mkdir(parents=True)
-    comp.config.indexing.project_memory_dirs = [local]
-    target = local / "note.md"
-    target.write_text(_NOTE, encoding="utf-8")
-    assert not (await comp.index_engine.index_file(target)).errors
-    comp.config.indexing.project_memory_dirs = []
-
-    owner = _Owner(comp.storage)
-    armed = False
-    real_change = scope_guard.scope_change
-    real_to_thread = asyncio.to_thread
-
-    def scope_change(*args, **kwargs):
-        nonlocal armed
-        change = real_change(*args, **kwargs)
-        armed = change is not None
-        return change
-
-    async def to_thread(func, *args, **kwargs):
-        nonlocal armed
-        if armed and func is norm_path:
-            armed = False
-            await owner.start()
-        return await real_to_thread(func, *args, **kwargs)
-
-    monkeypatch.setattr(scope_guard, "scope_change", scope_change)
-    monkeypatch.setattr(asyncio, "to_thread", to_thread)
-
-    stats = await _overlap(comp.storage, owner, comp.index_engine.index_file(target, force=True))
-
-    assert owner.task is not None, "the scope-loss hold was not reached"
-    assert stats.scope_held
-    assert _hold_reason(comp.storage, target) == SCOPE_LOST_HOLD
-
-
 async def test_a_held_source_is_released_after_a_clean_pass_that_overlaps(
     components, engine, memory_dir, monkeypatch
 ):
@@ -394,6 +352,166 @@ async def test_a_held_source_is_released_after_a_clean_pass_that_overlaps(
 
     assert not stats.errors
     assert _hold_reason(components.storage, path) is None
+
+
+# ---- a path relinked while the index waits keeps its own key --------------
+#
+# Each wait leaves time for the path to be swapped for a symbolic link to
+# another indexed source. Every key is taken before the wait, where the code
+# without the wait took it, so the link's target is never touched.
+
+
+def _symlink_or_skip(tmp_path: Path) -> None:
+    probe = tmp_path / "symlink-probe"
+    try:
+        probe.symlink_to(tmp_path)
+    except OSError as exc:  # Windows without symlink privilege
+        pytest.skip(f"cannot create symlink: {exc}")
+    probe.unlink()
+
+
+def _relink(path: Path, target: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        path.rmdir()
+    else:
+        path.unlink()
+    path.symlink_to(target)
+
+
+def _rows_under(storage, key: str) -> int:
+    return (
+        storage._get_db()
+        .execute("SELECT COUNT(*) FROM chunks WHERE source_file=?", (key,))
+        .fetchone()[0]
+    )
+
+
+def _reason_under(storage, key: str) -> str | None:
+    row = (
+        storage._get_db()
+        .execute("SELECT reason FROM held_sources WHERE source_file=?", (key,))
+        .fetchone()
+    )
+    return row[0] if row else None
+
+
+_OTHER = "# B\n\n## S\n\nbeta heron\n"
+
+
+async def test_a_non_regular_file_relinked_during_the_wait_deletes_only_its_own_rows(
+    components, engine, memory_dir, tmp_path
+):
+    _symlink_or_skip(tmp_path)
+    path, other = memory_dir / "a.md", memory_dir / "b.md"
+    await _indexed(engine, path)
+    await _indexed(engine, other, _OTHER)
+    a_key, b_key = norm_path(path), norm_path(other)
+    path.unlink()
+    path.mkdir()
+    owner = _Owner(components.storage)
+    await owner.start()
+
+    await _overlap(
+        components.storage,
+        owner,
+        engine.index_file(path),
+        while_queued=lambda: _relink(path, other),
+    )
+
+    assert _rows_under(components.storage, a_key) == 0
+    assert _rows_under(components.storage, b_key) > 0
+
+
+async def test_an_emptied_file_relinked_during_the_wait_deletes_only_its_own_rows(
+    components, engine, memory_dir, tmp_path
+):
+    _symlink_or_skip(tmp_path)
+    path, other = memory_dir / "a.md", memory_dir / "b.md"
+    await _indexed(engine, path)
+    await _indexed(engine, other, _OTHER)
+    a_key, b_key = norm_path(path), norm_path(other)
+    path.write_text("", encoding="utf-8")
+    owner = _Owner(components.storage)
+    await owner.start()
+
+    await _overlap(
+        components.storage,
+        owner,
+        engine.index_file(path),
+        while_queued=lambda: _relink(path, other),
+    )
+
+    assert _rows_under(components.storage, a_key) == 0
+    assert _rows_under(components.storage, b_key) > 0
+
+
+async def test_a_hold_release_relinked_during_the_wait_lifts_only_its_own_hold(
+    components, engine, memory_dir, tmp_path, monkeypatch
+):
+    """Both sources held at the same generation: only the one indexed may be released."""
+    _symlink_or_skip(tmp_path)
+    path, other = memory_dir / "a.md", memory_dir / "b.md"
+    await _indexed(engine, path)
+    await _indexed(engine, other, _OTHER)
+    a_key, b_key = norm_path(path), norm_path(other)
+    assert await components.storage.hold_source(path, "source_missing")
+    assert await components.storage.hold_source(other, "source_missing")
+    assert await components.storage.source_hold_snapshot(path) == (
+        await components.storage.source_hold_snapshot(other)
+    )
+    owner = _Owner(components.storage)
+    real = engine._index_file
+
+    async def index_file_then_compete(*args, **kwargs):
+        result = await real(*args, **kwargs)
+        await owner.start()
+        return result
+
+    monkeypatch.setattr(engine, "_index_file", index_file_then_compete)
+
+    await _overlap(
+        components.storage,
+        owner,
+        engine.index_file(path),
+        while_queued=lambda: _relink(path, other),
+    )
+
+    assert _reason_under(components.storage, a_key) is None
+    assert _reason_under(components.storage, b_key) == "source_missing"
+
+
+async def test_a_scope_loss_hold_relinked_during_the_wait_holds_its_own_rows(
+    bm25_only_components, tmp_path
+):
+    """The scope read waits; the hold uses the key taken before it."""
+    _symlink_or_skip(tmp_path)
+    comp, mem_dir = bm25_only_components
+    root = tmp_path / "proj"
+    (root / ".git").mkdir(parents=True)
+    local = (root / ".memtomem" / "memories.local").resolve()
+    local.mkdir(parents=True)
+    comp.config.indexing.project_memory_dirs = [local]
+    target = local / "note.md"
+    target.write_text(_NOTE, encoding="utf-8")
+    assert not (await comp.index_engine.index_file(target)).errors
+    other = mem_dir / "b.md"
+    other.write_text(_OTHER, encoding="utf-8")
+    assert not (await comp.index_engine.index_file(other)).errors
+    target_key, other_key = norm_path(target), norm_path(other)
+    comp.config.indexing.project_memory_dirs = []
+    owner = _Owner(comp.storage)
+    await owner.start()
+
+    stats = await _overlap(
+        comp.storage,
+        owner,
+        comp.index_engine.index_file(target, force=True),
+        while_queued=lambda: _relink(target, other),
+    )
+
+    assert stats.scope_held
+    assert _reason_under(comp.storage, target_key) == SCOPE_LOST_HOLD
+    assert _reason_under(comp.storage, other_key) is None
 
 
 async def test_a_release_kept_busy_by_another_process_is_deferred(

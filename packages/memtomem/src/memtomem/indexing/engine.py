@@ -1208,10 +1208,14 @@ class IndexEngine:
                 and not result.get("errors")
                 and (result["total"] or result["skipped"])
             ):
+                # Keyed before the wait, where the release without one keyed it:
+                # resolved after it, a path relinked meanwhile would release
+                # another source's hold (#3173).
+                release_key = norm_path(path)
                 try:
                     async with self._storage.transaction(wait=WRITER_WAIT_S):
                         released = await self._storage.release_source_hold(
-                            path, expected_generation=hold_generation
+                            Path(release_key), expected_generation=hold_generation, as_stored=True
                         )
                 except TransactionOwnedError as exc:
                     # Ahead of ``StorageError``, its base class.
@@ -1633,15 +1637,18 @@ class IndexEngine:
             logger.info("Held a written source that is now a symlink: %s", Path(own_key).name)
         return held
 
-    async def _hold_waiting(self, file_path: Path, reason: str) -> bool:
+    async def _hold_waiting(self, file_path: Path, reason: str, *, key: str | None = None) -> bool:
         """Hold ``file_path``'s rows for ``reason``, waiting out another task's writer (#3173).
 
         The key is ``norm_path(file_path)``, the one ``hold_source`` would
         compute, but resolved before the transaction: these holds fire when
         the path cannot be read or stat'ed, which is when a stale mount can
         make that resolve block, and it must not block holding the writer.
+        Resolved after the wait, a path relinked meanwhile would hold another
+        source. ``key`` is a key the caller already resolved, held as given.
         """
-        key = await asyncio.to_thread(norm_path, file_path)
+        if key is None:
+            key = await asyncio.to_thread(norm_path, file_path)
         async with self._storage.transaction(wait=WRITER_WAIT_S):
             return await self._storage.hold_source(Path(key), reason, as_stored=True)
 
@@ -2367,8 +2374,11 @@ class IndexEngine:
         # content read) and BEFORE the exclude guard, so an excluded file that
         # was swapped for a same-named directory is still cleaned up. (#1566)
         if not stat_module.S_ISREG(stat_result.st_mode):
+            # Keyed before the wait, next to the stat that judged it: a path
+            # relinked during the wait would delete the link target's rows.
+            gone_key = norm_path(file_path)
             async with self._storage.transaction(wait=WRITER_WAIT_S):
-                deleted = await self._storage.delete_by_source(file_path)
+                deleted = await self._storage.delete_by_source(Path(gone_key), as_stored=True)
             return {
                 "total": 0,
                 "indexed": 0,
@@ -2603,7 +2613,6 @@ class IndexEngine:
         # Namespace reassignment and trusted/bypassed ingress are never reused.
         from memtomem.indexing.source_receipt import content_hash, digest, reusable
         from memtomem.storage.sqlite_backend import SqliteBackend
-        from memtomem.storage.sqlite_helpers import norm_path
 
         # The source's stored scopes, read once under the lock and judged after
         # the diff below (#2923). Read here because a source held for losing
@@ -2620,12 +2629,19 @@ class IndexEngine:
         # embedding info, the receipt lookup and a receipt hit's chunk ids,
         # and the diff state when enrichment is off) are covered by the same
         # wait. A writer access after an ``await`` needs a wait of its own.
+        #
+        # ``source_key`` is taken before the wait, with the content read above:
+        # resolved after it, a path relinked meanwhile names another source.
+        # The reads and writes below that would otherwise resolve the path
+        # again (scope rows, a receipt hit's chunk ids, the empty-file delete,
+        # the scope-loss hold) use it as stored.
+        source_key = norm_path(file_path)
         scope_db = (
             await self._storage._get_db_when_idle(wait=WRITER_WAIT_S)
             if isinstance(self._storage, SqliteBackend)
             else None
         )
-        stored_scopes = self._stored_scope_rows(key_spellings(norm_path(file_path)), db=scope_db)
+        stored_scopes = self._stored_scope_rows(key_spellings(source_key), db=scope_db)
         held_scope_lost = any(r[3] == SCOPE_LOST_HOLD for r in stored_scopes)
 
         receipt_policy = ""
@@ -2707,7 +2723,7 @@ class IndexEngine:
                         for row in receipt_storage._get_db()
                         .execute(
                             "SELECT id FROM chunks WHERE source_file=? ORDER BY id",
-                            (norm_path(file_path),),
+                            (source_key,),
                         )
                         .fetchall()
                     ]
@@ -2771,7 +2787,7 @@ class IndexEngine:
             # collapse, and refusing here would strand its rows as
             # permanently searchable content for a file with no content.
             async with self._storage.transaction(wait=WRITER_WAIT_S):
-                deleted = await self._storage.delete_by_source(file_path)
+                deleted = await self._storage.delete_by_source(Path(source_key), as_stored=True)
             return {
                 "total": 0,
                 "indexed": 0,
@@ -2885,8 +2901,8 @@ class IndexEngine:
             # key. They keep their stored project scope, readable only there,
             # but stay searchable with the content they were indexed from; the
             # NFC/NFD key split behind that predates this check (#2926).
-            key = norm_path(file_path)
-            held = await self._hold_waiting(file_path, SCOPE_LOST_HOLD)
+            key = source_key
+            held = await self._hold_waiting(file_path, SCOPE_LOST_HOLD, key=key)
             logger.warning(
                 "Refusing to re-index %s: its %s rows would become %s",
                 file_path.name,
