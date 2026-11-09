@@ -1106,6 +1106,36 @@ def create_tables(
             raise
     db.execute("CREATE INDEX IF NOT EXISTS idx_schedules_enabled ON schedules(enabled)")
 
+    # Hermes built-in memory mirror: one last-writer-wins element set per
+    # (owner, target). Each row is one native entry keyed by the sha256 of its
+    # exact text; a tombstone keeps only the key. The Markdown file under
+    # ``hermes-mirror/`` is rendered from the live rows, so these tables are
+    # the source of truth and the file is derived. Plain user-data tables:
+    # no SCHEMA_VERSION bump.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS hermes_mirror_entries (
+            owner      TEXT NOT NULL,
+            target     TEXT NOT NULL,
+            entry_key  TEXT NOT NULL,
+            content    TEXT NOT NULL,
+            ts         INTEGER NOT NULL,
+            tombstone  INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (owner, target, entry_key)
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS hermes_mirror_targets (
+            owner             TEXT NOT NULL,
+            target            TEXT NOT NULL,
+            revision          INTEGER NOT NULL DEFAULT 0,
+            rendered_revision INTEGER NOT NULL DEFAULT 0,
+            render_pending    INTEGER NOT NULL DEFAULT 0,
+            purged_at         INTEGER,
+            updated_at        TEXT NOT NULL,
+            PRIMARY KEY (owner, target)
+        )
+    """)
+
     # ---- stamp schema version (monotonic, after migrations) ----
     # After, not before: a failed migration must not leave the DB claiming a
     # version it doesn't have. Atomic upsert — racing processes can never

@@ -267,6 +267,16 @@ class TestMemVersion:
         assert "context_compose" in ACTIONS
         assert "candidate_propose" in ACTIONS
 
+    async def test_capabilities_hermes_provider(self):
+        # The memtomem-memory Hermes provider sends ``namespace="!system"`` and
+        # ``deadline_ms`` only when these keys say the server understands them,
+        # and mirrors writes only when ``hermes_mirror`` is advertised.
+        capabilities = json.loads(await mem_version())["capabilities"]
+        assert capabilities["hermes_mirror"] == {"schema_version": 1}
+        assert capabilities["search_deadline_ms"] is True
+        assert capabilities["namespace_selectors"] == ["!system"]
+        assert "hermes_mirror_apply" in ACTIONS
+
     async def test_runtime_profile_is_additive_and_secret_free(self, monkeypatch, tmp_path):
         from memtomem import config as config_mod
 

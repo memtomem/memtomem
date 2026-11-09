@@ -118,6 +118,7 @@ class TestCoreDelegation:
             record=False,
             project_context_root=project_root,
             origin="mcp",
+            deadline_ms=None,
         )
 
     async def test_defaults_reach_the_core_unmodified(self, monkeypatch):

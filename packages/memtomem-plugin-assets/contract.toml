@@ -31,6 +31,9 @@ python = "3.12"
 # carries `record=False` without an exhaustive scan). The memory provider refuses anything
 # older at run time; its README names this release.
 memory_min_memtomem = "0.6.8"
+# Oldest Hermes Agent the memory provider supports (v2026.9.24): rendered into its plugin.yaml
+# as `requires_hermes`, which the catalog entry repeats (catalog rule 14).
+memory_requires_hermes = ">=0.21.5"
 
 [[workflows]]
 id = "search"

@@ -470,6 +470,7 @@ _TRANSACTION_SITES = {
     "indexing/engine.py": [True],
     "search/decay.py": [True],
     "search/dedup.py": [True],
+    "server/tools/hermes_mirror.py": [True, True],
     "server/tools/consolidation.py": [True],
     "storage/sqlite_backend.py": [False],
     "tools/consolidation_engine.py": [True],

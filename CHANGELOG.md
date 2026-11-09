@@ -5,18 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- **`mm init` no longer defaults to a choice this machine cannot finish (#3149, #3150).**
-  Pressing Enter at the preset prompt now selects Minimal unless the `onnx` extra is known to be
-  importable where memtomem will run, and a workspace that cannot be probed counts as missing.
-  Before this, a minimal install reached `Setup complete!` and then `mm add` and `mm search`
-  failed. Pressing Enter at the connect prompt now selects Skip when the `claude` CLI is not on
-  `PATH`; before this, init exited 2 and wrote no configuration. Choosing a preset or Claude Code
-  explicitly works as it did, including the exit when the Claude inventory is incomplete. The
-  missing-extra warning now names `mm add` and `mm search`, and says only reranking is affected
-  when the extra is wanted for the reranker alone. Workspace detection also finds
-  `.venv/Scripts/python.exe` on Windows.
+- **The Hermes memory provider can mirror Hermes's built-in memory into memtomem
+  (opt-in).** With `memory.memtomem-memory.mirror_writes: true`, each entry
+  Hermes saves, replaces or removes in `MEMORY.md` / `USER.md` is sent to the
+  new registered action `mem_do(action="hermes_mirror_apply")`. The server keeps
+  one row per entry (the newest write wins, a removed entry keeps only its key)
+  and renders them to `hermes-mirror/<profile hash>/<target>.md` under the first
+  memory directory, which is indexed like any other note. The provider README
+  lists what is stored, sent and dropped, and how to purge a mirror.
+- **`mem_search` takes `deadline_ms`, a budget for the server's own
+  processing.** It bounds the wait for a read connection and for a query
+  embedding that has not started, and is checked between search stages; past it
+  the call returns `Error (retryable): deadline … exceeded` and records nothing.
+  Work already running — a SQLite read, an embedding slice — finishes first, so
+  this is not a response deadline. Without it, search runs exactly as before.
+- **`mem_do(action="version")` advertises `hermes_mirror`, `search_deadline_ms`
+  and `namespace_selectors`.** The Hermes provider asks before its first call
+  and every 10 minutes, and sends `namespace="!system"`, `deadline_ms` and
+  mirror writes only to a server that lists them; an older server keeps getting
+  the recall call it always got.
+- **`hermes memory setup memtomem-memory` asks about mirroring** (default no, or
+  the earlier choice) and prints the `mcp_allowlist` command for the configured
+  server instead of granting it. Without a terminal it writes nothing.
+- **The provider's `plugin.yaml` declares `requires_hermes: ">=0.21.5"`.**
 
 ### Changed
 
@@ -30,6 +43,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm init` no longer defaults to a choice this machine cannot finish (#3149, #3150).**
+  Pressing Enter at the preset prompt now selects Minimal unless the `onnx` extra is known to be
+  importable where memtomem will run, and a workspace that cannot be probed counts as missing.
+  Before this, a minimal install reached `Setup complete!` and then `mm add` and `mm search`
+  failed. Pressing Enter at the connect prompt now selects Skip when the `claude` CLI is not on
+  `PATH`; before this, init exited 2 and wrote no configuration. Choosing a preset or Claude Code
+  explicitly works as it did, including the exit when the Claude inventory is incomplete. The
+  missing-extra warning now names `mm add` and `mm search`, and says only reranking is affected
+  when the extra is wanted for the reranker alone. Workspace detection also finds
+  `.venv/Scripts/python.exe` on Windows.
 - **Quality Lab replay compare no longer claims metric deltas should be zero when
   reports come from different memtomem versions (#3125).** Replay reports now
   record `memtomem_version`. When comparing reports produced by different
@@ -50,15 +73,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   is, as before, when another note shares its path, when that path is held or
   pending, or when the new path already has rows or a hold.
 
-- **Notion sibling pages sharing a title in the same directory no longer overwrite each other during import (#3113).**
+- **Notion sibling pages sharing a title in the same directory no longer
+  overwrite each other during import (#3113).**
   When Notion exports multiple pages in the same folder with duplicate titles
   (disambiguated in Notion by trailing 32-hex UUIDs), stripping the UUIDs
-  previously caused siblings to map to the same filename, silently overwriting earlier
-  siblings on disk. `import_notion` now disambiguates colliding siblings in the import
-  by appending their first 8 hex characters (e.g. `Meeting Notes (a1b2c3d4).md`, falling
-  back to 32 hex on prefix collision), and rewrites relative markdown links to match.
-  A page with a unique title keeps its plain name. Re-importing into an output directory
-  where siblings previously collided leaves the old plain-named file behind as stale.
+  previously caused siblings to map to the same filename, silently overwriting
+  earlier siblings on disk. `import_notion` now disambiguates colliding siblings
+  in the import by appending their first 8 hex characters (e.g. `Meeting Notes
+  (a1b2c3d4).md`, falling back to 32 hex on prefix collision), and rewrites
+  relative markdown links to match. A page with a unique title keeps its plain
+  name. Re-importing into an output directory where siblings previously collided
+  — or where a previously unique page gains a same-title sibling, moving it to
+  `<stem> (<prefix>).md` — leaves the old plain-named file behind as stale on disk
+  and indexed.
 
 - **Notion pages whose titles differ only by case or Unicode normalization no
   longer overwrite each other on macOS and Windows (#3141).** `Meeting notes` and

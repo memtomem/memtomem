@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+import time
+from typing import TYPE_CHECKING, Any, cast
+
+from memtomem.errors import SearchDeadlineExceeded
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -81,8 +84,13 @@ async def expand_query_headings(
     namespace_filter: NamespaceFilter | None = None,
     exhaustive: bool = False,
     report_failure: Callable[[], None] | None = None,
+    deadline: float | None = None,
 ) -> str:
     """Expand query by appending related heading terms from dense search.
+
+    ``deadline`` (a ``time.monotonic()`` instant from the search's ``deadline_ms``)
+    is passed to the probe's embedding and read; an expiry propagates instead of
+    falling back to the un-expanded query.
 
     ``project_context_root``, ``scope_filter`` and ``namespace_filter`` are the
     outer ``SearchPipeline.search`` call's, threaded onto this probe's
@@ -101,8 +109,18 @@ async def expand_query_headings(
     catch-and-fallback path, so a replay can observe the silent degradation. The
     fallback behavior (return the un-expanded query) is unchanged.
     """
+    deadline_kwargs: dict[str, Any] = {"deadline": deadline} if deadline is not None else {}
     try:
-        embedding = await embedder.embed_query(query)
+        if deadline is None:
+            embedding = await embedder.embed_query(query)
+        elif getattr(embedder, "supports_query_deadline", False) is True:
+            embedding = await cast(Any, embedder).embed_query(query, deadline=deadline)
+        else:
+            if time.monotonic() >= deadline:
+                raise SearchDeadlineExceeded(
+                    "search deadline exceeded at heading expansion; no results were returned"
+                )
+            embedding = await embedder.embed_query(query)
         results = await storage.dense_search(
             embedding,
             top_k=3,
@@ -115,7 +133,10 @@ async def expand_query_headings(
             # retrieval starts. Outside exhaustive mode it keeps to its first KNN
             # attempt and appends fewer heading terms when few rows survive.
             escalate=False,
+            **deadline_kwargs,
         )
+    except SearchDeadlineExceeded:
+        raise
     except Exception:
         logger.warning("Heading expansion failed; returning original query", exc_info=True)
         if report_failure is not None:
