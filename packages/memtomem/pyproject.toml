@@ -1,6 +1,6 @@
 [project]
 name = "memtomem"
-version = "0.7.7"
+version = "0.7.8"
 description = "Long-term memory for AI coding agents, kept as Markdown you own. Hybrid BM25 + vector search via MCP."
 authors = [
     {name = "DAPADA Inc.", email = "contact@dapada.co.kr"},
