@@ -54,8 +54,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   they are removed by never resolves the file name itself: a target replaced by
   a symbolic link in that window never costs the link's target its chunks, and
   on Windows a target whose file name differs in case from the stored one
-  removes nothing. Other indexing paths are unchanged: an excluded file's chunks
-  stay until `mm purge --matching-excluded`.
+  removes nothing. Other indexing paths, apart from the edit and delete tools
+  below, are unchanged: an excluded file's chunks stay until
+  `mm purge --matching-excluded`.
 - **A re-import no longer indexes through a target that was replaced by a
   symbolic link mid-import (#3164).** If a target that `mem_import_notion` or
   `mem_import_obsidian` had just written was swapped for a link before its
@@ -76,6 +77,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   and the old chunks stayed in search. The importers now refuse before they write, as
   `mem_index` and `mem_import` already did, and return the same `Embedding mismatch detected`
   message with the reset command.
+- **Editing or deleting a memory no longer leaves its pre-edit chunks searchable
+  when the file becomes excluded during the write (#3163).** `mem_edit`,
+  `mem_delete` and the web UI's edit and delete refuse an excluded file before
+  writing it, but an exclude pattern added between that check and the re-index
+  (for example through `mem_config`) made the re-index skip the file, so the old
+  chunks stayed in search beside the rewritten text. The change now stays on disk,
+  the file's stored chunks are removed, and the tool or page says that the file
+  is now excluded from indexing.
 - **`mm init` no longer defaults to a choice this machine cannot finish (#3149, #3150).**
   Pressing Enter at the preset prompt now selects Minimal unless the `onnx` extra is known to be
   importable where memtomem will run, and a workspace that cannot be probed counts as missing.
