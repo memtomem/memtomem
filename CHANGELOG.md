@@ -39,12 +39,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   0.7.8.** The provider asks the server what it supports, and a 0.7.8 server
   gets `namespace="!system"`: recall then searches every namespace except the
   system ones, even while the model has a memtomem session namespace open, where
-  0.1.2 searched the server's current namespace. It also gets `deadline_ms`, so a
-  search still running at the call's timeout less one second answers with a
-  retryable error instead of finishing after Hermes has stopped waiting. Against
-  0.7.7 or older, recall
-  is called exactly as before. Mirroring stays off until you set
-  `memory.memtomem-memory.mirror_writes: true` (or answer yes in
+  0.1.2 searched the server's current namespace. When `rpc_timeout_seconds` is
+  at least 1.5, it also gets `deadline_ms`, that timeout less one second; what
+  the budget bounds, and what it does not, is in the `mem_search` `deadline_ms`
+  entry under Added. Against 0.7.7 or older, recall is called exactly as before.
+  Mirroring stays off until you set `memory.memtomem-memory.mirror_writes: true` (or answer yes in
   `hermes memory setup memtomem-memory`) and needs a 0.7.8 server; the provider
   README's "Mirroring Hermes's built-in memory" section lists what is stored and
   how to purge a mirror. 0.2.0 declares `requires_hermes: ">=0.21.5"`.
@@ -62,14 +61,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   names replace, preview with `mm gc orphan-sources --under <output dir>`, then
   run it again with `--apply`.
 - **Import results read differently (#3158, #3162, #3164, #3168).**
-  `mem_import_notion` and `mem_import_obsidian` start with
-  `import incomplete: N of M written file(s) were not indexed` when any written
-  file was not indexed, and name up to five of them with the reason (for example
-  `Written but excluded from indexing`, or
-  `Written but replaced by a symlink (not indexed, previous chunks hidden)`). An
-  import refuses before writing while an embedding mismatch blocks indexing,
-  with the `Embedding mismatch detected` message. A script that looks for
-  `import complete` should handle both.
+  The first line of a `mem_import_notion` or `mem_import_obsidian` result reads
+  `import incomplete: N of M written file(s) were not indexed` only for the files
+  it then lists under `Written but not indexed` (up to five, with the reason).
+  Other written files that did not end up indexed are only counted, each on its
+  own line: `Blocked (redaction)`, `Written but excluded from indexing` and
+  `Written but replaced by a symlink (not indexed, previous chunks hidden)`. So
+  `import complete` does not mean every written file was indexed; a script should
+  read those counts too. An import refuses before writing while an embedding
+  mismatch blocks indexing, with the `Embedding mismatch detected` message.
 - **A write can now report that it reached the disk but not the index (#3163,
   #3165, #3172).** Add and batch add say so when the file became excluded during
   the write; edit and delete also when it was replaced by a symbolic link.
