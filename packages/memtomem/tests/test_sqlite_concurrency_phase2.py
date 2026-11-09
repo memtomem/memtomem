@@ -626,8 +626,9 @@ _TRANSACTION_SITES = {
     "indexing/engine.py": [True, True, True, True, True, True, True, True],
     # The description cache write after the LLM calls (#3173).
     "indexing/chunk_context.py": [True],
-    # The summary delete and write after the LLM call (#3173).
-    "indexing/summarizer.py": [True, True],
+    # The summary delete and write after the LLM call (#3173), and the bulk
+    # regenerate's write after its LLM call (#3179).
+    "indexing/summarizer.py": [True, True, True],
     "search/decay.py": [True],
     "search/dedup.py": [True],
     "server/tools/hermes_mirror.py": [True, True],
