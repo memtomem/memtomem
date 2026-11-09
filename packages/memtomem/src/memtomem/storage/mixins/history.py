@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from memtomem.errors import FeedbackConflictError, StorageError
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_helpers import project_boundary_key, utc_bound_from_iso
 
 _log = logging.getLogger(__name__)
@@ -286,7 +287,9 @@ class HistoryMixin:
             # This method owns its full BEGIN/commit/rollback contract and is
             # not composable inside an outer transaction.
             raise StorageError("save_search_feedback cannot run inside a transaction block")
-        db = self._get_db()
+        # Waits for another task's transaction instead of being refused at
+        # once (#3182); nothing suspends between the wait and the BEGIN.
+        db = await self._get_db_when_idle(wait=WRITER_WAIT_S)
         # Serialize validate→insert/update across connections and processes
         # (mm web and the MCP server may share one DB).
         db.execute("BEGIN IMMEDIATE")
@@ -410,18 +413,17 @@ class HistoryMixin:
         }
 
     def _require_search_run(
-        self, run_id: str, project_context_root: Path | str | None = None
+        self,
+        db: sqlite3.Connection,
+        run_id: str,
+        project_context_root: Path | str | None = None,
     ) -> tuple:
-        row = (
-            self._get_db()
-            .execute(
-                "SELECT run_id, query_text, created_at, observation_json, result_snapshot_json "
-                "FROM query_history WHERE run_id = ? AND project_key = ? "
-                "AND legacy_unscoped = 0",
-                (run_id, project_boundary_key(project_context_root)),
-            )
-            .fetchone()
-        )
+        row = db.execute(
+            "SELECT run_id, query_text, created_at, observation_json, result_snapshot_json "
+            "FROM query_history WHERE run_id = ? AND project_key = ? "
+            "AND legacy_unscoped = 0",
+            (run_id, project_boundary_key(project_context_root)),
+        ).fetchone()
         if row is None:
             raise KeyError(f"run_id {run_id!r} not found")
         return row
@@ -429,17 +431,19 @@ class HistoryMixin:
     async def get_search_feedback(
         self, run_id: str, *, project_context_root: Path | str | None = None
     ) -> list[dict]:
-        """Current judgments for one observed run, ordered by chunk_id."""
-        self._require_search_run(run_id, project_context_root)
-        rows = (
-            self._get_db()
-            .execute(
-                "SELECT chunk_id, judgment, created_at, updated_at FROM search_feedback "
-                "WHERE run_id = ? ORDER BY chunk_id",
-                (run_id,),
-            )
-            .fetchall()
-        )
+        """Current judgments for one observed run, ordered by chunk_id.
+
+        Reads the writer, which the callers read right after the observation
+        flush; waits for another task's transaction rather than being refused
+        (#3182).
+        """
+        db = await self._get_db_after_wait(wait=WRITER_WAIT_S)
+        self._require_search_run(db, run_id, project_context_root)
+        rows = db.execute(
+            "SELECT chunk_id, judgment, created_at, updated_at FROM search_feedback "
+            "WHERE run_id = ? ORDER BY chunk_id",
+            (run_id,),
+        ).fetchall()
         return [
             {"chunk_id": r[0], "judgment": r[1], "created_at": r[2], "updated_at": r[3]}
             for r in rows
@@ -449,7 +453,8 @@ class HistoryMixin:
         self, run_id: str, *, project_context_root: Path | str | None = None
     ) -> dict:
         """One observed run: query, observation metadata, ranked snapshot."""
-        row = self._require_search_run(run_id, project_context_root)
+        db = await self._get_db_after_wait(wait=WRITER_WAIT_S)
+        row = self._require_search_run(db, run_id, project_context_root)
         return {
             "run_id": row[0],
             "query_text": row[1],
@@ -486,7 +491,7 @@ class HistoryMixin:
             params.append(utc_bound_from_iso(since, field="since", timespec="seconds"))
         query += " ORDER BY h.created_at DESC, h.id DESC LIMIT ?"
         params.append(limit)
-        rows = self._get_db().execute(query, params).fetchall()
+        rows = (await self._get_db_after_wait(wait=WRITER_WAIT_S)).execute(query, params).fetchall()
         return [
             {
                 "run_id": r[0],

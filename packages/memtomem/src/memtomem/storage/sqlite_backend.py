@@ -34,6 +34,7 @@ from memtomem.errors import (
     TransactionOwnedError,
 )
 from memtomem.storage.base import (
+    WRITER_WAIT_S,
     ChunkKeyRow,
     NamespaceAssignResult,
     NamespaceChunkCandidate,
@@ -450,6 +451,7 @@ class SqliteBackend(
                 lambda: self._in_transaction,
                 self._get_read_db,
                 lease_read_db=self._lease_read_db,
+                get_db_after_wait=lambda: self._get_db_after_wait(wait=WRITER_WAIT_S),
             )
 
             if self._adopt_unpopulated_embedding_stamp:
@@ -586,6 +588,49 @@ class SqliteBackend(
         self._check_schema_current(self._db)
         return self._db
 
+    async def _wait_for_writer_idle(self, *, wait: float) -> None:
+        """Return once no other task owns the writer, waiting at most ``wait`` seconds.
+
+        The lock-wait half of :meth:`_get_db_when_idle`, for callers that do
+        not read through the writer connection themselves but are refused
+        while another task owns it: ``rebuild_fts`` and
+        ``reset_embedding_meta`` through ``_require_transaction_idle``, and the
+        synchronous ``stored_embedding_info`` property. It waits in
+        ``_writer_lock``'s FIFO queue only while a foreign task owns the
+        writer, then hands the lock straight on, so nothing can become owner
+        before the caller's next synchronous step. The caller must reach the
+        guarded access without an ``await`` in between. Raises
+        ``TransactionOwnedError`` when the wait runs out, or "Database is
+        closing" on a closing store.
+        """
+        owner = self._transaction_owner
+        if owner is None or owner is self._current_task():
+            return
+        # ``wait > 0`` rather than ``wait <= 0`` so NaN refuses too.
+        budget = wait if wait > 0 else 0.0
+        try:
+            async with asyncio.timeout(budget):
+                await self._writer_lock.acquire()
+        except TimeoutError:
+            if getattr(self, "_closing", False):
+                raise StorageError("Database is closing") from None
+            raise TransactionOwnedError(
+                "SQLite transaction is owned by another task; timed out waiting for writer lock"
+            ) from None
+        self._writer_lock.release()
+
+    async def _get_db_after_wait(self, *, wait: float) -> sqlite3.Connection:
+        """``_get_db()`` after :meth:`_wait_for_writer_idle`.
+
+        For writer reads that used ``_get_db()`` and should wait for another
+        task's transaction instead of being refused at once (#3182). Unlike
+        :meth:`_get_db_when_idle` it adds no refusal of a connection left in an
+        unowned transaction, so such a read behaves as it did, only later. The
+        caller must read without an ``await`` in between.
+        """
+        await self._wait_for_writer_idle(wait=wait)
+        return self._get_db()
+
     async def _get_db_when_idle(self, *, wait: float) -> sqlite3.Connection:
         """The writer connection for synchronous reads, once no other task owns it.
 
@@ -607,20 +652,7 @@ class SqliteBackend(
         that no task owns, rather than read another writer's uncommitted rows,
         and leaves that transaction as it is.
         """
-        owner = self._transaction_owner
-        if owner is not None and owner is not self._current_task():
-            # ``wait > 0`` rather than ``wait <= 0`` so NaN refuses too.
-            budget = wait if wait > 0 else 0.0
-            try:
-                async with asyncio.timeout(budget):
-                    await self._writer_lock.acquire()
-            except TimeoutError:
-                if getattr(self, "_closing", False):
-                    raise StorageError("Database is closing") from None
-                raise TransactionOwnedError(
-                    "SQLite transaction is owned by another task; timed out waiting for writer lock"
-                ) from None
-            self._writer_lock.release()
+        await self._wait_for_writer_idle(wait=wait)
         db = self._get_db()
         if db.in_transaction and not self._in_transaction:
             raise StorageError(
@@ -1488,6 +1520,9 @@ class SqliteBackend(
         purpose — no ``await`` may land between the DROP and the commit, or a
         concurrent ``dense_search`` could observe ``chunks_vec`` missing
         (``test_qa_audit_pins.py::test_reset_embedding_meta_is_single_atomic_transaction``).
+        A caller that should wait out another task's transaction calls
+        ``_wait_for_writer_idle`` immediately before this method; with no
+        ``await`` in here, nothing can take the writer in between.
         """
         assert self._meta is not None
         self._require_transaction_idle("reset_embedding_meta")
@@ -3011,7 +3046,12 @@ class SqliteBackend(
         schedules waits on the write lock and then rewrites the index. Once
         the rebuilds for overlapping runtime switches finish, the index is in
         the tokenizer that won, never the one that lost (#3018).
+
+        While another task owns ``transaction()``, it first waits for the
+        writer, up to ``WRITER_WAIT_S``, instead of being refused at once
+        (#3182). A caller that owns a transaction itself is still refused.
         """
+        await self._wait_for_writer_idle(wait=WRITER_WAIT_S)
         self._require_transaction_idle("rebuild_fts")
         assert self._db is not None
         db_path = str(Path(self._config.sqlite_path).expanduser())

@@ -31,8 +31,9 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -49,6 +50,7 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent / "src" / "memtomem" / "web
 def prod_app():
     application = create_app(lifespan=None, mode="prod")
     application.state.storage = AsyncMock()
+    application.state.storage.transaction = MagicMock(side_effect=lambda **_: nullcontext())
     application.state.config = None
     application.state.search_pipeline = None
     application.state.index_engine = None
@@ -62,6 +64,7 @@ def prod_app():
 def dev_app():
     application = create_app(lifespan=None, mode="dev")
     application.state.storage = AsyncMock()
+    application.state.storage.transaction = MagicMock(side_effect=lambda **_: nullcontext())
     application.state.config = None
     application.state.search_pipeline = None
     application.state.index_engine = None

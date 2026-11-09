@@ -17,6 +17,12 @@ from memtomem.source_provenance import (
     READ_ONLY_TARGET_DETAIL,
 )
 from memtomem.web.deps import get_config, get_index_engine, get_search_pipeline, get_storage
+from memtomem.web.routes._writer_wait import (
+    WRITER_BUSY_NOTHING_CHANGED_DETAIL,
+    WRITER_BUSY_READ_DETAIL,
+    writer_busy_as_503,
+    writer_transaction,
+)
 from memtomem.web.routes._errors import (
     NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
     index_blocked_http,
@@ -61,7 +67,8 @@ async def list_scratch(
     storage=Depends(get_storage),
 ) -> ScratchListResponse:
     """List all working memory entries."""
-    rows = await storage.scratch_list()
+    with writer_busy_as_503(WRITER_BUSY_READ_DETAIL):
+        rows = await storage.scratch_list()
     entries = [ScratchEntryOut(**r) for r in rows]
     return ScratchListResponse(entries=entries, total=len(entries))
 
@@ -77,9 +84,10 @@ async def set_scratch(
         expires_at = (datetime.now(timezone.utc) + timedelta(minutes=body.ttl_minutes)).isoformat(
             timespec="seconds"
         )
-    await storage.scratch_set(
-        body.key, body.value, session_id=body.session_id, expires_at=expires_at
-    )
+    async with writer_transaction(storage):
+        await storage.scratch_set(
+            body.key, body.value, session_id=body.session_id, expires_at=expires_at
+        )
     return ScratchSetResponse(key=body.key)
 
 
@@ -89,7 +97,8 @@ async def delete_scratch(
     storage=Depends(get_storage),
 ) -> ScratchDeleteResponse:
     """Delete a working memory entry."""
-    deleted = await storage.scratch_delete(key)
+    async with writer_transaction(storage):
+        deleted = await storage.scratch_delete(key)
     return ScratchDeleteResponse(key=key, deleted=deleted)
 
 
@@ -105,7 +114,8 @@ async def promote_scratch(
     """Promote a working memory entry to long-term memory."""
     import asyncio as _asyncio
 
-    entry = await storage.scratch_get(key)
+    with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
+        entry = await storage.scratch_get(key)
     if not entry:
         raise HTTPException(status_code=404, detail=f"Key '{key}' not found")
 
@@ -202,7 +212,8 @@ async def promote_scratch(
             # Read again under the lock, right before the append: promoted means
             # the body is already in a memory file (also after an append the
             # indexer refused), and a second promote must not add it again.
-            current = await storage.scratch_get(key)
+            with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
+                current = await storage.scratch_get(key)
             if not current:
                 raise HTTPException(status_code=404, detail=f"Key '{key}' not found")
             if current.get("promoted"):

@@ -635,6 +635,8 @@ _TRANSACTION_SITES = {
     "search/dedup.py": [True],
     "server/tools/hermes_mirror.py": [True, True],
     "server/tools/consolidation.py": [True],
+    # Tag rename, delete and merge, writer before the tag lock (#3182).
+    "services/tag_management.py": [True, True, True],
     "storage/sqlite_backend.py": [False],
     # Each chunk's tag write after the extraction (#3181).
     "tools/auto_tag.py": [True],
@@ -643,6 +645,8 @@ _TRANSACTION_SITES = {
     "tools/export_import.py": [True],
     # auto_archive, auto_expire, auto_promote (#3110).
     "tools/policy_engine.py": [True, True, True],
+    # writer_transaction, the web routes' waiting transaction (#3182).
+    "web/routes/_writer_wait.py": [True],
     # Writes that follow the append and index of a web write (#3181): the
     # index-only chunk delete, the promote mark, the memory-dir remove sweep and
     # the add's tag merge.

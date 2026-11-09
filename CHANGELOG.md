@@ -43,6 +43,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Web UI requests no longer answer HTTP 500 at once while another task holds a
+  write transaction (#3182).** While a policy job, an import or a consolidation
+  held `storage.transaction()` in `mm web`, these routes were refused with "SQLite
+  transaction is owned by another task" and answered "Internal server error",
+  before writing anything: the namespace, scratch, session and
+  search-run views and edits; tag rename, delete and merge; source delete;
+  feedback, eval-case promotion and replay; embedding status, embedding reset,
+  FTS rebuild and the database reset. They now wait up to the same 5-second
+  budget. If the wait runs out they answer 503 and say whether anything was
+  changed. The per-chunk tag edit does not wait (a memory migration may commit
+  between its read and its write), but answers that 503 instead of a 500.
+  Namespace rename and assign through MCP and the CLI, the tag tools, and the
+  scratch, session, search-history and eval-case reads wait the same way.
 - **Web UI writes that follow an index, and the watcher's hold on a file that
   became a symlink, wait for another task's write transaction instead of
   leaving a half-done result (#3181).** While another task in the same process

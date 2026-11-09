@@ -30,6 +30,7 @@ from uuid import uuid4
 from memtomem.errors import EvalCaseError, EvalCaseNotFoundError, EvalCaseValidationError
 from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter, ScopeFilter
 from memtomem.privacy import scan as _privacy_scan
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.mixins.history import FEEDBACK_JUDGMENTS
 from memtomem.storage.sqlite_helpers import project_boundary_key
 from memtomem.storage.sqlite_scope import _scopes_glob_clause, _scopes_in_clause
@@ -291,7 +292,9 @@ class EvalCaseMixin:
             # composable inside an outer transaction (mirrors feedback writes).
             raise EvalCaseError("promote_search_run cannot run inside a transaction block")
 
-        db = self._get_db()
+        # Waits for another task's transaction instead of being refused at
+        # once (#3182); nothing suspends between the wait and the BEGIN.
+        db = await self._get_db_when_idle(wait=WRITER_WAIT_S)
         db.execute("BEGIN IMMEDIATE")
         try:
             run = db.execute(
@@ -502,8 +505,9 @@ class EvalCaseMixin:
         # The writer, not a pool reader: ``promote_search_run`` and
         # ``set_eval_case_status`` return this read straight after their own
         # commit, and a pool connection another thread still has a statement
-        # open on keeps serving the snapshot from before that commit.
-        db = self._get_db()
+        # open on keeps serving the snapshot from before that commit. Waits for
+        # another task's transaction rather than being refused (#3182).
+        db = await self._get_db_after_wait(wait=WRITER_WAIT_S)
         case_id = self._resolve_case_id(db, case_id_or_name)
         row = db.execute(
             "SELECT case_id, name, query_text, top_k, filters_json, source_run_id, "

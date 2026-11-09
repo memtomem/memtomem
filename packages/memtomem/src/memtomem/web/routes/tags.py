@@ -8,6 +8,7 @@ from memtomem.errors import TransactionOwnedError
 from memtomem.services import tag_management as tag_svc
 from memtomem.tools.auto_tag import auto_tag_storage
 from memtomem.web.deps import get_project_context_root, get_search_pipeline, get_storage
+from memtomem.web.routes._writer_wait import WRITER_BUSY_NOTHING_CHANGED_DETAIL, writer_busy_as_503
 from memtomem.web.schemas.tags import (
     AutoTagRequest,
     AutoTagResponse,
@@ -127,13 +128,14 @@ async def rename_tag(
     apply call.
     """
     try:
-        result = await tag_svc.rename_tag(
-            storage,
-            name,
-            body.new_name,
-            dry_run=dry_run,
-            search_pipeline=search_pipeline,
-        )
+        with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
+            result = await tag_svc.rename_tag(
+                storage,
+                name,
+                body.new_name,
+                dry_run=dry_run,
+                search_pipeline=search_pipeline,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _to_response(result)
@@ -149,9 +151,10 @@ async def delete_tag(
     """Drop ``name`` from every visible chunk that carries it. Chunks ending up
     tag-less stay indexed; chunks of a held source keep the tag."""
     try:
-        result = await tag_svc.delete_tag(
-            storage, name, dry_run=dry_run, search_pipeline=search_pipeline
-        )
+        with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
+            result = await tag_svc.delete_tag(
+                storage, name, dry_run=dry_run, search_pipeline=search_pipeline
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _to_response(result)
@@ -167,13 +170,14 @@ async def merge_tags(
     """Replace every tag in ``body.sources`` with ``body.target`` across all
     visible chunks. Resulting per-chunk tag list is deduplicated."""
     try:
-        result = await tag_svc.merge_tags(
-            storage,
-            body.sources,
-            body.target,
-            dry_run=dry_run,
-            search_pipeline=search_pipeline,
-        )
+        with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
+            result = await tag_svc.merge_tags(
+                storage,
+                body.sources,
+                body.target,
+                dry_run=dry_run,
+                search_pipeline=search_pipeline,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _to_response(result)

@@ -27,7 +27,7 @@ from memtomem.errors import EvalCaseError
 from memtomem.privacy import has_emit_risk as _has_emit_risk
 from memtomem.quality import metrics
 from memtomem.quality.fingerprints import case_set_fingerprint
-from memtomem.quality.state import current_fingerprints, nondeterministic_stages
+from memtomem.quality.state import current_fingerprints_when_writer_idle, nondeterministic_stages
 
 if TYPE_CHECKING:
     from memtomem.config import Mem2MemConfig
@@ -305,7 +305,7 @@ async def replay_cases(
             f"(a representable unix timestamp), got {as_of_unix}"
         )
     pinned_as_of = int(time.time()) if as_of_unix is None else int(as_of_unix)
-    live_fps, knobs = current_fingerprints(storage, config)
+    live_fps, knobs = await current_fingerprints_when_writer_idle(storage, config)
     nd_stages = nondeterministic_stages(config, pipeline)
 
     ordered_ids, explicit_ids, archived_skipped = await resolve_case_ids(storage, case_ids)

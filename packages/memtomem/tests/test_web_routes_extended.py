@@ -8,6 +8,7 @@ with mocked app.state dependencies.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -2385,6 +2386,7 @@ class TestNamespaceProdTier:
     async def prod_client(self):
         application = create_app(lifespan=None, mode="prod")
         storage = AsyncMock()
+        storage.transaction = MagicMock(side_effect=lambda **_: contextlib.nullcontext())
         storage.list_namespace_meta = AsyncMock(
             return_value=[
                 {
