@@ -56,6 +56,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   on Windows a target whose file name differs in case from the stored one
   removes nothing. Other indexing paths are unchanged: an excluded file's chunks
   stay until `mm purge --matching-excluded`.
+- **A re-import no longer indexes through a target that was replaced by a
+  symbolic link mid-import (#3164).** If a target that `mem_import_notion` or
+  `mem_import_obsidian` had just written was swapped for a link before its
+  index, the link's target was indexed as the imported file, with the import's
+  namespace and tags, while the previous import's chunks under the target's own
+  path stayed searchable. The importers now hide those chunks until the path is
+  a regular file again, index nothing through the link, and report the file as
+  `Written but replaced by a symlink (not indexed, previous chunks hidden)`. A
+  swap in the moment between that check and the file's read is still indexed
+  through the link, and a swap into a directory whose lock file cannot be
+  created, while the import waits for an indexing slot, fails the import with
+  that error; a running watcher hides the path afterwards. Other indexing paths
+  still follow the link.
 - **A Notion or Obsidian import no longer overwrites earlier imports while indexing is blocked
   by an embedding mismatch (#3162).** In that mode the index accepts no files, but
   `mem_import_notion` and `mem_import_obsidian` still wrote every target and then reported

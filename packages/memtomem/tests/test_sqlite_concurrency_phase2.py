@@ -467,7 +467,8 @@ async def test_close_refuses_each_writer_queued_behind_a_released_owner(
 #: Production ``transaction()`` call sites and whether each opts into waiting
 #: (#2860). A new site must be added here, deciding which it is.
 _TRANSACTION_SITES = {
-    "indexing/engine.py": [True],
+    # _hold_relinked_key (#3164), the per-file chunk write.
+    "indexing/engine.py": [True, True],
     "search/decay.py": [True],
     "search/dedup.py": [True],
     "server/tools/hermes_mirror.py": [True, True],

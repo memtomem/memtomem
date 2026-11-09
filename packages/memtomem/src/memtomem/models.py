@@ -631,3 +631,8 @@ class IndexingStats:
     # ``deleted_chunks`` says how many (#3158). Appended last for positional
     # construction compatibility.
     excluded_files: int = 0
+    # 1 when ``index_file(hold_if_relinked=True)`` found the file it was handed
+    # replaced by a symlink: the chunks stored under the path's own key were
+    # held, and nothing was indexed through the link (#3164). Only that call
+    # sets it. Appended last for positional construction compatibility.
+    relinked_files: int = 0
