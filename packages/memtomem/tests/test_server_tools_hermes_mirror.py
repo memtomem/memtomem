@@ -209,6 +209,55 @@ async def test_a_cancelled_write_holds_the_lock_until_its_thread_is_done(mirror,
     assert not mirror.app.get_memory_file_lock(_file(mirror)).locked()
 
 
+async def test_a_shutdown_cancel_still_waits_for_the_write_thread(mirror, monkeypatch):
+    # asyncio.run cancels every task at shutdown, the drain's inner worker included.
+    import asyncio
+    import contextlib
+    import contextvars
+    import threading
+
+    import memtomem.context._atomic as atomic
+
+    real_write = atomic.atomic_write_text
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="unset")
+    seen: list[str] = []
+
+    def slow_write(*args, **kwargs):
+        seen.append(marker.get())  # the thread runs in the caller's context
+        entered.set()
+        release.wait(10)
+        try:
+            return real_write(*args, **kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(atomic, "atomic_write_text", slow_write)
+    marker.set("caller")
+    task = asyncio.create_task(mirror(op="add", content="Slow.", ts=1))
+    try:
+        started = await asyncio.get_running_loop().run_in_executor(None, entered.wait, 5)
+        assert started, "the write never started"
+        me = asyncio.current_task()
+        others = [t for t in asyncio.all_tasks() if t is not me]
+        assert task in others
+        for t in others:
+            t.cancel()
+        await asyncio.sleep(0.1)
+        assert not task.done(), "the drain ended while the write thread was still running"
+        assert mirror.app.get_memory_file_lock(_file(mirror)).locked()
+    finally:
+        release.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert task.cancelled()
+    assert finished.is_set()
+    assert seen == ["caller"]
+    assert not mirror.app.get_memory_file_lock(_file(mirror)).locked()
+
+
 async def test_a_render_failure_keeps_the_operation_and_reconcile_recovers(mirror, monkeypatch):
     engine = mirror.app.index_engine
     real_index_file = engine.index_file
