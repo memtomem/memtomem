@@ -116,6 +116,11 @@ DELEGATED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         # reports which of the two sources answered).
         ("_provenance.py", "capture_session_and_namespace", "namespace"),
         ("_provenance.py", "capture_session_and_namespace_split", "namespace"),
+        # The Notion and Obsidian tools' shared indexing step and their result
+        # renderer receive the namespace the tool already passed through
+        # ``writable_namespace_arg`` (or its fixed default) (#3168).
+        ("importers.py", "_index_imported", "namespace"),
+        ("importers.py", "_render_import", "namespace"),
     }
 )
 

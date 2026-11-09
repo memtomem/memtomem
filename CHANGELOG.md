@@ -96,6 +96,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   and the old chunks stayed in search. The importers now refuse before they write, as
   `mem_index` and `mem_import` already did, and return the same `Embedding mismatch detected`
   message with the reset command.
+- **A Notion or Obsidian import now lists the files it wrote but could not index, and no longer
+  calls that result complete (#3168).** `mem_import_notion` and `mem_import_obsidian` counted
+  only the chunks indexed, so a written file that the index refused (too large, binary,
+  unreadable, held for a scope change, or failed to embed) was reported under
+  `import complete`. The result now starts with `import incomplete: N of M written file(s) were
+  not indexed` and names up to five of them with the reason. A file whose chunks were written
+  but whose AI summary refresh then failed is still counted and tagged, and is reported as
+  `Indexed, AI summary not refreshed`. If another process changes the stored embedding policy
+  during an import, the import no longer stops with only an error: the files indexed before the
+  change are tagged and the session is flagged, and the rest are listed as not indexed.
+  `IndexingStats` gains `current_files`, which `index_file` sets to 1 when the file's stored
+  chunks describe its current content.
 - **Editing or deleting a memory no longer leaves its pre-edit chunks searchable
   when the file becomes excluded during the write (#3163).** `mem_edit`,
   `mem_delete` and the web UI's edit and delete refuse an excluded file before

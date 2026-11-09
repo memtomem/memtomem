@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from memtomem.constants import writable_namespace_arg
-from memtomem.errors import ConfigError
+from memtomem.errors import ConfigError, EmbeddingPolicyChangedError
 from memtomem.memory_scope import require_user_base
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app_initialized
+from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _check_embedding_mismatch
 from memtomem.server.tool_registry import register
@@ -28,6 +29,202 @@ def _mismatch_refusal(app: object, label: str) -> str | None:
     """
     msg = _check_embedding_mismatch(app)
     return None if msg is None else f"{label} import wrote nothing.\n{msg}"
+
+
+# The not-indexed list in an import result names this many files at most.
+_NOT_INDEXED_SHOWN = 5
+
+
+@dataclass
+class _NotIndexed:
+    name: str
+    reason: str
+    # Only a scope hold says the file's stored rows are hidden: its engine
+    # contract is that every stored row is under the held key. Other refusals
+    # say nothing reliable about visibility (a repeated read-error hold reports
+    # no change while its rows stay hidden), so the result makes no claim.
+    hidden: bool = False
+
+
+@dataclass
+class _ImportIndexOutcome:
+    total_chunks: int = 0
+    engine_blocked: int = 0
+    excluded_purged: int = 0
+    purged_chunks: int = 0
+    relinked: int = 0
+    summary_failed: int = 0
+    not_indexed: list[_NotIndexed] = field(default_factory=list)
+
+
+def _display_name(path: Path, output_dir: Path) -> str:
+    try:
+        return path.relative_to(output_dir).as_posix()
+    except ValueError:
+        return path.name
+
+
+async def _index_imported(
+    app: AppContext,
+    imported: list[Path],
+    *,
+    output_dir: Path,
+    namespace: str,
+    source_tag: str,
+    tags: list[str] | None,
+    force_unsafe: bool,
+    written_text: dict[Path, str],
+    provenance_session_id: str | None,
+) -> _ImportIndexOutcome:
+    """Index the files an import wrote, then tag them and flag the session.
+
+    The import guarded each file's exact text; the engine judges it again under
+    its own scope, and ``valve_text`` keeps a forced import's valve to those
+    bytes. A refused file is reported rather than aborting the import. An
+    exclusion installed after a file was written makes the engine skip it;
+    ``purge_if_excluded`` then removes the chunks of the bytes this import
+    overwrote (#3158). A target replaced by a symlink after its write is held,
+    not indexed through the link (``hold_if_relinked``, #3164).
+
+    A file counts as indexed only when the engine says its stored chunks now
+    describe what it read (``current_files``). ``errors`` cannot answer that:
+    an unreadable file is held with no error, and a file whose chunks committed
+    can still carry the error of the AI summary refresh that runs after the
+    commit (#3168). Another process restamping the embedding policy makes the
+    engine raise ``EmbeddingPolicyChangedError`` for the file being written and
+    refuse every later one, so the loop records it and goes on; the files
+    indexed before it are still tagged and flagged below.
+    """
+    from memtomem.indexing.engine import PrivacyRejection
+
+    outcome = _ImportIndexOutcome()
+    indexed_files: list[Path] = []
+    mutated = False
+    for f in imported:
+        try:
+            stats = await app.index_engine.index_file(
+                f,
+                namespace=namespace,
+                ingress_guarded=True,
+                force_unsafe=force_unsafe,
+                valve_text=written_text.get(f),
+                purge_if_excluded=True,
+                hold_if_relinked=True,
+            )
+        except PrivacyRejection as exc:
+            outcome.engine_blocked += 1
+            # The engine commits a redaction hold before it re-raises, and
+            # ``held`` is True once that hold ran, even over no rows. Counting
+            # it as a change can only weaken the session's provenance claim.
+            mutated = mutated or bool(exc.held)
+            continue
+        except EmbeddingPolicyChangedError as exc:
+            outcome.not_indexed.append(_NotIndexed(_display_name(f, output_dir), str(exc)))
+            continue
+        mutated = mutated or stats.mutated
+        if stats.relinked_files:
+            outcome.relinked += 1
+            continue
+        if stats.excluded_files:
+            outcome.excluded_purged += 1
+            outcome.purged_chunks += stats.deleted_chunks
+            continue
+        if not stats.current_files:
+            reason = (
+                stats.errors[0].removeprefix(f"{f.name}: ")
+                if stats.errors
+                else "not indexed (unreadable, missing, or no longer a regular file)"
+            )
+            outcome.not_indexed.append(
+                _NotIndexed(_display_name(f, output_dir), reason, hidden=stats.scope_held)
+            )
+            continue
+        indexed_files.append(f)
+        outcome.total_chunks += stats.indexed_chunks
+        if stats.errors:
+            # On a current file the only error is the post-commit summary refresh.
+            outcome.summary_failed += 1
+
+    if tags and outcome.total_chunks > 0:
+        for f in indexed_files:
+            chunks = await app.storage.list_chunks_by_source(f)
+            for c in chunks:
+                merged = set(c.metadata.tags) | set(tags) | {source_tag, "imported"}
+                if merged != set(c.metadata.tags):
+                    c.metadata = c.metadata.__class__(
+                        **{
+                            **{
+                                attr: getattr(c.metadata, attr)
+                                for attr in c.metadata.__dataclass_fields__
+                            },
+                            "tags": tuple(sorted(merged)),
+                        }
+                    )
+            if chunks:
+                await app.storage.upsert_chunks(chunks)
+
+    app.search_pipeline.invalidate_cache()
+
+    # A purge or a hold changes the session's chunk set as much as an index does.
+    if outcome.total_chunks or outcome.purged_chunks or mutated:
+        await flag_untracked_write(app, provenance_session_id)
+    return outcome
+
+
+def _render_import(
+    label: str,
+    outcome: _ImportIndexOutcome,
+    *,
+    imported: int,
+    guard_blocked: int,
+    excluded: int,
+    symlinks: int,
+    read_only: int,
+    source_symlinks: int,
+    source_noun: str,
+    namespace: str,
+    output_dir: Path,
+) -> str:
+    missed = outcome.not_indexed
+    if missed:
+        header = (
+            f"{label} import incomplete: {len(missed)} of {imported} written file(s) "
+            f"were not indexed."
+        )
+    else:
+        header = f"{label} import complete:"
+    lines = [
+        header,
+        f"- Files imported: {imported}",
+        f"- Chunks indexed: {outcome.total_chunks}",
+    ]
+    if missed:
+        lines.append(f"- Written but not indexed: {len(missed)}")
+        for item in missed[:_NOT_INDEXED_SHOWN]:
+            note = " — previous chunks hidden from search" if item.hidden else ""
+            lines.append(f"  - {item.name}: {item.reason}{note}")
+        if len(missed) > _NOT_INDEXED_SHOWN:
+            lines.append(f"  - … and {len(missed) - _NOT_INDEXED_SHOWN} more")
+        lines.append(
+            "  Chunks from an earlier import of these files were not replaced; "
+            "depending on the reason they may still be searchable."
+        )
+    if outcome.summary_failed:
+        lines.append(f"- Indexed, AI summary not refreshed: {outcome.summary_failed}")
+    lines += [
+        f"- Blocked (redaction): {guard_blocked + outcome.engine_blocked}",
+        f"- Skipped (target excluded from indexing): {excluded}",
+        f"- Skipped (target is a symlink): {symlinks}",
+        f"- Skipped (target under a read-only index root): {read_only}",
+        f"- Written but excluded from indexing: {outcome.excluded_purged} "
+        f"(previous chunks removed: {outcome.purged_chunks})",
+        "- Written but replaced by a symlink (not indexed, previous chunks hidden): "
+        f"{outcome.relinked}",
+        f"- Skipped (source is a symlink or outside the {source_noun}): {source_symlinks}",
+        f"- Namespace: {namespace}",
+        f"- Output: {output_dir}",
+    ]
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -124,89 +321,30 @@ async def mem_import_notion(
     if not imported:
         return "No markdown files found in the Notion export."
 
-    # Index all imported files. The import guarded each file's exact text; the
-    # engine judges it again under its own scope, and ``valve_text`` keeps a
-    # forced import's valve to those bytes. Refused files are skipped and
-    # counted rather than aborting the whole import. An exclusion installed
-    # after a file was written makes the engine skip it; ``purge_if_excluded``
-    # then removes the chunks of the bytes this import overwrote (#3158). A
-    # target replaced by a symlink after its write is held, not indexed through
-    # the link (``hold_if_relinked``, #3164).
-    from memtomem.indexing.engine import PrivacyRejection
-
     effective_ns = namespace or "notion"
-    total_chunks = 0
-    blocked = len(blocked_paths)
-    indexed_files: list[Path] = []
-    excluded_purged = 0
-    purged_chunks = 0
-    relinked = 0
-    relink_held = False
-    for f in imported:
-        try:
-            stats = await app.index_engine.index_file(
-                f,
-                namespace=effective_ns,
-                ingress_guarded=True,
-                force_unsafe=force_unsafe,
-                valve_text=written_text.get(f),
-                purge_if_excluded=True,
-                hold_if_relinked=True,
-            )
-        except PrivacyRejection:
-            blocked += 1
-            continue
-        if stats.relinked_files:
-            relinked += 1
-            relink_held = relink_held or stats.mutated
-            continue
-        if stats.excluded_files:
-            excluded_purged += 1
-            purged_chunks += stats.deleted_chunks
-            continue
-        indexed_files.append(f)
-        total_chunks += stats.indexed_chunks
-
-    # Apply tags
-    if tags and total_chunks > 0:
-        for f in indexed_files:
-            chunks = await app.storage.list_chunks_by_source(f)
-            for c in chunks:
-                merged = set(c.metadata.tags) | set(tags) | {"notion", "imported"}
-                if merged != set(c.metadata.tags):
-                    c.metadata = c.metadata.__class__(
-                        **{
-                            **{
-                                field: getattr(c.metadata, field)
-                                for field in c.metadata.__dataclass_fields__
-                            },
-                            "tags": tuple(sorted(merged)),
-                        }
-                    )
-            if chunks:
-                await app.storage.upsert_chunks(chunks)
-
-    app.search_pipeline.invalidate_cache()
-
-    # A purge or a hold changes the session's chunk set as much as an index does.
-    if total_chunks or purged_chunks or relink_held:
-        await flag_untracked_write(app, provenance_session_id)
-
-    return (
-        f"Notion import complete:\n"
-        f"- Files imported: {len(imported)}\n"
-        f"- Chunks indexed: {total_chunks}\n"
-        f"- Blocked (redaction): {blocked}\n"
-        f"- Skipped (target excluded from indexing): {len(excluded_paths)}\n"
-        f"- Skipped (target is a symlink): {len(symlink_paths)}\n"
-        f"- Skipped (target under a read-only index root): {len(read_only_paths)}\n"
-        f"- Written but excluded from indexing: {excluded_purged} "
-        f"(previous chunks removed: {purged_chunks})\n"
-        f"- Written but replaced by a symlink (not indexed, previous chunks hidden): "
-        f"{relinked}\n"
-        f"- Skipped (source is a symlink or outside the export): {len(source_symlink_paths)}\n"
-        f"- Namespace: {effective_ns}\n"
-        f"- Output: {output_dir}"
+    outcome = await _index_imported(
+        app,
+        imported,
+        output_dir=output_dir,
+        namespace=effective_ns,
+        source_tag="notion",
+        tags=tags,
+        force_unsafe=force_unsafe,
+        written_text=written_text,
+        provenance_session_id=provenance_session_id,
+    )
+    return _render_import(
+        "Notion",
+        outcome,
+        imported=len(imported),
+        guard_blocked=len(blocked_paths),
+        excluded=len(excluded_paths),
+        symlinks=len(symlink_paths),
+        read_only=len(read_only_paths),
+        source_symlinks=len(source_symlink_paths),
+        source_noun="export",
+        namespace=effective_ns,
+        output_dir=output_dir,
     )
 
 
@@ -304,87 +442,28 @@ async def mem_import_obsidian(
     if not imported:
         return "No markdown files found in the Obsidian vault."
 
-    # Index all imported files. The import guarded each file's exact text; the
-    # engine judges it again under its own scope, and ``valve_text`` keeps a
-    # forced import's valve to those bytes. Refused files are skipped and
-    # counted rather than aborting the whole import. An exclusion installed
-    # after a file was written makes the engine skip it; ``purge_if_excluded``
-    # then removes the chunks of the bytes this import overwrote (#3158). A
-    # target replaced by a symlink after its write is held, not indexed through
-    # the link (``hold_if_relinked``, #3164).
-    from memtomem.indexing.engine import PrivacyRejection
-
     effective_ns = namespace or "obsidian"
-    total_chunks = 0
-    blocked = len(blocked_paths)
-    indexed_files: list[Path] = []
-    excluded_purged = 0
-    purged_chunks = 0
-    relinked = 0
-    relink_held = False
-    for f in imported:
-        try:
-            stats = await app.index_engine.index_file(
-                f,
-                namespace=effective_ns,
-                ingress_guarded=True,
-                force_unsafe=force_unsafe,
-                valve_text=written_text.get(f),
-                purge_if_excluded=True,
-                hold_if_relinked=True,
-            )
-        except PrivacyRejection:
-            blocked += 1
-            continue
-        if stats.relinked_files:
-            relinked += 1
-            relink_held = relink_held or stats.mutated
-            continue
-        if stats.excluded_files:
-            excluded_purged += 1
-            purged_chunks += stats.deleted_chunks
-            continue
-        indexed_files.append(f)
-        total_chunks += stats.indexed_chunks
-
-    # Apply tags
-    if tags and total_chunks > 0:
-        for f in indexed_files:
-            chunks = await app.storage.list_chunks_by_source(f)
-            for c in chunks:
-                merged = set(c.metadata.tags) | set(tags) | {"obsidian", "imported"}
-                if merged != set(c.metadata.tags):
-                    c.metadata = c.metadata.__class__(
-                        **{
-                            **{
-                                field: getattr(c.metadata, field)
-                                for field in c.metadata.__dataclass_fields__
-                            },
-                            "tags": tuple(sorted(merged)),
-                        }
-                    )
-            if chunks:
-                await app.storage.upsert_chunks(chunks)
-
-    app.search_pipeline.invalidate_cache()
-
-    # A purge or a hold changes the session's chunk set as much as an index does.
-    if total_chunks or purged_chunks or relink_held:
-        await flag_untracked_write(app, provenance_session_id)
-
-    return (
-        f"Obsidian import complete:\n"
-        f"- Files imported: {len(imported)}\n"
-        f"- Chunks indexed: {total_chunks}\n"
-        f"- Blocked (redaction): {blocked}\n"
-        f"- Skipped (target excluded from indexing): {len(excluded_paths)}\n"
-        f"- Skipped (target is a symlink): {len(symlink_paths)}\n"
-        f"- Skipped (target under a read-only index root): {len(read_only_paths)}\n"
-        f"- Written but excluded from indexing: {excluded_purged} "
-        f"(previous chunks removed: {purged_chunks})\n"
-        f"- Written but replaced by a symlink (not indexed, previous chunks hidden): "
-        f"{relinked}\n"
-        f"- Skipped (source is a symlink or outside the vault): {len(source_symlink_paths)}\n"
-        f"- Namespace: {effective_ns}\n"
-        f"- Output: {output_dir}"
+    outcome = await _index_imported(
+        app,
+        imported,
+        output_dir=output_dir,
+        namespace=effective_ns,
+        source_tag="obsidian",
+        tags=tags,
+        force_unsafe=force_unsafe,
+        written_text=written_text,
+        provenance_session_id=provenance_session_id,
+    )
+    return _render_import(
+        "Obsidian",
+        outcome,
+        imported=len(imported),
+        guard_blocked=len(blocked_paths),
+        excluded=len(excluded_paths),
+        symlinks=len(symlink_paths),
+        read_only=len(read_only_paths),
+        source_symlinks=len(source_symlink_paths),
+        source_noun="vault",
+        namespace=effective_ns,
+        output_dir=output_dir,
     )
