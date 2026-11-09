@@ -1411,8 +1411,9 @@ class IndexEngine:
         # A purge decides inside the locks instead, from the same exclusion read
         # that skips the file. Its key never follows the leaf, now or later: a
         # leaf that is, or becomes, a symlink must not redirect the delete to
-        # its target's rows (#2835). Resolved parent plus the name is the key
-        # the store wrote while the leaf was a regular file (#2878).
+        # its target's rows (#2835). Resolved parent plus the name matches the
+        # key the store wrote while the leaf was a regular file, when the leaf
+        # is spelled as it was stored (#2878).
         purge_key = (
             fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
             if purge_if_excluded

@@ -50,11 +50,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mem_config`), the file was overwritten but not indexed, and its old chunks
   stayed in search. The importers now remove those chunks and report the file
   as `Written but excluded from indexing`, with the number of chunks removed.
-  Only the chunks stored under the target's own path are removed, and the path
-  is never followed: a target replaced by a symbolic link in that window never
-  costs the link's target its chunks, and on Windows a target whose case differs
-  from the stored path removes nothing. Other indexing paths are unchanged: an
-  excluded file's chunks stay until `mm purge --matching-excluded`.
+  Only the chunks stored under the target's own path are removed, and the key
+  they are removed by never resolves the file name itself: a target replaced by
+  a symbolic link in that window never costs the link's target its chunks, and
+  on Windows a target whose file name differs in case from the stored one
+  removes nothing. Other indexing paths are unchanged: an excluded file's chunks
+  stay until `mm purge --matching-excluded`.
 - **`mm init` no longer defaults to a choice this machine cannot finish (#3149, #3150).**
   Pressing Enter at the preset prompt now selects Minimal unless the `onnx` extra is known to be
   importable where memtomem will run, and a workspace that cannot be probed counts as missing.
