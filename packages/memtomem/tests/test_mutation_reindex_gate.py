@@ -15,6 +15,7 @@ import pytest
 from memtomem import privacy
 from memtomem.server.context import AppContext
 from memtomem.server.tools.memory_crud import mem_add, mem_delete, mem_edit
+from memtomem.storage.sqlite_helpers import norm_path
 
 from helpers import StubCtx
 
@@ -23,6 +24,11 @@ from helpers import StubCtx
 _KEY = "AKIA" + "IOSFODNN7EXAMPLE"
 _CLEAN = "## A\n\nalpha entry about deploys\n\n## B\n\nbeta entry about reviews\n"
 _SECRET_SECTION = f"\n## K\n\naws {_KEY}\n"
+
+
+def _preflight(engine, path, pre_image):
+    """The preflight as the memory tools call it: the source key resolved with the read."""
+    return engine.preflight_mutation(path, pre_image, source_key=norm_path(path))
 
 
 @pytest.fixture(autouse=True)
@@ -181,21 +187,19 @@ _DECLARED = (
 class TestPreflight:
     def test_a_new_file_is_clean(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
-        pf = comp.index_engine.preflight_mutation(mem_dir / "new.md", b"")
+        pf = _preflight(comp.index_engine, mem_dir / "new.md", b"")
         assert (pf.rejection, pf.masking_locked, pf.valve_ok) == (None, False, True)
 
     def test_a_clean_file_lets_the_valve_through(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
-        pf = comp.index_engine.preflight_mutation(mem_dir / "a.md", _CLEAN.encode())
+        pf = _preflight(comp.index_engine, mem_dir / "a.md", _CLEAN.encode())
         assert (pf.rejection, pf.masking_locked, pf.valve_ok) == (None, False, True)
 
     def test_unscanned_content_is_refused_and_nothing_is_recorded(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         before = privacy.snapshot()
 
-        pf = comp.index_engine.preflight_mutation(
-            mem_dir / "a.md", (_CLEAN + _SECRET_SECTION).encode()
-        )
+        pf = _preflight(comp.index_engine, mem_dir / "a.md", (_CLEAN + _SECRET_SECTION).encode())
 
         assert pf.rejection is not None and pf.rejection.decision == "blocked"
         assert pf.rejection.held is None
@@ -204,16 +208,16 @@ class TestPreflight:
 
     def test_a_declared_label_passes_but_keeps_the_valve_off(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
-        pf = comp.index_engine.preflight_mutation(mem_dir / "d.md", _DECLARED.encode())
+        pf = _preflight(comp.index_engine, mem_dir / "d.md", _DECLARED.encode())
         assert pf.rejection is None
         assert pf.valve_ok is False
 
     def test_crlf_and_invalid_utf8_are_read_as_the_engine_reads_them(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         crlf = _CLEAN.replace("\n", "\r\n").encode()
-        assert comp.index_engine.preflight_mutation(mem_dir / "c.md", crlf).valve_ok
+        assert _preflight(comp.index_engine, mem_dir / "c.md", crlf).valve_ok
         broken = b"## A\n\nbad byte \xff here\n" + _SECRET_SECTION.encode()
-        assert comp.index_engine.preflight_mutation(mem_dir / "b.md", broken).rejection
+        assert _preflight(comp.index_engine, mem_dir / "b.md", broken).rejection
 
     @pytest.mark.asyncio
     async def test_a_reviewed_masking_manifest_locks_the_file(self, bm25_only_components, tmp_path):
@@ -240,7 +244,7 @@ class TestPreflight:
         )
         comp.index_engine._config.index_masking_manifest_path = str(manifest)
 
-        pf = comp.index_engine.preflight_mutation(target, text.encode())
+        pf = _preflight(comp.index_engine, target, text.encode())
         assert pf.rejection is None
         assert pf.masking_locked
         result = await mem_add(  # type: ignore[arg-type]
@@ -257,7 +261,7 @@ class TestRefuseMutation:
     async def test_records_once_and_holds(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         target = await _indexed_then_tampered(comp, mem_dir)
-        pf = comp.index_engine.preflight_mutation(target, target.read_bytes())
+        pf = _preflight(comp.index_engine, target, target.read_bytes())
 
         rejection = await comp.index_engine.refuse_mutation(target, pf)
 
@@ -272,7 +276,7 @@ class TestRefuseMutation:
         comp, mem_dir = bm25_only_components
         target = mem_dir / "declared.md"
         target.write_text(_DECLARED + f"\naws {_KEY}\n", encoding="utf-8")
-        pf = comp.index_engine.preflight_mutation(target, target.read_bytes())
+        pf = _preflight(comp.index_engine, target, target.read_bytes())
         assert pf.rejection is not None
 
         with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):

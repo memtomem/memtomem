@@ -17,6 +17,7 @@ from uuid import uuid4
 
 
 from memtomem.source_provenance import StaleSourceProvenanceError, source_span_hash
+from memtomem.storage.sqlite_helpers import norm_path
 
 
 logger = logging.getLogger(__name__)
@@ -653,6 +654,22 @@ def read_pre_image_or_empty(file_path: Path) -> bytes:
         return read_pre_image(file_path).data
     except FileNotFoundError:
         return b""
+
+
+def read_with_source_key[T](read: Callable[[Path], T], file_path: Path) -> tuple[T, str]:
+    """``read(file_path)``, and the stored key of the source it read, resolved right after it.
+
+    For a memory tool that hands the bytes to ``IndexEngine.preflight_mutation``:
+    a refusal holds the source under this key, so it must be the source whose
+    bytes were judged. Resolved later, after an ``await``, a path replaced by a
+    symlink meanwhile would hold the link's target and leave the refused
+    source's chunks searchable (#3183). Call it as one worker-thread call, so
+    the caller has no ``await`` between the read and the resolution. Not seen:
+    another process swapping the path between the read and the resolution
+    right after it.
+    """
+    data = read(file_path)
+    return data, norm_path(file_path)
 
 
 def restore_pre_image_quietly(file_path: Path, pre_image: PreImage) -> RestoreOutcome:
