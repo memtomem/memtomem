@@ -13,6 +13,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from collections import deque
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
@@ -27,6 +28,7 @@ from memtomem.errors import (
     EmbeddingDimensionMismatchError,
     EmbeddingPolicyChangedError,
     SchemaDowngradeError,
+    SearchDeadlineExceeded,
     StorageError,
     StorageStartupError,
     TransactionOwnedError,
@@ -94,6 +96,7 @@ from memtomem.storage.mixins import (
     EntityMixin,
     EvalCaseMixin,
     FormationMixin,
+    HermesMirrorMixin,
     HistoryMixin,
     IdempotencyMixin,
     MaintenanceRunMixin,
@@ -272,6 +275,7 @@ class SqliteBackend(
     FormationMixin,
     MaintenanceRunMixin,
     UpdateCoverageMixin,
+    HermesMirrorMixin,
 ):
     def __init__(
         self,
@@ -751,10 +755,29 @@ class SqliteBackend(
         return self._get_db() if self._in_transaction else self._get_read_db()
 
     @asynccontextmanager
-    async def _lease_read_db(self) -> AsyncIterator[sqlite3.Connection]:
-        """Lease an idle read-pool connection with exclusive checkout and drain tracking."""
+    async def _lease_read_db(
+        self, *, deadline: float | None = None
+    ) -> AsyncIterator[sqlite3.Connection]:
+        """Lease an idle read-pool connection with exclusive checkout and drain tracking.
+
+        ``deadline`` (a ``time.monotonic()`` instant, from a search's
+        ``deadline_ms``) bounds only the wait for a free connection: past it the
+        lease raises ``SearchDeadlineExceeded`` having acquired nothing. A read
+        that already holds a connection is never cut short by it.
+        """
         if getattr(self, "_closing", False):
             raise StorageError("Database is closing")
+        if deadline is None:
+            # The budget of a search running in this task, for the reads it makes itself
+            # (visibility epoch, hidden counts, summary lookup, boosts) — see search/deadline.py.
+            from memtomem.search.deadline import ambient_read_deadline
+
+            deadline = ambient_read_deadline()
+        if deadline is not None and time.monotonic() >= deadline:
+            raise SearchDeadlineExceeded(
+                "search deadline exceeded before a read connection was taken; "
+                "no results were returned"
+            )
         if "_get_read_db" in self.__dict__ or not self._read_pool:
             direct_conn = self._get_read_db()
             self._increment_active_readers()
@@ -768,6 +791,14 @@ class SqliteBackend(
         while conn is None:
             if getattr(self, "_closing", False):
                 raise StorageError("Database is closing")
+            # Admission, not only the wait: an expired request takes no reader, free or not,
+            # and one woken after its deadline does not take the reader it was woken for.
+            if deadline is not None and time.monotonic() >= deadline:
+                self._notify_reader_waiters()
+                raise SearchDeadlineExceeded(
+                    "search deadline exceeded before a read connection was taken; "
+                    "no results were returned"
+                )
             if not self._read_pool:
                 fallback = self._get_db()
                 self._increment_active_readers()
@@ -790,7 +821,10 @@ class SqliteBackend(
                 waiter: asyncio.Future[None] = loop.create_future()
                 self._reader_waiters.append(waiter)
                 try:
-                    await waiter
+                    if deadline is None:
+                        await waiter
+                    else:
+                        await self._await_reader_until(waiter, deadline)
                 except BaseException:
                     if waiter.done() and not waiter.cancelled():
                         self._notify_reader_waiters()
@@ -812,6 +846,18 @@ class SqliteBackend(
                 self._in_use_readers.discard(id(conn))
             self._decrement_active_readers()
             self._notify_reader_waiters()
+
+    @staticmethod
+    async def _await_reader_until(waiter: asyncio.Future[None], deadline: float) -> None:
+        """Wait for a free reader until ``deadline``; the caller's handler settles the waiter."""
+        try:
+            async with asyncio.timeout(max(0.0, deadline - time.monotonic())):
+                await waiter
+        except TimeoutError:
+            raise SearchDeadlineExceeded(
+                "search deadline exceeded while waiting for a read connection; "
+                "no results were returned"
+            ) from None
 
     @asynccontextmanager
     async def _lease_txn_read_db(self) -> AsyncIterator[sqlite3.Connection]:

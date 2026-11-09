@@ -245,6 +245,16 @@ class RetryableError(Exception):
     """Error that can be resolved by retrying (e.g., network timeout, rate limit)."""
 
 
+class SearchDeadlineExceeded(RetryableError):
+    """A search's ``deadline_ms`` processing budget ran out; it returns no results.
+
+    Raised only at safe points — a stage boundary, a wait for a read connection,
+    an embedding slice that had not started — never by cancelling work already
+    running. Every leg that degrades on ``Exception`` re-raises this first, so an
+    expiry never turns into a partial result.
+    """
+
+
 class NamespaceMutationBusyError(StorageError, RetryableError):
     """A namespace writer could not freeze one stable source-row snapshot.
 

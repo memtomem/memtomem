@@ -404,13 +404,15 @@ def _hermes_memory_manifest(contract: dict) -> str:
     # key: the provider registers no general-plugin hooks. tools/release_preflight.py reads
     # `version` back without PyYAML, so the shape of that line is part of the contract.
     description = (
-        "Recall-only memtomem memory provider: injects relevant long-term memories on each "
-        "turn through Hermes's own memtomem MCP connection."
+        "memtomem memory provider: injects relevant long-term memories on each turn through "
+        "Hermes's own memtomem MCP connection, and can mirror Hermes's built-in memory writes "
+        "into memtomem (opt-in)."
     )
     return (
         f"name: {_yaml_q('memtomem-memory')}\n"
         f"version: {_yaml_q(contract['plugins']['hermes_memory_version'])}\n"
         f"description: {_yaml_q(description)}\n"
+        f"requires_hermes: {_yaml_q(contract['hermes']['memory_requires_hermes'])}\n"
     )
 
 

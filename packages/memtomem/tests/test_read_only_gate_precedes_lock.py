@@ -49,6 +49,7 @@ _MUST_GATE = {
     ("integrations/langgraph.py", "add"),
     ("web/routes/system_indexing.py", "add_memory"),
     ("web/routes/scratch.py", "promote_scratch"),
+    ("server/tools/hermes_mirror.py", "mem_hermes_mirror_apply"),
 }
 
 #: Acquires that are deliberately ungated, each with the reason.

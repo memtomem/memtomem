@@ -161,6 +161,10 @@ DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         # ``services.tag_management`` and SQLite ``chunks.tags`` JSON; no
         # namespace gate applies.
         ("tag_management.py", "mem_tag_merge", "target"),
+        # ``target`` is a Hermes built-in memory target (``memory`` / ``user``),
+        # validated against a fixed grammar and used as a file name; the mirror
+        # file is indexed through the engine's own namespace rules.
+        ("hermes_mirror.py", "mem_hermes_mirror_apply", "target"),
         # ``target`` here is the *file path* being written to, not a
         # namespace — the parameter-name heuristic catches it, but these two
         # #2005 helpers take a ``Path`` the caller already validated

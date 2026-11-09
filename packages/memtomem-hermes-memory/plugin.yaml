@@ -1,3 +1,4 @@
 name: "memtomem-memory"
 version: "0.1.2"
-description: "Recall-only memtomem memory provider: injects relevant long-term memories on each turn through Hermes's own memtomem MCP connection."
+description: "memtomem memory provider: injects relevant long-term memories on each turn through Hermes's own memtomem MCP connection, and can mirror Hermes's built-in memory writes into memtomem (opt-in)."
+requires_hermes: ">=0.21.5"
