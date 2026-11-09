@@ -7668,6 +7668,7 @@ class TestPresetMcpFlagPreAnswer:
 
         set_home(monkeypatch, tmp_path)
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr("memtomem.cli.init_cmd._claude_cli_found", lambda: True)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
