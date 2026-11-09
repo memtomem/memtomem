@@ -40,6 +40,22 @@ EXCLUDED_SOURCE_DETAIL = (
 )
 
 
+def excluded_after_write_notice(op: str) -> str:
+    """What a by-id rewrite tells its caller when the source became excluded while it ran.
+
+    The check before the write passed, so the exclusion was installed between it
+    and the re-index. The re-index removed the file's stored chunks rather than
+    leaving the pre-rewrite ones searchable beside the new bytes (#3163).
+    """
+    return (
+        f"The {op} is on disk, but indexing started skipping this source (an exclude "
+        "pattern, a built-in rule, or a nested git worktree) while it ran, so the file's "
+        "stored chunks were removed instead of re-indexed. If an exclude pattern or a nested "
+        "worktree matched, remove the pattern or register the worktree as its own memory "
+        "directory, then re-index the file; a file a built-in rule skips stays unindexed."
+    )
+
+
 READ_ONLY_TARGET_DETAIL = (
     "read_only_target: this destination is under a read-only index root "
     "(indexing.read_only_memory_dirs), so memtomem will not write it. Nothing was written. "

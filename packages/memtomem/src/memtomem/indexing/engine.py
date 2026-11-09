@@ -1450,11 +1450,13 @@ class IndexEngine:
         the same pair, so a preview cannot describe an operation the write
         would reject).
 
-        ``purge_if_excluded=True`` is for a caller that has just replaced the
-        whole file itself (the importers): if the exclude guard skips the file,
-        the chunks stored under ``file_path``'s own key are deleted, because
-        they describe bytes the caller has already overwritten. The guard is
-        judged once, under the file's locks. The key is ``file_path``'s resolved
+        ``purge_if_excluded=True`` is for a caller that has just written the
+        file itself: the importers, which replace it whole (#3158), and the
+        by-id edit and delete paths, which rewrite lines of it (#3163). If the
+        exclude guard skips the file, the chunks stored under ``file_path``'s
+        own key are deleted, because they describe bytes the caller has
+        already overwritten. The guard is judged once, under the file's locks.
+        The key is ``file_path``'s resolved
         parent plus its name as given, so the leaf is never followed: a path
         that has become a symbolic link loses its own rows and never its
         target's. Like :func:`~memtomem.storage.sqlite_helpers.stored_key_for`,
@@ -1464,7 +1466,7 @@ class IndexEngine:
         an excluded file's chunks stay until ``mm purge --matching-excluded``
         (#3158).
 
-        ``hold_if_relinked=True`` is for the same caller: if the regular file it
+        ``hold_if_relinked=True`` is for the importers: if the regular file one
         wrote at ``file_path`` has been replaced by a symlink, the rows stored
         under the path's own key are held with ``source_relinked`` and nothing
         is indexed, so the link's target is never indexed, namespaced or tagged

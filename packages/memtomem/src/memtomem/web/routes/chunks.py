@@ -25,6 +25,7 @@ from memtomem.source_provenance import (
     SourceMissingError,
     ReadOnlySourceError,
     StaleSourceProvenanceError,
+    excluded_after_write_notice,
 )
 from memtomem.tools.memory_writer import (
     EditBaseMismatchError,
@@ -577,6 +578,10 @@ async def edit_chunk(
         # The tier was unregistered while the edit ran (#2923): the edit is on
         # disk and the source is held rather than re-indexed as another scope.
         out.warning = scope_held_notice("edit")
+    elif stats.excluded_files:
+        # Excluded while the edit ran: the re-index removed the file's chunks,
+        # so ``updated`` is gone and the echo is the pre-edit row (#3163).
+        out.warning = excluded_after_write_notice("edit")
     return out
 
 
@@ -782,6 +787,7 @@ async def delete_chunk(
         # would be pointless churn.
         mutation_attempted = False
         scope_held = False
+        excluded = False
         try:
             if source_exists:
                 if meta.source_read_only or meta.redaction_count:
@@ -982,11 +988,15 @@ async def delete_chunk(
                         # No ``namespace=``: see the pre-flight above. The engine
                         # preserves the file's stored namespace in-lock, which is both
                         # the correct value and a fresher one than anything read here.
+                        # The purge covers an exclusion installed since the guard
+                        # above: the sibling chunks would otherwise keep their
+                        # pre-delete line ranges (#3163).
                         stats = await index_engine.index_file(
                             source,
                             force=True,
                             ingress_guarded=True,
                             lock_held=True,
+                            purge_if_excluded=True,
                         )
                     except PrivacyRejection as exc:
                         # Removing the line made the rest of the file refusable
@@ -1009,6 +1019,7 @@ async def delete_chunk(
                                 "; ".join(stats.errors),
                             )
                         scope_held = stats.scope_held
+                        excluded = bool(stats.excluded_files)
 
                     # A single-file index can report an error in IndexingStats instead
                     # of raising (for example, an embedding failure), or can finish with
@@ -1024,7 +1035,12 @@ async def delete_chunk(
             if mutation_attempted:
                 search_pipeline.invalidate_cache()
 
-    return DeleteResponse(deleted=1, warning=scope_held_notice("delete") if scope_held else None)
+    warning = None
+    if scope_held:
+        warning = scope_held_notice("delete")
+    elif excluded:
+        warning = excluded_after_write_notice("delete")
+    return DeleteResponse(deleted=1, warning=warning)
 
 
 @router.patch("/{chunk_id}/tags", response_model=TagsUpdateResponse)
