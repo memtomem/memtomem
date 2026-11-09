@@ -2708,9 +2708,11 @@ class SqliteBackend(
         assert self._holds is not None
         return await self._holds.source_hold_generation(source_file)
 
-    async def source_hold_snapshot(self, source_file: Path) -> int | None:
+    async def source_hold_snapshot(
+        self, source_file: Path, *, as_stored: bool = False
+    ) -> int | None:
         assert self._holds is not None
-        return await self._holds.source_hold_snapshot(source_file)
+        return await self._holds.source_hold_snapshot(source_file, as_stored=as_stored)
 
     def queue_source_check_sync(self, source_file: Path) -> bool:
         assert self._holds is not None
