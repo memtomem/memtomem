@@ -79,8 +79,20 @@ class PrivacyRejection(Exception):
 
     retryable = False
 
-    def __init__(self, *, path: Path, hit_count: int, scope: str, decision: str) -> None:
+    def __init__(
+        self,
+        *,
+        path: Path,
+        hit_count: int,
+        scope: str,
+        decision: str,
+        source_key: str | None = None,
+    ) -> None:
         self.path = path
+        # The stored key of the source whose content was refused, taken with the
+        # read. The hold uses it, so a path relinked before the hold still hides
+        # the refused source's rows, not the link target's (#3180).
+        self.source_key = source_key
         self.hit_count = hit_count
         self.scope = scope
         self.decision = decision
