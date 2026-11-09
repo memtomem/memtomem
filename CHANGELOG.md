@@ -56,6 +56,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   on Windows a target whose file name differs in case from the stored one
   removes nothing. Other indexing paths are unchanged: an excluded file's chunks
   stay until `mm purge --matching-excluded`.
+- **A Notion or Obsidian import no longer overwrites earlier imports while indexing is blocked
+  by an embedding mismatch (#3162).** In that mode the index accepts no files, but
+  `mem_import_notion` and `mem_import_obsidian` still wrote every target and then reported
+  `import complete` with 0 chunks indexed. A re-import overwrote the earlier imported files,
+  and the old chunks stayed in search. The importers now refuse before they write, as
+  `mem_index` and `mem_import` already did, and return the same `Embedding mismatch detected`
+  message with the reset command.
 - **`mm init` no longer defaults to a choice this machine cannot finish (#3149, #3150).**
   Pressing Enter at the preset prompt now selects Minimal unless the `onnx` extra is known to be
   importable where memtomem will run, and a workspace that cannot be probed counts as missing.
@@ -66,6 +73,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   missing-extra warning now names `mm add` and `mm search`, and says only reranking is affected
   when the extra is wanted for the reranker alone. Workspace detection also finds
   `.venv/Scripts/python.exe` on Windows.
+
+- **Notion and Obsidian imports no longer stall the MCP server while they run (#3124).**
+  `mem_import_notion` and `mem_import_obsidian` read the export, rewrite it and write the
+  cleaned files on a worker thread, so other requests are served during a large import. A
+  cancelled import stops between files and returns only after the worker has stopped, and
+  every file of one import is checked against the indexing configuration that was installed
+  when the import started.
+
 - **Quality Lab replay compare no longer claims metric deltas should be zero when
   reports come from different memtomem versions (#3125).** Replay reports now
   record `memtomem_version`. When comparing reports produced by different

@@ -10,11 +10,24 @@ from memtomem.memory_scope import require_user_base
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
+from memtomem.server.helpers import _check_embedding_mismatch
 from memtomem.server.tool_registry import register
 from memtomem.server.tools._provenance import (
     capture_session_for_untracked_write,
     flag_untracked_write,
 )
+
+
+def _mismatch_refusal(app: object, label: str) -> str | None:
+    """Refuse an import before it writes while the index refuses every file.
+
+    In embedding-mismatch mode ``IndexEngine`` indexes nothing, and an import
+    writes all its targets before it indexes any. Writing anyway would
+    overwrite the previous import's files while their old chunks stay
+    searchable beside bytes that no search reads (#3162).
+    """
+    msg = _check_embedding_mismatch(app)
+    return None if msg is None else f"{label} import wrote nothing.\n{msg}"
 
 
 @mcp.tool()
@@ -47,6 +60,9 @@ async def mem_import_notion(
     from memtomem.indexing.importers import import_notion
 
     app = await _get_app_initialized(ctx)
+    refusal = _mismatch_refusal(app, "Notion")
+    if refusal:
+        return refusal
     # A bulk import is not session work — its chunks are an ingest, and
     # summarizing them would describe someone else's notes as this
     # session's output. But it does change the session's chunk set, so
@@ -213,6 +229,9 @@ async def mem_import_obsidian(
     from memtomem.indexing.importers import import_obsidian
 
     app = await _get_app_initialized(ctx)
+    refusal = _mismatch_refusal(app, "Obsidian")
+    if refusal:
+        return refusal
     # A bulk import is not session work — its chunks are an ingest, and
     # summarizing them would describe someone else's notes as this
     # session's output. But it does change the session's chunk set, so
