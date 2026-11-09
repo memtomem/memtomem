@@ -43,6 +43,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A Notion or Obsidian import no longer overwrites earlier imports while indexing is blocked
+  by an embedding mismatch (#3162).** In that mode the index accepts no files, but
+  `mem_import_notion` and `mem_import_obsidian` still wrote every target and then reported
+  `import complete` with 0 chunks indexed. A re-import overwrote the earlier imported files,
+  and the old chunks stayed in search. The importers now refuse before they write, as
+  `mem_index` and `mem_import` already did, and return the same `Embedding mismatch detected`
+  message with the reset command.
 - **`mm init` no longer defaults to a choice this machine cannot finish (#3149, #3150).**
   Pressing Enter at the preset prompt now selects Minimal unless the `onnx` extra is known to be
   importable where memtomem will run, and a workspace that cannot be probed counts as missing.
