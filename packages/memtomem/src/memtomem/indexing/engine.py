@@ -3902,12 +3902,23 @@ class IndexEngine:
             scope_change,
             scope_change_detail,
         )
+        from memtomem.storage.sqlite_backend import SqliteBackend
         from memtomem.storage.sqlite_helpers import stored_key_moved
 
         name = Path(stored_key).name
+        # The scope read waits out another task's write transaction instead of
+        # being refused at once (#3179); the callers' locks are the ones the
+        # re-index after it already waits under. The relink check runs after
+        # the wait, so a key relinked while waiting is still refused before the
+        # caller reads or holds through it.
+        scope_db = (
+            await self._storage._get_db_when_idle(wait=WRITER_WAIT_S)
+            if isinstance(self._storage, SqliteBackend)
+            else None
+        )
+        rows = self._stored_scope_rows(key_spellings(stored_key), db=scope_db)
         if await asyncio.to_thread(stored_key_moved, stored_key):
             return relinked_detail(name, op=op)
-        rows = self._stored_scope_rows(key_spellings(stored_key))
         if not rows:
             return None
         decision_path = await asyncio.to_thread(resolve_path, Path(stored_key))
