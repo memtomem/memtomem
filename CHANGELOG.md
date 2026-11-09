@@ -43,6 +43,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Editing or deleting a memory by id, and regenerating summaries in bulk, no
+  longer fail at once while another task holds a write transaction (#3179).**
+  Since 0.7.1, an edit or delete by chunk id (`mem_edit`, `mem_delete`, and the
+  web UI's edit and delete) first checks the source's stored scope on the write
+  connection. While another task in the same process held
+  `storage.transaction()`, that check was refused with "SQLite transaction is
+  owned by another task", before anything was written. The web UI's
+  **Regenerate all** for AI summaries in another language wrote each summary
+  after its LLM call the same way, and one refusal ended the whole job, skipping
+  every remaining source. Both now wait up to the same 5-second budget. In the
+  bulk regenerate, a source whose wait runs out counts as failed and the job
+  goes on.
 - **Indexing a file no longer fails at once while another task holds a write
   transaction (#3173).** Since 0.7.1, re-indexing an existing file first reads
   its stored scope on the write connection, and that read was refused at once
