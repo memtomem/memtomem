@@ -199,6 +199,10 @@ def app(_isolated_config_paths: Path):
     import asyncio as _asyncio
 
     storage._tag_write_lock = _asyncio.Lock()
+    # Routes that wait for the writer enter ``storage.transaction(wait=...)``.
+    import contextlib as _contextlib
+
+    storage.transaction = MagicMock(side_effect=lambda **_: _contextlib.nullcontext())
 
     # timeline / recall
     storage.recall_chunks = AsyncMock(return_value=[_make_test_chunk()])
