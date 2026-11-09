@@ -64,12 +64,15 @@ async def test_reimport_removes_old_chunks_of_a_target_excluded_after_its_write(
     out = mem_dir / "_imported" / kind
     await tool(str(vault), ctx=ctx)
     assert any("oldword" in t for t in await _chunk_texts(comp, out / "hidden.md"))
+    assert await comp.storage.bm25_search("oldword", 10)
 
     (vault / "hidden.md").write_text("# Hidden\n\nnewword body\n", encoding="utf-8")
     _exclude_after_write(monkeypatch, comp, kind, f"**/_imported/{kind}/hidden.md")
     result = await tool(str(vault), ctx=ctx)
 
     assert "newword" in (out / "hidden.md").read_text(encoding="utf-8")
+    # What the issue is about: the overwritten text is no longer found by search.
+    assert not await comp.storage.bm25_search("oldword", 10)
     assert await _chunk_texts(comp, out / "hidden.md") == []
     assert any("kept" in t for t in await _chunk_texts(comp, out / "kept.md"))
     lines = result.splitlines()
