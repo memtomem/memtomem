@@ -68,8 +68,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   swap in the moment between that check and the file's read is still indexed
   through the link, and a swap into a directory whose lock file cannot be
   created, while the import waits for an indexing slot, fails the import with
-  that error; a running watcher hides the path afterwards. Other indexing paths
-  still follow the link.
+  that error; a running watcher hides the path afterwards. Other indexing paths,
+  apart from the edit and delete tools below, still follow the link.
 - **A Notion or Obsidian import no longer overwrites earlier imports while indexing is blocked
   by an embedding mismatch (#3162).** In that mode the index accepts no files, but
   `mem_import_notion` and `mem_import_obsidian` still wrote every target and then reported
@@ -85,6 +85,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   chunks stayed in search beside the rewritten text. The change now stays on disk,
   the file's stored chunks are removed, and the tool or page says that the file
   is now excluded from indexing.
+- **Editing or deleting a memory no longer indexes through its file when the file
+  is replaced by a symbolic link during the write (#3172).** `mem_edit`,
+  `mem_delete` and the web UI's edit and delete refuse a file that is already a
+  link before writing it, but a swap between the write and the re-index made the
+  re-index index the link's target, while the pre-edit chunks under the file's
+  own path stayed in search. Those chunks are now hidden until the path is a
+  regular file again and is re-indexed, nothing is indexed through the link, and
+  the tool or page says so. On macOS, chunks stored under a path spelling from
+  before Unicode normalization cannot be hidden this way; the message then says
+  they are still searchable.
 - **`mm init` no longer defaults to a choice this machine cannot finish (#3149, #3150).**
   Pressing Enter at the preset prompt now selects Minimal unless the `onnx` extra is known to be
   importable where memtomem will run, and a workspace that cannot be probed counts as missing.

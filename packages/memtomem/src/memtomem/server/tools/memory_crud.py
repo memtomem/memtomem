@@ -38,6 +38,7 @@ from memtomem.source_provenance import (
     STALE_SOURCE_PROVENANCE_DETAIL,
     StaleSourceProvenanceError,
     excluded_after_write_notice,
+    relinked_after_write_notice,
 )
 from memtomem.tools.memory_writer import (
     EditBaseMismatchError,
@@ -442,9 +443,11 @@ async def _preflight_refusal(
     return refusal, pre
 
 
-def _rewrite_notices(op: str, stats: IndexingStats) -> str:
+def _rewrite_notices(op: str, stats: IndexingStats, source_file: Path) -> str:
     """The lines a completed rewrite adds when its re-index did not index the file."""
     notices = []
+    if stats.relinked_files:
+        notices.append(relinked_after_write_notice(op, str(source_file)))
     if stats.scope_held:
         notices.append(scope_held_notice(op))
     if stats.excluded_files:
@@ -548,6 +551,9 @@ async def _mutate_file_and_reindex(
         # ``exclude_patterns`` is runtime-mutable: one installed since would
         # make the engine skip the file and leave the pre-edit chunks beside
         # the new bytes. The purge judges it again under the locks (#3163).
+        # A file replaced by a symlink since the write, which the caller's
+        # relinked-key refusal (#2923) could not see, is held rather than
+        # indexed through the link (#3172).
         stats = await app.index_engine.index_file(
             source_file,
             ingress_guarded=True,
@@ -555,6 +561,7 @@ async def _mutate_file_and_reindex(
             valve_text=valve_text,
             lock_held=True,
             purge_if_excluded=True,
+            hold_if_relinked=True,
         )
         app.search_pipeline.invalidate_cache()
         await flag_untracked_write(app, provenance_session_id)
@@ -1610,7 +1617,7 @@ async def mem_edit(
             f"Memory updated in {meta.source_file}\n"
             f"- Lines {meta.start_line}-{meta.end_line} replaced\n"
             f"- Re-indexed: {stats.indexed_chunks} chunks"
-        ) + _rewrite_notices("edit", stats)
+        ) + _rewrite_notices("edit", stats, meta.source_file)
 
 
 @mcp.tool()
@@ -1713,7 +1720,7 @@ async def mem_delete(
                 f"Memory deleted from {meta.source_file}\n"
                 f"- Lines {meta.start_line}-{meta.end_line} removed\n"
                 f"- Re-indexed: {stats.indexed_chunks} chunks"
-            ) + _rewrite_notices("delete", stats)
+            ) + _rewrite_notices("delete", stats, meta.source_file)
 
     if source_file:
         # ``source_file`` usually names a stored key, as ``mem_list`` prints it

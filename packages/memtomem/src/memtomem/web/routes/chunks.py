@@ -26,6 +26,7 @@ from memtomem.source_provenance import (
     ReadOnlySourceError,
     StaleSourceProvenanceError,
     excluded_after_write_notice,
+    relinked_after_write_notice,
 )
 from memtomem.tools.memory_writer import (
     EditBaseMismatchError,
@@ -574,7 +575,12 @@ async def edit_chunk(
     # write falls back rather than returning a row the caller may not read.
     updated = await resolve_visible_chunk(storage, chunk_id, project_context_root=_boundary(config))
     out = chunk_to_out(updated if updated is not None else chunk)
-    if stats.scope_held:
+    if stats.relinked_files:
+        # Replaced by a symlink while the edit ran: the re-index held the
+        # file's rows and indexed nothing through the link, so the echo is the
+        # retained pre-edit row (#3172).
+        out.warning = relinked_after_write_notice("edit", str(meta.source_file))
+    elif stats.scope_held:
         # The tier was unregistered while the edit ran (#2923): the edit is on
         # disk and the source is held rather than re-indexed as another scope.
         out.warning = scope_held_notice("edit")
@@ -786,6 +792,7 @@ async def delete_chunk(
         # drops the LLM query-expansion cache, so flushing on a pure refusal
         # would be pointless churn.
         mutation_attempted = False
+        relinked = False
         scope_held = False
         excluded = False
         try:
@@ -990,13 +997,16 @@ async def delete_chunk(
                         # the correct value and a fresher one than anything read here.
                         # The purge covers an exclusion installed since the guard
                         # above: the sibling chunks would otherwise keep their
-                        # pre-delete line ranges (#3163).
+                        # pre-delete line ranges (#3163). A file replaced by a
+                        # symlink since the write is held, not indexed through
+                        # the link (#3172).
                         stats = await index_engine.index_file(
                             source,
                             force=True,
                             ingress_guarded=True,
                             lock_held=True,
                             purge_if_excluded=True,
+                            hold_if_relinked=True,
                         )
                     except PrivacyRejection as exc:
                         # Removing the line made the rest of the file refusable
@@ -1018,6 +1028,7 @@ async def delete_chunk(
                                 chunk_id,
                                 "; ".join(stats.errors),
                             )
+                        relinked = bool(stats.relinked_files)
                         scope_held = stats.scope_held
                         excluded = bool(stats.excluded_files)
 
@@ -1036,7 +1047,9 @@ async def delete_chunk(
                 search_pipeline.invalidate_cache()
 
     warning = None
-    if scope_held:
+    if relinked:
+        warning = relinked_after_write_notice("delete", str(source))
+    elif scope_held:
         warning = scope_held_notice("delete")
     elif excluded:
         warning = excluded_after_write_notice("delete")

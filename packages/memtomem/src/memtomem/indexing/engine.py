@@ -252,8 +252,9 @@ def _leaf_relinked(own_key: str, work_path: Path) -> bool:
     before the locks) names another file: the leaf was a link then, and was
     replaced by a regular file while the call waited (#3164). Case is compared
     the way the platform compares it, because Windows' ``resolve()`` takes the
-    leaf's on-disk case. A parent moved and linked back also changes
-    ``work_path``, so it counts as a relink here.
+    leaf's on-disk case. A parent moved and linked back changes ``work_path``
+    only if the move landed between the two resolutions, both taken before the
+    locks; one made while the call waits is not seen (#3172).
     """
     if Path(own_key).is_symlink():
         return True
@@ -1466,11 +1467,12 @@ class IndexEngine:
         an excluded file's chunks stay until ``mm purge --matching-excluded``
         (#3158).
 
-        ``hold_if_relinked=True`` is for the importers: if the regular file one
-        wrote at ``file_path`` has been replaced by a symlink, the rows stored
-        under the path's own key are held with ``source_relinked`` and nothing
-        is indexed, so the link's target is never indexed, namespaced or tagged
-        as the caller's file. ``IndexingStats.relinked_files`` is then 1. It is
+        ``hold_if_relinked=True`` is for a caller that has just written the
+        regular file at ``file_path``: the importers (#3164) and the by-id edit
+        and delete paths (#3172). If that file has been replaced by a symlink,
+        the rows stored under the path's own key are held with
+        ``source_relinked`` and nothing is indexed, so the link's target is
+        never indexed, namespaced or tagged as the caller's file. ``IndexingStats.relinked_files`` is then 1. It is
         checked before the locks, so a link into a directory whose sidecar
         cannot be taken is still held, and again under them, for a swap while
         the call waits; it precedes the exclude guard, so such a file is held
@@ -1480,8 +1482,13 @@ class IndexEngine:
         a pipeline slot, into a directory whose sidecar cannot be taken, raises
         that ``OSError`` before the check under the locks. The watcher's relink
         hold catches the leaf afterwards. A parent directory moved and linked
-        back counts as a relink. Every other caller keeps the default and
-        indexes through the link (#3164).
+        back is seen only when the move lands between the own key's resolution
+        and ``file_path``'s, both taken before the locks; before both, they
+        agree on the new location, and after both, the leaf is still a regular
+        file. A key stored before Unicode folding (macOS NFD) holds no rows,
+        since the hold uses the folded key, and ``relinked_files`` is 1 all the
+        same (#2907). Every other caller keeps the default and indexes through
+        the link (#3164).
 
         If ``file_path`` is missing or inaccessible, its existing chunks are
         held outside search until recovery or explicit cleanup (#2498). A
