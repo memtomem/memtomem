@@ -168,6 +168,37 @@ async def test_purge_if_excluded_indexes_a_file_that_is_not_excluded(bm25_only_c
     assert stats.indexed_chunks > 0
 
 
+async def test_the_purge_waits_for_another_task_write_transaction(bm25_only_components):
+    comp, mem_dir = bm25_only_components
+    path = mem_dir / "note.md"
+    await _indexed(comp, path, "# Note\n\nalpha body\n")
+    _exclude(comp, "**/note.md")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def writer():
+        async with comp.storage.transaction():
+            entered.set()
+            await release.wait()
+
+    owner = asyncio.create_task(writer())
+    await entered.wait()
+    call = asyncio.create_task(comp.index_engine.index_file(path, purge_if_excluded=True))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    waited = not call.done()
+    # Release before awaiting the purge: a refused purge then fails the test
+    # with its own error, and teardown finds no transaction still open.
+    release.set()
+    await owner
+    stats = await asyncio.wait_for(call, timeout=10)
+
+    assert waited
+    assert stats.excluded_files == 1
+    assert stats.deleted_chunks > 0
+    assert await _chunk_texts(comp, path) == []
+
+
 def _link_or_skip(link: Path, target: Path) -> None:
     link.unlink()
     try:
