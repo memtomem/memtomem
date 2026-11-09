@@ -10,6 +10,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from memtomem.chunking.bounded import TokenBudget
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.llm.utils import strip_llm_response
 
 if TYPE_CHECKING:
@@ -83,4 +84,7 @@ async def enrich_context(
             chunk.metadata = replace(chunk.metadata, retrieval_context=structural)
             logger.warning("Chunk description unavailable; retaining structural context")
 
-    await storage.set_chunk_descriptions(source, current)
+    # After the LLM calls, so another task may own the writer by now: wait it
+    # out rather than fail the index at once (#3173).
+    async with storage.transaction(wait=WRITER_WAIT_S):
+        await storage.set_chunk_descriptions(source, current)

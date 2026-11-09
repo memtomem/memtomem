@@ -464,12 +464,170 @@ async def test_close_refuses_each_writer_queued_behind_a_released_owner(
     _assert_writer_idle(storage)
 
 
+# ---- _get_db_when_idle (#3173) ---------------------------------------------
+
+
+async def _read_when_idle(storage: SqliteBackend, wait: float) -> int:
+    db = await storage._get_db_when_idle(wait=wait)
+    return db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+
+
+async def test_writer_read_with_no_owner_returns_the_writer_at_once(storage: SqliteBackend):
+    assert await storage._get_db_when_idle(wait=5.0) is storage._db
+    _assert_writer_idle(storage)
+
+
+async def test_writer_read_by_the_owner_itself_does_not_wait(storage: SqliteBackend):
+    async with storage.transaction():
+        # ``asyncio.timeout``, not ``wait_for``: the read must run in this task.
+        async with asyncio.timeout(1):
+            assert await storage._get_db_when_idle(wait=5.0) is storage._db
+
+
+async def test_writer_read_waits_for_a_foreign_owner(storage: SqliteBackend, tmp_path: Path):
+    holder = await _Holder(storage).start()
+    reader = await _queue(storage, _read_when_idle(storage, 5.0), 1)
+    assert not reader.done()
+    holder.release.set()
+    await holder.task
+    assert await asyncio.wait_for(reader, 5) == 0
+    _assert_writer_idle(storage)
+
+
+async def test_writer_read_times_out_with_an_ownership_error(storage: SqliteBackend):
+    holder = await _Holder(storage).start()
+    try:
+        with pytest.raises(TransactionOwnedError, match="timed out waiting for writer lock"):
+            await storage._get_db_when_idle(wait=0.05)
+    finally:
+        holder.release.set()
+        await holder.task
+    _assert_writer_idle(storage)
+
+
+async def test_writer_read_that_runs_out_on_a_closing_store_reports_closing(
+    storage: SqliteBackend,
+):
+    """As for ``transaction()``: ``_closing`` is set directly while an owner holds."""
+    holder = await _Holder(storage).start()
+    reader = await _queue(storage, _read_when_idle(storage, 0.05), 1)
+    storage._closing = True
+    try:
+        with pytest.raises(StorageError, match="Database is closing") as info:
+            await asyncio.wait_for(reader, 5)
+        assert not isinstance(info.value, TransactionOwnedError)
+    finally:
+        storage._closing = False
+    holder.release.set()
+    await holder.task
+    _assert_writer_idle(storage)
+
+
+async def test_writer_read_refuses_an_unowned_open_transaction_and_leaves_it(
+    storage: SqliteBackend,
+):
+    assert storage._db is not None
+    storage._db.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(StorageError, match="already has an open transaction"):
+            await storage._get_db_when_idle(wait=5.0)
+        assert storage._db.in_transaction
+    finally:
+        storage._db.rollback()
+
+
+async def test_writer_read_refuses_an_unowned_transaction_found_after_the_wait(
+    storage: SqliteBackend,
+):
+    """The owner leaves a raw transaction open on its way out; the waiter must not read it."""
+    assert storage._db is not None
+    db = storage._db
+
+    async def leave_open() -> None:
+        # After the owner's commit, before the reader resumes.
+        db.execute("BEGIN IMMEDIATE")
+
+    holder = await _Holder(storage, leave_open).start()
+    reader = await _queue(storage, _read_when_idle(storage, 5.0), 1)
+    holder.release.set()
+    await holder.task
+    try:
+        with pytest.raises(StorageError, match="already has an open transaction"):
+            await asyncio.wait_for(reader, 5)
+        assert db.in_transaction
+    finally:
+        db.rollback()
+    _assert_writer_idle(storage)
+
+
+async def test_writer_read_in_the_handoff_window_does_not_queue(
+    storage: SqliteBackend, tmp_path: Path
+):
+    """The lock is granted to a queued writer that has not resumed: the read goes first.
+
+    It holds nothing, so the queued writer then enters as it would have.
+    """
+    order: list[str] = []
+
+    async def after() -> None:
+        assert storage._transaction_owner is None
+        assert not storage._writer_lock.locked() and _live_waiters(storage)[0].done()
+        db = await storage._get_db_when_idle(wait=5.0)
+        db.execute("SELECT 1").fetchone()
+        order.append("reader")
+
+    holder = await _Holder(storage, after).start()
+    queued = await _queue(storage, _queue_writer(storage, "queued", order, tmp_path), 1)
+    holder.release.set()
+    await asyncio.wait_for(asyncio.gather(holder.task, queued), 5)
+    assert order == ["reader", "queued"]
+    _assert_writer_idle(storage)
+
+
+async def test_writer_read_queues_behind_a_writer_already_waiting(
+    storage: SqliteBackend, tmp_path: Path
+):
+    """While an owner holds, a read that arrives after a queued writer waits for both."""
+    order: list[str] = []
+
+    async def read() -> None:
+        await _read_when_idle(storage, 5.0)
+        order.append("reader")
+
+    holder = await _Holder(storage).start()
+    queued = await _queue(storage, _queue_writer(storage, "queued", order, tmp_path), 1)
+    reader = await _queue(storage, read(), 2)
+    holder.release.set()
+    await asyncio.wait_for(asyncio.gather(holder.task, queued, reader), 5)
+    assert order == ["queued", "reader"]
+    _assert_writer_idle(storage)
+
+
+async def test_a_cancelled_writer_read_leaves_the_lock_usable(storage: SqliteBackend):
+    holder = await _Holder(storage).start()
+    reader = await _queue(storage, _read_when_idle(storage, 5.0), 1)
+    reader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reader
+    holder.release.set()
+    await holder.task
+    async with storage.transaction(wait=1.0):
+        pass
+    _assert_writer_idle(storage)
+
+
 #: Production ``transaction()`` call sites and whether each opts into waiting
 #: (#2860). A new site must be added here, deciding which it is.
 _TRANSACTION_SITES = {
-    # _hold_relinked_key (#3164), the exclusion purge (#3171), the per-file
-    # chunk write.
-    "indexing/engine.py": [True, True, True],
+    # The hold release after a clean pass (#3173), _hold_relinked_key (#3164),
+    # _hold_waiting, the retained-source release and the non-regular-file
+    # delete (#3173), the exclusion purge (#3171), the empty-file delete
+    # (#3173), the per-file chunk write.
+    "indexing/engine.py": [True, True, True, True, True, True, True, True],
+    # The description cache write after the LLM calls (#3173).
+    "indexing/chunk_context.py": [True],
+    # The summary delete and write after the LLM call (#3173).
+    "indexing/summarizer.py": [True, True],
     "search/decay.py": [True],
     "search/dedup.py": [True],
     "server/tools/hermes_mirror.py": [True, True],
