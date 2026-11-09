@@ -74,7 +74,9 @@ async def test_reimport_removes_old_chunks_of_a_target_excluded_after_its_write(
     assert any("kept" in t for t in await _chunk_texts(comp, out / "kept.md"))
     lines = result.splitlines()
     assert "- Files imported: 2" in lines
-    assert "- Written but excluded from indexing (previous chunks removed): 1" in lines
+    removed = [ln for ln in lines if ln.startswith("- Written but excluded from indexing:")]
+    assert removed and removed[0].startswith("- Written but excluded from indexing: 1 (")
+    assert int(removed[0].rsplit(": ", 1)[1].rstrip(")")) > 0
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -122,14 +124,24 @@ async def test_default_index_of_an_excluded_file_keeps_its_chunks(bm25_only_comp
     assert await _chunk_texts(comp, path) != []
 
 
+def _visibility_rows(comp, path: Path) -> tuple[int, int]:
+    db = comp.storage._get_db()
+    key = norm_path(path)
+    held = db.execute("SELECT COUNT(*) FROM held_sources WHERE source_file=?", (key,))
+    pending = db.execute("SELECT COUNT(*) FROM pending_source_checks WHERE source_file=?", (key,))
+    return held.fetchone()[0], pending.fetchone()[0]
+
+
 async def test_purge_if_excluded_deletes_the_chunks_and_clears_hold_and_pending(
     bm25_only_components,
 ):
     comp, mem_dir = bm25_only_components
     path = mem_dir / "note.md"
     await _indexed(comp, path, "# Note\n\nalpha body\n")
-    comp.storage.queue_source_check_sync(path)
+    # Hold first: ``hold_source`` itself clears a pending check.
     await comp.storage.hold_source(path, "source_missing")
+    comp.storage.queue_source_check_sync(path)
+    assert _visibility_rows(comp, path) == (1, 1)
     _exclude(comp, "**/note.md")
 
     stats = await comp.index_engine.index_file(path, purge_if_excluded=True)
@@ -138,8 +150,8 @@ async def test_purge_if_excluded_deletes_the_chunks_and_clears_hold_and_pending(
     assert stats.deleted_chunks > 0
     assert stats.mutated is True
     assert await _chunk_texts(comp, path) == []
-    assert path not in await comp.storage.get_held_sources()
-    assert path not in await comp.storage.get_pending_source_checks()
+    # Read the tables directly: the storage getters skip sources with no chunks.
+    assert _visibility_rows(comp, path) == (0, 0)
 
 
 async def test_purge_if_excluded_indexes_a_file_that_is_not_excluded(bm25_only_components):
@@ -218,10 +230,33 @@ async def test_a_leaf_relinked_while_waiting_for_the_lock_keeps_the_target_rows(
     assert written_key not in keys
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows resolve() takes the on-disk case")
-async def test_purge_key_matches_the_stored_key_when_the_leaf_case_differs(
-    bm25_only_components,
-):
+async def test_the_purge_key_never_resolves_the_leaf(bm25_only_components, monkeypatch):
+    """A leaf swapped for a link between any check and the key capture is not followed."""
+    from memtomem.storage import sqlite_helpers
+
+    comp, mem_dir = bm25_only_components
+    written = mem_dir / "written.md"
+    target = mem_dir / "target.md"
+    await _indexed(comp, written, "# Written\n\nwritten body\n")
+    await _indexed(comp, target, "# Target\n\ntarget body\n")
+    written_key, target_key = norm_path(written), norm_path(target)
+    _link_or_skip(written, target)
+    _exclude(comp, "**/target.md")
+    _exclude(comp, "**/written.md")
+    # Hide the link from every ``is_symlink`` check, as if it were made right after.
+    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+    assert sqlite_helpers.norm_path(written) == target_key  # resolving would follow it
+
+    await comp.index_engine.index_file(written, purge_if_excluded=True)
+
+    keys = await _stored_keys(comp)
+    assert target_key in keys
+    assert written_key not in keys
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows resolve() changes the case")
+async def test_a_leaf_spelled_in_another_case_purges_nothing_on_windows(bm25_only_components):
+    """The cost of never following the leaf: like ``stored_key_for``, no case matching."""
     comp, mem_dir = bm25_only_components
     stored = mem_dir / "Note.md"
     await _indexed(comp, stored, "# Note\n\nalpha body\n")
@@ -229,8 +264,9 @@ async def test_purge_key_matches_the_stored_key_when_the_leaf_case_differs(
 
     stats = await comp.index_engine.index_file(mem_dir / "note.md", purge_if_excluded=True)
 
-    assert stats.deleted_chunks > 0
-    assert not await _stored_keys(comp)
+    assert stats.excluded_files == 1
+    assert stats.deleted_chunks == 0
+    assert norm_path(stored) in await _stored_keys(comp)
 
 
 async def test_bulk_index_counts_a_file_excluded_after_discovery(bm25_only_components):

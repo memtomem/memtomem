@@ -1381,12 +1381,15 @@ class IndexEngine:
         whole file itself (the importers): if the exclude guard skips the file,
         the chunks stored under ``file_path``'s own key are deleted, because
         they describe bytes the caller has already overwritten. The guard is
-        judged once, under the file's locks. The key is the one the store wrote
-        while the path was the caller's regular file, taken before the locks, so
-        a path that has become a symbolic link loses its own rows and never its
-        target's. Every other caller keeps the
-        default, where an excluded file's chunks stay until
-        ``mm purge --matching-excluded`` (#3158).
+        judged once, under the file's locks. The key is ``file_path``'s resolved
+        parent plus its name as given, so the leaf is never followed: a path
+        that has become a symbolic link loses its own rows and never its
+        target's. Like :func:`~memtomem.storage.sqlite_helpers.stored_key_for`,
+        it does not match another spelling of the leaf, so on Windows a path
+        whose case differs from the stored one purges nothing
+        (``deleted_chunks == 0``). Every other caller keeps the default, where
+        an excluded file's chunks stay until ``mm purge --matching-excluded``
+        (#3158).
 
         If ``file_path`` is missing or inaccessible, its existing chunks are
         held outside search until recovery or explicit cleanup (#2498). A
@@ -1406,19 +1409,15 @@ class IndexEngine:
         _reject_reassign_with_explicit_ns(namespace, reassign_namespaces, new_source_namespace)
         force = force or reassign_namespaces
         # A purge decides inside the locks instead, from the same exclusion read
-        # that skips the file. Its key is taken now and never resolved again: a
-        # leaf that becomes a symlink while this call waits for the locks must
-        # not redirect the delete (#2835). A regular file's key is the one the
-        # store wrote for it (``norm_path``, which on Windows also takes the
-        # leaf's on-disk case); a leaf that is already a link keeps its own
-        # name, the key it was stored under while it was a file (#2878).
-        purge_key: str | None = None
-        if purge_if_excluded:
-            purge_key = (
-                fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
-                if file_path.is_symlink()
-                else norm_path(file_path)
-            )
+        # that skips the file. Its key never follows the leaf, now or later: a
+        # leaf that is, or becomes, a symlink must not redirect the delete to
+        # its target's rows (#2835). Resolved parent plus the name is the key
+        # the store wrote while the leaf was a regular file (#2878).
+        purge_key = (
+            fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
+            if purge_if_excluded
+            else None
+        )
         if purge_key is None and self.is_excluded(file_path) and file_path.is_file():
             logger.debug("Skipping excluded file %s", file_path)
             return IndexingStats(
