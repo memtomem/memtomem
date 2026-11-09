@@ -1,9 +1,19 @@
-"""memtomem-memory: a recall-only Hermes memory provider.
+"""memtomem-memory: a Hermes memory provider backed by memtomem.
 
 On every non-trivial user turn it makes one ``mem_search`` call on the ``memtomem`` MCP entry
 through Hermes's own MCP client (``PluginContext.call_mcp``) and injects the shaped results. It
-owns no server, connection or child process: Hermes does. It writes nothing: the call passes
+owns no server, connection or child process: Hermes does. Recall writes nothing: the call passes
 ``record=False``, and the provider refuses a server that does not echo ``"recorded": false``.
+
+With ``memory.memtomem-memory.mirror_writes: true`` it also mirrors Hermes's built-in memory
+writes (``MEMORY.md`` / ``USER.md``) into memtomem: each committed add, replace or remove becomes
+one ``mem_do(action="hermes_mirror_apply")`` call, sent in order by a per-instance worker. The
+server keeps the entries (last writer wins per entry) and renders them to a Markdown file; the
+provider keeps no copy. Pending operations live in memory only, so a crash loses them.
+
+Each instance asks the server what it supports (``mem_do(action="version")``) before its first
+call and every 10 minutes, and sends ``namespace="!system"``, ``deadline_ms`` and mirror calls
+only to a server that advertises them; an older server gets exactly the recall call it always got.
 
 That connection, its call queue and its circuit breaker are shared with the model's own memtomem
 tools, so recall is rationed: at most one outstanding recall call per MCP entry name in the whole
@@ -17,14 +27,19 @@ and exercises it under 3.11.
 
 from __future__ import annotations
 
+import collections
+import contextvars
+import hashlib
 import json
 import logging
+import os
+import re
 import sys
 import threading
 import time
 import types
 import uuid
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 from agent.memory_provider import (
     MemoryProvider,
@@ -41,6 +56,22 @@ _DENSE_FAILED_HINT = "semantic search failed"
 # First memtomem release whose structured mem_search echoes "recorded"; pinned to
 # [hermes] memory_min_memtomem in packages/memtomem-plugin-assets/contract.toml by a test.
 _MIN_MEMTOMEM = "0.6.8"
+_DISPATCH_TOOL = "mem_do"
+_MIRROR_ACTION = "hermes_mirror_apply"
+_VERSION_ACTION = "version"
+# The server's "every non-system namespace" read selector (memtomem 0.7.1+). Sent only when the
+# server lists it: an older server reads it as a namespace name and returns nothing.
+_NON_SYSTEM = "!system"
+_CAPS_TTL_S = 600.0
+# Below this a processing budget leaves the server no room to answer; the argument is omitted.
+_MIN_DEADLINE_MS = 500
+# ``PluginContext.call_mcp`` clamps its timeout to [1, 600] s (Hermes 0.21.5 and 0.23.0).
+_HERMES_MIN_TIMEOUT_S = 1.0
+_MIRROR_QUEUE_MAX = 256
+_MIRROR_ATTEMPTS = 3
+_RETRY_BACKOFF_S = (1.0, 2.0, 4.0)
+_MIRROR_ACTIONS = frozenset({"add", "replace", "remove"})
+_TARGET_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 logger = logging.getLogger("memtomem_memory")
 
@@ -112,6 +143,36 @@ class _ContextHolder:
                     PluginManifest(name=_NAME, key=_NAME), get_plugin_manager()
                 )
             return self._context
+
+
+class _Caps:
+    """One provider instance's view of what its server supports.
+
+    Filled by the instance's first RPC (a ``mem_do`` version probe), dropped after any failure
+    that starts a cooldown, and stale after ``_CAPS_TTL_S``, so a server replaced under the same
+    entry is asked again. An empty mapping means an older server: nothing new is sent to it.
+    """
+
+    __slots__ = ("_lock", "_value", "_at")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._value: Optional[Dict[str, Any]] = None
+        self._at = 0.0
+
+    def fresh(self, now: float) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            if self._value is not None and now - self._at < _CAPS_TTL_S:
+                return self._value
+            return None
+
+    def store(self, value: Dict[str, Any], now: float) -> None:
+        with self._lock:
+            self._value, self._at = value, now
+
+    def drop(self) -> None:
+        with self._lock:
+            self._value = None
 
 
 class _Slot:
@@ -254,6 +315,7 @@ _DEFAULTS: Dict[str, Any] = {
     "cooldown_seconds": 15,
     "long_cooldown_seconds": 60,
     "max_cooldown_seconds": 300,
+    "mirror_writes": False,
 }
 
 _INDEPENDENT_CHECKS: Dict[str, Callable[[Any], bool]] = {
@@ -312,10 +374,60 @@ def _read_settings(cfg: Dict[str, Any], *, warn: bool) -> Dict[str, Any]:
         _num_in(second, 600)(max_value),
         max(_DEFAULTS["max_cooldown_seconds"], second),
     )
+    mirror = _strict_bool(raw.get("mirror_writes", False))
+    if mirror is None:
+        mirror = False
+        if warn:
+            logger.warning(
+                "memtomem-memory: memory.%s.mirror_writes = %r is not true or false; mirroring "
+                "stays off",
+                _NAME,
+                raw.get("mirror_writes"),
+            )
+    settings["mirror_writes"] = mirror
     unknown = sorted(set(raw) - set(_DEFAULTS))
     if unknown and warn:
         logger.warning("memtomem-memory: ignoring unknown keys under memory.%s: %s", _NAME, unknown)
     return settings
+
+
+def _strict_bool(value: Any) -> Optional[bool]:
+    """A real boolean or one of Hermes's boolish words; anything else is ``None`` (not a yes).
+
+    Stricter than ``_parse_boolish``: a number or a stray string never switches writes on.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in _TRUE_WORDS:
+            return True
+        if lowered in _FALSE_WORDS:
+            return False
+    return None
+
+
+def _profile_key(hermes_home: Any) -> str:
+    """The profile this instance serves, as Hermes keys it; ``""`` when Hermes gave no home."""
+    if not hermes_home:
+        return ""
+    try:
+        from hermes_constants import hermes_home_key
+
+        return str(hermes_home_key(hermes_home))
+    except Exception:
+        return str(hermes_home)
+
+
+def _owner_id(profile_key: str) -> str:
+    """Opaque mirror owner: no path of the profile reaches the store."""
+    return hashlib.sha256(profile_key.encode("utf-8")).hexdigest()[:32]
+
+
+def _deadline_ms(settings: Dict[str, Any]) -> Optional[int]:
+    """Server processing budget: the RPC timeout less one second, if that leaves room."""
+    budget = int(float(settings["rpc_timeout_seconds"]) * 1000) - 1000
+    return budget if budget >= _MIN_DEADLINE_MS else None
 
 
 # --- the worker ---------------------------------------------------------------------------------
@@ -329,7 +441,10 @@ def _event(event: str, **fields: Any) -> None:
 
 
 def _warn_once(registry: types.ModuleType, admission: _Admission, key: str, message: str) -> None:
-    """One WARNING per admission (entry name) per reason, for the life of the process."""
+    """One WARNING per admission (entry name) per key, for the life of the process.
+
+    Callers put the profile key in ``key``, so each profile sees its own configuration warning.
+    """
     with registry.lock:
         if key in admission.warned:
             return
@@ -359,6 +474,42 @@ def _parse_payload(envelope: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, An
     return "ok", payload
 
 
+def _probe(context: Any, server: str, timeout: float) -> Tuple[str, Dict[str, Any]]:
+    """Ask the server what it supports. ``("ok", caps)``, ``("legacy", {})`` for an answer
+    without capabilities, ``("failure", {})`` for a transport failure. ``PermissionError``
+    propagates (the allowlist refused the call)."""
+    try:
+        envelope = context.call_mcp(
+            server, _DISPATCH_TOOL, {"action": _VERSION_ACTION}, timeout=timeout
+        )
+    except PermissionError:
+        raise
+    except Exception:
+        return "failure", {}
+    if not isinstance(envelope, dict) or not envelope.get("ok"):
+        return "failure", {}
+    raw = envelope.get("result")
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return "legacy", {}
+    caps = payload.get("capabilities") if isinstance(payload, dict) else None
+    return ("ok", dict(caps)) if isinstance(caps, dict) else ("legacy", {})
+
+
+def _recall_arguments(
+    arguments: Dict[str, Any], caps: Dict[str, Any], deadline_ms: Optional[int]
+) -> Dict[str, Any]:
+    """The recall call's arguments for this server: new ones only where it advertises them."""
+    out = dict(arguments)
+    selectors = caps.get("namespace_selectors")
+    if isinstance(selectors, list) and _NON_SYSTEM in selectors:
+        out["namespace"] = _NON_SYSTEM
+    if caps.get("search_deadline_ms") is True and deadline_ms is not None:
+        out["deadline_ms"] = deadline_ms
+    return out
+
+
 def _run_call(
     registry: types.ModuleType,
     admission: _Admission,
@@ -369,11 +520,15 @@ def _run_call(
     timeout: float,
     schedule: Tuple[float, float, float],
     base: Dict[str, Any],
+    caps_holder: Optional[_Caps] = None,
+    profile_key: str = "",
+    deadline_ms: Optional[int] = None,
 ) -> None:
     """Worker body. Module-level on purpose: it holds the slot and the admission, never the
     provider instance, so a dropped instance is not kept alive by its last call."""
     started = time.perf_counter()
     verdict = "failure"  # failure | success | incompatible | neutral
+    caps_holder = caps_holder if caps_holder is not None else _Caps()
     try:
         try:
             outcome, warning = _preflight(server)
@@ -385,7 +540,7 @@ def _run_call(
         if outcome:
             verdict = "neutral"
             slot.outcome = outcome
-            _warn_once(registry, admission, outcome, warning)
+            _warn_once(registry, admission, f"{profile_key}:{outcome}", warning)
             _event("preflight", outcome=outcome, server=server, **base)
             return
         try:
@@ -396,17 +551,27 @@ def _run_call(
             _warn_once(
                 registry,
                 admission,
-                "context",
+                f"{profile_key}:context",
                 f"cannot build a Hermes plugin context ({type(exc).__name__}); is this Hermes "
                 "Agent 0.21.5 or later?",
             )
             _event("preflight", outcome=slot.outcome, server=server, **base)
             return
         try:
+            caps = caps_holder.fresh(registry.clock())
+            if caps is None:
+                kind, caps = _probe(context, server, timeout)
+                _event("probe", kind=kind, server=server, **base)
+                if kind == "failure":
+                    # One failure, and the cycle ends here: no recall call behind it.
+                    slot.outcome = "rpc_error"
+                    return
+                caps_holder.store(caps, registry.clock())
+            arguments = _recall_arguments(arguments, caps, deadline_ms)
             envelope = context.call_mcp(server, _TOOL, arguments, timeout=timeout)
         except PermissionError:
             slot.outcome = "rpc_error"
-            _warn_once(registry, admission, "permission", _allowlist_text(server))
+            _warn_once(registry, admission, f"{profile_key}:permission", _allowlist_text(server))
             _event("rpc_error", error="PermissionError", server=server, **base)
             return
         rpc_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -442,7 +607,7 @@ def _run_call(
             _warn_once(
                 registry,
                 admission,
-                "incompatible",
+                f"{profile_key}:incompatible",
                 f"the {server!r} MCP entry answers without the background-search contract "
                 f"(memtomem older than {_MIN_MEMTOMEM}); recall is off until the entry is "
                 "pinned to a newer release",
@@ -469,6 +634,8 @@ def _run_call(
         slot.outcome = "rpc_error"
         _event("rpc_error", error=type(exc).__name__, server=server, **base)
     finally:
+        if verdict in ("failure", "incompatible"):
+            caps_holder.drop()
         with registry.lock:
             _apply_verdict(registry, admission, verdict, schedule)
             if admission.slot is slot:
@@ -497,11 +664,411 @@ def _apply_verdict(
     admission.cooldown_until = registry.clock() + step
 
 
+# --- mirroring built-in memory writes ----------------------------------------------------------
+
+
+class _MirrorOp:
+    """One operation for ``hermes_mirror_apply``, with the context it was captured under."""
+
+    __slots__ = ("params", "context", "attempts", "not_before")
+
+    def __init__(self, params: Dict[str, Any], context: contextvars.Context) -> None:
+        self.params = params
+        self.context = context
+        self.attempts = 0
+        self.not_before = 0.0
+
+
+class _Mirror:
+    """One provider instance's mirror queue and worker state. Holds no provider instance.
+
+    Operations run in order, one at a time, through the entry name's recall slot. The queue is
+    bounded; what does not fit, what the server refuses and what still fails after
+    ``_MIRROR_ATTEMPTS`` tries is dropped and counted, never retried forever.
+    """
+
+    def __init__(
+        self,
+        *,
+        server: str,
+        owner: str,
+        profile_key: str,
+        settings: Dict[str, Any],
+        holder: "_ContextHolder",
+        caps: _Caps,
+        base: Dict[str, Any],
+    ) -> None:
+        self.server = server
+        self.owner = owner
+        self.profile_key = profile_key
+        self.timeout = float(settings["rpc_timeout_seconds"])
+        self.deadline_ms = _deadline_ms(settings)
+        self.schedule = (
+            float(settings["cooldown_seconds"]),
+            float(settings["long_cooldown_seconds"]),
+            float(settings["max_cooldown_seconds"]),
+        )
+        self.holder = holder
+        self.caps = caps
+        self.base = dict(base)
+        self.cond = threading.Condition()
+        self.queue: Deque[_MirrorOp] = collections.deque()
+        # Re-renders asked for after a ``rendered: false`` reply, by target. Kept out of the
+        # queue: a reconcile waits out a cooldown, and must not hold back the writes behind it.
+        self.reconcile_due: Dict[str, Tuple[float, contextvars.Context]] = {}
+        self.counts: Dict[str, int] = collections.Counter()
+        self.thread: Optional[threading.Thread] = None
+        self.closing = False
+        self.disabled = False
+        self.flush_until = 0.0
+
+    def count(self, registry: types.ModuleType, reason: str, message: str, n: int = 1) -> None:
+        """Warn once per profile and reason, then count (a reader of ``counts`` sees the log)."""
+        admission = _admission_for(registry, self.server)
+        _warn_once(registry, admission, f"{self.profile_key}:mirror:{reason}", message)
+        total = self.counts[reason] + n
+        _event("mirror_" + reason, n=n, total=total, server=self.server, **self.base)
+        self.counts[reason] = total
+
+
+def _admission_for(registry: types.ModuleType, server: str) -> _Admission:
+    with registry.lock:
+        admission = registry.admissions.get(server)
+        if admission is None:
+            admission = registry.admissions[server] = _Admission()
+        return admission
+
+
+def _take_slot(registry: types.ModuleType, server: str) -> Tuple[Optional[_Slot], float]:
+    """The name's slot for one write, or ``(None, seconds to wait)``: writes wait, never skip."""
+    with registry.lock:
+        admission = registry.admissions.get(server)
+        if admission is None:
+            admission = registry.admissions[server] = _Admission()
+        now = registry.clock()
+        if now < admission.cooldown_until:
+            return None, min(1.0, admission.cooldown_until - now)
+        if admission.slot is not None or registry.total_inflight >= registry.ceiling:
+            return None, 0.05
+        slot = _Slot()
+        admission.slot = slot
+        registry.total_inflight += 1
+        return slot, 0.0
+
+
+def _release_slot(registry: types.ModuleType, mirror: _Mirror, slot: _Slot, verdict: str) -> None:
+    admission = _admission_for(registry, mirror.server)
+    if verdict in ("failure", "incompatible"):
+        mirror.caps.drop()
+    with registry.lock:
+        _apply_verdict(registry, admission, verdict, mirror.schedule)
+        if admission.slot is slot:
+            admission.slot = None
+        registry.total_inflight -= 1
+    slot.done.set()
+
+
+def _rpc_timeout(mirror: _Mirror) -> Optional[float]:
+    """The timeout for the next RPC: the RPC timeout, or what is left of the shutdown flush.
+    ``None`` when the flush has run out (the operation is dropped, not started)."""
+    if not mirror.closing:
+        return mirror.timeout
+    left = mirror.flush_until - time.monotonic()
+    # Hermes raises any call_mcp timeout below 1 s to 1 s, so a shorter remainder cannot
+    # be honoured: such a call is not started.
+    return min(mirror.timeout, left) if left >= _HERMES_MIN_TIMEOUT_S else None
+
+
+_REFUSAL_KINDS = (
+    ("Error: content matches", "privacy_refused"),
+    ("Error: purged", "purged"),
+    ("Error: read_only_target", "destination_refused"),
+    ("Error: source_excluded", "destination_refused"),
+    ("Error: mirror_target_link", "destination_refused"),
+    ("Error: invalid parameter", "invalid_params"),
+)
+
+
+def _refusal_kind(text: str) -> str:
+    """A fixed code for a refusal: server text can quote paths or entry text, so it is
+    never logged."""
+    for prefix, kind in _REFUSAL_KINDS:
+        if text.startswith(prefix):
+            return kind
+    return "refused"
+
+
+_KNOWN_ERROR_TYPES = frozenset(
+    {
+        "OSError",
+        "PermissionError",
+        "FileNotFoundError",
+        "IsADirectoryError",
+        "TimeoutError",
+        "RuntimeError",
+        "ValueError",
+        "StorageError",
+        "TransactionOwnedError",
+        "RetryableError",
+        "EmbeddingError",
+        "MemoryScopeError",
+        "ConfigError",
+    }
+)
+
+
+def _error_type(text: Any) -> str:
+    """A ``render_error``'s exception name if it is one of a fixed set, else ``"other"``.
+
+    Server text can quote entry text or paths, and an identifier-shaped prefix is not proof
+    of an exception name, so only names on this list are logged.
+    """
+    head = str(text or "").split(":", 1)[0].strip()
+    return head if head in _KNOWN_ERROR_TYPES else "other"
+
+
+def _send_mirror_op(registry: types.ModuleType, mirror: _Mirror, op: _MirrorOp) -> str:
+    """Send ``op`` once under the name's slot. ``done`` | ``drop`` | ``retry`` | ``disable``."""
+    if _rpc_timeout(mirror) is None:
+        return "flush_over"
+    slot, wait = _take_slot(registry, mirror.server)
+    if slot is None:
+        op.not_before = time.monotonic() + wait
+        return "wait"
+    verdict = "neutral"
+    try:
+        try:
+            outcome, warning = _preflight(mirror.server)
+        except Exception as exc:
+            outcome, warning = "skipped_config_error", f"cannot read Hermes config ({exc!r})"
+        if outcome:
+            mirror.count(registry, "dropped_" + outcome, warning)
+            return "drop"
+        try:
+            context = mirror.holder.get()
+        except Exception as exc:
+            mirror.count(
+                registry, "dropped_no_context", f"cannot build a Hermes plugin context ({exc!r})"
+            )
+            return "drop"
+        caps = mirror.caps.fresh(registry.clock())
+        if caps is None:
+            timeout = _rpc_timeout(mirror)
+            if timeout is None:
+                return "flush_over"
+            try:
+                kind, caps = _probe(context, mirror.server, timeout)
+            except PermissionError:
+                mirror.count(registry, "dropped_permission", _allowlist_text(mirror.server))
+                return "drop"
+            _event("probe", kind=kind, server=mirror.server, **mirror.base)
+            if kind == "failure":
+                verdict = "failure"
+                return "retry"
+            mirror.caps.store(caps, registry.clock())
+        if not isinstance(caps.get("hermes_mirror"), dict):
+            return "disable"
+        params = dict(op.params)
+        if mirror.deadline_ms is not None and params.get("op") != "reconcile":
+            params["deadline_ms"] = mirror.deadline_ms
+        timeout = _rpc_timeout(mirror)
+        if timeout is None:
+            return "flush_over"
+        try:
+            envelope = context.call_mcp(
+                mirror.server,
+                _DISPATCH_TOOL,
+                {"action": _MIRROR_ACTION, "params": params},
+                timeout=timeout,
+            )
+        except PermissionError:
+            mirror.count(registry, "dropped_permission", _allowlist_text(mirror.server))
+            return "drop"
+        except Exception as exc:
+            verdict = "failure"
+            _event(
+                "mirror_rpc_error", error=type(exc).__name__, server=mirror.server, **mirror.base
+            )
+            return "retry"
+        if not isinstance(envelope, dict) or not envelope.get("ok"):
+            verdict = "failure"
+            _event("mirror_rpc_error", error="not_ok", server=mirror.server, **mirror.base)
+            return "retry"
+        raw = envelope.get("result")
+        text = raw if isinstance(raw, str) else json.dumps(raw)
+        if text.startswith("Error (retryable)"):
+            return "backoff"
+        if text.startswith("Error"):
+            # Validation, a privacy refusal, a refused destination, a purge fence: final.
+            kind = _refusal_kind(text)
+            mirror.count(
+                registry,
+                "dropped_" + kind,
+                f"memtomem refused a mirror write ({kind}); later writes still go",
+            )
+            return "drop"
+        try:
+            reply = json.loads(text)
+        except ValueError:
+            reply = None
+        if not isinstance(reply, dict) or reply.get("schema_version") != 1:
+            mirror.count(registry, "dropped_unparsed", "memtomem sent an unreadable mirror reply")
+            return "drop"
+        verdict = "success"
+        _event(
+            "mirror_applied",
+            op=params.get("op"),
+            changed=reply.get("changed"),
+            rendered=reply.get("rendered"),
+            server=mirror.server,
+            **mirror.base,
+        )
+        if reply.get("previous") == "unmatched":
+            mirror.count(
+                registry,
+                "unmatched",
+                "a replaced or removed Hermes memory entry was not found in the mirror (its text "
+                "differed from when it was mirrored, e.g. masked differently); the old copy stays "
+                "in memtomem. To clear it, purge the target and let Hermes write again",
+            )
+        if reply.get("content_refused"):
+            mirror.count(
+                registry,
+                "content_refused",
+                "a replacement entry matched a memtomem privacy pattern: the old entry was "
+                "removed from the mirror and the new one was not stored",
+            )
+        if reply.get("rendered") is False:
+            _event(
+                "mirror_not_rendered",
+                error=_error_type(reply.get("render_error")),
+                error_chars=len(str(reply.get("render_error") or "")),
+                server=mirror.server,
+                **mirror.base,
+            )
+            target = str(params.get("target"))
+            with mirror.cond:
+                if target not in mirror.reconcile_due:
+                    due = time.monotonic() + mirror.schedule[0]
+                    mirror.reconcile_due[target] = (due, op.context)
+                    mirror.cond.notify_all()
+        return "done"
+    finally:
+        _release_slot(registry, mirror, slot, verdict)
+
+
+def _next_op(mirror: _Mirror) -> Tuple[Optional[_MirrorOp], float]:
+    """The operation to send now, or ``(None, seconds to wait)``. Caller holds ``mirror.cond``.
+
+    Queued writes go first and in order; a due reconcile goes when the head write is not ready.
+    """
+    now = time.monotonic()
+    wait = 1.0
+    if mirror.queue:
+        head = mirror.queue[0]
+        if head.not_before <= now:
+            return head, 0.0
+        wait = head.not_before - now
+    for target, (due, context) in list(mirror.reconcile_due.items()):
+        if due <= now:
+            del mirror.reconcile_due[target]
+            return _MirrorOp(
+                {"owner": mirror.owner, "target": target, "op": "reconcile"}, context
+            ), 0.0
+        wait = min(wait, due - now)
+    return None, min(wait, 1.0)
+
+
+def _retire(mirror: _Mirror) -> None:
+    """Stop accepting writes; the worker flushes for at most one RPC timeout, then drops."""
+    with mirror.cond:
+        if not mirror.closing:
+            mirror.closing = True
+            mirror.flush_until = time.monotonic() + mirror.timeout
+        mirror.cond.notify_all()
+
+
+def _mirror_worker(registry: types.ModuleType, mirror: _Mirror) -> None:
+    """Send queued operations in order until the instance shuts down and the flush ends."""
+    while True:
+        with mirror.cond:
+            while not mirror.queue and not mirror.reconcile_due and not mirror.closing:
+                mirror.cond.wait(1.0)
+            if not mirror.queue and (mirror.closing or not mirror.reconcile_due):
+                return
+            if mirror.closing and time.monotonic() >= mirror.flush_until:
+                left = len(mirror.queue)
+                mirror.queue.clear()
+                mirror.reconcile_due.clear()
+                break
+            op, delay = _next_op(mirror)
+            if op is None:
+                mirror.cond.wait(delay)
+                continue
+        try:
+            result = op.context.run(_send_mirror_op, registry, mirror, op)
+        except Exception as exc:  # never let the worker die
+            _event("mirror_worker_error", error=type(exc).__name__, **mirror.base)
+            result = "drop"
+        if result == "flush_over":
+            with mirror.cond:
+                left = len(mirror.queue)
+                mirror.queue.clear()
+                mirror.reconcile_due.clear()
+            break
+        if op.params.get("op") == "reconcile":
+            if result in ("wait", "retry", "backoff"):
+                with mirror.cond:
+                    target = str(op.params["target"])
+                    if target not in mirror.reconcile_due:
+                        retry_at = max(op.not_before, time.monotonic() + mirror.schedule[0])
+                        mirror.reconcile_due[target] = (retry_at, op.context)
+            continue
+        with mirror.cond:
+            if result == "wait":
+                continue
+            if result in ("retry", "backoff"):
+                op.attempts += 1
+                if op.attempts < _MIRROR_ATTEMPTS:
+                    if result == "backoff":
+                        op.not_before = time.monotonic() + _RETRY_BACKOFF_S[op.attempts - 1]
+                    continue
+                result = "drop_retries"
+            if mirror.queue and mirror.queue[0] is op:
+                mirror.queue.popleft()
+            if result == "disable":
+                mirror.disabled = True
+                left = len(mirror.queue) + 1
+                mirror.queue.clear()
+        if result == "drop_retries":
+            mirror.count(
+                registry,
+                "dropped_retries",
+                f"a mirror write failed {_MIRROR_ATTEMPTS} times and was dropped",
+            )
+        elif result == "disable":
+            mirror.count(
+                registry,
+                "disabled_old_server",
+                f"the {mirror.server!r} MCP entry runs a memtomem without hermes_mirror_apply; "
+                "mirroring is off for this session (recall continues)",
+                n=left,
+            )
+            return
+    if left:
+        mirror.count(
+            registry,
+            "dropped_shutdown",
+            "memtomem-memory shut down with mirror writes still queued; they were dropped",
+            n=left,
+        )
+
+
 # --- the provider -------------------------------------------------------------------------------
 
 
 class MemtomemMemoryProvider(MemoryProvider):
-    """Recall-only: ``prefetch`` is the whole job; every other hook is a no-op or bookkeeping."""
+    """``prefetch`` recalls; ``on_memory_write`` mirrors built-in writes when opted in."""
 
     def __init__(self, context: Any = None) -> None:  # no side effects
         self._iid = uuid.uuid4().hex[:8]
@@ -512,6 +1079,10 @@ class MemtomemMemoryProvider(MemoryProvider):
         self._status: Optional[RecallStatus] = None
         self._settings: Dict[str, Any] = dict(_DEFAULTS)
         self._holder = _ContextHolder(context)
+        self._caps = _Caps()
+        self._profile_key = ""
+        self._mirror: Optional[_Mirror] = None
+        self._last_ts = 0
 
     @property
     def name(self) -> str:
@@ -575,10 +1146,29 @@ class MemtomemMemoryProvider(MemoryProvider):
                 "memtomem-memory: cannot read config.yaml (%s); using defaults", type(exc).__name__
             )
             settings = dict(_DEFAULTS)
+        profile_key = _profile_key(kwargs.get("hermes_home"))
         with self._lock:
             self._settings = settings
             self._gen += 1
             self._closed = False
+            self._profile_key = profile_key
+            # A fresh capability view: an old worker still holding the previous one cannot
+            # fill this one in for a server that may have changed.
+            self._caps = _Caps()
+            retired = self._mirror
+            self._mirror = None
+            if settings["mirror_writes"]:
+                self._mirror = _Mirror(
+                    server=settings["server"],
+                    owner=_owner_id(profile_key),
+                    profile_key=profile_key,
+                    settings=settings,
+                    holder=self._holder,
+                    caps=self._caps,
+                    base={"iid": self._iid},
+                )
+        if retired is not None:
+            _retire(retired)
         _event(
             "initialize",
             entry=origin,
@@ -590,10 +1180,19 @@ class MemtomemMemoryProvider(MemoryProvider):
 
     def shutdown(self) -> None:
         # Detach only: the connection is Hermes's, and the worker drains into its own slot.
+        # Queued mirror writes get one flush of at most the RPC timeout; the rest are dropped.
         with self._lock:
             self._closed = True
             self._gen += 1
             self._status = None
+            mirror = self._mirror
+        if mirror is not None:
+            _retire(mirror)
+            # The worker is a daemon thread: once Hermes's process exits it is gone, so the
+            # flush happens here, bounded by its budget, outside every provider lock.
+            thread = mirror.thread
+            if thread is not None and thread.is_alive():
+                thread.join(max(0.0, mirror.flush_until - time.monotonic()) + 0.5)
         _event("shutdown", **self._base())
 
     def on_session_switch(
@@ -699,6 +1298,9 @@ class MemtomemMemoryProvider(MemoryProvider):
                     float(settings["rpc_timeout_seconds"]),
                     schedule,
                     self._base(),
+                    self._caps,
+                    self._profile_key,
+                    _deadline_ms(settings),
                 ),
             ).start()
         except Exception as exc:
@@ -720,7 +1322,148 @@ class MemtomemMemoryProvider(MemoryProvider):
         with self._lock:
             return self._status
 
-    # -- everything a recall-only provider does not do --------------------------------------------
+    # -- mirroring built-in memory writes ---------------------------------------------------------
+
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Queue one committed built-in write; returns at once (Hermes calls this inline).
+
+        A replace or remove is mirrored only with ``metadata["previous_content"]`` (the entry as
+        the native store held it): identity is never inferred from ``old_text``. Mirrored in
+        every ``agent_context``: the operation reports what Hermes's own store committed, not a
+        write of this provider's.
+        """
+        with self._lock:
+            mirror = self._mirror
+            closed = self._closed
+            if mirror is None or closed or mirror.disabled or mirror.closing:
+                return
+            ts = max(time.time_ns(), self._last_ts + 1)
+            self._last_ts = ts
+        registry = _registry()
+        if action not in _MIRROR_ACTIONS or not isinstance(target, str):
+            return
+        if not _TARGET_RE.fullmatch(target):
+            mirror.count(registry, "skipped_target", f"cannot mirror memory target {target!r}")
+            return
+        params: Dict[str, Any] = {"owner": mirror.owner, "target": target, "op": action, "ts": ts}
+        if action in ("add", "replace"):
+            if not isinstance(content, str) or not content.strip():
+                return
+            params["content"] = content
+        if action in ("replace", "remove"):
+            previous = (metadata or {}).get("previous_content")
+            if not isinstance(previous, str) or not previous.strip():
+                mirror.count(
+                    registry,
+                    "skipped_no_previous",
+                    "this Hermes did not say which entry a replace or remove changed "
+                    "(no previous_content); that write was not mirrored",
+                )
+                return
+            params["previous_content"] = previous
+        op = _MirrorOp(params, contextvars.copy_context())
+        with mirror.cond:
+            if len(mirror.queue) >= _MIRROR_QUEUE_MAX:
+                full = True
+            else:
+                full = False
+                mirror.queue.append(op)
+                mirror.cond.notify_all()
+            start = not full and mirror.thread is None
+            if start:
+                mirror.thread = spawn_context_thread(
+                    _mirror_worker, name="memtomem-memory-mirror", args=(registry, mirror)
+                )
+        if full:
+            mirror.count(
+                registry,
+                "dropped_overflow",
+                f"more than {_MIRROR_QUEUE_MAX} mirror writes were waiting; the newest was dropped",
+            )
+            return
+        if start:
+            try:
+                mirror.thread.start()  # type: ignore[union-attr]
+            except Exception as exc:
+                logger.warning(
+                    "memtomem-memory: cannot start the mirror worker (%s)", type(exc).__name__
+                )
+                with mirror.cond:
+                    mirror.thread = None
+
+    # -- setup ------------------------------------------------------------------------------------
+
+    def post_setup(self, hermes_home: str, config: Dict[str, Any]) -> None:
+        """``hermes memory setup memtomem-memory``: activate, and ask about mirroring.
+
+        Writes ``memory.provider`` and ``memory.memtomem-memory.mirror_writes`` only after an
+        answer at a terminal; without one (cron, a gateway, piped input) it writes nothing and
+        prints the commands. It never grants itself MCP access: it prints the allowlist command.
+        """
+        memory = config.get("memory") if isinstance(config.get("memory"), dict) else {}
+        section = memory.get(_NAME) if isinstance(memory.get(_NAME), dict) else {}
+        server = _read_settings(config, warn=False)["server"]
+        granted = _allowlist(config)
+        merged = granted if server in granted else granted + [server]
+        allow_cmd = (
+            f"hermes config set plugins.entries.{_NAME}.mcp_allowlist '[{', '.join(merged)}]'"
+        )
+        stdin = sys.stdin
+        # ``hermes_cli.setup.is_noninteractive`` (not public): under it, and on EOF, Hermes's
+        # prompt returns its default without asking, which must not pass for an answer.
+        noninteractive = os.environ.get("HERMES_NONINTERACTIVE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if noninteractive or stdin is None or not stdin.isatty():
+            print(f"\n  {_NAME}: not a terminal, so nothing was written. To set it up, run:")
+            print(f"    hermes config set memory.provider {_NAME}")
+            print(f"    hermes config set memory.{_NAME}.mirror_writes false   # or true")
+            print(f"    {allow_cmd}\n")
+            return
+        stored = _strict_bool(section.get("mirror_writes"))
+        try:
+            from hermes_cli.config import save_config
+            from hermes_cli.setup import prompt_yes_no
+
+            mirror = bool(
+                prompt_yes_no(
+                    "Mirror Hermes's built-in memory (MEMORY.md / USER.md) into memtomem? "
+                    "Each saved, replaced or removed entry is sent to the memtomem server",
+                    default=bool(stored),
+                )
+            )
+        except (EOFError, KeyboardInterrupt):
+            # Hermes's prompt exits on Ctrl+C and returns the default on EOF; kept for a
+            # prompt that raises instead.
+            print(f"\n  {_NAME}: setup cancelled; nothing was written.\n")
+            return
+        new_memory = dict(memory)
+        new_section = dict(section)
+        new_section["mirror_writes"] = mirror
+        new_memory["provider"] = _NAME
+        new_memory[_NAME] = new_section
+        config["memory"] = new_memory
+        save_config(config, merge_existing=True)
+        print(f"\n  Memory provider: {_NAME} (mirror_writes: {str(mirror).lower()})")
+        if server in granted:
+            print(f"  It may call the {server!r} MCP entry already.\n")
+        else:
+            print(
+                f"  It cannot call memtomem until you grant it the {server!r} MCP entry "
+                "(the grant lets it send recall queries and, if enabled, mirror writes):"
+            )
+            print(f"    {allow_cmd}\n")
+
+    # -- everything else this provider does not do ------------------------------------------------
 
     def system_prompt_block(self) -> str:
         return ""

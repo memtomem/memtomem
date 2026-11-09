@@ -479,9 +479,12 @@ def test_hermes_memory_plugin_matches_contract() -> None:
 
     manifest = yaml.safe_load((root / "plugin.yaml").read_text(encoding="utf-8"))
     # No `hooks:` key: a memory provider registers through register(ctx), not hooks.
-    assert set(manifest) == {"name", "version", "description"}, manifest
+    assert set(manifest) == {"name", "version", "description", "requires_hermes"}, manifest
     assert manifest["name"] == "memtomem-memory"
     assert manifest["version"] == contract["plugins"]["hermes_memory_version"]
+    # Catalog rule 14: the floor is declared here too, and it is a SemVer lower bound.
+    assert manifest["requires_hermes"] == contract["hermes"]["memory_requires_hermes"]
+    assert re.fullmatch(r">=\d+\.\d+\.\d+", manifest["requires_hermes"]), manifest
 
     # Hermes's survival contract for a user plugin: no dependency declarations, nothing to
     # install. The provider imports the standard library and Hermes, nothing else.
@@ -494,7 +497,12 @@ def test_hermes_memory_plugin_matches_contract() -> None:
             imported.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             imported.add(node.module.split(".")[0])
-    assert imported - set(sys.stdlib_module_names) == {"agent", "hermes_cli"}, imported
+    # hermes_constants: the public ``hermes_home_key`` (catalog rule 9 lists the module).
+    assert imported - set(sys.stdlib_module_names) == {
+        "agent",
+        "hermes_cli",
+        "hermes_constants",
+    }, imported
 
     # The release the provider refuses to run below: one value in the code, the contract
     # and the README.

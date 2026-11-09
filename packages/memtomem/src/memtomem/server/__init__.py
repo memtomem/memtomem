@@ -192,6 +192,9 @@ from memtomem.server.tools.context import (
 from memtomem.server.tools.ingest import (
     mem_ingest,  # no @mcp.tool; import triggers @register("ingest") for mem_do routing
 )
+from memtomem.server.tools.hermes_mirror import (
+    mem_hermes_mirror_apply,  # no @mcp.tool; import triggers @register("ingest")
+)
 from memtomem.server.tools.watchdog import mem_watchdog
 from memtomem.server.tools.schedule import (
     mem_schedule_delete,

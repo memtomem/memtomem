@@ -6,6 +6,7 @@ import asyncio
 import functools
 import logging
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,7 +17,7 @@ from memtomem.config import EmbeddingConfig
 from memtomem.embedding.aliases import resolve_embedder_id
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
 from memtomem.embedding.hub_telemetry import hub_telemetry_off
-from memtomem.errors import EmbeddingError, Mem2MemError
+from memtomem.errors import EmbeddingError, Mem2MemError, SearchDeadlineExceeded
 from memtomem.embedding.profiles import E5_MODEL, e5_contract_error, is_e5, is_minilm
 
 logger = logging.getLogger(__name__)
@@ -482,8 +483,14 @@ class OnnxEmbedder:
         *,
         batch_size: int | None = None,
         refuse_truncation: bool = False,
+        deadline: float | None = None,
     ) -> list[list[float]]:
         """Run inference synchronously — submitted to ``_infer_executor``.
+
+        ``deadline`` (a ``time.monotonic()`` instant, from a search's
+        ``deadline_ms``) is checked once, when the slice starts: a slice that
+        waited in the executor queue past it raises ``SearchDeadlineExceeded``
+        without running, and a slice that started runs to completion.
 
         The single-worker executor serializes these calls, so there is no
         in-body lock: concurrency is bounded by the pool size, not by this
@@ -492,6 +499,11 @@ class OnnxEmbedder:
         the worker thread; callers on an asyncio loop wrap it with
         ``loop.call_soon_threadsafe`` (see ``embed_texts``).
         """
+        if deadline is not None and time.monotonic() >= deadline:
+            raise SearchDeadlineExceeded(
+                "search deadline exceeded before the query embedding started; "
+                "no results were returned"
+            )
         model = self._get_model()
         if batch_size is None:
             # Direct callers only — ``embed_texts`` always passes its
@@ -551,6 +563,7 @@ class OnnxEmbedder:
         chunk_indices: Sequence[int] | None = None,
         _query: bool = False,
         _probe: bool = False,
+        _deadline: float | None = None,
     ) -> list[list[float]]:
         if not texts:
             return []
@@ -666,10 +679,11 @@ class OnnxEmbedder:
                             slice_indices,
                             batch_size=batch_size,
                             refuse_truncation=is_e5(self._config.model) and not (_query or _probe),
+                            **({"deadline": _deadline} if _deadline is not None else {}),
                         ),
                     )
                 )
-        except EmbeddingError:
+        except (EmbeddingError, SearchDeadlineExceeded):
             raise
         except Exception as exc:
             # A memtomem error raised on the way to the model (the optional
@@ -693,10 +707,15 @@ class OnnxEmbedder:
             raise EmbeddingError.vetted("No embeddings returned for probe")
         return embeddings[0]
 
-    async def embed_query(self, query: str) -> list[float]:
+    # The search pipeline passes ``deadline`` only to embedders that say they
+    # take it; the others keep their one-argument ``embed_query``.
+    supports_query_deadline = True
+
+    async def embed_query(self, query: str, *, deadline: float | None = None) -> list[float]:
+        """``deadline``: see ``_embed_sync`` — a queued slice past it never runs."""
         if not query or not query.strip():
             raise EmbeddingError.vetted("Query text cannot be empty")
-        embeddings = await self.embed_texts([query], _query=True)
+        embeddings = await self.embed_texts([query], _query=True, _deadline=deadline)
         if not embeddings:
             raise EmbeddingError.vetted("No embeddings returned for query")
         return embeddings[0]

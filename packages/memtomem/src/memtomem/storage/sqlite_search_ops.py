@@ -227,8 +227,11 @@ class SearchOpsMixin:
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
         source_filter: str | None = None,
+        *,
+        deadline: float | None = None,
     ) -> list[SearchResult]:
-        async with self._lease_read_db() as db:
+        """``deadline`` bounds only the wait for a read connection (``_lease_read_db``)."""
+        async with self._lease_read_db(deadline=deadline) as db:
             ns_clause = ""
             ns_params: list = []
             if namespace_filter:
@@ -383,8 +386,11 @@ class SearchOpsMixin:
         *,
         exhaustive: bool = False,
         escalate: bool = True,
+        deadline: float | None = None,
     ) -> list[SearchResult]:
         """``escalate=False`` keeps a non-exhaustive search to its first KNN pass.
+
+        ``deadline`` bounds only the wait for a read connection (``_lease_read_db``).
 
         For a best-effort caller (query expansion's heading probe) a selective
         filter would otherwise drive the larger attempts, up to a full-table
@@ -397,7 +403,7 @@ class SearchOpsMixin:
         if not self._has_vec_table:
             return []
 
-        async with self._lease_read_db() as db:
+        async with self._lease_read_db(deadline=deadline) as db:
             # Validate the query width HERE, not by sniffing sqlite-vec's error on
             # the first MATCH. ``chunks_vec`` is legitimately empty while chunks
             # survive — ``reset_embedding_meta`` drops and recreates the vector
@@ -644,6 +650,7 @@ class SearchOpsMixin:
         project_context_root: Path | None,
         as_of_unix: int | None,
         hide_unavailable: bool,
+        deadline: float | None = None,
     ) -> dict[UUID, ContextWindowRows | None]:
         """Physical neighbours plus visible ordinal/total, without listing the file.
 
@@ -694,7 +701,9 @@ class SearchOpsMixin:
         # CTE can end in an INSERT and it should not have to parse one to find
         # out. This spelling is the same plan and is visibly a read.
         wanted = [str(a) for a in anchor_ids]
-        async with self._lease_read_db() as db:
+        # ``deadline`` (a search's ``deadline_ms``) bounds only the wait for a
+        # read connection; the reads themselves run to completion.
+        async with self._lease_read_db(deadline=deadline) as db:
             rows = db.execute(
                 f"""
                 SELECT id, start_line, rid, vis, COALESCE(visible_before, 0), visible_all
