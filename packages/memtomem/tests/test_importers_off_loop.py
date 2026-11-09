@@ -261,6 +261,34 @@ async def test_second_cancel_during_the_drain_still_waits(tmp_path, monkeypatch)
     assert len(_written(out)) == 1
 
 
+async def test_shutdown_cancelling_every_task_still_waits_for_the_worker(tmp_path, monkeypatch):
+    """``asyncio.run`` cancels every Task at shutdown, not only the importer's.
+
+    A worker wrapped in a Task would be cancelled too and report done while its
+    thread still wrote, ending the drain early.
+    """
+    out = tmp_path / "out"
+    gate = _Gate()
+    _gate_first_write(monkeypatch, gate)
+
+    task = asyncio.create_task(import_obsidian(_vault(tmp_path), out))
+    try:
+        await gate.wait_entered()
+        me = asyncio.current_task()
+        others = [t for t in asyncio.all_tasks() if t is not me]
+        assert task in others
+        for t in others:
+            t.cancel()
+        await _settle()
+        assert not task.done(), "the drain ended while the worker thread was still writing"
+    finally:
+        gate.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert not gate.timed_out
+    assert len(_written(out)) == 1
+
+
 async def test_worker_error_after_a_cancel_is_retrieved_not_raised(tmp_path, monkeypatch, caplog):
     out = tmp_path / "out"
     gate = _Gate()
@@ -399,11 +427,17 @@ def test_snapshot_answers_like_the_live_engine(tmp_path):
     from memtomem.indexing.engine import IndexEngine
 
     mem = tmp_path / "mem"
+    proj = tmp_path / "proj"
     ro = tmp_path / "ro"
-    for d in (mem, ro, mem / "sub"):
+    for d in (mem, proj, ro, mem / "sub", proj / "sub"):
         d.mkdir(parents=True, exist_ok=True)
+    # ``/sub/b.md`` is anchored: it matches only a path relative to an index
+    # root, so a snapshot that lost its roots answers differently on it.
     config = IndexingConfig(
-        memory_dirs=[mem], read_only_memory_dirs=[ro], exclude_patterns=["**/secret*"]
+        memory_dirs=[mem],
+        project_memory_dirs=[proj],
+        read_only_memory_dirs=[ro],
+        exclude_patterns=["**/secret*", "/sub/b.md"],
     )
     engine = IndexEngine.__new__(IndexEngine)
     engine._config = config
@@ -413,6 +447,9 @@ def test_snapshot_answers_like_the_live_engine(tmp_path):
     targets = [
         mem / "a.md",
         mem / "sub" / "b.md",
+        mem / "sub" / "c.md",
+        proj / "sub" / "b.md",
+        tmp_path / "sub" / "b.md",
         mem / "secret-notes.md",
         mem / ".env",
         ro / "c.md",
@@ -422,6 +459,12 @@ def test_snapshot_answers_like_the_live_engine(tmp_path):
     protected = [engine.is_read_only_source(t) for t in targets]
     assert [snapshot.is_excluded(t) for t in targets] == excluded
     assert [snapshot.is_read_only_source(t) for t in targets] == protected
-    # Non-vacuous: the matrix has both answers for both predicates.
+    # Non-vacuous: the matrix has both answers for both predicates, and the
+    # anchored pattern excludes under each writable root tier but not elsewhere.
     assert set(excluded) == {True, False}
     assert set(protected) == {True, False}
+    by_target = dict(zip(targets, excluded))
+    assert by_target[mem / "sub" / "b.md"] is True
+    assert by_target[proj / "sub" / "b.md"] is True
+    assert by_target[mem / "sub" / "c.md"] is False
+    assert by_target[tmp_path / "sub" / "b.md"] is False

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import hashlib
 import logging
 import os
@@ -182,22 +184,31 @@ async def _run_off_loop(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> 
     checkpoint, and only then propagates. Returning while the worker still
     wrote would let a retried import race the abandoned one on the same files,
     and let the worker resolve paths after its caller's environment is gone.
+
+    The worker is an executor future, not a Task, as in
+    ``SqliteBackend._run_read_in_thread``: ``asyncio.run`` cancels every Task
+    when it shuts down, and a cancelled Task wrapping the thread reports done
+    while the thread is still running, which would end the drain early.
     """
+    loop = asyncio.get_running_loop()
     with abandon_sync_on_exit() as abandoned:
-        future = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+        # Copied inside the ``with`` so the worker sees the abandon event, and
+        # carries the caller's other context variables as ``to_thread`` would.
+        ctx = contextvars.copy_context()
+        worker = loop.run_in_executor(None, functools.partial(ctx.run, fn, *args, **kwargs))
         try:
-            return await asyncio.shield(future)
+            return await asyncio.shield(worker)
         except asyncio.CancelledError:
             # Set now, not in the context manager's ``finally``: that runs after
             # the drain below, by which time the worker has done everything.
             abandoned.set()
-            while not future.done():
+            while not worker.done():
                 try:
-                    await asyncio.wait({future})
+                    await asyncio.wait({worker})
                 except asyncio.CancelledError:
                     continue
-            if not future.cancelled():
-                future.exception()  # retrieved; the cancel is what propagates
+            if not worker.cancelled():
+                worker.exception()  # retrieved; the cancel is what propagates
             raise
 
 
