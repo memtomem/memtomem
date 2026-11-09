@@ -47,6 +47,14 @@ def _message_of(exc: Exception) -> str:
     return info.value.format_message()
 
 
+def _wrapped(cause: sqlite3.OperationalError) -> StorageError:
+    """A ``StorageError`` raised from ``cause``, as ``transaction()`` raises it."""
+    try:
+        raise StorageError(f"transaction() could not take the write lock: {cause}") from cause
+    except StorageError as exc:
+        return exc
+
+
 _HINT_CASES = [
     (sqlite3.OperationalError("database is locked"), "another process is writing"),
     (sqlite3.OperationalError("no such table: chunks"), "run `mm init`"),
@@ -57,6 +65,10 @@ _HINT_CASES = [
     (EmbeddingError("model not found"), "docs/guides/embeddings.md"),
     (ConfigError("bad json"), "mm config show"),
     (StorageError("disk I/O error"), "run `mm status`"),
+    # Another process kept ``BEGIN IMMEDIATE`` busy inside ``transaction()``
+    # (#3173): the lock hint, by the cause, not by the wrapper's text.
+    (_wrapped(sqlite3.OperationalError("database is locked")), "another process is writing"),
+    (_wrapped(sqlite3.OperationalError("disk I/O error")), "run `mm status`"),
     # The open-time lock gets the lock hint, not "run `mm status`" — which
     # would be the advice inside `mm status` itself (#2589).
     (StorageStartupError(reason_code="storage_locked", stage="open"), "another process is writing"),

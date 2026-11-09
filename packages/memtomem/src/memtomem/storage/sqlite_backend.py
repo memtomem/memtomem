@@ -586,6 +586,48 @@ class SqliteBackend(
         self._check_schema_current(self._db)
         return self._db
 
+    async def _get_db_when_idle(self, *, wait: float) -> sqlite3.Connection:
+        """The writer connection for synchronous reads, once no other task owns it.
+
+        ``_get_db()`` refuses at once while another task owns ``transaction()``.
+        This waits instead, in ``_writer_lock``'s FIFO queue, for at most
+        ``wait`` seconds, then hands the lock straight on and returns the
+        connection. Nothing suspends between that release and the hand-out, so
+        no task can become owner in between; the caller's reads must run
+        without an ``await`` in between, as with any ``_get_db()`` result.
+
+        It waits only while another task owns the writer. It does not queue
+        behind a writer that has been granted the lock but has not resumed:
+        it never holds the lock, so a read in that moment delays nobody, and
+        it sees no uncommitted state, since the last owner has finished and
+        the next has not begun. It takes no SQLite lock, so other processes
+        are not held up either.
+
+        Like ``transaction()``, it refuses a connection left in a transaction
+        that no task owns, rather than read another writer's uncommitted rows,
+        and leaves that transaction as it is.
+        """
+        owner = self._transaction_owner
+        if owner is not None and owner is not self._current_task():
+            # ``wait > 0`` rather than ``wait <= 0`` so NaN refuses too.
+            budget = wait if wait > 0 else 0.0
+            try:
+                async with asyncio.timeout(budget):
+                    await self._writer_lock.acquire()
+            except TimeoutError:
+                if getattr(self, "_closing", False):
+                    raise StorageError("Database is closing") from None
+                raise TransactionOwnedError(
+                    "SQLite transaction is owned by another task; timed out waiting for writer lock"
+                ) from None
+            self._writer_lock.release()
+        db = self._get_db()
+        if db.in_transaction and not self._in_transaction:
+            raise StorageError(
+                "writer read refused: the connection already has an open transaction"
+            )
+        return db
+
     def _check_schema_current(self, conn: sqlite3.Connection, *, force: bool = False) -> None:
         """Stop this process once another one has migrated the DB past it (#2564).
 

@@ -43,6 +43,7 @@ from memtomem.errors import (
     EmbeddingError,
     NamespaceResolutionError,
     RetryableError,
+    StorageError,
     TransactionOwnedError,
 )
 from memtomem.generation import ComponentGeneration
@@ -243,6 +244,29 @@ def _own_leaf_key(file_path: Path) -> str:
     no rows.
     """
     return fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
+
+
+def _require_same_source(file_path: Path, source_key: str) -> None:
+    """Stop a pass whose path names another source than it did before a writer wait (#3173).
+
+    The wait leaves time for the path to be replaced by a link to another
+    indexed source. Writes that resolve the path afterwards would reach that
+    source with this file's content. A relink during the embedding await
+    predates the waits and is not checked here (#3180).
+    """
+    if norm_path(file_path) != source_key:
+        raise RetryableError(
+            "Source path now names another file after waiting for the writer; retry"
+        )
+
+
+def _sqlite_busy(exc: BaseException) -> bool:
+    """Whether ``exc`` is SQLite's busy/locked error, bare or as a ``StorageError``'s cause."""
+    cause = exc if isinstance(exc, sqlite3.OperationalError) else exc.__cause__
+    if not isinstance(cause, sqlite3.OperationalError):
+        return False
+    text = str(cause).lower()
+    return "locked" in text or "busy" in text
 
 
 def _leaf_relinked(own_key: str, work_path: Path) -> bool:
@@ -1198,16 +1222,25 @@ class IndexEngine:
                 and not result.get("errors")
                 and (result["total"] or result["skipped"])
             ):
+                # Keyed before the wait, where the release without one keyed it:
+                # resolved after it, a path relinked meanwhile would release
+                # another source's hold (#3173).
+                release_key = norm_path(path)
                 try:
-                    released = await self._storage.release_source_hold(
-                        path, expected_generation=hold_generation
-                    )
-                except sqlite3.OperationalError as exc:
-                    if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
-                        raise
+                    async with self._storage.transaction(wait=WRITER_WAIT_S):
+                        released = await self._storage.release_source_hold(
+                            Path(release_key), expected_generation=hold_generation, as_stored=True
+                        )
+                except TransactionOwnedError as exc:
+                    # Ahead of ``StorageError``, its base class.
                     logger.warning("Indexed %s but deferred hold release: %s", path, exc)
                     released = False
-                except TransactionOwnedError as exc:
+                except (sqlite3.OperationalError, StorageError) as exc:
+                    # Another process holding the write lock reaches here as a
+                    # bare ``OperationalError`` or, at ``transaction()``'s
+                    # ``BEGIN IMMEDIATE``, wrapped in a ``StorageError``.
+                    if not _sqlite_busy(exc):
+                        raise
                     logger.warning("Indexed %s but deferred hold release: %s", path, exc)
                     released = False
                 if released:
@@ -1617,6 +1650,21 @@ class IndexEngine:
         if held:
             logger.info("Held a written source that is now a symlink: %s", Path(own_key).name)
         return held
+
+    async def _hold_waiting(self, file_path: Path, reason: str, *, key: str | None = None) -> bool:
+        """Hold ``file_path``'s rows for ``reason``, waiting out another task's writer (#3173).
+
+        The key is ``norm_path(file_path)``, the one ``hold_source`` would
+        compute, but resolved before the transaction: these holds fire when
+        the path cannot be read or stat'ed, which is when a stale mount can
+        make that resolve block, and it must not block holding the writer.
+        Resolved after the wait, a path relinked meanwhile would hold another
+        source. ``key`` is a key the caller already resolved, held as given.
+        """
+        if key is None:
+            key = await asyncio.to_thread(norm_path, file_path)
+        async with self._storage.transaction(wait=WRITER_WAIT_S):
+            return await self._storage.hold_source(Path(key), reason, as_stored=True)
 
     async def is_duplicate(
         self,
@@ -2093,7 +2141,7 @@ class IndexEngine:
         for the caller to retry rather than raised.
         """
         try:
-            held = await self._storage.hold_source(path, REDACTION_BLOCKED_HOLD)
+            held = await self._hold_waiting(path, REDACTION_BLOCKED_HOLD)
         except Exception as hold_exc:
             exc.mark_unheld()
             logger.error(
@@ -2130,7 +2178,8 @@ class IndexEngine:
         if absent and self._config.retain_missing_dirs:
             key = await asyncio.to_thread(self._retained_key, file_path)
             if key is not None:
-                shown = await self._storage.release_absence_hold(key)
+                async with self._storage.transaction(wait=WRITER_WAIT_S):
+                    shown = await self._storage.release_absence_hold(key)
                 return {
                     "total": 0,
                     "indexed": 0,
@@ -2139,7 +2188,7 @@ class IndexEngine:
                     "errors": [],
                     "mutated": shown,
                 }
-        held = await self._storage.hold_source(file_path, "source_missing")
+        held = await self._hold_waiting(file_path, "source_missing")
         if held:
             logger.warning("Source unavailable; holding indexed chunks: %s", file_path)
         return {
@@ -2309,7 +2358,7 @@ class IndexEngine:
             # stale chunks instead of a silent no-op.
             return await self._delete_missing_source(file_path, path_scope=path_scope)
         except OSError as exc:
-            held = await self._storage.hold_source(file_path, f"stat_error:{exc.errno}")
+            held = await self._hold_waiting(file_path, f"stat_error:{exc.errno}")
             return {
                 "total": 0,
                 "indexed": 0,
@@ -2339,7 +2388,11 @@ class IndexEngine:
         # content read) and BEFORE the exclude guard, so an excluded file that
         # was swapped for a same-named directory is still cleaned up. (#1566)
         if not stat_module.S_ISREG(stat_result.st_mode):
-            deleted = await self._storage.delete_by_source(file_path)
+            # Keyed before the wait, next to the stat that judged it: a path
+            # relinked during the wait would delete the link target's rows.
+            gone_key = norm_path(file_path)
+            async with self._storage.transaction(wait=WRITER_WAIT_S):
+                deleted = await self._storage.delete_by_source(Path(gone_key), as_stored=True)
             return {
                 "total": 0,
                 "indexed": 0,
@@ -2440,7 +2493,7 @@ class IndexEngine:
             # retain dir does not show it as an archive (#2833).
             return await self._delete_missing_source(file_path, path_scope=path_scope, absent=False)
         except OSError as exc:
-            held = await self._storage.hold_source(file_path, f"read_error:{exc.errno}")
+            held = await self._hold_waiting(file_path, f"read_error:{exc.errno}")
             return {
                 "total": 0,
                 "indexed": 0,
@@ -2574,7 +2627,6 @@ class IndexEngine:
         # Namespace reassignment and trusted/bypassed ingress are never reused.
         from memtomem.indexing.source_receipt import content_hash, digest, reusable
         from memtomem.storage.sqlite_backend import SqliteBackend
-        from memtomem.storage.sqlite_helpers import norm_path
 
         # The source's stored scopes, read once under the lock and judged after
         # the diff below (#2923). Read here because a source held for losing
@@ -2584,7 +2636,30 @@ class IndexEngine:
         from memtomem.indexing.scope_guard import key_spellings, scope_change, scope_change_detail
         from memtomem.storage.source_holds import SCOPE_LOST_HOLD
 
-        stored_scopes = self._stored_scope_rows(key_spellings(norm_path(file_path)))
+        #
+        # Every index of an existing file reads here, so it waits out another
+        # task's write transaction instead of being refused at once (#3173).
+        # Writer reads below that follow it with no ``await`` in between (the
+        # embedding info, the receipt lookup and a receipt hit's chunk ids,
+        # and the diff state when enrichment is off) are covered by the same
+        # wait. A writer access after an ``await`` needs a wait of its own.
+        #
+        # ``source_key`` is taken before the wait, with the content read above:
+        # resolved after it, a path relinked meanwhile names another source.
+        # The reads and writes below that would otherwise resolve the path
+        # again (scope rows, a receipt hit's chunk ids, the empty-file delete,
+        # the scope-loss hold) use it as stored.
+        source_key = norm_path(file_path)
+        scope_db = (
+            await self._storage._get_db_when_idle(wait=WRITER_WAIT_S)
+            if isinstance(self._storage, SqliteBackend)
+            else None
+        )
+        # The diff and chunk write below resolve ``file_path`` again. A path
+        # relinked during the wait would have them write this file's content
+        # into the link target's rows, so the pass stops and is retried.
+        _require_same_source(file_path, source_key)
+        stored_scopes = self._stored_scope_rows(key_spellings(source_key), db=scope_db)
         held_scope_lost = any(r[3] == SCOPE_LOST_HOLD for r in stored_scopes)
 
         receipt_policy = ""
@@ -2656,6 +2731,23 @@ class IndexEngine:
                 self._embedder.dimension,
             )
             if reused is not None:
+                # Read with the receipt, under the scope read's wait: the
+                # checks below await, and nothing may suspend between them
+                # and the return, or the file could change after it was
+                # judged unchanged (#3173).
+                unchanged_chunk_ids = (
+                    [
+                        row[0]
+                        for row in receipt_storage._get_db()
+                        .execute(
+                            "SELECT id FROM chunks WHERE source_file=? ORDER BY id",
+                            (source_key,),
+                        )
+                        .fetchall()
+                    ]
+                    if self._embedder.dimension > 0
+                    else []
+                )
                 await self._validate_source_commit(file_path)
                 if not await self._source_unchanged(file_path, content):
                     raise RetryableError(
@@ -2679,17 +2771,7 @@ class IndexEngine:
                     "exempted": int(exempted),
                     "namespace_decision": ns_decision,
                     "namespace_written": False,
-                    "unchanged_chunk_ids": [
-                        row[0]
-                        for row in receipt_storage._get_db()
-                        .execute(
-                            "SELECT id FROM chunks WHERE source_file=? ORDER BY id",
-                            (norm_path(file_path),),
-                        )
-                        .fetchall()
-                    ]
-                    if self._embedder.dimension > 0
-                    else [],
+                    "unchanged_chunk_ids": unchanged_chunk_ids,
                 }
         index_started = time.monotonic()
         new_chunks = self.chunk_content(file_path, content, exempt=masking_exempt)
@@ -2722,7 +2804,8 @@ class IndexEngine:
             # emptied source writes no namespace, so there is nothing to
             # collapse, and refusing here would strand its rows as
             # permanently searchable content for a file with no content.
-            deleted = await self._storage.delete_by_source(file_path)
+            async with self._storage.transaction(wait=WRITER_WAIT_S):
+                deleted = await self._storage.delete_by_source(Path(source_key), as_stored=True)
             return {
                 "total": 0,
                 "indexed": 0,
@@ -2770,6 +2853,8 @@ class IndexEngine:
             await enrich_context(
                 new_chunks, self._config, self._llm, cast("SqliteBackend", self._storage)
             )
+            # Its cache write waits for the writer, like the scope read above.
+            _require_same_source(file_path, source_key)
         existing_state = await self._storage.get_chunk_index_state(file_path)
         diff_result = compute_diff(existing_state, new_chunks)
         chunk_positions = {id(chunk): index + 1 for index, chunk in enumerate(new_chunks)}
@@ -2836,8 +2921,8 @@ class IndexEngine:
             # key. They keep their stored project scope, readable only there,
             # but stay searchable with the content they were indexed from; the
             # NFC/NFD key split behind that predates this check (#2926).
-            key = norm_path(file_path)
-            held = await self._storage.hold_source(file_path, SCOPE_LOST_HOLD)
+            key = source_key
+            held = await self._hold_waiting(file_path, SCOPE_LOST_HOLD, key=key)
             logger.warning(
                 "Refusing to re-index %s: its %s rows would become %s",
                 file_path.name,
@@ -3709,12 +3794,13 @@ class IndexEngine:
         return classify_scope(file_path, self._config.project_memory_dirs)
 
     def _stored_scope_rows(
-        self, keys: Iterable[str]
+        self, keys: Iterable[str], *, db: sqlite3.Connection | None = None
     ) -> list[tuple[str, str, str | None, str | None]]:
         """``(key, scope, project_root, hold reason)`` for each distinct stored row under ``keys``.
 
         Read on the writer connection, which a caller holding the source's lock
-        is the only one to write through for this source. A store that is not
+        is the only one to write through for this source: ``db`` when the
+        caller already waited for it, else ``_get_db()``. A store that is not
         SQLite has no rows to judge.
         """
         from memtomem.storage.sqlite_backend import SqliteBackend
@@ -3723,16 +3809,15 @@ class IndexEngine:
             return []
         keys = list(dict.fromkeys(keys))
         marks = ",".join("?" for _ in keys)
+        conn = db if db is not None else self._storage._get_db()
         return [
             (row[0], row[1], row[2], row[3])
-            for row in self._storage._get_db()
-            .execute(
+            for row in conn.execute(
                 "SELECT DISTINCT c.source_file, c.scope, c.project_root, h.reason "  # nosec B608
                 "FROM chunks c LEFT JOIN held_sources h ON h.source_file = c.source_file "
                 f"WHERE c.source_file IN ({marks})",
                 keys,
-            )
-            .fetchall()
+            ).fetchall()
         ]
 
     async def rewrite_refusal(

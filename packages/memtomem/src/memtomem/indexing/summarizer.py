@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
 
 from memtomem.llm.utils import strip_llm_response
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_helpers import norm_path
 
 if TYPE_CHECKING:
@@ -209,16 +210,20 @@ async def maybe_update_ai_summary(
         # Clear it so the heuristic excerpt takes over until the next
         # successful refresh.
         if cached is not None:
-            await storage.delete_ai_summary(stored, as_stored=True)
+            # After the LLM call, so another task may own the writer by now;
+            # the writes before it ran with none since the chunk write (#3173).
+            async with storage.transaction(wait=WRITER_WAIT_S):
+                await storage.delete_ai_summary(stored, as_stored=True)
         return
 
-    await storage.set_ai_summary(
-        stored,
-        summary=summary,
-        signature=signature,
-        language=config.summary_language,
-        as_stored=True,
-    )
+    async with storage.transaction(wait=WRITER_WAIT_S):
+        await storage.set_ai_summary(
+            stored,
+            summary=summary,
+            signature=signature,
+            language=config.summary_language,
+            as_stored=True,
+        )
 
 
 async def regenerate_for_paths(

@@ -43,6 +43,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Indexing a file no longer fails at once while another task holds a write
+  transaction (#3173).** Since 0.7.1, re-indexing an existing file first reads
+  its stored scope on the write connection, and that read was refused at once
+  while another task in the same process (a policy job, an import, a
+  consolidation) held `storage.transaction()`. The file failed with "SQLite
+  transaction is owned by another task", and an emptied file kept its old chunks
+  searchable. The hold placed on a missing, unreadable, redaction-blocked or
+  scope-changed file failed the same way, as did the `enrich_chunk_context`
+  description cache and the `auto_summarize` summary written after their LLM
+  calls. Each now waits for that transaction to end, up to the 5-second budget
+  the chunk write already used (#2860), and fails as before after that. Another
+  process holding the database is handled as before, through SQLite's busy
+  timeout; when that error comes from inside a write transaction, the CLI now
+  gives it the same "another process is writing" hint as the bare error.
 - **Web UI: translate toast close button tooltip and empty Source Chunks panel (#3136).**
   The toast ✕ button tooltip now reads `common.close` (e.g. 닫기 in Korean) instead of
   hard-coded English, and the empty Source Chunks panel renders `chunks.none_found`
