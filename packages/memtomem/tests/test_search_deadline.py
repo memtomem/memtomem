@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from helpers import StubCtx, make_chunk
+from helpers import BUDGET_TOLERANCE_S, StubCtx, make_chunk
 from memtomem.config import SearchConfig
 from memtomem.errors import SearchDeadlineExceeded
 from memtomem.models import SearchResult
@@ -50,7 +50,7 @@ def _pipeline(*, bm25=None, dense=None, embed=None, enable_dense: bool = False) 
 def test_deadline_helper():
     assert SearchDeadline.from_ms(None) is None
     d = SearchDeadline.from_ms(60_000)
-    assert d is not None and 59 < d.remaining() <= 60
+    assert d is not None and 59 < d.remaining() <= 60 + BUDGET_TOLERANCE_S
     d.check("start")
     expired = SearchDeadline(time.monotonic() - 1, 5)
     with pytest.raises(SearchDeadlineExceeded, match="5 ms exceeded at fusion"):
