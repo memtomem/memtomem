@@ -129,7 +129,9 @@ async def mem_import_notion(
     # forced import's valve to those bytes. Refused files are skipped and
     # counted rather than aborting the whole import. An exclusion installed
     # after a file was written makes the engine skip it; ``purge_if_excluded``
-    # then removes the chunks of the bytes this import overwrote (#3158).
+    # then removes the chunks of the bytes this import overwrote (#3158). A
+    # target replaced by a symlink after its write is held, not indexed through
+    # the link (``hold_if_relinked``, #3164).
     from memtomem.indexing.engine import PrivacyRejection
 
     effective_ns = namespace or "notion"
@@ -138,6 +140,8 @@ async def mem_import_notion(
     indexed_files: list[Path] = []
     excluded_purged = 0
     purged_chunks = 0
+    relinked = 0
+    relink_held = False
     for f in imported:
         try:
             stats = await app.index_engine.index_file(
@@ -147,9 +151,14 @@ async def mem_import_notion(
                 force_unsafe=force_unsafe,
                 valve_text=written_text.get(f),
                 purge_if_excluded=True,
+                hold_if_relinked=True,
             )
         except PrivacyRejection:
             blocked += 1
+            continue
+        if stats.relinked_files:
+            relinked += 1
+            relink_held = relink_held or stats.mutated
             continue
         if stats.excluded_files:
             excluded_purged += 1
@@ -179,8 +188,8 @@ async def mem_import_notion(
 
     app.search_pipeline.invalidate_cache()
 
-    # A purge changes the session's chunk set as much as an index does.
-    if total_chunks or purged_chunks:
+    # A purge or a hold changes the session's chunk set as much as an index does.
+    if total_chunks or purged_chunks or relink_held:
         await flag_untracked_write(app, provenance_session_id)
 
     return (
@@ -193,6 +202,8 @@ async def mem_import_notion(
         f"- Skipped (target under a read-only index root): {len(read_only_paths)}\n"
         f"- Written but excluded from indexing: {excluded_purged} "
         f"(previous chunks removed: {purged_chunks})\n"
+        f"- Written but replaced by a symlink (not indexed, previous chunks hidden): "
+        f"{relinked}\n"
         f"- Skipped (source is a symlink or outside the export): {len(source_symlink_paths)}\n"
         f"- Namespace: {effective_ns}\n"
         f"- Output: {output_dir}"
@@ -298,7 +309,9 @@ async def mem_import_obsidian(
     # forced import's valve to those bytes. Refused files are skipped and
     # counted rather than aborting the whole import. An exclusion installed
     # after a file was written makes the engine skip it; ``purge_if_excluded``
-    # then removes the chunks of the bytes this import overwrote (#3158).
+    # then removes the chunks of the bytes this import overwrote (#3158). A
+    # target replaced by a symlink after its write is held, not indexed through
+    # the link (``hold_if_relinked``, #3164).
     from memtomem.indexing.engine import PrivacyRejection
 
     effective_ns = namespace or "obsidian"
@@ -307,6 +320,8 @@ async def mem_import_obsidian(
     indexed_files: list[Path] = []
     excluded_purged = 0
     purged_chunks = 0
+    relinked = 0
+    relink_held = False
     for f in imported:
         try:
             stats = await app.index_engine.index_file(
@@ -316,9 +331,14 @@ async def mem_import_obsidian(
                 force_unsafe=force_unsafe,
                 valve_text=written_text.get(f),
                 purge_if_excluded=True,
+                hold_if_relinked=True,
             )
         except PrivacyRejection:
             blocked += 1
+            continue
+        if stats.relinked_files:
+            relinked += 1
+            relink_held = relink_held or stats.mutated
             continue
         if stats.excluded_files:
             excluded_purged += 1
@@ -348,8 +368,8 @@ async def mem_import_obsidian(
 
     app.search_pipeline.invalidate_cache()
 
-    # A purge changes the session's chunk set as much as an index does.
-    if total_chunks or purged_chunks:
+    # A purge or a hold changes the session's chunk set as much as an index does.
+    if total_chunks or purged_chunks or relink_held:
         await flag_untracked_write(app, provenance_session_id)
 
     return (
@@ -362,6 +382,8 @@ async def mem_import_obsidian(
         f"- Skipped (target under a read-only index root): {len(read_only_paths)}\n"
         f"- Written but excluded from indexing: {excluded_purged} "
         f"(previous chunks removed: {purged_chunks})\n"
+        f"- Written but replaced by a symlink (not indexed, previous chunks hidden): "
+        f"{relinked}\n"
         f"- Skipped (source is a symlink or outside the vault): {len(source_symlink_paths)}\n"
         f"- Namespace: {effective_ns}\n"
         f"- Output: {output_dir}"

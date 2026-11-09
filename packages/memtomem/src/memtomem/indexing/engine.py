@@ -51,7 +51,7 @@ from memtomem.indexing.redaction_exemption import declared_exemption, indexer_te
 from memtomem.indexing.source_receipt import chunker_versions, code_fingerprint, digest
 from memtomem.models import Chunk, IndexingStats, stored_namespace
 from memtomem.storage.base import WRITER_WAIT_S
-from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
+from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD, RELINKED_HOLD
 from memtomem.storage.sqlite_helpers import fold_path_form
 from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
 from memtomem.storage.sqlite_helpers import norm_path
@@ -233,6 +233,33 @@ def _exclude_match_keys(
     return keys
 
 
+def _own_leaf_key(file_path: Path) -> str:
+    """The key the store wrote for ``file_path`` while it was a regular file.
+
+    Its resolved parent plus its name as given: the leaf is never followed, so
+    a leaf that is, or becomes, a symlink still names its own rows and never
+    its target's (#2835, #2878). It does not match another spelling of the
+    leaf, so on Windows a name typed in a case other than the stored one names
+    no rows.
+    """
+    return fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
+
+
+def _leaf_relinked(own_key: str, work_path: Path) -> bool:
+    """True when the path being indexed is no longer the regular file at ``own_key``.
+
+    Either the leaf is a symlink now, or ``work_path`` (the resolution taken
+    before the locks) names another file: the leaf was a link then, and was
+    replaced by a regular file while the call waited (#3164). Case is compared
+    the way the platform compares it, because Windows' ``resolve()`` takes the
+    leaf's on-disk case. A parent moved and linked back also changes
+    ``work_path``, so it counts as a relink here.
+    """
+    if Path(own_key).is_symlink():
+        return True
+    return os.path.normcase(fold_path_form(str(work_path))) != os.path.normcase(own_key)
+
+
 def _path_is_excluded(
     file_path: Path,
     memory_dirs: Iterable[str | Path] | IndexRoots,
@@ -322,6 +349,9 @@ class IndexFileResult(_IndexFileBase, total=False):
     # ``IndexingStats.excluded_files``; ``deleted`` counts the rows the opt-in
     # ``purge_key`` delete removed (#3158).
     excluded: bool
+    # True when the opt-in ``relink_key`` check found the leaf replaced by a
+    # symlink; the rows under that key were held, not indexed (#3164).
+    relinked: bool
     # 1 when the file carried a frontmatter ``redaction: documents-patterns``
     # declaration the guard honoured (#2076). Set only on the success return,
     # after the chunk transaction commits: an exempted file whose embedding or
@@ -1086,6 +1116,7 @@ class IndexEngine:
         walk_root: Path | None = None,
         index_roots: IndexRoots | None = None,
         purge_key: str | None = None,
+        relink_key: str | None = None,
     ) -> tuple[IndexFileResult, float]:
         """Run ``_index_file`` under the L2 sidecar → L3 ``_index_lock`` pair.
 
@@ -1153,6 +1184,7 @@ class IndexEngine:
                     walk_root=walk_root,
                     index_roots=index_roots,
                     purge_key=purge_key,
+                    relink_key=relink_key,
                 )
             except PrivacyRejection as exc:
                 await self._hold_blocked_source(path, exc)
@@ -1357,6 +1389,7 @@ class IndexEngine:
         reassign_namespaces: bool = False,
         new_source_namespace: str | None = None,
         purge_if_excluded: bool = False,
+        hold_if_relinked: bool = False,
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers.
 
@@ -1431,6 +1464,23 @@ class IndexEngine:
         an excluded file's chunks stay until ``mm purge --matching-excluded``
         (#3158).
 
+        ``hold_if_relinked=True`` is for the same caller: if the regular file it
+        wrote at ``file_path`` has been replaced by a symlink, the rows stored
+        under the path's own key are held with ``source_relinked`` and nothing
+        is indexed, so the link's target is never indexed, namespaced or tagged
+        as the caller's file. ``IndexingStats.relinked_files`` is then 1. It is
+        checked before the locks, so a link into a directory whose sidecar
+        cannot be taken is still held, and again under them, for a swap while
+        the call waits; it precedes the exclude guard, so such a file is held
+        rather than purged. Not covered: a swap after the check under the locks
+        reads the target and writes its rows under the target's key, the way
+        any caller's index follows a link; and a swap while the call waits for
+        a pipeline slot, into a directory whose sidecar cannot be taken, raises
+        that ``OSError`` before the check under the locks. The watcher's relink
+        hold catches the leaf afterwards. A parent directory moved and linked
+        back counts as a relink. Every other caller keeps the default and
+        indexes through the link (#3164).
+
         If ``file_path`` is missing or inaccessible, its existing chunks are
         held outside search until recovery or explicit cleanup (#2498). A
         present nonregular replacement is positively known to be no longer an
@@ -1454,12 +1504,16 @@ class IndexEngine:
         # its target's rows (#2835). Resolved parent plus the name matches the
         # key the store wrote while the leaf was a regular file, when the leaf
         # is spelled as it was stored (#2878).
-        purge_key = (
-            fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
-            if purge_if_excluded
-            else None
-        )
-        if purge_key is None and self.is_excluded(file_path) and file_path.is_file():
+        purge_key = _own_leaf_key(file_path) if purge_if_excluded else None
+        # The relink check runs inside the locks too, so a hold-only call must
+        # not stop at the early exclusion return below (#3164).
+        relink_key = _own_leaf_key(file_path) if hold_if_relinked else None
+        if (
+            purge_key is None
+            and relink_key is None
+            and self.is_excluded(file_path)
+            and file_path.is_file()
+        ):
             logger.debug("Skipping excluded file %s", file_path)
             return IndexingStats(
                 total_files=0,
@@ -1471,9 +1525,26 @@ class IndexEngine:
                 new_chunk_ids=(),
                 excluded_files=1,
             )
+        work_path = resolve_path(file_path)
         with self._active_run():
+            # Before the locks: the sidecar is keyed on ``work_path``, which for a
+            # link is its target's, and a target whose sidecar cannot be taken
+            # must not keep the leaf's rows served (#3164).
+            if relink_key is not None and _leaf_relinked(relink_key, work_path):
+                held = await self._hold_relinked_key(relink_key)
+                return IndexingStats(
+                    total_files=0,
+                    total_chunks=0,
+                    indexed_chunks=0,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=0.0,
+                    new_chunk_ids=(),
+                    mutated=held,
+                    relinked_files=1,
+                )
             result, duration = await self._index_file_locked(
-                resolve_path(file_path),
+                work_path,
                 force,
                 namespace=namespace,
                 force_unsafe=force_unsafe,
@@ -1484,6 +1555,7 @@ class IndexEngine:
                 reassign_namespaces=reassign_namespaces,
                 new_source_namespace=new_source_namespace,
                 purge_key=purge_key,
+                relink_key=relink_key,
             )
         tally = _NamespaceTally()
         decision = result.get("namespace_decision")
@@ -1520,7 +1592,22 @@ class IndexEngine:
             mutated=result.get("mutated", False),
             scope_held=result.get("scope_held", False),
             excluded_files=1 if result.get("excluded") else 0,
+            relinked_files=1 if result.get("relinked") else 0,
         )
+
+    async def _hold_relinked_key(self, own_key: str) -> bool:
+        """Hold the rows stored under ``own_key``, a leaf that is now a symlink (#3164).
+
+        The key is held as stored, never resolved again: resolving it would
+        hold the link's target. A key with no rows holds nothing. The hold
+        waits for another task's write transaction the way the index's own
+        write does, rather than being refused at once.
+        """
+        async with self._storage.transaction(wait=WRITER_WAIT_S):
+            held = await self._storage.hold_source(Path(own_key), RELINKED_HOLD, as_stored=True)
+        if held:
+            logger.info("Held a written source that is now a symlink: %s", Path(own_key).name)
+        return held
 
     async def is_duplicate(
         self,
@@ -2177,11 +2264,28 @@ class IndexEngine:
         walk_root: Path | None = None,
         index_roots: IndexRoots | None = None,
         purge_key: str | None = None,
+        relink_key: str | None = None,
     ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]), and resolved_namespace (str | None) when
         # at least one chunk was successfully upserted. Early/no-write paths
         # may omit the optional keys — consumers must tolerate their absence.
+
+        # A caller that wrote this file asks, under the locks, whether the leaf
+        # is still its regular file. Before the stat, so a dangling link or a
+        # link to a directory is held too, and before the exclude guard, so a
+        # relinked file is held rather than purged (#3164).
+        if relink_key is not None and _leaf_relinked(relink_key, file_path):
+            held = await self._hold_relinked_key(relink_key)
+            return {
+                "total": 0,
+                "indexed": 0,
+                "skipped": 0,
+                "deleted": 0,
+                "errors": [],
+                "mutated": held,
+                "relinked": True,
+            }
 
         # Existence check FIRST — before the exclude guard. A source that is
         # missing must be held even if newly excluded, so old chunks cannot
