@@ -53,6 +53,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   missing-extra warning now names `mm add` and `mm search`, and says only reranking is affected
   when the extra is wanted for the reranker alone. Workspace detection also finds
   `.venv/Scripts/python.exe` on Windows.
+
+- **Notion and Obsidian imports no longer stall the MCP server while they run (#3124).**
+  `mem_import_notion` and `mem_import_obsidian` read the export, rewrite it and write the
+  cleaned files on a worker thread, so other requests are served during a large import. A
+  cancelled import stops between files and returns only after the worker has stopped, and
+  every file of one import is checked against the indexing configuration that was installed
+  when the import started.
+
 - **Quality Lab replay compare no longer claims metric deltas should be zero when
   reports come from different memtomem versions (#3125).** Replay reports now
   record `memtomem_version`. When comparing reports produced by different

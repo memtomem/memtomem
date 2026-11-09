@@ -350,6 +350,29 @@ class IndexFileResult(_IndexFileBase, total=False):
     scope_held: bool
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class WriteTargetSnapshot:
+    """The engine's write-target questions, answered against one fixed config.
+
+    Built by :meth:`IndexEngine.write_target_snapshot` for work that runs on a
+    worker thread (#3124). The live predicates read ``IndexEngine._config`` on
+    every call, and another tool call can install new roots between two of a
+    worker's reads; this object holds the roots, read-only roots and exclude
+    spec from a single read, so every target of one run is judged against the
+    same configuration. Both predicates call the same helpers the live ones do.
+    """
+
+    roots: tuple[Path, ...]
+    read_only_roots: tuple[Path, ...]
+    user_spec: pathspec.GitIgnoreSpec
+
+    def is_excluded(self, file_path: Path) -> bool:
+        return _path_is_excluded(file_path, self.roots, self.user_spec)
+
+    def is_read_only_source(self, file_path: Path) -> bool:
+        return _is_under_any_root(file_path, self.read_only_roots)
+
+
 class IndexEngine:
     # A class-level default, not an ``__init__`` assignment: tests (and any
     # helper) that build an engine with ``IndexEngine.__new__`` and set only
@@ -1294,6 +1317,23 @@ class IndexEngine:
         is why an unavailable mount does not turn this into an error path.
         """
         return _is_under_any_root(file_path, self._config.read_only_memory_dirs)
+
+    def write_target_snapshot(self) -> WriteTargetSnapshot:
+        """Freeze :meth:`is_excluded` and :meth:`is_read_only_source` for a worker thread.
+
+        Call it on the event-loop thread, right before the hand-off. Reading the
+        config through one local reference does not make its three root lists one
+        read; what makes the snapshot coherent is that the code which replaces
+        them (the MCP root install and its rollback in ``server/context.py``, the
+        web hot reload) also runs on the loop, with no ``await`` between its
+        assignments.
+        """
+        config = self._config
+        return WriteTargetSnapshot(
+            roots=tuple(config.all_index_roots()),
+            read_only_roots=tuple(config.read_only_memory_dirs),
+            user_spec=self._get_user_exclude_spec(),
+        )
 
     async def index_file(
         self,
