@@ -1433,8 +1433,8 @@ class FileWatcher:
         """Reindex one changed file. Returns ``file_path`` when the reindex
         timed out acquiring the file's cross-process sidecar, or was refused by
         the redaction guard without its older chunks being held, or is now a
-        symlink whose own chunks could not be held (so the caller can retry it
-        next window), else ``None``.
+        symlink whose own chunks could not be held, or became one while it was
+        being indexed (so the caller can retry it next window), else ``None``.
 
         A path no longer contained in any configured root is dropped. Events are
         collected before a flush and ``reconfigure`` leaves them alone, so a file
@@ -1446,7 +1446,7 @@ class FileWatcher:
         and the engine. It is also a check, not a lock: a flush that passed it
         before the root was removed can still write afterwards.
         """
-        from memtomem.indexing.engine import PrivacyRejection
+        from memtomem.indexing.engine import PrivacyRejection, SourceRelinkedError
 
         if not is_under_any_root(file_path, self._config.all_index_roots()):
             logger.info("Skipped auto-reindex for %s: not under a configured root", file_path.name)
@@ -1517,6 +1517,12 @@ class FileWatcher:
             # would leave the edit unindexed until something else touched the
             # file.
             logger.warning("Auto-reindex deferred for %s: %s; will retry", file_path.name, exc)
+            return file_path
+        except SourceRelinkedError as exc:
+            # The path became a link to another source while the index awaited,
+            # and the index wrote nothing (#3180). The retry holds the leaf's
+            # own rows (``_hold_relinked_leaf``) before indexing through the link.
+            logger.warning("Auto-reindex deferred for %s: %s", file_path.name, exc)
             return file_path
         except Exception as exc:
             logger.error("Auto-reindex failed for %s: %s", file_path, exc)
