@@ -13,6 +13,7 @@ from memtomem.embedding.probe import embed_document_probe
 from memtomem.errors import NamespaceResolutionError
 from memtomem.indexing.scope_guard import scope_held_notice
 from memtomem.search.visibility import resolve_visible_chunk
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_visibility import source_hidden
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
@@ -683,7 +684,12 @@ async def delete_chunk(
             try:
                 remaining = await storage.get_chunk(chunk_id)
                 if remaining is not None:
-                    await storage.delete_chunks([chunk_id])
+                    # Waits for another task's transaction (#3181). Inside one,
+                    # only ``finalize_emptied`` keeps the emptied-source cleanup
+                    # the standalone delete runs. The check after it reads the
+                    # pool, so it runs once this has committed.
+                    async with storage.transaction(wait=WRITER_WAIT_S):
+                        await storage.delete_chunks([chunk_id], finalize_emptied=True)
                     remaining = await storage.get_chunk(chunk_id)
             except Exception as exc:
                 logger.error("Index cleanup failed for deleted chunk %s", chunk_id, exc_info=True)

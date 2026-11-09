@@ -629,16 +629,27 @@ _TRANSACTION_SITES = {
     # The summary delete and write after the LLM call (#3173), and the bulk
     # regenerate's write after its LLM call (#3179).
     "indexing/summarizer.py": [True, True, True],
+    # The relinked leaf's hold after the link check (#3181).
+    "indexing/watcher.py": [True],
     "search/decay.py": [True],
     "search/dedup.py": [True],
     "server/tools/hermes_mirror.py": [True, True],
     "server/tools/consolidation.py": [True],
     "storage/sqlite_backend.py": [False],
+    # Each chunk's tag write after the extraction (#3181).
+    "tools/auto_tag.py": [True],
     "tools/consolidation_engine.py": [True],
     "tools/entity_backfill.py": [False],
     "tools/export_import.py": [True],
     # auto_archive, auto_expire, auto_promote (#3110).
     "tools/policy_engine.py": [True, True, True],
+    # Writes that follow the append and index of a web write (#3181): the
+    # index-only chunk delete, the promote mark, the memory-dir remove sweep and
+    # the add's tag merge.
+    "web/routes/chunks.py": [True],
+    "web/routes/scratch.py": [True],
+    "web/routes/system_config.py": [True],
+    "web/routes/system_indexing.py": [True],
 }
 
 

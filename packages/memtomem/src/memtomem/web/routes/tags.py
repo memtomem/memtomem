@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from memtomem.errors import TransactionOwnedError
 from memtomem.services import tag_management as tag_svc
 from memtomem.tools.auto_tag import auto_tag_storage
 from memtomem.web.deps import get_project_context_root, get_search_pipeline, get_storage
@@ -54,15 +55,28 @@ async def run_auto_tag(
     on the response is just bytes the UI doesn't need.
     """
     sample_limit = _DRY_RUN_SAMPLE_CAP if body.dry_run else 0
-    stats = await auto_tag_storage(
-        storage,
-        source_filter=body.source_filter,
-        max_tags=body.max_tags,
-        overwrite=body.overwrite,
-        dry_run=body.dry_run,
-        sample_limit=sample_limit,
-        search_pipeline=search_pipeline,
-    )
+    try:
+        stats = await auto_tag_storage(
+            storage,
+            source_filter=body.source_filter,
+            max_tags=body.max_tags,
+            overwrite=body.overwrite,
+            dry_run=body.dry_run,
+            sample_limit=sample_limit,
+            search_pipeline=search_pipeline,
+        )
+    except TransactionOwnedError as exc:
+        # Each chunk's tags commit on their own, so the run stopped partway
+        # with the earlier ones written (#3181).
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Auto-tag stopped partway: another write held the database longer than "
+                "this request waits. The tags written before it stopped are kept. Run it "
+                "again to continue; without overwrite, chunks that already have tags are "
+                "skipped."
+            ),
+        ) from exc
     return AutoTagResponse(
         total_chunks=stats.total_chunks,
         tagged_chunks=stats.tagged_chunks,

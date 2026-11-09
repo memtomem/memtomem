@@ -43,6 +43,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Web UI writes that follow an index, and the watcher's hold on a file that
+  became a symlink, wait for another task's write transaction instead of
+  leaving a half-done result (#3181).** While another task in the same process
+  held `storage.transaction()`, these writes were refused at once with "SQLite
+  transaction is owned by another task", after something had already been
+  written. Promoting a working-memory entry appended it but left it unmarked, so
+  promoting it again appended it twice. Removing a memory directory with its
+  chunks saved the config, deleted only part of the chunks and skipped the file
+  watcher update, and a retry answered 404. An add with tags missing from the
+  index lost them, an index-only chunk delete left the row searchable, auto-tag
+  stopped partway, and the watcher left the file's old chunks searchable until
+  its next retry. Each now waits up to the same 5-second budget. When that runs
+  out, the promote, the add, the directory removal and auto-tag answer 503 with
+  what was written and what to do, instead of 500; the chunk delete keeps its
+  500, which already said so, and the watcher retries the file. A promote says
+  not to promote again. A directory removal deletes none of the chunks, because
+  the sweep is now all-or-nothing, still updates the watcher, and gets a
+  deadline of its own after the config is saved. The promote mark is also taken before the file lock is released, so
+  a second promote cannot append the entry while the first waits.
+
 - **Editing or deleting a memory by id, and regenerating summaries in bulk, no
   longer fail at once while another task holds a write transaction (#3179).**
   Since 0.7.1, an edit or delete by chunk id (`mem_edit`, `mem_delete`, and the

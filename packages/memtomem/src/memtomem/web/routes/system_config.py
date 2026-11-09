@@ -26,8 +26,9 @@ from memtomem.config import (
     saved_embedding_identity,
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
-from memtomem.errors import RetryableError
+from memtomem.errors import RetryableError, TransactionOwnedError
 from memtomem.search.reranker.factory import create_reranker, load_reranker
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_helpers import fold_path_form, norm_path
 from memtomem.web import hot_reload as _hot_reload
 from memtomem.web.deps import (
@@ -67,6 +68,10 @@ from memtomem.web.schemas.config import (
 )
 
 logger = logging.getLogger("memtomem.web.routes.system")
+
+#: Seconds ``memory-dirs/remove`` allows the sweep and watcher update after the
+#: config save, on a deadline of their own (#3181).
+_POST_SAVE_BUDGET_S = 60.0
 
 _LOCALHOST_ADDRS = {"127.0.0.1", "::1", "localhost"}
 
@@ -1007,8 +1012,9 @@ async def remove_memory_dir(
         raise HTTPException(status_code=400, detail="path is required")
     delete_chunks = bool(body.get("delete_chunks", False))
 
+    saved_as_removed: Path | None = None
     try:
-        async with _asyncio.timeout(60):
+        async with _asyncio.timeout(60) as deadline:
             async with _config_lock:
                 await hr.reload_if_stale(
                     request.app, storage=storage, search_pipeline=search_pipeline
@@ -1061,6 +1067,11 @@ async def remove_memory_dir(
                         )
                     raise
                 hr.commit_writer_signature(request.app)
+                # What follows the save gets a budget of its own (#3181): the
+                # sweep's writer wait must not inherit what the lock wait spent,
+                # or the deadline lands after the save and skips the watcher.
+                saved_as_removed = resolved
+                deadline.reschedule(_asyncio.get_running_loop().time() + _POST_SAVE_BUDGET_S)
 
                 # Chunk cleanup happens after the registration is removed
                 # so a partial failure never leaves chunks orphaned with
@@ -1068,10 +1079,10 @@ async def remove_memory_dir(
                 # to ``chunks_fts`` / ``chunks_vec`` / ``chunk_links`` via
                 # the schema's ``ON DELETE CASCADE``.
                 deleted_chunks = 0
+                sweep_refused = False
                 if delete_chunks:
                     from memtomem.indexing.engine import norm_dir_prefix, swept_on_remove
 
-                    rows = await storage.get_source_files_with_counts()
                     # The same form :func:`norm_dir_prefix` builds (Unicode form
                     # folded where the filesystem folds it, a trailing
                     # ``os.sep``; #647), made from the path checked above
@@ -1086,27 +1097,58 @@ async def remove_memory_dir(
                     # status ``delete_chunk_count`` the dialog shows applies the
                     # same rule.
                     surviving = [norm_dir_prefix(p) for p in config.indexing.all_index_roots()]
+                    # One transaction that waits for another task's (#3181).
+                    # ``delete_by_source`` does not suspend, so the loop held the
+                    # event loop for its whole length already; holding the writer
+                    # for it too makes the sweep all-or-nothing and costs one
+                    # wait, not one per source. Listing inside it sweeps a source
+                    # indexed during the wait as well.
+                    swept = 0
                     try:
-                        for row in rows:
-                            source_path = row[0]
-                            # Judged and deleted by the stored key: resolving it
-                            # would follow a path that has since become a link
-                            # to another source's rows (#2835, #2878).
-                            key = fold_path_form(str(source_path))
-                            if swept_on_remove(key, prefix, surviving):
-                                deleted_chunks += await storage.delete_by_source(
-                                    source_path, as_stored=True
-                                )
-                    finally:
+                        async with storage.transaction(wait=WRITER_WAIT_S):
+                            rows = await storage.get_source_files_with_counts()
+                            for row in rows:
+                                source_path = row[0]
+                                # Judged and deleted by the stored key: resolving
+                                # it would follow a path that has since become a
+                                # link to another source's rows (#2835, #2878).
+                                key = fold_path_form(str(source_path))
+                                if swept_on_remove(key, prefix, surviving):
+                                    swept += await storage.delete_by_source(
+                                        source_path, as_stored=True
+                                    )
+                    except TransactionOwnedError:
+                        # Refused at admission: nothing was deleted.
+                        sweep_refused = True
+                    else:
+                        deleted_chunks = swept
                         # Same cache-staleness class as #2141: these rows are
                         # gone from the store but a warmed query would still
-                        # return them. In ``finally`` because a source that
-                        # fails partway through the sweep must not discard the
-                        # deletions the sources before it already committed.
+                        # return them.
                         if deleted_chunks:
                             search_pipeline.invalidate_cache()
 
                 watcher = getattr(request.app.state, "file_watcher", None)
+                if sweep_refused:
+                    # The directory is already saved as removed and a retry
+                    # answers 404, so the refusal says what is left, and a
+                    # watcher failure must not replace it with a bare 500.
+                    detail = (
+                        f"{resolved} was removed from memory_dirs, but none of its chunks were "
+                        "deleted: another write held the database longer than this request "
+                        "waits. Its sources that no other memory directory contains stay "
+                        "indexed and can be removed from the Sources page."
+                    )
+                    if watcher is not None:
+                        try:
+                            await watcher.reconfigure(config.indexing)
+                        except Exception:
+                            logger.exception("Could not reconfigure the file watcher")
+                            detail += (
+                                " The file watcher could not be updated either; restart "
+                                "mm web to stop watching the directory."
+                            )
+                    raise HTTPException(status_code=503, detail=detail)
                 if watcher is not None:
                     await watcher.reconfigure(config.indexing)
 
@@ -1119,6 +1161,13 @@ async def remove_memory_dir(
                     "deleted_chunks": deleted_chunks,
                 }
     except TimeoutError:
+        if saved_as_removed is not None:
+            raise HTTPException(
+                503,
+                f"{saved_as_removed} was removed from memory_dirs, but removing its chunks or "
+                "updating the file watcher did not finish in time. Chunks still indexed under "
+                "it can be removed from the Sources page.",
+            )
         raise HTTPException(503, "memory-dirs/remove timed out — another update may be in progress")
 
 

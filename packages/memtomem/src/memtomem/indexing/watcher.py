@@ -19,6 +19,7 @@ from watchdog.observers.polling import PollingObserver
 
 from memtomem.config import IndexingConfig
 from memtomem.errors import NamespaceResolutionError, RetryableError
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.source_holds import RELINKED_HOLD
 from memtomem.storage.sqlite_helpers import (
     fold_path_form,
@@ -1420,7 +1421,11 @@ class FileWatcher:
         if key is None:
             return True
         try:
-            if await storage.hold_source(Path(key), RELINKED_HOLD, as_stored=True):
+            # The link check above awaited, so another task may own the writer;
+            # wait for it rather than be refused (#3181).
+            async with storage.transaction(wait=WRITER_WAIT_S):
+                held = await storage.hold_source(Path(key), RELINKED_HOLD, as_stored=True)
+            if held:
                 logger.info("Held a source that is now a symlink: %s", file_path.name)
                 if self._search_pipeline is not None:
                     self._search_pipeline.invalidate_cache()
