@@ -7,7 +7,7 @@ memtomem supports three embedding providers: **ONNX** (local, no server), **Olla
 Embeddings are **opt-in** — out of the box memtomem runs keyword-only search with no model and no server. Pick a provider by what you need:
 
 - **Stay on the default (`none`)** — BM25 keyword search, no model download, no server. Works immediately, and is the fastest no-download first proof — the `mm init` **Minimal** preset selects it.
-- **Want semantic ("by meaning") search?** → **ONNX** with `multilingual-e5-small`. Runs locally in-process on CPU, ~490 MB downloaded automatically on first use, and covers English plus Korean / Chinese / Japanese. It is the ONNX default, the model both the English and Korean-optimized `mm init` presets use, and the wizard's default choice.
+- **Want semantic ("by meaning") search?** → **ONNX** with `multilingual-e5-small`. Runs locally in-process on CPU, ~490 MB downloaded automatically on first use, and covers English plus Korean / Chinese / Japanese. It is the ONNX default, the model both the English and Korean-optimized `mm init` presets use, and the wizard's default choice when the `onnx` extra is installed. Without it, the wizard defaults to **Minimal**.
 - **Want the smallest English-only download?** → **ONNX** with `all-MiniLM-L6-v2` (~90 MB) or `bge-small-en-v1.5` (~67 MB).
 - **Already run an Ollama server?** → **Ollama** with `nomic-embed-text`, to reuse that daemon instead of embedding in-process.
 - **Want cloud accuracy with no local compute?** → **OpenAI** with `text-embedding-3-small` (needs an API key; text is sent to OpenAI).

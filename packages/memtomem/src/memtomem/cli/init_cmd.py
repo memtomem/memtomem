@@ -76,6 +76,10 @@ def _ollama_available() -> bool:
     return shutil.which("ollama") is not None
 
 
+def _claude_cli_found() -> bool:
+    return shutil.which("claude") is not None
+
+
 def _ollama_running() -> bool:
     try:
         if sys.platform == "win32":
@@ -1196,7 +1200,11 @@ def _step_mcp(state: dict) -> None:
         return
     step_header(state, "Connect to AI Editor")
     click.echo("  How do you want to connect memtomem?")
-    click.echo("    [1] Claude Code (run 'claude mcp add' automatically)")
+    claude_found = _claude_cli_found()
+    if claude_found:
+        click.echo("    [1] Claude Code (run 'claude mcp add' automatically)")
+    else:
+        click.echo("    [1] Claude Code (claude CLI not found on PATH)")
     click.echo("    [2] Generate .mcp.json here (Claude Code project scope;")
     click.echo("        copy into your editor's config file for Cursor / Windsurf / others)")
     click.echo("    [3] Skip — I'll configure it manually")
@@ -1204,7 +1212,8 @@ def _step_mcp(state: dict) -> None:
     click.echo("        it already bundles the server, and a manual entry would run a")
     click.echo("        second copy against the same store)")
     click.echo("    [4] Kimi Code (write ~/.kimi-code/mcp.json or $KIMI_CODE_HOME/mcp.json)")
-    state["mcp_choice"] = nav_prompt("  Select", type=click.IntRange(1, 4), default=1)
+    default = 1 if claude_found else 3
+    state["mcp_choice"] = nav_prompt("  Select", type=click.IntRange(1, 4), default=default)
     click.echo()
 
 
@@ -1646,18 +1655,22 @@ def _workspace_python(state: dict) -> Path | None:
     profile = state["_profile"]
     if profile.workspace_venv_path is None:
         return None
-    py = profile.workspace_venv_path / "bin" / "python"
-    return py if py.exists() else None
+    for relative in (("bin", "python"), ("Scripts", "python.exe")):
+        py = profile.workspace_venv_path.joinpath(*relative)
+        if py.exists():
+            return py
+    return None
 
 
 def _probe_workspace_extras(py: Path) -> set[str] | None:
     """Ask a foreign Python which of ``fastembed`` / ``fastapi`` / ``uvicorn``
     are importable. Returns the importable subset, or ``None`` on subprocess
-    failure (missing binary, timeout, non-zero rc, bad JSON). Callers treat
-    ``None`` as "unknown — fall back to the in-process probe"."""
+    failure (a binary that is missing or cannot run, timeout, non-zero rc, bad
+    JSON). ``None`` means unknown: :func:`_collect_missing_extras` falls back to the
+    in-process probe, and :func:`_onnx_preset_will_work` counts it as missing."""
     try:
         result = _run([str(py), "-c", _PROBE_EXTRAS_CODE], timeout=5)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
         return None
@@ -1684,6 +1697,22 @@ def _inproc_have_extras() -> tuple[bool, bool]:
     from memtomem.cli.web import _missing_web_deps
 
     return (_have_module("fastembed"), _missing_web_deps() is None)
+
+
+def _onnx_preset_will_work(state: dict) -> bool:
+    """True only when the ``onnx`` extra is known to be importable where memtomem will run.
+
+    Decides what pressing Enter at the preset picker selects, so unknown counts as
+    missing: unlike :func:`_collect_missing_extras`, a workspace whose interpreter
+    is absent or cannot be probed does not fall back to the running interpreter."""
+    profile = state.get("_profile")
+    if profile is None or profile.cwd_install_type not in ("source", "project"):
+        return _have_module("fastembed")
+    workspace_python = _workspace_python(state)
+    if workspace_python is None:
+        return False
+    importable = _probe_workspace_extras(workspace_python)
+    return importable is not None and "fastembed" in importable
 
 
 def _workspace_needs_sync(state: dict) -> bool:
@@ -2264,10 +2293,23 @@ def _emit_missing_extras_warning(missing: list[str], state: dict) -> None:
         fg="yellow",
         bold=True,
     )
+    embeds_with_onnx = state.get("provider") == "onnx"
     if "onnx" in missing and "web" in missing:
-        click.echo("      'mm index' (embeddings) and 'mm web' (UI) will fail until installed.")
+        if embeds_with_onnx:
+            click.echo(
+                "      'mm add', 'mm search', 'mm index' (embeddings) and 'mm web' (UI) "
+                "will fail until installed."
+            )
+        else:
+            click.echo(
+                "      Reranking keeps the original order and 'mm web' (UI) will fail "
+                "until installed."
+            )
     elif "onnx" in missing:
-        click.echo("      'mm index' will fail to embed until installed.")
+        if embeds_with_onnx:
+            click.echo("      'mm add', 'mm search' and 'mm index' will fail until installed.")
+        else:
+            click.echo("      Reranking keeps the original order until installed.")
     elif "web" in missing:
         click.echo("      'mm web' will fail to start until installed.")
     click.echo(f"      → {_extra_install_hint(missing, state)}")
@@ -2927,15 +2969,18 @@ def _step_preset_picker(state: dict) -> None:
     click.echo()
 
     ordered: list[str] = ["minimal", "english", "korean"]
+    onnx_will_work = _onnx_preset_will_work(state)
     for i, name in enumerate(ordered, start=1):
         spec = PRESETS[name]  # type: ignore[index]
-        click.echo(f"    [{i}] {spec.label}")
+        needs_extra = spec.provider == "onnx" and not onnx_will_work
+        click.echo(f"    [{i}] {spec.label}{' — needs memtomem[onnx]' if needs_extra else ''}")
         click.echo(f"        {spec.description}")
     advanced_idx = len(ordered) + 1
     click.echo(f"    [{advanced_idx}] Advanced — full 10-step wizard (all options)")
     click.echo()
 
-    choice = nav_prompt("  Select", type=click.IntRange(1, advanced_idx), default=2)
+    default = ordered.index("english" if onnx_will_work else "minimal") + 1
+    choice = nav_prompt("  Select", type=click.IntRange(1, advanced_idx), default=default)
     click.echo()
 
     if choice == advanced_idx:
@@ -3385,7 +3430,8 @@ def init(
             click.secho(
                 "  Note: --non-interactive without --preset applies the "
                 "'minimal' preset (BM25 keyword search only, no embeddings); "
-                "the interactive wizard defaults to 'english'. Pass --preset "
+                "the interactive wizard defaults to 'english' when the onnx extra "
+                "is installed and to 'minimal' otherwise. Pass --preset "
                 "minimal|english|korean to choose explicitly, or run "
                 "`mm init` for the wizard.",
                 fg="yellow",
