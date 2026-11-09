@@ -38,8 +38,8 @@ hand-written.
   plugin from `packages/memtomem-hermes-plugin`, or your own `mcp_servers.memtomem` entry in
   `config.yaml`. Earlier memtomem releases do not confirm that a search records nothing, and
   this provider refuses to use them.
-- Mirroring needs a memtomem release newer than 0.7.7: one whose `mem_do(action="version")`
-  lists `hermes_mirror`. With an older server, recall works as before and mirroring stays off
+- Mirroring needs memtomem 0.7.8 or newer, whose `mem_do(action="version")` lists
+  `hermes_mirror`. With an older server, recall works as before and mirroring stays off
   with one warning.
 - Git on `PATH`, for the commit lookup under [Install](#install).
 
