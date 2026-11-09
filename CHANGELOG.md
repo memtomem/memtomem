@@ -43,6 +43,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A re-import no longer leaves the previous import's chunks searchable when its
+  targets become excluded mid-import (#3158).** `mem_import_notion` and
+  `mem_import_obsidian` write every target before indexing any of them. If an
+  exclude pattern covering a target was added in between (for example through
+  `mem_config`), the file was overwritten but not indexed, and its old chunks
+  stayed in search. The importers now remove those chunks and report the file
+  as `Written but excluded from indexing`, with the number of chunks removed.
+  Only the chunks stored under the target's own path are removed, and the key
+  they are removed by never resolves the file name itself: a target replaced by
+  a symbolic link in that window never costs the link's target its chunks, and
+  on Windows a target whose file name differs in case from the stored one
+  removes nothing. Other indexing paths are unchanged: an excluded file's chunks
+  stay until `mm purge --matching-excluded`.
 - **A Notion or Obsidian import no longer overwrites earlier imports while indexing is blocked
   by an embedding mismatch (#3162).** In that mode the index accepts no files, but
   `mem_import_notion` and `mem_import_obsidian` still wrote every target and then reported

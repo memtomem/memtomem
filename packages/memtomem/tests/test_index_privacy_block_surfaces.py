@@ -706,13 +706,14 @@ class TestIndexingStatsFieldOrder:
         from memtomem.models import IndexingStats
 
         names = [f.name for f in fields(IndexingStats)]
-        # ADR-0043 appended the two day-file-name counters last, after #2923's
-        # ``scope_held`` and #2141's ``mutated``.
-        assert names[-2:] == ["namespaces_restored_from_name", "day_file_names_undecoded"]
-        assert names[-4:-2] == ["mutated", "scope_held"]
-        assert names[-6:-4] == ["exempted_files", "exempted_paths"]
+        # #3158 appended ``excluded_files`` last, after ADR-0043's two day-file-name
+        # counters, #2923's ``scope_held`` and #2141's ``mutated``.
+        assert names[-1:] == ["excluded_files"]
+        assert names[-3:-1] == ["namespaces_restored_from_name", "day_file_names_undecoded"]
+        assert names[-5:-3] == ["mutated", "scope_held"]
+        assert names[-7:-5] == ["exempted_files", "exempted_paths"]
         # The tail that existed before #2076 keeps its order.
-        assert names[-10:-6] == [
+        assert names[-11:-7] == [
             "namespaces_preserved_against_rules",
             "namespaces_reassigned",
             "namespace_moves",

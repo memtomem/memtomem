@@ -623,3 +623,11 @@ class IndexingStats:
     # Appended last for positional construction compatibility.
     namespaces_restored_from_name: int = 0
     day_file_names_undecoded: int = 0
+    # Files the exclude guard skipped after they were handed to the engine:
+    # a single-file ``index_file`` call, or a walked file whose exclusion was
+    # installed after discovery. Files a directory walk filtered out at
+    # discovery are not counted. With ``index_file(purge_if_excluded=True)``
+    # the chunks stored under the path's own key were also removed, and
+    # ``deleted_chunks`` says how many (#3158). Appended last for positional
+    # construction compatibility.
+    excluded_files: int = 0
