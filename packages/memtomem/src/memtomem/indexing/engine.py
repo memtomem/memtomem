@@ -2377,8 +2377,11 @@ class IndexEngine:
             # The caller replaced this file, so its stored chunks describe bytes
             # that are gone (#3158). Delete by the key captured before the locks:
             # ``file_path`` may have become a link since, and a delete without
-            # ``as_stored`` would resolve it to the link's target.
-            deleted = await self._storage.delete_by_source(Path(purge_key), as_stored=True)
+            # ``as_stored`` would resolve it to the link's target. Like the chunk
+            # write, it waits out another task's write transaction instead of
+            # being refused at once and leaving those chunks searchable (#3171).
+            async with self._storage.transaction(wait=WRITER_WAIT_S):
+                deleted = await self._storage.delete_by_source(Path(purge_key), as_stored=True)
             return {
                 "total": 0,
                 "indexed": 0,
