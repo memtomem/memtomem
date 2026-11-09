@@ -231,6 +231,7 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
             if claimed is None:
                 raise click.ClickException("Candidate state changed concurrently")
             write_location = "the durable destination"
+            excluded_warning: str | None = None
             try:
                 if candidate["destination"] == "pinned":
                     block = PinnedContextStore(
@@ -279,9 +280,17 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                             tags=["formation-approved", candidate["kind"]],
                         )
                         try:
-                            await comp.index_engine.index_file(
+                            stats = await comp.index_engine.index_file(
                                 target, ingress_guarded=True, lock_held=True
                             )
+                            if stats.excluded_files:
+                                # Excluded while the entry was appended (#3165):
+                                # on disk, so the approval stands; say so.
+                                from memtomem.source_provenance import (
+                                    EXCLUDED_AFTER_APPEND_NOTICE,
+                                )
+
+                                excluded_warning = EXCLUDED_AFTER_APPEND_NOTICE
                         except PrivacyRejection as exc:
                             # Appended, unindexed. Quarantine the claim rather than
                             # releasing it, or a re-approval appends it again.
@@ -341,6 +350,11 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                     else " Candidate state changed again; inspect the review queue."
                 )
                 raise click.ClickException(warning + suffix)
+            approved: dict[str, object] = {"ok": True, "status": decision}
+            if excluded_warning is not None:
+                approved["warning"] = excluded_warning
+            click.echo(json.dumps(approved))
+            return
         else:
             changed = await comp.storage.decide_memory_candidate(
                 candidate_id, decision, reviewer, reason

@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from memtomem.constants import InvalidNameError, writable_namespace_arg
 from memtomem.errors import NamespaceResolutionError
 from memtomem.source_provenance import (
+    EXCLUDED_AFTER_APPEND_NOTICE,
     EXCLUDED_TARGET_DETAIL,
     READ_ONLY_TARGET_DETAIL,
     ExcludedSourceError,
@@ -1069,4 +1070,9 @@ async def add_memory(
             status_code=503, detail="Memory file is locked by another writer; try again."
         ) from exc
 
-    return AddMemoryResponse(file=str(target), indexed_chunks=stats.indexed_chunks)
+    return AddMemoryResponse(
+        file=str(target),
+        indexed_chunks=stats.indexed_chunks,
+        # The file became excluded while the entry was appended (#3165).
+        warning=EXCLUDED_AFTER_APPEND_NOTICE if stats.excluded_files else None,
+    )

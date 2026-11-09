@@ -10,7 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from memtomem.errors import NamespaceResolutionError
 from memtomem.models import stored_namespace
 from memtomem.storage.sqlite_helpers import norm_path
-from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL, READ_ONLY_TARGET_DETAIL
+from memtomem.source_provenance import (
+    EXCLUDED_AFTER_APPEND_NOTICE,
+    EXCLUDED_TARGET_DETAIL,
+    READ_ONLY_TARGET_DETAIL,
+)
 from memtomem.web.deps import get_config, get_index_engine, get_search_pipeline, get_storage
 from memtomem.web.routes._errors import (
     NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
@@ -245,4 +249,6 @@ async def promote_scratch(
         promoted=True,
         file=str(target),
         indexed_chunks=stats.indexed_chunks,
+        # The file became excluded while the entry was appended (#3165).
+        warning=EXCLUDED_AFTER_APPEND_NOTICE if stats.excluded_files else None,
     )
