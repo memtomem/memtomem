@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import memtomem.indexing.engine as engine_mod
-from memtomem.errors import StorageError, TransactionOwnedError
+from memtomem.errors import RetryableError, StorageError, TransactionOwnedError
 from memtomem.indexing.engine import PrivacyRejection
 from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD, SCOPE_LOST_HOLD
 from memtomem.storage.sqlite_helpers import norm_path
@@ -239,6 +239,27 @@ async def test_a_file_replaced_by_a_directory_is_cleared_once_the_owner_finishes
     assert await _texts(components.storage, path) == []
 
 
+async def test_a_scope_loss_reindex_holds_once_the_owner_finishes(bm25_only_components, tmp_path):
+    """Unregistered project rows are held, not rewritten as user rows, after the scope wait."""
+    comp, _ = bm25_only_components
+    root = tmp_path / "proj"
+    (root / ".git").mkdir(parents=True)
+    local = (root / ".memtomem" / "memories.local").resolve()
+    local.mkdir(parents=True)
+    comp.config.indexing.project_memory_dirs = [local]
+    target = local / "note.md"
+    target.write_text(_NOTE, encoding="utf-8")
+    assert not (await comp.index_engine.index_file(target)).errors
+    comp.config.indexing.project_memory_dirs = []
+    owner = _Owner(comp.storage)
+    await owner.start()
+
+    stats = await _overlap(comp.storage, owner, comp.index_engine.index_file(target, force=True))
+
+    assert stats.scope_held
+    assert _hold_reason(comp.storage, target) == SCOPE_LOST_HOLD
+
+
 async def test_a_redaction_blocked_reindex_holds_once_the_owner_finishes(
     components, engine, memory_dir
 ):
@@ -422,29 +443,6 @@ async def test_a_non_regular_file_relinked_during_the_wait_deletes_only_its_own_
     assert _rows_under(components.storage, b_key) > 0
 
 
-async def test_an_emptied_file_relinked_during_the_wait_deletes_only_its_own_rows(
-    components, engine, memory_dir, tmp_path
-):
-    _symlink_or_skip(tmp_path)
-    path, other = memory_dir / "a.md", memory_dir / "b.md"
-    await _indexed(engine, path)
-    await _indexed(engine, other, _OTHER)
-    a_key, b_key = norm_path(path), norm_path(other)
-    path.write_text("", encoding="utf-8")
-    owner = _Owner(components.storage)
-    await owner.start()
-
-    await _overlap(
-        components.storage,
-        owner,
-        engine.index_file(path),
-        while_queued=lambda: _relink(path, other),
-    )
-
-    assert _rows_under(components.storage, a_key) == 0
-    assert _rows_under(components.storage, b_key) > 0
-
-
 async def test_a_hold_release_relinked_during_the_wait_lifts_only_its_own_hold(
     components, engine, memory_dir, tmp_path, monkeypatch
 ):
@@ -480,10 +478,44 @@ async def test_a_hold_release_relinked_during_the_wait_lifts_only_its_own_hold(
     assert _reason_under(components.storage, b_key) == "source_missing"
 
 
-async def test_a_scope_loss_hold_relinked_during_the_wait_holds_its_own_rows(
+def _contents_under(storage, key: str) -> list[tuple[str, str]]:
+    return (
+        storage._get_db()
+        .execute("SELECT content, scope FROM chunks WHERE source_file=? ORDER BY id", (key,))
+        .fetchall()
+    )
+
+
+async def test_an_emptied_file_relinked_during_the_scope_wait_stops_and_deletes_nothing(
+    components, engine, memory_dir, tmp_path
+):
+    _symlink_or_skip(tmp_path)
+    path, other = memory_dir / "a.md", memory_dir / "b.md"
+    await _indexed(engine, path)
+    await _indexed(engine, other, _OTHER)
+    a_key, b_key = norm_path(path), norm_path(other)
+    a_before = _contents_under(components.storage, a_key)
+    b_before = _contents_under(components.storage, b_key)
+    path.write_text("", encoding="utf-8")
+    owner = _Owner(components.storage)
+    await owner.start()
+
+    with pytest.raises(RetryableError, match="names another file"):
+        await _overlap(
+            components.storage,
+            owner,
+            engine.index_file(path),
+            while_queued=lambda: _relink(path, other),
+        )
+
+    assert _contents_under(components.storage, a_key) == a_before
+    assert _contents_under(components.storage, b_key) == b_before
+
+
+async def test_a_forced_reindex_relinked_during_the_scope_wait_leaves_the_target_alone(
     bm25_only_components, tmp_path
 ):
-    """The scope read waits; the hold uses the key taken before it."""
+    """The review's case: A's content must not replace B's project rows as user rows."""
     _symlink_or_skip(tmp_path)
     comp, mem_dir = bm25_only_components
     root = tmp_path / "proj"
@@ -491,27 +523,29 @@ async def test_a_scope_loss_hold_relinked_during_the_wait_holds_its_own_rows(
     local = (root / ".memtomem" / "memories.local").resolve()
     local.mkdir(parents=True)
     comp.config.indexing.project_memory_dirs = [local]
-    target = local / "note.md"
-    target.write_text(_NOTE, encoding="utf-8")
-    assert not (await comp.index_engine.index_file(target)).errors
-    other = mem_dir / "b.md"
+    other = local / "b.md"
     other.write_text(_OTHER, encoding="utf-8")
     assert not (await comp.index_engine.index_file(other)).errors
-    target_key, other_key = norm_path(target), norm_path(other)
-    comp.config.indexing.project_memory_dirs = []
+    path = mem_dir / "a.md"
+    path.write_text(_NOTE, encoding="utf-8")
+    assert not (await comp.index_engine.index_file(path)).errors
+    a_key, b_key = norm_path(path), norm_path(other)
+    a_before = _contents_under(comp.storage, a_key)
+    b_before = _contents_under(comp.storage, b_key)
+    path.write_text(_NOTE + "\n## Later\n\nedited falcon line\n", encoding="utf-8")
     owner = _Owner(comp.storage)
     await owner.start()
 
-    stats = await _overlap(
-        comp.storage,
-        owner,
-        comp.index_engine.index_file(target, force=True),
-        while_queued=lambda: _relink(target, other),
-    )
+    with pytest.raises(RetryableError, match="names another file"):
+        await _overlap(
+            comp.storage,
+            owner,
+            comp.index_engine.index_file(path, force=True),
+            while_queued=lambda: _relink(path, other),
+        )
 
-    assert stats.scope_held
-    assert _reason_under(comp.storage, target_key) == SCOPE_LOST_HOLD
-    assert _reason_under(comp.storage, other_key) is None
+    assert _contents_under(comp.storage, b_key) == b_before
+    assert _contents_under(comp.storage, a_key) == a_before
 
 
 async def test_a_release_kept_busy_by_another_process_is_deferred(
@@ -609,6 +643,36 @@ async def test_enrichment_waits_to_cache_its_descriptions(components, engine, me
 
     assert not stats.errors
     assert await components.storage.get_chunk_descriptions(path)
+
+
+async def test_enrichment_relinked_during_its_cache_wait_stops_before_the_diff(
+    components, engine, memory_dir, tmp_path
+):
+    """The description cache waits after the LLM; the diff and chunk write do not follow a relink."""
+    _symlink_or_skip(tmp_path)
+    path, other = memory_dir / "a.md", memory_dir / "b.md"
+    await _indexed(engine, path)
+    await _indexed(engine, other, _OTHER)
+    b_key = norm_path(other)
+    b_before = _contents_under(components.storage, b_key)
+    owner = _Owner(components.storage)
+    engine._llm = _CompetingLLM(owner, "Describes the falcon plans.")
+    engine._config.chunk_tokenizer_path = _byte_tokenizer(tmp_path)
+    engine._config.hard_max_chunk_tokens = 64
+    engine._config.chunk_context_tokens = 256
+    engine._config.chunk_model_tokens = 384
+    engine._config.enrich_chunk_context = True
+    path.write_text("# Note\n\n## Plans\n\nbeta heron body\n", encoding="utf-8")
+
+    with pytest.raises(RetryableError, match="names another file"):
+        await _overlap(
+            components.storage,
+            owner,
+            engine.index_file(path),
+            while_queued=lambda: _relink(path, other),
+        )
+
+    assert _contents_under(components.storage, b_key) == b_before
 
 
 async def test_a_summary_waits_to_be_written(components, engine, memory_dir):

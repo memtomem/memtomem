@@ -246,6 +246,20 @@ def _own_leaf_key(file_path: Path) -> str:
     return fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
 
 
+def _require_same_source(file_path: Path, source_key: str) -> None:
+    """Stop a pass whose path names another source than it did before a writer wait (#3173).
+
+    The wait leaves time for the path to be replaced by a link to another
+    indexed source. Writes that resolve the path afterwards would reach that
+    source with this file's content. A relink during the embedding await
+    predates the waits and is not checked here (#3180).
+    """
+    if norm_path(file_path) != source_key:
+        raise RetryableError(
+            "Source path now names another file after waiting for the writer; retry"
+        )
+
+
 def _sqlite_busy(exc: BaseException) -> bool:
     """Whether ``exc`` is SQLite's busy/locked error, bare or as a ``StorageError``'s cause."""
     cause = exc if isinstance(exc, sqlite3.OperationalError) else exc.__cause__
@@ -2641,6 +2655,10 @@ class IndexEngine:
             if isinstance(self._storage, SqliteBackend)
             else None
         )
+        # The diff and chunk write below resolve ``file_path`` again. A path
+        # relinked during the wait would have them write this file's content
+        # into the link target's rows, so the pass stops and is retried.
+        _require_same_source(file_path, source_key)
         stored_scopes = self._stored_scope_rows(key_spellings(source_key), db=scope_db)
         held_scope_lost = any(r[3] == SCOPE_LOST_HOLD for r in stored_scopes)
 
@@ -2835,6 +2853,8 @@ class IndexEngine:
             await enrich_context(
                 new_chunks, self._config, self._llm, cast("SqliteBackend", self._storage)
             )
+            # Its cache write waits for the writer, like the scope read above.
+            _require_same_source(file_path, source_key)
         existing_state = await self._storage.get_chunk_index_state(file_path)
         diff_result = compute_diff(existing_state, new_chunks)
         chunk_positions = {id(chunk): index + 1 for index, chunk in enumerate(new_chunks)}
