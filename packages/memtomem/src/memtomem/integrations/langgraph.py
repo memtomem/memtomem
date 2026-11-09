@@ -719,10 +719,16 @@ class MemtomemStore:
         if stats.mutated:
             comp.search_pipeline.invalidate_cache()
 
-        return {
+        result: dict[str, Any] = {
             "file": str(target),
             "indexed_chunks": stats.indexed_chunks,
         }
+        if stats.excluded_files:
+            # The file became excluded while the entry was appended (#3165).
+            from memtomem.source_provenance import EXCLUDED_AFTER_APPEND_NOTICE
+
+            result["warning"] = EXCLUDED_AFTER_APPEND_NOTICE
+        return result
 
     async def get(self, chunk_id: str) -> dict | None:
         """Get a chunk by UUID, inside the caller's project boundary.

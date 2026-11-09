@@ -42,6 +42,13 @@ EXCLUDED_SOURCE_DETAIL = (
 )
 
 
+_EXCLUDED_MID_WRITE_REMEDY = (
+    "If an exclude pattern or a nested worktree matched, remove the pattern or register the "
+    "worktree as its own memory directory, then re-index the file; a file a built-in rule "
+    "skips stays unindexed."
+)
+
+
 def excluded_after_write_notice(op: str) -> str:
     """What a by-id rewrite tells its caller when the source became excluded while it ran.
 
@@ -52,9 +59,7 @@ def excluded_after_write_notice(op: str) -> str:
     return (
         f"The {op} is on disk, but indexing started skipping this source (an exclude "
         "pattern, a built-in rule, or a nested git worktree) while it ran, so the file's "
-        "stored chunks were removed instead of re-indexed. If an exclude pattern or a nested "
-        "worktree matched, remove the pattern or register the worktree as its own memory "
-        "directory, then re-index the file; a file a built-in rule skips stays unindexed."
+        f"stored chunks were removed instead of re-indexed. {_EXCLUDED_MID_WRITE_REMEDY}"
     )
 
 
@@ -85,6 +90,17 @@ def relinked_after_write_notice(op: str, stored_key: str) -> str:
         f"{lead} and the file's chunks are held (hidden from search). Put a regular file back "
         "at the path and re-index it to lift the hold."
     )
+
+
+# What an append tells its caller when the target became excluded while it ran.
+# The check before the append passed, so the exclusion was installed between it
+# and the re-index, which then skipped the file. The file's earlier chunks still
+# describe bytes that are there, so they stay (#3165).
+EXCLUDED_AFTER_APPEND_NOTICE = (
+    "The new entry is on disk, but indexing started skipping this file (an exclude "
+    "pattern, a built-in rule, or a nested git worktree) while it was written, so the "
+    f"entry was not indexed. {_EXCLUDED_MID_WRITE_REMEDY}"
+)
 
 
 READ_ONLY_TARGET_DETAIL = (

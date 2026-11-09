@@ -6989,7 +6989,10 @@ qs('add-btn').addEventListener('click', async () => {
     const data = await apiWithRedactionRetry('POST', '/api/add', body);
     if (data === null) return;
     const n = data.indexed_chunks;
-    showToast(t('toast.saved_to_file', { path: tildifyPath(data.file), count: n }), 'success');
+    // Set when the file became excluded while the entry was appended (#3165):
+    // the entry is on disk but not indexed, so it replaces the success toast.
+    if (data.warning) showToast(data.warning, 'warning');
+    else showToast(t('toast.saved_to_file', { path: tildifyPath(data.file), count: n }), 'success');
     qs('add-content').value = '';
     _markDataStale();
     loadStats();

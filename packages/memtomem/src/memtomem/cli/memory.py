@@ -502,26 +502,32 @@ async def _add(
         else:
             raise click.ClickException(NS_RETARGET_EXHAUSTED_ERROR)
 
+        from memtomem.source_provenance import EXCLUDED_AFTER_APPEND_NOTICE
+
+        # The file became excluded while the entry was appended (#3165). Exit 0:
+        # the entry is on disk, and a failure status would invite a duplicate.
+        warning = EXCLUDED_AFTER_APPEND_NOTICE if stats.excluded_files else None
         if as_json:
-            click.echo(
-                json.dumps(
-                    {
-                        "ok": True,
-                        "target": str(target),
-                        "chunks": stats.indexed_chunks,
-                        # ``None`` when the write was un-pinned and the engine's
-                        # namespace rules decided — the ack reports what this
-                        # command pinned, not what the engine resolved.
-                        "namespace": effective_ns,
-                    }
-                )
-            )
+            payload: dict[str, object] = {
+                "ok": True,
+                "target": str(target),
+                "chunks": stats.indexed_chunks,
+                # ``None`` when the write was un-pinned and the engine's
+                # namespace rules decided — the ack reports what this
+                # command pinned, not what the engine resolved.
+                "namespace": effective_ns,
+            }
+            if warning is not None:
+                payload["warning"] = warning
+            click.echo(json.dumps(payload))
         else:
             click.echo(f"Added to {target} ({stats.indexed_chunks} chunks indexed)")
             if effective_ns is not None:
                 # Surfaced so a session-inherited redirect is never silent: a
                 # plain ``mm search`` hides system namespaces.
                 click.echo(f"  Namespace: {effective_ns}")
+            if warning is not None:
+                click.echo(f"Warning: {warning}", err=True)
 
 
 # See the note on ``SEARCH_EPILOG`` in ``cli/search.py`` for why ``\b`` is

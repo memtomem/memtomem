@@ -89,6 +89,8 @@ class ProjectTierBlockedResponse(BaseModel):
 class AddMemoryResponse(BaseModel):
     file: str
     indexed_chunks: int
+    # Set when the file became excluded while the entry was appended (#3165).
+    warning: str | None = None
 
 
 class UploadFileResult(BaseModel):

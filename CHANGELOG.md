@@ -100,6 +100,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the tool or page says so. On macOS, chunks stored under a path spelling from
   before Unicode normalization cannot be hidden this way; the message then says
   they are still searchable.
+- **Adding a memory no longer reports a zero-chunk success when the file becomes
+  excluded during the write (#3165).** The add paths refuse an excluded file
+  before appending, but an exclude pattern added between that check and the
+  re-index left the new entry on disk and unindexed while the tool reported
+  `Chunks indexed: 0` as an ordinary success. `mem_add`, `mem_batch_add` and the
+  MCP tools built on `mem_add`, `mm add` (text and `--json`), the shell's `add`,
+  `mm agent share`, `mm review approve`, the LangGraph store's `add`, and the web
+  UI's add and scratch promote now say that the entry was written but not
+  indexed. The CLI still exits 0. The file's earlier chunks stay, because they
+  still describe what is on disk. `mem_reflect_save` no longer links the
+  insight's related chunks to an older chunk in that case, and a session that
+  made such an add is marked as having an incomplete write record.
 - **`mm init` no longer defaults to a choice this machine cannot finish (#3149, #3150).**
   Pressing Enter at the preset prompt now selects Minimal unless the `onnx` extra is known to be
   importable where memtomem will run, and a workspace that cannot be probed counts as missing.

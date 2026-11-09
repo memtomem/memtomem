@@ -603,7 +603,9 @@ class TestCliSurface:
                 namespace=SimpleNamespace(default_namespace="default"),
             ),
             index_engine=SimpleNamespace(
-                index_file=AsyncMock(return_value=SimpleNamespace(indexed_chunks=1)),
+                index_file=AsyncMock(
+                    return_value=SimpleNamespace(indexed_chunks=1, excluded_files=0)
+                ),
                 effective_namespace_for=AsyncMock(side_effect=lambda p, ns=None, **k: ns),
                 is_excluded=lambda path: False,
                 is_read_only_source=lambda path: False,

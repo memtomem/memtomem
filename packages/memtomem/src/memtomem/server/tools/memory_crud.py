@@ -30,6 +30,7 @@ from memtomem.server.tools._provenance import (
 )
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
 from memtomem.source_provenance import (
+    EXCLUDED_AFTER_APPEND_NOTICE,
     EXCLUDED_SOURCE_DETAIL,
     SOURCE_MISSING_DETAIL,
     EXCLUDED_TARGET_DETAIL,
@@ -398,11 +399,11 @@ async def _scope_loss_refusal(app: AppContext, chunk: Chunk, chunk_id: str) -> s
 
 
 async def _flag_imprecise_write(
-    app: AppContext, session_id: str | None, stats: IndexingStats
+    app: AppContext, session_id: str | None, stats: IndexingStats, *, appended: bool = True
 ) -> None:
     """Mark the session when an append's own record may overstate it.
 
-    Two cases, both of which leave ``new_chunk_ids`` describing something
+    Three cases, each of which leaves ``new_chunk_ids`` describing something
     other than "exactly what this call contributed":
 
     ``deleted_chunks`` is non-zero. An append re-indexes the whole file,
@@ -419,12 +420,19 @@ async def _flag_imprecise_write(
     point, so the content exists, will be picked up by the watcher later,
     and belongs to no event. Only the raising path was handled before.
 
+    ``excluded_files`` is non-zero. An exclusion installed between the
+    append and its re-index made the engine skip the file: the entry is on
+    disk with no new ids, and ``record_write_provenance`` records nothing
+    for an empty list (#3165). ``appended`` is false for a batch whose entries
+    were all empty: it wrote nothing, so there is nothing missing from the
+    record.
+
     Attributing precisely instead of flagging would mean tracking the
     appended span through chunking and diffing, which is a change to the
     indexing contract rather than to this call site. Until then, saying
     "this record is not exact" is the honest answer.
     """
-    if stats.deleted_chunks or stats.errors:
+    if stats.deleted_chunks or stats.errors or (stats.excluded_files and appended):
         await mark_provenance_incomplete(app, session_id)
 
 
@@ -1216,6 +1224,10 @@ async def _mem_add_core(
                         f"- Chunks indexed: {stats.indexed_chunks}\n"
                         f"- File: {target}"
                     )
+                    # A fact of this write, not an advisory tail: stored with the
+                    # base result, so a replay reports it too (#3165).
+                    if stats.excluded_files:
+                        result += f"\n- {EXCLUDED_AFTER_APPEND_NOTICE}"
                     # Fill in the won claim with the base result, under the lock. Only
                     # the deterministic base message is stored — the advisory tails
                     # below are non-deterministic and original-only. A complete failure
@@ -2332,7 +2344,9 @@ async def mem_batch_add(
                     except Exception:
                         await mark_provenance_incomplete(app, provenance_session_id)
                         raise
-                    await _flag_imprecise_write(app, provenance_session_id, stats)
+                    await _flag_imprecise_write(
+                        app, provenance_session_id, stats, appended=bool(appended)
+                    )
                     display_ns = await _written_namespace_label(app, target, effective_ns, stats)
                     result = (
                         f"Batch add complete ({len(entries)} entries) → {target}\n"
@@ -2341,6 +2355,10 @@ async def mem_batch_add(
                     )
                     if skipped:
                         result += f"\n- Skipped: {skipped} entries (empty content)"
+                    # Part of the stored base result, as in ``_mem_add_core`` (#3165).
+                    # Not for a batch of only empty entries: it appended nothing.
+                    if stats.excluded_files and appended:
+                        result += f"\n- {EXCLUDED_AFTER_APPEND_NOTICE}"
                     # Fill in the won claim under the lock. A complete failure leaves the
                     # row pending (never released — the append is durable), so a retry
                     # replays/blocks instead of duplicating.

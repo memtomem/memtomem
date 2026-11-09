@@ -292,6 +292,11 @@ async def _cmd_add(comp, args: list[str]) -> None:
         comp.search_pipeline.invalidate_cache()
 
     click.secho(f"Added to {target.name} ({stats.indexed_chunks} chunks indexed)", fg="green")
+    if stats.excluded_files:
+        # The file became excluded while the entry was appended (#3165).
+        from memtomem.source_provenance import EXCLUDED_AFTER_APPEND_NOTICE
+
+        click.secho(EXCLUDED_AFTER_APPEND_NOTICE, fg="yellow")
 
 
 async def _cmd_recall(comp, args: list[str]) -> None:
