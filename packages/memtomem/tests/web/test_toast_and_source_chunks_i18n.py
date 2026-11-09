@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from playwright.sync_api import expect
 
 from .conftest import goto_after_i18n_init, install_default_stubs
 
@@ -28,7 +29,7 @@ def test_toast_close_button_tooltip_translated(page, mm_web_url: str) -> None:
     assert expected_title != "Close", "fixture must render the Korean locale"
 
     close_btn = page.locator(".toast-close")
-    assert close_btn.get_attribute("title") == expected_title
+    expect(close_btn).to_have_attribute("title", expected_title)
 
 
 def test_empty_source_chunks_panel_translated_and_updates_on_lang_switch(
@@ -58,13 +59,13 @@ def test_empty_source_chunks_panel_translated_and_updates_on_lang_switch(
     page.locator("#d-source-btn").click()
 
     empty_state = page.locator("#source-chunks-list .empty-state")
-    assert empty_state.is_visible()
+    expect(empty_state).to_be_visible()
 
     expected_ko = page.evaluate("() => t('chunks.none_found')")
     assert expected_ko != "No chunks found", "fixture must render the Korean locale"
-    assert (empty_state.text_content() or "").strip() == expected_ko
+    expect(empty_state).to_have_text(expected_ko)
 
     page.evaluate("() => I18N.setLang('en')")
 
-    assert empty_state.is_visible()
-    assert (empty_state.text_content() or "").strip() == "No chunks found"
+    expect(empty_state).to_be_visible()
+    expect(empty_state).to_have_text("No chunks found")
