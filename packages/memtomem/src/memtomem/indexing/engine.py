@@ -420,6 +420,11 @@ class IndexFileResult(_IndexFileBase, total=False):
     # True when the source was held instead of re-indexed because its project
     # rows would have changed scope or project root (#2923).
     scope_held: bool
+    # True on the three returns after which the file's stored chunks describe
+    # the content this call read: the committed write, the receipt hit, and the
+    # emptied file whose rows were removed. Aggregated into
+    # ``IndexingStats.current_files`` by ``index_file`` (#3168).
+    current: bool
     # The stored key the content was read and committed under, on a receipt
     # hit or a completed write. The hold release compares it to the key it
     # snapshotted (#3180).
@@ -1677,6 +1682,7 @@ class IndexEngine:
             scope_held=result.get("scope_held", False),
             excluded_files=1 if result.get("excluded") else 0,
             relinked_files=1 if result.get("relinked") else 0,
+            current_files=1 if result.get("current") else 0,
         )
 
     async def _hold_relinked_key(self, own_key: str) -> bool:
@@ -2821,6 +2827,7 @@ class IndexEngine:
                     "deleted": 0,
                     "errors": [],
                     "mutated": False,
+                    "current": True,
                     "exempted": int(exempted),
                     "namespace_decision": ns_decision,
                     "namespace_written": False,
@@ -2867,6 +2874,7 @@ class IndexEngine:
                 "deleted": deleted,
                 "errors": [],
                 "mutated": deleted > 0,
+                "current": True,
             }
 
         if ns_decision.reason == "mixed_force_refused":
@@ -3267,6 +3275,7 @@ class IndexEngine:
             "deleted": len(diff_result.to_delete),
             "errors": [],
             "mutated": mutated,
+            "current": True,
             "new_chunk_ids": [
                 chunk_id for chunk_id in truly_new_chunk_ids if chunk_id in persisted_upsert_ids
             ],
