@@ -43,6 +43,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Web UI: translate toast close button tooltip and empty Source Chunks panel (#3136).**
+  The toast ✕ button tooltip now reads `common.close` (e.g. 닫기 in Korean) instead of
+  hard-coded English, and the empty Source Chunks panel renders `chunks.none_found`
+  with `data-i18n` binding so switching languages while the panel is open updates the
+  empty message in place.
 - **A re-import no longer leaves the previous import's chunks searchable when its
   targets become excluded mid-import (#3158).** `mem_import_notion` and
   `mem_import_obsidian` write every target before indexing any of them. If an
