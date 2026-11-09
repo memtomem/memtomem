@@ -235,7 +235,9 @@ async def mutate_source_and_reindex(
         valve_text = rewrite_valve_text(pre_image.data, written) if force_unsafe else None
         # An exclusion installed since the check above would make the engine
         # skip the file and leave the pre-edit chunks beside the new bytes; the
-        # purge judges it again under the locks (#3163).
+        # purge judges it again under the locks (#3163). A file replaced by a
+        # symlink since the write, after the relinked-key refusal above, is held
+        # rather than indexed through the link (#3172).
         return await index_engine.index_file(
             source_file,
             ingress_guarded=True,
@@ -243,6 +245,7 @@ async def mutate_source_and_reindex(
             valve_text=valve_text,
             lock_held=True,
             purge_if_excluded=True,
+            hold_if_relinked=True,
         )
     except Exception as exc:
         if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:

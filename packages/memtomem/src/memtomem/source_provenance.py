@@ -7,6 +7,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, Protocol
 
+from memtomem.storage.sqlite_helpers import fold_path_form
+
 
 # Covers both reasons a chunk's source may not be rewritten here, because the
 # gates that raise it cannot always tell them apart: the chunk is a fragment or
@@ -53,6 +55,35 @@ def excluded_after_write_notice(op: str) -> str:
         "stored chunks were removed instead of re-indexed. If an exclude pattern or a nested "
         "worktree matched, remove the pattern or register the worktree as its own memory "
         "directory, then re-index the file; a file a built-in rule skips stays unindexed."
+    )
+
+
+def relinked_after_write_notice(op: str, stored_key: str) -> str:
+    """What a by-id rewrite tells its caller when its file became a symlink while it ran.
+
+    The rewrite refused a relinked key before writing (#2923), so the file was
+    replaced between the write and the re-index. The re-index held the rows
+    under the path's own key instead of indexing the link's target (#3172).
+
+    ``stored_key`` is the chunk's source key. The hold is placed under the
+    folded spelling, so rows stored under a key from before Unicode folding
+    are not held and stay searchable (#2907); the text says so rather than
+    claiming they are hidden. No remedy is named for those rows: a re-index
+    does not find them either (#2926).
+    """
+    lead = (
+        f"The {op} was written, but the file was replaced by a symbolic link before it was "
+        "re-indexed, so the link's target was not indexed in its place"
+    )
+    if stored_key != fold_path_form(stored_key):
+        return (
+            f"{lead}. The file's earlier chunks could not be hidden: they are stored under a "
+            "path spelling from before Unicode normalization, which the hold does not match, "
+            "so they stay searchable."
+        )
+    return (
+        f"{lead} and the file's chunks are held (hidden from search). Put a regular file back "
+        "at the path and re-index it to lift the hold."
     )
 
 
