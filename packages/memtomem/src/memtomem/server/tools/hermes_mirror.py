@@ -28,6 +28,8 @@ cooperating writers, it does not stop a directory rename.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import hashlib
 import json
 import logging
@@ -316,8 +318,15 @@ async def _write_draining(fn: Any, *args: Any) -> None:
 
     The caller holds the file's locks. Released while the thread still writes, a later
     render could land its newer bytes first and be overwritten by this older ones.
+
+    The worker is an executor future, not a Task: ``asyncio.run`` cancels every Task
+    when it shuts down, and a cancelled Task wrapping the thread reports done while
+    the thread is still running.
     """
-    future = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    loop = asyncio.get_running_loop()
+    # ``asyncio.to_thread`` carries the caller's contextvars; keep that.
+    ctx = contextvars.copy_context()
+    future = loop.run_in_executor(None, functools.partial(ctx.run, fn, *args))
     try:
         await asyncio.shield(future)
     except asyncio.CancelledError:
