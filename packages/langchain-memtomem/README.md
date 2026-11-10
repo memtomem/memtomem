@@ -86,6 +86,35 @@ store and are refused, so this release has no chunking override. A top-level
 section `Mem2MemConfig` does not define is ignored, not refused; an unknown key
 inside a known section is refused.
 
+### BM25, dense or hybrid
+
+`retrieval` picks which retrievers a query search runs. It takes the same keys
+as memtomem's `MemtomemHybridStore`:
+
+```python
+store = await MemtomemPipelineStore.open(
+    "/var/app/memory",
+    config={"embedding": {"provider": "onnx", "model": "multilingual-e5-small"}},
+    retrieval={"mode": "hybrid", "weights": [1.0, 1.0], "rrf_k": 60},
+)
+```
+
+- `"hybrid"` (the default) fuses BM25 and dense with reciprocal-rank fusion,
+  `weights` being `[bm25, dense]`. Without an embedder, or when the dense leg
+  cannot run, it ranks by BM25 alone.
+- `"bm25"` runs keyword search only.
+- `"dense"` runs vector search only. It needs an embedder: opening without one
+  raises `ValueError`. A query whose dense leg cannot run (the query
+  embedding or the vector lookup failed, or the index was built with another
+  embedding model) raises `DenseSearchUnavailable` instead of returning
+  nothing.
+
+`weights` apply to `"hybrid"` only, and are validated in every mode. Set the
+legs either here or with `config["search"]` (`enable_bm25`, `enable_dense`,
+`rrf_weights`, `rrf_k`), not both: giving both is refused. The choice is not
+saved under the root; pass it again when you reopen. Every mode indexes the
+same way, so changing it on a later open needs no reindex.
+
 ## What to know
 
 - **Recall is bounded.** A query search asks the pipeline for at most
@@ -114,6 +143,14 @@ inside a known section is refused.
   to at most 256; a longer one is refused at `put`. The encoding is
   single-case, so names that differ only in case stay apart on macOS and
   Windows too.
+- **Scores depend on the retrievers that ran.** With one retriever active
+  and no session-summary rescue results, `item.score` is its raw score (Okapi
+  BM25, or `1 / (1 + distance)` for dense). Otherwise it is a
+  reciprocal-rank-fusion score. That includes the default without an
+  embedder, where the dense leg is on but finds nothing. A reranker's score
+  replaces either one when it rescored the results, and any enabled score
+  modifiers (time decay, access, importance, entity boosts) multiply on top.
+  Compare scores within one store configuration only.
 - **TTLs** are not supported in this version: an explicit `ttl=` raises
   `NotImplementedError` (LangGraph's own check, since `supports_ttl` is
   `False`).

@@ -362,6 +362,55 @@ interrupted `put`) is found by a query on its **old** text, which repairs it,
 and by every query after that; a query on its new text alone finds nothing to
 repair until the next open.
 
+### Retrieval legs
+
+`retrieval=` picks the legs once per store, in `MemtomemHybridStore`'s
+vocabulary: `{"mode": "hybrid" | "bm25" | "dense", "weights": [bm25, dense],
+"rrf_k": 60}`, merged over those defaults. Unknown keys and modes are refused at
+construction, and `weights` and `rrf_k` go through `SearchConfig`'s own
+validators there in every mode. At open, it becomes `search` settings the
+pipeline already honours, and `_search` is not otherwise changed:
+
+| mode | `enable_bm25` | `enable_dense` | `rrf_weights` |
+|---|---|---|---|
+| `hybrid` | `true` | `true` | `weights` |
+| `bm25` | `true` | `false` | `[1.0, 1.0]` |
+| `dense` | `false` | `true` | `[1.0, 1.0]` |
+
+Every mode also sets `rrf_k`. A single-leg mode keeps neutral weights: a zero
+weight on its one leg would gate that leg off as well. Giving `retrieval` (an
+empty dict included) and any of those four keys in `config["search"]` is
+refused. Without `retrieval`, `config["search"]` reaches the pipeline as it did
+in 0.1.0. The setting is not stored under root, so a reopen passes it again.
+Indexing does not depend on it: a `bm25` store with an embedder still embeds,
+so a later open in another mode needs no reindex.
+
+`dense` needs an embedder. With `embedding.provider` `none` (in any case, as
+memtomem's factory compares it), open refuses before creating any directory.
+Open refuses at the same point when `embedding.dimension` is 0, for example
+OpenAI without a `dimension`. Every provider's embedder reports the configured
+dimension, and an E5 profile's 384 is filled in when the config is validated.
+With 0 the index would have no vector table.
+`MemtomemHybridStore` refuses at the first query instead. At query time, a
+pipeline pass whose dense leg did not run raises `DenseSearchUnavailable`.
+The store checks after the first pass and after the `record=False` re-search
+of every window: `dense_error` (the query embedding or the vector lookup failed) or
+`dense_suppressed_mismatch` (the stored embeddings come from another model
+or policy). Without that check the pass would return no hits. `hybrid` ranks by
+BM25 alone in both cases, as 0.1.0 does.
+
+`item.score` is on the pipeline's base scale, which follows the legs that
+are active after gating, not the mode's name. With exactly one active leg and no
+session-summary rescue list, the score is that retriever's raw score: Okapi BM25,
+or `1 / (1 + L2 distance)` for dense. Otherwise it is RRF. That includes the
+no-embedder default, whose dense leg is enabled but empty. It also includes
+`hybrid` with an embedder and both weights positive, until an embedding
+mismatch gates its dense leg off.
+A reranker's scale replaces it only when the reranker actually rescored the
+window, and the default-off modifiers multiply on top. Compare scores within
+one store configuration only. `tests/test_lcmm_retrieval.py` pins each case
+against the pipeline's `score_scale`.
+
 ## Read-after-write
 
 The writing instance sees its own write at once (its cache is invalidated).
@@ -375,8 +424,9 @@ The components are built from `Mem2MemConfig.without_environment(...)` with
 `storage.sqlite_path = <root>/index.db`, `indexing.memory_dirs =
 [<root>/projections]`, `search.system_namespace_prefixes = []`, the caller's
 `config` sections (`embedding`, `search`, `rerank`, …; `storage` and
-`indexing` are refused; an undefined top-level section is ignored) and `create_components(config,
-load_ambient_config=False)`. No watcher runs. Measured on a scratch `HOME`
+`indexing` are refused; an undefined top-level section is ignored) and,
+when `retrieval=` is given, the `search` settings it stands for; then
+`create_components(config, load_ambient_config=False)`. No watcher runs. Measured on a scratch `HOME`
 with `config.json`, a `config.d` fragment and `MEMTOMEM_STORAGE__SQLITE_PATH`
 all pointing elsewhere: the store's index is under root and none of the
 other paths is created.
