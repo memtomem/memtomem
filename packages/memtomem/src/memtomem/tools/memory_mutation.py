@@ -25,7 +25,9 @@ from typing import TYPE_CHECKING
 
 from memtomem.context import _atomic
 from memtomem.context._atomic import async_memory_file_lock
+from memtomem.errors import StorageError
 from memtomem.search.visibility import chunk_in_scope_boundary
+from memtomem.storage.sqlite_errors import is_writer_busy
 from memtomem.source_provenance import (
     ExcludedSourceError,
     ReadOnlySourceError,
@@ -65,7 +67,8 @@ async def locked_source_chunk(
     """Yield ``(chunk, None, cross_process_held)`` with the chunk's source-file
     sidecar (L2) held and the chunk re-fetched fresh under it, or
     ``(None, reason, cross_process_held)`` where ``reason`` is one of
-    ``"not_found"`` / ``"moved"`` / ``"locked"``.
+    ``"not_found"`` / ``"moved"`` / ``"locked"`` / ``"read_only"`` /
+    ``"writer_busy"``.
 
     Two-step acquire (issue #1587): fetch once *unlocked* to learn the
     ``source_file`` (the lock key), acquire that file's sidecar, then re-fetch
@@ -74,8 +77,16 @@ async def locked_source_chunk(
     re-keys onto a moved file and holds the L1 lock too), a file moved by
     ``memory-migrate`` between the two fetches is reported as ``"moved"`` for the
     caller to retry — web/CLI callers re-issue the request rather than looping.
-    ``"locked"`` means the sidecar acquire timed out. Exactly one ``yield`` runs
-    on every path.
+    ``"locked"`` means the sidecar acquire timed out. ``"writer_busy"`` means the
+    re-fetch, which reads the store's writer, waited ``WRITER_WAIT_S`` for another
+    task in this process to finish its transaction and gave up; nothing was read
+    or changed. The read takes no SQLite lock, so another process's writer does
+    not hold it up. Exactly one ``yield`` runs on every path.
+
+    The re-fetch reads the writer rather than a pool connection: its ``scope``
+    decides the caller's Gate-B check and its line range what the caller cuts
+    from the file, and a pool connection can serve a snapshot from before a
+    commit made while the lock was awaited (#3202).
 
     The span is ``async_memory_file_lock``, not a bare sidecar acquire: this
     helper is reached for a *delete* as well as an edit, and a chunk can
@@ -130,7 +141,13 @@ async def locked_source_chunk(
     try:
         async with async_memory_file_lock(resolved, timeout=budget) as cross_process_held:
             acquired = True
-            fresh = await storage.get_chunk(chunk_id, exclude_withheld=True)
+            try:
+                fresh = await storage.get_chunk(chunk_id, exclude_withheld=True, read_writer=True)
+            except StorageError as exc:
+                if not is_writer_busy(exc):
+                    raise
+                yield None, "writer_busy", cross_process_held
+                return
             if fresh is None or not chunk_in_scope_boundary(fresh.metadata, project_context_root):
                 yield None, "not_found", cross_process_held
                 return
