@@ -3052,3 +3052,33 @@ def test_remote_inference_docs_name_every_classified_provider() -> None:
     missing = sorted(p for p in providers if f"`{p}`" not in section and f"={p}`" not in section)
     assert missing == []
     assert "Remote inference endpoints" in section
+
+
+class TestRecallUntilBoundaryDocs:
+    """A date-only ``until`` includes the period it names; only a datetime is exclusive.
+
+    ``_parse_recall_date(..., end_of_period=True)`` advances ``2026-10-23`` to
+    ``2026-10-24T00:00Z`` before the ``created_at < until`` comparison, so a
+    surface calling every ``until`` "exclusive" leads an agent to pass the day
+    after the range it means and silently get one extra day (#3070). The CLI
+    help is pinned in ``test_cli.py``; these pin the other two surfaces.
+    """
+
+    def test_reference_table_row_describes_both_boundaries(self) -> None:
+        text = _read(_GUIDES / "reference" / "core-memory-tools.md")
+        start = text.index("### `mem_recall`")
+        section = text[start : text.index("\n## ", start)]
+        rows = [line for line in section.splitlines() if line.startswith("| `until` |")]
+        assert len(rows) == 1, rows
+        description = rows[0].split("|")[2].strip()
+        assert description == (
+            "End date. A date-only value includes that whole period (UTC); "
+            "a full datetime is exclusive"
+        )
+
+    def test_mem_recall_docstring_describes_both_boundaries(self) -> None:
+        from memtomem.server.tools.recall import mem_recall
+
+        doc = mem_recall.__doc__ or ""
+        lines = [line.strip() for line in doc.splitlines() if line.strip().startswith("until:")]
+        assert lines == ["until: Date-only includes UTC period; full datetime exclusive"]
