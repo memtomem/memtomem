@@ -2193,6 +2193,71 @@ class TestDeleteProjectSharedGateB:
         assert stats["total_files"] == 0
         assert any("outside configured memory directories" in e for e in stats["errors"]), stats
 
+    @pytest.mark.asyncio
+    async def test_the_re_fetch_reads_past_a_stale_pool_snapshot(self, tiers, monkeypatch):
+        """The re-fetch under the lock reads the writer, not an old pool snapshot (#3202).
+
+        The row is committed as ``user`` and then, while a pool connection
+        still has a statement open, as ``project_shared``. A re-fetch on that
+        connection would still see ``user`` and delete without consent.
+        """
+        from uuid import UUID
+
+        from memtomem.errors import ProjectSharedConfirmationRequiredError
+
+        store, dirs = tiers
+        try:
+            comp, _target, cid = await self._seed(store, dirs, "project_shared")
+            writer = comp.storage._get_db()
+            writer.execute("UPDATE chunks SET scope = 'user' WHERE id = ?", (cid,))
+            writer.commit()
+            reader = comp.storage._read_pool[0]
+            monkeypatch.setattr(comp.storage, "_read_pool", [reader])
+            # Many rows, so the cursor cannot step past the end and finish the
+            # statement, which would release the snapshot.
+            held = reader.execute("SELECT name FROM sqlite_master")
+            assert held.fetchone() is not None
+            try:
+                writer.execute("UPDATE chunks SET scope = 'project_shared' WHERE id = ?", (cid,))
+                writer.commit()
+                pooled = await comp.storage.get_chunk(UUID(cid))
+                assert pooled is not None and pooled.metadata.scope == "user"
+                with pytest.raises(ProjectSharedConfirmationRequiredError):
+                    await store.delete(cid)
+            finally:
+                held.close()
+            assert await store.get(cid) is not None
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_busy_writer_at_the_re_fetch_is_a_timeout(self, tiers, monkeypatch):
+        """Another task holding the writer past the wait raises the documented TimeoutError."""
+        import asyncio
+
+        store, dirs = tiers
+        try:
+            comp, _target, cid = await self._seed(store, dirs, "user")
+            monkeypatch.setattr("memtomem.storage.sqlite_backend.WRITER_WAIT_S", 0.05)
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def owner() -> None:
+                async with comp.storage.transaction():
+                    entered.set()
+                    await release.wait()
+
+            task = asyncio.create_task(owner())
+            await entered.wait()
+            try:
+                with pytest.raises(TimeoutError, match="writer stayed busy"):
+                    await store.delete(cid)
+            finally:
+                release.set()
+                await task
+            assert await store.get(cid) is not None
+        finally:
+            await store.close()
+
 
 class TestDeleteGateBUnderTheLock:
     """The tier is judged on the chunk re-fetched under the source file lock.

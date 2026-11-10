@@ -207,8 +207,13 @@ class StorageBackend(Protocol):
     # window) for hash-matched chunks without touching content, vectors or
     # timestamps (#2124, #2140).
     async def update_chunk_metadata(self, chunks: Sequence[Chunk]) -> int: ...
+    # ``read_writer=True`` reads the writer connection once no other task owns
+    # it (FIFO wait of at most ``WRITER_WAIT_S``, then ``TransactionOwnedError``);
+    # a task that owns ``transaction()`` reads its own uncommitted state. For a
+    # read that decides a write it guards: a pool connection can still serve a
+    # snapshot from before a commit (#3202).
     async def get_chunk(
-        self, chunk_id: UUID, *, exclude_withheld: bool = False
+        self, chunk_id: UUID, *, exclude_withheld: bool = False, read_writer: bool = False
     ) -> Chunk | None: ...
     async def get_chunks_batch(
         self, chunk_ids: Sequence[UUID], *, exclude_withheld: bool = False

@@ -681,3 +681,78 @@ async def test_a_rename_whose_locked_reload_times_out_is_the_busy_503(env, short
     assert resp.status_code == 503, resp.text
     assert "nothing was changed" in resp.json()["detail"]
     assert await env.storage.count_chunks_by_namespace("renamed") == 0
+
+
+def _chunk_request(method: str) -> dict:
+    if method == "PATCH":
+        return {"json": {"new_content": "replaced body"}}
+    return {}
+
+
+async def _project_shared_note(env, tmp_path, monkeypatch):
+    """A note in the project's shared tier, indexed, then committed as ``user``.
+
+    Returns ``(note, chunk_id)``. The row lives in the caller's project
+    boundary (the web resolves it from the cwd), so a refusal below is Gate B's
+    and not the id-boundary 404.
+    """
+    proj_root = tmp_path / "proj"
+    proj_dir = proj_root / ".memtomem" / "memories"
+    proj_dir.mkdir(parents=True)
+    env.comp.config.indexing.project_memory_dirs = [proj_dir]
+    monkeypatch.chdir(proj_root)
+    note = proj_dir / "rule.md"
+    note.write_text("## Rule\n\nshared rule body\n", encoding="utf-8")
+    await env.comp.index_engine.index_file(note)
+    chunks = await env.storage.list_chunks_by_source(note)
+    assert [c.metadata.scope for c in chunks] == ["project_shared"]
+    writer = env.storage._get_db()
+    writer.execute("UPDATE chunks SET scope = 'user' WHERE source_file = ?", (str(note),))
+    writer.commit()
+    return note, str(chunks[0].id)
+
+
+@pytest.mark.parametrize("method", ["PATCH", "DELETE"])
+async def test_chunk_gate_b_reads_past_a_stale_pool_snapshot(env, monkeypatch, tmp_path, method):
+    """The locked re-read reads the writer, not a pool snapshot from before a commit (#3202).
+
+    The chunk is made ``project_shared`` and committed while a pool connection
+    still has a statement open, so a re-read on it would still see ``user`` and
+    let the edit or delete through without consent.
+    """
+    note, chunk_id = await _project_shared_note(env, tmp_path, monkeypatch)
+    reader = env.storage._read_pool[0]
+    monkeypatch.setattr(env.storage, "_read_pool", [reader])
+    held = reader.execute("SELECT id FROM chunks")
+    assert held.fetchone() is not None
+    text_before = note.read_text(encoding="utf-8")
+    try:
+        writer = env.storage._get_db()
+        writer.execute("UPDATE chunks SET scope = 'project_shared' WHERE id = ?", (chunk_id,))
+        writer.commit()
+        pooled = await env.storage.get_chunk(uuid.UUID(chunk_id))
+        assert pooled is not None and pooled.metadata.scope == "user"
+        resp = await env.client.request(method, f"/api/chunks/{chunk_id}", **_chunk_request(method))
+    finally:
+        held.close()
+    if method == "PATCH":
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "needs_confirmation", resp.json()
+    else:
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"]["detail"] == "blocked_project_shared", resp.json()
+    assert note.read_text(encoding="utf-8") == text_before
+    assert len(await env.storage.list_chunks_by_source(note)) == 1
+
+
+@pytest.mark.parametrize("method", ["PATCH", "DELETE"])
+async def test_chunk_writer_busy_at_the_locked_reread_is_the_busy_503(env, short_wait, method):
+    text_before = env.note.read_text(encoding="utf-8")
+    before = await _count(env)
+    resp = await _send_past_wait(
+        env, method, f"/api/chunks/{env.chunk_id}", **_chunk_request(method)
+    )
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["detail"] == WRITER_BUSY_NOTHING_CHANGED_DETAIL
+    assert env.note.read_text(encoding="utf-8") == text_before
+    assert await _count(env) == before

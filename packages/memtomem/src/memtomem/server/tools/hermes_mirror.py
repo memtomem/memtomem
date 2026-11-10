@@ -34,7 +34,6 @@ import hashlib
 import json
 import logging
 import re
-import sqlite3
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -58,6 +57,7 @@ from memtomem.source_provenance import (
 )
 from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.mixins.hermes_mirror import MirrorEntry, MirrorWrite
+from memtomem.storage.sqlite_errors import is_writer_busy
 
 logger = logging.getLogger(__name__)
 
@@ -155,15 +155,6 @@ def _remaining(deadline: float | None) -> float | None:
     return None if deadline is None else deadline - time.monotonic()
 
 
-def _busy(exc: BaseException) -> bool:
-    """Whether a storage error is the writer being held (here or by another process)."""
-    if isinstance(exc, TransactionOwnedError):
-        return True
-    cause = exc.__cause__
-    text = f"{exc} {cause}".lower()
-    return isinstance(cause, sqlite3.OperationalError) and ("locked" in text or "busy" in text)
-
-
 def _expired(stage: str) -> RetryableError:
     return RetryableError(f"deadline exceeded before the commit ({stage}); nothing was stored")
 
@@ -232,7 +223,7 @@ async def _commit(
                 owner, mirror_target, writes, previous_key=previous_key
             )
     except (TransactionOwnedError, StorageError) as exc:
-        if not _busy(exc):
+        if not is_writer_busy(exc):
             raise
         raise RetryableError(f"the store's writer is busy; nothing was stored ({exc})") from exc
 
