@@ -936,7 +936,18 @@ def test_unavailable_without_hermes_plugin_mcp_access(
     monkeypatch.setitem(sys.modules, "hermes_cli.plugins", None)
     provider = mod.MemtomemMemoryProvider()
     assert provider.is_available() is False
-    assert "0.21.5" in provider.unavailable_reason()
+    # Hermes logs this string at WARNING: the exception's class, never its text.
+    assert provider.unavailable_reason() == (
+        "this Hermes has no plugin MCP access (needs Hermes Agent 0.21.5 or later): "
+        "ModuleNotFoundError"
+    )
+
+
+def test_a_config_read_error_names_the_class_not_the_text(mod: Any, hermes: Any) -> None:
+    hermes.config_error = RuntimeError("SENTINEL-3217 secret text")
+    provider = mod.MemtomemMemoryProvider()
+    assert provider.is_available() is False
+    assert provider.unavailable_reason() == "cannot read Hermes config: RuntimeError"
 
 
 def test_the_availability_probe_reads_the_server_setting(mod: Any, hermes: Any) -> None:
@@ -1712,3 +1723,43 @@ def test_shutdown_returns_after_the_queued_writes_are_sent(mod: Any, hermes: Any
     provider.on_memory_write("add", "memory", "B")
     provider.shutdown()
     assert [c.arguments["params"]["content"] for c in hermes.mirror_calls] == ["A", "B"]
+
+
+def test_preflight_exception_text_is_not_logged_by_mirror(
+    mod: Any, hermes: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=_LOGGER)
+    sentinel = "SECRET_SENTINEL_PREFLIGHT_LEAK"
+
+    def bad_preflight(server: str) -> tuple[str, str]:
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(mod, "_preflight", bad_preflight)
+    provider = mirroring(mod, hermes)
+    provider.on_memory_write("add", "memory", "A")
+    deadline = time.monotonic() + 5.0
+    while not provider._mirror.counts and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert provider._mirror.counts["dropped_skipped_config_error"] == 1
+    assert any("cannot read Hermes config (RuntimeError)" in w for w in warnings(caplog))
+    assert not any(sentinel in record.getMessage() for record in caplog.records)
+
+
+def test_context_holder_exception_text_is_not_logged_by_mirror(
+    mod: Any, hermes: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=_LOGGER)
+    sentinel = "SECRET_SENTINEL_CONTEXT_LEAK"
+
+    def bad_get(self: Any) -> Any:
+        raise ValueError(sentinel)
+
+    monkeypatch.setattr(mod._ContextHolder, "get", bad_get)
+    provider = mirroring(mod, hermes)
+    provider.on_memory_write("add", "memory", "A")
+    deadline = time.monotonic() + 5.0
+    while not provider._mirror.counts and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert provider._mirror.counts["dropped_no_context"] == 1
+    assert any("cannot build a Hermes plugin context (ValueError)" in w for w in warnings(caplog))
+    assert not any(sentinel in record.getMessage() for record in caplog.records)

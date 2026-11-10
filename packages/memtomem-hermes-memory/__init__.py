@@ -840,7 +840,10 @@ def _send_mirror_op(registry: types.ModuleType, mirror: _Mirror, op: _MirrorOp) 
         try:
             outcome, warning = _preflight(mirror.server)
         except Exception as exc:
-            outcome, warning = "skipped_config_error", f"cannot read Hermes config ({exc!r})"
+            outcome, warning = (
+                "skipped_config_error",
+                f"cannot read Hermes config ({type(exc).__name__})",
+            )
         if outcome:
             mirror.count(registry, "dropped_" + outcome, warning)
             return "drop"
@@ -848,7 +851,9 @@ def _send_mirror_op(registry: types.ModuleType, mirror: _Mirror, op: _MirrorOp) 
             context = mirror.holder.get()
         except Exception as exc:
             mirror.count(
-                registry, "dropped_no_context", f"cannot build a Hermes plugin context ({exc!r})"
+                registry,
+                "dropped_no_context",
+                f"cannot build a Hermes plugin context ({type(exc).__name__})",
             )
             return "drop"
         caps = mirror.caps.fresh(registry.clock())
@@ -1103,12 +1108,13 @@ class MemtomemMemoryProvider(MemoryProvider):
             from hermes_cli.config import load_config_readonly
         except Exception as exc:
             return (
-                f"this Hermes has no plugin MCP access (needs Hermes Agent 0.21.5 or later): {exc}"
+                "this Hermes has no plugin MCP access (needs Hermes Agent 0.21.5 or later): "
+                f"{type(exc).__name__}"
             )
         try:
             cfg = _mapping(load_config_readonly())
         except Exception as exc:
-            return f"cannot read Hermes config: {exc}"
+            return f"cannot read Hermes config: {type(exc).__name__}"
         server = _read_settings(cfg, warn=False)["server"]
         if server not in _allowlist(cfg):
             return _allowlist_text(server)
