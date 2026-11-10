@@ -20,6 +20,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   between its read and its write), but answers that 503 instead of a 500.
   Namespace rename and assign through MCP and the CLI, the tag tools, and the
   scratch, session, search-history and eval-case reads wait the same way.
+- **Hermes provider: `hermes memory setup memtomem-memory` names the right reason
+  when it writes nothing (#3204).** Run at a terminal with
+  `HERMES_NONINTERACTIVE=1`, it said "not a terminal"; it now says
+  "HERMES_NONINTERACTIVE is set". It still writes nothing and prints the commands.
 
 ## [0.7.8] — 2026-11-10
 
