@@ -214,6 +214,53 @@ class TestTheFallbackCanBeTurnedOff:
         assert [r.chunk.id for r in results] == [path_only.id]
 
 
+class TestOnlyTheFileNameIsAFallbackTerm:
+    """A word every chunk under a directory shares is not a fallback term (#3208).
+
+    The path column used to hold the whole path, so the memory dir's root words
+    and the extension were terms of every chunk under it: with no content
+    match, ``plane`` or ``md`` returned all of them, scored like real hits.
+    Subdirectory words below the root go the same way: they are shared by every
+    file in that subdirectory, which is the ``.claude/plans/`` noise #2224 was
+    about. Only the file's own name finds it.
+    """
+
+    @pytest.fixture
+    async def files(self, storage):
+        chunks = {
+            "a": _make_chunk("I like apples and pears.", source="plane-notes/a.md"),
+            "b": _make_chunk("The dog sleeps all day.", source="plane-notes/b.md"),
+            "octopus": _make_chunk("Nothing marked here.", source="plane-notes/octopus.md"),
+            "c": _make_chunk("The cat purrs.", source="plane-notes/projects/alpha/c.md"),
+        }
+        await storage.upsert_chunks(list(chunks.values()))
+        return chunks
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("query", ["plane", "notes", "plane-notes", "md", "tmp"])
+    async def test_a_word_every_chunk_shares_matches_nothing(self, storage, files, query):
+        results = await storage.bm25_search(query, top_k=10)
+        assert results == [], [str(r.chunk.metadata.source_file) for r in results]
+
+    @pytest.mark.asyncio
+    async def test_a_subdirectory_word_matches_nothing(self, storage, files):
+        """The narrowing is deliberate, so it is pinned rather than left implicit."""
+        assert await storage.bm25_search("alpha", top_k=10) == []
+
+    @pytest.mark.asyncio
+    async def test_the_file_name_still_finds_its_file(self, storage, files):
+        results = await storage.bm25_search("octopus", top_k=10)
+        assert [r.chunk.id for r in results] == [files["octopus"].id]
+
+    @pytest.mark.asyncio
+    async def test_through_the_pipeline(self, pipeline, storage, files):
+        """The issue's reproduction: fused results, not only the BM25 leg."""
+        for query, expected in (("plane", set()), ("notes", set()), ("apples", {"a"})):
+            results, _stats = await pipeline.search(query, top_k=5, record=False)
+            got = {r.chunk.id for r in results}
+            assert got == {files[k].id for k in expected}, (query, got)
+
+
 class TestTheColumnFilterCannotBeEscaped:
     """A query cannot spell its way out of the filter imposed on it.
 

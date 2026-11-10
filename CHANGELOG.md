@@ -16,6 +16,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A search word that is part of a memory directory's path no longer returns
+  every memory under it (#3208).** When no memory's text matched, keyword search
+  fell back to matching file paths, so that typing a file's name still finds the
+  file (#2224). It matched the whole path, so a word of the directory's path
+  (your home directory's name, `memories`, a project's name) or the extension
+  `md` matched every file under that directory, and they came back scored like
+  real matches. The fallback now matches the file's name without its extension:
+  `octopus` still finds `octopus.md`. A folder name below the memory directory
+  no longer finds the files in that folder. Existing databases are updated once,
+  the first time this version opens them. On a store of 49,496 chunks that took
+  about 4 seconds. If an older version later indexes or moves a file in the same
+  database, that file's memories go back to the old behavior until this
+  version indexes it with `mm index --force` or rebuilds the FTS index. An
+  ordinary reindex does not rewrite unchanged memories.
+
 - **Web UI requests no longer answer HTTP 500 at once while another task holds a
   write transaction (#3182).** While a policy job, an import or a consolidation
   held `storage.transaction()` in `mm web`, these routes were refused with "SQLite

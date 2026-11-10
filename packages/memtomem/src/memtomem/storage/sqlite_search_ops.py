@@ -85,7 +85,9 @@ _VISIBLE_SOURCE = VISIBLE_SOURCE_CHUNKS
 
 #: The two ``chunks_fts`` columns, as fts5 column-filter names (#2224).
 #: ``content`` is what a search is *for*; ``source_file`` is a fallback so
-#: typing a filename still finds that file, never a competitor to prose.
+#: typing a filename still finds that file, never a competitor to prose. It
+#: holds only the file's name without its suffix (``fts_source_text``), not
+#: the path: a directory word is shared by every chunk under it (#3208).
 _FTS_CONTENT_COLUMN = "content"
 _FTS_SOURCE_COLUMN = "source_file"
 
@@ -263,9 +265,9 @@ class SearchOpsMixin:
             # ``fts5(content, source_file)`` and an unqualified MATCH searches
             # both, so a term appearing only in a chunk's *path* used to
             # retrieve it and — every column weighted 1.0 in the default
-            # ``rank`` — score as a relevance signal. ``source_file`` is stored
-            # raw, so unicode61 splits it into components and every directory
-            # and filename word became a searchable term: on a real
+            # ``rank`` — score as a relevance signal. ``source_file`` then held
+            # the raw path, so unicode61 split it into components and every
+            # directory and filename word became a searchable term: on a real
             # 6,995-chunk store, 71 of the top 100 hits for ``plans`` were
             # chunks about something else, surfaced because they live under
             # ``.claude/plans/``.
@@ -276,9 +278,12 @@ class SearchOpsMixin:
             # scored 0.0 still occupies a BM25 slot and still contributes
             # positive fused relevance downstream. It has to not be retrieved.
             #
-            # The fallback keeps filename lookup working — typing a path word
+            # The fallback keeps filename lookup working — typing a file's name
             # still finds that file's chunks — but only once nothing in any
             # chunk's *content* matches, so a path can never outrank prose.
+            # The column holds only that name (``fts_source_text``): with the
+            # whole path, a word of the memory dir's root, or the extension,
+            # matched every chunk under it and returned them all (#3208).
             # No weights are needed either way: under a column-qualified MATCH
             # ``bm25(chunks_fts, 1.0, 0.0)`` and the bare ``rank`` score
             # identically, because the excluded column contributes nothing to

@@ -52,6 +52,7 @@ from memtomem.models import (
 from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_helpers import (
     deserialize_f32,
+    fts_source_text,
     match_source_filter_value,
     namespace_sql,
     norm_path,
@@ -2050,7 +2051,7 @@ class SqliteBackend(
                     [
                         (
                             _fts.tokenize_for_fts(c.retrieval_content, tokenizer=tokenizer),
-                            norm_sources[c.metadata.source_file],
+                            fts_source_text(norm_sources[c.metadata.source_file]),
                             rowid,
                         )
                         for c, rowid in to_update
@@ -2172,7 +2173,7 @@ class SqliteBackend(
                             (
                                 new_rowid_map[str(c.id)],
                                 _fts.tokenize_for_fts(c.retrieval_content, tokenizer=tokenizer),
-                                norm_sources[c.metadata.source_file],
+                                fts_source_text(norm_sources[c.metadata.source_file]),
                             )
                             for c in to_insert
                             if str(c.id) in new_rowid_map
@@ -2939,7 +2940,7 @@ class SqliteBackend(
                 db.execute(
                     f"UPDATE chunks_fts SET source_file=? "
                     f"WHERE rowid IN ({placeholders(len(rowid_batch))})",
-                    [new_norm, *rowid_batch],
+                    [fts_source_text(new_norm), *rowid_batch],
                 )
             # Move the AI summary cache row alongside the chunks. The
             # cache key is derived from the source path, so an in-place
@@ -3032,7 +3033,7 @@ class SqliteBackend(
             db.execute(
                 f"UPDATE chunks_fts SET source_file=? "
                 f"WHERE rowid IN ({placeholders(len(rowid_batch))})",
-                [new_summary, *rowid_batch],
+                [fts_source_text(new_summary), *rowid_batch],
             )
         self._move_ai_summary_cache(db, old_summary, new_summary)
 
@@ -3100,7 +3101,7 @@ class SqliteBackend(
                                             ),
                                             tokenizer=tokenizer,
                                         ),
-                                        r[2],
+                                        fts_source_text(r[2]),
                                     )
                                     for r in batch
                                 ],
