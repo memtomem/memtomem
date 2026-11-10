@@ -1,12 +1,12 @@
 """A file's path retrieves it only when nothing's prose matches (#2224).
 
 ``chunks_fts`` is ``fts5(content, source_file)`` and an unqualified ``MATCH``
-searches both columns. ``source_file`` is stored raw, so unicode61 splits it
+searches both columns. ``source_file`` was stored raw, so unicode61 split it
 into components and every directory and filename word became a searchable term:
 on a real 6,995-chunk store, 71 of the top 100 hits for ``plans`` were chunks
 about something else, surfaced because they live under ``.claude/plans/``, and
 for auto-generated plan-filename words the path noise was the *entire* result
-set.
+set. Since #3208 the column holds only the file's name without its last suffix.
 
 **Why weighting the column 0.0 is not the fix.** It was the obvious one — the
 issue proposes it — and it is not enough: RRF fuses on a result's *ordinal
@@ -158,8 +158,9 @@ class TestPipelineFusion:
 class TestTheFallbackCanBeTurnedOff:
     """``create_components(bm25_path_fallback=False)`` never matches a path (#3205).
 
-    For a component whose paths are its own bookkeeping: every row shares the
-    root's words, so the fallback returns every row for a query naming one.
+    For a component whose file names are its own bookkeeping: with the
+    fallback, a query that happens to equal one returns that row though its
+    content never says it.
     """
 
     @pytest.fixture

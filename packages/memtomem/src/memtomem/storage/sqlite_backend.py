@@ -301,8 +301,9 @@ class SqliteBackend(
         # choice lives here rather than in a process global (#3018).
         self._fts_tokenizer = _fts.validate_tokenizer(fts_tokenizer)
         # Whether ``bm25_search`` falls back to the ``source_file`` column when
-        # no chunk's content matches (#2224). Off for a store whose paths are
-        # its own bookkeeping, where every row shares the path words (#3205).
+        # no chunk's content matches (#2224). Off for a store whose file names
+        # are its own bookkeeping, which can still spell a word a caller types
+        # (#3205).
         self._bm25_path_fallback = bm25_path_fallback
         self._chunk_budget_config = chunk_budget_config
         self._dimension = dimension

@@ -171,6 +171,8 @@ async def test_the_stores_bookkeeping_is_not_searchable(store: MemtomemPipelineS
     await store.aput(("docs",), "empty", {"text": "nothing selected"}, index=["missing"])
     # Not the store's layout and not its root either, whatever pytest named
     # the basetemp: a path word every row shares matched every row (#3205).
+    # Since #3208 no path word but the encoded key reaches the index; the
+    # store's own switch is pinned by the encoded-key test below.
     path_words = ("projections", "md", store.root.name, store.root.parent.name)
     for query in ("langchain memtomem", "gen", "lcmm", *path_words):
         assert await store.asearch(("docs",), query=query) == [], query
@@ -191,6 +193,8 @@ async def test_a_word_of_the_root_path_does_not_return_every_item(
     """``plane`` is in no value, only in the root every projection path shares (#3205).
 
     With BM25's path fallback every item matched it and was scored like a real hit.
+    Since #3208 memtomem leaves the root out of the path text, so this passes
+    with the fallback on as well.
     """
     store = await MemtomemPipelineStore.open(tmp_path / "plane-store", **options)
     try:
@@ -261,5 +265,32 @@ async def test_bounded_chunking_does_not_make_file_names_searchable(
         for query in ("md", "file", "fragment", encoded):
             assert [h.key for h in await store.asearch(("u",), query=query)] == [], query
         assert [h.key for h in await store.asearch(("u",), query="pears")] == ["b"]
+    finally:
+        await store.aclose()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"config": {"search": {"enable_dense": False}}}, {"retrieval": {"mode": "bm25"}}],
+    ids=["default", "dense-off", "retrieval-bm25"],
+)
+async def test_a_word_an_encoded_key_spells_does_not_return_its_item(
+    tmp_path: Path, options: dict
+) -> None:
+    """Key ``V`` encodes to ``sky``, the only path text BM25's fallback still sees.
+
+    The store's ``bm25_path_fallback=False`` is what keeps such a query from
+    returning the item: with the fallback on, ``sky`` returned ``V`` (#3215).
+    """
+    values = {"V": "apples", "R": "pears", "9": "plums"}
+    words = {"V": "sky", "R": "ski", "9": "she"}
+    assert {key: encode_segment(key) for key in values} == words
+    store = await MemtomemPipelineStore.open(tmp_path / "store", **options)
+    try:
+        for key, text in values.items():
+            await store.aput(("u",), key, {"text": text})
+        for word in words.values():
+            assert await store.asearch(("u",), query=word) == [], word
+        assert [h.key for h in await store.asearch(("u",), query="pears")] == ["R"]
     finally:
         await store.aclose()
