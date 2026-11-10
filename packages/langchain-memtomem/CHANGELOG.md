@@ -5,6 +5,8 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-10
+
 ### Added
 
 - `MemtomemPipelineStore(retrieval={"mode": "hybrid" | "bm25" | "dense", "weights": [bm25, dense],
