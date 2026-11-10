@@ -1424,7 +1424,8 @@ class MemtomemMemoryProvider(MemoryProvider):
             "on",
         }
         if noninteractive or stdin is None or not stdin.isatty():
-            print(f"\n  {_NAME}: not a terminal, so nothing was written. To set it up, run:")
+            reason = "HERMES_NONINTERACTIVE is set" if noninteractive else "not a terminal"
+            print(f"\n  {_NAME}: {reason}, so nothing was written. To set it up, run:")
             print(f"    hermes config set memory.provider {_NAME}")
             print(f"    hermes config set memory.{_NAME}.mirror_writes false   # or true")
             print(f"    {allow_cmd}\n")

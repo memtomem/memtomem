@@ -1523,7 +1523,8 @@ def test_setup_without_a_terminal_writes_nothing(
     provider.post_setup("/tmp/hermes", {"memory": {}})
     assert hermes.saved_configs == []
     out = capsys.readouterr().out
-    assert "nothing was written" in out
+    assert "not a terminal, so nothing was written" in out
+    assert "HERMES_NONINTERACTIVE" not in out
     assert "mcp_allowlist '[memtomem]'" in out
 
 
@@ -1589,7 +1590,11 @@ def test_setup_under_hermes_noninteractive_writes_nothing(
     hermes.setup_answers.append(True)
     mod.MemtomemMemoryProvider().post_setup("/tmp/hermes", {"memory": {}})
     assert hermes.saved_configs == []
-    assert "nothing was written" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # At a terminal, the variable is the reason; "not a terminal" would be false.
+    assert "HERMES_NONINTERACTIVE is set, so nothing was written" in out
+    assert "not a terminal" not in out
+    assert "hermes config set memory.provider memtomem-memory" in out
 
 
 def test_reinitializing_with_mirroring_off_stops_writes(mod: Any, hermes: Any) -> None:
