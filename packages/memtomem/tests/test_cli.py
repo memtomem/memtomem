@@ -2246,7 +2246,7 @@ class TestHelpEpilog:
         assert 'mm schedule add --cron "0 3 * * 0" --job compaction' in lines
         assert 'mm schedule add --cron "0 4 1 * *" --job importance_decay' in lines
         assert (
-            'mm schedule add --cron "30 2 * * 1" --job dedup_scan --params \'{"limit": 20}\''
+            'mm schedule add --cron "30 2 * * 1" --job dedup_scan --params \'{"limit":20}\''
             in lines
         )
         assert "mm schedule run-now <id>" in lines
