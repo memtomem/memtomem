@@ -546,7 +546,14 @@ Examples:
 @click.option(
     "--since", default=None, help="Start date (YYYY, YYYY-MM, YYYY-MM-DD, or ISO datetime)"
 )
-@click.option("--until", default=None, help="End date (exclusive, same formats)")
+@click.option(
+    "--until",
+    default=None,
+    help=(
+        "End date, same formats. A date-only value includes that whole period (UTC); "
+        "a full datetime is exclusive."
+    ),
+)
 @click.option("--limit", "-l", default=20, help="Number of recent chunks")
 @click.option("--source-filter", "-s", default=None, help="Filter by source")
 @click.option(
