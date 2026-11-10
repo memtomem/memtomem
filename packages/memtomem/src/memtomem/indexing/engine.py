@@ -459,6 +459,9 @@ class IndexEngine:
     # helper) that build an engine with ``IndexEngine.__new__`` and set only
     # ``_config`` still reach the exclusion checks.
     _user_exclude_cache: tuple[tuple[str, ...], pathspec.GitIgnoreSpec] | None = None
+    # Class-level for the same reason: whether bounded chunk descriptions carry
+    # the ``File:`` and ``Fragment`` lines (see ``bound_chunks``).
+    _chunk_source_labels: bool = True
 
     def __init__(
         self,
@@ -470,9 +473,15 @@ class IndexEngine:
         progress_threshold: int = 32,
         llm: "LLMProvider | None" = None,
         generation: ComponentGeneration | None = None,
+        *,
+        chunk_source_labels: bool = True,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
+        # False for a caller whose file names are its own bookkeeping
+        # (langchain-memtomem's store): bounded descriptions are embedded and
+        # BM25-indexed, so ``File: <name>`` would make the name searchable (#3209).
+        self._chunk_source_labels = chunk_source_labels
         # The embedder/pipeline/engine generation this engine belongs to
         # (#2180); see the matching field on ``SearchPipeline``. Held for the
         # span of every entry point that can reach ``self._embedder``, so
@@ -1117,11 +1126,15 @@ class IndexEngine:
         }:
             from memtomem.chunking.bounded import chunk_code
 
-            return chunk_code(file_path, content, self._config)
+            return chunk_code(
+                file_path, content, self._config, source_labels=self._chunk_source_labels
+            )
         if self._config.hard_max_chunk_tokens and file_path.suffix.lower() == ".json":
             from memtomem.chunking.bounded import chunk_json
 
-            return chunk_json(file_path, content, self._config)
+            return chunk_json(
+                file_path, content, self._config, source_labels=self._chunk_source_labels
+            )
         chunks = self._registry.chunk_file(file_path, content)
         # Post-processing: merge short chunks + add overlap
         chunks = _merge_short_chunks(
@@ -1135,7 +1148,7 @@ class IndexEngine:
         if self._config.hard_max_chunk_tokens:
             from memtomem.chunking.bounded import bound_chunks
 
-            chunks = bound_chunks(chunks, self._config)
+            chunks = bound_chunks(chunks, self._config, source_labels=self._chunk_source_labels)
         return chunks
 
     async def _validate_source_commit(self, file_path: Path) -> None:
@@ -2748,6 +2761,11 @@ class IndexEngine:
                     # which a chunker silently falls back from when absent.
                     "chunkers": _CHUNKER_VERSIONS,
                     "indexing": self._config.model_dump(mode="python"),
+                    # Not part of ``IndexingConfig`` but it changes every
+                    # bounded description, so a receipt written under the
+                    # other value must not let an unchanged source skip
+                    # re-chunking.
+                    "chunk_source_labels": self._chunk_source_labels,
                     "namespace": self._ns_config.model_dump(mode="python"),
                     "namespace_target": ns_decision.target,
                     # The whole effective projection, not just the guard input.

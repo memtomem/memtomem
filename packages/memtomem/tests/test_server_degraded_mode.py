@@ -356,6 +356,22 @@ async def test_revert_to_stored_preserves_llm_on_index_engine(degraded_component
     assert app.index_engine._llm is sentinel_llm
 
 
+async def test_revert_to_stored_preserves_chunk_source_labels(degraded_components):
+    """``chunk_source_labels`` is a component setting, not a config field, so
+    the rebuilt engine has nothing to read it from but the engine it replaces
+    (#3209). Dropping it would put ``File:`` lines back into a store whose file
+    names are bookkeeping."""
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    pre_index = app.index_engine
+    pre_index._chunk_source_labels = False
+
+    await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    assert app.index_engine is not pre_index
+    assert app.index_engine._chunk_source_labels is False
+
+
 async def test_revert_to_stored_closes_the_retired_generation(degraded_components):
     """Publish-first, then retire: the swap must close the old pipeline and
     the old embedder, and only after the new generation is published — a

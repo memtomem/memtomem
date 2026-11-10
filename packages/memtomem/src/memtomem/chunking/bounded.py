@@ -224,8 +224,19 @@ def _fragment_lines(line_map: tuple[int, ...], first: int, last: int) -> tuple[i
 
 
 def bound_chunks(
-    chunks: list[Chunk], config: IndexingConfig, *, preserve_source_lines: bool = False
+    chunks: list[Chunk],
+    config: IndexingConfig,
+    *,
+    preserve_source_lines: bool = False,
+    source_labels: bool = True,
 ) -> list[Chunk]:
+    """Split ``chunks`` to the token budget and give each part a description.
+
+    ``source_labels=False`` leaves the ``File:`` and ``Fragment`` lines out of
+    the description, for callers whose file names are their own bookkeeping:
+    the description is embedded and BM25-indexed, so those lines would make
+    the names searchable (#3209).
+    """
     budget = TokenBudget(config)
     result: list[Chunk] = []
     copies: set[int] = set()
@@ -275,16 +286,20 @@ def bound_chunks(
             # keyed on this string) the whole file, instead of taking the
             # hash-equal ``update_chunk_line_ranges`` path (#1788). The range
             # lives in ``start_line``/``end_line``, which that path refreshes,
-            # and adds nothing to a vector. The fragment ordinal stays: it
-            # moves only when the split itself moves.
+            # and adds nothing to a vector. The fragment ordinal stays when
+            # labels are on: it moves only when the split itself moves.
+            labels = (
+                (f"File: {chunk.metadata.source_file.name}", f"Fragment {index + 1}/{len(spans)}")
+                if source_labels
+                else ()
+            )
             description = "\n".join(
                 filter(
                     None,
                     (
                         chunk.metadata.retrieval_context,
                         " > ".join(chunk.metadata.heading_hierarchy),
-                        f"File: {chunk.metadata.source_file.name}",
-                        f"Fragment {index + 1}/{len(spans)}",
+                        *labels,
                     ),
                 )
             )
@@ -526,7 +541,10 @@ def _merge_short_code_spans(
     return [span for span, _ in merged]
 
 
-def chunk_code(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
+def chunk_code(
+    path: Path, text: str, config: IndexingConfig, *, source_labels: bool = True
+) -> list[Chunk]:
+    """Split source code on symbol boundaries; ``source_labels`` as in ``bound_chunks``."""
     if not text.strip():
         return []
     budget = TokenBudget(config)
@@ -631,11 +649,9 @@ def chunk_code(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
         # Position-independent for the reason spelled out in ``bound_chunks``:
         # a line range in the embedded description turns any edit above a chunk
         # into a re-embed of everything below it.
-        identity = (
-            " > ".join(hierarchy)
-            + f"\nFile: {path.name}\n"
-            + f"Fragment {seen[hierarchy]}/{totals[hierarchy]}"
-        )
+        identity = " > ".join(hierarchy)
+        if source_labels:
+            identity += f"\nFile: {path.name}\nFragment {seen[hierarchy]}/{totals[hierarchy]}"
         # Identity first; reserve room for local comments and concise symbol docs.
         detail_limit = max(1, budget.context // 4)
         details = [budget.trim(comments, detail_limit)]
@@ -741,7 +757,9 @@ def _pack_json_siblings(
     return [(start, end) for start, end in groups]
 
 
-def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
+def chunk_json(
+    path: Path, text: str, config: IndexingConfig, *, source_labels: bool = True
+) -> list[Chunk]:
     """Split oversized containers by pointer, packing adjacent small members.
 
     Group labels contain a parent pointer and first/last raw member names or
@@ -893,7 +911,9 @@ def chunk_json(path: Path, text: str, config: IndexingConfig) -> list[Chunk]:
                 ),
             )
         ]
-    bounded = bound_chunks(chunks, config, preserve_source_lines=serialized)
+    bounded = bound_chunks(
+        chunks, config, preserve_source_lines=serialized, source_labels=source_labels
+    )
     for chunk in bounded:
         chunk.metadata = replace(chunk.metadata, source_read_only=True, source_span_hash=None)
     return bounded
