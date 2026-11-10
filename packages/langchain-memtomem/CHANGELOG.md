@@ -13,11 +13,16 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
   content matches, and every projection path shares those words, so without an embedder (or in
   `bm25` mode) every item came back, scored as a real match at its rank would be. The store now
   turns that fallback off, so such a query returns `[]` there. Dense retrieval is unchanged: in
-  `hybrid` or `dense` mode with an embedder, any query still returns the nearest items. With
-  bounded chunking (on for an E5 embedding model) `md`, `file`, `fragment` and an item's encoded
-  key still match, through the chunker's `File:` and `Fragment` lines (#3209). Needs
+  `hybrid` or `dense` mode with an embedder, any query still returns the nearest items. Needs
   memtomem 0.7.9, which adds the `create_components` keyword the store passes; the dependency
   floor rises with that release.
+- With bounded chunking (on for an E5 embedding model), the words `md`, `file` and `fragment` and
+  an item's encoded key no longer match items through text the store did not write (#3209).
+  memtomem's chunker wrote `File: <encoded key>.md` and `Fragment <i>/<n>` lines into each row's
+  embedded and BM25-indexed text, so in BM25 the first three matched every item and the encoded
+  key matched its item. The store now opens its components with `chunk_source_labels=False`,
+  which leaves both lines out. Rows indexed before the upgrade keep them until their item is
+  written again. Needs memtomem 0.7.9 as well.
 
 ## [0.2.0] — 2026-11-10
 

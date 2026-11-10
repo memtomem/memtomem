@@ -82,13 +82,15 @@ selectors. Nothing of the store's own bookkeeping is in it, so none of it is
 searchable and no value can imitate it. The projection's path is bookkeeping
 too, and is not searched either: the store opens its components with
 `bm25_path_fallback=False`, so BM25 matches a query against content only, never
-against the root, `projections` or an encoded namespace or key. One gap remains
-(#3209): with bounded chunking, which an E5 embedding model turns on, memtomem's
-chunker adds `File: <encoded key>.md` and `Fragment <i>/<n>` lines to each row's
-retrieval text, so `md`, `file`, `fragment` and an item's encoded key still match
-as content. The empty line keeps memtomem's
-chunker from reading a value that opens with `---` as frontmatter (measured:
-such a value setting `valid_to` in the past was otherwise hidden from search).
+against the root, `projections` or an encoded namespace or key. Nor does the
+file name reach the content: with bounded chunking, which an E5 embedding model
+turns on, memtomem's chunker would add `File: <encoded key>.md` and
+`Fragment <i>/<n>` lines to each row's embedded and indexed text, and the store
+passes `chunk_source_labels=False` so it does not (#3209). Rows indexed before
+that change keep the lines until their item is written again. The empty line
+keeps memtomem's chunker from reading a value that opens with `---` as
+frontmatter (measured: such a value setting `valid_to` in the past was otherwise
+hidden from search).
 A record whose selectors render to empty text has no projection, the same as
 `index=False`.
 

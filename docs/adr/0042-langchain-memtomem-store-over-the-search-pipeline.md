@@ -285,6 +285,19 @@ boundary of `put` and `delete` against the repair that restores agreement).
      > under bounded chunking (on for E5) the chunker writes
      > `File: <encoded key>.md` into each row's retrieval text, which BM25
      > indexes as content (#3209).
+     > **Amended 2026-11-10** after #3209. Under bounded chunking the
+     > chunker's description for each row added `File: <encoded key>.md` and
+     > `Fragment <i>/<n>` lines, and that description is embedded and
+     > BM25-indexed with the body, so `md`, `file` and `fragment` returned
+     > every item and an item's encoded key returned that item. The store
+     > now also passes `create_components(..., chunk_source_labels=False)`,
+     > a second public keyword, and the chunker leaves both lines out of the
+     > embedded and the indexed text alike. The store adds no headings to a
+     > projection, so a row's description is now only the headings the value
+     > itself holds, and empty when it holds none. Rows indexed before the
+     > change keep the lines until their item is written again (measured:
+     > reopening the store does not re-describe them; a `put` of the item
+     > does).
    - A deletion marker carries the generation it was written for. A later
      `put` under the lock settles or supersedes the marker before it writes.
      Repair gives a marker precedence only over a record of the same or an
