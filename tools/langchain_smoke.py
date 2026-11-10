@@ -9,7 +9,9 @@ library and ``uv`` on PATH, so ``uv run --no-project`` can start it.
 
 ``check`` refuses to run against a source checkout. It writes three items,
 checks that a query search returns the right one with its value, closes,
-reopens, searches again, deletes, and checks the deleted item is gone. HOME
+reopens, searches again, deletes, and checks the deleted item is gone.
+Then it opens a ``retrieval={"mode": "bm25"}`` store, checks it ranks, and
+checks that ``{"mode": "dense"}`` without an embedder is refused. HOME
 points at a scratch directory and every ``MEMTOMEM_*`` variable is dropped
 before memtomem is imported, so the developer's own memtomem is never read.
 ``--expect-version`` and ``--expect-core`` make the installed distribution
@@ -69,6 +71,13 @@ async def _top_hit(store: object, query: str) -> tuple[str, dict]:
     return hits[0].key, hits[0].value
 
 
+async def _no_hit(store: object, query: str, when: str) -> None:
+    """``query`` is a word of every projection path and of no value (#3205)."""
+    hits = await store.asearch(("users",), query=query, limit=3)  # type: ignore[attr-defined]
+    if hits:
+        _fail(f"{when}, the path word {query!r} returned {[hit.key for hit in hits]}")
+
+
 async def _exercise(root: Path) -> None:
     from langchain_memtomem import MemtomemPipelineStore
 
@@ -79,6 +88,7 @@ async def _exercise(root: Path) -> None:
         key, value = await _top_hit(store, "window seat")
         if (key, value) != ("seat", ITEMS["seat"]):
             _fail(f"query 'window seat' ranked {key!r} {value!r} first")
+        await _no_hit(store, "projections", "before reopen")
     finally:
         await store.aclose()
 
@@ -87,6 +97,7 @@ async def _exercise(root: Path) -> None:
         key, value = await _top_hit(store, "peanuts")
         if (key, value) != ("food", ITEMS["food"]):
             _fail(f"after reopen, query 'peanuts' ranked {key!r} {value!r} first")
+        await _no_hit(store, "projections", "after reopen")
         item = await store.aget(NAMESPACE, "lang")
         if item is None or item.value != ITEMS["lang"]:
             _fail(f"get after reopen returned {item!r}")
@@ -99,6 +110,29 @@ async def _exercise(root: Path) -> None:
     print("put, search, reopen, get and delete behave")
 
 
+async def _exercise_retrieval(root: Path) -> None:
+    from langchain_memtomem import MemtomemPipelineStore
+
+    store = await MemtomemPipelineStore.open(root / "bm25", retrieval={"mode": "bm25"})
+    try:
+        for key, value in ITEMS.items():
+            await store.aput(NAMESPACE, key, value)
+        key, value = await _top_hit(store, "window seat")
+        if (key, value) != ("seat", ITEMS["seat"]):
+            _fail(f"a bm25 store ranked {key!r} {value!r} first for 'window seat'")
+    finally:
+        await store.aclose()
+    try:
+        store = await MemtomemPipelineStore.open(root / "dense", retrieval={"mode": "dense"})
+    except ValueError as exc:
+        if "dense mode requires embeddings" not in str(exc):
+            _fail(f"dense without an embedder was refused for another reason: {exc}")
+    else:
+        await store.aclose()
+        _fail("a dense store opened without an embedder")
+    print("retrieval: bm25 ranks, dense without an embedder is refused")
+
+
 def _check(args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory(prefix="lcmm-smoke-") as scratch:
         home = Path(scratch) / "home"
@@ -109,6 +143,7 @@ def _check(args: argparse.Namespace) -> int:
             del os.environ[name]
         _check_installed(args.expect_version, args.expect_core)
         asyncio.run(_exercise(Path(scratch) / "store"))
+        asyncio.run(_exercise_retrieval(Path(scratch) / "retrieval"))
     return 0
 
 

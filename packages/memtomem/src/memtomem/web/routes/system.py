@@ -42,6 +42,11 @@ from memtomem.web.deps import (
 )
 from memtomem.web.routes import system_config, system_indexing
 from memtomem.web.routes._locks import _config_lock
+from memtomem.web.routes._writer_wait import (
+    WRITER_BUSY_NOTHING_CHANGED_DETAIL,
+    writer_busy_as_503,
+    writer_transaction,
+)
 from memtomem.web.routes.system_config import (
     _DENIED_MEMORY_DIR_PARTS,
     _DENIED_MEMORY_DIR_PREFIXES,
@@ -418,7 +423,8 @@ async def embed_text(request: Request, embedder=Depends(get_embedder)):
 @router.post("/reset", dependencies=[Depends(_require_localhost)])
 async def reset_all(storage=Depends(get_storage)):
     """Delete ALL data and reinitialize the database. Embedding config preserved."""
-    deleted = await storage.reset_all()
+    async with writer_transaction(storage):
+        deleted = await storage.reset_all()
     total = sum(deleted.values())
     return {
         "ok": True,
@@ -431,7 +437,9 @@ async def reset_all(storage=Depends(get_storage)):
 @router.post("/fts-rebuild", dependencies=[Depends(_require_localhost)])
 async def rebuild_fts(storage=Depends(get_storage)):
     """Rebuild the FTS5 full-text index using the current tokenizer."""
-    count = await storage.rebuild_fts()
+    # The writer wait comes before the rebuild starts (#3182).
+    with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
+        count = await storage.rebuild_fts()
     return {"ok": True, "rebuilt_rows": count, "message": f"FTS index rebuilt for {count} chunks."}
 
 

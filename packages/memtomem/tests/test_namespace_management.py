@@ -5,9 +5,9 @@ from __future__ import annotations
 import ast
 import dataclasses
 import multiprocessing
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -44,6 +44,7 @@ class TestNamespaceCoordinator:
         candidate_a = _candidate(source_a)
         candidate_b = _candidate(source_b)
         storage = AsyncMock()
+        storage.transaction = MagicMock(side_effect=lambda **_: nullcontext())
         storage.list_namespace_chunk_candidates = AsyncMock(
             side_effect=[
                 [candidate_b],
@@ -96,6 +97,7 @@ class TestNamespaceCoordinator:
         candidates = [_candidate(tmp_path / f"{name}.md") for name in "abcd"]
         snapshots = [candidates[:1], candidates[:2], candidates[:3], candidates[:4]]
         storage = AsyncMock()
+        storage.transaction = MagicMock(side_effect=lambda **_: nullcontext())
         storage.list_namespace_chunk_candidates = AsyncMock(side_effect=snapshots)
         storage.rename_namespace = AsyncMock()
 
@@ -118,6 +120,7 @@ class TestNamespaceCoordinator:
         source = tmp_path / "removed" / "source.md"
         candidate = _candidate(source)
         storage = AsyncMock()
+        storage.transaction = MagicMock(side_effect=lambda **_: nullcontext())
         storage.list_namespace_chunk_candidates = AsyncMock(side_effect=[[candidate], [candidate]])
         expected = NamespaceRenameResult(1, False, False)
         storage.rename_namespace = AsyncMock(return_value=expected)

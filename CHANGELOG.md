@@ -7,6 +7,118 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`create_components(..., bm25_path_fallback=False)` keeps BM25 from matching chunk paths
+  (#3205).** By default a BM25 search that matches no chunk's content falls back to matching
+  file paths, so typing a filename still finds that file (#2224). A component whose paths are
+  its own bookkeeping can now turn that off. langchain-memtomem's store does: every one of its
+  paths shares the store's root and layout words, so a query naming one returned every item.
+  The default is unchanged.
+
+### Fixed
+
+- **Web UI requests no longer answer HTTP 500 at once while another task holds a
+  write transaction (#3182).** While a policy job, an import or a consolidation
+  held `storage.transaction()` in `mm web`, these routes were refused with "SQLite
+  transaction is owned by another task" and answered "Internal server error",
+  before writing anything: the namespace, scratch, session and
+  search-run views and edits; tag rename, delete and merge; source delete;
+  feedback, eval-case promotion and replay; embedding status, embedding reset,
+  FTS rebuild and the database reset. They now wait up to the same 5-second
+  budget. If the wait runs out they answer 503 and say whether anything was
+  changed. The per-chunk tag edit does not wait (a memory migration may commit
+  between its read and its write), but answers that 503 instead of a 500.
+  Namespace rename and assign through MCP and the CLI, the tag tools, and the
+  scratch, session, search-history and eval-case reads wait the same way.
+- **Hermes provider: `hermes memory setup memtomem-memory` names the right reason
+  when it writes nothing (#3204).** Run at a terminal with
+  `HERMES_NONINTERACTIVE=1`, it said "not a terminal"; it now says
+  "HERMES_NONINTERACTIVE is set". It still writes nothing and prints the commands.
+
+## [0.7.8] — 2026-11-10
+
+### Upgrading
+
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.22 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.8;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.8`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.8`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.8.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.7" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.7` to
+  `==0.7.8` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.8 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.8`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
+- **Hermes memory provider 0.2.0 changes what recall searches once the server is
+  0.7.8.** The provider asks the server what it supports, and a 0.7.8 server
+  gets `namespace="!system"`: recall then searches every namespace except the
+  system ones, even while the model has a memtomem session namespace open, where
+  0.1.2 searched the server's current namespace. When `rpc_timeout_seconds` is
+  at least 1.5, it also gets `deadline_ms`, that timeout less one second; what
+  the budget bounds, and what it does not, is in the `mem_search` `deadline_ms`
+  entry under Added. Against 0.7.7 or older, recall is called exactly as before.
+  Mirroring stays off until you set `memory.memtomem-memory.mirror_writes: true` (or answer yes in
+  `hermes memory setup memtomem-memory`) and needs a 0.7.8 server; the provider
+  README's "Mirroring Hermes's built-in memory" section lists what is stored and
+  how to purge a mirror. 0.2.0 declares `requires_hermes: ">=0.21.5"`.
+- **The first 0.7.8 start adds two tables.** `hermes_mirror_entries` and
+  `hermes_mirror_targets` are created in the existing database even when nothing
+  mirrors; no migration step is needed and the schema version stays 3. Going
+  back to 0.7.7 leaves both tables, and any `hermes-mirror/` Markdown, in place;
+  0.7.7 indexes that Markdown as an ordinary note.
+- **Re-importing a Notion export can leave old files behind (#3113, #3141).**
+  Sibling pages with the same title, or with titles that differ only by case or
+  Unicode normalization, now get their own names with a UUID prefix
+  (`Meeting Notes (a1b2c3d4).md`), on every platform. The next re-import writes
+  those names and leaves the earlier plain-named file on disk and indexed, so
+  the page can come up twice in search. Delete the plain-named files the new
+  names replace, preview with `mm gc orphan-sources --under <output dir>`, then
+  run it again with `--apply`.
+- **Import results read differently (#3158, #3162, #3164, #3168).**
+  The first line of a `mem_import_notion` or `mem_import_obsidian` result reads
+  `import incomplete: N of M written file(s) were not indexed` only for the files
+  it then lists under `Written but not indexed` (up to five, with the reason).
+  Other written files that did not end up indexed are only counted, each on its
+  own line: `Blocked (redaction)`, `Written but excluded from indexing` and
+  `Written but replaced by a symlink (not indexed, previous chunks hidden)`. So
+  `import complete` does not mean every written file was indexed; a script should
+  read those counts too. An import refuses before writing while an embedding
+  mismatch blocks indexing, with the `Embedding mismatch detected` message.
+- **A write can now report that it reached the disk but not the index (#3163,
+  #3165, #3172).** Add and batch add say so when the file became excluded during
+  the write; edit and delete also when it was replaced by a symbolic link.
+  `mm add --json`
+  gains an optional `warning` key, and the web UI's add and scratch promote
+  responses a `warning` field that is `null` otherwise. The CLI still exits 0
+  and the entry stays in the file: do not retry the add, which would write it a
+  second time. Fix the exclude pattern or the link, then index the file.
+- **Web API: a write that gives up waiting for another task's transaction answers
+  503 (#3181).** Working-memory promote, add, memory directory removal and
+  auto-tag return 503 with what was written and what to do, where 0.7.7 returned
+  500; chunk delete keeps its 500.
+- **`mm init`: pressing Enter picks what this machine can finish (#3149,
+  #3150).** The preset prompt defaults to Minimal unless the `onnx` extra is
+  importable where memtomem will run, and the connect prompt defaults to Skip
+  when the `claude` CLI is not on `PATH`. `mm init --non-interactive` without
+  `--preset` still applies `minimal`.
+
+### Added
+
 - **The Hermes memory provider can mirror Hermes's built-in memory into memtomem
   (opt-in).** With `memory.memtomem-memory.mirror_writes: true`, each entry
   Hermes saves, replaces or removes in `MEMORY.md` / `USER.md` is sent to the
@@ -16,11 +128,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   memory directory, which is indexed like any other note. The provider README
   lists what is stored, sent and dropped, and how to purge a mirror.
 - **`mem_search` takes `deadline_ms`, a budget for the server's own
-  processing.** It bounds the wait for a read connection and for a query
-  embedding that has not started, and is checked between search stages; past it
-  the call returns `Error (retryable): deadline … exceeded` and records nothing.
-  Work already running — a SQLite read, an embedding slice — finishes first, so
-  this is not a response deadline. Without it, search runs exactly as before.
+  processing.** It bounds the wait for a read connection, and is checked between
+  search stages and when a queued query embedding reaches the model, which then
+  does not run; past it the call returns `Error (retryable): … deadline …
+  exceeded …` and records nothing. Work already running — a SQLite read, an
+  embedding slice — finishes first, and a query embedding queued behind other
+  inference waits for it before failing, so this is not a response deadline.
+  Without it, search runs exactly as before.
 - **`mem_do(action="version")` advertises `hermes_mirror`, `search_deadline_ms`
   and `namespace_selectors`.** The Hermes provider asks before its first call
   and every 10 minutes, and sends `namespace="!system"`, `deadline_ms` and
@@ -158,6 +272,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the tool or page says so. On macOS, chunks stored under a path spelling from
   before Unicode normalization cannot be hidden this way; the message then says
   they are still searchable.
+- **Indexing a file that is replaced by a symbolic link while the index runs no
+  longer files its content under another source (#3180).** An index pass reads
+  the file, then waits on namespace resolution, the writer, enrichment's LLM
+  calls and the embedding before it writes, and each write resolved the path
+  again. A path replaced in that window by a link to another indexed source had
+  its content stored under that source's key and its own chunks deleted, with no
+  error, and the hold release after the pass could lift the link target's hold.
+  The pass now takes the source's stored key with the read and checks it before
+  it writes; a changed resolution stops the pass with a retryable error and rolls
+  its writes back, and the watcher retries the path. A path that is already a
+  link when it is read is indexed through it, as before. A swap and swap back
+  between the read and the check is not detected.
+- **A memory tool's redaction refusal hides the file it refused, not the file its
+  path was relinked to (#3183).** Before writing, the memory tools (`mem_add`,
+  `mem_edit`, `mem_delete`, `mm add` and the web UI's add, edit, chunk delete and
+  scratch promote among them) read the file and check its current content; a
+  refusal holds the file's chunks as `redaction_blocked`. The hold resolved the
+  path after that check, so a path replaced by a symbolic link to another indexed
+  source in between hid that other source, left the refused file's chunks
+  searchable, and still reported them held. The hold key is now taken with the
+  read. The scope that check applies is still resolved from the path afterwards
+  (#3191).
 - **Adding a memory no longer reports a zero-chunk success when the file becomes
   excluded during the write (#3165).** The add paths refuse an excluded file
   before appending, but an exclude pattern added between that check and the
@@ -206,7 +342,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   so it was never summarized again. The summary now moves in the same
   transaction, keeping its id and taking the file's new scope. It stays where it
   is, as before, when another note shares its path, when that path is held or
-  pending, or when the new path already has rows or a hold.
+  pending, or when the new path already has rows or a hold. The file's cached
+  chunk descriptions, which `enrich_chunk_context` reuses, now move with it as
+  well (#3139); they used to stay under the old path, so the moved file's next
+  enrichment generated them again.
 
 - **Notion sibling pages sharing a title in the same directory no longer
   overwrite each other during import (#3113).**

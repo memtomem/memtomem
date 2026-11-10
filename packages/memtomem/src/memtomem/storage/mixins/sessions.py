@@ -6,6 +6,8 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
+from memtomem.storage.base import WRITER_WAIT_S
+
 logger = logging.getLogger(__name__)
 
 
@@ -276,8 +278,9 @@ class SessionMixin:
         This matches :meth:`get_session` and keeps HTTP/CLI/MCP consumers
         from having to distinguish SQLite's raw JSON text from an object.
         See :func:`decode_session_metadata` for malformed-row handling.
+        Waits for another task's transaction rather than being refused (#3182).
         """
-        db = self._get_db()
+        db = await self._get_db_after_wait(wait=WRITER_WAIT_S)
         query = (
             "SELECT id, agent_id, started_at, ended_at, summary, namespace, metadata FROM sessions"
         )
@@ -383,7 +386,8 @@ class SessionMixin:
         ]
 
     async def get_session_events(self, session_id: str) -> list[dict]:
-        db = self._get_db()
+        # Waits for another task's transaction rather than being refused (#3182).
+        db = await self._get_db_after_wait(wait=WRITER_WAIT_S)
         rows = db.execute(
             "SELECT id, event_type, content, chunk_ids, created_at, metadata"
             " FROM session_events WHERE session_id = ? ORDER BY id",

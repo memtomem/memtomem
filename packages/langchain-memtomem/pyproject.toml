@@ -1,6 +1,6 @@
 [project]
 name = "langchain-memtomem"
-version = "0.1.0"
+version = "0.2.0"
 description = "A LangGraph BaseStore whose query search runs the memtomem pipeline over Markdown projections"
 authors = [
     {name = "DAPADA Inc.", email = "contact@dapada.co.kr"},

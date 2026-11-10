@@ -5,7 +5,16 @@ Single source of truth for tag mutations. Web routes, MCP tools, and the
 
 Concurrency: each entry point acquires ``storage._tag_write_lock`` for
 the read-modify-write window so it can't interleave with
-``auto_tag_storage`` running in the same process. Cross-process
+``auto_tag_storage`` running in the same process. A write first waits for
+the writer (``transaction(wait=WRITER_WAIT_S)``) and only then takes the tag
+lock, the order the index path takes them (#3182): it owns the writer and
+then takes the tag lock in ``update_chunk_metadata``. Dry runs take only the
+tag lock. ``replace_chunk_tags`` does not wait: holding the writer from its
+read to its write would close the window in which a ``memory-migrate`` may
+commit, which its write's SQL predicate is there to handle
+(``test_replace_chunk_tags_is_atomic_against_memory_migrate``), and waiting
+inside the tag lock would reverse the lock order. Its refusal comes before it
+writes, so callers can report "nothing was changed". Cross-process
 serialization still falls back to SQLite's WAL file lock — concurrent
 ``mm web`` and ``mm`` CLI processes can still race on the same chunks
 (known limitation, see #688 confirm thread).
@@ -29,6 +38,7 @@ from typing import TYPE_CHECKING, Sequence
 from uuid import UUID
 
 from memtomem.search.visibility import chunk_in_scope_boundary
+from memtomem.storage.base import WRITER_WAIT_S
 
 if TYPE_CHECKING:
     from memtomem.models import Chunk
@@ -122,16 +132,18 @@ async def rename_tag(
     if old == new:
         raise ValueError("rename_tag old and new tag names are identical")
 
-    async with storage._tag_write_lock:
-        if dry_run:
+    if dry_run:
+        async with storage._tag_write_lock:
             count = await storage.count_chunks_by_tag(old)
             samples = await _samples_for_tag(storage, old) if count else ()
             return TagOpResult(tag=new, affected_chunks=count, dry_run=True, samples=samples)
 
-        affected = await storage.rename_tag(old, new)
-        if affected:
-            _invalidate(search_pipeline)
-        return TagOpResult(tag=new, affected_chunks=affected, dry_run=False)
+    async with storage.transaction(wait=WRITER_WAIT_S):
+        async with storage._tag_write_lock:
+            affected = await storage.rename_tag(old, new)
+    if affected:
+        _invalidate(search_pipeline)
+    return TagOpResult(tag=new, affected_chunks=affected, dry_run=False)
 
 
 async def delete_tag(
@@ -151,16 +163,18 @@ async def delete_tag(
     if not tag:
         raise ValueError("delete_tag requires a non-empty tag name")
 
-    async with storage._tag_write_lock:
-        if dry_run:
+    if dry_run:
+        async with storage._tag_write_lock:
             count = await storage.count_chunks_by_tag(tag)
             samples = await _samples_for_tag(storage, tag) if count else ()
             return TagOpResult(tag=tag, affected_chunks=count, dry_run=True, samples=samples)
 
-        affected = await storage.delete_tag(tag)
-        if affected:
-            _invalidate(search_pipeline)
-        return TagOpResult(tag=tag, affected_chunks=affected, dry_run=False)
+    async with storage.transaction(wait=WRITER_WAIT_S):
+        async with storage._tag_write_lock:
+            affected = await storage.delete_tag(tag)
+    if affected:
+        _invalidate(search_pipeline)
+    return TagOpResult(tag=tag, affected_chunks=affected, dry_run=False)
 
 
 async def merge_tags(
@@ -187,8 +201,8 @@ async def merge_tags(
         # Nothing to do — empty sources, or sources collapsed to just the target.
         return TagOpResult(tag=target, affected_chunks=0, dry_run=dry_run)
 
-    async with storage._tag_write_lock:
-        if dry_run:
+    if dry_run:
+        async with storage._tag_write_lock:
             # Use a single COUNT(DISTINCT chunk) query for affected_chunks so
             # the dry-run number is accurate even when a single source tag
             # is attached to a very large number of chunks. Sampling stays
@@ -213,10 +227,12 @@ async def merge_tags(
                 samples=samples,
             )
 
-        affected = await storage.merge_tags(list(source_set), target)
-        if affected:
-            _invalidate(search_pipeline)
-        return TagOpResult(tag=target, affected_chunks=affected, dry_run=False)
+    async with storage.transaction(wait=WRITER_WAIT_S):
+        async with storage._tag_write_lock:
+            affected = await storage.merge_tags(list(source_set), target)
+    if affected:
+        _invalidate(search_pipeline)
+    return TagOpResult(tag=target, affected_chunks=affected, dry_run=False)
 
 
 async def replace_chunk_tags(

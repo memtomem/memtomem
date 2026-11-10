@@ -6,7 +6,7 @@ memtomem repository records the decisions this package implements).
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 try:
     from memtomem.integrations.langgraph_store import matches_filter as _matches_filter  # noqa: F401
@@ -19,12 +19,14 @@ except ImportError as exc:  # pragma: no cover - exercised against an older memt
 
 from langchain_memtomem.store import (
     DEFAULT_MAX_CHUNKS_PER_SEARCH,
+    DenseSearchUnavailable,
     MemtomemPipelineStore,
     StoreIndexError,
 )
 
 __all__ = [
     "DEFAULT_MAX_CHUNKS_PER_SEARCH",
+    "DenseSearchUnavailable",
     "MemtomemPipelineStore",
     "StoreIndexError",
     "__version__",

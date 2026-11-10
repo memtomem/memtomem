@@ -50,6 +50,10 @@ from memtomem.web.deps import (
     get_storage,
 )
 from memtomem.web.routes._confirm import needs_confirmation_envelope
+from memtomem.web.routes._writer_wait import (
+    WRITER_BUSY_REFUSED_NOTHING_CHANGED_DETAIL,
+    writer_busy_as_503,
+)
 from memtomem.web.routes._errors import (
     DEGRADED_SOURCE_EDIT_DETAIL,
     NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
@@ -1084,13 +1088,16 @@ async def update_chunk_tags(
     ``upsert_chunks`` call could race against an in-flight bulk rewrite
     and leave search-result tag filters cached against stale tags.
     """
-    updated = await tag_svc.replace_chunk_tags(
-        storage,
-        chunk_id,
-        body.tags,
-        project_context_root=_boundary(config),
-        search_pipeline=search_pipeline,
-    )
+    # The service does not wait for another task's transaction (see its
+    # docstring); its refusal comes before the write, so it answers 503 (#3182).
+    with writer_busy_as_503(WRITER_BUSY_REFUSED_NOTHING_CHANGED_DETAIL):
+        updated = await tag_svc.replace_chunk_tags(
+            storage,
+            chunk_id,
+            body.tags,
+            project_context_root=_boundary(config),
+            search_pipeline=search_pipeline,
+        )
     if updated is None:
         raise HTTPException(status_code=404, detail="Chunk not found")
     return TagsUpdateResponse(id=str(chunk_id), tags=list(updated.metadata.tags))

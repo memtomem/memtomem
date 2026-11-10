@@ -169,9 +169,35 @@ async def test_value_text_cannot_steer_the_store(store: MemtomemPipelineStore, t
 async def test_the_stores_bookkeeping_is_not_searchable(store: MemtomemPipelineStore) -> None:
     await store.aput(("docs",), "k", {"text": "apples"})
     await store.aput(("docs",), "empty", {"text": "nothing selected"}, index=["missing"])
-    for query in ("langchain memtomem", "gen", "lcmm"):
+    # Not the store's layout and not its root either, whatever pytest named
+    # the basetemp: a path word every row shares matched every row (#3205).
+    path_words = ("projections", "md", store.root.name, store.root.parent.name)
+    for query in ("langchain memtomem", "gen", "lcmm", *path_words):
         assert await store.asearch(("docs",), query=query) == [], query
     # an item whose selectors render nothing has no projection and no rows
     paths = store._paths(("docs",), "empty")
     assert not paths.projection.exists() and not paths.indexed.exists()
     assert {i.key for i in await store.asearch(("docs",))} == {"k", "empty"}
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"config": {"search": {"enable_dense": False}}}, {"retrieval": {"mode": "bm25"}}],
+    ids=["default", "dense-off", "retrieval-bm25"],
+)
+async def test_a_word_of_the_root_path_does_not_return_every_item(
+    tmp_path: Path, options: dict
+) -> None:
+    """``plane`` is in no value, only in the root every projection path shares (#3205).
+
+    With BM25's path fallback every item matched it and was scored like a real hit.
+    """
+    store = await MemtomemPipelineStore.open(tmp_path / "plane-store", **options)
+    try:
+        for key, text in {"a": "apples", "b": "pears", "c": "plums"}.items():
+            await store.aput(("u",), key, {"text": text})
+        for query in ("plane", "plane store", "projections", "md"):
+            assert await store.asearch(("u",), query=query) == [], query
+        assert [h.key for h in await store.asearch(("u",), query="pears")] == ["b"]
+    finally:
+        await store.aclose()

@@ -8,7 +8,14 @@ import sqlite3
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncContextManager, AsyncIterator, Callable, Sequence
+from typing import (
+    TYPE_CHECKING,
+    AsyncContextManager,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Sequence,
+)
 from uuid import UUID
 
 from memtomem.constants import validate_namespace_color
@@ -116,8 +123,13 @@ class NamespaceOps:
         get_read_db: Callable[[], sqlite3.Connection],
         *,
         lease_read_db: Callable[[], AsyncContextManager[sqlite3.Connection]] | None = None,
+        get_db_after_wait: Callable[[], Awaitable[sqlite3.Connection]] | None = None,
     ) -> None:
         self._get_db = get_db
+        # Writer reads that wait for another task's transaction instead of
+        # being refused at once (#3182), then read as ``get_db`` does. Without
+        # one, those reads use ``get_db`` directly.
+        self._get_db_after_wait_cb = get_db_after_wait
         # Read-only counters route here when the current task holds no
         # transaction: the ownership-guarded writer connection refuses reads
         # while any *other* task owns a transaction, which silently starved
@@ -135,6 +147,11 @@ class NamespaceOps:
         # by ``SqliteBackend.transaction()``. Required (no default) so a future
         # caller can't silently regress to "always owns".
         self._in_transaction = in_transaction
+
+    async def _writer_after_wait(self) -> sqlite3.Connection:
+        if self._get_db_after_wait_cb is None:
+            return self._get_db()
+        return await self._get_db_after_wait_cb()
 
     @asynccontextmanager
     async def _lease_txn_read_db(self) -> AsyncIterator[sqlite3.Connection]:
@@ -273,7 +290,7 @@ class NamespaceOps:
         if exclude_namespace is not None:
             conditions.append("namespace <> ?")
             params.append(exclude_namespace)
-        db = self._get_db()
+        db = await self._writer_after_wait()
         rows = db.execute(
             "SELECT id, source_file, namespace FROM chunks WHERE "
             + " AND ".join(conditions)
@@ -898,7 +915,7 @@ class NamespaceOps:
         return row is not None or self._has_namespace_meta(db, namespace)
 
     async def get_namespace_meta(self, namespace: str) -> dict | None:
-        db = self._get_db()
+        db = await self._writer_after_wait()
         row = db.execute(
             "SELECT namespace, description, color, created_at, updated_at "
             "FROM namespace_metadata WHERE namespace=?",
@@ -985,7 +1002,7 @@ class NamespaceOps:
         # by ``mm agent list`` should show the agent), and conversely a
         # legacy chunk in a namespace without a metadata row should not
         # disappear from the listing.
-        db = self._get_db()
+        db = await self._writer_after_wait()
         rows = db.execute("""
             SELECT
                 ns.namespace,

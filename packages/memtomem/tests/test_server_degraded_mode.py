@@ -192,6 +192,18 @@ async def test_create_components_enters_degraded_instead_of_raising(degraded_com
     assert comp.storage.embedding_mismatch is not None
 
 
+async def test_the_recovery_backend_keeps_bm25_path_fallback(tmp_path, monkeypatch):
+    """The degraded-mode reopen builds its own backend; it must not drop the setting."""
+    comp = await create_components(
+        _degraded_config(tmp_path, monkeypatch), bm25_path_fallback=False
+    )
+    try:
+        assert comp.embedding_broken is not None, "fixture must start degraded"
+        assert comp.storage.bm25_path_fallback is False
+    finally:
+        await close_components(comp)
+
+
 async def test_mem_add_blocked_in_degraded_mode(degraded_components):
     """``mem_add`` must return the actionable mismatch error, not crash."""
     app = _make_app(degraded_components)

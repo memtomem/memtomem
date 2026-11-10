@@ -34,6 +34,8 @@ import sqlite3
 
 import pytest
 
+from memtomem.config import Mem2MemConfig
+from memtomem.runtime import close_components, create_components
 from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_backend import _column_match
 
@@ -151,6 +153,65 @@ class TestPipelineFusion:
         assert any("marine-biology" in s for s in surfaced), (
             "the genuine content match did not survive the pipeline"
         )
+
+
+class TestTheFallbackCanBeTurnedOff:
+    """``create_components(bm25_path_fallback=False)`` never matches a path (#3205).
+
+    For a component whose paths are its own bookkeeping: every row shares the
+    root's words, so the fallback returns every row for a query naming one.
+    """
+
+    @pytest.fixture
+    async def stack(self, tmp_path):
+        async def build(*, fallback: bool):
+            config = Mem2MemConfig.without_environment(
+                storage={"sqlite_path": tmp_path / f"fallback-{fallback}.db"},
+                indexing={"memory_dirs": [tmp_path / "memories"]},
+            )
+            comp = await create_components(
+                config, load_ambient_config=False, bm25_path_fallback=fallback
+            )
+            opened.append(comp)
+            return comp
+
+        opened: list = []
+        yield build
+        for comp in opened:
+            await close_components(comp)
+
+    @pytest.mark.asyncio
+    async def test_a_path_only_match_is_not_retrieved(self, stack):
+        comp = await stack(fallback=False)
+        assert comp.storage.bm25_path_fallback is False
+        path_only = _make_chunk("body text with no marker word", source="reports/octopus.md")
+        await comp.storage.upsert_chunks([path_only])
+
+        assert await comp.storage.bm25_search("octopus", top_k=5) == []
+        assert await comp.storage.bm25_search("octopus quokka", top_k=5) == []
+        results, _stats = await comp.search_pipeline.search("octopus", top_k=5, record=False)
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_content_matches_are_unaffected(self, stack):
+        comp = await stack(fallback=False)
+        content_hit = _make_chunk("a note about octopus habitats", source="reports/octopus.md")
+        await comp.storage.upsert_chunks([content_hit])
+
+        results = await comp.storage.bm25_search("octopus", top_k=5)
+
+        assert [r.chunk.id for r in results] == [content_hit.id]
+
+    @pytest.mark.asyncio
+    async def test_the_default_keeps_the_fallback(self, stack):
+        comp = await stack(fallback=True)
+        assert comp.storage.bm25_path_fallback is True
+        path_only = _make_chunk("body text with no marker word", source="reports/octopus.md")
+        await comp.storage.upsert_chunks([path_only])
+
+        results = await comp.storage.bm25_search("octopus", top_k=5)
+
+        assert [r.chunk.id for r in results] == [path_only.id]
 
 
 class TestTheColumnFilterCannotBeEscaped:
