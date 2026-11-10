@@ -23,6 +23,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Deleting or editing memory no longer skips the `project_shared` confirmation when
+  it decides from an outdated read (#3202).** Before removing or rewriting memories in
+  the git-tracked tier, `mem_delete` (by `source_file`, `namespace` or `chunk_id`),
+  `mem_edit`, the web UI's chunk edit and delete, and the LangGraph store's `delete` ask
+  for `confirm_project_shared=True`. They read the memory's tier from a pooled read
+  connection, which can still show the state from before a recent commit. A memory
+  moved into the shared tier just before could therefore be deleted or rewritten
+  without the confirmation. These checks now read the store's writer, and the bulk
+  deletes check and delete in one transaction. If another write in the same process
+  holds the store for longer than 5 seconds, the call is refused and nothing is
+  changed. For the bulk deletes the same applies when another process holds the
+  database's write lock past SQLite's 10-second busy timeout. `mem_delete` and
+  `mem_edit` answer `Error (retryable): ...`, the web UI answers HTTP 503, and the
+  LangGraph store raises `TimeoutError`.
+
 - **A search word that is part of a memory directory's path no longer returns
   every memory under it (#3208).** When no memory's text matched, keyword search
   fell back to matching file paths, so that typing a file's name still finds the

@@ -634,6 +634,9 @@ _TRANSACTION_SITES = {
     "search/decay.py": [True],
     "search/dedup.py": [True],
     "server/tools/hermes_mirror.py": [True, True],
+    # _gated_delete_transaction: mem_delete's Gate-B probe and its source or
+    # namespace delete in one transaction (#3202).
+    "server/tools/memory_crud.py": [True],
     "server/tools/consolidation.py": [True],
     # Tag rename, delete and merge, writer before the tag lock (#3182).
     "services/tag_management.py": [True, True, True],
