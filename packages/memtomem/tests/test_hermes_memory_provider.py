@@ -1712,3 +1712,43 @@ def test_shutdown_returns_after_the_queued_writes_are_sent(mod: Any, hermes: Any
     provider.on_memory_write("add", "memory", "B")
     provider.shutdown()
     assert [c.arguments["params"]["content"] for c in hermes.mirror_calls] == ["A", "B"]
+
+
+def test_preflight_exception_text_is_not_logged_by_mirror(
+    mod: Any, hermes: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=_LOGGER)
+    sentinel = "SECRET_SENTINEL_PREFLIGHT_LEAK"
+
+    def bad_preflight(server: str) -> tuple[str, str]:
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(mod, "_preflight", bad_preflight)
+    provider = mirroring(mod, hermes)
+    provider.on_memory_write("add", "memory", "A")
+    deadline = time.monotonic() + 5.0
+    while not provider._mirror.counts and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert provider._mirror.counts["dropped_skipped_config_error"] == 1
+    assert any("cannot read Hermes config (RuntimeError)" in w for w in warnings(caplog))
+    assert not any(sentinel in record.getMessage() for record in caplog.records)
+
+
+def test_context_holder_exception_text_is_not_logged_by_mirror(
+    mod: Any, hermes: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=_LOGGER)
+    sentinel = "SECRET_SENTINEL_CONTEXT_LEAK"
+
+    def bad_get(self: Any) -> Any:
+        raise ValueError(sentinel)
+
+    monkeypatch.setattr(mod._ContextHolder, "get", bad_get)
+    provider = mirroring(mod, hermes)
+    provider.on_memory_write("add", "memory", "A")
+    deadline = time.monotonic() + 5.0
+    while not provider._mirror.counts and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert provider._mirror.counts["dropped_no_context"] == 1
+    assert any("cannot build a Hermes plugin context (ValueError)" in w for w in warnings(caplog))
+    assert not any(sentinel in record.getMessage() for record in caplog.records)
