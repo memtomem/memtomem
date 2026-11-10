@@ -19,12 +19,14 @@ except ImportError as exc:  # pragma: no cover - exercised against an older memt
 
 from langchain_memtomem.store import (
     DEFAULT_MAX_CHUNKS_PER_SEARCH,
+    DenseSearchUnavailable,
     MemtomemPipelineStore,
     StoreIndexError,
 )
 
 __all__ = [
     "DEFAULT_MAX_CHUNKS_PER_SEARCH",
+    "DenseSearchUnavailable",
     "MemtomemPipelineStore",
     "StoreIndexError",
     "__version__",

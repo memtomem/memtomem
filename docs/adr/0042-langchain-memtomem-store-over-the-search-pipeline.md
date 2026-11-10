@@ -226,6 +226,17 @@ boundary of `put` and `delete` against the repair that restores agreement).
      > with nothing saying so. `max_pool` now bounds only the oversampling,
      > and the budget is `max_chunks_per_search` with or without a reranker,
      > on a memtomem that carries this fix.
+     > **Amended 2026-11-10.** The store takes `retrieval={"mode": "hybrid" |
+     > "bm25" | "dense", "weights", "rrf_k"}`, the keys and refusals of
+     > `MemtomemHybridStore`, so a caller can choose the legs without spelling
+     > pipeline settings. It is translated into the `search` settings the
+     > pipeline already honours (`enable_bm25`, `enable_dense`,
+     > `rrf_weights`, `rrf_k`), and giving both forms is refused. Without it,
+     > the search is the one above. `dense` is refused at open without an
+     > embedder, and raises when a pass's dense leg did not run; `hybrid`
+     > ranks by BM25 alone in that state. The mode is set per store because
+     > LangGraph's `SearchOp` carries no per-call field. Mechanics:
+     > `packages/langchain-memtomem/docs/protocol.md`, "Retrieval legs".
 5. **Mutation and repair: the constraints the protocol must meet.**
    - The JSON record is the source of truth. The projection and the index
      rows are derived from it.
