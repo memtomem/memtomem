@@ -298,6 +298,15 @@ boundary of `put` and `delete` against the repair that restores agreement).
      > change keep the lines until their item is written again (measured:
      > reopening the store does not re-describe them; a `put` of the item
      > does).
+     > **Amended 2026-11-10** after #3208. The FTS index now holds only a
+     > file's name without its suffix as the path text BM25 falls back to,
+     > so the root's words, `projections` and `md` no longer match through
+     > the path, whether or not the store turns the fallback off. The switch
+     > stays for what is left there: the item's encoded key. A caller does
+     > not type the encoding, but it can spell a word: one-character keys
+     > `V`, `R` and `9` encode to `sky`, `ski` and `she` (measured: with the
+     > fallback on, a query `sky` returned item `V`, whose value is `apples`;
+     > with it off, nothing).
    - A deletion marker carries the generation it was written for. A later
      `put` under the lock settles or supersedes the marker before it writes.
      Repair gives a marker precedence only over a record of the same or an

@@ -9,10 +9,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - **`create_components(..., bm25_path_fallback=False)` keeps BM25 from matching chunk paths
   (#3205).** By default a BM25 search that matches no chunk's content falls back to matching
-  file paths, so typing a filename still finds that file (#2224). A component whose paths are
-  its own bookkeeping can now turn that off. langchain-memtomem's store does: every one of its
-  paths shares the store's root and layout words, so a query naming one returned every item.
-  The default is unchanged.
+  file names, so typing a filename still finds that file (#2224). A component whose file names
+  are its own bookkeeping can now turn that off. langchain-memtomem's store does: it names each
+  file by an item's encoded key, and a key can encode to a word (`V` to `sky`), so a query for
+  that word returned the item though its value never said it. The default is unchanged.
 - **`create_components(..., chunk_source_labels=False)` leaves the `File:` and `Fragment` lines
   out of bounded chunk descriptions (#3209).** With bounded chunking on
   (`indexing.hard_max_chunk_tokens`, which an E5 embedding model sets), each chunk's description

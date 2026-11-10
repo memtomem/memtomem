@@ -301,9 +301,10 @@ class MemtomemPipelineStore(BaseStore):
                 mechanism="param",
                 action="init",
             )
-        # Every projection path shares the root's words and the store's own
-        # layout (``projections``, ``md``), and keys and namespaces are encoded,
-        # so a path match says nothing about an item and returned every item (#3205).
+        # BM25's path fallback matches a projection's file name, which is the
+        # item's encoded key. No caller types that, but it can spell a word
+        # (key ``V`` encodes to ``sky``), and the fallback returned the item
+        # for it though its value never says it (#3205).
         # The file name also reached content: bounded chunking (on under E5)
         # wrote ``File: <encoded key>.md`` into each row's indexed description (#3209).
         comp = await create_components(

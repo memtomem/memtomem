@@ -313,9 +313,10 @@ class SearchOpsMixin:
             or_body = _fts.tokenize_for_fts(query, for_query=True, use_or=True, tokenizer=tokenizer)
             bodies = [and_body] if or_body == and_body else [and_body, or_body]
             # A backend built with ``bm25_path_fallback=False`` never reaches
-            # the path column. Its rows' paths are the owner's bookkeeping, a
-            # word of which every row shares, so the fallback would return
-            # every row for any query that names one of those words (#3205).
+            # the path column. Its rows' file names are the owner's
+            # bookkeeping, not names a user types, but one can still spell a
+            # word (langchain-memtomem's key ``V`` encodes to ``sky``), and the
+            # fallback would return that row for it (#3205).
             columns = (
                 (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN)
                 if self._bm25_path_fallback

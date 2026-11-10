@@ -179,11 +179,11 @@ async def create_components(
     (Quality Lab replays). Every durable entry point keeps the default.
 
     ``bm25_path_fallback=False`` stops BM25 from matching a query against
-    chunk paths once nothing matches on content (#2224's filename lookup).
-    It is for callers whose source paths are their own bookkeeping rather
-    than names a user types, such as langchain-memtomem's store: every row
-    there shares the root and layout words, so the fallback would return
-    every row for a query naming one of them (#3205).
+    chunk file names once nothing matches on content (#2224's filename lookup).
+    It is for callers whose file names are their own bookkeeping rather than
+    names a user types, such as langchain-memtomem's store, which names each
+    file by an encoded key. Such a name can still spell a word (key ``V``
+    encodes to ``sky``), and the fallback would return that row for it (#3205).
 
     ``chunk_source_labels=False`` leaves the ``File: <name>`` and
     ``Fragment <i>/<n>`` lines out of the descriptions bounded chunking writes
