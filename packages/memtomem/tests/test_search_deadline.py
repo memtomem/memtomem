@@ -351,11 +351,13 @@ class TestTool:
         ctx = StubCtx(AppContext.from_components(comp))
 
         async def expired(*args, **kwargs):
-            raise SearchDeadlineExceeded("deadline of 5 ms exceeded at retrieval")
+            raise SearchDeadlineExceeded("stub deadline exceeded at retrieval")
 
         monkeypatch.setattr(comp.storage, "bm25_search", expired)
-        out = await mem_search(query="anything", deadline_ms=5, ctx=ctx)  # type: ignore[arg-type]
-        assert out.startswith("Error (retryable): deadline of 5 ms exceeded")
+        # The stub raises on its own. A generous budget keeps a real expiry in a lease taken
+        # before retrieval (the hidden-namespace count) from answering first on a slow runner.
+        out = await mem_search(query="anything", deadline_ms=600_000, ctx=ctx)  # type: ignore[arg-type]
+        assert out.startswith("Error (retryable): stub deadline exceeded at retrieval")
 
     @pytest.mark.parametrize("bad", [0, -1, True])
     async def test_mem_search_refuses_a_bad_deadline(self, bad):
