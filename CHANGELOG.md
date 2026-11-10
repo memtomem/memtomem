@@ -55,6 +55,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   when it writes nothing (#3204).** Run at a terminal with
   `HERMES_NONINTERACTIVE=1`, it said "not a terminal"; it now says
   "HERMES_NONINTERACTIVE is set". It still writes nothing and prints the commands.
+- **Hermes provider: two mirror warnings log exception class names instead of exception text (#3203).**
+  When preflight or building the plugin context fails on the mirror worker, the provider now logs
+  `cannot read Hermes config (<ExceptionName>)` and `cannot build a Hermes plugin context (<ExceptionName>)`
+  matching the recall path, ensuring Hermes exception text is never written to log lines at any level.
 
 ## [0.7.8] — 2026-11-10
 
