@@ -936,7 +936,18 @@ def test_unavailable_without_hermes_plugin_mcp_access(
     monkeypatch.setitem(sys.modules, "hermes_cli.plugins", None)
     provider = mod.MemtomemMemoryProvider()
     assert provider.is_available() is False
-    assert "0.21.5" in provider.unavailable_reason()
+    # Hermes logs this string at WARNING: the exception's class, never its text.
+    assert provider.unavailable_reason() == (
+        "this Hermes has no plugin MCP access (needs Hermes Agent 0.21.5 or later): "
+        "ModuleNotFoundError"
+    )
+
+
+def test_a_config_read_error_names_the_class_not_the_text(mod: Any, hermes: Any) -> None:
+    hermes.config_error = RuntimeError("SENTINEL-3217 secret text")
+    provider = mod.MemtomemMemoryProvider()
+    assert provider.is_available() is False
+    assert provider.unavailable_reason() == "cannot read Hermes config: RuntimeError"
 
 
 def test_the_availability_probe_reads_the_server_setting(mod: Any, hermes: Any) -> None:
