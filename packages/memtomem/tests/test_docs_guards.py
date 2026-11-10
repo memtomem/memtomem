@@ -3068,9 +3068,7 @@ class TestRecallUntilBoundaryDocs:
         text = _read(_GUIDES / "reference" / "core-memory-tools.md")
         start = text.index("### `mem_recall`")
         section = text[start : text.index("\n## ", start)]
-        rows = [line for line in section.splitlines() if line.startswith("| `until` |")]
-        assert len(rows) == 1, rows
-        description = rows[0].split("|")[2].strip()
+        description = _table_row(section, "until")[1]
         assert description == (
             "End date. A date-only value includes that whole period (UTC); "
             "a full datetime is exclusive"
