@@ -6,7 +6,7 @@ memtomem repository records the decisions this package implements).
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 try:
     from memtomem.integrations.langgraph_store import matches_filter as _matches_filter  # noqa: F401
