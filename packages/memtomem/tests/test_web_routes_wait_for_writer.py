@@ -458,6 +458,38 @@ async def test_source_delete_rejudges_consent_after_its_wait(env):
     assert await _count(env) == before
 
 
+async def test_source_delete_rejudges_consent_past_a_stale_pool_snapshot(env, monkeypatch):
+    """The consent probe reads the writer, not a pool snapshot from before the wait.
+
+    The pool is pinned to one connection with another reader's statement still
+    open, started before the owner commits. SQLite keeps that connection's
+    snapshot until the statement finishes, so a probe on it would still see the
+    source as ``user`` after the owner made it ``project_shared``.
+    """
+
+    async def make_shared(storage) -> None:
+        storage._get_db().execute(
+            "UPDATE chunks SET scope = 'project_shared' WHERE source_file = ?",
+            (str(env.note),),
+        )
+
+    reader = env.storage._read_pool[0]
+    monkeypatch.setattr(env.storage, "_read_pool", [reader])
+    held = reader.execute("SELECT id FROM chunks")
+    assert held.fetchone() is not None
+    before = await _count(env)
+    try:
+        queued, resp = await _send_while_owned(
+            env, "DELETE", "/api/sources", params={"path": str(env.note)}, inside=make_shared
+        )
+    finally:
+        held.close()
+    assert queued
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "needs_confirmation", resp.json()
+    assert await _count(env) == before
+
+
 async def test_a_waiting_tag_write_does_not_hold_the_tag_lock(env):
     """The index path owns the writer and then takes the tag lock.
 

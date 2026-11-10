@@ -357,8 +357,9 @@ async def delete_source(
     # that waits for another task's (#3182). Nothing can commit while this
     # request holds the writer, so the scopes the probe reads are the ones the
     # delete removes; a wait between them would let a policy job make the
-    # source project_shared after the probe said it was not. The probe's pool
-    # read sees that state too: nothing is written before it.
+    # source project_shared after the probe said it was not. The probe reads
+    # the writer inside the transaction, not a pool connection, which can still
+    # hold a snapshot from before that commit.
     async with writer_transaction(storage):
         # Gate-B: a bulk source delete that would take project_shared chunks with
         # it needs consent first. The probe is re-read below rather than trusted

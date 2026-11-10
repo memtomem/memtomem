@@ -2816,10 +2816,14 @@ class SqliteBackend(
         """Return the distinct persisted scopes for chunks from ``source_file``.
 
         ``as_stored`` as in :meth:`delete_by_source`, so a consent probe reads the
-        rows that the delete it guards removes.
+        rows that the delete it guards removes. A caller that owns
+        ``transaction()`` reads the writer: a pool connection can still hold a
+        snapshot from before a commit made while the caller waited for the
+        writer, and the consent decision would then judge rows the delete no
+        longer removes (#3182).
         """
         key = str(source_file) if as_stored else norm_path(source_file)
-        async with self._lease_read_db() as db:
+        async with self._lease_txn_read_db() as db:
             rows = db.execute(
                 "SELECT DISTINCT COALESCE(scope, 'user') FROM chunks WHERE source_file=?",
                 (key,),
