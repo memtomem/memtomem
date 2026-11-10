@@ -51,7 +51,7 @@ async def mem_recall(
 
     Args:
         since: Inclusive start date (YYYY, YYYY-MM, YYYY-MM-DD, or ISO datetime)
-        until: Exclusive end date — same formats as *since*
+        until: Date-only includes UTC period; full datetime exclusive
         source_filter: Filter by source file path (substring match, or glob pattern with *, ?, [])
         tag_filter: Comma-separated tags, matching ANY; applied before *limit*.
         namespace: Namespace scope — single, comma list, or glob ("project:*"), not both.

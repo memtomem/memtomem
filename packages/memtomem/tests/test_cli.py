@@ -2106,6 +2106,13 @@ class TestSubcommandHelp:
         assert "--until" in result.output
         assert "--format" in result.output
 
+    def test_recall_until_help_explains_boundaries(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["recall", "--help"])
+        assert result.exit_code == 0, result.output
+        help_text = " ".join(result.output.split())
+        assert "date-only value includes that whole period (UTC)" in help_text
+        assert "full datetime is exclusive" in help_text
+
     def test_recall_until_partial_date_is_inclusive_of_the_period(
         self, runner: CliRunner, monkeypatch
     ) -> None:
