@@ -71,6 +71,13 @@ async def _top_hit(store: object, query: str) -> tuple[str, dict]:
     return hits[0].key, hits[0].value
 
 
+async def _no_hit(store: object, query: str, when: str) -> None:
+    """``query`` is a word of every projection path and of no value (#3205)."""
+    hits = await store.asearch(("users",), query=query, limit=3)  # type: ignore[attr-defined]
+    if hits:
+        _fail(f"{when}, the path word {query!r} returned {[hit.key for hit in hits]}")
+
+
 async def _exercise(root: Path) -> None:
     from langchain_memtomem import MemtomemPipelineStore
 
@@ -81,6 +88,7 @@ async def _exercise(root: Path) -> None:
         key, value = await _top_hit(store, "window seat")
         if (key, value) != ("seat", ITEMS["seat"]):
             _fail(f"query 'window seat' ranked {key!r} {value!r} first")
+        await _no_hit(store, "projections", "before reopen")
     finally:
         await store.aclose()
 
@@ -89,6 +97,7 @@ async def _exercise(root: Path) -> None:
         key, value = await _top_hit(store, "peanuts")
         if (key, value) != ("food", ITEMS["food"]):
             _fail(f"after reopen, query 'peanuts' ranked {key!r} {value!r} first")
+        await _no_hit(store, "projections", "after reopen")
         item = await store.aget(NAMESPACE, "lang")
         if item is None or item.value != ITEMS["lang"]:
             _fail(f"get after reopen returned {item!r}")

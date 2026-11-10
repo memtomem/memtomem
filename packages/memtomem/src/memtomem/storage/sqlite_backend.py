@@ -291,6 +291,7 @@ class SqliteBackend(
         adopt_unpopulated_embedding_stamp: bool = False,
         chunk_budget_config: "IndexingConfig | None" = None,
         fts_tokenizer: str = "unicode61",
+        bm25_path_fallback: bool = True,
     ) -> None:
         self._config = config
         # This backend's FTS tokenizer, from ``search.tokenizer``. Index-time
@@ -298,6 +299,10 @@ class SqliteBackend(
         # backend that indexes a database is the one that queries it, so the
         # choice lives here rather than in a process global (#3018).
         self._fts_tokenizer = _fts.validate_tokenizer(fts_tokenizer)
+        # Whether ``bm25_search`` falls back to the ``source_file`` column when
+        # no chunk's content matches (#2224). Off for a store whose paths are
+        # its own bookkeeping, where every row shares the path words (#3205).
+        self._bm25_path_fallback = bm25_path_fallback
         self._chunk_budget_config = chunk_budget_config
         self._dimension = dimension
         self._chunk_column_positions: dict[str, int] = {}
@@ -1288,6 +1293,11 @@ class SqliteBackend(
     def fts_tokenizer(self) -> str:
         """The FTS tokenizer this backend is configured with."""
         return self._fts_tokenizer
+
+    @property
+    def bm25_path_fallback(self) -> bool:
+        """Whether ``bm25_search`` falls back to matching chunk paths."""
+        return self._bm25_path_fallback
 
     @property
     def fts_tokenizer_effective(self) -> str:

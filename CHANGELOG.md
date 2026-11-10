@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`create_components(..., bm25_path_fallback=False)` keeps BM25 from matching chunk paths
+  (#3205).** By default a BM25 search that matches no chunk's content falls back to matching
+  file paths, so typing a filename still finds that file (#2224). A component whose paths are
+  its own bookkeeping can now turn that off. langchain-memtomem's store does: every one of its
+  paths shares the store's root and layout words, so a query naming one returned every item.
+  The default is unchanged.
+
 ### Fixed
 
 - **Web UI requests no longer answer HTTP 500 at once while another task holds a

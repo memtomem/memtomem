@@ -6,8 +6,12 @@ from memtomem.config import Mem2MemConfig, embedding_policy_fingerprint
 from memtomem.storage.sqlite_backend import SqliteBackend
 
 
-def create_storage(config: Mem2MemConfig) -> SqliteBackend:
-    """Return the SQLite storage backend."""
+def create_storage(config: Mem2MemConfig, *, bm25_path_fallback: bool = True) -> SqliteBackend:
+    """Return the SQLite storage backend.
+
+    ``bm25_path_fallback`` is passed to the backend unchanged; see
+    ``create_components``.
+    """
     return SqliteBackend(
         config.storage,
         chunk_budget_config=config.indexing,
@@ -17,6 +21,7 @@ def create_storage(config: Mem2MemConfig) -> SqliteBackend:
         embedding_policy_fingerprint=embedding_policy_fingerprint(config.embedding),
         embedding_max_sequence_tokens=config.embedding.max_sequence_tokens,
         fts_tokenizer=config.search.tokenizer,
+        bm25_path_fallback=bm25_path_fallback,
         # Ordinary builds only; recovery and probe opens construct their own
         # backend so they observe a dim=0 stamp instead of adopting it (#2416).
         adopt_unpopulated_embedding_stamp=True,

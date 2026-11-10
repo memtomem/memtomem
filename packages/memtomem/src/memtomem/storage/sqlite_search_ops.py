@@ -217,6 +217,7 @@ class SearchOpsMixin:
     """Search, recall, context-window, and audit read operations for SqliteBackend."""
 
     _fts_tokenizer: str  # set by ``SqliteBackend.__init__``
+    _bm25_path_fallback: bool  # set by ``SqliteBackend.__init__``
 
     async def bm25_search(
         self,
@@ -306,6 +307,15 @@ class SearchOpsMixin:
             and_body = _fts.tokenize_for_fts(query, for_query=True, tokenizer=tokenizer)
             or_body = _fts.tokenize_for_fts(query, for_query=True, use_or=True, tokenizer=tokenizer)
             bodies = [and_body] if or_body == and_body else [and_body, or_body]
+            # A backend built with ``bm25_path_fallback=False`` never reaches
+            # the path column. Its rows' paths are the owner's bookkeeping, a
+            # word of which every row shares, so the fallback would return
+            # every row for any query that names one of those words (#3205).
+            columns = (
+                (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN)
+                if self._bm25_path_fallback
+                else (_FTS_CONTENT_COLUMN,)
+            )
 
             def _query(conn: sqlite3.Connection) -> list:
                 # ADR-0011 §6 + PR-D review #2: filter must run *inside* the
@@ -334,7 +344,7 @@ class SearchOpsMixin:
                        ORDER BY fts.rank, {tie_break}, c.id
                        LIMIT ?"""
                 rows: list = []
-                for column in (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN):
+                for column in columns:
                     for body in bodies:
                         rows = conn.execute(
                             sql,
