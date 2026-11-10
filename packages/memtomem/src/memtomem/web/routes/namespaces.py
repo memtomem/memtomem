@@ -20,6 +20,11 @@ from memtomem.constants import InvalidNameError, validate_namespace
 from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError
 from memtomem.services import namespace_management
 from memtomem.web.deps import get_storage
+from memtomem.web.routes._writer_wait import (
+    WRITER_BUSY_READ_DETAIL,
+    writer_busy_as_503,
+    writer_transaction,
+)
 from memtomem.web.schemas import (
     DeleteResponse,
     NamespaceInfoResponse,
@@ -47,7 +52,8 @@ _RENAME_CONFLICT_DETAIL = {
 # (read-side surface lives in the prod tier — see web/app.py _PROD_ROUTERS).
 async def list_namespaces(storage=Depends(get_storage)) -> NamespacesListResponse:
     """List all namespaces with chunk counts and metadata."""
-    meta_list = await storage.list_namespace_meta()
+    with writer_busy_as_503(WRITER_BUSY_READ_DETAIL):
+        meta_list = await storage.list_namespace_meta()
     out = [
         NamespaceOut(
             namespace=m["namespace"],
@@ -71,7 +77,8 @@ async def get_namespace(namespace: str, storage=Depends(get_storage)) -> Namespa
         if namespace not in all_ns:
             raise HTTPException(status_code=404, detail=f"Namespace '{namespace}' not found")
 
-    meta = await storage.get_namespace_meta(namespace)
+    with writer_busy_as_503(WRITER_BUSY_READ_DETAIL):
+        meta = await storage.get_namespace_meta(namespace)
     return NamespaceInfoResponse(
         namespace=namespace,
         chunk_count=count,
@@ -87,10 +94,15 @@ async def update_metadata(
     body: NamespaceMetaRequest,
     storage=Depends(get_storage),
 ) -> NamespaceInfoResponse:
-    """Update namespace description and/or color."""
-    await storage.set_namespace_meta(namespace, description=body.description, color=body.color)
-    meta = await storage.get_namespace_meta(namespace)
-    ns_list = await storage.list_namespaces()
+    """Update namespace description and/or color.
+
+    The write and the receipt reads share one transaction that waits for
+    another task's (#3182), so the receipt reads this write on the writer.
+    """
+    async with writer_transaction(storage):
+        await storage.set_namespace_meta(namespace, description=body.description, color=body.color)
+        meta = await storage.get_namespace_meta(namespace)
+        ns_list = await storage.list_namespaces()
     count = dict(ns_list).get(namespace, 0)
     return NamespaceInfoResponse(
         namespace=namespace,
@@ -186,7 +198,8 @@ async def rename_namespace(
 @admin_router.delete("/{namespace}", response_model=DeleteResponse)
 async def delete_namespace(namespace: str, storage=Depends(get_storage)) -> DeleteResponse:
     """Delete all chunks in a namespace."""
-    deleted = await storage.delete_by_namespace(namespace)
+    async with writer_transaction(storage):
+        deleted = await storage.delete_by_namespace(namespace)
     return DeleteResponse(deleted=deleted)
 
 

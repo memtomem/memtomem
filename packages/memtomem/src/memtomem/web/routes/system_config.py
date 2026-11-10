@@ -40,6 +40,11 @@ from memtomem.web.deps import (
     require_configured,
 )
 from memtomem.web.routes._locks import _config_lock
+from memtomem.web.routes._writer_wait import (
+    WRITER_BUSY_NOTHING_CHANGED_DETAIL,
+    WRITER_BUSY_READ_DETAIL,
+    wait_for_writer,
+)
 from memtomem.web.schemas.config import (
     BuiltinExcludePatternsResponse,
     ConfigDecayOut,
@@ -1345,6 +1350,9 @@ async def memory_dirs_status(
 
 @router.get("/embedding-status", response_model=EmbeddingStatusResponse)
 async def get_embedding_status(storage=Depends(get_storage)) -> EmbeddingStatusResponse:
+    # ``stored_embedding_info`` reads the writer synchronously; wait for
+    # another task's transaction first, with no ``await`` before the read (#3182).
+    await wait_for_writer(storage, detail=WRITER_BUSY_READ_DETAIL)
     stored_info = getattr(storage, "stored_embedding_info", None)
     stored_out = (
         EmbeddingConfigInfo(
@@ -1523,6 +1531,10 @@ async def reset_embedding(
     """Reset embedding metadata to current config. Drops all vectors."""
     from memtomem.config import embedding_policy_fingerprint
 
+    # Wait out another task's transaction first (#3182); a timeout changed
+    # nothing. ``reset_embedding_meta`` has no ``await`` before its idle check
+    # (pinned by test_qa_audit_pins), so nothing takes the writer in between.
+    await wait_for_writer(storage, detail=WRITER_BUSY_NOTHING_CHANGED_DETAIL)
     await storage.reset_embedding_meta(
         dimension=config.embedding.dimension,
         provider=config.embedding.provider,
