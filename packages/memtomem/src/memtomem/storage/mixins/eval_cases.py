@@ -868,15 +868,18 @@ class EvalCaseMixin:
             ).fetchall()
 
     def read_fts_fingerprint_rows(self) -> list[tuple]:
-        """(content_hash, namespace, source_file, start_line, fts_content) per FTS row.
+        """(content_hash, namespace, source_file, start_line, fts_content, fts_source).
 
         Keyed by durable chunk identity (see :meth:`read_vector_fingerprint_rows`)
         so FTS text that has drifted out of sync with its chunk registers, while
-        a rekeyed rebuild does not.
+        a rekeyed rebuild does not. ``fts_source`` is the indexed path text,
+        which BM25's fallback matches and its length normalization reads; it is
+        no longer the chunk's own path (#3208), so it is a separate input.
         """
         with self._lease_read_db_sync() as db:
             return db.execute(
-                "SELECT c.content_hash, c.namespace, c.source_file, c.start_line, f.content "
+                "SELECT c.content_hash, c.namespace, c.source_file, c.start_line, "
+                "f.content, f.source_file "
                 "FROM chunks c JOIN chunks_fts f ON f.rowid = c.rowid"
             ).fetchall()
 
