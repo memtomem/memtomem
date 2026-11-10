@@ -15,6 +15,18 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
   `"dense"` query whose dense leg cannot run raises the new `DenseSearchUnavailable` instead of
   returning nothing. Without `retrieval`, a store searches as 0.1.0 did.
 
+### Fixed
+
+- A query search whose words match no value no longer returns every item when one of the words
+  is in the store's path: its root (`plane-store` for `plane`), or `projections` and `md`, which
+  every store's paths contain (#3205). memtomem's BM25 leg falls back to matching a row's path
+  when no content matches, and every projection path shares those words, so every item came
+  back, scored as a real match at its rank would be. The store now turns that fallback off. With
+  bounded chunking (on for an E5 embedding model) `md`, `file`, `fragment` and an item's encoded
+  key still match, through the chunker's `File:` and `Fragment` lines (#3209). Needs
+  memtomem 0.7.9, which adds the `create_components` keyword the store passes; the dependency
+  floor rises with that release.
+
 ## [0.1.0] — 2026-11-04
 
 ### Added

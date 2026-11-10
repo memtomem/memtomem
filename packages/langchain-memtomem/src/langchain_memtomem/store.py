@@ -301,7 +301,10 @@ class MemtomemPipelineStore(BaseStore):
                 mechanism="param",
                 action="init",
             )
-        comp = await create_components(config, load_ambient_config=False)
+        # Every projection path shares the root's words and the store's own
+        # layout (``projections``, ``md``), and keys and namespaces are encoded,
+        # so a path match says nothing about an item and returned every item (#3205).
+        comp = await create_components(config, load_ambient_config=False, bm25_path_fallback=False)
         try:
             self._records = RecordStore(
                 self.records_dir, scope=tier, force_unsafe=self.force_unsafe

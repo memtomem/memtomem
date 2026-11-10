@@ -164,6 +164,7 @@ async def create_components(
     *,
     load_ambient_config: bool = True,
     entity_backfill: bool = True,
+    bm25_path_fallback: bool = True,
 ) -> Components:
     """Create and initialise all core components.
 
@@ -175,6 +176,13 @@ async def create_components(
     ``entity_backfill=False`` skips the one-time #2133 entity backfill — for
     callers standing up transient stacks over stores they must not mutate
     (Quality Lab replays). Every durable entry point keeps the default.
+
+    ``bm25_path_fallback=False`` stops BM25 from matching a query against
+    chunk paths once nothing matches on content (#2224's filename lookup).
+    It is for callers whose source paths are their own bookkeeping rather
+    than names a user types, such as langchain-memtomem's store: every row
+    there shares the root and layout words, so the fallback would return
+    every row for a query naming one of them (#3205).
     """
     from memtomem.config import load_config_d, load_config_overrides
 
@@ -202,7 +210,7 @@ async def create_components(
     apply_e5_defaults(config)
     await asyncio.to_thread(validate_budget_configuration, config)
 
-    storage = create_storage(config)
+    storage = create_storage(config, bm25_path_fallback=bm25_path_fallback)
     embedder: EmbeddingProvider | None = None
     embedding_broken: dict | None = None
     reranker: object | None = None
@@ -247,6 +255,7 @@ async def create_components(
             strict_dim_check=False,
             chunk_budget_config=config.indexing,
             fts_tokenizer=config.search.tokenizer,
+            bm25_path_fallback=bm25_path_fallback,
         )
         try:
             await storage.initialize()

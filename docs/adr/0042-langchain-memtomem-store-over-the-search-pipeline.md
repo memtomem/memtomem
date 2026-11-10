@@ -269,6 +269,22 @@ boundary of `put` and `delete` against the repair that restores agreement).
      > B2's header and B4's "decodes each hit's header" read accordingly:
      > the hit's item is named by its source path and checked against the
      > row's namespace.
+     > **Amended 2026-11-10** after #3205. The projection's path is
+     > bookkeeping too, and it was searchable: memtomem's BM25 leg matches a
+     > query against `source_file` once no row's content matches (#2224), and
+     > every projection path shares the root's words and `projections`, so
+     > such a query returned every item, scored as real matches at those
+     > ranks would be. The store
+     > now opens its components with
+     > `create_components(..., bm25_path_fallback=False)`, a public keyword
+     > added for it, so BM25 matches content only. Nothing a caller types is
+     > lost: keys and namespaces appear in the path only in encoded form
+     > (measured: with the fallback on, querying an item's key found
+     > nothing). The package's memtomem floor rises to the first release
+     > carrying the keyword. This closes the path, not all bookkeeping:
+     > under bounded chunking (on for E5) the chunker writes
+     > `File: <encoded key>.md` into each row's retrieval text, which BM25
+     > indexes as content (#3209).
    - A deletion marker carries the generation it was written for. A later
      `put` under the lock settles or supersedes the marker before it writes.
      Repair gives a marker precedence only over a record of the same or an
