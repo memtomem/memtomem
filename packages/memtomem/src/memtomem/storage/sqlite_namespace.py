@@ -90,7 +90,7 @@ def _is_valid_ns_chars(name: str) -> bool:
     namespace lists, …). Kept private to ``sqlite_namespace`` so callers
     don't accidentally use it as a substitute for the public gate.
     """
-    return bool(_NS_NAME_RE.match(name))
+    return bool(_NS_NAME_RE.fullmatch(name))
 
 
 def sanitize_namespace_segment(name: str) -> str:
