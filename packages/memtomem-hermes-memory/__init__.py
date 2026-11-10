@@ -1103,12 +1103,13 @@ class MemtomemMemoryProvider(MemoryProvider):
             from hermes_cli.config import load_config_readonly
         except Exception as exc:
             return (
-                f"this Hermes has no plugin MCP access (needs Hermes Agent 0.21.5 or later): {exc}"
+                "this Hermes has no plugin MCP access (needs Hermes Agent 0.21.5 or later): "
+                f"{type(exc).__name__}"
             )
         try:
             cfg = _mapping(load_config_readonly())
         except Exception as exc:
-            return f"cannot read Hermes config: {exc}"
+            return f"cannot read Hermes config: {type(exc).__name__}"
         server = _read_settings(cfg, warn=False)["server"]
         if server not in _allowlist(cfg):
             return _allowlist_text(server)

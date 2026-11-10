@@ -48,6 +48,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   when it writes nothing (#3204).** Run at a terminal with
   `HERMES_NONINTERACTIVE=1`, it said "not a terminal"; it now says
   "HERMES_NONINTERACTIVE is set". It still writes nothing and prints the commands.
+- **Hermes provider: the reason it gives Hermes for being unavailable names the
+  exception's class, not its text (#3217).** When importing Hermes's plugin
+  modules or reading Hermes's config fails, `unavailable_reason()` returned the
+  exception's text, and Hermes logs that reason at WARNING and shows it to the
+  user. It now ends with the class name, for example
+  `cannot read Hermes config: RuntimeError`. The message for an old Hermes still
+  names the version it needs (0.21.5 or later).
 
 ## [0.7.8] — 2026-11-10
 
