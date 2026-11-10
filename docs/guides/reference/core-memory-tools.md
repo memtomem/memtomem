@@ -438,7 +438,7 @@ mem_recall(namespace="project:*", limit=5)
 | Parameter | Description | Format |
 |-----------|-------------|--------|
 | `since` | Inclusive start date | `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, ISO datetime |
-| `until` | Exclusive end date | same formats |
+| `until` | End date. A date-only value includes that whole period (UTC); a full datetime is exclusive | same formats |
 | `source_filter` | File path substring or glob | `"notes"`, `"*.md"` |
 | `tag_filter` | Comma-separated tags, matching ANY | `"handoff,decision"` |
 | `namespace` | Single, comma-separated, or glob; `"!system"` = every non-system namespace | `"work"`, `"project:*"`, `"!system"` |
