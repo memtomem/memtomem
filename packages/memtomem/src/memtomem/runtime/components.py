@@ -165,6 +165,7 @@ async def create_components(
     load_ambient_config: bool = True,
     entity_backfill: bool = True,
     bm25_path_fallback: bool = True,
+    chunk_source_labels: bool = True,
 ) -> Components:
     """Create and initialise all core components.
 
@@ -183,6 +184,14 @@ async def create_components(
     than names a user types, such as langchain-memtomem's store: every row
     there shares the root and layout words, so the fallback would return
     every row for a query naming one of them (#3205).
+
+    ``chunk_source_labels=False`` leaves the ``File: <name>`` and
+    ``Fragment <i>/<n>`` lines out of the descriptions bounded chunking writes
+    (on whenever ``indexing.hard_max_chunk_tokens`` is set, as E5 sets it).
+    Those descriptions are embedded and BM25-indexed as content, so the lines
+    make each source's file name searchable, which ``bm25_path_fallback``
+    does not reach. It is for the same callers: in langchain-memtomem's store
+    every row would match ``md`` and its item's encoded key (#3209).
     """
     from memtomem.config import load_config_d, load_config_overrides
 
@@ -321,6 +330,7 @@ async def create_components(
             progress_threshold=config.embedding.progress_threshold,
             llm=llm,
             generation=generation,
+            chunk_source_labels=chunk_source_labels,
         )
 
         search_pipeline = create_search_pipeline(

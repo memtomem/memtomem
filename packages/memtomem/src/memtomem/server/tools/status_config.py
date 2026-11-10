@@ -1745,6 +1745,9 @@ async def _revert_to_stored_locked(
             # ``component_factory.create_components``.
             llm=app.llm_provider,
             generation=new_generation,
+            # A component setting, not a config field: carry it over, or the
+            # rebuilt engine would put the labels back (#3209).
+            chunk_source_labels=comp.index_engine._chunk_source_labels,
         )
         # Storage-only since the scan stopped embedding; rebuilt with the rest
         # so a construction failure still rolls back before any publication.
