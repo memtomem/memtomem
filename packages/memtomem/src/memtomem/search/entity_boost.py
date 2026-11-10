@@ -26,6 +26,14 @@ from memtomem.search.access import boosted_score
 # query bounded, not to tune ranking.
 _MAX_QUERY_ENTITIES = 8
 
+# Hangul (Jamo, compatibility Jamo, syllables), kana (incl. phonetic extensions
+# and halfwidth katakana) and Han (Ext A, unified, compatibility) — character-class
+# ranges for ``_is_word_boundary_match``.
+_CJK_RANGES = (
+    "\u1100-\u11ff\u3040-\u30ff\u3130-\u318f\u31f0-\u31ff"
+    "\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff66-\uff9f"
+)
+
 
 def entity_boost_factor(matched: int, total: int, max_boost: float = 1.5) -> float:
     """Coverage-based boost factor.
@@ -95,8 +103,17 @@ def extract_query_entities(
 
 
 def _is_word_boundary_match(query: str, value: str) -> bool:
-    """Whether ``value`` appears in ``query`` as a whole word."""
-    return re.search(rf"(?<!\w){re.escape(value)}(?!\w)", query, re.IGNORECASE) is not None
+    """Whether ``value`` appears in ``query`` as a whole word.
+
+    A neighbouring word character blocks the match ("git" in "digit", "rest" in
+    "resté"), except a Hangul, kana or Han one: those scripts attach particles
+    and words to a Latin term with no space ("sqlite를", "redisで", "用python"),
+    and treating them as part of the word dropped the entity from every query
+    written that way, while the chunk side still records it.
+    """
+    blocked = rf"[^\W{_CJK_RANGES}]"
+    pattern = rf"(?<!{blocked}){re.escape(value)}(?!{blocked})"
+    return re.search(pattern, query, re.IGNORECASE) is not None
 
 
 def apply_entity_boost(
