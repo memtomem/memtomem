@@ -39,6 +39,9 @@
     "@types/node": "26.6.6",
     "typescript": "5.9.3"
   },
+  "overrides": {
+    "effect": "4.0.0-beta.103"
+  },
   "publishConfig": {
     "access": "public",
     "provenance": true

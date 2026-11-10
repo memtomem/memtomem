@@ -82,6 +82,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `cannot read Hermes config: RuntimeError`. The message for an old Hermes still
   names the version it needs (0.21.5 or later).
 
+### Security
+
+- An advisory published on 2026-11-10 against `effect` 4.0.0-beta.83
+  ([GHSA-chp3-j5qr-2vfr](https://osv.dev/vulnerability/GHSA-chp3-j5qr-2vfr)):
+  `makeCookie()` in `@effect/platform` lets the domain, path and name fields
+  inject cookie attributes. `effect` is a dev-only dependency of the OpenCode
+  plugin, and `@opencode-ai/plugin` 1.19.5, its latest release, pins
+  4.0.0-beta.83 exactly, so the plugin's `package.json` now overrides it to
+  4.0.0-beta.103, the fixed release. The plugin's source never imports
+  `effect`, and the published package ships no dependencies, so nothing an
+  OpenCode user installs changes.
+
 ## [0.7.8] — 2026-11-10
 
 ### Upgrading

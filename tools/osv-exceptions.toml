@@ -341,31 +341,36 @@ ignoreUntil = 2026-11-20
 
 # toml 4.3.0 in packages/opencode-memtomem/package-lock.json (dev), published
 # 2026-10-22. GHSA-h895-cgqg-jf52 named the package `tome` until OSV matched it to
-# toml on 2026-10-26. Remove when @opencode-ai/plugin moves to an effect that allows
-# toml>=5.0.1.
+# toml on 2026-10-26. Remove when an effect release allows toml>=5.0.1 and the
+# lockfile moves to it.
+#
+# effect itself is not an exception: packages/opencode-memtomem/package.json
+# overrides the plugin's exact 4.0.0-beta.83 pin to 4.0.0-beta.103, the fix for
+# GHSA-chp3-j5qr-2vfr. Drop that override once @opencode-ai/plugin pins
+# 4.0.0-beta.103 or later itself.
 
 [[exceptions]]
 id = "GHSA-4qx8-w7c3-pj3p"
 owner = "memtomem"
-reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect 4.0.0-beta.83, which requires toml ^4.1.1 (plugin 1.19.4 still pins it); the plugin ships no dependencies and its build parses no untrusted TOML"
+reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect, which requires toml ^4 up to 4.0.0-beta.103 (the plugin pins 4.0.0-beta.83; an npm override lifts it to 4.0.0-beta.103); the plugin ships no dependencies and its build parses no untrusted TOML"
 ignoreUntil = 2026-11-20
 
 [[exceptions]]
 id = "GHSA-9j65-hcg3-gc64"
 owner = "memtomem"
-reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect 4.0.0-beta.83, which requires toml ^4.1.1 (plugin 1.19.4 still pins it); the plugin ships no dependencies and its build parses no untrusted TOML"
+reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect, which requires toml ^4 up to 4.0.0-beta.103 (the plugin pins 4.0.0-beta.83; an npm override lifts it to 4.0.0-beta.103); the plugin ships no dependencies and its build parses no untrusted TOML"
 ignoreUntil = 2026-11-20
 
 [[exceptions]]
 id = "GHSA-9qmh-m7c6-f92p"
 owner = "memtomem"
-reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect 4.0.0-beta.83, which requires toml ^4.1.1 (plugin 1.19.4 still pins it); the plugin ships no dependencies and its build parses no untrusted TOML"
+reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect, which requires toml ^4 up to 4.0.0-beta.103 (the plugin pins 4.0.0-beta.83; an npm override lifts it to 4.0.0-beta.103); the plugin ships no dependencies and its build parses no untrusted TOML"
 ignoreUntil = 2026-11-20
 
 [[exceptions]]
 id = "GHSA-h895-cgqg-jf52"
 owner = "memtomem"
-reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect 4.0.0-beta.83, which requires toml ^4.1.1 (plugin 1.19.4 still pins it); the plugin ships no dependencies and its build parses no untrusted TOML"
+reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect, which requires toml ^4 up to 4.0.0-beta.103 (the plugin pins 4.0.0-beta.83; an npm override lifts it to 4.0.0-beta.103); the plugin ships no dependencies and its build parses no untrusted TOML"
 ignoreUntil = 2026-11-20
 
 # zod 4.1.8 in packages/opencode-memtomem/package-lock.json (dev), published
