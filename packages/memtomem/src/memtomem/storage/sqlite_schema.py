@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from memtomem.embedding.identity import embedding_identity_complete, same_embedding_model
 from memtomem.errors import EmbeddingDimensionMismatchError, SchemaDowngradeError
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
-from memtomem.storage.sqlite_helpers import utc_stamp
+from memtomem.storage.sqlite_helpers import fts_source_text, utc_stamp
 from memtomem.storage.sqlite_meta import MetaManager
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,11 @@ _CHUNK_TS_UTC_REPAIR_KEY = "chunk_timestamps_utc_repair_v1"
 # it, so the batch is what keeps a large store's startup off a full
 # materialization of the table's timestamp columns.
 _TS_REPAIR_BATCH = 1000
+
+# One-shot rewrite key for ``chunks_fts.source_file``, which held the chunk's
+# full path before #3208 and holds ``fts_source_text`` of it since. Bump
+# (``..._v2``) to force a re-run if that function's output changes.
+_FTS_SOURCE_TEXT_KEY = "fts_source_text_v1"
 
 # One-shot adoption key for consolidation summaries written before
 # ``chunks.origin`` existed (#2161). Bump (``..._v2``) to re-run.
@@ -851,6 +856,7 @@ def create_tables(
     _backfill_chunk_links(db, meta)
     _repair_unicode_escaped_tags(db, meta)
     _repair_non_utc_chunk_timestamps(db, meta)
+    _rewrite_fts_source_text(db, meta)
 
     # --- Entity extraction table ---
     db.execute("""
@@ -1566,6 +1572,84 @@ def _repair_non_utc_chunk_timestamps(db: sqlite3.Connection, meta: MetaManager) 
         if owns_txn:
             db.execute("COMMIT")
         return repaired
+    except Exception:
+        if owns_txn:
+            db.rollback()
+        raise
+
+
+def _rewrite_fts_source_text(db: sqlite3.Connection, meta: MetaManager) -> int:
+    """Rewrite each ``chunks_fts.source_file`` as ``fts_source_text`` of its chunk (#3208).
+
+    Before #3208 the column held the chunk's full path, so every word of a
+    memory dir's path, and the extension, was a fallback term shared by every
+    chunk under it. Writers now store the file's name without its suffix; this
+    pass brings rows written before that to the same form, once.
+
+    The value is derived from ``chunks.source_file`` through the join, never
+    from the FTS value already there: ``fts_source_text`` is not idempotent on
+    multi-dot names (``archive.tar.md`` → ``archive.tar`` → ``archive``), so a
+    pass that fed on its own output would strip one suffix per run. Only the
+    ``source_file`` column is written; content keeps its tokenization, so this
+    is cheaper than ``rebuild_fts`` and does not depend on the tokenizer.
+
+    **Concurrency**: ``BEGIN IMMEDIATE`` keeps a writer on another process
+    from moving or reindexing a file between this pass's read and its write,
+    and the marker is written in the same transaction as the rewrites, so a
+    crash leaves either nothing or everything recorded. Unlike
+    ``_repair_non_utc_chunk_timestamps`` there is no re-check of the marker
+    under the lock: every value is recomputed from ``chunks``, so a second
+    startup that passed the fast path while the first one ran repeats the
+    scan and writes nothing. The ``in_transaction`` branch carries the caveats
+    that function's docstring gives for a caller that wrapped
+    ``create_tables``.
+
+    **No SCHEMA_VERSION bump**, on the same reasoning as that repair. The
+    residual: an older binary that writes or moves a file after this ran puts
+    the full path back for that file's rows, which then behave as they did
+    before #3208 until a forced reindex (``mm index --force``) or
+    ``rebuild_fts`` writes them again. An ordinary reindex skips unchanged
+    chunks, so it does not.
+
+    Returns the number of FTS rows rewritten on this call (0 once recorded).
+    """
+    if meta.get_meta(_FTS_SOURCE_TEXT_KEY) == "done":
+        return 0
+
+    owns_txn = not db.in_transaction
+    if owns_txn:
+        db.execute("BEGIN IMMEDIATE")
+    try:
+        rewritten = 0
+        after = 0
+        while True:
+            rows = db.execute(
+                "SELECT f.rowid, c.source_file, f.source_file "
+                "FROM chunks_fts f JOIN chunks c ON c.rowid = f.rowid "
+                "WHERE f.rowid > ? ORDER BY f.rowid LIMIT ?",
+                (after, _TS_REPAIR_BATCH),
+            ).fetchall()
+            if not rows:
+                break
+            after = rows[-1][0]
+            changes = [
+                (fts_source_text(source), rowid)
+                for rowid, source, current in rows
+                if fts_source_text(source) != current
+            ]
+            if changes:
+                db.executemany("UPDATE chunks_fts SET source_file=? WHERE rowid=?", changes)
+                rewritten += len(changes)
+
+        # Inline rather than ``meta.set_meta``, which commits: see the
+        # timestamp repair above for why the marker shares the transaction.
+        db.execute(
+            "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+            (_FTS_SOURCE_TEXT_KEY, "done"),
+        )
+        if owns_txn:
+            db.execute("COMMIT")
+        return rewritten
     except Exception:
         if owns_txn:
             db.rollback()

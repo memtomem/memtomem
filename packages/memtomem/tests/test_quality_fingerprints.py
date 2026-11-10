@@ -69,10 +69,10 @@ _VECTORS = [
     ("hash-1", "default", "/n/a.md", 0, b"\x00\x01\x02\x03"),
     ("hash-2", "default", "/n/b.md", 4, b"\x04\x05\x06\x07"),
 ]
-# (content_hash, namespace, source_file, start_line, fts_content)
+# (content_hash, namespace, source_file, start_line, fts_content, fts_source)
 _FTS = [
-    ("hash-1", "default", "/n/a.md", 0, "alpha body"),
-    ("hash-2", "default", "/n/b.md", 4, "beta body"),
+    ("hash-1", "default", "/n/a.md", 0, "alpha body", "a"),
+    ("hash-2", "default", "/n/b.md", 4, "beta body", "b"),
 ]
 
 
@@ -234,7 +234,16 @@ class TestIndexFingerprint:
         assert index_fingerprint(_BASE_CORPUS, reordered, _FTS, _EMB) == self._base()
 
     def test_fts_text_edit_drifts(self):
-        edited = [("hash-1", "default", "/n/a.md", 0, "ALPHA CHANGED"), _FTS[1]]
+        edited = [("hash-1", "default", "/n/a.md", 0, "ALPHA CHANGED", "a"), _FTS[1]]
+        assert index_fingerprint(_BASE_CORPUS, _VECTORS, edited, _EMB) != self._base()
+
+    def test_fts_source_text_edit_drifts(self):
+        """The indexed path text is a BM25 input of its own (#3208).
+
+        A store whose rows still hold full paths retrieves differently from one
+        holding file names, with the same chunks and content.
+        """
+        edited = [("hash-1", "default", "/n/a.md", 0, "alpha body", "/n/a.md"), _FTS[1]]
         assert index_fingerprint(_BASE_CORPUS, _VECTORS, edited, _EMB) != self._base()
 
     def test_embedding_identity_drifts(self):
