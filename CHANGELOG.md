@@ -23,6 +23,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Entity extraction no longer cuts or drops an entity that has Korean, Japanese
+  or Chinese text attached (#3222, #3227).** Korean and Japanese write a particle
+  against the preceding word with no space, and the extractor treated Hangul, kana
+  and Han as part of the word: `@alice에게` was stored as the person `@alice에게`,
+  `2026-11-10에` and `OpenSearch를` yielded nothing, and `August 17, 2026에` was cut
+  to `August 17`. A query written that way also lost its technology names
+  (`sqlite를`). These now yield `@alice`, `2026-11-10`, `OpenSearch`,
+  `August 17, 2026` and `sqlite`, on stored memories and on queries alike, so the
+  entity-match boost (`entity_boost.enabled`, off by default) matches them.
+  Accented letters and non-ASCII digits still count as part of a word (`OpenSearché`
+  does not yield `OpenSearch`), and text with no Hangul, kana or Han next to an entity
+  extracts exactly as before. Entities already stored keep their old values until the memory
+  is rewritten. On a store of 49,539 chunks, re-extracting everything would change
+  317 chunks: 331 entities added and 3 mentions replaced. `mem_entity_scan` with
+  `overwrite=True` refreshes them now; with an LLM provider configured it makes one
+  LLM call per scanned chunk, and without one it replaces each scanned chunk's
+  entities, including any an earlier LLM scan wrote, with the regex result.
+  `namespace` and `source_filter` narrow the scan.
 - **A search word that is part of a memory directory's path no longer returns
   every memory under it (#3208).** When no memory's text matched, keyword search
   fell back to matching file paths, so that typing a file's name still finds the

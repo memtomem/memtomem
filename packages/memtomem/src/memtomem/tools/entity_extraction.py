@@ -126,16 +126,33 @@ _KNOWN_TECH = {
 
 # ── Regex patterns ────────────────────────────────────────────────────
 
+# Hangul (Jamo, compatibility Jamo, syllables), kana (incl. phonetic extensions
+# and halfwidth katakana) and Han (Ext A, unified, compatibility).
+_CJK_RANGES = (
+    "\u1100-\u11ff\u3040-\u30ff\u3130-\u318f\u31f0-\u31ff"
+    "\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff66-\uff9f"
+)
+# A word character that ends an entity's word: Unicode ``\w`` minus Hangul, kana
+# and Han. Those scripts attach particles and words to a Latin term or a date
+# with no space ("@alice에게", "2026-11-10에", "OpenSearch를"), so plain ``\w`` /
+# ``\b`` cut the entity wrong or lose it. Accented letters and non-ASCII digits
+# stay word characters ("OpenSearché" is not "OpenSearch"). The patterns below and
+# the query-side technology re-check in ``search/entity_boost.py`` both use this
+# class, so they end a word at the same places. ``_extract_technologies``'s
+# known-tech scan does not: it is a plain substring search.
+_NON_CJK_WORD_CHAR = rf"[^\W{_CJK_RANGES}]"
+_B = _NON_CJK_WORD_CHAR
+
 _PERSON_CONTEXT_RE = re.compile(
     r"(?:(?:by|from|cc|to|with|author|assigned|reviewer)\s*[:\s]+)"
     r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})",
     re.MULTILINE,
 )
-_MENTION_RE = re.compile(r"@([a-zA-Z]\w{2,})")
+_MENTION_RE = re.compile(rf"@([a-zA-Z]{_B}{{2,}})")
 
-_ISO_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+_ISO_DATE_RE = re.compile(rf"(?<!{_B})(\d{{4}}-\d{{2}}-\d{{2}})(?!{_B})")
 _NATURAL_DATE_RE = re.compile(
-    rf"\b((?:{_MONTHS_PATTERN})\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?)(?:\b|$)",
+    rf"(?<!{_B})((?:{_MONTHS_PATTERN})\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?)(?!{_B})",
     re.IGNORECASE,
 )
 
@@ -153,7 +170,7 @@ _ACTION_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 
-_PASCAL_CASE_RE = re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b")
+_PASCAL_CASE_RE = re.compile(rf"(?<!{_B})([A-Z][a-z]+(?:[A-Z][a-z]+)+)(?!{_B})")
 
 _QUOTED_TERM_RE = re.compile(r'"([^"]{3,50})"')
 
