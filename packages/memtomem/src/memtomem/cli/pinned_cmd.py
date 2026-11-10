@@ -96,7 +96,12 @@ async def _get_block(block_id: str, scope: TargetScope, agent_id: str | None) ->
 @pinned.command("set")
 @click.argument("block_id")
 @click.option("--content", default=None, help="Block text; omit when using --file.")
-@click.option("--file", "content_file", type=click.Path(path_type=Path), default=None)
+@click.option(
+    "--file",
+    "content_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+)
 @click.option("--description", default="")
 @click.option("--priority", type=int, default=0)
 @click.option("--scope", type=click.Choice(_SCOPES), default="user")
@@ -120,7 +125,12 @@ def set_block(
     if content is not None:
         body = content
     elif content_file is not None:
-        body = content_file.read_text(encoding="utf-8")
+        try:
+            body = content_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            # ``exists``/``dir_okay`` above reject a missing path or a directory
+            # before this runs; an unreadable or non-UTF-8 file still gets here.
+            raise click.ClickException(f"Could not read {content_file}: {exc}") from exc
     else:  # guarded by the exactly-one check above
         raise click.UsageError("Provide exactly one of --content or --file")
     from memtomem.cli._errors import raise_cli_error
