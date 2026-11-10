@@ -201,3 +201,65 @@ async def test_a_word_of_the_root_path_does_not_return_every_item(
         assert [h.key for h in await store.asearch(("u",), query="pears")] == ["b"]
     finally:
         await store.aclose()
+
+
+def _byte_tokenizer(directory: Path) -> str:
+    """A byte-level tokenizer file, so bounded chunking runs without a model download."""
+    tokenizers = pytest.importorskip("tokenizers")
+    alphabet = sorted(tokenizers.pre_tokenizers.ByteLevel.alphabet())
+    tokenizer = tokenizers.Tokenizer(
+        tokenizers.models.BPE(vocab={c: i for i, c in enumerate(alphabet)}, merges=[])
+    )
+    tokenizer.pre_tokenizer = tokenizers.pre_tokenizers.ByteLevel(add_prefix_space=False)
+    path = directory / "tokenizer.json"
+    tokenizer.save(str(path))
+    return str(path)
+
+
+class _BoundedStore(MemtomemPipelineStore):
+    """The store with bounded chunking on, as an E5 model turns it on.
+
+    ``config["indexing"]`` belongs to the store, so the budget goes in here
+    rather than through ``config=``; E5 itself would download a model.
+    """
+
+    budget: dict = {}
+
+    def _config_sections(self, registry: list[Path]) -> dict:
+        sections = super()._config_sections(registry)
+        sections["indexing"].update(self.budget)
+        return sections
+
+
+@pytest.mark.parametrize("mode", ["bm25", "hybrid"])
+async def test_bounded_chunking_does_not_make_file_names_searchable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Bounded chunking writes ``File: <name>`` and ``Fragment <i>/<n>`` into each
+    row's indexed description, and the name here is ``<encoded key>.md`` (#3209).
+
+    Before the fix ``md``, ``file`` and ``fragment`` returned every item and the
+    encoded key returned its item, none of them in any value.
+    """
+    monkeypatch.setattr(
+        _BoundedStore,
+        "budget",
+        {
+            "hard_max_chunk_tokens": 64,
+            "chunk_tokenizer_path": _byte_tokenizer(tmp_path),
+            "chunk_context_tokens": 256,
+            "chunk_model_tokens": 384,
+        },
+    )
+    store = await _BoundedStore.open(tmp_path / "s", retrieval={"mode": mode})
+    try:
+        for key, text in {"a": "apples", "b": "pears", "c": "plums"}.items():
+            await store.aput(("u",), key, {"text": text})
+        assert store._comp is not None
+        assert store._comp.index_engine._config.hard_max_chunk_tokens == 64
+        encoded = encode_segment("a")
+        for query in ("md", "file", "fragment", encoded):
+            assert [h.key for h in await store.asearch(("u",), query=query)] == [], query
+        assert [h.key for h in await store.asearch(("u",), query="pears")] == ["b"]
+    finally:
+        await store.aclose()
