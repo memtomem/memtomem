@@ -179,3 +179,70 @@ async def test_reads_after_an_observation_flush_see_it_past_an_open_pool_stateme
         assert "quality query" in await storage.suggest_queries("quality")
         gaps = [g["query"] for g in await storage.get_knowledge_gaps()]
         assert gaps == ["nothing found here"]
+
+
+def _commit_scope(storage, chunk_id, scope: str) -> None:
+    writer = storage._get_db()
+    writer.execute("UPDATE chunks SET scope=? WHERE id=?", (scope, str(chunk_id)))
+    writer.commit()
+
+
+async def test_namespace_scope_probe_in_a_transaction_reads_past_an_open_pool_statement(
+    storage, monkeypatch
+):
+    """The Gate-B probe of ``mem_delete(namespace=...)`` reads the writer in its transaction."""
+    chunk = _chunk("shared.md")
+    await storage.upsert_chunks([chunk])
+    with pool_reader_mid_statement(storage, monkeypatch):
+        _commit_scope(storage, chunk.id, "project_shared")
+        assert await storage.list_scopes_by_namespace("routed") == {"user"}
+        async with storage.transaction():
+            assert await storage.list_scopes_by_namespace("routed") == {"project_shared"}
+
+
+async def test_get_chunk_read_writer_reads_past_an_open_pool_statement(storage, monkeypatch):
+    """``read_writer=True`` sees the commit; the default read stays on the pool."""
+    chunk = _chunk("shared.md")
+    await storage.upsert_chunks([chunk])
+    with pool_reader_mid_statement(storage, monkeypatch):
+        _commit_scope(storage, chunk.id, "project_shared")
+        pooled = await storage.get_chunk(chunk.id)
+        fresh = await storage.get_chunk(chunk.id, read_writer=True)
+    assert pooled is not None and pooled.metadata.scope == "user"
+    assert fresh is not None and fresh.metadata.scope == "project_shared"
+
+
+async def test_get_chunk_read_writer_times_out_on_a_foreign_owner(storage, monkeypatch):
+    from memtomem.errors import TransactionOwnedError
+
+    chunk = _chunk("held.md")
+    await storage.upsert_chunks([chunk])
+    monkeypatch.setattr("memtomem.storage.sqlite_backend.WRITER_WAIT_S", 0.05)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def owner() -> None:
+        async with storage.transaction():
+            entered.set()
+            await release.wait()
+
+    task = asyncio.create_task(owner())
+    await entered.wait()
+    try:
+        with pytest.raises(TransactionOwnedError):
+            await storage.get_chunk(chunk.id, read_writer=True)
+        # The pool read does not wait for the writer at all.
+        assert await storage.get_chunk(chunk.id) is not None
+    finally:
+        release.set()
+        await task
+
+
+async def test_get_chunk_read_writer_by_the_owner_reads_its_own_writes(storage):
+    chunk = _chunk("owned.md")
+    await storage.upsert_chunks([chunk])
+    async with storage.transaction():
+        storage._get_db().execute(
+            "UPDATE chunks SET scope='project_shared' WHERE id=?", (str(chunk.id),)
+        )
+        fresh = await storage.get_chunk(chunk.id, read_writer=True)
+    assert fresh is not None and fresh.metadata.scope == "project_shared"

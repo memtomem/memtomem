@@ -11,7 +11,7 @@ from uuid import UUID
 
 from memtomem.config import TargetScope
 from memtomem.constants import writable_namespace_arg
-from memtomem.errors import RetryableError
+from memtomem.errors import RetryableError, StorageError
 from memtomem.indexing.scope_guard import scope_held_notice
 from memtomem.memory_scope import NS_RETARGET_ATTEMPTS, MemoryScopeError
 from memtomem.memory_scope import NS_RETARGET_EXHAUSTED_ERROR as _NS_RETARGET_EXHAUSTED
@@ -29,6 +29,8 @@ from memtomem.server.tools._provenance import (
     record_write_provenance,
 )
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
+from memtomem.storage.base import WRITER_WAIT_S
+from memtomem.storage.sqlite_errors import is_writer_busy
 from memtomem.source_provenance import (
     EXCLUDED_AFTER_APPEND_NOTICE,
     EXCLUDED_SOURCE_DETAIL,
@@ -355,7 +357,18 @@ async def _locked_chunk(
                 async with async_memory_file_lock(
                     source_file, timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
                 ) as cross_process_held:
-                    fresh = await app.storage.get_chunk(uid, exclude_withheld=True)
+                    # The writer, not a pool reader: this row's scope decides the
+                    # Gate-B check and its line range what the caller cuts from the
+                    # file, and a pool connection can serve a snapshot from before
+                    # a commit made while we waited for the locks (#3202).
+                    try:
+                        fresh = await app.storage.get_chunk(
+                            uid, exclude_withheld=True, read_writer=True
+                        )
+                    except StorageError as exc:
+                        if not is_writer_busy(exc):
+                            raise
+                        raise RetryableError(_WRITER_BUSY_NOTHING_CHANGED) from exc
                     if fresh is None or not in_boundary(fresh, boundary):
                         yield None, f"Error: chunk {chunk_id} not found.", cross_process_held
                         return
@@ -380,6 +393,29 @@ async def _locked_chunk(
             )
             return
     yield None, f"Error: chunk {chunk_id} source file is being moved concurrently; retry.", False
+
+
+_WRITER_BUSY_NOTHING_CHANGED = "the store's writer is busy; nothing was changed. Retry."
+
+
+@asynccontextmanager
+async def _gated_delete_transaction(app: AppContext) -> AsyncIterator[None]:
+    """One writer transaction for a bulk delete's Gate-B probe and the delete itself.
+
+    Nothing can commit while the body holds the writer, so the scopes the probe
+    reads are the rows the delete removes, and the probe reads the writer, not
+    a pool connection that can still hold a snapshot from before a commit
+    (#3202). Waits up to ``WRITER_WAIT_S`` for another task's transaction. A
+    busy writer, here or in another process, is a retryable refusal; the
+    transaction rolls back on it, so nothing was deleted.
+    """
+    try:
+        async with app.storage.transaction(wait=WRITER_WAIT_S):
+            yield
+    except StorageError as exc:
+        if not is_writer_busy(exc):
+            raise
+        raise RetryableError(_WRITER_BUSY_NOTHING_CHANGED) from exc
 
 
 async def _scope_loss_refusal(app: AppContext, chunk: Chunk, chunk_id: str) -> str | None:
@@ -1789,7 +1825,8 @@ async def mem_delete(
         # incremental ``index_file`` — in this process or another — can land
         # after this delete and re-upsert the whole file, silently
         # resurrecting the rows just removed. The Gate-B scope probe runs under
-        # the locks too so it sees the same state the delete acts on.
+        # the locks too, and in one writer transaction with the delete, so it
+        # sees the state the delete acts on (#3202).
         #
         # L2 through ``async_memory_file_lock`` (#2346): ``_validate_path``
         # resolves and range-checks ``source_file`` but never stats it, so
@@ -1814,27 +1851,28 @@ async def mem_delete(
                 # not the rows). If the directory returned after the degrade,
                 # the worst case is rows removed for a file that is back, which
                 # the next index of that file restores.
-                scopes = await app.storage.list_scopes_by_source(stored_key, as_stored=True)
-                if "project_shared" in scopes and not confirm_project_shared:
-                    logger.info(
-                        "mem_delete rejected bulk project_shared source without confirmation",
-                        extra={"source_file": str(sf_path), "scopes": sorted(scopes)},
-                    )
-                    return (
-                        "Error: source_file delete would remove scope='project_shared' chunks; "
-                        "pass confirm_project_shared=True to proceed. Bulk source deletes are "
-                        "all-or-nothing; use chunk_id for per-chunk control."
-                    )
-                # Same predicate as the gate — a source holding no
-                # project_shared chunks needed no consent.
-                if "project_shared" in scopes:
-                    privacy.emit_project_shared_confirmation(
-                        surface="mem_delete",
-                        mechanism="param",
-                        action="delete",
-                        audit_context={"source_file": sf_path.name, "scopes": len(scopes)},
-                    )
-                deleted = await app.storage.delete_by_source(stored_key, as_stored=True)
+                async with _gated_delete_transaction(app):
+                    scopes = await app.storage.list_scopes_by_source(stored_key, as_stored=True)
+                    if "project_shared" in scopes and not confirm_project_shared:
+                        logger.info(
+                            "mem_delete rejected bulk project_shared source without confirmation",
+                            extra={"source_file": str(sf_path), "scopes": sorted(scopes)},
+                        )
+                        return (
+                            "Error: source_file delete would remove scope='project_shared' chunks; "
+                            "pass confirm_project_shared=True to proceed. Bulk source deletes are "
+                            "all-or-nothing; use chunk_id for per-chunk control."
+                        )
+                    # Same predicate as the gate — a source holding no
+                    # project_shared chunks needed no consent.
+                    if "project_shared" in scopes:
+                        privacy.emit_project_shared_confirmation(
+                            surface="mem_delete",
+                            mechanism="param",
+                            action="delete",
+                            audit_context={"source_file": sf_path.name, "scopes": len(scopes)},
+                        )
+                    deleted = await app.storage.delete_by_source(stored_key, as_stored=True)
         except TimeoutError:
             return (
                 f"Error: {source_file} is locked by another process (migration in flight?); retry."
@@ -1871,30 +1909,32 @@ async def mem_delete(
             # ADR-0011 PR-D Gate B on bulk namespace delete. project_shared
             # memories can sit in the default namespace alongside user
             # memories, so the namespace string alone does not imply the
-            # trust tier — probe the persisted scope set (under the locks,
-            # so the gate sees the same state the delete acts on).
-            ns_scopes = await app.storage.list_scopes_by_namespace(namespace)
-            if "project_shared" in ns_scopes and not confirm_project_shared:
-                logger.info(
-                    "mem_delete rejected bulk project_shared namespace without confirmation",
-                    extra={"namespace": namespace, "scopes": sorted(ns_scopes)},
-                )
-                return (
-                    f"Error: namespace='{namespace}' delete would remove "
-                    "scope='project_shared' chunks; pass confirm_project_shared=True "
-                    "to proceed. Bulk namespace deletes are all-or-nothing; use "
-                    "chunk_id for per-chunk control."
-                )
-            # Same predicate as the gate — a namespace holding no
-            # project_shared chunks needed no consent.
-            if "project_shared" in ns_scopes:
-                privacy.emit_project_shared_confirmation(
-                    surface="mem_delete",
-                    mechanism="param",
-                    action="delete",
-                    audit_context={"namespace": namespace, "scopes": len(ns_scopes)},
-                )
-            deleted = await app.storage.delete_by_namespace(namespace)
+            # trust tier — probe the persisted scope set (under the locks and
+            # in one writer transaction with the delete, so the gate sees the
+            # state the delete acts on, #3202).
+            async with _gated_delete_transaction(app):
+                ns_scopes = await app.storage.list_scopes_by_namespace(namespace)
+                if "project_shared" in ns_scopes and not confirm_project_shared:
+                    logger.info(
+                        "mem_delete rejected bulk project_shared namespace without confirmation",
+                        extra={"namespace": namespace, "scopes": sorted(ns_scopes)},
+                    )
+                    return (
+                        f"Error: namespace='{namespace}' delete would remove "
+                        "scope='project_shared' chunks; pass confirm_project_shared=True "
+                        "to proceed. Bulk namespace deletes are all-or-nothing; use "
+                        "chunk_id for per-chunk control."
+                    )
+                # Same predicate as the gate — a namespace holding no
+                # project_shared chunks needed no consent.
+                if "project_shared" in ns_scopes:
+                    privacy.emit_project_shared_confirmation(
+                        surface="mem_delete",
+                        mechanism="param",
+                        action="delete",
+                        audit_context={"namespace": namespace, "scopes": len(ns_scopes)},
+                    )
+                deleted = await app.storage.delete_by_namespace(namespace)
         app.search_pipeline.invalidate_cache()
         if deleted:
             await flag_untracked_write(app, provenance_session_id)
