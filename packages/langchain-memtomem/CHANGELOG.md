@@ -5,16 +5,6 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
 
 ## [Unreleased]
 
-## [0.2.0] — 2026-11-10
-
-### Added
-
-- `MemtomemPipelineStore(retrieval={"mode": "hybrid" | "bm25" | "dense", "weights": [bm25, dense],
-  "rrf_k": 60})` chooses which retrievers a query search runs, with the keys and refusals of
-  memtomem's `MemtomemHybridStore`. `"dense"` without an embedder is refused at open, and a
-  `"dense"` query whose dense leg cannot run raises the new `DenseSearchUnavailable` instead of
-  returning nothing. Without `retrieval`, a store searches as 0.1.0 did.
-
 ### Fixed
 
 - BM25 no longer matches every item for a query whose words match no value but name a word of
@@ -28,6 +18,16 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
   key still match, through the chunker's `File:` and `Fragment` lines (#3209). Needs
   memtomem 0.7.9, which adds the `create_components` keyword the store passes; the dependency
   floor rises with that release.
+
+## [0.2.0] — 2026-11-10
+
+### Added
+
+- `MemtomemPipelineStore(retrieval={"mode": "hybrid" | "bm25" | "dense", "weights": [bm25, dense],
+  "rrf_k": 60})` chooses which retrievers a query search runs, with the keys and refusals of
+  memtomem's `MemtomemHybridStore`. `"dense"` without an embedder is refused at open, and a
+  `"dense"` query whose dense leg cannot run raises the new `DenseSearchUnavailable` instead of
+  returning nothing. Without `retrieval`, a store searches as 0.1.0 did.
 
 ## [0.1.0] — 2026-11-04
 
