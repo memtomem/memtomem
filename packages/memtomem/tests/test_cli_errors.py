@@ -32,6 +32,9 @@ from memtomem.errors import (
     ConfigError,
     EmbeddingDimensionMismatchError,
     EmbeddingError,
+    EvalCaseError,
+    EvalCaseNotFoundError,
+    EvalCaseValidationError,
     NamespaceMutationBusyError,
     NamespaceResolutionError,
     SchemaDowngradeError,
@@ -109,6 +112,22 @@ class TestHintMapping:
         # never attach a misleading remediation.
         message = _message_of(sqlite3.OperationalError("disk I/O error"))
         assert message == "disk I/O error"
+        assert "Hint:" not in message
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            EvalCaseNotFoundError("eval case 'x' not found"),
+            EvalCaseValidationError("invalid case name"),
+            EvalCaseError("eval case name 'x' already exists"),
+        ],
+    )
+    def test_eval_case_errors_get_no_storage_hint(self, exc: Exception) -> None:
+        # ``EvalCaseError`` subclasses ``StorageError``, but an unknown case or
+        # run is an input problem: "run `mm status`" would point at a healthy
+        # database. The message names the problem on its own.
+        message = _message_of(exc)
+        assert message == str(exc)
         assert "Hint:" not in message
 
     def test_empty_message_falls_back_to_class_name(self) -> None:
