@@ -13,6 +13,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   its own bookkeeping can now turn that off. langchain-memtomem's store does: every one of its
   paths shares the store's root and layout words, so a query naming one returned every item.
   The default is unchanged.
+- **`create_components(..., chunk_source_labels=False)` leaves the `File:` and `Fragment` lines
+  out of bounded chunk descriptions (#3209).** With bounded chunking on
+  (`indexing.hard_max_chunk_tokens`, which an E5 embedding model sets), each chunk's description
+  carries `File: <name>` and `Fragment <i>/<n>` lines, and that description is embedded and
+  BM25-indexed with the body. A component whose file names are its own bookkeeping can now leave
+  both lines out. langchain-memtomem's store does: its file names are encoded keys ending in
+  `.md`, so `md` returned every item. The default is unchanged, so existing indexes do not re-embed.
 
 ### Fixed
 
@@ -48,6 +55,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   when it writes nothing (#3204).** Run at a terminal with
   `HERMES_NONINTERACTIVE=1`, it said "not a terminal"; it now says
   "HERMES_NONINTERACTIVE is set". It still writes nothing and prints the commands.
+- **Hermes provider: two mirror warnings log exception class names instead of exception text (#3203).**
+  When preflight or building the plugin context fails on the mirror worker, the provider now logs
+  `cannot read Hermes config (<ExceptionName>)` and `cannot build a Hermes plugin context (<ExceptionName>)`
+  matching the recall path, ensuring Hermes exception text is never written to log lines at any level.
 - **Hermes provider: the reason it gives Hermes for being unavailable names the
   exception's class, not its text (#3217).** When importing Hermes's plugin
   modules or reading Hermes's config fails, `unavailable_reason()` returned the

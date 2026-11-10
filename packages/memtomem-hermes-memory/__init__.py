@@ -840,7 +840,10 @@ def _send_mirror_op(registry: types.ModuleType, mirror: _Mirror, op: _MirrorOp) 
         try:
             outcome, warning = _preflight(mirror.server)
         except Exception as exc:
-            outcome, warning = "skipped_config_error", f"cannot read Hermes config ({exc!r})"
+            outcome, warning = (
+                "skipped_config_error",
+                f"cannot read Hermes config ({type(exc).__name__})",
+            )
         if outcome:
             mirror.count(registry, "dropped_" + outcome, warning)
             return "drop"
@@ -848,7 +851,9 @@ def _send_mirror_op(registry: types.ModuleType, mirror: _Mirror, op: _MirrorOp) 
             context = mirror.holder.get()
         except Exception as exc:
             mirror.count(
-                registry, "dropped_no_context", f"cannot build a Hermes plugin context ({exc!r})"
+                registry,
+                "dropped_no_context",
+                f"cannot build a Hermes plugin context ({type(exc).__name__})",
             )
             return "drop"
         caps = mirror.caps.fresh(registry.clock())
