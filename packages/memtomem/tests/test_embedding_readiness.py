@@ -11,6 +11,10 @@ from memtomem.embedding.profiles import E5_REVISION, MINILM_REVISION
 from memtomem.embedding.readiness import approx_size_mb, model_snapshot_present
 
 MARKERS = ("config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json")
+# What fastembed's tokenizer loader cannot do without, and what it reads only
+# when present. A pinned model needs all of ``MARKERS``.
+REQUIRED_MARKERS = ("tokenizer.json", "tokenizer_config.json")
+OPTIONAL_MARKERS = ("config.json", "special_tokens_map.json")
 
 MINILM_ID = "sentence-transformers/all-MiniLM-L6-v2"
 BGE_SMALL_ID = "BAAI/bge-small-en-v1.5"
@@ -97,6 +101,78 @@ def test_bge_small_under_its_model_id_is_not_what_the_loader_opens(tmp_path: Pat
     pytest.importorskip("fastembed")
     _make_snapshot(tmp_path, BGE_SMALL_ID, ("model.onnx",))
     assert not model_snapshot_present(tmp_path, BGE_SMALL_ID)
+
+
+@pytest.mark.parametrize("missing", REQUIRED_MARKERS)
+def test_catalog_snapshot_needs_the_tokenizer_files(tmp_path: Path, missing: str) -> None:
+    pytest.importorskip("fastembed")
+    repo = _catalog_hf_repo(BGE_SMALL_ID)
+    _make_snapshot(tmp_path, repo, ("model_optimized.onnx",), drop=missing)
+    assert not model_snapshot_present(tmp_path, BGE_SMALL_ID)
+
+
+@pytest.mark.parametrize("missing", OPTIONAL_MARKERS)
+def test_catalog_snapshot_loads_without_the_optional_files(tmp_path: Path, missing: str) -> None:
+    """fastembed reads these two only when they exist, so a snapshot without
+    one still loads from the cache."""
+    pytest.importorskip("fastembed")
+    repo = _catalog_hf_repo(BGE_SMALL_ID)
+    _make_snapshot(tmp_path, repo, ("model_optimized.onnx",), drop=missing)
+    assert model_snapshot_present(tmp_path, BGE_SMALL_ID)
+
+
+def test_marker_files_match_fastembed() -> None:
+    """Readiness copies which files fastembed's tokenizer loaders require.
+    Pin the lines it copies, so a change there fails here."""
+    pytest.importorskip("fastembed")
+    import inspect
+
+    from fastembed.common import preprocessor_utils
+    from fastembed.text import static_embedding
+
+    from memtomem.embedding import readiness
+
+    loader = inspect.getsource(preprocessor_utils.load_tokenizer)
+    required = [
+        name for name in MARKERS if f'raise ValueError(f"Could not find {name} in' in loader
+    ]
+    assert tuple(required) == readiness._LOADER_MARKER_FILES == REQUIRED_MARKERS
+    assert "if config_path.exists():" in loader
+    special_tokens = inspect.getsource(preprocessor_utils.load_special_tokens)
+    assert "if not tokens_map_path.exists():\n        return {}" in special_tokens
+
+    static_loader = inspect.getsource(static_embedding.load_static_tokenizer)
+    assert 'raise ValueError(f"Could not find tokenizer.json in' in static_loader
+    assert not any(name in static_loader for name in MARKERS if name != "tokenizer.json")
+    assert readiness._STATIC_MARKER_FILES == ("tokenizer.json",)
+
+
+# -- static models (fastembed 0.9 loads potion from safetensors) ---------------
+
+POTION_ID = "minishlab/potion-base-8M"
+
+
+def _potion_layout() -> tuple[str, tuple[str, ...]]:
+    entry = _catalog_entry(POTION_ID)
+    sources = entry["sources"]
+    assert isinstance(sources, dict)
+    assert entry["model_file"] == "model.safetensors"
+    return str(sources["hf"]), (str(entry["model_file"]),)
+
+
+def test_static_model_needs_only_its_tokenizer(tmp_path: Path) -> None:
+    repo, files = _potion_layout()
+    snap = tmp_path / ("models--" + repo.replace("/", "--")) / "snapshots" / "deadbeef"
+    snap.mkdir(parents=True)
+    for name in ("tokenizer.json", *files):
+        (snap / name).write_text("")
+    assert model_snapshot_present(tmp_path, POTION_ID)
+
+
+def test_static_model_without_its_tokenizer_is_absent(tmp_path: Path) -> None:
+    repo, files = _potion_layout()
+    _make_snapshot(tmp_path, repo, files, drop="tokenizer.json")
+    assert not model_snapshot_present(tmp_path, POTION_ID)
 
 
 # -- pinned E5 ---------------------------------------------------------------
@@ -211,10 +287,17 @@ def _catalog_entry(model: str) -> dict[str, object]:
 
 
 def _gcs_layout(model: str) -> tuple[str, tuple[str, ...]]:
-    """The directory and files the catalog says the tarball unpacks to."""
+    """The directory and files an older fastembed unpacked the tarball to.
+
+    fastembed 0.9 has no ``url`` on these entries, since it downloads no
+    tarball; ``_deprecated_tar_struct`` is what still marks one whose
+    leftover ``fast-`` directory it loads.
+    """
     entry = _catalog_entry(model)
     sources = entry["sources"]
-    assert isinstance(sources, dict) and sources.get("url"), f"{model} has no GCS fallback"
+    assert isinstance(sources, dict) and sources.get("_deprecated_tar_struct") is True, (
+        f"{model} never had a GCS tarball"
+    )
     prefix = "fast-" if sources.get("_deprecated_tar_struct") else ""
     extra = tuple(entry.get("additional_files") or ())  # type: ignore[call-overload]
     return prefix + model.split("/")[-1], (str(entry["model_file"]), *extra)
@@ -233,12 +316,21 @@ def test_gcs_dir_is_found_for_a_lowercased_id(tmp_path: Path, hf_offline: None) 
     assert model_snapshot_present(tmp_path, BGE_BASE_ID.lower())
 
 
-@pytest.mark.parametrize("missing", [*MARKERS, "model_optimized.onnx"])
+@pytest.mark.parametrize("missing", [*REQUIRED_MARKERS, "model_optimized.onnx"])
 def test_incomplete_gcs_dir_is_not_present(tmp_path: Path, hf_offline: None, missing: str) -> None:
     name, files = _gcs_layout(BGE_BASE_ID)
     assert "model_optimized.onnx" in files
     _make_gcs_dir(tmp_path, name, files, drop=missing)
     assert not model_snapshot_present(tmp_path, BGE_BASE_ID)
+
+
+@pytest.mark.parametrize("missing", OPTIONAL_MARKERS)
+def test_gcs_dir_loads_without_the_optional_files(
+    tmp_path: Path, hf_offline: None, missing: str
+) -> None:
+    name, files = _gcs_layout(BGE_BASE_ID)
+    _make_gcs_dir(tmp_path, name, files, drop=missing)
+    assert model_snapshot_present(tmp_path, BGE_BASE_ID)
 
 
 def test_gcs_dir_needs_additional_files(tmp_path: Path, hf_offline: None) -> None:
@@ -278,8 +370,10 @@ def test_offline_values_fastembed_accepts(
 def test_offline_order_matches_fastembed() -> None:
     """Readiness copies how fastembed's loader parses ``HF_HUB_OFFLINE``,
     that a local Hugging Face snapshot is tried before the tarball
-    directory, and that offline the directory is tried for an entry without
-    a url too. Pin those lines so a change there fails here."""
+    directory, that offline the directory is tried for an entry without
+    a url too, and that online a leftover directory is read only after the
+    Hugging Face download was tried. Pin those lines so a change there fails
+    here."""
     pytest.importorskip("fastembed")
     import inspect
 
@@ -292,13 +386,16 @@ def test_offline_order_matches_fastembed() -> None:
         "retrieve_model_gcs("
     )
     assert "if url_source or local_files_only:" in load_source
+    online_download = load_source.index("if hf_source and not local_files_only:")
+    leftover_dir = load_source.index("elif model.sources.deprecated_tar_struct:")
+    assert online_download < load_source.index("if url_source or local_files_only:") < leftover_dir
 
 
 @pytest.fixture(params=["with-url", "without-url"])
 def plain_tarball_catalog(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> str:
     """A catalog holding one tarball entry without ``_deprecated_tar_struct``.
 
-    fastembed 0.8 marks every tarball entry with the flag, so the plain
+    fastembed marks every built-in tarball entry with the flag, so the plain
     ``<name>`` layout needs a fake entry. Its id is mixed-case so a test can
     tell the catalog's id from a lowercased one on any filesystem. Offline,
     fastembed looks for the directory whether or not the entry has a ``url``,
@@ -423,8 +520,42 @@ def test_registration_reads_and_adds_under_the_lock(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.parametrize("missing", [*MARKERS, "onnx/model.onnx"])
 def test_missing_file_reads_as_incomplete(tmp_path: Path, missing: str) -> None:
+    """A pinned model needs all four: ``profiles.py`` asks the Hub for each,
+    so the next online load would download a missing one."""
     _make_snapshot(tmp_path, E5_ID, ("onnx/model.onnx",), revision=E5_REVISION, drop=missing)
     assert not model_snapshot_present(tmp_path, E5_ID)
+
+
+@pytest.mark.parametrize("missing", MARKERS)
+def test_pinned_minilm_needs_every_marker(tmp_path: Path, missing: str) -> None:
+    _make_snapshot(
+        tmp_path,
+        "qdrant/all-MiniLM-L6-v2-onnx",
+        ("model.onnx",),
+        revision=MINILM_REVISION,
+        drop=missing,
+    )
+    assert not model_snapshot_present(tmp_path, MINILM_ID)
+
+
+def test_pinned_markers_are_what_the_pinned_downloads_request() -> None:
+    """Readiness asks a pinned snapshot for the files ``profiles.py`` puts in
+    ``allow_patterns``. Pin that list so the two cannot drift."""
+    import inspect
+
+    from memtomem.embedding import profiles, readiness
+
+    for fetch in (profiles.e5_snapshot, profiles.minilm_snapshot):
+        source = inspect.getsource(fetch)
+        for name in readiness._PINNED_MARKER_FILES:
+            assert f'"{name}",' in source, (fetch.__name__, name)
+    assert set(readiness._PINNED_MARKER_FILES) == set(MARKERS)
+
+
+@pytest.mark.parametrize("missing", OPTIONAL_MARKERS)
+def test_uncatalogued_model_loads_without_the_optional_files(tmp_path: Path, missing: str) -> None:
+    _make_snapshot(tmp_path, "custom/model", ("model.onnx",), drop=missing)
+    assert model_snapshot_present(tmp_path, "custom/model")
 
 
 # -- models the catalog cannot describe ---------------------------------------

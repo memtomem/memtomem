@@ -1,6 +1,6 @@
 """Tests for custom-model registration in the ONNX embedder.
 
-fastembed 0.8.0's built-in ``TextEmbedding`` catalog no longer ships
+fastembed's built-in ``TextEmbedding`` catalog no longer ships
 ``BAAI/bge-m3`` (the embedding classes were split per model family, and none
 of them currently host bge-m3). ``_register_custom_models_if_needed`` in
 ``memtomem.embedding.onnx`` re-registers the model from its official HF ONNX

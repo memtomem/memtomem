@@ -111,10 +111,15 @@ dependencies = [
 [project.optional-dependencies]
 onnx = [
     "tokenizers>=0.21,<1",
-    "fastembed>=0.8,<0.9",
+    # 0.9.1 is the first release that allows pillow 13. The cap stays because
+    # `embedding/readiness.py` mirrors this minor's cache lookup.
+    "fastembed>=0.9.1,<0.10",
     # E5 tokenizer resolution imports the Hub directly, before inference.
     "huggingface-hub>=0.20,<2",
     "urllib3>=2.7.0",
+    # Security floor for a fastembed dependency memtomem never imports:
+    # fastembed still accepts pillow 12, whose advisories are fixed only in 13.
+    "pillow>=13.0.0",
 ]
 # The Ollama and OpenAI providers call their HTTP APIs through httpx, a base
 # dependency, and nothing imports the vendor SDKs (#2353). The names stay so
