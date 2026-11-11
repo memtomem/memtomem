@@ -89,14 +89,17 @@ def resolve_tokenizer(path: str) -> Path:
         raise missing_onnx_dependency(exc.name) from exc
 
     from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+    from memtomem.embedding.hub_locks import prepare_hub_locks
 
+    cache_dir = resolve_fastembed_cache_dir()
+    prepare_hub_locks(cache_dir)
     with hub_telemetry_off():
         resolved = Path(
             hf_hub_download(
                 E5_MODEL,
                 "tokenizer.json",
                 revision=E5_REVISION,
-                cache_dir=str(resolve_fastembed_cache_dir()),
+                cache_dir=str(cache_dir),
             )
         )
     stat = resolved.stat()
@@ -115,13 +118,16 @@ def e5_snapshot() -> Path:
         raise missing_onnx_dependency(exc.name) from exc
 
     from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+    from memtomem.embedding.hub_locks import prepare_hub_locks
 
+    cache_dir = resolve_fastembed_cache_dir()
+    prepare_hub_locks(cache_dir)
     with hub_telemetry_off():
         snapshot = Path(
             snapshot_download(
                 E5_MODEL,
                 revision=E5_REVISION,
-                cache_dir=str(resolve_fastembed_cache_dir()),
+                cache_dir=str(cache_dir),
                 allow_patterns=[
                     "onnx/model.onnx",
                     "config.json",
@@ -150,13 +156,16 @@ def minilm_snapshot() -> Path:
         raise missing_onnx_dependency(exc.name) from exc
 
     from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+    from memtomem.embedding.hub_locks import prepare_hub_locks
 
+    cache_dir = resolve_fastembed_cache_dir()
+    prepare_hub_locks(cache_dir)
     with hub_telemetry_off():
         return Path(
             snapshot_download(
                 MINILM_REPO,
                 revision=MINILM_REVISION,
-                cache_dir=str(resolve_fastembed_cache_dir()),
+                cache_dir=str(cache_dir),
                 allow_patterns=[
                     "model.onnx",
                     "config.json",

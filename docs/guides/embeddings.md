@@ -58,6 +58,16 @@ Or run `mm init` and pick the English or Korean-optimized preset, or select "Loc
 
 The model is downloaded automatically on first use (~490 MB for multilingual-e5-small) and cached in `~/.memtomem/cache/fastembed/` (override with `MEMTOMEM_FASTEMBED_CACHE` or `FASTEMBED_CACHE_PATH`; a `.env` file applies only the first, so set `FASTEMBED_CACHE_PATH` in the environment). On macOS and Linux memtomem creates the default directory owner-only (mode 0700); a directory you name with either variable, and one that already exists, keep their own permissions.
 
+On a filesystem that does not implement `flock`, filelock 4.2.1 through at least 4.2.10 never
+grant the lock huggingface-hub takes when it links a download to the store it shares across the
+cache, and the download would wait for it forever. Before downloading, memtomem checks that
+`flock` works in the model cache directory, once per directory per process. Where it does not, or the check cannot
+run, memtomem turns huggingface-hub's shared blob store off for the whole process and logs a
+warning; a file another model already stored is then downloaded again instead of linked. A lock
+file left behind by an earlier run can still block a download there; if one does, set
+`MEMTOMEM_FASTEMBED_CACHE` to a directory on a local disk. The `local` (sentence-transformers)
+reranker is not covered yet ([#3266](https://github.com/memtomem/memtomem/issues/3266)).
+
 The download goes through `huggingface_hub`. memtomem runs it with Hub telemetry off: the pinned
 E5 calls, the `fastembed` constructors for other ONNX embedding models and the `fastembed`
 reranker, and the `local` (sentence-transformers) reranker, which download on a cache miss. This
