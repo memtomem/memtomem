@@ -382,6 +382,33 @@ def test_review_recovery_cli_and_mcp_action_are_public():
     assert "candidate_recover" in ACTIONS
 
 
+def test_review_cli_options_have_help_text() -> None:
+    """Every visible CLI option on `review` must explain itself."""
+    import click
+    from click.testing import CliRunner
+    from memtomem.cli.review_cmd import review
+
+    for command_name, command in review.commands.items():
+        for param in command.params:
+            if isinstance(param, click.Option) and param.name != "help":
+                assert param.help, (
+                    f"Missing help text for option {param.opts} in command {command_name}"
+                )
+
+    runner = CliRunner()
+
+    result = runner.invoke(review, ["list", "--help"])
+    assert result.exit_code == 0
+    output = " ".join(result.output.split())
+    for status in ["pending", "approved", "rejected", "expired", "writing", "write_uncertain"]:
+        assert status in output, f"Status '{status}' missing from review list --help"
+
+    result = runner.invoke(review, ["reject", "--help"])
+    assert result.exit_code == 0
+    output = " ".join(result.output.split())
+    assert "write_uncertain" in output, "write_uncertain missing from review reject --help"
+
+
 @pytest.mark.asyncio
 async def test_mcp_recovery_validation_returns_structured_errors():
     from memtomem.server.tools.formation import mem_candidate_recover
