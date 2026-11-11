@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Render the shipped Claude, Codex, Kimi, OpenCode, Hermes, Antigravity, and Cursor assets
-from one contract."""
+"""Render the shipped Claude, Codex, Kimi, OpenCode, Hermes, Antigravity, Cursor, and OpenClaw
+assets from one contract."""
 
 from __future__ import annotations
 
@@ -23,6 +23,10 @@ HERMES_ROOT = ROOT / "packages" / "memtomem-hermes-plugin"
 ANTIGRAVITY_ROOT = ROOT / "packages" / "memtomem-antigravity-plugin"
 CURSOR_ROOT = ROOT / "packages" / "memtomem-cursor-plugin"
 CURSOR_MARKETPLACE = ROOT / ".cursor-plugin" / "marketplace.json"
+# OpenClaw installs this as a Codex-format bundle: ClawHub publishes bundles only under a
+# Codex, Claude or Cursor marker, not the Agent Plugins `plugin.json` the Hermes package uses.
+# Not `packages/memtomem-openclaw-plugin/`, which .gitignore keeps for a native plugin.
+OPENCLAW_ROOT = ROOT / "packages" / "memtomem-openclaw-bundle"
 HERMES_MEMORY_ROOT = ROOT / "packages" / "memtomem-hermes-memory"
 
 # Workflow sources may carry scope variants: a host that starts the server inside the
@@ -328,6 +332,50 @@ def _pinned_mcp_config(contract: dict) -> str:
     return json.dumps(payload, indent=2) + "\n"
 
 
+def _openclaw_mcp_config(contract: dict) -> str:
+    # OpenClaw starts a bundle's stdio server in the plugin's config directory, so the
+    # server would otherwise parse the nearest `.env` above its installed module (normally
+    # ~/.env) and take its MEMTOMEM_* keys. No "type": OpenClaw takes the transport from
+    # the fields, as it does for the Codex bundle's own `.mcp.json`.
+    payload = {
+        "mcpServers": {
+            "memtomem": {
+                "command": "uvx",
+                "args": _pinned_python_args(contract),
+                "env": {**_launch_env(contract["core"]), "PYTHON_DOTENV_DISABLED": "1"},
+            }
+        },
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def _openclaw_bundle_manifest(contract: dict) -> str:
+    payload = {
+        "name": "memtomem",
+        "version": contract["plugins"]["openclaw_version"],
+        "description": (
+            "Markdown-first long-term memory shared across your agents: one local memtomem "
+            "store, searchable from OpenClaw, Claude Code, Codex CLI and Hermes."
+        ),
+        "author": {"name": "memtomem", "url": "https://github.com/memtomem"},
+        "homepage": "https://github.com/memtomem/memtomem",
+        "repository": "https://github.com/memtomem/memtomem",
+        "license": "Apache-2.0",
+        "keywords": ["memory", "mcp", "long-term-memory", "local-first", "markdown"],
+        "skills": "./skills/",
+        "mcpServers": "./.mcp.json",
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def _openclaw_catalog_manifest() -> str:
+    # ClawHub reads the package's category from a root `openclaw.plugin.json` and its name
+    # from `id` (without one, the folder name); OpenClaw still installs the folder as a
+    # Codex bundle. One category per release, or ClawHub picks one itself.
+    payload = {"id": "memtomem", "categories": ["memory"]}
+    return json.dumps(payload, indent=2) + "\n"
+
+
 def _antigravity_plugin_manifest(contract: dict) -> str:
     payload = {
         "name": "memtomem",
@@ -444,6 +492,9 @@ def expected_files() -> dict[Path, str]:
         CURSOR_ROOT / ".cursor-plugin" / "plugin.json": _cursor_plugin_manifest(contract),
         CURSOR_ROOT / "mcp.json": _pinned_mcp_config(contract),
         CURSOR_MARKETPLACE: _cursor_marketplace(),
+        OPENCLAW_ROOT / ".codex-plugin" / "plugin.json": _openclaw_bundle_manifest(contract),
+        OPENCLAW_ROOT / ".mcp.json": _openclaw_mcp_config(contract),
+        OPENCLAW_ROOT / "openclaw.plugin.json": _openclaw_catalog_manifest(),
     }
     for workflow in contract["workflows"]:
         body = _workflow_body(workflow["id"], "project")
@@ -470,9 +521,9 @@ def expected_files() -> dict[Path, str]:
             files[OPENCODE_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _opencode_skill(
                 workflow, body, contract["opencode"]["version_range"]
             )
-        # Hermes and Antigravity start the server in the plugin directory, and Cursor starts
-        # it in the home directory. Hermes has no project, so it ships the user render and
-        # skips the workflows without one. Antigravity and Cursor ship the bound render, which
+        # Hermes, OpenClaw and Antigravity start the server in the plugin directory, and
+        # Cursor starts it in the home directory. Hermes and OpenClaw have no project, so they
+        # ship the user render and skip the workflows without one. Antigravity and Cursor ship the bound render, which
         # binds to the project first, where the workflow has one, and the user render
         # otherwise. Cursor alone honours `disable-model-invocation`, so its explicit-only
         # workflows carry that one line on top of the Antigravity text.
@@ -485,6 +536,7 @@ def expected_files() -> dict[Path, str]:
             user_body = _workflow_body(workflow["id"], "user")
             user_skill = _portable_skill(user, user_body)
             files[HERMES_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = user_skill
+            files[OPENCLAW_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = user_skill
         if "bound" in scopes:
             agy_workflow, agy_body = workflow, _workflow_body(workflow["id"], "bound")
         else:

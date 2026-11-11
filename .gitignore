@@ -26,6 +26,8 @@ coverage.json
 !packages/memtomem-claude-plugin/.mcp.json
 # The Codex plugin also ships its MCP server declaration
 !plugins/memtomem/.mcp.json
+# The OpenClaw bundle's MCP server declaration
+!packages/memtomem-openclaw-bundle/.mcp.json
 
 # Claude Code
 .claude/
@@ -66,6 +68,8 @@ BUG_REPORT.md
 !plugins/memtomem/assets/icon.png
 # The Cursor plugin's manifest logo, the same image
 !packages/memtomem-cursor-plugin/assets/icon.png
+# The OpenClaw bundle's ClawHub catalog icon, the same image
+!packages/memtomem-openclaw-bundle/assets/icon.png
 main.py
 scripts/
 .agents-dev/

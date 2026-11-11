@@ -24,6 +24,7 @@ _RENDERER = _ROOT / "tools/render_plugin_assets.py"
 _HERMES_SKILLS = _ROOT / "packages/memtomem-hermes-plugin/skills"
 _ANTIGRAVITY_SKILLS = _ROOT / "packages/memtomem-antigravity-plugin/skills"
 _CURSOR_SKILLS = _ROOT / "packages/memtomem-cursor-plugin/skills"
+_OPENCLAW_SKILLS = _ROOT / "packages/memtomem-openclaw-bundle/skills"
 _CURSOR_EXPLICIT_ONLY = "disable-model-invocation: true\n"
 
 
@@ -127,6 +128,29 @@ def test_workflow_contract_is_safe_and_matches_runtime_assets() -> None:
 _PROJECT_ONLY_SKILLS = {"memtomem-handoff", "memtomem-brief", "memtomem-update"}
 _BOUND_READ_SKILLS = {"memtomem-search", "memtomem-recall"}
 _BOUND_SKILLS = _PROJECT_ONLY_SKILLS | _BOUND_READ_SKILLS | {"memtomem-remember"}
+
+
+def test_openclaw_skills_are_the_hermes_user_scope_render() -> None:
+    """OpenClaw also starts the bundle's server in the plugin directory and binds no
+    project, so it ships Hermes' skills unchanged.
+
+    Byte-identical rather than separately asserted: every user-scope rule and leak check
+    pinned for the Hermes skills then holds here too, and no project-only workflow
+    (handoff, brief, update) reaches OpenClaw.
+    """
+    hermes = {path.parent.name: path.read_bytes() for path in _skill_files(_HERMES_SKILLS)}
+    openclaw = {path.parent.name: path.read_bytes() for path in _skill_files(_OPENCLAW_SKILLS)}
+    assert hermes, "no Hermes skills found"
+    assert openclaw == hermes
+    assert not _PROJECT_ONLY_SKILLS & set(openclaw)
+    # Each skill directory holds its SKILL.md alone: no Codex agents/openai.yaml sidecar,
+    # which the comparison above (SKILL.md only) would not see.
+    extra = [
+        path.relative_to(_OPENCLAW_SKILLS).as_posix()
+        for path in _OPENCLAW_SKILLS.rglob("*")
+        if path.is_file() and path.name != "SKILL.md"
+    ]
+    assert extra == []
 
 
 def test_antigravity_skills_are_the_hermes_user_scope_render_plus_the_bound_ones() -> None:
@@ -418,20 +442,23 @@ def test_every_input_taking_surface_carries_the_non_interactive_fallback() -> No
         surfaces.append((f"OPENCODE_COMMANDS[{name}]", workflow, command["template"]))
 
     # Every non-status workflow renders to four SKILL.md surfaces except the
-    # OpenCode skills, which carry only the implicit read workflows; the Hermes
-    # skills, which carry only the user-scope ones; and the Antigravity and Cursor
-    # skills, which each carry every workflow (those with a bound render in that
+    # OpenCode skills, which carry only the implicit read workflows; the Hermes and
+    # OpenClaw skills, which each carry only the user-scope ones; and the Antigravity and
+    # Cursor skills, which each carry every workflow (those with a bound render in that
     # variant).
     non_status = [row for row in contract["workflows"] if row["id"] != "status"]
     opencode_skills = [row for row in non_status if row["implicit"] and row["effect"] == "read"]
     user_scope_skills = _user_scope_workflows(non_status)
     assert len(surfaces) == (
-        len(non_status) * 4 + len(opencode_skills) + len(user_scope_skills) + len(non_status) * 2
+        len(non_status) * 4
+        + len(opencode_skills)
+        + len(user_scope_skills) * 2
+        + len(non_status) * 2
     )
 
     optional = [label for label, workflow, _ in surfaces if workflow.get("input_optional")]
     # brief's and update's Claude, Codex, Kimi, Antigravity, Cursor, and OpenCode command
-    # surfaces; Hermes carries no project-only workflow.
+    # surfaces; Hermes and OpenClaw carry no project-only workflow.
     assert len(optional) == 12, optional
     assert {workflow["id"] for _, workflow, _ in surfaces if workflow.get("input_optional")} == {
         "brief",
