@@ -1,7 +1,7 @@
 """FastEmbed static models (potion) behind memtomem's ONNX embedder.
 
-FastEmbed 0.9 computes these from ``model.safetensors`` with numpy, where
-0.8 ran an ONNX export of the same model. There is no ORT session, so the
+FastEmbed 0.9.1 computes these from ``model.safetensors`` with numpy, where
+earlier releases ran an ONNX export of the same model. There is no ORT session, so the
 arena check cannot apply, and inference tokenizes without special tokens.
 """
 

@@ -193,9 +193,9 @@ def _truncated_input_indexes(
     ]
 
 
-# Models FastEmbed 0.9 computes from ``model.safetensors`` with numpy instead
+# Models FastEmbed 0.9.1 computes from ``model.safetensors`` with numpy instead
 # of running an ONNX graph. They have no ORT session, so the arena check does
-# not apply to them. FastEmbed 0.8 loaded the same ids from ONNX exports, and
+# not apply to them. Earlier FastEmbed loaded the same ids from ONNX exports, and
 # an index built then is searched with vectors from the new implementation, so
 # an id is listed only after both were compared on the same inputs (#3246: 13
 # texts across the 512-token limit, largest element difference 1.2e-6). Stored

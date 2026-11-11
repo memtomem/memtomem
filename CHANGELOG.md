@@ -25,12 +25,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - **The `onnx` extra requires fastembed 0.9.1 or later and pillow 13 (#3246).** `memtomem[onnx]`
   declared `fastembed>=0.8,<0.9`. It now declares `fastembed>=0.9.1,<0.10` and `pillow>=13.0.0`,
-  so upgrading memtomem upgrades both. Models already in the fastembed cache load without a new
-  download and no reindex is needed: with the same onnxruntime, fastembed 0.9.1 and 0.8.1 differ
-  by at most 1.3e-8 per vector element on `multilingual-e5-small` and `all-MiniLM-L6-v2`, and not
-  at all on `bge-m3`, `bge-small-en-v1.5` or the three rerankers.
+  so upgrading memtomem upgrades both. No reindex is needed: with the same onnxruntime,
+  fastembed 0.9.1 and 0.8.1 differ by at most 1.3e-8 per vector element on
+  `multilingual-e5-small` and `all-MiniLM-L6-v2`, and not at all on `bge-m3`,
+  `bge-small-en-v1.5` or the three rerankers. Those models, already downloaded from Hugging
+  Face by the earlier version, loaded from the cache with `HF_HUB_OFFLINE` set; the potion
+  models below are the exception.
 - **`minishlab/potion-*` embedding models load from fastembed's static implementation (#3246).**
-  fastembed 0.9 computes `potion-base-8M`, `potion-retrieval-32M` and `potion-multilingual-128M`
+  fastembed 0.9.1 computes `potion-base-8M`, `potion-retrieval-32M` and `potion-multilingual-128M`
   from `model.safetensors` instead of running an ONNX export, and downloads that file on the first
   load after the upgrade. An index built with one of them needs no reindex: across 13 inputs on
   both sides of the 512-token limit the largest element difference was 1.2e-6.

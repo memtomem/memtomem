@@ -147,7 +147,7 @@ def test_marker_files_match_fastembed() -> None:
     assert readiness._STATIC_MARKER_FILES == ("tokenizer.json",)
 
 
-# -- static models (fastembed 0.9 loads potion from safetensors) ---------------
+# -- static models (fastembed 0.9.1 loads potion from safetensors) -------------
 
 POTION_ID = "minishlab/potion-base-8M"
 
