@@ -1768,6 +1768,7 @@ class TestRegistryAndInstallDocs:
             _REPO_ROOT / "packages" / "opencode-memtomem" / "README.md",
             _REPO_ROOT / "packages" / "memtomem-antigravity-plugin" / "README.md",
             _REPO_ROOT / "packages" / "memtomem-cursor-plugin" / "README.md",
+            _REPO_ROOT / "packages" / "memtomem-openclaw-bundle" / "README.md",
             _REPO_ROOT / "examples" / "onboarding" / "retry-policy" / "README.md",
             # Workflow sources and every rendered skill: the renderer copies a
             # stale pin verbatim, so its own check passes on a missed bump.
