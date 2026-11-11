@@ -136,6 +136,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   [GHSA-8mx5-7m5m-r77g](https://osv.dev/vulnerability/GHSA-8mx5-7m5m-r77g)). If other
   accounts share your machine, or the cache sits on a network mount, point
   `MEMTOMEM_FASTEMBED_CACHE` at a private local directory.
+- **The default model cache is created owner-only on macOS and Linux (#3252).**
+  `~/.memtomem/cache/fastembed` used to be created with the umask default, usually 0755,
+  so another local account could traverse it and reach the lock files huggingface-hub
+  keeps under it. Being able to reach them is a precondition of two of the filelock
+  advisories above (GHSA-rfpc-qcw5-3pc4, GHSA-69hj-f68j-2879). The directory is now
+  created with mode 0700. A cache that already exists is not changed, since tightening
+  it would change who can read the models in it: run `chmod 700 ~/.memtomem/cache/fastembed`
+  to make it private. A directory named by `MEMTOMEM_FASTEMBED_CACHE` or
+  `FASTEMBED_CACHE_PATH` is created as before, and Windows is unchanged. The OSV
+  exceptions stay, because the scanner reads the lockfile.
 
 ## [0.7.8] — 2026-11-10
 
