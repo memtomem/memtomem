@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **An OpenClaw plugin bundle (experimental).** `packages/memtomem-openclaw-bundle` gives an
+  OpenClaw agent the memtomem MCP server and the six user-scope skills the Hermes plugin ships
+  (search, recall, remember, index, status, setup), byte for byte, with the same launch line:
+  Python 3.12, the pinned `memtomem[onnx]` release and `PYTHON_DOTENV_DISABLED=1`. OpenClaw
+  reads it as a Codex-format bundle, the shape ClawHub publishes; ClawHub refuses the Hermes
+  plugin's Agent Plugins manifest. It is a bundle, not a memory plugin: OpenClaw's own memory
+  keeps `plugins.slots.memory`. The README tells operators to keep the memtomem tools away from
+  messaging and group agents, where anyone who can message the agent could search the store.
+  The release check now also refuses this package when it changed since the last release
+  without a version bump, as it does for the two Hermes packages.
 - **`create_components(..., bm25_path_fallback=False)` keeps BM25 from matching chunk paths
   (#3205).** By default a BM25 search that matches no chunk's content falls back to matching
   file names, so typing a filename still finds that file (#2224). A component whose file names
@@ -20,6 +30,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   BM25-indexed with the body. A component whose file names are its own bookkeeping can now leave
   both lines out. langchain-memtomem's store does: its file names are encoded keys ending in
   `.md`, so `md` returned every item. The default is unchanged, so existing indexes do not re-embed.
+
+### Changed
+
+- **The `onnx` extra requires fastembed 0.9.1 or later and pillow 13 (#3246).** `memtomem[onnx]`
+  declared `fastembed>=0.8,<0.9`. It now declares `fastembed>=0.9.1,<0.10` and `pillow>=13.0.0`,
+  so upgrading memtomem upgrades both. No reindex is needed: with the same onnxruntime,
+  fastembed 0.9.1 and 0.8.1 differ by at most 1.3e-8 per vector element on
+  `multilingual-e5-small` and `all-MiniLM-L6-v2`, and not at all on `bge-m3`,
+  `bge-small-en-v1.5` or the three rerankers. Those models, already downloaded from Hugging
+  Face by the earlier version, loaded from the cache with `HF_HUB_OFFLINE` set; the potion
+  models below are the exception.
+- **`minishlab/potion-*` embedding models load from fastembed's static implementation (#3246).**
+  fastembed 0.9.1 computes `potion-base-8M`, `potion-retrieval-32M` and `potion-multilingual-128M`
+  from `model.safetensors` instead of running an ONNX export, and downloads that file on the first
+  load after the upgrade. An index built with one of them needs no reindex: across 13 inputs on
+  both sides of the 512-token limit the largest element difference was 1.2e-6.
+  `embedding.onnx_cpu_mem_arena` has no effect on these models, and the truncation warning now
+  counts their tokens without special tokens, as the model does. A static model that fastembed
+  adds later is refused by name until it has been compared the same way.
 
 ### Fixed
 
@@ -37,6 +66,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   fails are hidden as before. So is a path whose check does not answer within 0.5 s, and while
   that check is still running, later deletes are hidden without one.
 
+- **A newly downloaded `bge-m3` loads (#3246).** huggingface-hub 1.33.0 stores a new download in a
+  blob directory shared by the whole cache, and onnxruntime refuses a weights file that resolves
+  outside the model's own directory, so loading a `bge-m3` downloaded that way failed with
+  `External data path validation failed`. fastembed 0.9 hardlinks the model and its weights into
+  `onnx_snapshots/` inside the model's cache directory and loads them from there. A cache
+  downloaded by an older huggingface-hub was not affected. In a read-only cache the links cannot
+  be made and the load still fails; make the cache writable for the first load.
 - **Registering a schedule refuses a params key the job does not take (#3247).** `mm schedule add
   --params` and `mem_schedule_register` used to accept any key and store it as given, so a
   typo was ignored on every run: `--job dedup_scan --params '{"limt": 20}'` registered a scan
@@ -134,11 +170,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   only types from `@opencode-ai/plugin` and nothing from `effect`, ships no
   dependencies and sets no cookies, so the advisory is recorded as an exception with
   the same expiry as the others rather than overridden past the pin.
-- The 56 recorded OSV exceptions, all due to expire on 2026-11-20, were re-judged and
-  renewed to 2026-12-20; none of their blockers has cleared yet. fastembed 0.9.1 now
-  allows pillow 13.0.0, the only fix for the 41 pillow 12.3.0 advisories, but the `onnx`
-  extra still declares `fastembed<0.9`, and moving it means re-mirroring the model
-  readiness check against fastembed 0.9's download path (#3246). filelock 4.2.10, the
+- pillow moves from 12.3.0 to 13.0.0, the only fix for 41 advisories published between
+  2026-10-20 and 2026-10-23, and their 41 recorded exceptions are removed (#3246).
+  memtomem embeds text and opens no images; pillow is installed because fastembed
+  depends on it. The `onnx` extra now requires `pillow>=13.0.0` itself, since fastembed
+  0.9.1 still accepts pillow 12.
+- The other 15 recorded OSV exceptions, due to expire on 2026-11-20, were re-judged and
+  renewed to 2026-12-20; none of their blockers has cleared yet. filelock 4.2.10, the
   latest, still hangs huggingface-hub 1.33.0 on a filesystem without `flock`, and
   fastembed still requires huggingface-hub below 2.0. `@opencode-ai/plugin` 1.19.5 still
   pins the `effect`, `zod` and (through `effect`) `toml` versions behind the other six.
@@ -150,6 +188,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   [GHSA-8mx5-7m5m-r77g](https://osv.dev/vulnerability/GHSA-8mx5-7m5m-r77g)). If other
   accounts share your machine, or the cache sits on a network mount, point
   `MEMTOMEM_FASTEMBED_CACHE` at a private local directory.
+- **The default model cache is created owner-only on macOS and Linux (#3252).**
+  `~/.memtomem/cache/fastembed` used to be created with the umask default, usually 0755,
+  so another local account could traverse it and reach the lock files huggingface-hub
+  keeps under it. Being able to reach them is a precondition of two of the filelock
+  advisories above (GHSA-rfpc-qcw5-3pc4, GHSA-69hj-f68j-2879). The directory is now
+  created with mode 0700. A cache that already exists is not changed, since tightening
+  it would change who can read the models in it: run `chmod 700 ~/.memtomem/cache/fastembed`
+  to make it private. A directory named by `MEMTOMEM_FASTEMBED_CACHE` or
+  `FASTEMBED_CACHE_PATH` is created as before, and Windows is unchanged. The OSV
+  exceptions stay, because the scanner reads the lockfile.
 
 ## [0.7.8] — 2026-11-10
 

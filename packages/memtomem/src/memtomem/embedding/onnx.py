@@ -39,7 +39,7 @@ def _configure_tokenizer_limit(
 ) -> tuple[object | None, int | None]:
     """Apply memtomem's safety cap to FastEmbed's tokenizer.
 
-    FastEmbed 0.8 does not expose a public sequence-length argument. Its
+    FastEmbed does not expose a public sequence-length argument. Its
     ``TextEmbedding`` wrapper does expose the loaded tokenizer at
     ``model.model.tokenizer``; validate that pinned layout explicitly so a
     future FastEmbed change cannot silently restore bge-m3's 8192-token peak.
@@ -139,11 +139,20 @@ def _truncated_input_indexes(
     tokenizer: object | None,
     texts: list[str],
     max_sequence_tokens: int | None = None,
+    *,
+    add_special_tokens: bool = True,
 ) -> list[int]:
-    """Return zero-based indexes truncated by the configured tokenizer."""
+    """Return zero-based indexes truncated by the configured tokenizer.
+
+    ``add_special_tokens`` must match how the model tokenizes for inference.
+    A static model encodes without special tokens, so counting them here
+    would report an input that fills the limit exactly as truncated.
+    """
 
     if tokenizer is None:
         return []
+    # Passed only when off, so tokenizer-like doubles need not accept it.
+    special: dict[str, bool] = {} if add_special_tokens else {"add_special_tokens": False}
     encode = getattr(tokenizer, "encode", None)
     if callable(encode):
         truncated: list[int] = []
@@ -162,7 +171,7 @@ def _truncated_input_indexes(
                     and len(text) + 8 <= max_sequence_tokens
                 ):
                     continue
-                if bool(getattr(encode(text), "overflowing", ())):
+                if bool(getattr(encode(text, **special), "overflowing", ())):
                     truncated.append(index)
         except Exception as exc:
             raise EmbeddingError(f"FastEmbed tokenizer preflight failed: {exc}") from exc
@@ -174,7 +183,7 @@ def _truncated_input_indexes(
     if not callable(encode_batch):
         return []
     try:
-        encodings = encode_batch(texts)
+        encodings = encode_batch(texts, **special)
     except Exception as exc:
         raise EmbeddingError(f"FastEmbed tokenizer preflight failed: {exc}") from exc
     return [
@@ -182,6 +191,60 @@ def _truncated_input_indexes(
         for index, encoding in enumerate(encodings)
         if bool(getattr(encoding, "overflowing", ()))
     ]
+
+
+# Models FastEmbed 0.9.1 computes from ``model.safetensors`` with numpy instead
+# of running an ONNX graph. They have no ORT session, so the arena check does
+# not apply to them. Earlier FastEmbed loaded the same ids from ONNX exports, and
+# an index built then is searched with vectors from the new implementation, so
+# an id is listed only after both were compared on the same inputs (#3246: 13
+# texts across the 512-token limit, largest element difference 1.2e-6). Stored
+# lowercase; FastEmbed matches model names case-insensitively.
+_VERIFIED_STATIC_MODELS = frozenset(
+    {
+        "minishlab/potion-base-8m",
+        "minishlab/potion-retrieval-32m",
+        "minishlab/potion-multilingual-128m",
+    }
+)
+
+
+def _static_catalog_ids() -> frozenset[str]:
+    """Lowercased ids FastEmbed serves as static models.
+
+    Read from the class ``TextEmbedding`` itself routes by; the public
+    ``list_supported_models`` is not implemented on it. Empty when FastEmbed
+    has no such class or catalog, in which case the check after the load
+    still refuses an unlisted static model.
+    """
+    try:
+        from fastembed.text.static_embedding import (  # type: ignore[import-untyped]
+            StaticTextEmbedding,
+        )
+    except ImportError:
+        return frozenset()
+    catalog = getattr(StaticTextEmbedding, "_list_supported_models", None)
+    if not callable(catalog):
+        return frozenset()
+    return frozenset(str(getattr(desc, "model", "")).lower() for desc in catalog())
+
+
+def _is_static_model(model: object) -> bool:
+    try:
+        from fastembed.text.static_embedding import (  # type: ignore[import-untyped]
+            StaticTextEmbedding,
+        )
+    except ImportError:
+        return False
+    return isinstance(getattr(model, "model", None), StaticTextEmbedding)
+
+
+def _unverified_static_model_error(model_id: str) -> EmbeddingError:
+    return EmbeddingError.vetted(
+        f"{model_id} is a FastEmbed static model that memtomem has not compared with the "
+        "ONNX export earlier FastEmbed versions loaded under this name, so vectors already "
+        "in the index may not match it. Choose another embedding.model and reindex."
+    )
 
 
 # FastEmbed raises when a model is registered twice, and both the embedder's
@@ -193,7 +256,7 @@ _CUSTOM_MODELS_LOCK = threading.Lock()
 def _register_custom_models_if_needed() -> None:
     """Register models that fastembed >=0.4 dropped from its built-in catalog.
 
-    fastembed 0.8.0's ``TextEmbedding`` no longer ships ``BAAI/bge-m3`` (the
+    fastembed's ``TextEmbedding`` no longer ships ``BAAI/bge-m3`` (the
     model type split across dedicated classes none of which currently host
     it). Re-register it from the official HF ONNX export so existing installs
     keep working without changing the user-facing model name.
@@ -265,6 +328,9 @@ class OnnxEmbedder:
         self._model: object | None = None  # fastembed.TextEmbedding
         self._tokenizer: object | None = None
         self._active_max_sequence_tokens: int | None = None
+        # Whether the loaded model tokenizes with special tokens for inference;
+        # the truncation preflight has to count the same way.
+        self._tokenizer_special_tokens = True
         # Observability flags read by ``GET /api/system/model-readiness``.
         # Plain attribute reads/writes — bool/Optional[str] assignment is
         # atomic under CPython, and the readiness endpoint is allowed to
@@ -366,6 +432,9 @@ class OnnxEmbedder:
 
                 _register_custom_models_if_needed()
                 model_id = resolve_embedder_id(self._config.model)
+                # Refused before the constructor below, which would download it.
+                if model_id.lower() in _static_catalog_ids() - _VERIFIED_STATIC_MODELS:
+                    raise _unverified_static_model_error(model_id)
                 model_options: dict[str, Any] = {}
                 if self._config.onnx_variant != "fp32":
                     from fastembed.common.model_description import ModelSource, PoolingType
@@ -431,10 +500,15 @@ class OnnxEmbedder:
                         enable_cpu_mem_arena=self._config.onnx_cpu_mem_arena,
                         **model_options,
                     )
-                _verify_cpu_mem_arena(model, self._config.onnx_cpu_mem_arena)
+                static = _is_static_model(model)
+                if static and model_id.lower() not in _VERIFIED_STATIC_MODELS:
+                    raise _unverified_static_model_error(model_id)
+                if not static:
+                    _verify_cpu_mem_arena(model, self._config.onnx_cpu_mem_arena)
                 tokenizer, active_limit = _configure_tokenizer_limit(
                     model, self._config.max_sequence_tokens
                 )
+                self._tokenizer_special_tokens = not static
                 self._tokenizer = tokenizer
                 self._active_max_sequence_tokens = active_limit
                 self._model = model
@@ -510,7 +584,10 @@ class OnnxEmbedder:
             # entry snapshot so every slice of one call shares one value.
             batch_size = self._onnx_batch_size
         truncated = _truncated_input_indexes(
-            self._tokenizer, texts, self._active_max_sequence_tokens
+            self._tokenizer,
+            texts,
+            self._active_max_sequence_tokens,
+            add_special_tokens=self._tokenizer_special_tokens,
         )
         # Refusal is an *ingress* policy: the chunker guarantees the budget, so
         # an over-length passage means the budget was bypassed and the stored
