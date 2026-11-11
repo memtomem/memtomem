@@ -1617,6 +1617,17 @@ def test_version_specifier_rejected(monkeypatch, fake_uv, force_tty):
     assert calls == []
 
 
+def test_version_with_a_trailing_newline_rejected(monkeypatch, fake_uv, force_tty):
+    # ``match`` + ``$`` accepted "0.1.30\n" and passed "memtomem==0.1.30\n" to uv.
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--version", "0.1.30\n"])
+    assert result.exit_code != 0
+    assert "not a bare PEP 440 release" in result.output
+    assert calls == []
+
+
 def test_version_prerelease_accepted(monkeypatch, fake_uv, force_tty):
     calls, _configure = fake_uv
     _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))

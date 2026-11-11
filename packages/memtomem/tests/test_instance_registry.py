@@ -217,6 +217,13 @@ class TestFilenameRoundTrip:
         assert reg._parse_entry(Path("garbage.lock")) is None
         assert reg._parse_entry(Path("1-2-3.lock")) is None
 
+    def test_a_trailing_newline_is_not_a_registration_name(self, rt):
+        # ``match`` + ``$`` also matches before a final ``\n``, so a stray
+        # ``<valid name>\n`` file (legal on POSIX) parsed as a live instance.
+        name = "1-2-0123456789abcdef-01234567-89abcdef.lock"
+        assert reg._parse_entry(Path(name)) is not None
+        assert reg._parse_entry(Path(name + "\n")) is None
+
 
 class TestRegistrationState:
     def test_non_file_store_skips(self, rt, tmp_path):
