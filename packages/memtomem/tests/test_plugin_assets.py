@@ -143,6 +143,14 @@ def test_openclaw_skills_are_the_hermes_user_scope_render() -> None:
     assert hermes, "no Hermes skills found"
     assert openclaw == hermes
     assert not _PROJECT_ONLY_SKILLS & set(openclaw)
+    # Each skill directory holds its SKILL.md alone: no Codex agents/openai.yaml sidecar,
+    # which the comparison above (SKILL.md only) would not see.
+    extra = [
+        path.relative_to(_OPENCLAW_SKILLS).as_posix()
+        for path in _OPENCLAW_SKILLS.rglob("*")
+        if path.is_file() and path.name != "SKILL.md"
+    ]
+    assert extra == []
 
 
 def test_antigravity_skills_are_the_hermes_user_scope_render_plus_the_bound_ones() -> None:

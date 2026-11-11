@@ -42,11 +42,13 @@ openclaw skills list                # memtomem-search, memtomem-recall, …
 
 - **MCP server `memtomem`**, started by OpenClaw in the plugin's directory with
   `PYTHON_DOTENV_DISABLED=1`, so the server does not read a `.env` file (the one
-  it would find is normally `~/.env`). OpenClaw passes a stdio server only a short
-  list of variables (`HOME`, `PATH`, …) plus the bundle's own `env`, so
-  `MEMTOMEM_*` variables set for the Gateway do not reach it. With no memtomem
-  configuration the server uses its defaults: BM25 search and the store under
-  `~/.memtomem`.
+  it would find is normally `~/.env`). OpenClaw's
+  [bundle documentation](https://github.com/openclaw/openclaw/blob/847611d/docs/plugins/bundles.md)
+  says a stdio MCP server gets only `HOME`, `LOGNAME`, `PATH`, `TERM` and `USER`
+  from the Gateway, plus the bundle's own `env`; memtomem has not measured this, but
+  if it holds, `MEMTOMEM_*` variables set for the Gateway do not reach the server.
+  With no memtomem configuration the server uses its defaults: BM25 search and the
+  store under `~/.memtomem`.
 - **Tools**, registered as `memtomem__<tool>`: `mem_search`, `mem_recall`,
   `mem_read`, `mem_list`, `mem_status`, `mem_stats`, `mem_add`, `mem_index`,
   `mem_do`, and `mem_update_coverage`. `mem_add`, `mem_index` and `mem_do` change
@@ -59,10 +61,13 @@ openclaw skills list                # memtomem-search, memtomem-recall, …
 
 ## Messaging and group agents
 
-OpenClaw's `coding` and `messaging` tool profiles include configured MCP tools by
-default. In a messaging channel or group chat, anyone who can message the agent can
-then have it search and read your memtomem store, not only write to it. Keep the
-memtomem tools away from those agents:
+OpenClaw's
+[tool-policy documentation](https://github.com/openclaw/openclaw/blob/847611d/docs/gateway/config-tools/tool-policy.md)
+says its `coding` and `messaging` tool profiles
+include configured MCP tools by default. In a messaging channel or group chat, anyone
+who can message the agent could then have it search and read your memtomem store, not
+only write to it. Keep the memtomem tools away from those agents with a deny rule in
+OpenClaw's tool policy:
 
 ```json5
 {
@@ -74,21 +79,12 @@ memtomem tools away from those agents:
 }
 ```
 
-`tools.deny` at the top level applies the same rule to every agent, and
-`"bundle-mcp"` in a deny list blocks every MCP server, not only memtomem. The
-setting is yours to change: remove the rule for an agent that only you talk to.
-
-An agent that only you talk to can keep the read tools and drop the writers with an
-OpenClaw-managed server entry of the same name, then a tool filter on it:
-
-```bash
-openclaw mcp set memtomem '{"command": "uvx", "args": ["--python", "3.12", "--from", "memtomem[onnx]==0.7.8", "memtomem-server"], "env": {"MEMTOMEM_TOOL_MODE": "core", "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage", "ORT_DISABLE_TELEMETRY": "1", "PYTHON_DOTENV_DISABLED": "1"}}'
-openclaw mcp tools memtomem --exclude mem_add,mem_index,mem_do,mem_update_coverage
-openclaw mcp probe memtomem   # lists the remaining tools
-```
-
-The entry carries the bundle's whole launch line and environment; keep it in step
-with the bundle when you update it.
+`openclaw config validate` accepts this rule. That the rule then keeps the tools out of
+the agent's turns is OpenClaw's documented behavior, which memtomem has not yet tested
+in an agent turn. Per the same documentation, `tools.deny` at the top level applies to
+every agent, and `"bundle-mcp"` in a deny list blocks every MCP server, not only
+memtomem. The setting is yours to change: remove the rule for an agent that only you
+talk to.
 
 ## Uninstall
 

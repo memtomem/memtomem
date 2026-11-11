@@ -529,14 +529,14 @@ def test_openclaw_bundle_matches_contract() -> None:
     codex_catalog = _json(".agents/plugins/marketplace.json")
     assert [entry["source"]["path"] for entry in codex_catalog["plugins"]] == ["./plugins/memtomem"]
 
-    # The README's writer-filter example replaces the bundle's server, so it carries the
-    # bundle's whole launch line and environment.
+    # The README's install line and its messaging-agent deny rule, which names every tool
+    # the bundle registers (OpenClaw prefixes them `memtomem__`).
     readme = (root / "README.md").read_text(encoding="utf-8")
-    sets = [line for line in readme.splitlines() if line.startswith("openclaw mcp set memtomem ")]
-    assert len(sets) == 1, sets
-    example = json.loads(sets[0].removeprefix("openclaw mcp set memtomem ").strip("'"))
-    assert example == expected_server
-    assert "openclaw plugins install --force --accept-capabilities " in readme
+    installs = [line for line in readme.splitlines() if line.startswith("openclaw plugins install")]
+    assert installs == [
+        "openclaw plugins install --force --accept-capabilities ./packages/memtomem-openclaw-bundle"
+    ], installs
+    assert '"family-chat": { tools: { deny: ["memtomem__*"] } },' in readme
 
 
 def test_hermes_memory_plugin_matches_contract() -> None:
