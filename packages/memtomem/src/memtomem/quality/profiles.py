@@ -466,7 +466,7 @@ class RerankKnobs(_Knobs):
         # A model id is one or two plain segments joined by a single slash. Any
         # other slash/backslash/drive/dot shape is a path, not a model id.
         segments = v.split("/")
-        if len(segments) > 2 or not all(_MODEL_SEGMENT_RE.match(s) for s in segments):
+        if len(segments) > 2 or not all(_MODEL_SEGMENT_RE.fullmatch(s) for s in segments):
             raise ValueError("model must be a plain model id (no path-shaped value)")
         return v
 
@@ -617,7 +617,7 @@ class RetrievalProfileDoc(BaseModel):
     @field_validator("name")
     @classmethod
     def _name(cls, v: str) -> str:
-        if not _NAME_RE.match(v):
+        if not _NAME_RE.fullmatch(v):
             raise ValueError("name must be 1-64 chars of [a-z0-9_-] starting with [a-z0-9]")
         # The charset cannot express a path, but it can still spell a
         # secret-shaped token (e.g. an ``sk-`` prefix), so scan it — name feeds

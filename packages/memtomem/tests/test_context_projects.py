@@ -1713,6 +1713,22 @@ def test_selector_scope_id_shape_never_falls_through_to_path(tmp_path: Path) -> 
     assert scope is None
 
 
+def test_selector_scope_id_with_a_trailing_newline_is_not_a_scope_id(tmp_path: Path) -> None:
+    """Only the exact ``p-<12 hex>`` shape takes the scope_id branch; ``match``
+    + ``$`` also let ``"p-…\n"`` in, which then failed as an unknown scope_id."""
+    from memtomem.context.projects import (
+        UnknownProjectSelectorError,
+        resolve_project_selector,
+    )
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    scopes = _discover(tmp_path, cwd)
+
+    with pytest.raises(UnknownProjectSelectorError, match="neither a discovered scope_id"):
+        resolve_project_selector(scopes[0].scope_id + "\n", scopes)
+
+
 def test_selector_path_matches_registered_scope(tmp_path: Path) -> None:
     from memtomem.context.projects import resolve_project_selector
 

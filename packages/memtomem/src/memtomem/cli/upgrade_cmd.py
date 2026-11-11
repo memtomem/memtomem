@@ -662,7 +662,7 @@ def _build_install_cmd(version: str | None, extras: list[str]) -> list[str]:
     if extras:
         pkg = f"memtomem[{','.join(extras)}]"
     if version:
-        if not _VERSION_PATTERN.match(version):
+        if not _VERSION_PATTERN.fullmatch(version):
             raise click.BadParameter(
                 f"{version!r} is not a bare PEP 440 release (e.g. 0.1.30, 0.1.30rc1). "
                 "Pass a literal version, not a specifier like '>=0.1.30'.",
