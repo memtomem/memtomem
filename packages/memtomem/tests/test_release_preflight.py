@@ -59,7 +59,7 @@ def _repo(
         '  "python-multipart>=0.0.27",\n'
         "]\n\n"
         "[project.optional-dependencies]\n"
-        f'onnx = ["fastembed>=0.8,<0.9", "urllib3{urllib3}"]\n'
+        f'onnx = ["fastembed>=0.9.1,<0.10", "urllib3{urllib3}"]\n'
         f'langfuse = ["langfuse>=4.0", "urllib3{urllib3}"]\n'
         'all = ["memtomem[onnx,langfuse]"]\n',
         encoding="utf-8",

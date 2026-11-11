@@ -31,8 +31,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   both lines out. langchain-memtomem's store does: its file names are encoded keys ending in
   `.md`, so `md` returned every item. The default is unchanged, so existing indexes do not re-embed.
 
+### Changed
+
+- **The `onnx` extra requires fastembed 0.9.1 or later and pillow 13 (#3246).** `memtomem[onnx]`
+  declared `fastembed>=0.8,<0.9`. It now declares `fastembed>=0.9.1,<0.10` and `pillow>=13.0.0`,
+  so upgrading memtomem upgrades both. No reindex is needed: with the same onnxruntime,
+  fastembed 0.9.1 and 0.8.1 differ by at most 1.3e-8 per vector element on
+  `multilingual-e5-small` and `all-MiniLM-L6-v2`, and not at all on `bge-m3`,
+  `bge-small-en-v1.5` or the three rerankers. Those models, already downloaded from Hugging
+  Face by the earlier version, loaded from the cache with `HF_HUB_OFFLINE` set; the potion
+  models below are the exception.
+- **`minishlab/potion-*` embedding models load from fastembed's static implementation (#3246).**
+  fastembed 0.9.1 computes `potion-base-8M`, `potion-retrieval-32M` and `potion-multilingual-128M`
+  from `model.safetensors` instead of running an ONNX export, and downloads that file on the first
+  load after the upgrade. An index built with one of them needs no reindex: across 13 inputs on
+  both sides of the 512-token limit the largest element difference was 1.2e-6.
+  `embedding.onnx_cpu_mem_arena` has no effect on these models, and the truncation warning now
+  counts their tokens without special tokens, as the model does. A static model that fastembed
+  adds later is refused by name until it has been compared the same way.
+
 ### Fixed
 
+- **A newly downloaded `bge-m3` loads (#3246).** huggingface-hub 1.33.0 stores a new download in a
+  blob directory shared by the whole cache, and onnxruntime refuses a weights file that resolves
+  outside the model's own directory, so loading a `bge-m3` downloaded that way failed with
+  `External data path validation failed`. fastembed 0.9 hardlinks the model and its weights into
+  `onnx_snapshots/` inside the model's cache directory and loads them from there. A cache
+  downloaded by an older huggingface-hub was not affected. In a read-only cache the links cannot
+  be made and the load still fails; make the cache writable for the first load.
 - **Registering a schedule refuses a params key the job does not take (#3247).** `mm schedule add
   --params` and `mem_schedule_register` used to accept any key and store it as given, so a
   typo was ignored on every run: `--job dedup_scan --params '{"limt": 20}'` registered a scan
@@ -130,11 +156,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   only types from `@opencode-ai/plugin` and nothing from `effect`, ships no
   dependencies and sets no cookies, so the advisory is recorded as an exception with
   the same expiry as the others rather than overridden past the pin.
-- The 56 recorded OSV exceptions, all due to expire on 2026-11-20, were re-judged and
-  renewed to 2026-12-20; none of their blockers has cleared yet. fastembed 0.9.1 now
-  allows pillow 13.0.0, the only fix for the 41 pillow 12.3.0 advisories, but the `onnx`
-  extra still declares `fastembed<0.9`, and moving it means re-mirroring the model
-  readiness check against fastembed 0.9's download path (#3246). filelock 4.2.10, the
+- pillow moves from 12.3.0 to 13.0.0, the only fix for 41 advisories published between
+  2026-10-20 and 2026-10-23, and their 41 recorded exceptions are removed (#3246).
+  memtomem embeds text and opens no images; pillow is installed because fastembed
+  depends on it. The `onnx` extra now requires `pillow>=13.0.0` itself, since fastembed
+  0.9.1 still accepts pillow 12.
+- The other 15 recorded OSV exceptions, due to expire on 2026-11-20, were re-judged and
+  renewed to 2026-12-20; none of their blockers has cleared yet. filelock 4.2.10, the
   latest, still hangs huggingface-hub 1.33.0 on a filesystem without `flock`, and
   fastembed still requires huggingface-hub below 2.0. `@opencode-ai/plugin` 1.19.5 still
   pins the `effect`, `zod` and (through `effect`) `toml` versions behind the other six.
