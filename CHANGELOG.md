@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Upgrading
+
+- **`mm add --file` and the Web UI's `/api/add` with `file` refuse a file in another memory
+  tier (#2821).** A file named relative to the user memory directory that lands in a project
+  tier registered inside it used to be written, and indexed as that tier, under the user
+  scope's gates. It is now refused with `nothing was written`, even with
+  `--confirm-project-shared`. Write to that tier from its project with its own scope:
+  `mm add "<note>" --scope project_shared --confirm-project-shared --file <name>` (or
+  `--scope project_local`), where `--file` is relative to that tier's directory. MCP
+  `mem_add(file=...)` is unchanged: it infers the tier and asks for that tier's confirmation.
+
 ### Added
 
 - **An OpenClaw plugin bundle (experimental).** `packages/memtomem-openclaw-bundle` gives an
@@ -51,6 +62,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   adds later is refused by name until it has been compared the same way.
 
 ### Fixed
+
+- **A file named with `mm add --file` or `/api/add` no longer skips the project_shared
+  confirmation (#2821).** Both confined the file to the directory the requested scope chose,
+  then ran the gates for that scope, without asking which tier the file was in. A
+  `project_shared` tier registered inside the user memory directory therefore took a write
+  made with the default user scope, without `--confirm-project-shared`, and its rows were
+  stored as `project_shared`. Both now judge the file by the tier it resolves into, the way
+  the default day file has been judged since #2807, and refuse any tier other than the
+  requested one. A link inside the user directory that leads into such a tier is refused the
+  same way on the CLI (the Web UI already refused links). The tier is still decided by the
+  path's spelling, so a differently cased or Unicode-normalized alias of a registered tier,
+  and a `project_shared` tier nested inside a `project_local` one, are not caught yet (#3268).
 
 - **A newly downloaded `bge-m3` loads (#3246).** huggingface-hub 1.33.0 stores a new download in a
   blob directory shared by the whole cache, and onnxruntime refuses a weights file that resolves

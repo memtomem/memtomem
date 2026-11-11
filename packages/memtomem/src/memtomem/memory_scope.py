@@ -23,7 +23,7 @@ import logging
 import re
 import stat as stat_mod
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -224,6 +224,54 @@ def resolve_scope_target(
         f"{base / name} resolves to {target}, which is not in {where} {base}; nothing "
         "was written. Remove the link on that path, or replace it with a regular file "
         "or directory."
+    )
+
+
+def explicit_target_tier_refusal(
+    target: Path,
+    scope: str,
+    *,
+    memory_dirs: Sequence[Path | str],
+    project_memory_dirs: Sequence[Path | str],
+    scope_hint: Callable[[str], str],
+) -> str | None:
+    """Why a caller-named append target may not be written for ``scope``, or ``None``.
+
+    The CLI and web confine an explicit file to the directory ``scope`` chose,
+    but a tier registered inside that directory is another tier with its own
+    gates (#2821). The target is judged by the tier it is in: which configured
+    directory owns it, and which tier the indexer will label its rows with
+    (:func:`~memtomem.integrations.langgraph.resolve_target_scope`, the gate
+    ADR-0042 published so that it is not copied). Any other tier is refused,
+    with or without that tier's confirmation, as the day file is (#2807).
+
+    The tier is decided by spelling, so an alias of a registered tier (another
+    case, another Unicode form) passes as ``user`` here as it does on every
+    surface (#3268).
+
+    ``scope_hint`` renders, in the caller's vocabulary, how to write with a
+    tier's own scope.
+    """
+    from memtomem.integrations.langgraph import (
+        TierWouldNotRoundTrip,
+        UnregisteredProjectTarget,
+        resolve_target_scope,
+    )
+
+    try:
+        tier = resolve_target_scope(target, list(memory_dirs), list(project_memory_dirs))
+    except (TierWouldNotRoundTrip, UnregisteredProjectTarget) as exc:
+        return f"{exc} Nothing was written."
+    except (OSError, RuntimeError) as exc:
+        # A configured root that cannot be resolved (``~nobody/...`` raises
+        # ``RuntimeError`` from ``expanduser``) leaves the tier unknown.
+        return f"Could not tell which memory tier {target} is in ({exc}); nothing was written."
+    if tier == scope:
+        return None
+    return (
+        f"{target} is in the {tier} memory tier, not the {scope} one; nothing was written. "
+        f"Choose a file outside that tier, or write to it from its project with "
+        f"{scope_hint(tier)}."
     )
 
 
