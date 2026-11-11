@@ -78,6 +78,32 @@ class JobSpec:
     runner: Callable[..., Awaitable[JobResult]]
 
 
+def validate_new_params(spec: JobSpec, params: object) -> BaseModel:
+    """Validate params for a schedule being registered, refusing unknown keys.
+
+    The params models ignore unknown keys (pydantic's default), and the
+    registration paths store the caller's dict as given, so a typo such as
+    ``{"limt": 20}`` would be saved and every run would quietly use the
+    default. Registration therefore refuses any key the model does not
+    declare. Runs of already-stored schedules validate with the model alone
+    and keep ignoring such keys, so a row saved before this check still runs.
+
+    The key check is a set difference rather than ``extra="forbid"`` on the
+    call, because that per-call argument does not exist at the
+    ``pydantic>=2.10`` floor. It only covers field names; no params model
+    declares an alias. A non-dict skips the key check and is rejected by
+    ``model_validate`` (``mem_do`` does not enforce the ``dict`` annotation,
+    and iterating a string would report its characters as keys).
+    """
+    if isinstance(params, dict):
+        unknown = sorted(set(params) - set(spec.params_model.model_fields), key=repr)
+        if unknown:
+            allowed = ", ".join(sorted(spec.params_model.model_fields)) or "none"
+            names = ", ".join(repr(key) for key in unknown)
+            raise ValueError(f"unknown params for {spec.name}: {names} (allowed: {allowed})")
+    return spec.params_model.model_validate(params)
+
+
 # ---------------------------------------------------------------------------
 # Param models
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
+from memtomem.search.dedup import DedupScanner
 
 
 def _patched_cli_components(comp):
@@ -83,6 +85,63 @@ class TestScheduleAdd:
         )
         assert result.exit_code != 0
         comp.storage.schedule_insert.assert_not_awaited()
+
+    def _add(self, runner, monkeypatch, job, params_json):
+        comp = _mock_components()
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = runner.invoke(
+            cli, ["schedule", "add", "--cron", "* * * * *", "--job", job, "--params", params_json]
+        )
+        return comp, result
+
+    def test_unknown_param_key_rejected(self, runner, monkeypatch):
+        # A typo used to be stored and ignored, so every run used limit=50.
+        comp, result = self._add(runner, monkeypatch, "dedup_scan", '{"limt": 20}')
+        assert result.exit_code != 0
+        assert (
+            "Error: invalid params: unknown params for dedup_scan: 'limt' "
+            "(allowed: limit, max_scan, threshold)"
+        ) in result.output.splitlines()
+        comp.storage.schedule_insert.assert_not_awaited()
+
+    def test_any_key_rejected_for_a_job_without_params(self, runner, monkeypatch):
+        comp, result = self._add(runner, monkeypatch, "compaction", '{"x": 1}')
+        assert result.exit_code != 0
+        assert (
+            "Error: invalid params: unknown params for compaction: 'x' (allowed: none)"
+        ) in result.output.splitlines()
+        comp.storage.schedule_insert.assert_not_awaited()
+
+    def test_known_param_key_still_registered(self, runner, monkeypatch):
+        comp, result = self._add(runner, monkeypatch, "dedup_scan", '{"limit": 20}')
+        assert result.exit_code == 0, result.output
+        comp.storage.schedule_insert.assert_awaited_once_with(
+            "* * * * *", "dedup_scan", {"limit": 20}
+        )
+
+
+class TestStoredUnknownKeyStillRuns:
+    """A row stored before registration refused unknown keys keeps running."""
+
+    def test_cli_run_now_ignores_the_stored_key(self, runner, components, monkeypatch):
+        coverage = SimpleNamespace(pool=0, probed=0, without_vector=0, near_search_enabled=False)
+        scan = AsyncMock(return_value=([], coverage))
+        monkeypatch.setattr(DedupScanner, "scan_with_coverage", scan)
+        monkeypatch.setattr(
+            "memtomem.cli._bootstrap.cli_components", _patched_cli_components(components)
+        )
+        # Inserted directly: registration would now refuse this row.
+        sid = asyncio.run(
+            components.storage.schedule_insert("* * * * *", "dedup_scan", {"limt": 20})
+        )
+
+        result = runner.invoke(cli, ["schedule", "run-now", sid])
+
+        assert result.exit_code == 0, result.output
+        scan.assert_awaited_once_with(threshold=0.92, limit=50, max_scan=500)
+        sched = asyncio.run(components.storage.schedule_get(sid))
+        assert sched["last_run_status"] == "ok"
+        assert sched["params"] == {"limt": 20}
 
 
 class TestScheduleList:

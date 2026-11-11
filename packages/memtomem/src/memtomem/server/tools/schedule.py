@@ -19,7 +19,7 @@ import logging
 
 from croniter import croniter  # type: ignore[import-untyped]
 
-from memtomem.scheduler.jobs import JOB_KINDS, run_outcome
+from memtomem.scheduler.jobs import JOB_KINDS, run_outcome, validate_new_params
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -63,7 +63,8 @@ async def mem_schedule_register(
         cron: Five-field cron expression interpreted in UTC (e.g. ``"0 3 * * 0"``).
         job_kind: One of the registered ``JOB_KINDS`` keys (e.g. ``"compaction"``).
         params: Optional dict of parameters validated against the job's
-            ``params_model`` before storage.
+            ``params_model`` before storage. A key the model does not declare
+            is refused.
     """
     if not croniter.is_valid(cron):
         return json.dumps({"ok": False, "reason": f"invalid cron expression: {cron!r}"})
@@ -74,7 +75,7 @@ async def mem_schedule_register(
             {"ok": False, "reason": f"unknown job_kind {job_kind!r}; available: {kinds}"}
         )
     try:
-        spec.params_model.model_validate(params or {})
+        validate_new_params(spec, params or {})
     except Exception as exc:
         return json.dumps({"ok": False, "reason": f"invalid params: {exc}"})
 
