@@ -223,3 +223,25 @@ def test_existing_default_dir_survives_a_non_eexist_mkdir_error(
     monkeypatch.setattr(os, "mkdir", _mkdir)
 
     assert resolve_fastembed_cache_dir() == default
+
+
+def test_default_dir_mode_requested_follows_the_platform(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The tests that read a mode back are skipped on Windows, so this one
+    checks the mode the resolver asks for: 0700 on POSIX, and on Windows the
+    default it always passed."""
+    default = _use_default(monkeypatch, tmp_path)
+    requested: dict[Path, int] = {}
+    real_mkdir = Path.mkdir
+
+    def _mkdir(
+        self: Path, mode: int = 0o777, parents: bool = False, exist_ok: bool = False
+    ) -> None:
+        requested.setdefault(self, mode)
+        real_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", _mkdir)
+
+    assert resolve_fastembed_cache_dir() == default
+    assert requested[default] == (0o777 if sys.platform == "win32" else 0o700)
