@@ -240,15 +240,21 @@ function _syncSearchDefaults() {
 // Pipeline badges merged into _syncSearchConfig — no separate function needed
 
 // ── A2: Context-Window "Off" label ──
+// JS-owned (no data-i18n on the option): applyDOM would otherwise replace the
+// "Config (N↑M↓)" label with the plain "Off" translation on every switch.
+// Re-rendered from the langchange handler below.
 function _updateContextWindowLabel() {
   const sel = qs('context-window');
   const offOpt = sel?.querySelector('option[value="0"]');
   if (!offOpt) return;
   const ctx = STATE.serverConfig?.context;
   if (ctx?.enabled && (ctx.window_before > 0 || ctx.window_after > 0)) {
-    offOpt.textContent = `Config (${ctx.window_before}\u2191${ctx.window_after}\u2193)`;
+    offOpt.textContent = t('search.context_config', {
+      before: ctx.window_before,
+      after: ctx.window_after,
+    });
   } else {
-    offOpt.textContent = 'Off';
+    offOpt.textContent = t('search.context_off');
   }
 }
 
@@ -263,6 +269,7 @@ function _refreshAddFilePlaceholder() {
 }
 window.addEventListener('langchange', () => {
   _refreshAddFilePlaceholder();
+  _updateContextWindowLabel();
   _syncHeaderConfig();
   // ``index-namespace`` / ``add-namespace`` placeholders are JS-owned
   // (no ``data-i18n-placeholder``) so the dynamic ``(auto-determined

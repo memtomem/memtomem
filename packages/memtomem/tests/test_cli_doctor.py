@@ -18,6 +18,7 @@ from click.testing import CliRunner
 from memtomem._instance_registry import InstanceInfo, RegistrySnapshot
 from memtomem.cli import cli
 from memtomem.cli import doctor_cmd
+from memtomem.cli.doctor_cmd import _age_buckets, _format_age
 
 
 def _snapshot(instances=(), **kw) -> RegistrySnapshot:
@@ -259,6 +260,51 @@ class TestParentAnnotation:
         assert row["recorded_parent"] == "alive"
         assert payload["checks"][1]["data"]["missing_recorded_parents"] == 0
         assert "parent pid of 1" in _run().output
+
+
+class TestAgeHelpers:
+    @pytest.mark.parametrize(
+        ("seconds", "expected"),
+        [
+            pytest.param(None, "unknown", id="unknown"),
+            pytest.param(0, "0m", id="zero"),
+            pytest.param(90, "2m", id="rounded-minutes"),
+            pytest.param(3569, "59m", id="below-one-hour"),
+            pytest.param(3600, "1.0h", id="one-hour"),
+            pytest.param(86400, "1.0d", id="one-day"),
+            pytest.param(604800, "7.0d", id="seven-days"),
+        ],
+    )
+    def test_format_age(self, seconds: float | None, expected: str):
+        assert _format_age(seconds) == expected
+
+    @pytest.mark.parametrize(
+        ("ages", "expected"),
+        [
+            pytest.param(
+                [],
+                {"lt_1h": 0, "1h_1d": 0, "1d_7d": 0, "gt_7d": 0},
+                id="empty",
+            ),
+            pytest.param(
+                [3599.9, 3600],
+                {"lt_1h": 1, "1h_1d": 1, "1d_7d": 0, "gt_7d": 0},
+                id="one-hour-boundary",
+            ),
+            pytest.param(
+                [86399, 86400],
+                {"lt_1h": 0, "1h_1d": 1, "1d_7d": 1, "gt_7d": 0},
+                id="one-day-boundary",
+            ),
+            pytest.param(
+                [604799, 604800],
+                {"lt_1h": 0, "1h_1d": 0, "1d_7d": 1, "gt_7d": 1},
+                id="seven-days-boundary",
+            ),
+        ],
+    )
+    def test_age_buckets(self, ages: list[float], expected: dict[str, int]):
+        assert _age_buckets(ages) == expected
 
 
 class TestAgeAggregation:
