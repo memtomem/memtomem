@@ -58,7 +58,14 @@ def _parse_duration(spec: str) -> timedelta:
         raise click.BadParameter(f"invalid duration {spec!r}; expected like '30m', '24h', '7d'.")
     n = int(match.group(1))
     unit = _DURATION_UNITS[match.group(2).lower()]
-    return timedelta(**{unit: n})
+    try:
+        duration = timedelta(**{unit: n})
+        # The caller subtracts the duration from now; check that here so an
+        # oversized value is a parameter error, not an OverflowError later.
+        datetime.now(timezone.utc) - duration
+    except OverflowError:
+        raise click.BadParameter(f"duration {spec!r} is too large.") from None
+    return duration
 
 
 def _derive_session_namespace(agent_id: str, namespace: str | None) -> str:

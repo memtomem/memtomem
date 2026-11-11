@@ -51,6 +51,7 @@ from memtomem.web.deps import (
 )
 from memtomem.web.routes._confirm import needs_confirmation_envelope
 from memtomem.web.routes._writer_wait import (
+    WRITER_BUSY_NOTHING_CHANGED_DETAIL,
     WRITER_BUSY_REFUSED_NOTHING_CHANGED_DETAIL,
     writer_busy_as_503,
 )
@@ -326,6 +327,10 @@ async def edit_chunk(
             raise HTTPException(
                 status_code=503, detail="Memory file is locked by another writer; try again."
             )
+        if reason == "writer_busy":
+            # Refused before the route judged or changed anything; the sidecar
+            # lock file the helper took is lock infrastructure, not memory data.
+            raise HTTPException(status_code=503, detail=WRITER_BUSY_NOTHING_CHANGED_DETAIL)
         if not cross_process_held:
             # #2346: the source's directory was gone when the lock was taken,
             # so this span holds no cross-process exclusion. An edit rewrites
@@ -657,6 +662,10 @@ async def delete_chunk(
             raise HTTPException(
                 status_code=503, detail="Memory file is locked by another writer; try again."
             )
+        if reason == "writer_busy":
+            # Refused before the route judged or changed anything; the sidecar
+            # lock file the helper took is lock infrastructure, not memory data.
+            raise HTTPException(status_code=503, detail=WRITER_BUSY_NOTHING_CHANGED_DETAIL)
         if fresh is None:
             raise HTTPException(status_code=409, detail="Chunk state changed; retry.")
         meta = fresh.metadata

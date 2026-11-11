@@ -1018,7 +1018,7 @@ def _gc_stale_presence(directory: Path, deadline: float) -> None:
             for entry in entries:
                 if time.monotonic() >= deadline:
                     return
-                if _ENTRY_RE.match(entry.name) is None:
+                if _ENTRY_RE.fullmatch(entry.name) is None:
                     continue
                 path = Path(entry.path)
                 if path in own:
@@ -1037,7 +1037,7 @@ def _gc_stale_presence(directory: Path, deadline: float) -> None:
 
 
 def _parse_entry(path: Path) -> InstanceInfo | None:
-    m = _ENTRY_RE.match(path.name)
+    m = _ENTRY_RE.fullmatch(path.name)
     if m is None:
         return None
     return InstanceInfo(

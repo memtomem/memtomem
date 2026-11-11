@@ -2377,7 +2377,9 @@ class SqliteBackend(
                 ) from exc
         return len(changed)
 
-    async def get_chunk(self, chunk_id: UUID, *, exclude_withheld: bool = False) -> Chunk | None:
+    async def get_chunk(
+        self, chunk_id: UUID, *, exclude_withheld: bool = False, read_writer: bool = False
+    ) -> Chunk | None:
         """Fetch one chunk by id.
 
         ``exclude_withheld=True`` is the read for a caller that will hand the
@@ -2385,13 +2387,23 @@ class SqliteBackend(
         statement, so a returned row was not withheld at the instant it was
         read. A separate check afterwards could not say that — a hold can be
         committed, or released together with the row's deletion, in between.
+
+        ``read_writer=True`` is the read for a caller about to act on the row:
+        the re-fetch under a source's locks, whose scope decides the Gate-B
+        consent check and whose line range decides what is cut from the file.
+        A pool connection another thread still has a statement open on serves
+        the snapshot from before later commits (#3202). The writer is read once
+        no other task owns it, waiting up to ``WRITER_WAIT_S`` and then raising
+        ``TransactionOwnedError``.
         """
         withheld = f" AND {NOT_WITHHELD_CHUNKS}" if exclude_withheld else ""
-        async with self._lease_read_db() as db:
-            row = db.execute(
-                f"SELECT * FROM chunks WHERE id=?{withheld}",  # nosec B608
-                (str(chunk_id),),
-            ).fetchone()
+        sql = f"SELECT * FROM chunks WHERE id=?{withheld}"  # nosec B608
+        if read_writer:
+            writer = await self._get_db_when_idle(wait=WRITER_WAIT_S)
+            row = writer.execute(sql, (str(chunk_id),)).fetchone()
+        else:
+            async with self._lease_read_db() as db:
+                row = db.execute(sql, (str(chunk_id),)).fetchone()
         if not row:
             return None
         return self._row_to_chunk(row)
@@ -2849,9 +2861,12 @@ class SqliteBackend(
         bulk deletes that would remove ``project_shared`` chunks without
         ``confirm_project_shared=True``. Project-shared memories can sit
         in the same default namespace as user memories, so the
-        namespace string alone does not imply the trust tier.
+        namespace string alone does not imply the trust tier. A caller that
+        owns ``transaction()`` reads the writer, so the probe sees the rows the
+        delete it guards removes; a pool connection can still hold a snapshot
+        from before a commit (#3202).
         """
-        async with self._lease_read_db() as db:
+        async with self._lease_txn_read_db() as db:
             rows = db.execute(
                 "SELECT DISTINCT COALESCE(scope, 'user') FROM chunks WHERE namespace=?",
                 (namespace,),
