@@ -110,7 +110,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   4.0.0-beta.83, as its latest release (1.19.5) still does. The OpenCode plugin imports
   only types from `@opencode-ai/plugin` and nothing from `effect`, ships no
   dependencies and sets no cookies, so the advisory is recorded as an exception with
-  the same 2026-11-20 expiry as the others rather than overridden past the pin.
+  the same expiry as the others rather than overridden past the pin.
+- The 56 recorded OSV exceptions, all due to expire on 2026-11-20, were re-judged and
+  renewed to 2026-12-20; none of their blockers has cleared yet. fastembed 0.9.1 now
+  allows pillow 13.0.0, the only fix for the 41 pillow 12.3.0 advisories, but the `onnx`
+  extra still declares `fastembed<0.9`, and moving it means re-mirroring the model
+  readiness check against fastembed 0.9's download path (#3246). filelock 4.2.10, the
+  latest, still hangs huggingface-hub 1.33.0 on a filesystem without `flock`, and
+  fastembed still requires huggingface-hub below 2.0. `@opencode-ai/plugin` 1.19.5 still
+  pins the `effect`, `zod` and (through `effect`) `toml` versions behind the other six.
+  Four of the filelock advisories stay reachable through the fastembed cache, as the
+  0.7.1 entry describes
+  ([GHSA-fq56-3cx3-fjxp](https://osv.dev/vulnerability/GHSA-fq56-3cx3-fjxp),
+  [GHSA-rfpc-qcw5-3pc4](https://osv.dev/vulnerability/GHSA-rfpc-qcw5-3pc4),
+  [GHSA-69hj-f68j-2879](https://osv.dev/vulnerability/GHSA-69hj-f68j-2879),
+  [GHSA-8mx5-7m5m-r77g](https://osv.dev/vulnerability/GHSA-8mx5-7m5m-r77g)). If other
+  accounts share your machine, or the cache sits on a network mount, point
+  `MEMTOMEM_FASTEMBED_CACHE` at a private local directory.
 
 ## [0.7.8] — 2026-11-10
 
