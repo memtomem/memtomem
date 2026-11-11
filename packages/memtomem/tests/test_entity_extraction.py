@@ -110,6 +110,80 @@ class TestExtractTechnologies:
         assert "SuperWidget" in values
 
 
+def _values(text: str, entity_type: str) -> list[str]:
+    return [e.entity_value for e in extract_entities(text, [entity_type])]
+
+
+class TestCJKNeighbour:
+    """Hangul, kana and Han next to an entity end its word; nothing else does.
+
+    Korean and Japanese write a particle against the preceding word, so Unicode
+    ``\\w`` / ``\\b`` made ``@alice에게`` one handle and lost ``2026-11-10에``.
+    Rows cover each side of each pattern that has a boundary there.
+    """
+
+    @pytest.mark.parametrize(
+        ("text", "entity_type", "expected"),
+        [
+            ("@alice에게 물어봄", "person", "@alice"),
+            ("@aliceさんに聞く", "person", "@alice"),
+            ("2026-11-10에 배포", "date", "2026-11-10"),
+            ("배포일2026-11-10", "date", "2026-11-10"),
+            ("2026-11-10にリリース", "date", "2026-11-10"),
+            ("August 17에 출시", "date", "August 17"),
+            ("May 5th에 회의", "date", "May 5th"),
+            ("출시일August 17", "date", "August 17"),
+            # main backtracked the optional year and kept "August 17".
+            ("August 17, 2026에 출시", "date", "August 17, 2026"),
+            ("OpenSearch를 쓰자", "technology", "OpenSearch"),
+            ("用OpenSearch搜索", "technology", "OpenSearch"),
+            ("OpenSearchを使う", "technology", "OpenSearch"),
+        ],
+    )
+    def test_cjk_neighbour_ends_the_entity(self, text, entity_type, expected):
+        assert _values(text, entity_type) == [expected]
+
+    @pytest.mark.parametrize(
+        ("text", "entity_type", "expected"),
+        [
+            ("@alice_bob", "person", ["@alice_bob"]),
+            ("@rené", "person", ["@rené"]),  # an accented letter stays in the handle
+            ("@ab에게", "person", []),  # the handle is "ab", under the 3-char minimum
+            ("x2026-11-10", "date", []),
+            ("2026-11-10x", "date", []),
+            ("é2026-11-10", "date", []),
+            ("2026-11-10١", "date", []),  # a non-ASCII digit is still a word character
+            ("August 175", "date", []),
+            ("éAugust 17", "date", []),
+            ("August 17thé", "date", []),
+            ("August 17١", "date", []),
+            ("OpenSearché", "technology", []),
+            ("éOpenSearch", "technology", []),
+        ],
+    )
+    def test_other_word_characters_still_join_the_word(self, text, entity_type, expected):
+        assert _values(text, entity_type) == expected
+
+    @pytest.mark.parametrize(
+        ("chunk_text", "query", "entity_type"),
+        [
+            ("Ask @alice about the rollout.", "@alice에게 물어봄", "person"),
+            ("Released on 2026-11-10.", "2026-11-10에 배포한 것", "date"),
+            ("We moved search to OpenSearch.", "OpenSearch를 쓰는 이유", "technology"),
+        ],
+    )
+    def test_chunk_and_query_share_the_key(self, chunk_text, query, entity_type):
+        # The chunk side writes ``chunk_entities`` from this extractor; the query
+        # side builds its keys from it too. A particle on one side only must not
+        # change the key.
+        from memtomem.search.entity_boost import extract_query_entities
+        from memtomem.tools.entity_extraction import fold_entity_value
+
+        chunk_keys = {(entity_type, fold_entity_value(v)) for v in _values(chunk_text, entity_type)}
+        query_keys = set(extract_query_entities(query, [entity_type]))
+        assert query_keys and query_keys == chunk_keys
+
+
 class TestExtractConcepts:
     def test_quoted_terms(self):
         entities = extract_entities('The "event sourcing" pattern is key', ["concept"])
