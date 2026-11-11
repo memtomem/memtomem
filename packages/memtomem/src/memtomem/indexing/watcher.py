@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import os
 import random
+import stat
 import sys
 import threading
 import time
@@ -75,6 +77,26 @@ _HELD_PROBE_TIMEOUT_S = 2.0
 # write that met a busy database.
 _RELINK_WAIT_POLL_S = 1.0
 _RELINK_JOURNAL_RETRY_DELAYS_S = (0.1, 0.5, 2.0)
+# How long the watchdog thread waits for a delete event's probe (#3031). A
+# probe that does not answer in time counts as a delete.
+_REMOVED_PROBE_TIMEOUT_S = 0.5
+
+
+def _path_still_presents_its_file(path: Path) -> bool:
+    """Whether ``path`` is a regular file reached through no symlink at all (#3031).
+
+    Run on a probe thread for a delete event. A save that renames a temporary
+    file over its target is reported as a delete of a path that still exists:
+    watchdog's FSEvents observer ends the burst with one, and the polling
+    observer reports the inode change as a delete and a create. Only a path
+    whose every component is the one the rows were keyed to counts: a leaf or
+    parent that became a link may present another file, and the stored rows
+    must then be hidden as before (#2878, #2904). ``strict`` makes a component
+    that cannot be resolved raise instead of returning the spelling unchanged.
+    """
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        return False
+    return os.path.realpath(path, strict=True) == os.path.normpath(path)
 
 
 def _held_probe(path: Path) -> tuple[str, bool]:
@@ -220,7 +242,9 @@ class _MarkdownEventHandler(FileSystemEventHandler):
     def on_deleted(self, event: FileSystemEvent) -> None:
         # Persist the source check before debounce can lose the path. Its
         # chunks become hidden immediately and remain stored until recovery or
-        # explicit cleanup (#1566, #2498).
+        # explicit cleanup (#1566, #2498). ``on_removed`` skips the check for a
+        # path still a regular file, which a rename-over save reports as
+        # deleted (#3031); the event is queued either way.
         if not event.is_directory:
             self._enqueue(str(event.src_path), removed=True)
 
@@ -308,6 +332,12 @@ class FileWatcher:
         self._held_cursor = 0
         self._recheck_wakeup = asyncio.Event()
         self._journal_failures = 0
+        # Delete-event probe threads that outlived their wait (#3031). Shared by
+        # every observer this watcher runs (``reconfigure`` briefly has two on
+        # one handler), so the lock guards the set, never a wait. Threads, not
+        # futures: whether one is still running does not depend on a loop.
+        self._removed_probe_lock = threading.Lock()
+        self._stalled_removed_probes: set[threading.Thread] = set()
         self._handler: _MarkdownEventHandler | None = None
         self._watches: dict[Path, ObservedWatch] = {}
         # Queue-overflow recovery (#2530). ``_rescan_due`` maps a root to the
@@ -365,6 +395,9 @@ class FileWatcher:
         )
         if journal is None:
             return
+        if self._removed_path_present(path):
+            logger.debug("Delete event for a path that is still a regular file: %s", path)
+            return
         try:
             journal(path)
             self._journal_failures = 0
@@ -378,6 +411,48 @@ class FileWatcher:
             else:
                 logger.debug("Could not journal deleted watcher path %s", path, exc_info=True)
             self._journal_failures += 1
+
+    def _removed_path_present(self, path: Path) -> bool:
+        """Whether a deleted event's path is still its regular file (#3031).
+
+        Runs on the watchdog thread, before the journal. The check itself runs
+        on a daemon thread and is waited for at most ``_REMOVED_PROBE_TIMEOUT_S``:
+        a detached mount can block a filesystem call indefinitely. A probe that
+        outlives its wait is kept, and while one is still running no other
+        starts, so a dead mount costs one wait and no thread per later event.
+        Every outcome but a timely "present" answers ``False`` and the delete is
+        journaled as before: a stalled earlier probe, a thread that cannot
+        start, a timeout, an error, or a path that is not a regular file reached
+        through no link. On a slow but responsive filesystem each delete event
+        can hold the observer up by up to the wait; watchdog's FSEvents and
+        polling emitters already stat the paths they report on their own
+        threads before the event gets here.
+        """
+        with self._removed_probe_lock:
+            self._stalled_removed_probes = {t for t in self._stalled_removed_probes if t.is_alive()}
+            if self._stalled_removed_probes:
+                return False
+
+        outcome: list[bool] = []
+
+        def run() -> None:
+            try:
+                outcome.append(_path_still_presents_its_file(path))
+            except Exception:
+                outcome.append(False)
+
+        thread = threading.Thread(target=run, name="memtomem-removed-probe", daemon=True)
+        try:
+            thread.start()
+        except RuntimeError:
+            return False
+        thread.join(_REMOVED_PROBE_TIMEOUT_S)
+        if thread.is_alive():
+            with self._removed_probe_lock:
+                self._stalled_removed_probes.add(thread)
+            logger.warning("Delete-event probe timed out; hiding %s until it is reindexed", path)
+            return False
+        return outcome == [True]
 
     def _configured_roots(self) -> list[Path]:
         return [Path(d).expanduser().resolve() for d in self._config.all_index_roots()]
