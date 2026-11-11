@@ -23,6 +23,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Registering a schedule refuses a params key the job does not take.** `mm schedule add
+  --params` and `mem_schedule_register` used to accept any key and store it as given, so a
+  typo was ignored on every run: `--job dedup_scan --params '{"limt": 20}'` registered a scan
+  that ran with the default `limit=50`. Registration now fails and names the key and the keys
+  the job accepts, as in `unknown params for dedup_scan: 'limt' (allowed: limit, max_scan,
+  threshold)`. A job that takes no params (`compaction`, `dead_chunk_link_cleanup`) refuses
+  any key. Schedules already stored are not changed: an unknown key in one is still ignored
+  when it runs, and its values are still type- and range-checked as before.
+
 - **Entity extraction no longer cuts or drops an entity that has Korean, Japanese
   or Chinese text attached (#3222, #3227).** Korean and Japanese write a particle
   against the preceding word with no space, and the extractor treated Hangul, kana
