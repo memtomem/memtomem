@@ -3789,21 +3789,16 @@ class IndexEngine:
         the bytes were read under; it is used as given by all three, so a path
         relinked since the read is not followed (#3191).
         """
-        frozen = decision_path is not None
+        # No keyword at all when not frozen: those calls stay the gate's own.
+        frozen: dict[str, bool] = {} if decision_path is None else {"resolved": True}
         if decision_path is None:
             try:
                 decision_path = file_path.resolve()
             except OSError:  # pragma: no cover - defensive: unreadable parent
                 decision_path = file_path
-        if frozen:
-            scope_val, _ = self._resolve_scope(decision_path, resolved=True)
-            projection = self._prepare_index_projection(
-                decision_path, content, scope_val, resolved=True
-            )
-        else:
-            scope_val, _ = self._resolve_scope(decision_path)
-            projection = self._prepare_index_projection(decision_path, content, scope_val)
+        scope_val, _ = self._resolve_scope(decision_path, **frozen)
         declared = declared_exemption(decision_path, content)
+        projection = self._prepare_index_projection(decision_path, content, scope_val, **frozen)
         guard_input = content if declared else projection.guard_content
 
         def _guard(record: bool) -> privacy.WriteGuardResult:

@@ -252,7 +252,7 @@ async def test_the_manifest_entry_is_the_read_paths(bm25_only_components, tmp_pa
 
 def test_a_read_whose_resolution_fails_keeps_the_given_path(tmp_path, monkeypatch):
     path = tmp_path / "note.md"
-    path.write_text(_CLEAN_A, encoding="utf-8")
+    path.write_bytes(_CLEAN_A.encode())  # bytes compared below: no CRLF on Windows
 
     def fail(_p):
         raise OSError("unresolvable")
