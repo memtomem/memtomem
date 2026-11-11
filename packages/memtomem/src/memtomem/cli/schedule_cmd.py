@@ -21,7 +21,26 @@ def schedule() -> None:
     """Scheduled jobs — register, list, run, and delete cron schedules (UTC)."""
 
 
-@schedule.command("add")
+# The ``\b`` line stops Click from rewrapping the examples into one paragraph.
+# Click adds its own two columns to the epilog, on top of the two-space indent of
+# the example lines below, so the longest one (dedup_scan) renders at exactly 80
+# columns. That is why its --params JSON has no space after the colon.
+SCHEDULE_ADD_EPILOG = """\
+Cron times are UTC. Schedules fire only while an MCP server is running with
+scheduler.enabled and health_watchdog.enabled both true (both default to false);
+run-now runs one immediately.
+
+Examples:
+
+\b
+  mm schedule add --cron "0 3 * * 0" --job compaction
+  mm schedule add --cron "0 4 1 * *" --job importance_decay
+  mm schedule add --cron "30 2 * * 1" --job dedup_scan --params '{"limit":20}'
+  mm schedule run-now <id>
+"""
+
+
+@schedule.command("add", epilog=SCHEDULE_ADD_EPILOG)
 @click.option("--cron", "cron_expr", required=True, help="5-field cron expression (UTC)")
 @click.option(
     "--job",

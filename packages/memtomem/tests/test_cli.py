@@ -2237,3 +2237,30 @@ class TestHelpEpilog:
             assert examples, f"no examples rendered for {command}"
             over_width = [line for line in examples if len(line) > 80]
             assert not over_width, f"{command} examples exceed 80 columns: {over_width}"
+
+    def test_schedule_add_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["schedule", "add", "--help"])
+        assert result.exit_code == 0
+        lines = [line.strip() for line in result.output.splitlines()]
+        assert "Examples:" in lines
+        assert 'mm schedule add --cron "0 3 * * 0" --job compaction' in lines
+        assert 'mm schedule add --cron "0 4 1 * *" --job importance_decay' in lines
+        assert (
+            'mm schedule add --cron "30 2 * * 1" --job dedup_scan --params \'{"limit":20}\''
+            in lines
+        )
+        assert "mm schedule run-now <id>" in lines
+
+        # Click may wrap the prose note, so compare it with whitespace joined.
+        flattened = " ".join(result.output.split())
+        assert (
+            "Cron times are UTC. Schedules fire only while an MCP server is running "
+            "with scheduler.enabled and health_watchdog.enabled both true "
+            "(both default to false); run-now runs one immediately."
+        ) in flattened
+
+        # The single-word loop above cannot take `schedule add`, so check it here.
+        examples = [line for line in result.output.splitlines() if line.strip().startswith("mm ")]
+        assert len(examples) == 4
+        over_width = [line for line in examples if len(line) > 80]
+        assert not over_width, f"schedule add examples exceed 80 columns: {over_width}"
