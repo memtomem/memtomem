@@ -150,6 +150,18 @@ export async function bootApp({
     pretendToBeVisual: true,
   });
   const { window } = dom;
+  // jsdom 31 returns from the constructor with DOMContentLoaded not yet fired
+  // (readyState is already "interactive") and dispatches it from a later task;
+  // under jsdom 30 the document was complete one microtask after bootApp()
+  // returned. app.js runs I18N.init() and the rest of boot from its
+  // DOMContentLoaded handler, so without this wait a test asserting right after
+  // bootApp() sees raw i18n keys. Listen now, before app.js registers its
+  // handler, and await it before returning.
+  const domContentLoaded = window.document.readyState === 'complete'
+    ? Promise.resolve()
+    : new Promise((resolve) => {
+      window.document.addEventListener('DOMContentLoaded', resolve, { once: true });
+    });
 
   shimBrowserAPIs(window);
   window.fetch = makeFetchStub(apiResponses, localeGate);
@@ -237,5 +249,6 @@ export async function bootApp({
     Object.assign(window.STATE, state);
   }
 
+  await domContentLoaded;
   return dom;
 }
