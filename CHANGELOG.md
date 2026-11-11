@@ -23,7 +23,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
-- **Registering a schedule refuses a params key the job does not take.** `mm schedule add
+- **Registering a schedule refuses a params key the job does not take (#3247).** `mm schedule add
   --params` and `mem_schedule_register` used to accept any key and store it as given, so a
   typo was ignored on every run: `--job dedup_scan --params '{"limt": 20}'` registered a scan
   that ran with the default `limit=50`. Registration now fails and names the key and the keys
