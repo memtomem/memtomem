@@ -345,32 +345,34 @@ ignoreUntil = 2026-11-20
 # lockfile moves to it.
 #
 # effect itself is not an exception: packages/opencode-memtomem/package.json
-# overrides the plugin's exact 4.0.0-beta.83 pin to 4.0.0-beta.103, the fix for
-# GHSA-chp3-j5qr-2vfr. Drop that override once @opencode-ai/plugin pins
-# 4.0.0-beta.103 or later itself.
+# overrides @opencode-ai/plugin 1.19.5's exact 4.0.0-beta.83 pin to 4.0.0-beta.103,
+# the fix for GHSA-chp3-j5qr-2vfr. The override is keyed to plugin 1.19.5, so a
+# plugin bump switches it off by itself and the lockfile takes whatever effect the
+# new plugin pins. In that bump, delete the `overrides` block if the new plugin pins
+# effect 4.0.0-beta.103 or later; otherwise re-key it to the new plugin version.
 
 [[exceptions]]
 id = "GHSA-4qx8-w7c3-pj3p"
 owner = "memtomem"
-reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect, which requires toml ^4 up to 4.0.0-beta.103 (the plugin pins 4.0.0-beta.83; an npm override lifts it to 4.0.0-beta.103); the plugin ships no dependencies and its build parses no untrusted TOML"
+reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect 4.0.0-beta.103 (an npm override of the plugin's exact 4.0.0-beta.83 pin), which requires toml ^4.1.2; the plugin ships no dependencies and its build parses no untrusted TOML"
 ignoreUntil = 2026-11-20
 
 [[exceptions]]
 id = "GHSA-9j65-hcg3-gc64"
 owner = "memtomem"
-reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect, which requires toml ^4 up to 4.0.0-beta.103 (the plugin pins 4.0.0-beta.83; an npm override lifts it to 4.0.0-beta.103); the plugin ships no dependencies and its build parses no untrusted TOML"
+reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect 4.0.0-beta.103 (an npm override of the plugin's exact 4.0.0-beta.83 pin), which requires toml ^4.1.2; the plugin ships no dependencies and its build parses no untrusted TOML"
 ignoreUntil = 2026-11-20
 
 [[exceptions]]
 id = "GHSA-9qmh-m7c6-f92p"
 owner = "memtomem"
-reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect, which requires toml ^4 up to 4.0.0-beta.103 (the plugin pins 4.0.0-beta.83; an npm override lifts it to 4.0.0-beta.103); the plugin ships no dependencies and its build parses no untrusted TOML"
+reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect 4.0.0-beta.103 (an npm override of the plugin's exact 4.0.0-beta.83 pin), which requires toml ^4.1.2; the plugin ships no dependencies and its build parses no untrusted TOML"
 ignoreUntil = 2026-11-20
 
 [[exceptions]]
 id = "GHSA-h895-cgqg-jf52"
 owner = "memtomem"
-reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect, which requires toml ^4 up to 4.0.0-beta.103 (the plugin pins 4.0.0-beta.83; an npm override lifts it to 4.0.0-beta.103); the plugin ships no dependencies and its build parses no untrusted TOML"
+reason = "toml (npm) flaw reached only by parsing untrusted TOML; dev-only, pulled by @opencode-ai/plugin through effect 4.0.0-beta.103 (an npm override of the plugin's exact 4.0.0-beta.83 pin), which requires toml ^4.1.2; the plugin ships no dependencies and its build parses no untrusted TOML"
 ignoreUntil = 2026-11-20
 
 # zod 4.1.8 in packages/opencode-memtomem/package-lock.json (dev), published
@@ -379,5 +381,5 @@ ignoreUntil = 2026-11-20
 [[exceptions]]
 id = "GHSA-mrhx-c7xc-m3w5"
 owner = "memtomem"
-reason = "zod (npm) flaw reached only by validating untrusted input against an unbounded array schema; dev-only, @opencode-ai/plugin pins zod 4.1.8 exactly (plugin 1.19.4 still does); the plugin imports only types from it, ships no dependencies, and its build validates nothing"
+reason = "zod (npm) flaw reached only by validating untrusted input against an unbounded array schema; dev-only, @opencode-ai/plugin pins zod 4.1.8 exactly (plugin 1.19.5 still does); the plugin imports only types from it, ships no dependencies, and its build validates nothing"
 ignoreUntil = 2026-11-20
