@@ -158,6 +158,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   user. It now ends with the class name, for example
   `cannot read Hermes config: RuntimeError`. The message for an old Hermes still
   names the version it needs (0.21.5 or later).
+- **The first model download no longer hangs on a filesystem without `flock` (#3261).**
+  huggingface-hub 1.33.0 takes a lock with no timeout when it links a downloaded file to
+  the store it shares across the cache. On a filesystem that does not implement `flock`,
+  filelock 4.2.1 through 4.2.10, the latest, which a fresh install gets, never grant that
+  lock, so the ONNX embedder or the fastembed reranker never finished loading a model it
+  had not downloaded yet. Before downloading, memtomem now checks that `flock` works in the model
+  cache directory. If it does not, or the check cannot run, memtomem turns
+  huggingface-hub's shared blob store off for the whole process and logs a warning; a
+  file another model already stored is then downloaded again instead of linked. A lock
+  file left behind by an earlier run can still block a download there: point
+  `MEMTOMEM_FASTEMBED_CACHE` at a local disk if one does. The `local`
+  (sentence-transformers) reranker downloads into the Hugging Face cache and is not
+  covered yet (#3266).
 
 ### Security
 
@@ -174,29 +187,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   memtomem embeds text and opens no images; pillow is installed because fastembed
   depends on it. The `onnx` extra now requires `pillow>=13.0.0` itself, since fastembed
   0.9.1 still accepts pillow 12.
-- The other 15 recorded OSV exceptions, due to expire on 2026-11-20, were re-judged and
-  renewed to 2026-12-20; none of their blockers has cleared yet. filelock 4.2.10, the
-  latest, still hangs huggingface-hub 1.33.0 on a filesystem without `flock`, and
-  fastembed still requires huggingface-hub below 2.0. `@opencode-ai/plugin` 1.19.5 still
-  pins the `effect`, `zod` and (through `effect`) `toml` versions behind the other six.
-  Four of the filelock advisories stay reachable through the fastembed cache, as the
-  0.7.1 entry describes
+- The other six recorded OSV exceptions, due to expire on 2026-11-20, were re-judged and
+  renewed to 2026-12-20; none of their blockers has cleared yet. `@opencode-ai/plugin`
+  1.19.5 still pins the `effect`, `zod` and (through `effect`) `toml` versions behind
+  them.
+- **filelock moves from 3.25.2 to 4.2.10 in the lockfile, and its nine recorded
+  exceptions are removed (#3261).** No memtomem package declares filelock, so an install
+  made without the lockfile (pip, `uvx`, the plugin launch lines) already got the latest
+  release, in which the nine advisories are fixed; the lockfile, which development and CI
+  install from, now matches it. Four of the nine were reachable through the fastembed
+  cache, as the 0.7.1 entry describes
   ([GHSA-fq56-3cx3-fjxp](https://osv.dev/vulnerability/GHSA-fq56-3cx3-fjxp),
   [GHSA-rfpc-qcw5-3pc4](https://osv.dev/vulnerability/GHSA-rfpc-qcw5-3pc4),
   [GHSA-69hj-f68j-2879](https://osv.dev/vulnerability/GHSA-69hj-f68j-2879),
-  [GHSA-8mx5-7m5m-r77g](https://osv.dev/vulnerability/GHSA-8mx5-7m5m-r77g)). If other
-  accounts share your machine, or the cache sits on a network mount, point
-  `MEMTOMEM_FASTEMBED_CACHE` at a private local directory.
+  [GHSA-8mx5-7m5m-r77g](https://osv.dev/vulnerability/GHSA-8mx5-7m5m-r77g)). Upgrading
+  memtomem does not upgrade filelock in an environment that already has it: run
+  `pip install -U filelock` there. The release that fixes them used to hang the first
+  model download on a filesystem without `flock`; see Fixed.
 - **The default model cache is created owner-only on macOS and Linux (#3252).**
   `~/.memtomem/cache/fastembed` used to be created with the umask default, usually 0755,
   so another local account could traverse it and reach the lock files huggingface-hub
   keeps under it. Being able to reach them is a precondition of two of the filelock
-  advisories above (GHSA-rfpc-qcw5-3pc4, GHSA-69hj-f68j-2879). The directory is now
+  advisories above (GHSA-rfpc-qcw5-3pc4, GHSA-69hj-f68j-2879), which still apply where
+  filelock is older than 4.2.1. The directory is now
   created with mode 0700. A cache that already exists is not changed, since tightening
   it would change who can read the models in it: run `chmod 700 ~/.memtomem/cache/fastembed`
   to make it private. A directory named by `MEMTOMEM_FASTEMBED_CACHE` or
-  `FASTEMBED_CACHE_PATH` is created as before, and Windows is unchanged. The OSV
-  exceptions stay, because the scanner reads the lockfile.
+  `FASTEMBED_CACHE_PATH` is created as before, and Windows is unchanged.
 
 ## [0.7.8] — 2026-11-10
 
