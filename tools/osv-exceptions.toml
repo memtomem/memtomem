@@ -376,3 +376,12 @@ id = "GHSA-mrhx-c7xc-m3w5"
 owner = "memtomem"
 reason = "zod (npm) flaw reached only by validating untrusted input against an unbounded array schema; dev-only, @opencode-ai/plugin pins zod 4.1.8 exactly (plugin 1.19.4 still does); the plugin imports only types from it, ships no dependencies, and its build validates nothing"
 ignoreUntil = 2026-11-20
+
+# effect 4.0.0-beta.83 in packages/opencode-memtomem/package-lock.json (dev),
+# published 2026-11-10. Remove when @opencode-ai/plugin allows effect>=4.0.0-beta.103.
+
+[[exceptions]]
+id = "GHSA-chp3-j5qr-2vfr"
+owner = "memtomem"
+reason = "effect (npm) flaw reached only by building a Set-Cookie header from untrusted cookie name, domain or path; dev-only, @opencode-ai/plugin pins effect 4.0.0-beta.83 exactly (plugin 1.19.5, its latest, still does); opencode-memtomem imports only types from @opencode-ai/plugin and nothing from effect, ships no dependencies, and neither it nor its build sets cookies"
+ignoreUntil = 2026-11-20
