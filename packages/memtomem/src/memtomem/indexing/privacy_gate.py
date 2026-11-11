@@ -201,15 +201,24 @@ class MutationPreflight:
     ``valve_ok`` — the file holds nothing flagged and nothing masked, so every
     hit in the result of this write comes from the write itself and the
     caller's ``force_unsafe`` may cover it.
+    ``relinked`` — the path no longer resolves to the source that was read, so
+    the write would reach a file nobody judged. Checked before the other two:
+    they describe the file that was read (#3191).
     """
 
     rejection: PrivacyRejection | None
     masking_locked: bool
     valve_ok: bool
     replay: Callable[[], object] | None = field(default=None, repr=False, compare=False)
+    relinked: bool = False
 
     def blocker(self, op: str, name: str, *, needs_valve: bool) -> str | None:
         """The refusal text for a write the preflight forbids, other than ``rejection``."""
+        if self.relinked:
+            return (
+                f"Error: {op} refused: {name} now resolves to a different location than "
+                "when it was read; nothing was written. Try again."
+            )
         if self.masking_locked:
             return (
                 f"Error: {op} refused: {name} is under a reviewed masking manifest, "

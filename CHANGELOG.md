@@ -59,6 +59,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `onnx_snapshots/` inside the model's cache directory and loads them from there. A cache
   downloaded by an older huggingface-hub was not affected. In a read-only cache the links cannot
   be made and the load still fails; make the cache writable for the first load.
+
+- **A memory tool's privacy preflight judges a file under the path it read it from (#3191).**
+  Before a memory tool appends to or rewrites a file, on any surface, it checks that the file as
+  it stands may be indexed. That check resolved the path again after the read, so a path replaced
+  by a symlink in between had the read's bytes judged under the link target's scope: a
+  `project_shared` file declaring `redaction: documents-patterns`, which is refused there, passed
+  as a user-scope file, and the write went through the link to the target. The re-index after the
+  write still judged what it stored, so nothing it refuses was stored. The check now uses the path
+  resolved with the read, and when the path resolves somewhere else by the time of the check, the
+  write is refused with nothing written ("now resolves to a different location than when it was
+  read"). A path that was already a symlink when read is judged through it, as before. Not
+  covered: a path replaced after this check and before the write.
+
 - **Registering a schedule refuses a params key the job does not take (#3247).** `mm schedule add
   --params` and `mem_schedule_register` used to accept any key and store it as given, so a
   typo was ignored on every run: `--job dedup_scan --params '{"limt": 20}'` registered a scan

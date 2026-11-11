@@ -3750,17 +3750,30 @@ class IndexEngine:
             )
         return result
 
-    def _prepare_index_projection(self, path: Path, content: str, scope: str):
+    def _prepare_index_projection(
+        self, path: Path, content: str, scope: str, *, resolved: bool = False
+    ):
         from memtomem.indexing.reviewed_projection import prepare_reviewed_projection
         from memtomem.indexing.privacy_projection import prepare_index_content
 
         if self._config.index_masking_manifest_path:
             return prepare_reviewed_projection(
-                path, content, self._config.index_masking_manifest_path, scope=scope
+                path,
+                content,
+                self._config.index_masking_manifest_path,
+                scope=scope,
+                resolved=resolved,
             )
         return prepare_index_content(content, scope=scope)
 
-    def _judge_as_it_stands(self, file_path: Path, content: str, *, surface: str):
+    def _judge_as_it_stands(
+        self,
+        file_path: Path,
+        content: str,
+        *,
+        surface: str,
+        decision_path: Path | None = None,
+    ):
         """The gate's inputs for ``content`` at ``file_path``, and a recorder.
 
         Shared by the two read-only twins of the gate in ``_index_file`` —
@@ -3769,14 +3782,28 @@ class IndexEngine:
         projection the same way the gate does. Returns the projection, the
         unrecorded guard result, and a callable that runs the same guard with
         recording on (counter and audit lines, exactly once).
+
+        Without ``decision_path`` the path is resolved here and the scope and
+        manifest lookups resolve it again, exactly as the gate does, so the
+        preview answers as the gate would. ``decision_path`` is the resolution
+        the bytes were read under; it is used as given by all three, so a path
+        relinked since the read is not followed (#3191).
         """
-        try:
-            decision_path = file_path.resolve()
-        except OSError:  # pragma: no cover - defensive: unreadable parent
-            decision_path = file_path
-        scope_val, _ = self._resolve_scope(decision_path)
+        frozen = decision_path is not None
+        if decision_path is None:
+            try:
+                decision_path = file_path.resolve()
+            except OSError:  # pragma: no cover - defensive: unreadable parent
+                decision_path = file_path
+        if frozen:
+            scope_val, _ = self._resolve_scope(decision_path, resolved=True)
+            projection = self._prepare_index_projection(
+                decision_path, content, scope_val, resolved=True
+            )
+        else:
+            scope_val, _ = self._resolve_scope(decision_path)
+            projection = self._prepare_index_projection(decision_path, content, scope_val)
         declared = declared_exemption(decision_path, content)
-        projection = self._prepare_index_projection(decision_path, content, scope_val)
         guard_input = content if declared else projection.guard_content
 
         def _guard(record: bool) -> privacy.WriteGuardResult:
@@ -3815,7 +3842,7 @@ class IndexEngine:
         return guard.decision
 
     def preflight_mutation(
-        self, file_path: Path, pre_image: bytes, *, source_key: str
+        self, file_path: Path, pre_image: bytes, *, source_path: Path
     ) -> MutationPreflight:
         """May a memory tool modify ``file_path``, whose bytes are ``pre_image``?
 
@@ -3831,17 +3858,31 @@ class IndexEngine:
         write itself would already be on disk. See :class:`MutationPreflight`
         for the other two answers.
 
-        ``source_key`` is the stored key of the source ``pre_image`` was read
-        from, resolved with the read (``memory_writer.read_with_source_key``). A
-        refusal holds that key: resolved here or later, a path replaced by a
-        symlink after the read would hold the link's target and leave the
-        refused source's chunks searchable (#3183).
+        ``source_path`` is the path ``pre_image`` was read from, resolved with
+        the read (``memory_writer.read_with_source_key``). The bytes are judged
+        under it, and a refusal holds its stored key: resolved here or later, a
+        path replaced by a symlink after the read would judge the bytes under
+        the link target's scope (#3191) and hold the target, leaving the refused
+        source's chunks searchable (#3183).
+
+        If ``file_path`` no longer resolves to ``source_path``, or no longer
+        resolves at all, a write would reach a file nobody judged, so the answer
+        is ``relinked`` and the caller writes nothing. Bytes the gate refuses are
+        still refused and held under the read's key first. That hold is
+        best-effort: the registered project roots are resolved now, so a root
+        directory itself replaced by a link since the read can make the bytes
+        read as user scope and go unheld; the write is refused either way.
         """
+        source_key = fold_path_form(str(source_path))
+        try:
+            relinked = fold_path_form(str(resolve_path(file_path))) != source_key
+        except OSError:
+            relinked = True
         if not pre_image or self._registry.get(file_path.suffix) is None:
-            return MutationPreflight(None, False, True)
+            return MutationPreflight(None, False, True, relinked=relinked)
         text = indexer_text(pre_image, errors="replace")
         scope_val, projection, guard, replay = self._judge_as_it_stands(
-            file_path, text, surface="index"
+            file_path, text, surface="index", decision_path=source_path
         )
         rejection = None
         if guard.decision in ("blocked", "blocked_project_shared"):
@@ -3856,7 +3897,7 @@ class IndexEngine:
             projection.redaction_count
         )
         valve_ok = not privacy.scan(text) and not projection.redaction_count
-        return MutationPreflight(rejection, masking_locked, valve_ok, replay)
+        return MutationPreflight(rejection, masking_locked, valve_ok, replay, relinked=relinked)
 
     async def refuse_mutation(
         self, file_path: Path, preflight: MutationPreflight
@@ -3884,7 +3925,7 @@ class IndexEngine:
         await self._hold_blocked_source(file_path, rejection)
         return rejection
 
-    def _resolve_scope(self, file_path: Path) -> tuple[str, Path | None]:
+    def _resolve_scope(self, file_path: Path, *, resolved: bool = False) -> tuple[str, Path | None]:
         """Classify ``file_path`` into ``(scope, project_root)`` (ADR-0011 §2).
 
         Path-based — the same ``classify_scope`` helper that the config
@@ -3893,7 +3934,7 @@ class IndexEngine:
         (e.g. memoization, additional registry sources) land here
         without touching call sites.
         """
-        return classify_scope(file_path, self._config.project_memory_dirs)
+        return classify_scope(file_path, self._config.project_memory_dirs, resolved=resolved)
 
     def _stored_scope_rows(
         self, keys: Iterable[str], *, db: sqlite3.Connection | None = None
