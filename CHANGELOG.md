@@ -101,6 +101,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `cannot read Hermes config: RuntimeError`. The message for an old Hermes still
   names the version it needs (0.21.5 or later).
 
+### Security
+
+- An advisory against `effect` 4.0.0-beta.83 (npm), published on 2026-11-10, lets a
+  caller who builds a cookie from an untrusted name, domain or path add attributes to
+  the `Set-Cookie` header; the fix is 4.0.0-beta.103. It is a dev-only dependency of
+  the OpenCode plugin, and `@opencode-ai/plugin` pins `effect` at exactly
+  4.0.0-beta.83, as its latest release (1.19.5) still does. The OpenCode plugin imports
+  only types from `@opencode-ai/plugin` and nothing from `effect`, ships no
+  dependencies and sets no cookies, so the advisory is recorded as an exception with
+  the same 2026-11-20 expiry as the others rather than overridden past the pin.
+
 ## [0.7.8] — 2026-11-10
 
 ### Upgrading
