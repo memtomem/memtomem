@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from memtomem._settlement import settle_shielded
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+from memtomem.embedding.hub_locks import prepare_hub_locks
 from memtomem.embedding.hub_telemetry import hub_telemetry_off
 
 if TYPE_CHECKING:
@@ -157,6 +158,7 @@ class FastEmbedReranker:
 
             ensure_custom_reranker_registered(self._config.model)
             cache_dir = resolve_fastembed_cache_dir()
+            prepare_hub_locks(cache_dir)
             logger.info(
                 "Loading fastembed reranker %s (cache_dir=%s) …",
                 self._config.model,
