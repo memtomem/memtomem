@@ -85,7 +85,9 @@ _VISIBLE_SOURCE = VISIBLE_SOURCE_CHUNKS
 
 #: The two ``chunks_fts`` columns, as fts5 column-filter names (#2224).
 #: ``content`` is what a search is *for*; ``source_file`` is a fallback so
-#: typing a filename still finds that file, never a competitor to prose.
+#: typing a filename still finds that file, never a competitor to prose. It
+#: holds only the file's name without its suffix (``fts_source_text``), not
+#: the path: a directory word is shared by every chunk under it (#3208).
 _FTS_CONTENT_COLUMN = "content"
 _FTS_SOURCE_COLUMN = "source_file"
 
@@ -217,6 +219,7 @@ class SearchOpsMixin:
     """Search, recall, context-window, and audit read operations for SqliteBackend."""
 
     _fts_tokenizer: str  # set by ``SqliteBackend.__init__``
+    _bm25_path_fallback: bool  # set by ``SqliteBackend.__init__``
 
     async def bm25_search(
         self,
@@ -227,8 +230,11 @@ class SearchOpsMixin:
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
         source_filter: str | None = None,
+        *,
+        deadline: float | None = None,
     ) -> list[SearchResult]:
-        async with self._lease_read_db() as db:
+        """``deadline`` bounds only the wait for a read connection (``_lease_read_db``)."""
+        async with self._lease_read_db(deadline=deadline) as db:
             ns_clause = ""
             ns_params: list = []
             if namespace_filter:
@@ -259,9 +265,9 @@ class SearchOpsMixin:
             # ``fts5(content, source_file)`` and an unqualified MATCH searches
             # both, so a term appearing only in a chunk's *path* used to
             # retrieve it and — every column weighted 1.0 in the default
-            # ``rank`` — score as a relevance signal. ``source_file`` is stored
-            # raw, so unicode61 splits it into components and every directory
-            # and filename word became a searchable term: on a real
+            # ``rank`` — score as a relevance signal. ``source_file`` then held
+            # the raw path, so unicode61 split it into components and every
+            # directory and filename word became a searchable term: on a real
             # 6,995-chunk store, 71 of the top 100 hits for ``plans`` were
             # chunks about something else, surfaced because they live under
             # ``.claude/plans/``.
@@ -272,9 +278,12 @@ class SearchOpsMixin:
             # scored 0.0 still occupies a BM25 slot and still contributes
             # positive fused relevance downstream. It has to not be retrieved.
             #
-            # The fallback keeps filename lookup working — typing a path word
+            # The fallback keeps filename lookup working — typing a file's name
             # still finds that file's chunks — but only once nothing in any
             # chunk's *content* matches, so a path can never outrank prose.
+            # The column holds only that name (``fts_source_text``): with the
+            # whole path, a word of the memory dir's root, or the extension,
+            # matched every chunk under it and returned them all (#3208).
             # No weights are needed either way: under a column-qualified MATCH
             # ``bm25(chunks_fts, 1.0, 0.0)`` and the bare ``rank`` score
             # identically, because the excluded column contributes nothing to
@@ -303,6 +312,16 @@ class SearchOpsMixin:
             and_body = _fts.tokenize_for_fts(query, for_query=True, tokenizer=tokenizer)
             or_body = _fts.tokenize_for_fts(query, for_query=True, use_or=True, tokenizer=tokenizer)
             bodies = [and_body] if or_body == and_body else [and_body, or_body]
+            # A backend built with ``bm25_path_fallback=False`` never reaches
+            # the path column. Its rows' file names are the owner's
+            # bookkeeping, not names a user types, but one can still spell a
+            # word (langchain-memtomem's key ``V`` encodes to ``sky``), and the
+            # fallback would return that row for it (#3205).
+            columns = (
+                (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN)
+                if self._bm25_path_fallback
+                else (_FTS_CONTENT_COLUMN,)
+            )
 
             def _query(conn: sqlite3.Connection) -> list:
                 # ADR-0011 §6 + PR-D review #2: filter must run *inside* the
@@ -331,7 +350,7 @@ class SearchOpsMixin:
                        ORDER BY fts.rank, {tie_break}, c.id
                        LIMIT ?"""
                 rows: list = []
-                for column in (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN):
+                for column in columns:
                     for body in bodies:
                         rows = conn.execute(
                             sql,
@@ -383,8 +402,11 @@ class SearchOpsMixin:
         *,
         exhaustive: bool = False,
         escalate: bool = True,
+        deadline: float | None = None,
     ) -> list[SearchResult]:
         """``escalate=False`` keeps a non-exhaustive search to its first KNN pass.
+
+        ``deadline`` bounds only the wait for a read connection (``_lease_read_db``).
 
         For a best-effort caller (query expansion's heading probe) a selective
         filter would otherwise drive the larger attempts, up to a full-table
@@ -397,7 +419,7 @@ class SearchOpsMixin:
         if not self._has_vec_table:
             return []
 
-        async with self._lease_read_db() as db:
+        async with self._lease_read_db(deadline=deadline) as db:
             # Validate the query width HERE, not by sniffing sqlite-vec's error on
             # the first MATCH. ``chunks_vec`` is legitimately empty while chunks
             # survive — ``reset_embedding_meta`` drops and recreates the vector
@@ -644,6 +666,7 @@ class SearchOpsMixin:
         project_context_root: Path | None,
         as_of_unix: int | None,
         hide_unavailable: bool,
+        deadline: float | None = None,
     ) -> dict[UUID, ContextWindowRows | None]:
         """Physical neighbours plus visible ordinal/total, without listing the file.
 
@@ -694,7 +717,9 @@ class SearchOpsMixin:
         # CTE can end in an INSERT and it should not have to parse one to find
         # out. This spelling is the same plan and is visibly a read.
         wanted = [str(a) for a in anchor_ids]
-        async with self._lease_read_db() as db:
+        # ``deadline`` (a search's ``deadline_ms``) bounds only the wait for a
+        # read connection; the reads themselves run to completion.
+        async with self._lease_read_db(deadline=deadline) as db:
             rows = db.execute(
                 f"""
                 SELECT id, start_line, rid, vis, COALESCE(visible_before, 0), visible_all

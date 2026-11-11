@@ -190,6 +190,45 @@ def ok_envelope(
     return {"ok": True, "result": json.dumps(payload) if as_text else payload}
 
 
+def version_envelope(capabilities: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """What ``mem_do(action="version")`` answers. Default: a server older than the keys the
+    provider negotiates (it gets the legacy recall call and no mirror writes)."""
+    import json
+
+    caps: Dict[str, Any] = {"search_formats": ["compact", "verbose", "structured"]}
+    caps.update(capabilities or {})
+    return {"ok": True, "result": json.dumps({"version": "0.7.8", "capabilities": caps})}
+
+
+#: The capabilities a server carrying the mirror and deadline features advertises.
+CURRENT_CAPABILITIES: Dict[str, Any] = {
+    "hermes_mirror": {"schema_version": 1},
+    "search_deadline_ms": True,
+    "namespace_selectors": ["!system"],
+}
+
+
+def mirror_reply(**fields: Any) -> Dict[str, Any]:
+    """A ``hermes_mirror_apply`` success envelope; ``fields`` override the defaults."""
+    import json
+
+    reply: Dict[str, Any] = {
+        "schema_version": 1,
+        "op": "add",
+        "applied": True,
+        "changed": True,
+        "accepted_revision": 1,
+        "previous": None,
+        "content_refused": False,
+        "live_entries": 1,
+        "rendered": True,
+        "rendered_revision": 1,
+        "render_error": None,
+    }
+    reply.update(fields)
+    return {"ok": True, "result": json.dumps(reply)}
+
+
 def chunk(n: int, *, content: str = "", source: str = "notes.md", hierarchy: str = "") -> dict:
     return {
         "chunk_id": f"c{n}",
@@ -231,6 +270,16 @@ class FakeHermes:
         self.default: Callable[[Call], Dict[str, Any]] = lambda call: ok_envelope([chunk(1)])
         self.call_gate: Optional[threading.Event] = None
         self.call_started = threading.Event()
+        # ``mem_do`` version probes and mirror writes are answered and recorded apart from
+        # recall calls, so recall tests read ``calls`` and ``responders`` as before.
+        self.probes: List[Call] = []
+        self.version: Callable[[Call], Dict[str, Any]] = lambda call: version_envelope()
+        self.mirror_calls: List[Call] = []
+        self.mirror_responders: List[Callable[[Call], Dict[str, Any]]] = []
+        self.mirror_default: Callable[[Call], Dict[str, Any]] = lambda call: mirror_reply()
+        self.mirror_done = threading.Condition()
+        self.setup_answers: List[Any] = []
+        self.saved_configs: List[Dict[str, Any]] = []
         self.contexts_built = 0
         # When set, get_plugin_manager() waits on it (Hermes takes a lock there).
         self.manager_gate: Optional[threading.Event] = None
@@ -244,6 +293,23 @@ class FakeHermes:
                 self.responders.append(item)
             else:
                 self.responders.append(lambda call, item=item: _raise_or_return(item))
+
+    def advertise(self, capabilities: Optional[Dict[str, Any]] = None) -> None:
+        """Make the version probe answer as a server with ``capabilities`` (default: current)."""
+        caps = CURRENT_CAPABILITIES if capabilities is None else capabilities
+        self.version = lambda call: version_envelope(caps)
+
+    def respond_mirror(self, *responders: Any) -> None:
+        for item in responders:
+            if callable(item) and not isinstance(item, BaseException):
+                self.mirror_responders.append(item)
+            else:
+                self.mirror_responders.append(lambda call, item=item: _raise_or_return(item))
+
+    def wait_mirror_calls(self, n: int, timeout: float = 5.0) -> bool:
+        """Wait until ``n`` mirror calls have been answered."""
+        with self.mirror_done:
+            return self.mirror_done.wait_for(lambda: len(self.mirror_calls) >= n, timeout)
 
     def block_calls(self) -> threading.Event:
         """Every call waits on the returned event before answering."""
@@ -271,6 +337,22 @@ class FakeHermes:
         call = Call(
             plugin_id, server, tool, dict(arguments or {}), timeout, threading.current_thread().name
         )
+        action = call.arguments.get("action") if tool == "mem_do" else None
+        if action == "version":
+            with self.calls_lock:
+                self.probes.append(call)
+            return self.version(call)
+        if action == "hermes_mirror_apply":
+            with self.calls_lock:
+                responder = (
+                    self.mirror_responders.pop(0) if self.mirror_responders else self.mirror_default
+                )
+            try:
+                return responder(call)
+            finally:
+                with self.mirror_done:
+                    self.mirror_calls.append(call)
+                    self.mirror_done.notify_all()
         with self.calls_lock:
             self.calls.append(call)
             responder = self.responders.pop(0) if self.responders else self.default
@@ -347,6 +429,8 @@ def build_modules(state: FakeHermes) -> Dict[str, types.ModuleType]:
             arguments: Optional[Dict[str, Any]] = None,
             timeout: float = 30,
         ) -> Dict[str, Any]:
+            # As Hermes 0.21.5 and 0.23.0: ``timeout = max(1.0, min(timeout, 600.0))``.
+            timeout = max(1.0, min(float(timeout), 600.0))
             return state._call_mcp(self.plugin_id, server, tool, arguments, timeout)
 
     plugins.PluginManifest = PluginManifest
@@ -359,14 +443,56 @@ def build_modules(state: FakeHermes) -> Dict[str, types.ModuleType]:
 
     plugins.get_plugin_manager = get_plugin_manager
     config.load_config_readonly = state._load_config_readonly
+
+    def save_config(cfg: Dict[str, Any], *, merge_existing: bool = False, **_: Any) -> None:
+        import copy
+
+        state.saved_configs.append({"config": copy.deepcopy(cfg), "merge_existing": merge_existing})
+
+    config.save_config = save_config
+
+    setup = types.ModuleType("hermes_cli.setup")
+
+    def prompt_yes_no(question: str, default: bool = True) -> bool:
+        # As Hermes 0.21.5 and 0.23.0 (hermes_cli/setup.py): HERMES_NONINTERACTIVE and end of
+        # input return ``default`` without an answer; Ctrl+C exits (``sys.exit(1)``).
+        import os
+
+        if os.environ.get("HERMES_NONINTERACTIVE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            return default
+        answer = state.setup_answers.pop(0) if state.setup_answers else default
+        if answer == "EOF":
+            return default
+        if isinstance(answer, BaseException):
+            raise answer
+        return bool(answer)
+
+    setup.prompt_yes_no = prompt_yes_no
+
+    constants = types.ModuleType("hermes_constants")
+
+    def hermes_home_key(path: Any = None) -> str:
+        import os
+
+        return os.path.realpath(str(path)) if path else "default"
+
+    constants.hermes_home_key = hermes_home_key
     hermes_cli.plugins = plugins
     hermes_cli.config = config
+    hermes_cli.setup = setup
     return {
         "agent": agent,
         "agent.memory_provider": memory_provider,
         "hermes_cli": hermes_cli,
         "hermes_cli.plugins": plugins,
         "hermes_cli.config": config,
+        "hermes_cli.setup": setup,
+        "hermes_constants": constants,
     }
 
 

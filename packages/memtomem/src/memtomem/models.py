@@ -623,3 +623,26 @@ class IndexingStats:
     # Appended last for positional construction compatibility.
     namespaces_restored_from_name: int = 0
     day_file_names_undecoded: int = 0
+    # Files the exclude guard skipped after they were handed to the engine:
+    # a single-file ``index_file`` call, or a walked file whose exclusion was
+    # installed after discovery. Files a directory walk filtered out at
+    # discovery are not counted. With ``index_file(purge_if_excluded=True)``
+    # the chunks stored under the path's own key were also removed, and
+    # ``deleted_chunks`` says how many (#3158). Appended last for positional
+    # construction compatibility.
+    excluded_files: int = 0
+    # 1 when ``index_file(hold_if_relinked=True)`` found the file it was handed
+    # replaced by a symlink: the chunks stored under the path's own key were
+    # held, and nothing was indexed through the link (#3164). Only that call
+    # sets it. Appended last for positional construction compatibility.
+    relinked_files: int = 0
+    # 1 when ``index_file`` left the file's stored chunks describing the content
+    # it read: its chunk write committed (even if the AI summary refresh after
+    # the commit then failed, which is then the only entry in ``errors``), every
+    # chunk was already current, or an emptied file's rows were removed. 0 on
+    # every refusal and hold, several of which report no error at all (an
+    # unreadable file's rows are held with ``errors`` empty), so a caller that
+    # must know whether a file it wrote was indexed reads this, not ``errors``
+    # (#3168). Only that call sets it. Appended last for positional
+    # construction compatibility.
+    current_files: int = 0

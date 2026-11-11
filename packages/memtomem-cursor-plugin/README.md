@@ -21,7 +21,7 @@ there, not the files here.
 
 - Cursor 3.27.22 or later, the version this plugin was verified against.
 - `uv` on the `PATH` Cursor starts MCP servers with. The server is started with
-  `uvx --python 3.12 --from 'memtomem[onnx]==0.7.7' memtomem-server`.
+  `uvx --python 3.12 --from 'memtomem[onnx]==0.7.8' memtomem-server`.
 - Python 3.12. uv uses a 3.12 it can find; if there is none, it downloads one (about
   70 MiB) on first start. If that is not possible (offline, or uv's Python downloads
   turned off), the server does not start; run `uv python install 3.12` once to fix it.

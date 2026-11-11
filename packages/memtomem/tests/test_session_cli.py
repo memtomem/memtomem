@@ -773,6 +773,27 @@ class TestSessionStartIdempotent:
         comp.storage.find_stale_active_sessions.assert_not_awaited()
         comp.storage.create_session.assert_not_awaited()
 
+    @pytest.mark.parametrize(
+        "duration",
+        [
+            "1000000000d",  # beyond timedelta's own range
+            "800000d",  # a valid timedelta, but now minus it is before year 1
+        ],
+    )
+    def test_oversized_duration_raises_bad_parameter(self, runner, monkeypatch, duration):
+        comp = self._comp(current_row=None)
+        self._patch(monkeypatch, comp, None)
+
+        result = runner.invoke(
+            cli,
+            ["session", "start", "--agent-id", "claude-code", "--auto-end-stale", duration],
+        )
+        assert result.exit_code == 2, result.output
+        assert isinstance(result.exception, SystemExit)
+        assert f"duration '{duration}' is too large." in result.output
+        comp.storage.find_stale_active_sessions.assert_not_awaited()
+        comp.storage.create_session.assert_not_awaited()
+
     def test_auto_end_stale_warns_when_cap_hit(self, runner, monkeypatch, caplog):
         """When ``find_stale_active_sessions`` returns ``_STALE_CLEANUP_BATCH``
         rows the CLI emits a ``logger.warning`` so the next hook fire knows

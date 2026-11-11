@@ -49,7 +49,7 @@ def _components(tmp_path: Path, *, index_error: Exception | None = None) -> Simp
     index_file = (
         AsyncMock(side_effect=index_error)
         if index_error is not None
-        else AsyncMock(return_value=SimpleNamespace(indexed_chunks=2))
+        else AsyncMock(return_value=SimpleNamespace(indexed_chunks=2, excluded_files=0))
     )
     return SimpleNamespace(
         config=SimpleNamespace(

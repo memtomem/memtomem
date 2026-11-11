@@ -226,6 +226,17 @@ boundary of `put` and `delete` against the repair that restores agreement).
      > with nothing saying so. `max_pool` now bounds only the oversampling,
      > and the budget is `max_chunks_per_search` with or without a reranker,
      > on a memtomem that carries this fix.
+     > **Amended 2026-11-10.** The store takes `retrieval={"mode": "hybrid" |
+     > "bm25" | "dense", "weights", "rrf_k"}`, the keys and refusals of
+     > `MemtomemHybridStore`, so a caller can choose the legs without spelling
+     > pipeline settings. It is translated into the `search` settings the
+     > pipeline already honours (`enable_bm25`, `enable_dense`,
+     > `rrf_weights`, `rrf_k`), and giving both forms is refused. Without it,
+     > the search is the one above. `dense` is refused at open without an
+     > embedder, and raises when a pass's dense leg did not run; `hybrid`
+     > ranks by BM25 alone in that state. The mode is set per store because
+     > LangGraph's `SearchOp` carries no per-call field. Mechanics:
+     > `packages/langchain-memtomem/docs/protocol.md`, "Retrieval legs".
 5. **Mutation and repair: the constraints the protocol must meet.**
    - The JSON record is the source of truth. The projection and the index
      rows are derived from it.
@@ -258,6 +269,44 @@ boundary of `put` and `delete` against the repair that restores agreement).
      > B2's header and B4's "decodes each hit's header" read accordingly:
      > the hit's item is named by its source path and checked against the
      > row's namespace.
+     > **Amended 2026-11-10** after #3205. The projection's path is
+     > bookkeeping too, and it was searchable: memtomem's BM25 leg matches a
+     > query against `source_file` once no row's content matches (#2224), and
+     > every projection path shares the root's words and `projections`, so
+     > such a query returned every item, scored as real matches at those
+     > ranks would be. The store
+     > now opens its components with
+     > `create_components(..., bm25_path_fallback=False)`, a public keyword
+     > added for it, so BM25 matches content only. Nothing a caller types is
+     > lost: keys and namespaces appear in the path only in encoded form
+     > (measured: with the fallback on, querying an item's key found
+     > nothing). The package's memtomem floor rises to the first release
+     > carrying the keyword. This closes the path, not all bookkeeping:
+     > under bounded chunking (on for E5) the chunker writes
+     > `File: <encoded key>.md` into each row's retrieval text, which BM25
+     > indexes as content (#3209).
+     > **Amended 2026-11-10** after #3209. Under bounded chunking the
+     > chunker's description for each row added `File: <encoded key>.md` and
+     > `Fragment <i>/<n>` lines, and that description is embedded and
+     > BM25-indexed with the body, so `md`, `file` and `fragment` returned
+     > every item and an item's encoded key returned that item. The store
+     > now also passes `create_components(..., chunk_source_labels=False)`,
+     > a second public keyword, and the chunker leaves both lines out of the
+     > embedded and the indexed text alike. The store adds no headings to a
+     > projection, so a row's description is now only the headings the value
+     > itself holds, and empty when it holds none. Rows indexed before the
+     > change keep the lines until their item is written again (measured:
+     > reopening the store does not re-describe them; a `put` of the item
+     > does).
+     > **Amended 2026-11-10** after #3208. The FTS index now holds only a
+     > file's name without its suffix as the path text BM25 falls back to,
+     > so the root's words, `projections` and `md` no longer match through
+     > the path, whether or not the store turns the fallback off. The switch
+     > stays for what is left there: the item's encoded key. A caller does
+     > not type the encoding, but it can spell a word: one-character keys
+     > `V`, `R` and `9` encode to `sky`, `ski` and `she` (measured: with the
+     > fallback on, a query `sky` returned item `V`, whose value is `apples`;
+     > with it off, nothing).
    - A deletion marker carries the generation it was written for. A later
      `put` under the lock settles or supersedes the marker before it writes.
      Repair gives a marker precedence only over a record of the same or an

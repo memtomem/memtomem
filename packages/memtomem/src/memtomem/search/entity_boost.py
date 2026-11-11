@@ -95,8 +95,19 @@ def extract_query_entities(
 
 
 def _is_word_boundary_match(query: str, value: str) -> bool:
-    """Whether ``value`` appears in ``query`` as a whole word."""
-    return re.search(rf"(?<!\w){re.escape(value)}(?!\w)", query, re.IGNORECASE) is not None
+    """Whether ``value`` appears in ``query`` as a whole word.
+
+    A neighbouring word character blocks the match ("git" in "digit", "rest" in
+    "resté"), except a Hangul, kana or Han one: those scripts attach particles
+    and words to a Latin term with no space ("sqlite를", "redisで", "用python"),
+    and treating them as part of the word dropped the entity from every query
+    written that way, while the chunk side still records it. The class is the
+    extractor's own, so the chunk-side patterns cut words at the same places.
+    """
+    from memtomem.tools.entity_extraction import _NON_CJK_WORD_CHAR as blocked
+
+    pattern = rf"(?<!{blocked}){re.escape(value)}(?!{blocked})"
+    return re.search(pattern, query, re.IGNORECASE) is not None
 
 
 def apply_entity_boost(

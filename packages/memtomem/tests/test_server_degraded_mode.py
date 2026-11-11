@@ -192,6 +192,18 @@ async def test_create_components_enters_degraded_instead_of_raising(degraded_com
     assert comp.storage.embedding_mismatch is not None
 
 
+async def test_the_recovery_backend_keeps_bm25_path_fallback(tmp_path, monkeypatch):
+    """The degraded-mode reopen builds its own backend; it must not drop the setting."""
+    comp = await create_components(
+        _degraded_config(tmp_path, monkeypatch), bm25_path_fallback=False
+    )
+    try:
+        assert comp.embedding_broken is not None, "fixture must start degraded"
+        assert comp.storage.bm25_path_fallback is False
+    finally:
+        await close_components(comp)
+
+
 async def test_mem_add_blocked_in_degraded_mode(degraded_components):
     """``mem_add`` must return the actionable mismatch error, not crash."""
     app = _make_app(degraded_components)
@@ -342,6 +354,22 @@ async def test_revert_to_stored_preserves_llm_on_index_engine(degraded_component
     # The engine must still reference the same LLM instance — anything
     # else means the rebuild path silently dropped it.
     assert app.index_engine._llm is sentinel_llm
+
+
+async def test_revert_to_stored_preserves_chunk_source_labels(degraded_components):
+    """``chunk_source_labels`` is a component setting, not a config field, so
+    the rebuilt engine has nothing to read it from but the engine it replaces
+    (#3209). Dropping it would put ``File:`` lines back into a store whose file
+    names are bookkeeping."""
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    pre_index = app.index_engine
+    pre_index._chunk_source_labels = False
+
+    await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    assert app.index_engine is not pre_index
+    assert app.index_engine._chunk_source_labels is False
 
 
 async def test_revert_to_stored_closes_the_retired_generation(degraded_components):

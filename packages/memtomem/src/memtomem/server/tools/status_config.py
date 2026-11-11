@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from memtomem import __version__
 from memtomem._runtime_paths import scrub_text
+from memtomem.constants import NON_SYSTEM_NAMESPACES
 from memtomem._instance_registry import (
     enumerate_live_instances as _enumerate_live_instances,
     store_digest_for as _store_digest_for,
@@ -1744,6 +1745,9 @@ async def _revert_to_stored_locked(
             # ``component_factory.create_components``.
             llm=app.llm_provider,
             generation=new_generation,
+            # A component setting, not a config field: carry it over, or the
+            # rebuilt engine would put the labels back (#3209).
+            chunk_source_labels=comp.index_engine._chunk_source_labels,
         )
         # Storage-only since the scan stopped embedding; rebuilt with the rest
         # so a construction failure still rolls back before any publication.
@@ -2016,6 +2020,9 @@ async def mem_version(
                 "context_compose": {"schema_version": 4},
                 "candidate_propose": {"schema_version": 1},
                 "runtime_profile": {"schema_version": 1},
+                "hermes_mirror": {"schema_version": 1},
+                "search_deadline_ms": True,
+                "namespace_selectors": [NON_SYSTEM_NAMESPACES],
             },
             "runtime_profile": runtime_profile,
         },

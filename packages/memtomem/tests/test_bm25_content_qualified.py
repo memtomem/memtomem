@@ -1,12 +1,12 @@
 """A file's path retrieves it only when nothing's prose matches (#2224).
 
 ``chunks_fts`` is ``fts5(content, source_file)`` and an unqualified ``MATCH``
-searches both columns. ``source_file`` is stored raw, so unicode61 splits it
+searches both columns. ``source_file`` was stored raw, so unicode61 split it
 into components and every directory and filename word became a searchable term:
 on a real 6,995-chunk store, 71 of the top 100 hits for ``plans`` were chunks
 about something else, surfaced because they live under ``.claude/plans/``, and
 for auto-generated plan-filename words the path noise was the *entire* result
-set.
+set. Since #3208 the column holds only the file's name without its last suffix.
 
 **Why weighting the column 0.0 is not the fix.** It was the obvious one — the
 issue proposes it — and it is not enough: RRF fuses on a result's *ordinal
@@ -34,6 +34,8 @@ import sqlite3
 
 import pytest
 
+from memtomem.config import Mem2MemConfig
+from memtomem.runtime import close_components, create_components
 from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_backend import _column_match
 
@@ -151,6 +153,113 @@ class TestPipelineFusion:
         assert any("marine-biology" in s for s in surfaced), (
             "the genuine content match did not survive the pipeline"
         )
+
+
+class TestTheFallbackCanBeTurnedOff:
+    """``create_components(bm25_path_fallback=False)`` never matches a path (#3205).
+
+    For a component whose file names are its own bookkeeping: with the
+    fallback, a query that happens to equal one returns that row though its
+    content never says it.
+    """
+
+    @pytest.fixture
+    async def stack(self, tmp_path):
+        async def build(*, fallback: bool):
+            config = Mem2MemConfig.without_environment(
+                storage={"sqlite_path": tmp_path / f"fallback-{fallback}.db"},
+                indexing={"memory_dirs": [tmp_path / "memories"]},
+            )
+            comp = await create_components(
+                config, load_ambient_config=False, bm25_path_fallback=fallback
+            )
+            opened.append(comp)
+            return comp
+
+        opened: list = []
+        yield build
+        for comp in opened:
+            await close_components(comp)
+
+    @pytest.mark.asyncio
+    async def test_a_path_only_match_is_not_retrieved(self, stack):
+        comp = await stack(fallback=False)
+        assert comp.storage.bm25_path_fallback is False
+        path_only = _make_chunk("body text with no marker word", source="reports/octopus.md")
+        await comp.storage.upsert_chunks([path_only])
+
+        assert await comp.storage.bm25_search("octopus", top_k=5) == []
+        assert await comp.storage.bm25_search("octopus quokka", top_k=5) == []
+        results, _stats = await comp.search_pipeline.search("octopus", top_k=5, record=False)
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_content_matches_are_unaffected(self, stack):
+        comp = await stack(fallback=False)
+        content_hit = _make_chunk("a note about octopus habitats", source="reports/octopus.md")
+        await comp.storage.upsert_chunks([content_hit])
+
+        results = await comp.storage.bm25_search("octopus", top_k=5)
+
+        assert [r.chunk.id for r in results] == [content_hit.id]
+
+    @pytest.mark.asyncio
+    async def test_the_default_keeps_the_fallback(self, stack):
+        comp = await stack(fallback=True)
+        assert comp.storage.bm25_path_fallback is True
+        path_only = _make_chunk("body text with no marker word", source="reports/octopus.md")
+        await comp.storage.upsert_chunks([path_only])
+
+        results = await comp.storage.bm25_search("octopus", top_k=5)
+
+        assert [r.chunk.id for r in results] == [path_only.id]
+
+
+class TestOnlyTheFileNameIsAFallbackTerm:
+    """A word every chunk under a directory shares is not a fallback term (#3208).
+
+    The path column used to hold the whole path, so the memory dir's root words
+    and the extension were terms of every chunk under it: with no content
+    match, ``plane`` or ``md`` returned all of them, scored like real hits.
+    Subdirectory words below the root go the same way: they are shared by every
+    file in that subdirectory, which is the ``.claude/plans/`` noise #2224 was
+    about. Only the file's own name finds it.
+    """
+
+    @pytest.fixture
+    async def files(self, storage):
+        chunks = {
+            "a": _make_chunk("I like apples and pears.", source="plane-notes/a.md"),
+            "b": _make_chunk("The dog sleeps all day.", source="plane-notes/b.md"),
+            "octopus": _make_chunk("Nothing marked here.", source="plane-notes/octopus.md"),
+            "c": _make_chunk("The cat purrs.", source="plane-notes/projects/alpha/c.md"),
+        }
+        await storage.upsert_chunks(list(chunks.values()))
+        return chunks
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("query", ["plane", "notes", "plane-notes", "md", "tmp"])
+    async def test_a_word_every_chunk_shares_matches_nothing(self, storage, files, query):
+        results = await storage.bm25_search(query, top_k=10)
+        assert results == [], [str(r.chunk.metadata.source_file) for r in results]
+
+    @pytest.mark.asyncio
+    async def test_a_subdirectory_word_matches_nothing(self, storage, files):
+        """The narrowing is deliberate, so it is pinned rather than left implicit."""
+        assert await storage.bm25_search("alpha", top_k=10) == []
+
+    @pytest.mark.asyncio
+    async def test_the_file_name_still_finds_its_file(self, storage, files):
+        results = await storage.bm25_search("octopus", top_k=10)
+        assert [r.chunk.id for r in results] == [files["octopus"].id]
+
+    @pytest.mark.asyncio
+    async def test_through_the_pipeline(self, pipeline, storage, files):
+        """The issue's reproduction: fused results, not only the BM25 leg."""
+        for query, expected in (("plane", set()), ("notes", set()), ("apples", {"a"})):
+            results, _stats = await pipeline.search(query, top_k=5, record=False)
+            got = {r.chunk.id for r in results}
+            assert got == {files[k].id for k in expected}, (query, got)
 
 
 class TestTheColumnFilterCannotBeEscaped:

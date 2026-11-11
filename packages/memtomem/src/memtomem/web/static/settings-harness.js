@@ -621,7 +621,9 @@ async function promoteScratchEntry(key) {
       {},
     );
     if (resp === null) return;
-    showToast('Promoted to long-term memory', 'success');
+    // Set when the file became excluded while the entry was appended (#3165).
+    if (resp.warning) showToast(resp.warning, 'warning');
+    else showToast('Promoted to long-term memory', 'success');
     loadHarnessScratch();
   } catch (e) {
     showToast('Error: ' + e.message, 'error');

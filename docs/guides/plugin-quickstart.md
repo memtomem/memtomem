@@ -77,8 +77,8 @@ machine.
 Seeing an existing ONNX/E5 configuration is normal; this walkthrough does not change your model or database.
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.7' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.7.7' mm status
+uvx --from 'memtomem[onnx]==0.7.8' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem[onnx]==0.7.8' mm status
 ```
 
 `--mcp skip` leaves other clients' settings alone, because the plugin in the
@@ -102,7 +102,7 @@ Open the terminal in **the root of the project you are onboarding**, and run
 this diagnostic from the same folder:
 
 ```bash
-uvx --from "memtomem[all]==0.7.7" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.7.8" mm doctor --claude-mcp
 ```
 
 The plugin does not put `mm` on your PATH, so use the pinned command above.
@@ -176,7 +176,7 @@ You are connected when you see a real MCP tool call and the storage and
 database path match the ones you saw earlier. An install message, a list of
 tool names, or an internal error is not success. If there is an error, check
 the plugin's actual launch command and dependencies; the default server pin is
-`memtomem[onnx]==0.7.7`. Confirming the plugin is enabled and successfully
+`memtomem[onnx]==0.7.8`. Confirming the plugin is enabled and successfully
 reading data are separate steps.
 
 If you use Codex CLI, skip this section and follow Path B only.
@@ -283,7 +283,7 @@ specific test before every PR", needs its own store. Initialize it at the root
 of the actual Git repository:
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.7' mm mem init --scope project_local
+uvx --from 'memtomem[onnx]==0.7.8' mm mem init --scope project_local
 ```
 
 This creates and registers a local memory tier that is not committed to Git.

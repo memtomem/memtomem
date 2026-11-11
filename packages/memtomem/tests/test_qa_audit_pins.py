@@ -31,8 +31,9 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -49,6 +50,7 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent / "src" / "memtomem" / "web
 def prod_app():
     application = create_app(lifespan=None, mode="prod")
     application.state.storage = AsyncMock()
+    application.state.storage.transaction = MagicMock(side_effect=lambda **_: nullcontext())
     application.state.config = None
     application.state.search_pipeline = None
     application.state.index_engine = None
@@ -62,6 +64,7 @@ def prod_app():
 def dev_app():
     application = create_app(lifespan=None, mode="dev")
     application.state.storage = AsyncMock()
+    application.state.storage.transaction = MagicMock(side_effect=lambda **_: nullcontext())
     application.state.config = None
     application.state.search_pipeline = None
     application.state.index_engine = None
@@ -438,7 +441,9 @@ class TestEmbeddingResetBm25Fallback:
 
         dense_try_nodes: list[ast.Try] = []
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Try):
+            # A ``try/finally`` with no handler is the BM25 task's settlement around
+            # both legs, not a fallback: only a Try that catches counts here.
+            if not isinstance(node, ast.Try) or not node.handlers:
                 continue
             for stmt in node.body:
                 for inner in ast.walk(stmt):
@@ -466,7 +471,13 @@ class TestEmbeddingResetBm25Fallback:
             "any dense_search exception (incl. embedding-reset race) will "
             "now propagate as HTTP 5xx instead of degrading to BM25-only"
         )
-        handler = try_node.handlers[0]
+        # A leading ``except SearchDeadlineExceeded: raise`` lets a budget expiry
+        # through; the fallback is the handler after it.
+        handlers = list(try_node.handlers)
+        if handlers and ast.unparse(handlers[0].type or ast.Name("")) == "SearchDeadlineExceeded":
+            assert [ast.unparse(s) for s in handlers[0].body] == ["raise"]
+            handlers = handlers[1:]
+        handler = handlers[0]
         caught = "BaseException" if handler.type is None else ast.unparse(handler.type)
         assert caught in ("Exception", "BaseException"), (
             f"SearchPipeline.search dense leg narrowed its handler from "

@@ -1,5 +1,5 @@
 [core]
-version = "0.7.7"
+version = "0.7.8"
 tool_mode = "core"
 mcp_extras = ["onnx"]
 # Registered tools the bundled server configs expose on top of tool_mode, through
@@ -8,15 +8,16 @@ mcp_extras = ["onnx"]
 extra_tools = ["mem_update_coverage"]
 
 [plugins]
-claude_version = "0.5.34"
-codex_version = "0.3.32"
-automation_version = "0.3.21"
-opencode_version = "0.3.30"
+claude_version = "0.5.35"
+codex_version = "0.3.33"
+automation_version = "0.3.22"
+opencode_version = "0.3.31"
 kimi_version = "0.2.25"
-hermes_version = "0.1.19"
-hermes_memory_version = "0.1.2"
-antigravity_version = "0.2.11"
+hermes_version = "0.1.20"
+hermes_memory_version = "0.2.0"
+antigravity_version = "0.2.12"
 cursor_version = "0.1.0"
+openclaw_version = "0.1.0"
 
 [opencode]
 package = "opencode-memtomem"
@@ -31,6 +32,9 @@ python = "3.12"
 # carries `record=False` without an exhaustive scan). The memory provider refuses anything
 # older at run time; its README names this release.
 memory_min_memtomem = "0.6.8"
+# Oldest Hermes Agent the memory provider supports (v2026.9.24): rendered into its plugin.yaml
+# as `requires_hermes`, which the catalog entry repeats (catalog rule 14).
+memory_requires_hermes = ">=0.21.5"
 
 [[workflows]]
 id = "search"

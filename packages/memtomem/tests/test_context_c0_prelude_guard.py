@@ -765,6 +765,11 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "",
         "Memory file (L2).",
     ),
+    ("server/tools/hermes_mirror.py", "mem_hermes_mirror_apply", 0, "async_file_lock"): (
+        MEMORY_L2,
+        "",
+        "Memory file (L2): the derived Hermes mirror file, rewritten and re-indexed under it.",
+    ),
     ("tools/memory_mutation.py", "locked_source_chunk", 0, "async_memory_file_lock"): (
         MEMORY_L2,
         "",

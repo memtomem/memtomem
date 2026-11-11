@@ -207,8 +207,13 @@ class StorageBackend(Protocol):
     # window) for hash-matched chunks without touching content, vectors or
     # timestamps (#2124, #2140).
     async def update_chunk_metadata(self, chunks: Sequence[Chunk]) -> int: ...
+    # ``read_writer=True`` reads the writer connection once no other task owns
+    # it (FIFO wait of at most ``WRITER_WAIT_S``, then ``TransactionOwnedError``);
+    # a task that owns ``transaction()`` reads its own uncommitted state. For a
+    # read that decides a write it guards: a pool connection can still serve a
+    # snapshot from before a commit (#3202).
     async def get_chunk(
-        self, chunk_id: UUID, *, exclude_withheld: bool = False
+        self, chunk_id: UUID, *, exclude_withheld: bool = False, read_writer: bool = False
     ) -> Chunk | None: ...
     async def get_chunks_batch(
         self, chunk_ids: Sequence[UUID], *, exclude_withheld: bool = False
@@ -245,7 +250,9 @@ class StorageBackend(Protocol):
     async def is_source_pending(self, source_file: Path) -> bool: ...
     async def source_visibility_epoch(self) -> int: ...
     async def source_hold_generation(self, source_file: Path) -> int: ...
-    async def source_hold_snapshot(self, source_file: Path) -> int | None: ...
+    async def source_hold_snapshot(
+        self, source_file: Path, *, as_stored: bool = False
+    ) -> int | None: ...
     def queue_source_check_sync(self, source_file: Path) -> bool: ...
     async def get_pending_source_checks(self) -> list[Path]: ...
     # The stored key a caller's path string names, matched as a string (#2835).
@@ -284,6 +291,8 @@ class StorageBackend(Protocol):
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
         source_filter: str | None = None,
+        *,
+        deadline: float | None = None,
     ) -> list[SearchResult]: ...
     async def dense_search(
         self,
@@ -297,6 +306,7 @@ class StorageBackend(Protocol):
         *,
         exhaustive: bool = False,
         escalate: bool = True,
+        deadline: float | None = None,
     ) -> list[SearchResult]: ...
 
     # Metadata
@@ -375,6 +385,7 @@ class StorageBackend(Protocol):
         project_context_root: Path | None,
         as_of_unix: int | None,
         hide_unavailable: bool,
+        deadline: float | None = None,
     ) -> dict[UUID, ContextWindowRows | None]: ...
     # ``recall_chunks``'s ``chunk_ids`` restricts the recall to an explicit id
     # set while keeping every other filter this method applies — notably the

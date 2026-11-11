@@ -164,6 +164,8 @@ async def create_components(
     *,
     load_ambient_config: bool = True,
     entity_backfill: bool = True,
+    bm25_path_fallback: bool = True,
+    chunk_source_labels: bool = True,
 ) -> Components:
     """Create and initialise all core components.
 
@@ -175,6 +177,21 @@ async def create_components(
     ``entity_backfill=False`` skips the one-time #2133 entity backfill — for
     callers standing up transient stacks over stores they must not mutate
     (Quality Lab replays). Every durable entry point keeps the default.
+
+    ``bm25_path_fallback=False`` stops BM25 from matching a query against
+    chunk file names once nothing matches on content (#2224's filename lookup).
+    It is for callers whose file names are their own bookkeeping rather than
+    names a user types, such as langchain-memtomem's store, which names each
+    file by an encoded key. Such a name can still spell a word (key ``V``
+    encodes to ``sky``), and the fallback would return that row for it (#3205).
+
+    ``chunk_source_labels=False`` leaves the ``File: <name>`` and
+    ``Fragment <i>/<n>`` lines out of the descriptions bounded chunking writes
+    (on whenever ``indexing.hard_max_chunk_tokens`` is set, as E5 sets it).
+    Those descriptions are embedded and BM25-indexed as content, so the lines
+    make each source's file name searchable, which ``bm25_path_fallback``
+    does not reach. It is for the same callers: in langchain-memtomem's store
+    every row would match ``md`` and its item's encoded key (#3209).
     """
     from memtomem.config import load_config_d, load_config_overrides
 
@@ -202,7 +219,7 @@ async def create_components(
     apply_e5_defaults(config)
     await asyncio.to_thread(validate_budget_configuration, config)
 
-    storage = create_storage(config)
+    storage = create_storage(config, bm25_path_fallback=bm25_path_fallback)
     embedder: EmbeddingProvider | None = None
     embedding_broken: dict | None = None
     reranker: object | None = None
@@ -247,6 +264,7 @@ async def create_components(
             strict_dim_check=False,
             chunk_budget_config=config.indexing,
             fts_tokenizer=config.search.tokenizer,
+            bm25_path_fallback=bm25_path_fallback,
         )
         try:
             await storage.initialize()
@@ -312,6 +330,7 @@ async def create_components(
             progress_threshold=config.embedding.progress_threshold,
             llm=llm,
             generation=generation,
+            chunk_source_labels=chunk_source_labels,
         )
 
         search_pipeline = create_search_pipeline(

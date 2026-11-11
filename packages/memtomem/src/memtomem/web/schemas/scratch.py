@@ -61,3 +61,5 @@ class ScratchPromoteResponse(BaseModel):
     promoted: bool
     file: str | None = None
     indexed_chunks: int = 0
+    # Set when the file became excluded while the entry was appended (#3165).
+    warning: str | None = None

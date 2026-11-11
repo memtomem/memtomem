@@ -31,11 +31,12 @@ from langgraph.store.base import (
     SearchOp,
 )
 from memtomem import privacy
-from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+from memtomem.config import Mem2MemConfig, SearchConfig, load_config_d, load_config_overrides
 from memtomem.indexing.privacy_gate import PrivacyRejection
 from memtomem.integrations.langgraph import resolve_target_scope
 from memtomem.integrations.langgraph_store import matches_filter, render_projection
 from memtomem.models import IndexingStats, SearchResult
+from memtomem.search.pipeline import RetrievalStats
 from memtomem.runtime import Components, close_components, create_components
 from memtomem.runtime.files import (
     CRUD_SIDECAR_LOCK_BUDGET_S,
@@ -73,6 +74,11 @@ MIN_INITIAL_WINDOW = 20
 #: the item. Short on purpose: a writer holding the lock is mid-mutation.
 SEARCH_REPAIR_LOCK_S = 0.25
 
+#: ``retrieval`` defaults, the same as ``MemtomemHybridStore``'s.
+DEFAULT_RETRIEVAL: dict[str, Any] = {"mode": "hybrid", "weights": [1.0, 1.0], "rrf_k": 60}
+#: ``config["search"]`` keys that ``retrieval`` sets; giving both is refused.
+_RETRIEVAL_SEARCH_KEYS = ("enable_bm25", "enable_dense", "rrf_weights", "rrf_k")
+
 #: Surfaces this store reports to the redaction audit log.
 _SURFACE_PUT = "langchain_memtomem_put"
 _SURFACE_REPAIR = "langchain_memtomem_repair"
@@ -80,6 +86,16 @@ _SURFACE_REPAIR = "langchain_memtomem_repair"
 
 class StoreIndexError(RuntimeError):
     """The index step of a ``put`` did not take; the record was written."""
+
+
+class DenseSearchUnavailable(RuntimeError):
+    """A ``dense``-mode query search could not run its dense leg.
+
+    The query embedding or the vector lookup failed, or the stored embeddings
+    were written under another embedding model or policy than the store's. A
+    ``hybrid`` store ranks by BM25 alone in the same state; a ``dense`` one has
+    nothing left to rank by, and an empty result would read as "no matches".
+    """
 
 
 class Steps:
@@ -139,6 +155,44 @@ def _parse_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
+def _validate_retrieval(retrieval: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the caller's ``retrieval`` merged over the defaults, or ``None``.
+
+    ``weights`` and ``rrf_k`` are checked by ``SearchConfig``'s own validators,
+    in every mode, so this store refuses exactly what the pipeline config would.
+    """
+    if retrieval is None:
+        return None
+    if not isinstance(retrieval, dict):
+        raise TypeError("retrieval must be a dict")
+    unknown = sorted(set(retrieval) - set(DEFAULT_RETRIEVAL))
+    if unknown:
+        raise ValueError(f"Unknown retrieval keys: {', '.join(map(str, unknown))}")
+    merged = {**DEFAULT_RETRIEVAL, **retrieval}
+    if merged["mode"] not in ("hybrid", "bm25", "dense"):
+        raise ValueError("Unknown retrieval mode")
+    checked = SearchConfig(rrf_weights=merged["weights"], rrf_k=merged["rrf_k"])
+    # The validated copies, not the caller's objects: a list the caller keeps
+    # and changes later must not change this store.
+    return {"mode": merged["mode"], "weights": list(checked.rrf_weights), "rrf_k": checked.rrf_k}
+
+
+def _retrieval_search_settings(retrieval: dict[str, Any]) -> dict[str, Any]:
+    """The ``search`` settings a validated ``retrieval`` stands for.
+
+    A single-leg mode turns the other leg off and keeps neutral weights: the
+    caller's weights apply to ``hybrid`` only, and a zero weight on the one
+    selected leg would otherwise switch it off too.
+    """
+    mode = retrieval["mode"]
+    return {
+        "enable_bm25": mode != "dense",
+        "enable_dense": mode != "bm25",
+        "rrf_weights": list(retrieval["weights"]) if mode == "hybrid" else [1.0, 1.0],
+        "rrf_k": retrieval["rrf_k"],
+    }
+
+
 class MemtomemPipelineStore(BaseStore):
     """LangGraph ``BaseStore`` over JSON records, ranked by the memtomem pipeline.
 
@@ -152,6 +206,16 @@ class MemtomemPipelineStore(BaseStore):
     ``MEMTOMEM_*`` variables reaches these components. The project registry is
     read from them, once, to find which tier ``root`` is in.
 
+    ``retrieval`` chooses the legs a query search runs, in
+    ``MemtomemHybridStore``'s vocabulary: ``{"mode": "hybrid" | "bm25" |
+    "dense", "weights": [bm25, dense], "rrf_k": 60}``. ``weights`` apply to
+    ``hybrid`` only and are validated in every mode. ``dense`` needs an
+    embedder: it is refused at open without one, and a query whose dense leg
+    cannot run raises :class:`DenseSearchUnavailable`. ``hybrid`` ranks by
+    BM25 alone in both cases. Omitted, the store runs ``config["search"]`` as
+    given. The choice is not persisted; a store reopened without it runs the
+    default.
+
     TTLs are not supported: ``supports_ttl`` is ``False``, so LangGraph
     refuses an explicit ``ttl=`` with ``NotImplementedError``.
     """
@@ -161,6 +225,7 @@ class MemtomemPipelineStore(BaseStore):
         root: str | Path,
         *,
         config: dict[str, Any] | None = None,
+        retrieval: dict[str, Any] | None = None,
         max_chunks_per_search: int = DEFAULT_MAX_CHUNKS_PER_SEARCH,
         confirm_project_shared: bool = False,
         force_unsafe: bool = False,
@@ -178,6 +243,7 @@ class MemtomemPipelineStore(BaseStore):
         self.force_unsafe = force_unsafe
         self.scope: str = "user"
         self._config = copy.deepcopy(config or {})
+        self._retrieval = _validate_retrieval(retrieval)
         self._confirm_project_shared = confirm_project_shared
         self._comp: Components | None = None
         self._records: RecordStore | None = None
@@ -208,6 +274,22 @@ class MemtomemPipelineStore(BaseStore):
                 f"{self.root} is inside a registered project_shared tier; writes there are "
                 "git-tracked, so opening it requires confirm_project_shared=True"
             )
+        config = Mem2MemConfig.without_environment(**self._config_sections(registry))
+        if self._retrieval is not None and self._retrieval["mode"] == "dense":
+            # Every provider's embedder reports ``embedding.dimension`` as built
+            # here (an E5 profile fills it during validation), so this refuses
+            # before anything is written. With 0 the index would have no vector
+            # table and every query would return nothing.
+            if config.embedding.provider.lower() == "none":
+                raise ValueError(
+                    "dense mode requires embeddings: pass an embedding section, e.g. "
+                    'config={"embedding": {"provider": "onnx", "model": "multilingual-e5-small"}}'
+                )
+            if config.embedding.dimension <= 0:
+                raise ValueError(
+                    "dense mode requires embeddings: the configured embedder has no "
+                    "vector dimension; set embedding.dimension"
+                )
         self.scope = tier
         for directory in (self.records_dir, self.projections_dir):
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -219,8 +301,18 @@ class MemtomemPipelineStore(BaseStore):
                 mechanism="param",
                 action="init",
             )
-        config = Mem2MemConfig.without_environment(**self._config_sections(registry))
-        comp = await create_components(config, load_ambient_config=False)
+        # BM25's path fallback matches a projection's file name, which is the
+        # item's encoded key. No caller types that, but it can spell a word
+        # (key ``V`` encodes to ``sky``), and the fallback returned the item
+        # for it though its value never says it (#3205).
+        # The file name also reached content: bounded chunking (on under E5)
+        # wrote ``File: <encoded key>.md`` into each row's indexed description (#3209).
+        comp = await create_components(
+            config,
+            load_ambient_config=False,
+            bm25_path_fallback=False,
+            chunk_source_labels=False,
+        )
         try:
             self._records = RecordStore(
                 self.records_dir, scope=tier, force_unsafe=self.force_unsafe
@@ -240,6 +332,14 @@ class MemtomemPipelineStore(BaseStore):
             if owned in overrides:
                 raise ValueError(f"config[{owned!r}] belongs to the store; choose root= instead")
         search = dict(overrides.pop("search", None) or {})
+        if self._retrieval is not None:
+            given = [key for key in _RETRIEVAL_SEARCH_KEYS if key in search]
+            if given:
+                raise ValueError(
+                    f"config['search'] sets {', '.join(given)} and retrieval= is given; "
+                    "choose the retrieval legs in one place"
+                )
+            search.update(_retrieval_search_settings(self._retrieval))
         search["system_namespace_prefixes"] = []
         return {
             **overrides,
@@ -687,16 +787,30 @@ class MemtomemPipelineStore(BaseStore):
         Items still disagreeing on the second pass are skipped.
         """
         comp, _ = self._require_open()
-        results, _ = await comp.search_pipeline.search(
+        results, stats = await comp.search_pipeline.search(
             query, top_k=top_k, namespace=pattern, scope=self.scope
         )
+        self._require_dense_leg(stats)
         served, repaired = await self._judge_hits(results, prefix, filters, need, repair=True)
         if repaired:
-            results, _ = await comp.search_pipeline.search(
+            results, stats = await comp.search_pipeline.search(
                 query, top_k=top_k, namespace=pattern, scope=self.scope, record=False
             )
+            self._require_dense_leg(stats)
             served, _ = await self._judge_hits(results, prefix, filters, need, repair=False)
         return served
+
+    def _require_dense_leg(self, stats: RetrievalStats) -> None:
+        """In ``dense`` mode, refuse a pipeline pass whose dense leg did not run."""
+        if self._retrieval is None or self._retrieval["mode"] != "dense":
+            return
+        if stats.dense_suppressed_mismatch:
+            raise DenseSearchUnavailable(
+                "the index's stored embeddings were written under another embedding model "
+                "or policy than this store's; reopen with the embedding config that built it"
+            )
+        if stats.dense_error is not None:
+            raise DenseSearchUnavailable(f"the dense search failed: {stats.dense_error}")
 
     def _group(
         self, results: list[SearchResult], prefix: tuple[str, ...]

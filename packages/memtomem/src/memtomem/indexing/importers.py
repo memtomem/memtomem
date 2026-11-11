@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import functools
 import hashlib
 import logging
 import os
@@ -11,15 +14,19 @@ import zipfile
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any, TypeVar
 
 import yaml
 
 from memtomem.chunking.markdown import _FRONT_MATTER_RE
+from memtomem.context._abandon import abandon_sync_on_exit, sync_is_abandoned
 from memtomem.context._atomic import atomic_write_text
 from memtomem.privacy import enforce_write_guard
 from memtomem.source_provenance import WriteTargetGuard, refuse_replace_target
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 # ── Safe ZIP extraction ──────────────────────────────────────────────────
@@ -167,7 +174,134 @@ def _unsafe_source(source_root: Path, resolved_root: Path, path: Path, rel: Path
     return False
 
 
+async def _run_off_loop(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
+    """Run an importer body on a worker thread, and never outlive it (#3124).
+
+    The bodies read archives, walk directories and fsync files; on the loop
+    they stall every other request the server is serving. A thread cannot be
+    cancelled, so a cancel here signals the worker through
+    :func:`abandon_sync_on_exit`, waits for it to stop at its next between-files
+    checkpoint, and only then propagates. Returning while the worker still
+    wrote would let a retried import race the abandoned one on the same files,
+    and let the worker resolve paths after its caller's environment is gone.
+
+    The worker is an executor future, not a Task, as in
+    ``SqliteBackend._run_read_in_thread``: ``asyncio.run`` cancels every Task
+    when it shuts down, and a cancelled Task wrapping the thread reports done
+    while the thread is still running, which would end the drain early.
+    """
+    loop = asyncio.get_running_loop()
+    with abandon_sync_on_exit() as abandoned:
+        # Copied inside the ``with`` so the worker sees the abandon event, and
+        # carries the caller's other context variables as ``to_thread`` would.
+        ctx = contextvars.copy_context()
+        worker = loop.run_in_executor(None, functools.partial(ctx.run, fn, *args, **kwargs))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # Set now, not in the context manager's ``finally``: that runs after
+            # the drain below, by which time the worker has done everything.
+            abandoned.set()
+            while not worker.done():
+                try:
+                    await asyncio.wait({worker})
+                except asyncio.CancelledError:
+                    continue
+            if not worker.cancelled():
+                worker.exception()  # retrieved; the cancel is what propagates
+            raise
+
+
+def _abandoned(imported: list[Path], label: str) -> list[Path]:
+    logger.info("%s import abandoned by its caller after %d file(s)", label, len(imported))
+    return imported
+
+
+def _frozen_guard(index_guard: WriteTargetGuard | None) -> WriteTargetGuard | None:
+    """The engine's guard answers frozen on the loop thread, before the hand-off.
+
+    The live engine predicates read whatever config is installed at each call,
+    and a concurrent tool call installs new roots between the worker's reads.
+    Any other guard is passed through as given.
+    """
+    from memtomem.indexing.engine import IndexEngine
+
+    if isinstance(index_guard, IndexEngine):
+        return index_guard.write_target_snapshot()
+    return index_guard
+
+
 async def import_notion(
+    export_path: Path,
+    output_dir: Path,
+    *,
+    force_unsafe: bool = False,
+    scope: str = "user",
+    blocked_paths: list[str] | None = None,
+    index_guard: WriteTargetGuard | None = None,
+    excluded_paths: list[str] | None = None,
+    symlink_paths: list[str] | None = None,
+    read_only_paths: list[str] | None = None,
+    source_symlink_paths: list[str] | None = None,
+    written_text: dict[Path, str] | None = None,
+) -> list[Path]:
+    """Import a Notion export on a worker thread; see :func:`_import_notion_sync`.
+
+    ``index_guard`` is frozen here, on the loop, so every target is judged
+    against the configuration installed when the import started.
+    """
+    return await _run_off_loop(
+        _import_notion_sync,
+        export_path,
+        output_dir,
+        force_unsafe=force_unsafe,
+        scope=scope,
+        blocked_paths=blocked_paths,
+        index_guard=_frozen_guard(index_guard),
+        excluded_paths=excluded_paths,
+        symlink_paths=symlink_paths,
+        read_only_paths=read_only_paths,
+        source_symlink_paths=source_symlink_paths,
+        written_text=written_text,
+    )
+
+
+async def import_obsidian(
+    vault_path: Path,
+    output_dir: Path,
+    *,
+    force_unsafe: bool = False,
+    scope: str = "user",
+    blocked_paths: list[str] | None = None,
+    index_guard: WriteTargetGuard | None = None,
+    excluded_paths: list[str] | None = None,
+    symlink_paths: list[str] | None = None,
+    read_only_paths: list[str] | None = None,
+    source_symlink_paths: list[str] | None = None,
+    written_text: dict[Path, str] | None = None,
+) -> list[Path]:
+    """Import an Obsidian vault on a worker thread; see :func:`_import_obsidian_sync`.
+
+    ``index_guard`` is frozen here, on the loop, so every target is judged
+    against the configuration installed when the import started.
+    """
+    return await _run_off_loop(
+        _import_obsidian_sync,
+        vault_path,
+        output_dir,
+        force_unsafe=force_unsafe,
+        scope=scope,
+        blocked_paths=blocked_paths,
+        index_guard=_frozen_guard(index_guard),
+        excluded_paths=excluded_paths,
+        symlink_paths=symlink_paths,
+        read_only_paths=read_only_paths,
+        source_symlink_paths=source_symlink_paths,
+        written_text=written_text,
+    )
+
+
+def _import_notion_sync(
     export_path: Path,
     output_dir: Path,
     *,
@@ -199,7 +333,8 @@ async def import_notion(
             resolve outside the export root.
 
     Returns:
-        List of imported file paths.
+        List of imported file paths. A run abandoned by its async caller
+        stops between files and returns the files written so far.
     """
     imported: list[Path] = []
     sources: list[tuple[Path, str, str]] = []
@@ -231,6 +366,8 @@ async def import_notion(
             ):
                 raise UnsafeArchiveError("archive compression ratio exceeds cap")
             for info in infos:
+                if sync_is_abandoned():
+                    return _abandoned(imported, "Notion")
                 if info.file_size > _ZIP_MAX_MEMBER_BYTES:
                     raise UnsafeArchiveError(f"member {info.filename!r} exceeds size cap")
                 raw = zf.open(info).read(_ZIP_MAX_MEMBER_BYTES + 1)
@@ -244,6 +381,8 @@ async def import_notion(
     else:
         export_root = export_path.resolve()
         for p in sorted(export_path.rglob("*.md")):
+            if sync_is_abandoned():
+                return _abandoned(imported, "Notion")
             rel = p.relative_to(export_path)
             if _unsafe_source(export_path, export_root, p, rel):
                 if source_symlink_paths is not None:
@@ -251,12 +390,19 @@ async def import_notion(
                 continue
             sources.append((rel, p.name, p.read_text(encoding="utf-8", errors="replace")))
 
+    # A cancel that lands during the last read must not go on to map and write.
+    if sync_is_abandoned():
+        return _abandoned(imported, "Notion")
+
     # Pass 1: group by folded (rel.parent, clean_stem) and build the output
     # mapping; raises before anything is written if two pages would share a file.
     mapping = _build_notion_output_mapping(sources)
 
     # Pass 2: Write files under the mapped name
     for rel, original_name, content in sources:
+        # Between files only: a write and the bookkeeping after it are one unit.
+        if sync_is_abandoned():
+            return _abandoned(imported, "Notion")
         canonical_parent = Path(os.path.normpath(rel.parent))
         output_name = mapping[(canonical_parent, original_name)]
 
@@ -294,7 +440,7 @@ async def import_notion(
     return imported
 
 
-async def import_obsidian(
+def _import_obsidian_sync(
     vault_path: Path,
     output_dir: Path,
     *,
@@ -329,12 +475,16 @@ async def import_obsidian(
             resolve outside the export root.
 
     Returns:
-        List of imported file paths.
+        List of imported file paths. A run abandoned by its async caller
+        stops between files and returns the files written so far.
     """
     imported: list[Path] = []
     vault_root = vault_path.resolve()
 
     for md_file in sorted(vault_path.rglob("*.md")):
+        # Between files only: a write and the bookkeeping after it are one unit.
+        if sync_is_abandoned():
+            return _abandoned(imported, "Obsidian")
         # Skip Obsidian config files
         rel = md_file.relative_to(vault_path)
         if str(rel).startswith(".obsidian"):
@@ -349,6 +499,9 @@ async def import_obsidian(
         # Convert Obsidian syntax
         content = _convert_obsidian_syntax(content)
 
+        # Before the guard and write, so a cancel during this file's read writes nothing.
+        if sync_is_abandoned():
+            return _abandoned(imported, "Obsidian")
         target = output_dir / rel
         final = _with_import_header(content, "obsidian", str(rel))
         guard = enforce_write_guard(
@@ -509,7 +662,7 @@ def _with_import_header(content: str, source: str, original_file: str) -> str:
 
 # ── Notion helpers ───────────────────────────────────────────────────────
 
-_UUID_RE = re.compile(r"\s+([0-9a-f]{32})$", re.IGNORECASE)
+_UUID_RE = re.compile(r"\s+([0-9a-f]{32})$")
 
 
 def _split_notion_uuid(stem: str) -> tuple[str, str | None]:
@@ -520,7 +673,7 @@ def _split_notion_uuid(stem: str) -> tuple[str, str | None]:
     clean = stem[: m.start()]
     if not clean:
         return stem, None
-    return clean, m.group(1).lower()
+    return clean, m.group(1)
 
 
 def _clean_notion_filename(stem: str) -> str:

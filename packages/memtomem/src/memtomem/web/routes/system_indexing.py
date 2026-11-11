@@ -15,8 +15,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from memtomem.constants import InvalidNameError, writable_namespace_arg
-from memtomem.errors import NamespaceResolutionError
+from memtomem.errors import NamespaceResolutionError, TransactionOwnedError
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.source_provenance import (
+    EXCLUDED_AFTER_APPEND_NOTICE,
     EXCLUDED_TARGET_DETAIL,
     READ_ONLY_TARGET_DETAIL,
     ExcludedSourceError,
@@ -993,12 +995,16 @@ async def add_memory(
             # flagged or masked in it.
             from memtomem.indexing.engine import PrivacyRejection
             from memtomem.tools.memory_mutation import appended_valve_text
-            from memtomem.tools.memory_writer import read_pre_image_or_empty
+            from memtomem.tools.memory_writer import read_pre_image_or_empty, read_with_source_key
             from memtomem.web.routes import system as _sys
 
             needs_valve = guard.decision == "bypassed"
-            pre = await _asyncio.to_thread(read_pre_image_or_empty, target)
-            preflight = await _asyncio.to_thread(index_engine.preflight_mutation, target, pre)
+            pre, source_key = await _asyncio.to_thread(
+                read_with_source_key, read_pre_image_or_empty, target
+            )
+            preflight = await _asyncio.to_thread(
+                index_engine.preflight_mutation, target, pre, source_key=source_key
+            )
             if preflight.rejection is not None:
                 rejection = await index_engine.refuse_mutation(target, preflight)
                 search_pipeline.invalidate_cache()
@@ -1041,25 +1047,55 @@ async def add_memory(
             # Apply tags only to newly appended chunks (so existing entries in
             # the same file are not polluted with the new entry's tags).
             if tags and stats.indexed_chunks > 0:
-                chunks = await storage.list_chunks_by_source(target, limit=None)
-                updated = []
-                for c in chunks:
-                    if c.metadata.start_line is not None and c.metadata.start_line <= pre_lines:
-                        continue
-                    merged = set(c.metadata.tags) | set(tags)
-                    if merged != set(c.metadata.tags):
-                        c.metadata = c.metadata.__class__(
-                            **{
+
+                def untagged(chunks: list) -> list:
+                    """The new entry's chunks still missing a requested tag, with it merged."""
+                    out = []
+                    for c in chunks:
+                        if c.metadata.start_line is not None and c.metadata.start_line <= pre_lines:
+                            continue
+                        merged = set(c.metadata.tags) | set(tags)
+                        if merged != set(c.metadata.tags):
+                            c.metadata = c.metadata.__class__(
                                 **{
-                                    f: getattr(c.metadata, f)
-                                    for f in c.metadata.__dataclass_fields__
-                                },
-                                "tags": tuple(sorted(merged)),
-                            }
-                        )
-                        updated.append(c)
+                                    **{
+                                        f: getattr(c.metadata, f)
+                                        for f in c.metadata.__dataclass_fields__
+                                    },
+                                    "tags": tuple(sorted(merged)),
+                                }
+                            )
+                            out.append(c)
+                    return out
+
+                # The entry carries its tags, so the index usually stored them
+                # already and nothing needs the writer. Otherwise read, merge and
+                # write again in one transaction that waits for another task's
+                # (#3181): ``upsert_chunks`` rewrites whole rows, so rows read
+                # before a wait would overwrite what that task committed to them.
+                updated = untagged(await storage.list_chunks_by_source(target, limit=None))
                 if updated:
-                    await storage.upsert_chunks(updated)
+                    try:
+                        async with storage.transaction(wait=WRITER_WAIT_S):
+                            updated = untagged(
+                                await storage.list_chunks_by_source(target, limit=None)
+                            )
+                            if updated:
+                                await storage.upsert_chunks(updated)
+                    except TransactionOwnedError as exc:
+                        # The add is durable and indexed; only its tags are
+                        # missing. Adding it again would append a second copy
+                        # (#2731).
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                f"The entry was added to {target.name} and indexed, but its "
+                                "tags were not applied: another write held the database longer "
+                                "than this request waits. Edit the new entry's tags instead of "
+                                "adding it again."
+                            ),
+                        ) from exc
+                if updated:
                     # Written outside the engine, so it carries no ``mutated``
                     # flag of its own — and it rewrites exactly the tag column
                     # search filters on (#2141).
@@ -1069,4 +1105,9 @@ async def add_memory(
             status_code=503, detail="Memory file is locked by another writer; try again."
         ) from exc
 
-    return AddMemoryResponse(file=str(target), indexed_chunks=stats.indexed_chunks)
+    return AddMemoryResponse(
+        file=str(target),
+        indexed_chunks=stats.indexed_chunks,
+        # The file became excluded while the entry was appended (#3165).
+        warning=EXCLUDED_AFTER_APPEND_NOTICE if stats.excluded_files else None,
+    )

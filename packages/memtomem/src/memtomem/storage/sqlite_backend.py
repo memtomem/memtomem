@@ -13,6 +13,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from collections import deque
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
@@ -27,11 +28,13 @@ from memtomem.errors import (
     EmbeddingDimensionMismatchError,
     EmbeddingPolicyChangedError,
     SchemaDowngradeError,
+    SearchDeadlineExceeded,
     StorageError,
     StorageStartupError,
     TransactionOwnedError,
 )
 from memtomem.storage.base import (
+    WRITER_WAIT_S,
     ChunkKeyRow,
     NamespaceAssignResult,
     NamespaceChunkCandidate,
@@ -49,6 +52,7 @@ from memtomem.models import (
 from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_helpers import (
     deserialize_f32,
+    fts_source_text,
     match_source_filter_value,
     namespace_sql,
     norm_path,
@@ -94,6 +98,7 @@ from memtomem.storage.mixins import (
     EntityMixin,
     EvalCaseMixin,
     FormationMixin,
+    HermesMirrorMixin,
     HistoryMixin,
     IdempotencyMixin,
     MaintenanceRunMixin,
@@ -272,6 +277,7 @@ class SqliteBackend(
     FormationMixin,
     MaintenanceRunMixin,
     UpdateCoverageMixin,
+    HermesMirrorMixin,
 ):
     def __init__(
         self,
@@ -286,6 +292,7 @@ class SqliteBackend(
         adopt_unpopulated_embedding_stamp: bool = False,
         chunk_budget_config: "IndexingConfig | None" = None,
         fts_tokenizer: str = "unicode61",
+        bm25_path_fallback: bool = True,
     ) -> None:
         self._config = config
         # This backend's FTS tokenizer, from ``search.tokenizer``. Index-time
@@ -293,6 +300,11 @@ class SqliteBackend(
         # backend that indexes a database is the one that queries it, so the
         # choice lives here rather than in a process global (#3018).
         self._fts_tokenizer = _fts.validate_tokenizer(fts_tokenizer)
+        # Whether ``bm25_search`` falls back to the ``source_file`` column when
+        # no chunk's content matches (#2224). Off for a store whose file names
+        # are its own bookkeeping, which can still spell a word a caller types
+        # (#3205).
+        self._bm25_path_fallback = bm25_path_fallback
         self._chunk_budget_config = chunk_budget_config
         self._dimension = dimension
         self._chunk_column_positions: dict[str, int] = {}
@@ -446,6 +458,7 @@ class SqliteBackend(
                 lambda: self._in_transaction,
                 self._get_read_db,
                 lease_read_db=self._lease_read_db,
+                get_db_after_wait=lambda: self._get_db_after_wait(wait=WRITER_WAIT_S),
             )
 
             if self._adopt_unpopulated_embedding_stamp:
@@ -581,6 +594,78 @@ class SqliteBackend(
             )
         self._check_schema_current(self._db)
         return self._db
+
+    async def _wait_for_writer_idle(self, *, wait: float) -> None:
+        """Return once no other task owns the writer, waiting at most ``wait`` seconds.
+
+        The lock-wait half of :meth:`_get_db_when_idle`, for callers that do
+        not read through the writer connection themselves but are refused
+        while another task owns it: ``rebuild_fts`` and
+        ``reset_embedding_meta`` through ``_require_transaction_idle``, and the
+        synchronous ``stored_embedding_info`` property. It waits in
+        ``_writer_lock``'s FIFO queue only while a foreign task owns the
+        writer, then hands the lock straight on, so nothing can become owner
+        before the caller's next synchronous step. The caller must reach the
+        guarded access without an ``await`` in between. Raises
+        ``TransactionOwnedError`` when the wait runs out, or "Database is
+        closing" on a closing store.
+        """
+        owner = self._transaction_owner
+        if owner is None or owner is self._current_task():
+            return
+        # ``wait > 0`` rather than ``wait <= 0`` so NaN refuses too.
+        budget = wait if wait > 0 else 0.0
+        try:
+            async with asyncio.timeout(budget):
+                await self._writer_lock.acquire()
+        except TimeoutError:
+            if getattr(self, "_closing", False):
+                raise StorageError("Database is closing") from None
+            raise TransactionOwnedError(
+                "SQLite transaction is owned by another task; timed out waiting for writer lock"
+            ) from None
+        self._writer_lock.release()
+
+    async def _get_db_after_wait(self, *, wait: float) -> sqlite3.Connection:
+        """``_get_db()`` after :meth:`_wait_for_writer_idle`.
+
+        For writer reads that used ``_get_db()`` and should wait for another
+        task's transaction instead of being refused at once (#3182). Unlike
+        :meth:`_get_db_when_idle` it adds no refusal of a connection left in an
+        unowned transaction, so such a read behaves as it did, only later. The
+        caller must read without an ``await`` in between.
+        """
+        await self._wait_for_writer_idle(wait=wait)
+        return self._get_db()
+
+    async def _get_db_when_idle(self, *, wait: float) -> sqlite3.Connection:
+        """The writer connection for synchronous reads, once no other task owns it.
+
+        ``_get_db()`` refuses at once while another task owns ``transaction()``.
+        This waits instead, in ``_writer_lock``'s FIFO queue, for at most
+        ``wait`` seconds, then hands the lock straight on and returns the
+        connection. Nothing suspends between that release and the hand-out, so
+        no task can become owner in between; the caller's reads must run
+        without an ``await`` in between, as with any ``_get_db()`` result.
+
+        It waits only while another task owns the writer. It does not queue
+        behind a writer that has been granted the lock but has not resumed:
+        it never holds the lock, so a read in that moment delays nobody, and
+        it sees no uncommitted state, since the last owner has finished and
+        the next has not begun. It takes no SQLite lock, so other processes
+        are not held up either.
+
+        Like ``transaction()``, it refuses a connection left in a transaction
+        that no task owns, rather than read another writer's uncommitted rows,
+        and leaves that transaction as it is.
+        """
+        await self._wait_for_writer_idle(wait=wait)
+        db = self._get_db()
+        if db.in_transaction and not self._in_transaction:
+            raise StorageError(
+                "writer read refused: the connection already has an open transaction"
+            )
+        return db
 
     def _check_schema_current(self, conn: sqlite3.Connection, *, force: bool = False) -> None:
         """Stop this process once another one has migrated the DB past it (#2564).
@@ -751,10 +836,29 @@ class SqliteBackend(
         return self._get_db() if self._in_transaction else self._get_read_db()
 
     @asynccontextmanager
-    async def _lease_read_db(self) -> AsyncIterator[sqlite3.Connection]:
-        """Lease an idle read-pool connection with exclusive checkout and drain tracking."""
+    async def _lease_read_db(
+        self, *, deadline: float | None = None
+    ) -> AsyncIterator[sqlite3.Connection]:
+        """Lease an idle read-pool connection with exclusive checkout and drain tracking.
+
+        ``deadline`` (a ``time.monotonic()`` instant, from a search's
+        ``deadline_ms``) bounds only the wait for a free connection: past it the
+        lease raises ``SearchDeadlineExceeded`` having acquired nothing. A read
+        that already holds a connection is never cut short by it.
+        """
         if getattr(self, "_closing", False):
             raise StorageError("Database is closing")
+        if deadline is None:
+            # The budget of a search running in this task, for the reads it makes itself
+            # (visibility epoch, hidden counts, summary lookup, boosts) — see search/deadline.py.
+            from memtomem.search.deadline import ambient_read_deadline
+
+            deadline = ambient_read_deadline()
+        if deadline is not None and time.monotonic() >= deadline:
+            raise SearchDeadlineExceeded(
+                "search deadline exceeded before a read connection was taken; "
+                "no results were returned"
+            )
         if "_get_read_db" in self.__dict__ or not self._read_pool:
             direct_conn = self._get_read_db()
             self._increment_active_readers()
@@ -768,6 +872,14 @@ class SqliteBackend(
         while conn is None:
             if getattr(self, "_closing", False):
                 raise StorageError("Database is closing")
+            # Admission, not only the wait: an expired request takes no reader, free or not,
+            # and one woken after its deadline does not take the reader it was woken for.
+            if deadline is not None and time.monotonic() >= deadline:
+                self._notify_reader_waiters()
+                raise SearchDeadlineExceeded(
+                    "search deadline exceeded before a read connection was taken; "
+                    "no results were returned"
+                )
             if not self._read_pool:
                 fallback = self._get_db()
                 self._increment_active_readers()
@@ -790,7 +902,10 @@ class SqliteBackend(
                 waiter: asyncio.Future[None] = loop.create_future()
                 self._reader_waiters.append(waiter)
                 try:
-                    await waiter
+                    if deadline is None:
+                        await waiter
+                    else:
+                        await self._await_reader_until(waiter, deadline)
                 except BaseException:
                     if waiter.done() and not waiter.cancelled():
                         self._notify_reader_waiters()
@@ -812,6 +927,18 @@ class SqliteBackend(
                 self._in_use_readers.discard(id(conn))
             self._decrement_active_readers()
             self._notify_reader_waiters()
+
+    @staticmethod
+    async def _await_reader_until(waiter: asyncio.Future[None], deadline: float) -> None:
+        """Wait for a free reader until ``deadline``; the caller's handler settles the waiter."""
+        try:
+            async with asyncio.timeout(max(0.0, deadline - time.monotonic())):
+                await waiter
+        except TimeoutError:
+            raise SearchDeadlineExceeded(
+                "search deadline exceeded while waiting for a read connection; "
+                "no results were returned"
+            ) from None
 
     @asynccontextmanager
     async def _lease_txn_read_db(self) -> AsyncIterator[sqlite3.Connection]:
@@ -1170,6 +1297,11 @@ class SqliteBackend(
         return self._fts_tokenizer
 
     @property
+    def bm25_path_fallback(self) -> bool:
+        """Whether ``bm25_search`` falls back to matching chunk paths."""
+        return self._bm25_path_fallback
+
+    @property
     def fts_tokenizer_effective(self) -> str:
         """The tokenizer this backend's FTS calls actually run.
 
@@ -1400,6 +1532,9 @@ class SqliteBackend(
         purpose — no ``await`` may land between the DROP and the commit, or a
         concurrent ``dense_search`` could observe ``chunks_vec`` missing
         (``test_qa_audit_pins.py::test_reset_embedding_meta_is_single_atomic_transaction``).
+        A caller that should wait out another task's transaction calls
+        ``_wait_for_writer_idle`` immediately before this method; with no
+        ``await`` in here, nothing can take the writer in between.
         """
         assert self._meta is not None
         self._require_transaction_idle("reset_embedding_meta")
@@ -1917,7 +2052,7 @@ class SqliteBackend(
                     [
                         (
                             _fts.tokenize_for_fts(c.retrieval_content, tokenizer=tokenizer),
-                            norm_sources[c.metadata.source_file],
+                            fts_source_text(norm_sources[c.metadata.source_file]),
                             rowid,
                         )
                         for c, rowid in to_update
@@ -2039,7 +2174,7 @@ class SqliteBackend(
                             (
                                 new_rowid_map[str(c.id)],
                                 _fts.tokenize_for_fts(c.retrieval_content, tokenizer=tokenizer),
-                                norm_sources[c.metadata.source_file],
+                                fts_source_text(norm_sources[c.metadata.source_file]),
                             )
                             for c in to_insert
                             if str(c.id) in new_rowid_map
@@ -2242,7 +2377,9 @@ class SqliteBackend(
                 ) from exc
         return len(changed)
 
-    async def get_chunk(self, chunk_id: UUID, *, exclude_withheld: bool = False) -> Chunk | None:
+    async def get_chunk(
+        self, chunk_id: UUID, *, exclude_withheld: bool = False, read_writer: bool = False
+    ) -> Chunk | None:
         """Fetch one chunk by id.
 
         ``exclude_withheld=True`` is the read for a caller that will hand the
@@ -2250,13 +2387,23 @@ class SqliteBackend(
         statement, so a returned row was not withheld at the instant it was
         read. A separate check afterwards could not say that — a hold can be
         committed, or released together with the row's deletion, in between.
+
+        ``read_writer=True`` is the read for a caller about to act on the row:
+        the re-fetch under a source's locks, whose scope decides the Gate-B
+        consent check and whose line range decides what is cut from the file.
+        A pool connection another thread still has a statement open on serves
+        the snapshot from before later commits (#3202). The writer is read once
+        no other task owns it, waiting up to ``WRITER_WAIT_S`` and then raising
+        ``TransactionOwnedError``.
         """
         withheld = f" AND {NOT_WITHHELD_CHUNKS}" if exclude_withheld else ""
-        async with self._lease_read_db() as db:
-            row = db.execute(
-                f"SELECT * FROM chunks WHERE id=?{withheld}",  # nosec B608
-                (str(chunk_id),),
-            ).fetchone()
+        sql = f"SELECT * FROM chunks WHERE id=?{withheld}"  # nosec B608
+        if read_writer:
+            writer = await self._get_db_when_idle(wait=WRITER_WAIT_S)
+            row = writer.execute(sql, (str(chunk_id),)).fetchone()
+        else:
+            async with self._lease_read_db() as db:
+                row = db.execute(sql, (str(chunk_id),)).fetchone()
         if not row:
             return None
         return self._row_to_chunk(row)
@@ -2620,9 +2767,11 @@ class SqliteBackend(
         assert self._holds is not None
         return await self._holds.source_hold_generation(source_file)
 
-    async def source_hold_snapshot(self, source_file: Path) -> int | None:
+    async def source_hold_snapshot(
+        self, source_file: Path, *, as_stored: bool = False
+    ) -> int | None:
         assert self._holds is not None
-        return await self._holds.source_hold_snapshot(source_file)
+        return await self._holds.source_hold_snapshot(source_file, as_stored=as_stored)
 
     def queue_source_check_sync(self, source_file: Path) -> bool:
         assert self._holds is not None
@@ -2691,10 +2840,14 @@ class SqliteBackend(
         """Return the distinct persisted scopes for chunks from ``source_file``.
 
         ``as_stored`` as in :meth:`delete_by_source`, so a consent probe reads the
-        rows that the delete it guards removes.
+        rows that the delete it guards removes. A caller that owns
+        ``transaction()`` reads the writer: a pool connection can still hold a
+        snapshot from before a commit made while the caller waited for the
+        writer, and the consent decision would then judge rows the delete no
+        longer removes (#3182).
         """
         key = str(source_file) if as_stored else norm_path(source_file)
-        async with self._lease_read_db() as db:
+        async with self._lease_txn_read_db() as db:
             rows = db.execute(
                 "SELECT DISTINCT COALESCE(scope, 'user') FROM chunks WHERE source_file=?",
                 (key,),
@@ -2708,9 +2861,12 @@ class SqliteBackend(
         bulk deletes that would remove ``project_shared`` chunks without
         ``confirm_project_shared=True``. Project-shared memories can sit
         in the same default namespace as user memories, so the
-        namespace string alone does not imply the trust tier.
+        namespace string alone does not imply the trust tier. A caller that
+        owns ``transaction()`` reads the writer, so the probe sees the rows the
+        delete it guards removes; a pool connection can still hold a snapshot
+        from before a commit (#3202).
         """
-        async with self._lease_read_db() as db:
+        async with self._lease_txn_read_db() as db:
             rows = db.execute(
                 "SELECT DISTINCT COALESCE(scope, 'user') FROM chunks WHERE namespace=?",
                 (namespace,),
@@ -2800,7 +2956,7 @@ class SqliteBackend(
                 db.execute(
                     f"UPDATE chunks_fts SET source_file=? "
                     f"WHERE rowid IN ({placeholders(len(rowid_batch))})",
-                    [new_norm, *rowid_batch],
+                    [fts_source_text(new_norm), *rowid_batch],
                 )
             # Move the AI summary cache row alongside the chunks. The
             # cache key is derived from the source path, so an in-place
@@ -2836,14 +2992,15 @@ class SqliteBackend(
 
     @staticmethod
     def _move_ai_summary_cache(db: sqlite3.Connection, old_norm: str, new_norm: str) -> None:
-        old_key = f"{_AI_SUMMARY_KEY_PREFIX}{old_norm}"
-        row = db.execute("SELECT value FROM _memtomem_meta WHERE key=?", (old_key,)).fetchone()
-        if row is not None:
-            db.execute(
-                "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
-                (f"{_AI_SUMMARY_KEY_PREFIX}{new_norm}", row[0]),
-            )
-            db.execute("DELETE FROM _memtomem_meta WHERE key=?", (old_key,))
+        for prefix in (_AI_SUMMARY_KEY_PREFIX, f"chunk_descriptions:{_AI_SUMMARY_KEY_PREFIX}"):
+            old_key = f"{prefix}{old_norm}"
+            row = db.execute("SELECT value FROM _memtomem_meta WHERE key=?", (old_key,)).fetchone()
+            if row is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+                    (f"{prefix}{new_norm}", row[0]),
+                )
+                db.execute("DELETE FROM _memtomem_meta WHERE key=?", (old_key,))
 
     def _carry_policy_summary(
         self,
@@ -2892,7 +3049,7 @@ class SqliteBackend(
             db.execute(
                 f"UPDATE chunks_fts SET source_file=? "
                 f"WHERE rowid IN ({placeholders(len(rowid_batch))})",
-                [new_summary, *rowid_batch],
+                [fts_source_text(new_summary), *rowid_batch],
             )
         self._move_ai_summary_cache(db, old_summary, new_summary)
 
@@ -2920,7 +3077,12 @@ class SqliteBackend(
         schedules waits on the write lock and then rewrites the index. Once
         the rebuilds for overlapping runtime switches finish, the index is in
         the tokenizer that won, never the one that lost (#3018).
+
+        While another task owns ``transaction()``, it first waits for the
+        writer, up to ``WRITER_WAIT_S``, instead of being refused at once
+        (#3182). A caller that owns a transaction itself is still refused.
         """
+        await self._wait_for_writer_idle(wait=WRITER_WAIT_S)
         self._require_transaction_idle("rebuild_fts")
         assert self._db is not None
         db_path = str(Path(self._config.sqlite_path).expanduser())
@@ -2955,7 +3117,7 @@ class SqliteBackend(
                                             ),
                                             tokenizer=tokenizer,
                                         ),
-                                        r[2],
+                                        fts_source_text(r[2]),
                                     )
                                     for r in batch
                                 ],

@@ -8,6 +8,7 @@ with mocked app.state dependencies.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -199,6 +200,10 @@ def app(_isolated_config_paths: Path):
     import asyncio as _asyncio
 
     storage._tag_write_lock = _asyncio.Lock()
+    # Routes that wait for the writer enter ``storage.transaction(wait=...)``.
+    import contextlib as _contextlib
+
+    storage.transaction = MagicMock(side_effect=lambda **_: _contextlib.nullcontext())
 
     # timeline / recall
     storage.recall_chunks = AsyncMock(return_value=[_make_test_chunk()])
@@ -2381,6 +2386,7 @@ class TestNamespaceProdTier:
     async def prod_client(self):
         application = create_app(lifespan=None, mode="prod")
         storage = AsyncMock()
+        storage.transaction = MagicMock(side_effect=lambda **_: contextlib.nullcontext())
         storage.list_namespace_meta = AsyncMock(
             return_value=[
                 {

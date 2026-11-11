@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
 
 from memtomem.scheduler import JOB_KINDS, JobSpec
+from memtomem.scheduler.jobs import validate_new_params
 from memtomem.server.context import AppContext
 from memtomem.storage import orphan_detect
 
@@ -221,3 +223,75 @@ class TestCompactionOrphanGuards:
         app.storage.delete_by_source.assert_not_awaited()
         app.storage.hold_source.assert_awaited_once_with(gone, "scan_missing", as_stored=True)
         app.search_pipeline.invalidate_cache.assert_called_once()
+
+
+class TestValidateNewParams:
+    """Registration refuses keys the params model does not declare."""
+
+    @pytest.mark.parametrize("name", list(JOB_KINDS))
+    def test_params_fields_declare_no_alias(self, name):
+        # ``validate_new_params`` diffs against field names only; an alias
+        # would let a correctly spelled key be refused, or a typo pass.
+        for field in JOB_KINDS[name].params_model.model_fields.values():
+            assert field.alias is None
+            assert field.validation_alias is None
+
+    def test_unknown_keys_named_in_sorted_order(self):
+        with pytest.raises(ValueError) as excinfo:
+            validate_new_params(JOB_KINDS["importance_decay"], {"zz": 1, "max_age": 3})
+        assert str(excinfo.value) == (
+            "unknown params for importance_decay: 'max_age', 'zz' "
+            "(allowed: max_age_days, source_filter)"
+        )
+
+    def test_known_keys_return_the_validated_model(self):
+        validated = validate_new_params(JOB_KINDS["dedup_scan"], {"limit": 20})
+        assert validated.model_dump() == {"threshold": 0.92, "limit": 20, "max_scan": 500}
+
+    def test_value_errors_still_come_from_the_model(self):
+        with pytest.raises(ValidationError):
+            validate_new_params(JOB_KINDS["dedup_scan"], {"limit": 0})
+
+    def test_non_dict_is_rejected_by_the_model_not_split_into_keys(self):
+        with pytest.raises(ValidationError) as excinfo:
+            validate_new_params(JOB_KINDS["dedup_scan"], "foo")
+        assert "unknown params" not in str(excinfo.value)
+
+
+class TestMcpScheduleRegister:
+    @pytest.fixture
+    def tools(self, components, monkeypatch):
+        from memtomem.server.tools import schedule as schedule_tools
+
+        app = AppContext.from_components(components)
+        monkeypatch.setattr(schedule_tools, "_get_app_initialized", AsyncMock(return_value=app))
+        return schedule_tools
+
+    @pytest.mark.asyncio
+    async def test_unknown_key_refused_and_not_stored(self, tools, components):
+        out = json.loads(await tools.mem_schedule_register("* * * * *", "dedup_scan", {"limt": 20}))
+        assert out == {
+            "ok": False,
+            "reason": (
+                "invalid params: unknown params for dedup_scan: 'limt' "
+                "(allowed: limit, max_scan, threshold)"
+            ),
+        }
+        assert await components.storage.schedule_list_all() == []
+
+    @pytest.mark.asyncio
+    async def test_known_key_stored(self, tools, components):
+        out = json.loads(
+            await tools.mem_schedule_register("* * * * *", "dedup_scan", {"limit": 20})
+        )
+        assert out["ok"] is True
+        sched = await components.storage.schedule_get(out["id"])
+        assert sched["params"] == {"limit": 20}
+
+    @pytest.mark.asyncio
+    async def test_non_dict_params_refused_without_listing_characters(self, tools, components):
+        out = json.loads(await tools.mem_schedule_register("* * * * *", "dedup_scan", "foo"))
+        assert out["ok"] is False
+        assert out["reason"].startswith("invalid params: ")
+        assert "unknown params" not in out["reason"]
+        assert await components.storage.schedule_list_all() == []

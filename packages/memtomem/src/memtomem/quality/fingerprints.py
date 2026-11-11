@@ -272,7 +272,7 @@ def index_fingerprint(
 
     ``vector_rows`` = ``(content_hash, namespace, source_file, start_line,
     embedding_blob)``; ``fts_rows`` = ``(content_hash, namespace, source_file,
-    start_line, fts_content)``.
+    start_line, fts_content, fts_source)``.
 
     ``link_rows`` should be passed only when session-summary rescue is enabled,
     ``access_rows`` only when access or importance boost is enabled, and
@@ -285,8 +285,9 @@ def index_fingerprint(
         for content_hash, namespace, source, start_line, blob in vector_rows
     )
     fts = sorted(
-        _chunk_identity(content_hash, namespace, source, start_line) + [_sha256_text(content or "")]
-        for content_hash, namespace, source, start_line, content in fts_rows
+        _chunk_identity(content_hash, namespace, source, start_line)
+        + [_sha256_text(content or ""), _sha256_text(fts_source or "")]
+        for content_hash, namespace, source, start_line, content, fts_source in fts_rows
     )
     payload: dict[str, Any] = {
         "corpus": corpus_fingerprint(corpus_rows),

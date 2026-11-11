@@ -24,10 +24,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
 
+from memtomem.errors import TransactionOwnedError
 from memtomem.llm.utils import strip_llm_response
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_helpers import norm_path
 
 if TYPE_CHECKING:
@@ -209,16 +212,20 @@ async def maybe_update_ai_summary(
         # Clear it so the heuristic excerpt takes over until the next
         # successful refresh.
         if cached is not None:
-            await storage.delete_ai_summary(stored, as_stored=True)
+            # After the LLM call, so another task may own the writer by now;
+            # the writes before it ran with none since the chunk write (#3173).
+            async with storage.transaction(wait=WRITER_WAIT_S):
+                await storage.delete_ai_summary(stored, as_stored=True)
         return
 
-    await storage.set_ai_summary(
-        stored,
-        summary=summary,
-        signature=signature,
-        language=config.summary_language,
-        as_stored=True,
-    )
+    async with storage.transaction(wait=WRITER_WAIT_S):
+        await storage.set_ai_summary(
+            stored,
+            summary=summary,
+            signature=signature,
+            language=config.summary_language,
+            as_stored=True,
+        )
 
 
 async def regenerate_for_paths(
@@ -243,7 +250,9 @@ async def regenerate_for_paths(
 
     Returns a counter dict ``{processed, skipped, failed}``. *skipped* is
     incremented when a path produces no chunks (e.g., the file was
-    deleted between drift detection and regeneration).
+    deleted between drift detection and regeneration). *failed* counts a
+    path whose LLM call failed or whose write found the writer still owned
+    by another task after ``WRITER_WAIT_S``.
     """
     total = len(paths)
     processed = 0
@@ -278,15 +287,31 @@ async def regenerate_for_paths(
             continue
 
         signature = compute_source_signature(chunks)
-        # ``paths`` are stored summary keys, so the write must not resolve
-        # them again after the LLM call.
-        await storage.set_ai_summary(
-            path,
-            summary=summary,
-            signature=signature,
-            language=config.summary_language,
-            as_stored=True,
-        )
+        async with AsyncExitStack() as stack:
+            # After the LLM call, so another task may own the writer by now
+            # (#3179). A wait that runs out fails this path, as an LLM failure
+            # does, and the job goes on; only the entry is caught, so an error
+            # from the write itself still propagates.
+            try:
+                await stack.enter_async_context(storage.transaction(wait=WRITER_WAIT_S))
+            except TransactionOwnedError as exc:
+                # Source paths can be secret-shaped: log a fingerprint of the
+                # key, as the summary cache's own warnings do.
+                fingerprint = hashlib.sha256(str(path).encode("utf-8", "replace")).hexdigest()[:12]
+                logger.warning("Summary regenerate skipped source %s: %s", fingerprint, exc)
+                failed += 1
+                if progress is not None:
+                    progress(processed, total, failed)
+                continue
+            # ``paths`` are stored summary keys, so the write must not resolve
+            # them again after the LLM call.
+            await storage.set_ai_summary(
+                path,
+                summary=summary,
+                signature=signature,
+                language=config.summary_language,
+                as_stored=True,
+            )
         processed += 1
         if progress is not None:
             progress(processed, total, failed)

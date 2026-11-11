@@ -13,6 +13,7 @@ from memtomem.embedding.probe import embed_document_probe
 from memtomem.errors import NamespaceResolutionError
 from memtomem.indexing.scope_guard import scope_held_notice
 from memtomem.search.visibility import resolve_visible_chunk
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_visibility import source_hidden
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
@@ -25,6 +26,8 @@ from memtomem.source_provenance import (
     SourceMissingError,
     ReadOnlySourceError,
     StaleSourceProvenanceError,
+    excluded_after_write_notice,
+    relinked_after_write_notice,
 )
 from memtomem.tools.memory_writer import (
     EditBaseMismatchError,
@@ -34,6 +37,7 @@ from memtomem.tools.memory_writer import (
     SourceRemovedError,
     SourceReplacedError,
     read_pre_image,
+    read_with_source_key,
     remove_lines,
     replace_chunk_body,
     restore_pre_image_quietly,
@@ -46,6 +50,11 @@ from memtomem.web.deps import (
     get_storage,
 )
 from memtomem.web.routes._confirm import needs_confirmation_envelope
+from memtomem.web.routes._writer_wait import (
+    WRITER_BUSY_NOTHING_CHANGED_DETAIL,
+    WRITER_BUSY_REFUSED_NOTHING_CHANGED_DETAIL,
+    writer_busy_as_503,
+)
 from memtomem.web.routes._errors import (
     DEGRADED_SOURCE_EDIT_DETAIL,
     NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
@@ -318,6 +327,10 @@ async def edit_chunk(
             raise HTTPException(
                 status_code=503, detail="Memory file is locked by another writer; try again."
             )
+        if reason == "writer_busy":
+            # Refused before the route judged or changed anything; the sidecar
+            # lock file the helper took is lock infrastructure, not memory data.
+            raise HTTPException(status_code=503, detail=WRITER_BUSY_NOTHING_CHANGED_DETAIL)
         if not cross_process_held:
             # #2346: the source's directory was gone when the lock was taken,
             # so this span holds no cross-process exclusion. An edit rewrites
@@ -573,10 +586,19 @@ async def edit_chunk(
     # write falls back rather than returning a row the caller may not read.
     updated = await resolve_visible_chunk(storage, chunk_id, project_context_root=_boundary(config))
     out = chunk_to_out(updated if updated is not None else chunk)
-    if stats.scope_held:
+    if stats.relinked_files:
+        # Replaced by a symlink while the edit ran: the re-index held the
+        # file's rows and indexed nothing through the link, so the echo is the
+        # retained pre-edit row (#3172).
+        out.warning = relinked_after_write_notice("edit", str(meta.source_file))
+    elif stats.scope_held:
         # The tier was unregistered while the edit ran (#2923): the edit is on
         # disk and the source is held rather than re-indexed as another scope.
         out.warning = scope_held_notice("edit")
+    elif stats.excluded_files:
+        # Excluded while the edit ran: the re-index removed the file's chunks,
+        # so ``updated`` is gone and the echo is the pre-edit row (#3163).
+        out.warning = excluded_after_write_notice("edit")
     return out
 
 
@@ -640,6 +662,10 @@ async def delete_chunk(
             raise HTTPException(
                 status_code=503, detail="Memory file is locked by another writer; try again."
             )
+        if reason == "writer_busy":
+            # Refused before the route judged or changed anything; the sidecar
+            # lock file the helper took is lock infrastructure, not memory data.
+            raise HTTPException(status_code=503, detail=WRITER_BUSY_NOTHING_CHANGED_DETAIL)
         if fresh is None:
             raise HTTPException(status_code=409, detail="Chunk state changed; retry.")
         meta = fresh.metadata
@@ -671,7 +697,12 @@ async def delete_chunk(
             try:
                 remaining = await storage.get_chunk(chunk_id)
                 if remaining is not None:
-                    await storage.delete_chunks([chunk_id])
+                    # Waits for another task's transaction (#3181). Inside one,
+                    # only ``finalize_emptied`` keeps the emptied-source cleanup
+                    # the standalone delete runs. The check after it reads the
+                    # pool, so it runs once this has committed.
+                    async with storage.transaction(wait=WRITER_WAIT_S):
+                        await storage.delete_chunks([chunk_id], finalize_emptied=True)
                     remaining = await storage.get_chunk(chunk_id)
             except Exception as exc:
                 logger.error("Index cleanup failed for deleted chunk %s", chunk_id, exc_info=True)
@@ -781,7 +812,9 @@ async def delete_chunk(
         # drops the LLM query-expansion cache, so flushing on a pure refusal
         # would be pointless churn.
         mutation_attempted = False
+        relinked = False
         scope_held = False
+        excluded = False
         try:
             if source_exists:
                 if meta.source_read_only or meta.redaction_count:
@@ -888,9 +921,14 @@ async def delete_chunk(
                 from memtomem.indexing.engine import PrivacyRejection
                 from memtomem.tools.memory_mutation import outcome_after_restore
 
-                pre_image = await asyncio.to_thread(read_pre_image, source)
+                pre_image, source_key = await asyncio.to_thread(
+                    read_with_source_key, read_pre_image, source
+                )
                 preflight = await asyncio.to_thread(
-                    index_engine.preflight_mutation, source, pre_image.data
+                    index_engine.preflight_mutation,
+                    source,
+                    pre_image.data,
+                    source_key=source_key,
                 )
                 if preflight.rejection is not None:
                     mutation_attempted = True  # the hold changes what search may serve
@@ -982,11 +1020,18 @@ async def delete_chunk(
                         # No ``namespace=``: see the pre-flight above. The engine
                         # preserves the file's stored namespace in-lock, which is both
                         # the correct value and a fresher one than anything read here.
+                        # The purge covers an exclusion installed since the guard
+                        # above: the sibling chunks would otherwise keep their
+                        # pre-delete line ranges (#3163). A file replaced by a
+                        # symlink since the write is held, not indexed through
+                        # the link (#3172).
                         stats = await index_engine.index_file(
                             source,
                             force=True,
                             ingress_guarded=True,
                             lock_held=True,
+                            purge_if_excluded=True,
+                            hold_if_relinked=True,
                         )
                     except PrivacyRejection as exc:
                         # Removing the line made the rest of the file refusable
@@ -1008,7 +1053,9 @@ async def delete_chunk(
                                 chunk_id,
                                 "; ".join(stats.errors),
                             )
+                        relinked = bool(stats.relinked_files)
                         scope_held = stats.scope_held
+                        excluded = bool(stats.excluded_files)
 
                     # A single-file index can report an error in IndexingStats instead
                     # of raising (for example, an embedding failure), or can finish with
@@ -1024,7 +1071,14 @@ async def delete_chunk(
             if mutation_attempted:
                 search_pipeline.invalidate_cache()
 
-    return DeleteResponse(deleted=1, warning=scope_held_notice("delete") if scope_held else None)
+    warning = None
+    if relinked:
+        warning = relinked_after_write_notice("delete", str(source))
+    elif scope_held:
+        warning = scope_held_notice("delete")
+    elif excluded:
+        warning = excluded_after_write_notice("delete")
+    return DeleteResponse(deleted=1, warning=warning)
 
 
 @router.patch("/{chunk_id}/tags", response_model=TagsUpdateResponse)
@@ -1043,13 +1097,16 @@ async def update_chunk_tags(
     ``upsert_chunks`` call could race against an in-flight bulk rewrite
     and leave search-result tag filters cached against stale tags.
     """
-    updated = await tag_svc.replace_chunk_tags(
-        storage,
-        chunk_id,
-        body.tags,
-        project_context_root=_boundary(config),
-        search_pipeline=search_pipeline,
-    )
+    # The service does not wait for another task's transaction (see its
+    # docstring); its refusal comes before the write, so it answers 503 (#3182).
+    with writer_busy_as_503(WRITER_BUSY_REFUSED_NOTHING_CHANGED_DETAIL):
+        updated = await tag_svc.replace_chunk_tags(
+            storage,
+            chunk_id,
+            body.tags,
+            project_context_root=_boundary(config),
+            search_pipeline=search_pipeline,
+        )
     if updated is None:
         raise HTTPException(status_code=404, detail="Chunk not found")
     return TagsUpdateResponse(id=str(chunk_id), tags=list(updated.metadata.tags))

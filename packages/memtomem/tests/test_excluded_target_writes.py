@@ -22,7 +22,7 @@ from httpx import ASGITransport, AsyncClient
 
 from helpers import StubCtx
 from memtomem.server.context import AppContext
-from memtomem.source_provenance import EXCLUDED_TARGET_DETAIL
+from memtomem.source_provenance import EXCLUDED_AFTER_APPEND_NOTICE, EXCLUDED_TARGET_DETAIL
 from memtomem.tools import memory_writer
 from memtomem.web import upload_quarantine
 from memtomem.web.app import create_app
@@ -709,3 +709,298 @@ async def test_mcp_reflect_save_links_nothing_on_refusal(day_file):
     assert _snapshot(mem_dir) == files_before
     assert _rows(comp) == rows_before
     assert db.execute("SELECT * FROM chunk_relations").fetchall() == relations_before
+
+
+# ── an exclusion installed during the append (#3165) ────────────────────
+#
+# The refusals above run before the append. ``exclude_patterns`` is
+# runtime-mutable, so one installed between that check and the re-index makes
+# the engine skip the file: the entry is on disk and unindexed. The earlier
+# chunks still describe bytes that are there, so they stay; what must change
+# is the report, which used to read as a zero-chunk success.
+
+
+def _exclude_inside_the_append(monkeypatch, comp) -> None:
+    """Install the day-file exclusion inside the append writer, after the guard.
+
+    Patched in every module ``_writer_spies`` covers: the web add binds
+    ``append_entry`` at import, the rest resolve it through ``memory_writer``.
+    """
+    from memtomem.web.routes import system
+
+    for module, name in (
+        (memory_writer, "append_entry"),
+        (memory_writer, "append_blocks"),
+        (system, "append_entry"),
+    ):
+        real = getattr(module, name)
+
+        def write(*args, _real=real, **kwargs):
+            _exclude_day_files(comp)
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, write)
+
+
+def _assert_appended_unindexed(comp, source: Path, rows_before: list, text: str) -> None:
+    assert text in source.read_text(encoding="utf-8")
+    assert comp.index_engine.is_excluded(source)
+    assert _rows(comp) == rows_before
+
+
+@pytest.mark.parametrize("surface", APPENDERS)
+async def test_an_appender_reports_an_exclusion_installed_during_the_append(
+    day_file, monkeypatch, capsys, surface
+):
+    comp, mem_dir, source = day_file
+    (chunk,) = await comp.storage.list_chunks_by_source(source)
+    files_before = _snapshot(mem_dir)
+    rows_before = _rows(comp)
+    _exclude_inside_the_append(monkeypatch, comp)
+    capsys.readouterr()
+
+    result = await _append(surface, comp, monkeypatch, capsys, str(chunk.id))
+
+    # The one file the append wrote: ``mm agent share`` writes the target
+    # namespace's own day file, and appends the shared chunk's text.
+    files_after = _snapshot(mem_dir)
+    (written,) = [k for k, v in files_after.items() if files_before.get(k) != v]
+    appended = chunk.content if surface == "cli_agent_share" else "NEW ENTRY"
+    _assert_appended_unindexed(comp, mem_dir / written, rows_before, appended)
+    if surface in ("mcp_add", "mcp_batch_add"):
+        assert not result.startswith("Error"), result
+        assert result.endswith(f"\n- {EXCLUDED_AFTER_APPEND_NOTICE}"), result
+    elif surface in ("cli_add", "cli_agent_share"):
+        # Success (no ClickException, so exit 0), with the warning on stderr.
+        assert result is None, result
+        assert f"Warning: {EXCLUDED_AFTER_APPEND_NOTICE}\n" in capsys.readouterr().err
+    elif surface == "shell_add":
+        assert click_unstyle(result).endswith(f"{EXCLUDED_AFTER_APPEND_NOTICE}\n"), result
+    elif surface == "web_add":
+        assert result.status_code == 200, result.text
+        assert result.json()["warning"] == EXCLUDED_AFTER_APPEND_NOTICE
+    elif surface == "langgraph_add":
+        assert result["warning"] == EXCLUDED_AFTER_APPEND_NOTICE, result
+    else:
+        raise AssertionError(surface)
+
+
+@pytest.mark.parametrize("surface", ["mcp_add", "cli_add", "web_add", "langgraph_add"])
+async def test_an_append_that_is_indexed_carries_no_warning(day_file, monkeypatch, capsys, surface):
+    """The control: the warning names the exclusion, not every append."""
+    comp, _, source = day_file
+    capsys.readouterr()
+
+    result = await _append(surface, comp, monkeypatch, capsys, "")
+
+    if surface == "mcp_add":
+        assert EXCLUDED_AFTER_APPEND_NOTICE not in result
+    elif surface == "cli_add":
+        assert "Warning:" not in capsys.readouterr().err
+    elif surface == "web_add":
+        assert result.json()["warning"] is None
+    else:
+        assert "warning" not in result
+
+
+async def test_mm_add_json_carries_the_warning(day_file, monkeypatch, capsys):
+    import json
+
+    from memtomem.cli.memory import _add
+
+    comp, _, source = day_file
+    _patch_cli_components(monkeypatch, comp)
+    _exclude_inside_the_append(monkeypatch, comp)
+    capsys.readouterr()
+
+    await _add(
+        "NEW ENTRY",
+        None,
+        [],
+        None,
+        False,
+        "user",
+        False,
+        True,
+        namespace=None,
+        as_json=True,
+        allow_namespace_mix=False,
+    )
+
+    out = capsys.readouterr()
+    payload = json.loads(out.out)
+    assert payload["ok"] is True
+    assert payload["chunks"] == 0
+    assert payload["warning"] == EXCLUDED_AFTER_APPEND_NOTICE
+    assert out.err == ""
+
+
+async def test_mem_batch_add_marks_the_session_record_incomplete(day_file, monkeypatch):
+    comp, _, _ = day_file
+    _exclude_inside_the_append(monkeypatch, comp)
+    from memtomem.server.tools import memory_crud
+    from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+    app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+    await mem_session_start(ctx=ctx)
+    session_id = app.current_session_id
+    await memory_crud.mem_batch_add([{"content": "NEW ENTRY"}], ctx=ctx)
+
+    assert await app.storage.get_session_events(session_id) == []
+    row = await app.storage.get_session(session_id)
+    assert row["metadata"].get("provenance_incomplete") is True
+    await mem_session_end(ctx=ctx)
+
+
+@pytest.mark.parametrize("entries", [[], [{"content": ""}]], ids=["empty", "all_blank"])
+async def test_a_batch_that_appends_nothing_reports_no_exclusion(day_file, monkeypatch, entries):
+    """No entry written, so no "the new entry is on disk" and no incomplete record."""
+    comp, _, source = day_file
+    bytes_before = source.read_bytes()
+    from memtomem.server.tools import memory_crud
+    from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+    _exclude_day_files(comp)
+    # Past the guard, as an exclusion installed mid-write would be: the
+    # refusal before the append is what ``test_an_appender_refuses_*`` pins.
+    monkeypatch.setattr(comp.index_engine, "is_excluded", lambda _path: False)
+    app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+    await mem_session_start(ctx=ctx)
+    session_id = app.current_session_id
+
+    result = await memory_crud.mem_batch_add(entries, ctx=ctx)
+
+    assert source.read_bytes() == bytes_before
+    assert EXCLUDED_AFTER_APPEND_NOTICE not in result, result
+    row = await app.storage.get_session(session_id)
+    assert not row["metadata"].get("provenance_incomplete"), row["metadata"]
+    await mem_session_end(ctx=ctx)
+
+
+async def test_review_approve_reports_an_exclusion_installed_during_the_append(
+    day_file, monkeypatch, capsys
+):
+    """The entry is on disk, so the approval stands and says so."""
+    import json
+
+    from memtomem.cli.review_cmd import _decide
+    from memtomem.formation import propose_memory_candidate
+
+    comp, _, source = day_file
+    rows_before = _rows(comp)
+    _patch_cli_components(monkeypatch, comp)
+    candidate, _created = await propose_memory_candidate(
+        comp.storage,
+        "Decision: a durable fact",
+        source="test",
+        source_ref="ref-1",
+        idempotency_key="proposal-1",
+    )
+    _exclude_inside_the_append(monkeypatch, comp)
+    capsys.readouterr()
+
+    await _decide(candidate["id"], "approved", "alice", "")
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "ok": True,
+        "status": "approved",
+        "warning": EXCLUDED_AFTER_APPEND_NOTICE,
+    }
+    _assert_appended_unindexed(comp, source, rows_before, "Decision: a durable fact")
+    assert (await comp.storage.get_memory_candidate(candidate["id"]))["status"] == "approved"
+
+
+async def test_scratch_promote_reports_an_exclusion_installed_during_the_append(
+    day_file, monkeypatch
+):
+    comp, _, source = day_file
+    rows_before = _rows(comp)
+    await comp.storage.scratch_set("note", "promote me")
+    _exclude_inside_the_append(monkeypatch, comp)
+
+    async with _web_client(comp) as client:
+        resp = await client.post("/api/scratch/note/promote", json={})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["warning"] == EXCLUDED_AFTER_APPEND_NOTICE
+    _assert_appended_unindexed(comp, source, rows_before, "promote me")
+    assert (await comp.storage.scratch_get("note"))["promoted"]
+
+
+async def test_reflect_save_links_nothing_when_excluded_during_the_append(
+    bm25_only_components, monkeypatch
+):
+    """``recent[0]`` would be an older chunk, so no relation may be added."""
+    from memtomem.server.tools.reflection import mem_reflect_save
+
+    comp, mem_dir = bm25_only_components
+    source = mem_dir / "reflections.md"
+    source.write_text(EXISTING, encoding="utf-8")
+    assert (await comp.index_engine.index_file(source, ingress_guarded=True)).indexed_chunks == 1
+    related = mem_dir / "related.md"
+    related.write_text("## Related\n\nA chunk the insight draws on.\n", encoding="utf-8")
+    assert (await comp.index_engine.index_file(related, ingress_guarded=True)).indexed_chunks == 1
+    (related_chunk,) = await comp.storage.list_chunks_by_source(related)
+    db = comp.storage._get_db()
+    relations_before = db.execute("SELECT * FROM chunk_relations").fetchall()
+    rows_before = _rows(comp)
+
+    real = memory_writer.append_entry
+
+    def write(*args, **kwargs):
+        comp.config.indexing.exclude_patterns = ["**/reflections.md"]
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(memory_writer, "append_entry", write)
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    result = await mem_reflect_save(
+        "A new insight", related_chunks=[str(related_chunk.id)], ctx=ctx
+    )
+
+    assert result.startswith("Insight saved."), result
+    assert result.endswith(f"\n- {EXCLUDED_AFTER_APPEND_NOTICE}"), result
+    assert "A new insight" in source.read_text(encoding="utf-8")
+    assert _rows(comp) == rows_before
+    assert db.execute("SELECT * FROM chunk_relations").fetchall() == relations_before
+
+
+async def test_mem_add_reports_an_exclusion_installed_during_the_append(day_file, monkeypatch):
+    comp, _, source = day_file
+    rows_before = _rows(comp)
+    _exclude_inside_the_append(monkeypatch, comp)
+    from memtomem.server.tools import memory_crud
+
+    ctx = StubCtx(AppContext.from_components(comp))
+    result = await memory_crud.mem_add("NEW ENTRY", idempotency_key="k-add", ctx=ctx)
+
+    _assert_appended_unindexed(comp, source, rows_before, "NEW ENTRY")
+    assert result.startswith(f"Memory added to {source}"), result
+    assert "- Chunks indexed: 0" in result
+    assert result.endswith(f"\n- {EXCLUDED_AFTER_APPEND_NOTICE}"), result
+    # Stored with the base result, so a replay reports the same outcome.
+    replay = await memory_crud.mem_add("NEW ENTRY", idempotency_key="k-add", ctx=ctx)
+    assert f"\n- {EXCLUDED_AFTER_APPEND_NOTICE}" in replay, replay
+    assert source.read_text(encoding="utf-8").count("NEW ENTRY") == 1
+
+
+async def test_mem_add_marks_the_session_record_incomplete(day_file, monkeypatch):
+    """No new ids reach provenance, so the session must not claim a full record."""
+    comp, _, _ = day_file
+    _exclude_inside_the_append(monkeypatch, comp)
+    from memtomem.server.tools import memory_crud
+    from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+    app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+    await mem_session_start(ctx=ctx)
+    session_id = app.current_session_id
+    await memory_crud.mem_add("NEW ENTRY", ctx=ctx)
+
+    assert await app.storage.get_session_events(session_id) == []
+    row = await app.storage.get_session(session_id)
+    assert row["metadata"].get("provenance_incomplete") is True
+    await mem_session_end(ctx=ctx)

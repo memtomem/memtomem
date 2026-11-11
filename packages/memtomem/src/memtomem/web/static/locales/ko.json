@@ -185,6 +185,7 @@
   "search.context_label": "컨텍스트",
   "search.context_title": "각 결과 주변의 이웃 청크 N개를 포함하여 더 많은 맥락 제공",
   "search.context_off": "끄기",
+  "search.context_config": "설정값 ({before}↑{after}↓)",
   "search.date_all": "전체 기간",
   "search.date_today": "오늘",
   "search.date_7d": "최근 7일",

@@ -172,6 +172,9 @@ class TestConsumerRegressionPin:
         "memtomem/server/tools/url_index.py",
         "memtomem/server/tools/importers.py",
         "memtomem/server/tools/memory_crud.py",
+        # The Hermes memory mirror renders into the primary user-tier directory
+        # (``require_user_base``), like ``mem_add``'s default; project tiers are refused.
+        "memtomem/server/tools/hermes_mirror.py",
         # Diagnostics intentionally reports user and project tiers separately,
         # so it must read the user-tier field rather than flattening roots.
         "memtomem/server/tools/status_config.py",

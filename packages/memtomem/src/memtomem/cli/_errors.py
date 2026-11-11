@@ -148,6 +148,7 @@ def _hint_for(e: Exception) -> str | None:
         ConfigError,
         EmbeddingDimensionMismatchError,
         EmbeddingError,
+        EvalCaseError,
         RetryableError,
         SchemaDowngradeError,
         SchemaMigrationBlockedError,
@@ -192,6 +193,14 @@ def _hint_for(e: Exception) -> str | None:
         # ``StorageError`` hint below ("run `mm status`") would be the only
         # advice — even inside ``mm status`` (#2589).
         return _LOCKED_HINT
+    if (
+        isinstance(e, StorageError)
+        and isinstance(e.__cause__, sqlite3.OperationalError)
+        and "database is locked" in str(e.__cause__).lower()
+    ):
+        # ``transaction()`` wraps a ``BEGIN IMMEDIATE`` that another process
+        # kept busy; the cause is the same "database is locked" as above.
+        return _LOCKED_HINT
     if isinstance(e, RetryableError):
         # Deliberately ahead of ``StorageError``: a retryable failure that is
         # *also* a storage failure (``NamespaceMutationBusyError``) is more
@@ -202,6 +211,12 @@ def _hint_for(e: Exception) -> str | None:
         # (issue #2005) raises ``NamespaceResolutionError`` rather than
         # returning per-file errors, so ``print_index_errors`` never sees it.
         return "transient failure — retry the same command once the chunk store is reachable."
+    if isinstance(e, EvalCaseError):
+        # Ahead of ``StorageError``, its base class: an unknown case or run, a
+        # name collision or a malformed label is an input problem, and the
+        # message already names it. "run `mm status`" would send the user to
+        # check a database that is fine.
+        return None
     if isinstance(e, StorageError):
         return "storage backend error — run `mm status` to check the DB path and health."
     return None

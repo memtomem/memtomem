@@ -11,7 +11,7 @@ from uuid import UUID
 
 from memtomem.config import TargetScope
 from memtomem.constants import writable_namespace_arg
-from memtomem.errors import RetryableError
+from memtomem.errors import RetryableError, StorageError
 from memtomem.indexing.scope_guard import scope_held_notice
 from memtomem.memory_scope import NS_RETARGET_ATTEMPTS, MemoryScopeError
 from memtomem.memory_scope import NS_RETARGET_EXHAUSTED_ERROR as _NS_RETARGET_EXHAUSTED
@@ -29,7 +29,10 @@ from memtomem.server.tools._provenance import (
     record_write_provenance,
 )
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
+from memtomem.storage.base import WRITER_WAIT_S
+from memtomem.storage.sqlite_errors import is_writer_busy
 from memtomem.source_provenance import (
+    EXCLUDED_AFTER_APPEND_NOTICE,
     EXCLUDED_SOURCE_DETAIL,
     SOURCE_MISSING_DETAIL,
     EXCLUDED_TARGET_DETAIL,
@@ -37,12 +40,15 @@ from memtomem.source_provenance import (
     SOURCE_READ_ONLY_DETAIL,
     STALE_SOURCE_PROVENANCE_DETAIL,
     StaleSourceProvenanceError,
+    excluded_after_write_notice,
+    relinked_after_write_notice,
 )
 from memtomem.tools.memory_writer import (
     EditBaseMismatchError,
     RestoreOutcome,
     SourceChangedError,
     read_pre_image,
+    read_with_source_key,
     restore_pre_image_quietly,
     valid_base_hash,
 )
@@ -351,7 +357,18 @@ async def _locked_chunk(
                 async with async_memory_file_lock(
                     source_file, timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
                 ) as cross_process_held:
-                    fresh = await app.storage.get_chunk(uid, exclude_withheld=True)
+                    # The writer, not a pool reader: this row's scope decides the
+                    # Gate-B check and its line range what the caller cuts from the
+                    # file, and a pool connection can serve a snapshot from before
+                    # a commit made while we waited for the locks (#3202).
+                    try:
+                        fresh = await app.storage.get_chunk(
+                            uid, exclude_withheld=True, read_writer=True
+                        )
+                    except StorageError as exc:
+                        if not is_writer_busy(exc):
+                            raise
+                        raise RetryableError(_WRITER_BUSY_NOTHING_CHANGED) from exc
                     if fresh is None or not in_boundary(fresh, boundary):
                         yield None, f"Error: chunk {chunk_id} not found.", cross_process_held
                         return
@@ -378,6 +395,29 @@ async def _locked_chunk(
     yield None, f"Error: chunk {chunk_id} source file is being moved concurrently; retry.", False
 
 
+_WRITER_BUSY_NOTHING_CHANGED = "the store's writer is busy; nothing was changed. Retry."
+
+
+@asynccontextmanager
+async def _gated_delete_transaction(app: AppContext) -> AsyncIterator[None]:
+    """One writer transaction for a bulk delete's Gate-B probe and the delete itself.
+
+    Nothing can commit while the body holds the writer, so the scopes the probe
+    reads are the rows the delete removes, and the probe reads the writer, not
+    a pool connection that can still hold a snapshot from before a commit
+    (#3202). Waits up to ``WRITER_WAIT_S`` for another task's transaction. A
+    busy writer, here or in another process, is a retryable refusal; the
+    transaction rolls back on it, so nothing was deleted.
+    """
+    try:
+        async with app.storage.transaction(wait=WRITER_WAIT_S):
+            yield
+    except StorageError as exc:
+        if not is_writer_busy(exc):
+            raise
+        raise RetryableError(_WRITER_BUSY_NOTHING_CHANGED) from exc
+
+
 async def _scope_loss_refusal(app: AppContext, chunk: Chunk, chunk_id: str) -> str | None:
     """Refuse a rewrite that would re-index project memory as another scope or project.
 
@@ -396,11 +436,11 @@ async def _scope_loss_refusal(app: AppContext, chunk: Chunk, chunk_id: str) -> s
 
 
 async def _flag_imprecise_write(
-    app: AppContext, session_id: str | None, stats: IndexingStats
+    app: AppContext, session_id: str | None, stats: IndexingStats, *, appended: bool = True
 ) -> None:
     """Mark the session when an append's own record may overstate it.
 
-    Two cases, both of which leave ``new_chunk_ids`` describing something
+    Three cases, each of which leaves ``new_chunk_ids`` describing something
     other than "exactly what this call contributed":
 
     ``deleted_chunks`` is non-zero. An append re-indexes the whole file,
@@ -417,12 +457,19 @@ async def _flag_imprecise_write(
     point, so the content exists, will be picked up by the watcher later,
     and belongs to no event. Only the raising path was handled before.
 
+    ``excluded_files`` is non-zero. An exclusion installed between the
+    append and its re-index made the engine skip the file: the entry is on
+    disk with no new ids, and ``record_write_provenance`` records nothing
+    for an empty list (#3165). ``appended`` is false for a batch whose entries
+    were all empty: it wrote nothing, so there is nothing missing from the
+    record.
+
     Attributing precisely instead of flagging would mean tracking the
     appended span through chunking and diffing, which is a change to the
     indexing contract rather than to this call site. Until then, saying
     "this record is not exact" is the honest answer.
     """
-    if stats.deleted_chunks or stats.errors:
+    if stats.deleted_chunks or stats.errors or (stats.excluded_files and appended):
         await mark_provenance_incomplete(app, session_id)
 
 
@@ -439,6 +486,18 @@ async def _preflight_refusal(
     if refusal is not None:
         app.search_pipeline.invalidate_cache()
     return refusal, pre
+
+
+def _rewrite_notices(op: str, stats: IndexingStats, source_file: Path) -> str:
+    """The lines a completed rewrite adds when its re-index did not index the file."""
+    notices = []
+    if stats.relinked_files:
+        notices.append(relinked_after_write_notice(op, str(source_file)))
+    if stats.scope_held:
+        notices.append(scope_held_notice(op))
+    if stats.excluded_files:
+        notices.append(excluded_after_write_notice(op))
+    return "".join(f"\n- {notice}" for notice in notices)
 
 
 async def _mutate_file_and_reindex(
@@ -511,13 +570,15 @@ async def _mutate_file_and_reindex(
     # inherit a mutation that happened in its predecessor.
     provenance_session_id = await capture_session_for_untracked_write(app)
     try:
-        pre_image = await asyncio.to_thread(read_pre_image, source_file)
+        pre_image, source_key = await asyncio.to_thread(
+            read_with_source_key, read_pre_image, source_file
+        )
     except FileNotFoundError:
         # A missing source stays visible under ``retain_missing_dirs`` (#2833);
         # nothing has been read or written yet.
         return None, f"Error: {SOURCE_MISSING_DETAIL}"
     preflight = await asyncio.to_thread(
-        app.index_engine.preflight_mutation, source_file, pre_image.data
+        app.index_engine.preflight_mutation, source_file, pre_image.data, source_key=source_key
     )
     if preflight.rejection is not None:
         rejection = await app.index_engine.refuse_mutation(source_file, preflight)
@@ -533,12 +594,21 @@ async def _mutate_file_and_reindex(
         # The valve covers this edit only: bound to the judged file plus the
         # edit, and not forwarded when the rewrite read something else.
         valve_text = rewrite_valve_text(pre_image.data, written) if force_unsafe else None
+        # The exclusion check above ran before several awaits, and
+        # ``exclude_patterns`` is runtime-mutable: one installed since would
+        # make the engine skip the file and leave the pre-edit chunks beside
+        # the new bytes. The purge judges it again under the locks (#3163).
+        # A file replaced by a symlink since the write, which the caller's
+        # relinked-key refusal (#2923) could not see, is held rather than
+        # indexed through the link (#3172).
         stats = await app.index_engine.index_file(
             source_file,
             ingress_guarded=True,
             force_unsafe=valve_text is not None,
             valve_text=valve_text,
             lock_held=True,
+            purge_if_excluded=True,
+            hold_if_relinked=True,
         )
         app.search_pipeline.invalidate_cache()
         await flag_untracked_write(app, provenance_session_id)
@@ -1193,6 +1263,10 @@ async def _mem_add_core(
                         f"- Chunks indexed: {stats.indexed_chunks}\n"
                         f"- File: {target}"
                     )
+                    # A fact of this write, not an advisory tail: stored with the
+                    # base result, so a replay reports it too (#3165).
+                    if stats.excluded_files:
+                        result += f"\n- {EXCLUDED_AFTER_APPEND_NOTICE}"
                     # Fill in the won claim with the base result, under the lock. Only
                     # the deterministic base message is stored — the advisory tails
                     # below are non-deterministic and original-only. A complete failure
@@ -1594,7 +1668,7 @@ async def mem_edit(
             f"Memory updated in {meta.source_file}\n"
             f"- Lines {meta.start_line}-{meta.end_line} replaced\n"
             f"- Re-indexed: {stats.indexed_chunks} chunks"
-        ) + (f"\n- {scope_held_notice('edit')}" if stats.scope_held else "")
+        ) + _rewrite_notices("edit", stats, meta.source_file)
 
 
 @mcp.tool()
@@ -1697,7 +1771,7 @@ async def mem_delete(
                 f"Memory deleted from {meta.source_file}\n"
                 f"- Lines {meta.start_line}-{meta.end_line} removed\n"
                 f"- Re-indexed: {stats.indexed_chunks} chunks"
-            ) + (f"\n- {scope_held_notice('delete')}" if stats.scope_held else "")
+            ) + _rewrite_notices("delete", stats, meta.source_file)
 
     if source_file:
         # ``source_file`` usually names a stored key, as ``mem_list`` prints it
@@ -1751,7 +1825,8 @@ async def mem_delete(
         # incremental ``index_file`` — in this process or another — can land
         # after this delete and re-upsert the whole file, silently
         # resurrecting the rows just removed. The Gate-B scope probe runs under
-        # the locks too so it sees the same state the delete acts on.
+        # the locks too, and in one writer transaction with the delete, so it
+        # sees the state the delete acts on (#3202).
         #
         # L2 through ``async_memory_file_lock`` (#2346): ``_validate_path``
         # resolves and range-checks ``source_file`` but never stats it, so
@@ -1776,27 +1851,28 @@ async def mem_delete(
                 # not the rows). If the directory returned after the degrade,
                 # the worst case is rows removed for a file that is back, which
                 # the next index of that file restores.
-                scopes = await app.storage.list_scopes_by_source(stored_key, as_stored=True)
-                if "project_shared" in scopes and not confirm_project_shared:
-                    logger.info(
-                        "mem_delete rejected bulk project_shared source without confirmation",
-                        extra={"source_file": str(sf_path), "scopes": sorted(scopes)},
-                    )
-                    return (
-                        "Error: source_file delete would remove scope='project_shared' chunks; "
-                        "pass confirm_project_shared=True to proceed. Bulk source deletes are "
-                        "all-or-nothing; use chunk_id for per-chunk control."
-                    )
-                # Same predicate as the gate — a source holding no
-                # project_shared chunks needed no consent.
-                if "project_shared" in scopes:
-                    privacy.emit_project_shared_confirmation(
-                        surface="mem_delete",
-                        mechanism="param",
-                        action="delete",
-                        audit_context={"source_file": sf_path.name, "scopes": len(scopes)},
-                    )
-                deleted = await app.storage.delete_by_source(stored_key, as_stored=True)
+                async with _gated_delete_transaction(app):
+                    scopes = await app.storage.list_scopes_by_source(stored_key, as_stored=True)
+                    if "project_shared" in scopes and not confirm_project_shared:
+                        logger.info(
+                            "mem_delete rejected bulk project_shared source without confirmation",
+                            extra={"source_file": str(sf_path), "scopes": sorted(scopes)},
+                        )
+                        return (
+                            "Error: source_file delete would remove scope='project_shared' chunks; "
+                            "pass confirm_project_shared=True to proceed. Bulk source deletes are "
+                            "all-or-nothing; use chunk_id for per-chunk control."
+                        )
+                    # Same predicate as the gate — a source holding no
+                    # project_shared chunks needed no consent.
+                    if "project_shared" in scopes:
+                        privacy.emit_project_shared_confirmation(
+                            surface="mem_delete",
+                            mechanism="param",
+                            action="delete",
+                            audit_context={"source_file": sf_path.name, "scopes": len(scopes)},
+                        )
+                    deleted = await app.storage.delete_by_source(stored_key, as_stored=True)
         except TimeoutError:
             return (
                 f"Error: {source_file} is locked by another process (migration in flight?); retry."
@@ -1833,30 +1909,32 @@ async def mem_delete(
             # ADR-0011 PR-D Gate B on bulk namespace delete. project_shared
             # memories can sit in the default namespace alongside user
             # memories, so the namespace string alone does not imply the
-            # trust tier — probe the persisted scope set (under the locks,
-            # so the gate sees the same state the delete acts on).
-            ns_scopes = await app.storage.list_scopes_by_namespace(namespace)
-            if "project_shared" in ns_scopes and not confirm_project_shared:
-                logger.info(
-                    "mem_delete rejected bulk project_shared namespace without confirmation",
-                    extra={"namespace": namespace, "scopes": sorted(ns_scopes)},
-                )
-                return (
-                    f"Error: namespace='{namespace}' delete would remove "
-                    "scope='project_shared' chunks; pass confirm_project_shared=True "
-                    "to proceed. Bulk namespace deletes are all-or-nothing; use "
-                    "chunk_id for per-chunk control."
-                )
-            # Same predicate as the gate — a namespace holding no
-            # project_shared chunks needed no consent.
-            if "project_shared" in ns_scopes:
-                privacy.emit_project_shared_confirmation(
-                    surface="mem_delete",
-                    mechanism="param",
-                    action="delete",
-                    audit_context={"namespace": namespace, "scopes": len(ns_scopes)},
-                )
-            deleted = await app.storage.delete_by_namespace(namespace)
+            # trust tier — probe the persisted scope set (under the locks and
+            # in one writer transaction with the delete, so the gate sees the
+            # state the delete acts on, #3202).
+            async with _gated_delete_transaction(app):
+                ns_scopes = await app.storage.list_scopes_by_namespace(namespace)
+                if "project_shared" in ns_scopes and not confirm_project_shared:
+                    logger.info(
+                        "mem_delete rejected bulk project_shared namespace without confirmation",
+                        extra={"namespace": namespace, "scopes": sorted(ns_scopes)},
+                    )
+                    return (
+                        f"Error: namespace='{namespace}' delete would remove "
+                        "scope='project_shared' chunks; pass confirm_project_shared=True "
+                        "to proceed. Bulk namespace deletes are all-or-nothing; use "
+                        "chunk_id for per-chunk control."
+                    )
+                # Same predicate as the gate — a namespace holding no
+                # project_shared chunks needed no consent.
+                if "project_shared" in ns_scopes:
+                    privacy.emit_project_shared_confirmation(
+                        surface="mem_delete",
+                        mechanism="param",
+                        action="delete",
+                        audit_context={"namespace": namespace, "scopes": len(ns_scopes)},
+                    )
+                deleted = await app.storage.delete_by_namespace(namespace)
         app.search_pipeline.invalidate_cache()
         if deleted:
             await flag_untracked_write(app, provenance_session_id)
@@ -2309,7 +2387,9 @@ async def mem_batch_add(
                     except Exception:
                         await mark_provenance_incomplete(app, provenance_session_id)
                         raise
-                    await _flag_imprecise_write(app, provenance_session_id, stats)
+                    await _flag_imprecise_write(
+                        app, provenance_session_id, stats, appended=bool(appended)
+                    )
                     display_ns = await _written_namespace_label(app, target, effective_ns, stats)
                     result = (
                         f"Batch add complete ({len(entries)} entries) → {target}\n"
@@ -2318,6 +2398,10 @@ async def mem_batch_add(
                     )
                     if skipped:
                         result += f"\n- Skipped: {skipped} entries (empty content)"
+                    # Part of the stored base result, as in ``_mem_add_core`` (#3165).
+                    # Not for a batch of only empty entries: it appended nothing.
+                    if stats.excluded_files and appended:
+                        result += f"\n- {EXCLUDED_AFTER_APPEND_NOTICE}"
                     # Fill in the won claim under the lock. A complete failure leaves the
                     # row pending (never released — the append is durable), so a retry
                     # replays/blocks instead of duplicating.

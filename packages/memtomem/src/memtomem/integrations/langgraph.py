@@ -719,10 +719,16 @@ class MemtomemStore:
         if stats.mutated:
             comp.search_pipeline.invalidate_cache()
 
-        return {
+        result: dict[str, Any] = {
             "file": str(target),
             "indexed_chunks": stats.indexed_chunks,
         }
+        if stats.excluded_files:
+            # The file became excluded while the entry was appended (#3165).
+            from memtomem.source_provenance import EXCLUDED_AFTER_APPEND_NOTICE
+
+            result["warning"] = EXCLUDED_AFTER_APPEND_NOTICE
+        return result
 
     async def get(self, chunk_id: str) -> dict | None:
         """Get a chunk by UUID, inside the caller's project boundary.
@@ -804,6 +810,8 @@ class MemtomemStore:
                 the bounded re-key can follow. "Writer" and not "process":
                 the sidecar has an in-process layer as well, so a second
                 coroutine in this same interpreter can be the one holding it.
+                Or the store's writer stayed held past ``WRITER_WAIT_S`` while
+                the chunk was re-read under that lock; nothing was deleted.
         """
         from memtomem import privacy
         from memtomem.errors import ProjectSharedConfirmationRequiredError
@@ -843,6 +851,11 @@ class MemtomemStore:
                     raise TimeoutError(
                         f"chunk {chunk_id} source file is locked by another writer "
                         "(migration in flight?); retry."
+                    )
+                if reason == "writer_busy":
+                    raise TimeoutError(
+                        f"the store's writer stayed busy while re-reading chunk {chunk_id}; "
+                        "nothing was deleted, retry."
                     )
                 if reason == "read_only":
                     # Refused before the acquire, so nothing was written beside

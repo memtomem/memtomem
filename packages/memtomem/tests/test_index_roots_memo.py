@@ -483,4 +483,11 @@ async def test_the_guard_uses_fresh_roots_when_the_config_moved_mid_walk(
     result = await engine._index_file(toc, False, index_roots=stale)
 
     # Judged with the stale memo, MEMORY.md would be an orphan and indexed.
-    assert result == {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
+    assert result == {
+        "total": 0,
+        "indexed": 0,
+        "skipped": 0,
+        "deleted": 0,
+        "errors": [],
+        "excluded": True,
+    }

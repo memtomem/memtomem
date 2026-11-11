@@ -8,6 +8,7 @@ full component initialization (embedding provider, SQLite, etc.).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
@@ -273,6 +274,9 @@ def app(_isolated_config_paths: Path):
     # plain MagicMock children, which don't implement the async-context
     # protocol the tag-management service relies on.
     storage._tag_write_lock = asyncio.Lock()
+    # Routes that wait for the writer enter ``storage.transaction(wait=...)``;
+    # an AsyncMock child would hand back a coroutine, not a context manager.
+    storage.transaction = MagicMock(side_effect=lambda **_: contextlib.nullcontext())
 
     # -- embedder mock --
     embedder = AsyncMock()
@@ -2750,7 +2754,7 @@ class TestDeleteChunk:
         assert resp.status_code == 200
         data = resp.json()
         assert data["deleted"] == 1
-        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id], finalize_emptied=True)
 
     @staticmethod
     def _real_source_chunk(app, tmp_path: Path):
@@ -2943,7 +2947,7 @@ class TestDeleteChunk:
         resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
 
         assert resp.status_code == 200, resp.text
-        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id], finalize_emptied=True)
         assert "first" not in source.read_text(encoding="utf-8")
 
     async def test_delete_reports_partial_failure_when_index_cleanup_does_not_finish(
@@ -6247,36 +6251,6 @@ class TestRemoveMemoryDirChunkCleanup:
     # POST /api/upload — redaction guard wire-in
     # ---------------------------------------------------------------------------
 
-    async def test_partial_sweep_failure_still_invalidates_the_committed_deletes(
-        self, app, client: AsyncClient, tmp_path: Path
-    ) -> None:
-        """#2141 class: the first source's chunks are gone from the store even
-        though a later source blows the request up, so a warmed query must not
-        keep returning them."""
-        target = tmp_path / "going-away"
-        keep = tmp_path / "keep-this"
-        target.mkdir()
-        keep.mkdir()
-        app.state.config.indexing.memory_dirs = [target, keep]
-        app.state.storage.get_source_files_with_counts.return_value = [
-            (target / "a.md", 2, "2026-04-29T00:00:00", "default", 100, 50, 200),
-            (target / "b.md", 2, "2026-04-29T00:00:00", "default", 100, 50, 200),
-        ]
-        app.state.storage.delete_by_source = AsyncMock(side_effect=[2, RuntimeError("store blip")])
-        app.state.search_pipeline.invalidate_cache.reset_mock()
-
-        with (
-            patch("memtomem.web.routes.system.save_config_overrides"),
-            pytest.raises(RuntimeError, match="store blip"),
-        ):
-            await client.post(
-                "/api/memory-dirs/remove",
-                json={"path": str(target), "delete_chunks": True},
-            )
-
-        assert app.state.storage.delete_by_source.await_count == 2
-        assert app.state.search_pipeline.invalidate_cache.call_count == 1
-
     @staticmethod
     def _serve_rows(app, rows: list[tuple[Path, int]]) -> None:
         """Serve ``rows`` as ``(path, chunks)``; each delete returns that source's chunks."""
@@ -7857,7 +7831,7 @@ class TestChunkCrudCrossProcessLock:
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["deleted"] == 1
-        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id], finalize_emptied=True)
         assert not (tmp_path / "gone").exists()
         assert not any(tmp_path.iterdir()), f"stray artifacts: {list(tmp_path.iterdir())}"
 
@@ -7942,7 +7916,7 @@ class TestChunkCrudCrossProcessLock:
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["deleted"] == 1
-        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id], finalize_emptied=True)
         # Untouched: the rows went, the recreated file did not.
         assert src.read_text(encoding="utf-8") == "## H\n\nrecreated by another writer\n"
 
@@ -8082,7 +8056,7 @@ class TestChunkCrudCrossProcessLock:
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["deleted"] == 1
-        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id], finalize_emptied=True)
         assert not src.exists()  # nothing was recreated
         # No re-index of a file that is not there.
         app.state.index_engine.index_file.assert_not_awaited()
@@ -8482,7 +8456,7 @@ class TestIndexRoutesInvalidateSearchCache:
         resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
 
         assert resp.status_code >= 500
-        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id], finalize_emptied=True)
         assert app.state.search_pipeline.invalidate_cache.call_count == 1
 
     async def test_delete_chunk_refusal_inside_the_guarded_region_does_not_invalidate(

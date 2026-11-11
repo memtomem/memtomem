@@ -1760,7 +1760,9 @@ function showToast(message, type = 'success', options = {}) {
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
   closeBtn.className = 'toast-close';
-  closeBtn.title = 'Close';
+  closeBtn.title = (typeof I18N !== 'undefined' && I18N.t)
+    ? I18N.t('common.close')
+    : 'Close';
   closeBtn.setAttribute('aria-label', (typeof I18N !== 'undefined' && I18N.t)
     ? I18N.t('toast.close_aria')
     : 'Close notification');
@@ -6987,7 +6989,10 @@ qs('add-btn').addEventListener('click', async () => {
     const data = await apiWithRedactionRetry('POST', '/api/add', body);
     if (data === null) return;
     const n = data.indexed_chunks;
-    showToast(t('toast.saved_to_file', { path: tildifyPath(data.file), count: n }), 'success');
+    // Set when the file became excluded while the entry was appended (#3165):
+    // the entry is on disk but not indexed, so it replaces the success toast.
+    if (data.warning) showToast(data.warning, 'warning');
+    else showToast(t('toast.saved_to_file', { path: tildifyPath(data.file), count: n }), 'success');
     qs('add-content').value = '';
     _markDataStale();
     loadStats();
@@ -9330,7 +9335,7 @@ qs('d-source-btn').addEventListener('click', async () => {
     const data = await api('GET', `/api/chunks?source=${encodeURIComponent(sourceFile)}&limit=100`);
     const chunks = data.chunks || [];
     if (!chunks.length) {
-      list.innerHTML = '<div class="empty-state" style="height:40px"><span>No chunks found</span></div>';
+      list.innerHTML = `<div class="empty-state" style="height:40px"><span data-i18n="chunks.none_found">${escapeHtml(t('chunks.none_found'))}</span></div>`;
       return;
     }
     list.innerHTML = chunks.map(c => `

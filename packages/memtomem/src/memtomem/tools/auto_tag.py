@@ -13,6 +13,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from memtomem.storage.base import WRITER_WAIT_S
+
 if TYPE_CHECKING:
     from memtomem.llm.base import LLMProvider
     from memtomem.search.pipeline import SearchPipeline
@@ -375,7 +377,15 @@ async def auto_tag_storage(
                     # ``tags`` and ``updated_at`` and judges the hold itself, so
                     # a chunk deleted, or whose source was held, while the
                     # extractor ran is skipped rather than rewritten.
-                    async with storage._tag_write_lock:
+                    #
+                    # The write waits for another task's transaction (#3181),
+                    # taken before the tag lock: an index holds its transaction
+                    # and then takes the tag lock, so the other order would
+                    # leave each waiting for the other.
+                    async with (
+                        storage.transaction(wait=WRITER_WAIT_S),
+                        storage._tag_write_lock,
+                    ):
                         if not await storage.set_chunk_tags(chunk.id, new_tags):
                             skipped += 1
                             total -= 1  # rebalance: the chunk is no longer there to tag

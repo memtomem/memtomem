@@ -25,7 +25,9 @@ from typing import TYPE_CHECKING
 
 from memtomem.context import _atomic
 from memtomem.context._atomic import async_memory_file_lock
+from memtomem.errors import StorageError
 from memtomem.search.visibility import chunk_in_scope_boundary
+from memtomem.storage.sqlite_errors import is_writer_busy
 from memtomem.source_provenance import (
     ExcludedSourceError,
     ReadOnlySourceError,
@@ -36,6 +38,7 @@ from memtomem.tools.memory_writer import (
     RestoreOutcome,
     SourceChangedError,
     read_pre_image,
+    read_with_source_key,
     restore_pre_image_quietly,
 )
 
@@ -64,7 +67,8 @@ async def locked_source_chunk(
     """Yield ``(chunk, None, cross_process_held)`` with the chunk's source-file
     sidecar (L2) held and the chunk re-fetched fresh under it, or
     ``(None, reason, cross_process_held)`` where ``reason`` is one of
-    ``"not_found"`` / ``"moved"`` / ``"locked"``.
+    ``"not_found"`` / ``"moved"`` / ``"locked"`` / ``"read_only"`` /
+    ``"writer_busy"``.
 
     Two-step acquire (issue #1587): fetch once *unlocked* to learn the
     ``source_file`` (the lock key), acquire that file's sidecar, then re-fetch
@@ -73,8 +77,16 @@ async def locked_source_chunk(
     re-keys onto a moved file and holds the L1 lock too), a file moved by
     ``memory-migrate`` between the two fetches is reported as ``"moved"`` for the
     caller to retry — web/CLI callers re-issue the request rather than looping.
-    ``"locked"`` means the sidecar acquire timed out. Exactly one ``yield`` runs
-    on every path.
+    ``"locked"`` means the sidecar acquire timed out. ``"writer_busy"`` means the
+    re-fetch, which reads the store's writer, waited ``WRITER_WAIT_S`` for another
+    task in this process to finish its transaction and gave up; nothing was read
+    or changed. The read takes no SQLite lock, so another process's writer does
+    not hold it up. Exactly one ``yield`` runs on every path.
+
+    The re-fetch reads the writer rather than a pool connection: its ``scope``
+    decides the caller's Gate-B check and its line range what the caller cuts
+    from the file, and a pool connection can serve a snapshot from before a
+    commit made while the lock was awaited (#3202).
 
     The span is ``async_memory_file_lock``, not a bare sidecar acquire: this
     helper is reached for a *delete* as well as an edit, and a chunk can
@@ -129,7 +141,13 @@ async def locked_source_chunk(
     try:
         async with async_memory_file_lock(resolved, timeout=budget) as cross_process_held:
             acquired = True
-            fresh = await storage.get_chunk(chunk_id, exclude_withheld=True)
+            try:
+                fresh = await storage.get_chunk(chunk_id, exclude_withheld=True, read_writer=True)
+            except StorageError as exc:
+                if not is_writer_busy(exc):
+                    raise
+                yield None, "writer_busy", cross_process_held
+                return
             if fresh is None or not chunk_in_scope_boundary(fresh.metadata, project_context_root):
                 yield None, "not_found", cross_process_held
                 return
@@ -212,12 +230,14 @@ async def mutate_source_and_reindex(
     if refusal is not None:
         raise MutationBlockedError(refusal)
     try:
-        pre_image = await asyncio.to_thread(read_pre_image, source_file)
+        pre_image, source_key = await asyncio.to_thread(
+            read_with_source_key, read_pre_image, source_file
+        )
     except FileNotFoundError as exc:
         # Nothing read, nothing written (#2833).
         raise SourceMissingError(str(source_file)) from exc
     preflight = await asyncio.to_thread(
-        index_engine.preflight_mutation, source_file, pre_image.data
+        index_engine.preflight_mutation, source_file, pre_image.data, source_key=source_key
     )
     if preflight.rejection is not None:
         rejection = await index_engine.refuse_mutation(source_file, preflight)
@@ -233,12 +253,19 @@ async def mutate_source_and_reindex(
         # The valve covers this edit only: bound to the judged file plus the
         # edit, and not forwarded when the rewrite read something else.
         valve_text = rewrite_valve_text(pre_image.data, written) if force_unsafe else None
+        # An exclusion installed since the check above would make the engine
+        # skip the file and leave the pre-edit chunks beside the new bytes; the
+        # purge judges it again under the locks (#3163). A file replaced by a
+        # symlink since the write, after the relinked-key refusal above, is held
+        # rather than indexed through the link (#3172).
         return await index_engine.index_file(
             source_file,
             ingress_guarded=True,
             force_unsafe=valve_text is not None,
             valve_text=valve_text,
             lock_held=True,
+            purge_if_excluded=True,
+            hold_if_relinked=True,
         )
     except Exception as exc:
         if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:
@@ -304,8 +331,10 @@ async def preflight_refusal(
     """
     from memtomem.tools.memory_writer import read_pre_image_or_empty
 
-    pre = await asyncio.to_thread(read_pre_image_or_empty, path)
-    preflight = await asyncio.to_thread(index_engine.preflight_mutation, path, pre)
+    pre, source_key = await asyncio.to_thread(read_with_source_key, read_pre_image_or_empty, path)
+    preflight = await asyncio.to_thread(
+        index_engine.preflight_mutation, path, pre, source_key=source_key
+    )
     if preflight.rejection is not None:
         rejection = await index_engine.refuse_mutation(path, preflight)
         return rejection.mutation_detail(op, outcome="not_written", surface=surface), pre

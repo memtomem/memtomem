@@ -22,7 +22,7 @@ async def test_factory_can_skip_already_resolved_ambient_config(monkeypatch):
     monkeypatch.setattr(
         _factory,
         "create_storage",
-        lambda _config: (_ for _ in ()).throw(RuntimeError("factory reached")),
+        lambda _config, **_kw: (_ for _ in ()).throw(RuntimeError("factory reached")),
     )
     with pytest.raises(RuntimeError, match="factory reached"):
         await _factory.create_components(config, load_ambient_config=False)
@@ -48,7 +48,7 @@ async def test_factory_cleanup_attempts_every_resource_and_preserves_init_error(
             closed.append("embedder")
             raise RuntimeError("embedder cleanup failed")
 
-    monkeypatch.setattr(_factory, "create_storage", lambda _config: BrokenStorage())
+    monkeypatch.setattr(_factory, "create_storage", lambda _config, **_kw: BrokenStorage())
     monkeypatch.setattr(_factory, "create_embedder", lambda _config: BrokenEmbedder())
     config = _cfg.Mem2MemConfig()
 
@@ -79,7 +79,7 @@ async def test_factory_shared_pipeline_failure_closes_each_resource_once(monkeyp
     # Whether owned by the caller or a completed pipeline, a failing close
     # must still release the remaining resources and retain the root cause.
     reranker.close = AsyncMock(side_effect=RuntimeError("reranker cleanup failed"))
-    monkeypatch.setattr(factory, "create_storage", lambda _config: storage)
+    monkeypatch.setattr(factory, "create_storage", lambda _config, **_kw: storage)
     monkeypatch.setattr(factory, "create_embedder", lambda _config: embedder)
     monkeypatch.setattr("memtomem.llm.factory.create_llm", lambda _config: llm)
     monkeypatch.setattr(

@@ -16,7 +16,7 @@ from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, TypeVar
 
 from memtomem.context._atomic import async_file_lock, memory_lock_path
-from memtomem.errors import NamespaceMutationBusyError
+from memtomem.errors import NamespaceMutationBusyError, TransactionOwnedError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -73,8 +73,19 @@ async def _coordinated_mutation(
     load_candidates: Callable[[], Awaitable[list[NamespaceChunkCandidate]]],
     apply: Callable[[Sequence[NamespaceChunkCandidate]], Awaitable[_ResultT]],
 ) -> _ResultT:
+    """Load, lock and apply one namespace mutation; busy if it cannot settle.
+
+    Both candidate loads wait for another task's write transaction inside
+    storage (#3182). The reload under the file locks is followed by ``apply``
+    with no ``await`` before its write, so that wait covers the write too. A
+    wait that runs out is reported as ``NamespaceMutationBusyError``, like a
+    lock that stays busy: it comes before anything is written.
+    """
     deadline = time.monotonic() + _NAMESPACE_MUTATION_BUDGET_S
-    candidates = await load_candidates()
+    try:
+        candidates = await load_candidates()
+    except TransactionOwnedError as exc:
+        raise _busy_error() from exc
 
     for _attempt in range(_MAX_RETARGET_ATTEMPTS):
         if deadline - time.monotonic() <= 0:
@@ -106,7 +117,7 @@ async def _coordinated_mutation(
                         # rows between the service snapshot and storage CAS.
                         # The raw transaction rolled back, so re-snapshot.
                         retarget = True
-        except (TimeoutError, OSError) as exc:
+        except (TimeoutError, OSError, TransactionOwnedError) as exc:
             raise _busy_error() from exc
 
         if retarget:

@@ -1,0 +1,21 @@
+{
+  "name": "memtomem",
+  "version": "0.1.0",
+  "description": "Markdown-first long-term memory shared across your agents: one local memtomem store, searchable from OpenClaw, Claude Code, Codex CLI and Hermes.",
+  "author": {
+    "name": "memtomem",
+    "url": "https://github.com/memtomem"
+  },
+  "homepage": "https://github.com/memtomem/memtomem",
+  "repository": "https://github.com/memtomem/memtomem",
+  "license": "Apache-2.0",
+  "keywords": [
+    "memory",
+    "mcp",
+    "long-term-memory",
+    "local-first",
+    "markdown"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

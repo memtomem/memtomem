@@ -25,6 +25,7 @@ from click.testing import CliRunner
 
 from memtomem import privacy
 from memtomem.models import Chunk, ChunkMetadata
+from memtomem.storage.sqlite_helpers import fts_source_text
 
 
 _SECRET = "api_key=AKIA1234567890ABCDEF"
@@ -366,7 +367,7 @@ async def test_replace_chunk_tags_is_atomic_against_memory_migrate(
     fts_source = db.execute(
         "SELECT source_file FROM chunks_fts WHERE rowid=?", (rowid,)
     ).fetchone()[0]
-    assert Path(fts_source) == target
+    assert fts_source == fts_source_text(str(target))
     assert (
         db.execute("SELECT COUNT(*) FROM chunks_vec WHERE rowid=?", (rowid,)).fetchone()[0]
         == vector_rows_before
@@ -1632,12 +1633,18 @@ async def test_memory_migrate_moves_the_policy_summary_with_its_source(
     assert _summary_rows(comp.storage, new_summary) == [
         (summary_id, ORIGIN_CONSOLIDATION_POLICY, "project_shared", str(project_root))
     ]
+    # Through the chunk's rowid, not by the FTS value: a file name is shared by
+    # every file of that name, so matching on it could count another file's row.
     fts = (
         comp.storage._get_db()
-        .execute("SELECT source_file FROM chunks_fts WHERE source_file=?", (str(new_summary),))
+        .execute(
+            "SELECT f.source_file FROM chunks_fts f JOIN chunks c ON c.rowid = f.rowid "
+            "WHERE c.source_file=?",
+            (str(new_summary),),
+        )
         .fetchall()
     )
-    assert len(fts) == 1
+    assert fts == [(fts_source_text(str(new_summary)),)]
     assert (await scan_orphans(comp.storage, recheck_delay_seconds=0)).confirmed_orphans == []
     again = await execute_auto_consolidate(
         comp.storage, {"min_group_size": 3}, None, dry_run=False, extract_entities=False
@@ -1738,6 +1745,23 @@ async def test_the_summary_cache_moves_with_the_policy_summary(bm25_only_compone
     meta = dict(db.execute("SELECT key, value FROM _memtomem_meta").fetchall())
     assert old_key not in meta
     assert meta[new_key] == "cached"
+
+
+async def test_chunk_descriptions_move_with_migrated_source(bm25_only_components):
+    comp, mem_dir = bm25_only_components
+    storage = comp.storage
+    src = mem_dir / "rule.md"
+    await _source_with_policy_summary(storage, src)
+    descriptions = {"h1": "A description of chunk 1"}
+    await storage.set_chunk_descriptions(src, descriptions)
+    assert await storage.get_chunk_descriptions(src) == descriptions
+
+    tgt = mem_dir / "moved" / "rule.md"
+    tgt.parent.mkdir()
+    assert await storage.update_chunks_scope_for_source(src, tgt, "user", None) == 3
+
+    assert await storage.get_chunk_descriptions(src) == {}
+    assert await storage.get_chunk_descriptions(tgt) == descriptions
 
 
 async def test_a_failed_summary_move_rolls_the_source_move_back(bm25_only_components, monkeypatch):

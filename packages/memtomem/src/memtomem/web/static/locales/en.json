@@ -185,6 +185,7 @@
   "search.context_label": "Context",
   "search.context_title": "Include N neighboring chunks around each result for more context",
   "search.context_off": "Off",
+  "search.context_config": "Config ({before}↑{after}↓)",
   "search.date_all": "All Time",
   "search.date_today": "Today",
   "search.date_7d": "Last 7 days",

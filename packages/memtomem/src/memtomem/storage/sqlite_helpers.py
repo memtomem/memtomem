@@ -91,6 +91,29 @@ def norm_path(p: Path) -> str:
     return fold_path_form(resolved)
 
 
+def fts_source_text(stored_source: str) -> str:
+    """The text ``chunks_fts.source_file`` holds for a chunk stored at *stored_source*.
+
+    That column exists so a query naming a file still finds the file once no
+    chunk's content matches (#2224). Only the file's name serves that. Every
+    other word of the path is shared: a directory's words appear in every
+    chunk under it, and an extension in every file of its type. As terms they
+    made a query naming the memory dir's root, or ``md``, return every chunk
+    under it (#3208). So the column holds the last path component with its
+    last suffix removed: ``/home/me/notes/octopus.md`` is ``octopus``.
+
+    Both separators split, whatever the host, so a database gives the same
+    terms on every OS, including a Windows-made store opened on POSIX. Only
+    the last suffix goes (``archive.tar.md`` is ``archive.tar``), and a
+    leading dot is not a suffix (``.bashrc`` stays). The function is not
+    idempotent on multi-dot names, so derive it from ``chunks.source_file``,
+    never from a value already in ``chunks_fts``.
+    """
+    name = stored_source.replace("\\", "/").rsplit("/", 1)[-1]
+    dot = name.rfind(".")
+    return name[:dot] if dot > 0 else name
+
+
 def stored_key_moved(key: str) -> bool:
     """True when the stored source key ``key`` no longer resolves to itself.
 

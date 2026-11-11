@@ -36,8 +36,17 @@ async def _scan(session_id: str) -> None:
 
 
 @review.command("list")
-@click.option("--status", default="pending")
-@click.option("--limit", type=click.IntRange(min=1, max=1000), default=100)
+@click.option(
+    "--status",
+    default="pending",
+    help="Status to list: pending (default), approved, rejected, expired, writing, or write_uncertain. An unknown status lists nothing.",
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1, max=1000),
+    default=100,
+    help="Maximum candidates to return, oldest first.",
+)
 def list_candidates(status: str, limit: int) -> None:
     """List candidates by state."""
     asyncio.run(_list_candidates(status, limit))
@@ -74,7 +83,12 @@ async def _show(candidate_id: str) -> None:
 
 @review.command("evidence")
 @click.argument("candidate_id")
-@click.option("--top-k", type=click.IntRange(min=1, max=20), default=5)
+@click.option(
+    "--top-k",
+    type=click.IntRange(min=1, max=20),
+    default=5,
+    help="Maximum existing memories to show.",
+)
 def evidence(candidate_id: str, top_k: int) -> None:
     """Show what stored memory already says about a candidate."""
     asyncio.run(_evidence(candidate_id, top_k))
@@ -109,9 +123,19 @@ async def _evidence(candidate_id: str, top_k: int) -> None:
     type=click.IntRange(min=1, max=1440),
     default=DEFAULT_STALE_CLAIM_MINUTES,
     show_default=True,
+    help="Release claims older than this many minutes.",
 )
-@click.option("--limit", type=click.IntRange(min=1, max=1000), default=100)
-@click.option("--actor", default="cli-operator")
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1, max=1000),
+    default=100,
+    help="Maximum claims to release in one run.",
+)
+@click.option(
+    "--actor",
+    default="cli-operator",
+    help="Name recorded on each release in the audit trail.",
+)
 def recover(stale_after_minutes: int, limit: int, actor: str) -> None:
     """Return stale interrupted approval claims to the pending queue."""
     asyncio.run(_recover(stale_after_minutes, limit, actor))
@@ -231,6 +255,7 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
             if claimed is None:
                 raise click.ClickException("Candidate state changed concurrently")
             write_location = "the durable destination"
+            excluded_warning: str | None = None
             try:
                 if candidate["destination"] == "pinned":
                     block = PinnedContextStore(
@@ -279,9 +304,17 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                             tags=["formation-approved", candidate["kind"]],
                         )
                         try:
-                            await comp.index_engine.index_file(
+                            stats = await comp.index_engine.index_file(
                                 target, ingress_guarded=True, lock_held=True
                             )
+                            if stats.excluded_files:
+                                # Excluded while the entry was appended (#3165):
+                                # on disk, so the approval stands; say so.
+                                from memtomem.source_provenance import (
+                                    EXCLUDED_AFTER_APPEND_NOTICE,
+                                )
+
+                                excluded_warning = EXCLUDED_AFTER_APPEND_NOTICE
                         except PrivacyRejection as exc:
                             # Appended, unindexed. Quarantine the claim rather than
                             # releasing it, or a re-approval appends it again.
@@ -341,6 +374,11 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                     else " Candidate state changed again; inspect the review queue."
                 )
                 raise click.ClickException(warning + suffix)
+            approved: dict[str, object] = {"ok": True, "status": decision}
+            if excluded_warning is not None:
+                approved["warning"] = excluded_warning
+            click.echo(json.dumps(approved))
+            return
         else:
             changed = await comp.storage.decide_memory_candidate(
                 candidate_id, decision, reviewer, reason
@@ -356,8 +394,8 @@ class _WriteSettled(Exception):
 
 @review.command("approve")
 @click.argument("candidate_id")
-@click.option("--reviewer", default="user")
-@click.option("--reason", default="")
+@click.option("--reviewer", default="user", help="Who decided; recorded on the candidate.")
+@click.option("--reason", default="", help="Optional note recorded with the decision.")
 def approve(candidate_id: str, reviewer: str, reason: str) -> None:
     """Approve and persist a candidate."""
     from memtomem.cli._errors import raise_cli_error
@@ -371,8 +409,12 @@ def approve(candidate_id: str, reviewer: str, reason: str) -> None:
 
 @review.command("reject")
 @click.argument("candidate_id")
-@click.option("--reviewer", default="user")
-@click.option("--reason", default="")
+@click.option("--reviewer", default="user", help="Who decided; recorded on the candidate.")
+@click.option(
+    "--reason",
+    default="",
+    help="Why it was rejected. Required when the candidate is write_uncertain.",
+)
 def reject(candidate_id: str, reviewer: str, reason: str) -> None:
     """Reject without writing; uncertain writes require --reason."""
     asyncio.run(_decide(candidate_id, "rejected", reviewer, reason))

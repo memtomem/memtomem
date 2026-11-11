@@ -169,9 +169,128 @@ async def test_value_text_cannot_steer_the_store(store: MemtomemPipelineStore, t
 async def test_the_stores_bookkeeping_is_not_searchable(store: MemtomemPipelineStore) -> None:
     await store.aput(("docs",), "k", {"text": "apples"})
     await store.aput(("docs",), "empty", {"text": "nothing selected"}, index=["missing"])
-    for query in ("langchain memtomem", "gen", "lcmm"):
+    # Not the store's layout and not its root either, whatever pytest named
+    # the basetemp: a path word every row shares matched every row (#3205).
+    # Since #3208 no path word but the encoded key reaches the index; the
+    # store's own switch is pinned by the encoded-key test below.
+    path_words = ("projections", "md", store.root.name, store.root.parent.name)
+    for query in ("langchain memtomem", "gen", "lcmm", *path_words):
         assert await store.asearch(("docs",), query=query) == [], query
     # an item whose selectors render nothing has no projection and no rows
     paths = store._paths(("docs",), "empty")
     assert not paths.projection.exists() and not paths.indexed.exists()
     assert {i.key for i in await store.asearch(("docs",))} == {"k", "empty"}
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"config": {"search": {"enable_dense": False}}}, {"retrieval": {"mode": "bm25"}}],
+    ids=["default", "dense-off", "retrieval-bm25"],
+)
+async def test_a_word_of_the_root_path_does_not_return_every_item(
+    tmp_path: Path, options: dict
+) -> None:
+    """``plane`` is in no value, only in the root every projection path shares (#3205).
+
+    With BM25's path fallback every item matched it and was scored like a real hit.
+    Since #3208 memtomem leaves the root out of the path text, so this passes
+    with the fallback on as well.
+    """
+    store = await MemtomemPipelineStore.open(tmp_path / "plane-store", **options)
+    try:
+        for key, text in {"a": "apples", "b": "pears", "c": "plums"}.items():
+            await store.aput(("u",), key, {"text": text})
+        for query in ("plane", "plane store", "projections", "md"):
+            assert await store.asearch(("u",), query=query) == [], query
+        assert [h.key for h in await store.asearch(("u",), query="pears")] == ["b"]
+    finally:
+        await store.aclose()
+
+
+def _byte_tokenizer(directory: Path) -> str:
+    """A byte-level tokenizer file, so bounded chunking runs without a model download."""
+    tokenizers = pytest.importorskip("tokenizers")
+    alphabet = sorted(tokenizers.pre_tokenizers.ByteLevel.alphabet())
+    tokenizer = tokenizers.Tokenizer(
+        tokenizers.models.BPE(vocab={c: i for i, c in enumerate(alphabet)}, merges=[])
+    )
+    tokenizer.pre_tokenizer = tokenizers.pre_tokenizers.ByteLevel(add_prefix_space=False)
+    path = directory / "tokenizer.json"
+    tokenizer.save(str(path))
+    return str(path)
+
+
+class _BoundedStore(MemtomemPipelineStore):
+    """The store with bounded chunking on, as an E5 model turns it on.
+
+    ``config["indexing"]`` belongs to the store, so the budget goes in here
+    rather than through ``config=``; E5 itself would download a model.
+    """
+
+    budget: dict = {}
+
+    def _config_sections(self, registry: list[Path]) -> dict:
+        sections = super()._config_sections(registry)
+        sections["indexing"].update(self.budget)
+        return sections
+
+
+@pytest.mark.parametrize("mode", ["bm25", "hybrid"])
+async def test_bounded_chunking_does_not_make_file_names_searchable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Bounded chunking writes ``File: <name>`` and ``Fragment <i>/<n>`` into each
+    row's indexed description, and the name here is ``<encoded key>.md`` (#3209).
+
+    Before the fix ``md``, ``file`` and ``fragment`` returned every item and the
+    encoded key returned its item, none of them in any value.
+    """
+    monkeypatch.setattr(
+        _BoundedStore,
+        "budget",
+        {
+            "hard_max_chunk_tokens": 64,
+            "chunk_tokenizer_path": _byte_tokenizer(tmp_path),
+            "chunk_context_tokens": 256,
+            "chunk_model_tokens": 384,
+        },
+    )
+    store = await _BoundedStore.open(tmp_path / "s", retrieval={"mode": mode})
+    try:
+        for key, text in {"a": "apples", "b": "pears", "c": "plums"}.items():
+            await store.aput(("u",), key, {"text": text})
+        assert store._comp is not None
+        assert store._comp.index_engine._config.hard_max_chunk_tokens == 64
+        encoded = encode_segment("a")
+        for query in ("md", "file", "fragment", encoded):
+            assert [h.key for h in await store.asearch(("u",), query=query)] == [], query
+        assert [h.key for h in await store.asearch(("u",), query="pears")] == ["b"]
+    finally:
+        await store.aclose()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"config": {"search": {"enable_dense": False}}}, {"retrieval": {"mode": "bm25"}}],
+    ids=["default", "dense-off", "retrieval-bm25"],
+)
+async def test_a_word_an_encoded_key_spells_does_not_return_its_item(
+    tmp_path: Path, options: dict
+) -> None:
+    """Key ``V`` encodes to ``sky``, the only path text BM25's fallback still sees.
+
+    The store's ``bm25_path_fallback=False`` is what keeps such a query from
+    returning the item: with the fallback on, ``sky`` returned ``V`` (#3215).
+    """
+    values = {"V": "apples", "R": "pears", "9": "plums"}
+    words = {"V": "sky", "R": "ski", "9": "she"}
+    assert {key: encode_segment(key) for key in values} == words
+    store = await MemtomemPipelineStore.open(tmp_path / "store", **options)
+    try:
+        for key, text in values.items():
+            await store.aput(("u",), key, {"text": text})
+        for word in words.values():
+            assert await store.asearch(("u",), query=word) == [], word
+        assert [h.key for h in await store.asearch(("u",), query="pears")] == ["R"]
+    finally:
+        await store.aclose()

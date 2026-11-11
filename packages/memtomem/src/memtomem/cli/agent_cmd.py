@@ -554,6 +554,11 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
     click.echo(f"Shared to namespace '{target}'.")
     click.echo(f"- File: {path}")
     click.echo(f"- Indexed chunks: {stats.indexed_chunks}")
+    if stats.excluded_files:
+        # The file became excluded while the entry was appended (#3165).
+        from memtomem.source_provenance import EXCLUDED_AFTER_APPEND_NOTICE
+
+        click.echo(f"Warning: {EXCLUDED_AFTER_APPEND_NOTICE}", err=True)
 
 
 # ── search ──────────────────────────────────────────────────────────────
