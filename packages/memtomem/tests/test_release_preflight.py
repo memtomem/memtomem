@@ -524,16 +524,20 @@ class _Pkg(NamedTuple):
 
 _PLUGIN_PKG = _Pkg("packages/memtomem-hermes-plugin", "plugin.json", "hermes_version")
 _MEMORY_PKG = _Pkg("packages/memtomem-hermes-memory", "plugin.yaml", "hermes_memory_version")
+# Its manifest sits one directory down, so the fixture writes a nested path.
+_OPENCLAW_PKG = _Pkg(
+    "packages/memtomem-openclaw-bundle", ".codex-plugin/plugin.json", "openclaw_version"
+)
 _HERMES = _PLUGIN_PKG.path
 
 
-@pytest.fixture(params=[_PLUGIN_PKG, _MEMORY_PKG], ids=lambda pkg: pkg.manifest)
+@pytest.fixture(params=[_PLUGIN_PKG, _MEMORY_PKG, _OPENCLAW_PKG], ids=lambda pkg: pkg.manifest)
 def pkg(request: pytest.FixtureRequest) -> _Pkg:
     return request.param
 
 
 def _manifest_text(pkg: _Pkg, version: object) -> str:
-    if pkg.manifest == "plugin.json":
+    if pkg.manifest.endswith(".json"):
         manifest: dict[str, object] = {"name": "memtomem"}
         if version is not None:
             manifest["version"] = version
@@ -573,6 +577,7 @@ def _write_hermes(
 ) -> None:
     package = repo / pkg.path
     (package / "skills").mkdir(parents=True, exist_ok=True)
+    (package / pkg.manifest).parent.mkdir(parents=True, exist_ok=True)
     (package / pkg.manifest).write_text(_manifest_text(pkg, version), encoding="utf-8")
     (package / "skills" / "SKILL.md").write_text(skill, encoding="utf-8")
 
@@ -609,7 +614,7 @@ def test_the_checked_packages_are_the_repos_hermes_packages() -> None:
         (root / "packages/memtomem-plugin-assets/contract.toml").read_text(encoding="utf-8")
     )
     checked = [(p.path, p.manifest, p.contract_key) for p in rp._HERMES_PACKAGES]
-    assert checked == [tuple(_PLUGIN_PKG), tuple(_MEMORY_PKG)]
+    assert checked == [tuple(_PLUGIN_PKG), tuple(_MEMORY_PKG), tuple(_OPENCLAW_PKG)]
     for package in rp._HERMES_PACKAGES:
         raw = (root / package.path / package.manifest).read_text(encoding="utf-8")
         assert package.read_version(raw) == contract["plugins"][package.contract_key]
@@ -677,6 +682,18 @@ def test_each_package_is_judged_on_its_own(tmp_path: Path) -> None:
     _write_hermes(repo, "0.1.1", skill="changed", pkg=_PLUGIN_PKG)
     _commit(repo, "provider bumped, plugin changed, not bumped")
     with pytest.raises(rp.ReleaseCheckError, match=r"bump \[plugins\] hermes_version "):
+        rp.validate_hermes_version_bump("v0.6.8", repo)
+
+
+def test_the_openclaw_bundle_is_judged_apart_from_the_hermes_plugin(tmp_path: Path) -> None:
+    """Both render the same user-scope skills, so one bump must not stand in for the other."""
+    repo = _hermes_repo(tmp_path)
+    _write_hermes(repo, "0.1.0", pkg=_OPENCLAW_PKG)
+    _commit(repo, "bundle released", "v0.6.7")
+    _write_hermes(repo, "0.1.2", skill="changed", pkg=_PLUGIN_PKG)
+    _write_hermes(repo, "0.1.0", skill="changed", pkg=_OPENCLAW_PKG)
+    _commit(repo, "same skill change, only the Hermes plugin bumped")
+    with pytest.raises(rp.ReleaseCheckError, match=r"bump \[plugins\] openclaw_version "):
         rp.validate_hermes_version_bump("v0.6.8", repo)
 
 

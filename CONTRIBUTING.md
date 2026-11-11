@@ -60,6 +60,7 @@ uv run mypy packages/memtomem/src packages/langchain-memtomem/src
 - `packages/memtomem-hermes-plugin/` — Hermes Agent portable plugin (user scope: MCP server + six workflow skills)
 - `packages/memtomem-antigravity-plugin/` — Antigravity CLI (`agy`) plugin (MCP server + six user-scope workflow skills + three project workflows that bind the server with `mem_project_bind`)
 - `packages/memtomem-cursor-plugin/` — Cursor plugin (the Antigravity skill set, with the explicit-only workflows marked `disable-model-invocation`; the repo-root `.cursor-plugin/marketplace.json` lists it)
+- `packages/memtomem-openclaw-bundle/` — OpenClaw plugin bundle in the Codex bundle format (the Hermes user-scope skill set and launch line; `openclaw.plugin.json` carries the ClawHub name and category)
 - `packages/langchain-memtomem/` — `langchain-memtomem`: a LangGraph `BaseStore` whose query search runs the memtomem pipeline in an index the store owns (ADR-0042); second workspace member, own version line
 - `packages/memtomem-hermes-memory/` — Hermes Agent memory provider `memtomem-memory` (recall-only, through Hermes's own memtomem MCP connection; standard library, Python 3.11+)
 - `packages/memtomem-plugin-assets/` — shared plugin contract (`contract.toml`) and workflow sources rendered into the plugins by `tools/render_plugin_assets.py`

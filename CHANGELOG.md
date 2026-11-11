@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **An OpenClaw plugin bundle (experimental).** `packages/memtomem-openclaw-bundle` gives an
+  OpenClaw agent the memtomem MCP server and the six user-scope skills the Hermes plugin ships
+  (search, recall, remember, index, status, setup), byte for byte, with the same launch line:
+  Python 3.12, the pinned `memtomem[onnx]` release and `PYTHON_DOTENV_DISABLED=1`. OpenClaw
+  reads it as a Codex-format bundle, the shape ClawHub publishes; ClawHub refuses the Hermes
+  plugin's Agent Plugins manifest. It is a bundle, not a memory plugin: OpenClaw's own memory
+  keeps `plugins.slots.memory`. The README tells operators to keep the memtomem tools away from
+  messaging and group agents, where anyone who can message the agent could search the store.
+  The release check now also refuses this package when it changed since the last release
+  without a version bump, as it does for the two Hermes packages.
 - **`create_components(..., bm25_path_fallback=False)` keeps BM25 from matching chunk paths
   (#3205).** By default a BM25 search that matches no chunk's content falls back to matching
   file names, so typing a filename still finds that file (#2224). A component whose file names
