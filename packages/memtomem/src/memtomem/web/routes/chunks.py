@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from memtomem.embedding.probe import embed_document_probe
 from memtomem.errors import NamespaceResolutionError
 from memtomem.indexing.scope_guard import scope_held_notice
+from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter
 from memtomem.search.visibility import resolve_visible_chunk
 from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_visibility import source_hidden
@@ -1116,11 +1117,29 @@ async def update_chunk_tags(
 async def similar_chunks(
     chunk_id: UUID,
     top_k: int = Query(5, ge=1, le=50),
+    namespace: str | None = Query(
+        None, description="Namespace filter for the neighbours; omitted hides system namespaces"
+    ),
     storage=Depends(get_storage),
     embedder=Depends(get_embedder),
     config=Depends(get_config),
 ) -> SimilarChunksResponse:
-    """Find chunks semantically similar to the given chunk using dense search."""
+    """Find chunks semantically similar to the given chunk using dense search.
+
+    The neighbours are read the way a default search reads: without
+    ``namespace`` the system namespaces stay hidden, even when the chunk asked
+    about lives in one (#3117). Reading that chunk by its id is allowed
+    (ADR-0036); the other chunks it brings back are a search result.
+    """
+    # A blank value names no namespace, as in ``GET /api/search``: parsed as
+    # given it would be an exact namespace ``""`` that matches no row.
+    try:
+        ns_filter = NamespaceFilter.parse(
+            namespace or None,
+            system_prefixes=tuple(config.search.system_namespace_prefixes),
+        )
+    except InvalidFilterSyntaxError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     chunk = await _screened_chunk(storage, chunk_id, config)
 
     # Search with the vector the chunk is stored with. Re-embedding cannot be
@@ -1150,9 +1169,16 @@ async def similar_chunks(
     # ``project_context_root`` as out-of-project. The chunk we're
     # comparing IS the project context for "similar chunks under the
     # same scope".
+    #
+    # One extra row makes room for the chunk itself, dropped by id below, but
+    # only when the filter lets it through. Otherwise the extra row can only be
+    # filled by another neighbour, and when the nearest candidates are mostly
+    # filtered out, asking for it makes ``dense_search`` widen its KNN pass.
+    source_passes = ns_filter is None or ns_filter.matches(chunk.metadata.namespace)
     raw = await storage.dense_search(
         embedding,
-        top_k=top_k + 1,
+        top_k=top_k + 1 if source_passes else top_k,
+        namespace_filter=ns_filter,
         project_context_root=chunk.metadata.project_root,
     )
 
