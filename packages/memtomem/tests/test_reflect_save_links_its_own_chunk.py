@@ -366,4 +366,9 @@ class TestKnownGap:
 
         await _save(ctx, "repeat", related)
 
-        assert await _edges(comp, related) == []
+        rewritten = await _chunk_holding(comp, mem_dir, "prefix repeat")
+        edges = await _edges(comp, related)
+        # Today the rewritten neighbour gets the edge. A fix may link the
+        # insight's own (reused) chunk or link nothing; either passes.
+        assert (rewritten.id, "informs_reflection") not in edges
+        assert len(edges) <= 1
