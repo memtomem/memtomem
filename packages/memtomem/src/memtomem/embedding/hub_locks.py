@@ -55,7 +55,8 @@ def _flock_works(cache_dir: Path) -> bool:
 def prepare_hub_locks(cache_dir: Path) -> None:
     """Turn huggingface_hub's shared blob store off if ``cache_dir`` cannot ``flock``.
 
-    Called before every Hub download into the fastembed cache. Each directory is
+    Called before every Hub download memtomem starts: into the fastembed cache, and
+    into the cache sentence-transformers uses for the ``local`` reranker. Each directory is
     probed once per process. The setting is process-wide: later downloads into any
     cache skip the store too. A huggingface_hub without the setting (before the
     shared store existed) is left alone, as is one where the user already set it.
