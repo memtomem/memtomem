@@ -289,6 +289,7 @@
   "chunks.card_edit_title": "청크 편집",
   "chunks.card_delete": "삭제",
   "chunks.card_delete_title": "청크 삭제",
+  "chunks.refresh_held": "저장했습니다. 열려 있는 다른 편집을 닫기 전까지 이 카드들은 저장한 청크의 이전 내용을 보여 줍니다.",
   "chunks.shown_of_total": "{total}개 중 {shown}개 표시",
 
   "sources.help": "인덱싱된 소스 파일. 파일을 클릭하여 청크를 탐색. 구분선을 드래그하여 크기 조절. 이름, 청크, 크기, 최근순으로 정렬.",
