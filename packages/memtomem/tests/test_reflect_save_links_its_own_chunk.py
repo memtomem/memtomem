@@ -89,15 +89,19 @@ class TestLinksItsOwnChunk:
         # Lands after the insight's re-index and before the link step, in another
         # namespace and file. It is the newest row in the store.
         comp, mem_dir, ctx, related = stack
-        intruder = Chunk(
-            content="zqintruder written by another agent",
-            metadata=ChunkMetadata(source_file=mem_dir / "agent.md", namespace="agent-runtime:w1"),
-            content_hash=f"hash-{uuid4().hex}",
-            embedding=[0.1] * 1024,
-        )
         real = reflection._get_app_initialized
 
         async def write_then_get(ctx_):
+            # Built here, so its time is taken in the gap and it is newer than
+            # the insight even when the save crossed a second boundary.
+            intruder = Chunk(
+                content="zqintruder written by another agent",
+                metadata=ChunkMetadata(
+                    source_file=mem_dir / "agent.md", namespace="agent-runtime:w1"
+                ),
+                content_hash=f"hash-{uuid4().hex}",
+                embedding=[0.1] * 1024,
+            )
             await comp.storage.upsert_chunks([intruder])
             return await real(ctx_)
 

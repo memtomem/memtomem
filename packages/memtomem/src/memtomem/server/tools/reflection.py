@@ -254,8 +254,8 @@ async def _own_insight_chunk_id(app, stats, appended: list[str]):
       superset when a short entry merged into the section before it.
 
     Anything else (an insight split into several chunks, a pending edit to the
-    file indexed with it, a merge that adds a heading between the entry's
-    parts) is saved but not linked.
+    file indexed with it that adds another new chunk, a merge that adds a
+    heading between the entry's parts) is saved but not linked.
     """
     from memtomem.indexing.privacy_gate import _read_text_view
 
