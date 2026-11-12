@@ -1207,6 +1207,41 @@ def test_strict_mode_does_not_judge_an_ancestor_rename_alone(
     assert "1 passed" in combined
 
 
+#: Writes only its own sandbox, through a name that would resolve onto the real
+#: settings file if it were read against the cwd instead of the descriptor.
+_DIR_FD_SANDBOX_WRITE_TEST = """
+import os
+from pathlib import Path
+
+def test_writes_its_sandbox_through_a_dir_fd(monkeypatch, tmp_path):
+    sandbox = tmp_path / "sandbox"
+    (sandbox / ".claude").mkdir(parents=True)
+    monkeypatch.chdir(Path.home())
+    dir_fd = os.open(sandbox, os.O_RDONLY)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        os.close(os.open(".claude/settings.json", flags, dir_fd=dir_fd))
+    finally:
+        os.close(dir_fd)
+    assert (sandbox / ".claude" / "settings.json").exists()
+"""
+
+
+@pytest.mark.skipif(os.open not in os.supports_dir_fd, reason="os.open takes no dir_fd here")
+def test_strict_mode_does_not_judge_a_relative_open_under_a_dir_fd(tmp_path: Path) -> None:
+    """The ``open`` audit event carries no ``dir_fd`` (#3307 review).
+
+    A relative name can resolve under a descriptor rather than the cwd, so
+    reading it against the cwd would fail a test that wrote only its sandbox.
+    """
+    result = _run_nested_pytest(
+        tmp_path, _DIR_FD_SANDBOX_WRITE_TEST, mode="strict", prepare=_present_claude_settings
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "1 passed" in combined
+
+
 def test_strict_mode_passes_a_clean_test_beside_existing_settings(tmp_path: Path) -> None:
     result = _run_nested_pytest(
         tmp_path, _CLEAN_TEST, mode="strict", prepare=_present_claude_settings
@@ -1261,3 +1296,22 @@ def test_witness_marks_a_write_to_the_file_as_direct(
 ) -> None:
     watched.write_text("{}", encoding="utf-8")
     assert [item.direct for item in witness.drain()] == [True]
+
+
+def test_witness_marks_a_relative_open_as_not_direct(
+    witness: hg.WriteWitness, watched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative ``open`` still attributes, but is no strict verdict (#3307 review).
+
+    The event cannot say whether a ``dir_fd`` came with the name, so the
+    cwd-relative reading is a guess: good enough to attribute a net change,
+    not to fail a test on its own.
+    """
+    monkeypatch.chdir(watched.parent)
+    with open(watched.name, "w", encoding="utf-8") as handle:
+        handle.write("{}")
+    observed = witness.drain()
+    assert [(item.event, item.path, item.direct) for item in observed] == [
+        ("open", hg.normalise_target(watched), False)
+    ]
+    assert hg.access_without_change([], observed, ()) == []
