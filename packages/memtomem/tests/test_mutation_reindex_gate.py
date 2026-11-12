@@ -15,7 +15,6 @@ import pytest
 from memtomem import privacy
 from memtomem.server.context import AppContext
 from memtomem.server.tools.memory_crud import mem_add, mem_delete, mem_edit
-from memtomem.storage.sqlite_helpers import norm_path
 
 from helpers import StubCtx
 
@@ -27,8 +26,8 @@ _SECRET_SECTION = f"\n## K\n\naws {_KEY}\n"
 
 
 def _preflight(engine, path, pre_image):
-    """The preflight as the memory tools call it: the source key resolved with the read."""
-    return engine.preflight_mutation(path, pre_image, source_key=norm_path(path))
+    """The preflight as the memory tools call it: the source path resolved with the read."""
+    return engine.preflight_mutation(path, pre_image, source_path=path.resolve())
 
 
 @pytest.fixture(autouse=True)
