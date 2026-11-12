@@ -208,7 +208,7 @@ def test_any_other_instance_is_busy_while_one_call_is_outstanding(
     assert patient.prefetch(_QUERY) == ""
     assert time.perf_counter() - started < _PROMPT_S
     assert outcome(events) == "skipped_busy"
-    assert hermes.call_started.wait(5)  # the worker records its call after the hook gave up
+    assert hermes.call_started.wait(5)  # the worker may record its call after the hook gave up
     assert len(hermes.calls) == 1
     gate.set()
     drain(mod)
