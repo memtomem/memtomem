@@ -63,6 +63,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm shell`'s `recall`, the Web UI's procedures list and Find Similar no longer list
+  archived and per-agent chunks by default (#3117).** These three surfaces read storage with
+  no namespace filter. So they listed rows in `search.system_namespace_prefixes`
+  (`archive:*` and `agent-runtime:*` by default) next to live ones, although `mm recall`,
+  `mem_recall`, `mem_procedure_list`, search and the timeline hide them unless a namespace is
+  named. They now hide them too. Find Similar does so even when the chunk it starts from is
+  archived: that chunk is still read by its id, but its neighbours are a search result. To read
+  a system namespace, name it. `GET /api/procedures` and `GET /api/chunks/{id}/similar` take a
+  `namespace` parameter, read like `GET /api/search`'s (a blank value means none, a malformed
+  one answers 422). Find Similar sends the Search tab's namespace filter when one is selected.
+  In the shell, use `mm recall --namespace`. A `system_namespace_prefixes: []` config still
+  hides nothing.
 - **Saving a watched file by renaming a new copy over it no longer hides it from search
   (#3031).** Editors and tools that save atomically write a temporary file and rename it onto
   the original. watchdog reports that as a delete of a path that still exists: the native
