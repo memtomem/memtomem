@@ -476,8 +476,6 @@ class ContextInfo:
     chunk_position: int = 0  # 1-indexed
     total_chunks_in_file: int = 0
     context_tier_used: str | None = None  # "full" | "standard" | "minimal" | None
-    ranked_siblings: tuple[object, ...] = ()  # RankedSibling instances (Feature C)
-    related_chunks: tuple[object, ...] = ()  # cross-source related chunks (Feature I)
 
 
 @dataclass(frozen=True, slots=True)

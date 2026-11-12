@@ -61,6 +61,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   counts their tokens without special tokens, as the model does. A static model that fastembed
   adds later is refused by name until it has been compared the same way.
 
+### Removed
+
+- **`ContextInfo.ranked_siblings` and `ContextInfo.related_chunks` are gone (#3004).** Both
+  fields of `memtomem.models.ContextInfo` were declared for features that never shipped. Nothing
+  set them and nothing read them, so they were always empty tuples. Code that passes either name
+  to `ContextInfo(...)` now raises `TypeError`; drop the argument.
+
 ### Fixed
 
 - **Saving a watched file by renaming a new copy over it no longer hides it from search
@@ -205,8 +212,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   file another model already stored is then downloaded again instead of linked. A lock
   file left behind by an earlier run can still block a download there: point
   `MEMTOMEM_FASTEMBED_CACHE` at a local disk if one does. The `local`
-  (sentence-transformers) reranker downloads into the Hugging Face cache and is not
-  covered yet (#3266).
+  (sentence-transformers) reranker hung the same way on its first download, measured with
+  sentence-transformers 6.3.0 and `flock` failing with `ENOSYS`, and gets the same check
+  (#3266). It runs in the Hugging Face hub cache (`HF_HUB_CACHE`) and, when it is set, in
+  `SENTENCE_TRANSFORMERS_HOME`, since sentence-transformers 6 downloads there and earlier
+  releases do not. A model given as a local directory is not checked.
 
 ### Security
 

@@ -1,7 +1,7 @@
 # ADR-0002: Per-Entry Tag Promotion via Blockquote Header
 
-**Status:** Accepted; amended by #2747
-**Date:** 2026-04-25 (amended 2026-10-17)
+**Status:** Accepted; amended by #2747; tag text in the full-text index reviewed and declined (#2223)
+**Date:** 2026-04-25 (amended 2026-10-17; reviewed 2026-11-12)
 **Audience:** memtomem maintainers touching the markdown chunker
 (`packages/memtomem/src/memtomem/chunking/markdown.py`) or the `mem_add` /
 `mem_edit` writer (`packages/memtomem/src/memtomem/tools/memory_writer.py`).
@@ -201,6 +201,38 @@ passes per-entry tags straight through to `append_entry`.
    `mem_agent_share` (audit tag), tool callers, and the `mem_do`
    surface. Removing it is a behavior break with no replacement story
    for `tag_filter`.
+
+## 2026-11-12 review — tag text stays out of the full-text index (#2223)
+
+Moving the `> tags:` blockquote out of chunk content took tag words out of
+the full-text index: `chunks_fts` holds `content` and `source_file`, and the
+text written to it is `Chunk.retrieval_content`, which has no tags. A query
+term that appears only in a chunk's tags is therefore not a BM25 candidate.
+Measured on a two-entry file: a search for a word that one entry carries as a
+tag and the other has in its body returned only the second entry.
+
+#2223 asked whether to index tag text again, this time on purpose. Declined.
+
+- **The intent already has an exact answer.** `tag_filter` selects by tag at
+  retrieval, in both BM25 and recall, and `mem_recall` pages tagged rows
+  without a query. In the same measurement, the tagged entry came back when
+  the search carried the tag as a filter.
+- **The gain is narrow.** It covers only a chunk whose tag word appears
+  nowhere in its body or headings. On the store the issue measured, that was
+  one of nine chunks carrying the tag.
+- **The cost lands on the path this ADR's follow-ups made cheap.** A tag edit
+  is applied by `update_chunk_metadata` without touching the full-text index
+  or the vectors. With tags indexed as text, that write would leave the index
+  answering for the old tag until it also rewrote the full-text row. The
+  rest of the cost is a `chunks_fts` rebuild for every existing store (fts5
+  cannot add a column), most likely a schema version bump, and a tags column
+  in the index fingerprint Quality Lab compares.
+
+**Reopen trigger.** Reports of searches that miss a memory whose tag names
+the query term, from callers who could not have used `tag_filter`. If that
+happens, the shape to start from is a further rung in `bm25_search`'s
+column-qualified MATCH ladder (#2224), not a column weight: results are fused
+by rank, so a match in a down-weighted column still takes a slot.
 
 ## Tests
 
