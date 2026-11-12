@@ -3916,10 +3916,11 @@ class IndexEngine:
         If ``file_path`` no longer resolves to ``source_path``, or no longer
         resolves at all, a write would reach a file nobody judged, so the answer
         is ``relinked`` and the caller writes nothing. Bytes the gate refuses are
-        still refused and held under the read's key first. That hold is
-        best-effort: the registered project roots are resolved now, so a root
-        directory itself replaced by a link since the read can make the bytes
-        read as user scope and go unheld; the write is refused either way.
+        still refused and held under the read's key first. The judge's answer
+        for a relinked path is not relied on for the hold: the registered
+        project roots are resolved now, so a root directory itself replaced by a
+        link since the read makes the bytes read as user scope. The caller holds
+        the read's key either way (:meth:`hold_relinked_mutation`, #3291).
         """
         source_key = fold_path_form(str(source_path))
         try:
@@ -3927,7 +3928,7 @@ class IndexEngine:
         except OSError:
             relinked = True
         if not pre_image or self._registry.get(file_path.suffix) is None:
-            return MutationPreflight(None, False, True, relinked=relinked)
+            return MutationPreflight(None, False, True, relinked=relinked, source_key=source_key)
         text = indexer_text(pre_image, errors="replace")
         scope_val, projection, guard, replay = self._judge_as_it_stands(
             file_path, text, surface="index", decision_path=source_path
@@ -3945,7 +3946,55 @@ class IndexEngine:
             projection.redaction_count
         )
         valve_ok = not privacy.scan(text) and not projection.redaction_count
-        return MutationPreflight(rejection, masking_locked, valve_ok, replay, relinked=relinked)
+        return MutationPreflight(
+            rejection,
+            masking_locked,
+            valve_ok,
+            replay,
+            relinked=relinked,
+            source_key=source_key,
+        )
+
+    async def hold_relinked_mutation(self, file_path: Path, preflight: MutationPreflight) -> bool:
+        """Hold the source a preflight read when its path no longer resolves to it (#3291).
+
+        Called by every memory tool whose preflight came back ``relinked``,
+        before it asks for the ``blocker``. A relinked path gets no write, and
+        the source that was read is held with ``source_relinked`` under the
+        read's key, as stored, so its chunks leave search until the file is
+        indexed clean again.
+
+        The hold does not depend on what the judge said. Its scope answer can
+        be wrong exactly when the path was relinked: a registered project
+        directory replaced by a link makes ``project_shared`` bytes read as
+        user scope, so a refusal only that scope makes does not happen and
+        :meth:`refuse_mutation` is never called. Bytes the judge did refuse are
+        held by that method before a caller gets here, and its
+        ``redaction_blocked`` outranks this hold in the store.
+
+        Returns whether rows were held. A source with no chunks holds nothing.
+        The hold moves the store's visibility epoch, which is what makes the
+        search pipeline drop its warmed answers; no caller has to. A hold that
+        fails is logged and reported as ``False``: the write is refused either
+        way, and the failure must not replace that refusal.
+        """
+        if not preflight.relinked:
+            raise ValueError(
+                "hold_relinked_mutation needs a preflight that found the path relinked"
+            )
+        if preflight.source_key is None:
+            return False
+        try:
+            held = await self._hold_waiting(file_path, RELINKED_HOLD, key=preflight.source_key)
+        except Exception as exc:
+            logger.error("Could not hold the chunks of relinked source %s: %s", file_path.name, exc)
+            return False
+        if held:
+            logger.warning(
+                "Source path relinked since it was read; holding its indexed chunks: %s",
+                file_path.name,
+            )
+        return held
 
     async def refuse_mutation(
         self, file_path: Path, preflight: MutationPreflight

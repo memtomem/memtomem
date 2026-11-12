@@ -247,6 +247,8 @@ async def promote_scratch(
                 rejection = await index_engine.refuse_mutation(target, preflight)
                 search_pipeline.invalidate_cache()
                 raise privacy_index_blocked_http(rejection, "promote")
+            if preflight.relinked:
+                await index_engine.hold_relinked_mutation(target, preflight)
             blocker = preflight.blocker("promote", target.name, needs_valve=needs_valve)
             if blocker is not None:
                 raise index_blocked_http(blocker)

@@ -144,6 +144,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   downloaded by an older huggingface-hub was not affected. In a read-only cache the links cannot
   be made and the load still fails; make the cache writable for the first load.
 
+- **A memory tool that finds its file's path replaced takes that file out of search (#3291).**
+  When the path a memory tool read no longer leads to the same file by the time of its privacy
+  check, the tool writes nothing ("now resolves to a different location than when it was read").
+  It now also holds the chunks of the file it read, as `source_relinked`, until that file is
+  indexed again: a write that is retried once the path is back does that, and so does the
+  watcher. Before, the hold depended on the check refusing the file's content, and that answer
+  could be wrong for exactly this case: with the registered `.memtomem/memories` directory itself
+  replaced by a symlink, a `project_shared` file was judged as a user-scope one, nothing was
+  refused, and chunks indexed from an earlier version of the file stayed searchable. This also
+  hides a file whose content is fine, for as long as its path stays replaced, and one whose path
+  could not be resolved at the check. Reading a held chunk by id still works.
+
 - **A memory tool's privacy preflight judges a file under the path it read it from (#3191).**
   Before a memory tool appends to or rewrites a file, on any surface, it checks that the file as
   it stands may be indexed. That check resolved the path again after the read, so a path replaced

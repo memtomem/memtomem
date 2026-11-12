@@ -600,6 +600,8 @@ async def _mutate_file_and_reindex(
         rejection = await app.index_engine.refuse_mutation(source_file, preflight)
         app.search_pipeline.invalidate_cache()
         return None, rejection.mutation_detail(f"mem_{op}", outcome="not_written", surface="mcp")
+    if preflight.relinked:
+        await app.index_engine.hold_relinked_mutation(source_file, preflight)
     blocker = preflight.blocker(f"mem_{op}", source_file.name, needs_valve=force_unsafe)
     if blocker is not None:
         return None, blocker
