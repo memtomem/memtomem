@@ -256,6 +256,11 @@ async def _own_insight_chunk_id(app, stats, appended: list[str]):
     Anything else (an insight split into several chunks, a pending edit to the
     file indexed with it that adds another new chunk, a merge that adds a
     heading between the entry's parts) is saved but not linked.
+
+    Known gap: when a pending edit leaves another chunk holding the whole
+    insight text and the insight matches an existing chunk, the insight keeps
+    that chunk's id and the other chunk is the only new one, so it is linked.
+    Telling them apart needs the attribution #3292 asks for.
     """
     from memtomem.indexing.privacy_gate import _read_text_view
 

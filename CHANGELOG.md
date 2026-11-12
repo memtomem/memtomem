@@ -75,12 +75,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   another one. The insight chunk's time comes from its entry's `> created:` line, which has
   no fraction of a second, while a chunk indexed earlier in that same second keeps its
   fraction and so sorts as newer. In tests that was the related chunk itself, so it was
-  linked to itself. A write elsewhere between the save and the link also took the edges. The save now links only a chunk it can
-  tell is the insight's: the re-index of `reflections.md` produced exactly one new chunk, and
-  that chunk holds the entry as the indexer chunks it. Otherwise the insight is saved, nothing
-  is linked, and the result says so. That happens when the insight spans several chunks, when
-  an unindexed edit to the file is indexed with it and adds another new chunk, when merging it
-  with the section before it adds a heading inside it, or when the insight is only a heading.
+  linked to itself. A write elsewhere between the save and the link also took the edges. The
+  save now links only when the re-index of `reflections.md` produced exactly one new chunk,
+  and that chunk holds the entry as the indexer chunks it. Otherwise the insight is saved,
+  nothing is linked, and the result says so. That happens when the insight spans several
+  chunks, when an unindexed edit to the file is indexed with it and adds another new chunk,
+  when merging it with the section before it adds a heading inside it, or when the insight is
+  only a heading. One case still links the wrong chunk: an unindexed edit leaves another chunk
+  holding the whole insight text, and the insight itself matches a chunk that already existed,
+  so it keeps that chunk's id and the other chunk is the only new one. Precise attribution is
+  #3292.
 - **`mm shell`'s `recall`, the Web UI's procedures list and Find Similar no longer list
   archived and per-agent chunks by default (#3117).** These three surfaces read storage with
   no namespace filter. So they listed rows in `search.system_namespace_prefixes`

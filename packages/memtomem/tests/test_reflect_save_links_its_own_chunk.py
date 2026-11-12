@@ -346,3 +346,24 @@ class TestContextDependentMerge:
         assert len(seen[0].new_chunk_ids) == 1
         assert await _edges(comp, related) == []
         assert result.endswith(f"\n- {UNLINKED}")
+
+
+class TestKnownGap:
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        strict=True,
+        reason="#3292: the insight reuses an existing chunk's id, and a pending edit "
+        "leaves another chunk holding the whole insight as the only new id",
+    )
+    async def test_a_reused_id_and_a_rewritten_neighbour(self, stack):
+        comp, mem_dir, ctx, related = stack
+        comp.index_engine._config.min_chunk_tokens = 0
+        path = _reflections(mem_dir)
+        path.write_text("## Reflection\n\nrepeat\n\n## Other\n\nprefix\n", encoding="utf-8")
+        await comp.index_engine.index_file(path, ingress_guarded=True)
+        # Unindexed: drops Reflection and makes Other hold the insight's text.
+        path.write_text("## Other\n\nprefix repeat\n", encoding="utf-8")
+
+        await _save(ctx, "repeat", related)
+
+        assert await _edges(comp, related) == []
