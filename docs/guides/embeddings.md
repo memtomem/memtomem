@@ -66,7 +66,11 @@ run, memtomem turns huggingface-hub's shared blob store off for the whole proces
 warning; a file another model already stored is then downloaded again instead of linked. A lock
 file left behind by an earlier run can still block a download there; if one does, set
 `MEMTOMEM_FASTEMBED_CACHE` to a directory on a local disk. The `local` (sentence-transformers)
-reranker is not covered yet ([#3266](https://github.com/memtomem/memtomem/issues/3266)).
+reranker gets the same check in every directory sentence-transformers may download into: the
+Hugging Face hub cache (`HF_HUB_CACHE`, under `HF_HOME` by default), and also
+`SENTENCE_TRANSFORMERS_HOME` when it is set, which sentence-transformers 6 reads and earlier
+releases ignore for this reranker. For a lock file left there, move that directory to a local
+disk instead.
 
 The download goes through `huggingface_hub`. memtomem runs it with Hub telemetry off: the pinned
 E5 calls, the `fastembed` constructors for other ONNX embedding models and the `fastembed`
