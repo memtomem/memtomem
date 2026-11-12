@@ -11,6 +11,7 @@ refused (#2807).
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -150,6 +151,11 @@ async def test_a_link_into_a_nested_tier_is_refused_on_the_cli(bm25_only_compone
     assert note.read_text(encoding="utf-8") == "# Shared\n"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="ntpath.expanduser guesses ~user as a sibling of the current profile, so the root "
+    "resolves and there is no unknown tier to refuse",
+)
 async def test_an_unresolvable_configured_root_refuses(bm25_only_components, monkeypatch):
     """A root whose ``~user`` names no account leaves the tier unknown: refuse."""
     comp, mem_dir = bm25_only_components

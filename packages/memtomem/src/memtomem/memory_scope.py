@@ -263,8 +263,8 @@ def explicit_target_tier_refusal(
     except (TierWouldNotRoundTrip, UnregisteredProjectTarget) as exc:
         return f"{exc} Nothing was written."
     except (OSError, RuntimeError) as exc:
-        # A configured root that cannot be resolved (``~nobody/...`` raises
-        # ``RuntimeError`` from ``expanduser``) leaves the tier unknown.
+        # A configured root that cannot be resolved (on POSIX ``~nobody/...``
+        # raises ``RuntimeError`` from ``expanduser``) leaves the tier unknown.
         return f"Could not tell which memory tier {target} is in ({exc}); nothing was written."
     if tier == scope:
         return None
