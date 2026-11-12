@@ -333,7 +333,7 @@ async def transfer_context_artifact(
         description=(
             "Preview the transfer without touching disk: returns the engine's "
             "dry-run plan (status='plan') regardless of confirmation flags. "
-            "Mirrors the import routes' dry_run."
+            "Mirrors the pull routes' dry_run."
         ),
     ),
 ) -> dict:

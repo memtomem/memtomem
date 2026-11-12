@@ -1082,12 +1082,12 @@ async def import_skill(
 ) -> dict:
     """Pull a single runtime skill into the scoped canonical directory.
 
-    Same response shape as the section-level import so the web UI can reuse
+    Same response shape as the section-level pull so the web UI can reuse
     its rendering. 404 when no runtime directory matches the name (the
-    section import would silently report 0 imported, which is the wrong
+    section pull would silently report 0 ``imported``, which is the wrong
     shape of feedback for "you clicked a specific item that doesn't exist")
     — pinned on the gate's dry-run preview too, so a misnamed user-tier
-    import 404s instead of asking for confirmation.
+    pull 404s instead of asking for confirmation.
     """
     reject_project_local_write(target_scope, "Pull skill")
     try:
@@ -1155,8 +1155,8 @@ async def import_skill_to_user(
     The one web path for a project-runtime skill that trips Gate A's
     false-positive secret heuristic. ``/import`` to ``project_shared`` is a
     hard 422 (git history is forever — no bypass, ADR-0011 §5),
-    ``project_local`` web import is rejected (ADR-0011 §3), and a plain
-    ``user``-tier import reads ``~/.claude/skills`` — the wrong source for a
+    ``project_local`` web pull is rejected (ADR-0011 §3), and a plain
+    ``user``-tier pull reads ``~/.claude/skills`` — the wrong source for a
     skill that lives under ``<project>/.claude/skills``. This route reads the
     PROJECT runtime (``source_scope="project_shared"``) but writes the USER
     canonical (``scope="user"``), so Gate A's block decision keys off the

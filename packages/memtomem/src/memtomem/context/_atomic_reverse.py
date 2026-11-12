@@ -102,7 +102,7 @@ def resolve_artifact_under_root(
     has_flat = flat_target.is_file()
     if has_dir and has_flat:
         logger.warning(
-            "%s/%s: reverse-sync updates dir layout (%s/%s); the flat "
+            "%s/%s: pull updates dir layout (%s/%s); the flat "
             "file (%s.md) is now silently divergent. Remove it or run "
             "`mm context migrate` (PR-D).",
             artifact_label,
@@ -403,7 +403,7 @@ def import_passthrough_runtime(
                     content_bytes,
                     resolve_target=_resolve,
                     overwrite=overwrite,
-                    snapshot_note=f"pre-overwrite snapshot (import from {runtime})",
+                    snapshot_note=f"pre-overwrite snapshot (pull from {runtime})",
                     lock_timeout=None if lock_remaining is None else lock_remaining(),
                 )
             except TimeoutError:
