@@ -154,7 +154,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   replaced by a symlink, a `project_shared` file was judged as a user-scope one, nothing was
   refused, and chunks indexed from an earlier version of the file stayed searchable. This also
   hides a file whose content is fine, for as long as its path stays replaced, and one whose path
-  could not be resolved at the check. Reading a held chunk by id still works.
+  could not be resolved at the check. Reading a held chunk by id still works. Not covered:
+  chunks stored under a path spelling from before Unicode folding on macOS are not held (#2907).
 
 - **A memory tool's privacy preflight judges a file under the path it read it from (#3191).**
   Before a memory tool appends to or rewrites a file, on any surface, it checks that the file as

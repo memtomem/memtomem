@@ -3972,7 +3972,11 @@ class IndexEngine:
         held by that method before a caller gets here, and its
         ``redaction_blocked`` outranks this hold in the store.
 
-        Returns whether rows were held. A source with no chunks holds nothing.
+        Returns whether rows were held. A source with no chunks holds nothing,
+        and neither do rows stored under a key from before Unicode folding
+        (macOS NFD): the hold uses the folded key, as every stored-key hold
+        does, because one placed under the unfolded key would never lift
+        (#2907). Those rows stay searchable.
         The hold moves the store's visibility epoch, which is what makes the
         search pipeline drop its warmed answers; no caller has to. A hold that
         fails is logged and reported as ``False``: the write is refused either

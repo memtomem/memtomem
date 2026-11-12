@@ -541,3 +541,33 @@ async def test_a_hold_that_fails_does_not_replace_the_refusal(
     assert calls and _RELINKED in result, result
     assert _holds(comp) == {}
     assert bravo.read_text(encoding="utf-8") == _CLEAN_B
+
+
+async def test_rows_stored_under_a_key_from_before_folding_are_not_held(
+    bm25_only_components, tmp_path, monkeypatch
+):
+    """The hold uses the folded key; a legacy unfolded key holds nothing and stays served (#2907).
+
+    Folding is off while the file is indexed, so its rows are stored under the
+    NFD spelling as they were before folding existed, and on for the preflight.
+    """
+    comp, mem_dir = bm25_only_components
+    monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", False)
+    leaf = mem_dir / unicodedata.normalize("NFD", "café.md")
+    leaf.write_text(_CLEAN_A, encoding="utf-8")
+    bravo = mem_dir / "bravo.md"
+    bravo.write_text(_CLEAN_B, encoding="utf-8")
+    stats = await comp.index_engine.index_file(leaf, ingress_guarded=True)
+    assert stats.indexed_chunks == 1, stats
+    stored_key = norm_path(leaf)
+    monkeypatch.setattr(sqlite_helpers, "FOLDS_UNICODE_FORMS", True)
+    assert norm_path(leaf) != stored_key, "the folded key must differ from the stored one"
+    pre, source_path = _read(leaf)
+    _relink_away(leaf, bravo, tmp_path)
+
+    preflight = comp.index_engine.preflight_mutation(leaf, pre, source_path=source_path)
+
+    assert preflight.relinked is True
+    assert await comp.index_engine.hold_relinked_mutation(leaf, preflight) is False
+    assert _holds(comp) == {}
+    assert await _hits(comp, "Alphaword")
