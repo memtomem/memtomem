@@ -671,6 +671,46 @@ def project_tier_registration_error(target_dir: Path, scope: TargetScope) -> str
     )
 
 
+_PROJECT_TIER_DIR_NAMES = {"project_shared": "memories", "project_local": "memories.local"}
+
+
+def project_tier_dir(scope: str, project_root: Path) -> Path:
+    """A project tier's directory as spelled under ``project_root``, unresolved.
+
+    :func:`resolve_memory_scope_dir` returns where that path leads. This is
+    the path itself, for a caller that has to ask whether it is a link
+    (:func:`project_tier_is_relinked`).
+    """
+    return project_root / ".memtomem" / _PROJECT_TIER_DIR_NAMES[scope]
+
+
+def project_tier_is_relinked(tier_dir: Path) -> bool:
+    """Whether a project tier directory, or the ``.memtomem`` holding it, is a link.
+
+    Those two entries live in the project's checkout, and a checkout can
+    deliver either one as a symbolic link. The directory then names whatever
+    the link points at: ``memories -> ..`` makes the whole project the tier.
+    Nothing above the project root is asked about; that part of the path is
+    the machine's, not the repository's. A missing entry is not a link. An
+    entry that cannot be inspected counts as one: a tier nobody can vouch for
+    is not used, and the caller goes on to its other directories. ``lstat`` is
+    asked directly because ``Path.is_symlink`` answers ``False`` for some
+    errors and raises for others, and which ones has changed between Python
+    versions.
+    """
+    tier_dir = tier_dir.expanduser()
+    for entry in (tier_dir, tier_dir.parent):
+        try:
+            mode = entry.lstat().st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            return True
+        if stat_mod.S_ISLNK(mode) or entry.is_junction():
+            return True
+    return False
+
+
 def is_project_tier_registered(target_dir: Path, project_memory_dirs) -> bool:
     """``True`` iff ``target_dir`` is in the resolved registered set.
 

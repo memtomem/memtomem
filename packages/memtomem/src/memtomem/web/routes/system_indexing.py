@@ -23,6 +23,7 @@ from memtomem.source_provenance import (
     READ_ONLY_TARGET_DETAIL,
     ExcludedSourceError,
     ReadOnlySourceError,
+    UPLOAD_DIR,
 )
 from memtomem.web.deps import (
     get_config,
@@ -572,7 +573,7 @@ async def upload_files(
         quarantine_uploads,
     )
 
-    upload_dir = Path("~/.memtomem/uploads").expanduser()
+    upload_dir = UPLOAD_DIR.expanduser()
     # Before ``quarantine_uploads``, not inside it: that context manager calls
     # ``prepare_upload_dir`` (which chmods the directory to 0700) and then
     # creates a ``.quarantine-*`` subdirectory and writes the uploaded bytes
@@ -717,7 +718,7 @@ async def uploads_usage() -> UploadUsageResponse:
     gate so the panel surfaces the empty state on a fresh install before
     the user finishes the config wizard.
     """
-    upload_dir = Path("~/.memtomem/uploads").expanduser()
+    upload_dir = UPLOAD_DIR.expanduser()
     if not upload_dir.is_dir():
         return UploadUsageResponse(file_count=0, total_bytes=0, oldest_mtime=None)
     file_count = 0

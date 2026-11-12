@@ -50,12 +50,15 @@ from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.indexing.redaction_exemption import declared_exemption, indexer_text
 from memtomem.indexing.source_receipt import chunker_versions, code_fingerprint, digest
-from memtomem.models import Chunk, IndexingStats, stored_namespace
+from memtomem.memory_scope import project_tier_dir, project_tier_is_relinked
+from memtomem.models import Chunk, ChunkMetadata, IndexingStats, stored_namespace
 from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD, RELINKED_HOLD
 from memtomem.storage.sqlite_helpers import fold_path_form
+from memtomem.source_provenance import UPLOAD_DIR
 from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
 from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_helpers import resolves_under_any_root as _resolves_under_any_root
 from memtomem.storage.sqlite_helpers import resolve_path
 from memtomem.storage.orphan_detect import RetainRule
 from memtomem.tools.entity_sync import sync_entities_for_chunks
@@ -1449,6 +1452,56 @@ class IndexEngine:
         is why an unavailable mount does not turn this into an error path.
         """
         return _is_under_any_root(file_path, self._config.read_only_memory_dirs)
+
+    def is_managed_source(self, file_path: Path, stored: ChunkMetadata | None = None) -> bool:
+        """True when ``file_path`` resolves under a directory memtomem keeps memory files in.
+
+        Asked by the surfaces that edit or delete a chunk by id, beside
+        :meth:`is_read_only_source` and before they lock or write the chunk's
+        source. :meth:`index_file` accepts any path, so a chunk's
+        ``source_file`` can name a file memtomem was only asked to read: an
+        agent's settings, a script, another project's code. That file stays
+        indexed and searchable, and a by-id write to it is refused.
+
+        Three kinds of directory count. The configured index roots. The upload
+        directory, which is outside every root and whose files stay editable.
+        And, when ``stored`` is the chunk's metadata and the chunk was stored
+        as project memory, that project's own tier directory: its tier may be
+        unregistered by now, and a rewrite of such a row has its own refusal
+        (:meth:`rewrite_refusal`), which names how to register the tier again.
+        Answering no here would replace that refusal with this one.
+
+        A project tier directory that is a link counts for nothing, registered
+        or stored (:func:`~memtomem.memory_scope.project_tier_is_relinked`).
+        Roots are resolved before they are matched, so a tier a checkout
+        delivered as ``memories -> ..`` would make the whole project managed.
+        The roots in ``memory_dirs`` and ``read_only_memory_dirs`` come from
+        the user's own configuration and may be links, which is why the two
+        kinds are listed apart: a directory registered as both stays managed
+        through its user entry.
+
+        Not folded into :meth:`is_read_only_source`: that predicate is also
+        asked of new-file targets and of the upload directory, and it stamps
+        ``source_read_only`` on chunks at index time.
+
+        Only the resolved path counts
+        (:func:`~memtomem.storage.sqlite_helpers.resolves_under_any_root`): a
+        link inside one of these directories that points out of it is not
+        managed.
+        """
+        from memtomem.indexing.scope_guard import PROJECT_SCOPES
+
+        config = self._config
+        tiers = [Path(d) for d in config.project_memory_dirs]
+        if stored is not None and stored.scope in PROJECT_SCOPES and stored.project_root:
+            tiers.append(project_tier_dir(stored.scope, Path(stored.project_root)))
+        roots = [
+            *config.memory_dirs,
+            *config.read_only_memory_dirs,
+            UPLOAD_DIR,
+            *(tier for tier in tiers if not project_tier_is_relinked(tier)),
+        ]
+        return _resolves_under_any_root(file_path, roots)
 
     def write_target_snapshot(self) -> WriteTargetSnapshot:
         """Freeze :meth:`is_excluded` and :meth:`is_read_only_source` for a worker thread.

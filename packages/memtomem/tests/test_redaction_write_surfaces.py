@@ -65,7 +65,9 @@ class TestMemEditRedactionGuard:
         so the edit-surface guard runs with scope='user' (the default
         path the existing tests cover).
 
-        Source path is anchored at ``tmp_path`` (per-test isolation +
+        Source path is anchored under the fixture's memory directory, which
+        is under ``tmp_path`` (an edit by id is refused outside a memory
+        directory; ``tmp_path`` for per-test isolation +
         Windows portability — hardcoded ``/tmp/...`` paths trip the
         ``$HOME``-tilde-rewrite under Windows CI's
         ``C:\\Users\\runneradmin\\...`` HOME root, see
@@ -78,7 +80,7 @@ class TestMemEditRedactionGuard:
         chunk = Chunk(
             content="placeholder",
             metadata=ChunkMetadata(
-                source_file=tmp_path / "never_touched.md",
+                source_file=Path(comp.config.indexing.memory_dirs[0]) / "never_touched.md",
                 scope="user",
                 start_line=1,
                 end_line=2,
@@ -346,6 +348,7 @@ class TestCliMmAddRedactionGuard:
             comp.index_engine = AsyncMock()
             comp.index_engine.is_excluded = MagicMock(return_value=False)
             comp.index_engine.is_read_only_source = MagicMock(return_value=False)
+            comp.index_engine.is_managed_source = MagicMock(return_value=True)
             comp.index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
             comp.index_engine.rewrite_refusal = AsyncMock(return_value=None)
             comp.storage = AsyncMock()
@@ -506,6 +509,7 @@ class TestLangGraphAddRedactionGuard:
         index_engine = AsyncMock()
         index_engine.is_excluded = MagicMock(return_value=False)
         index_engine.is_read_only_source = MagicMock(return_value=False)
+        index_engine.is_managed_source = MagicMock(return_value=True)
         index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
         index_engine.rewrite_refusal = AsyncMock(return_value=None)
         mem._ensure_init = AsyncMock(  # type: ignore[attr-defined]

@@ -33,6 +33,7 @@ from memtomem.source_provenance import (
     ReadOnlySourceError,
     SourceMissingError,
     StaleSourceProvenanceError,
+    UnmanagedSourceError,
 )
 from memtomem.tools.memory_writer import (
     RestoreOutcome,
@@ -49,7 +50,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from uuid import UUID
 
-    from memtomem.models import Chunk, IndexingStats
+    from memtomem.models import Chunk, ChunkMetadata, IndexingStats
     from memtomem.tools.memory_writer import PreImage
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ async def locked_source_chunk(
     sidecar (L2) held and the chunk re-fetched fresh under it, or
     ``(None, reason, cross_process_held)`` where ``reason`` is one of
     ``"not_found"`` / ``"moved"`` / ``"locked"`` / ``"read_only"`` /
-    ``"writer_busy"``.
+    ``"unmanaged"`` / ``"writer_busy"``.
 
     Two-step acquire (issue #1587): fetch once *unlocked* to learn the
     ``source_file`` (the lock key), acquire that file's sidecar, then re-fetch
@@ -133,6 +134,12 @@ async def locked_source_chunk(
     if index_guard is not None and index_guard.is_read_only_source(resolved):
         yield None, "read_only", False
         return
+    # Same place for the same reason: a source outside every memory directory
+    # gets no sidecar beside it. ``"unmanaged"`` is a refusal of its own so a
+    # caller can say which of the two it was.
+    if index_guard is not None and not index_guard.is_managed_source(resolved, chunk.metadata):
+        yield None, "unmanaged", False
+        return
     # ``acquired`` distinguishes a timeout from the sidecar *acquire* (→ report
     # "locked") from a ``TimeoutError`` raised by the caller's own body after we
     # yielded — that must propagate, not be masked as a lock timeout or trigger
@@ -169,6 +176,7 @@ async def mutate_source_and_reindex(
     mutate: Callable[[PreImage], Rewrite | None],
     *,
     force_unsafe: bool = False,
+    stored: ChunkMetadata | None = None,
 ) -> IndexingStats:
     """Backup-read → ``mutate`` (in a worker thread) → incremental re-index with
     ``lock_held=True``, restoring the pre-image and re-raising on failure.
@@ -203,6 +211,9 @@ async def mutate_source_and_reindex(
     a read-only index root raises :class:`ReadOnlySourceError` in the same
     place and for the same reason — refusing before the read is what keeps a
     write off a file another tool owns, whatever the stored per-chunk flag says.
+    A source outside every memory directory raises :class:`UnmanagedSourceError`
+    there too; ``stored`` is the metadata of the chunk ``source_file`` came
+    from, for :meth:`~memtomem.indexing.engine.IndexEngine.is_managed_source`.
     Before ``mutate`` runs, the engine judges the file as it stands, as in the
     MCP twin: content that may not be indexed is recorded, held, and raised as
     :class:`~memtomem.indexing.engine.PrivacyRejection` with
@@ -219,6 +230,8 @@ async def mutate_source_and_reindex(
         raise ExcludedSourceError(str(source_file))
     if index_engine.is_read_only_source(source_file):
         raise ReadOnlySourceError(str(source_file))
+    if not index_engine.is_managed_source(source_file, stored):
+        raise UnmanagedSourceError(str(source_file))
     from memtomem.indexing.engine import MutationBlockedError, PrivacyRejection
 
     # ``source_file`` is the chunk's stored key. Re-indexing must not store its
